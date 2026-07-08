@@ -1496,3 +1496,203 @@ func (a *TenantIdentityAPIService) GetTenantIdentityTokenDelegationExecute(r Api
 
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
+
+type ApiReencryptTenantIdentitySecretsRequest struct {
+	ctx                                   context.Context
+	ApiService                            *TenantIdentityAPIService
+	org                                   string
+	siteID                                string
+	tenantIdentityReencryptSecretsRequest *TenantIdentityReencryptSecretsRequest
+}
+
+func (r ApiReencryptTenantIdentitySecretsRequest) TenantIdentityReencryptSecretsRequest(tenantIdentityReencryptSecretsRequest TenantIdentityReencryptSecretsRequest) ApiReencryptTenantIdentitySecretsRequest {
+	r.tenantIdentityReencryptSecretsRequest = &tenantIdentityReencryptSecretsRequest
+	return r
+}
+
+func (r ApiReencryptTenantIdentitySecretsRequest) Execute() (*TenantIdentityReencryptSecretsResponse, *http.Response, error) {
+	return r.ApiService.ReencryptTenantIdentitySecretsExecute(r)
+}
+
+/*
+ReencryptTenantIdentitySecrets Reencrypt Tenant Identity Secrets
+
+Re-wrap stored `tenant_identity_config` ciphertext with the Site's
+current master encryption key (KEK rotation). This is a
+site-operator operation, not a per-tenant one.
+
+User must have authorization role with `PROVIDER_ADMIN` suffix in the URL `{org}`.
+
+The URL `{org}` identifies the provider whose admin authorizes the
+operation. Omit `organizationId` to re-wrap every org's secrets on
+the Site, or set it to a tenant organization that has an allocation
+on the Site. Set `dryRun` to decrypt and validate without writing any
+changes.
+
+Returns `400 Bad Request` when a scoped tenant organization does not
+exist or has no allocation on the Site. Returns `404 Not Found` when
+`{org}` has no Infrastructure Provider, or when a scoped organization
+has no tenant identity configuration on the Site. An unknown, invalid,
+or unregistered `siteID` returns `400 Bad Request`.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the provider organization authorizing the operation
+	@param siteID ID of the target Site
+	@return ApiReencryptTenantIdentitySecretsRequest
+*/
+func (a *TenantIdentityAPIService) ReencryptTenantIdentitySecrets(ctx context.Context, org string, siteID string) ApiReencryptTenantIdentitySecretsRequest {
+	return ApiReencryptTenantIdentitySecretsRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		siteID:     siteID,
+	}
+}
+
+// Execute executes the request
+//
+//	@return TenantIdentityReencryptSecretsResponse
+func (a *TenantIdentityAPIService) ReencryptTenantIdentitySecretsExecute(r ApiReencryptTenantIdentitySecretsRequest) (*TenantIdentityReencryptSecretsResponse, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodPost
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue *TenantIdentityReencryptSecretsResponse
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "TenantIdentityAPIService.ReencryptTenantIdentitySecrets")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/site/{siteID}/tenant-identity/reencrypt"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"siteID"+"}", url.PathEscape(parameterValueToString(r.siteID, "siteID")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.tenantIdentityReencryptSecretsRequest == nil {
+		return localVarReturnValue, nil, reportError("tenantIdentityReencryptSecretsRequest is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	// body params
+	localVarPostBody = r.tenantIdentityReencryptSecretsRequest
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}

@@ -4,26 +4,27 @@
 
 ## Revision History
 
-| Version | Date | Modified By | Description |
+| Version | Date (MM/DD/YYYY) | Modified By | Description |
 | :---: | :---: | :---- | :---- |
 | 0.1 | 02/24/2026 | Binu Ramakrishnan | Initial version |
 | 0.2 | 03/11/2026 | Binu Ramakrishnan | gRPC/API updates and incorporated review feedback |
 | 0.3 | 05/11/2026 | Binu Ramakrishnan | DPU agent / FMDS optional HTTP sign proxy (`[machine-identity]` `sign-proxy-url`, `sign-proxy-tls-root-ca`); `FmdsMachineIdentityConfig` in FMDS config push |
 | 0.4 | 05/11/2026 | Binu Ramakrishnan | Signing key rotation (two slots), overlap policy on rotate only |
 | 0.5 | 06/02/2026 | Binu Ramakrishnan | Site master encryption key re-wrap (`ReencryptTenantIdentitySecrets` gRPC); envelope `key_id` in ciphertext (drop DB `encryption_key_id` column) |
+| 0.6 | 08/07/2026 | Parham Armani | Expose re-wrap via NICo-rest (`POST .../tenant-identity/reencrypt`, provider-admin), keeping `dryRun`; previously gRPC/Forge-Admin-CLI only |
 |  |  |  |  |
 
-# **1\. Introduction**
+## 1. Introduction
 
 This design document specifies how the Bare Metal Manager project will integrate the SPIFFE identity framework to issue and manage machine identities using SPIFFE Verifiable Identity Documents (SVIDs). SPIFFE provides a vendor-agnostic standard for service identity that enables cryptographically verifiable identities for workloads, removing reliance on static credentials and supporting zero-trust authentication across distributed systems.
 
 The document outlines the architecture, data models, APIs, security considerations, and interactions between Bare Metal Manager components and SPIFFE-compliant systems.
 
-## **1.1 Purpose**
+### 1.1 Purpose
 
 The purpose of this document is to articulate the design of the software system, ensuring all stakeholders have a shared understanding of the solution, its components, and their interactions. It details the high-level and low-level design choices, architecture, and implementation details necessary for the development.
 
-## **1.2 Definitions and Acronyms**
+### 1.2 Definitions and Acronyms
 
 | Term/Acronym | Definition |
 | :---- | :---- |
@@ -46,30 +47,30 @@ The purpose of this document is to articulate the design of the software system,
 | BM | A bare metal machine \- often referred as a machine or node in this document.  |
 | Token Exchange Server | A service capable of validating security tokens provided to it and issuing new security tokens in response, which enables clients to obtain appropriate access credentials for resources in heterogeneous environments or across security domains. Defined in [RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693). This document also refers to this as 'token endpoints' and 'token delegation server'  |
 
-## **1.3 Scope**
+### 1.3 Scope
 
 This SDD covers the design for NICo issuing SPIFFE compliant JWTs to nodes it manages. This includes the initial configuration, run-time and operational flows.
 
-### **1.3.1​ Assumptions, Constraints, Dependencies**
+#### 1.3.1 Assumptions, Constraints, Dependencies
 
 * Must implement SPIFFE SVIDs as NICo node identity
 * Must rotate and expire SVIDs  
 * Must provide configurable audience in SVIDs  
 * Must enable delegating node identity signing  
-* Must support per-tenant key for signing JWT-SVIDs   
+* Must support per-tenant key for signing JWT-SVIDs
 * Must produce tokens consumable by SPIFFE-enabled services.
 
-# **2\. System Architecture**
+## 2. System Architecture
 
-## **2.1 High-Level Architecture**
+### 2.1 High-Level Architecture
 
 From a high level, the goal for NICo is to issue a JWT-SVID identity to the requesting nodes under NICo’s management. A NICo managed node will be part of a tenant (aka org), and the issued JWT-SVID embodies both tenant and machine identity that complies with the SPIFFE format.
 
-![](nico-spiffe-jwt-svid-flow.svg)
+![High-level JWT-SVID issuance flow](nico-spiffe-jwt-svid-flow.svg)
 
 *Figure-1 High-level architecture and flow diagram*
 
-1. The bare metal (BM) tenant process makes HTTP requests to the NICo meta-data service (IMDS) over a link-local address (169.254.169.254). IMDS is running inside the DPU as part of the NICo DPU agent (or standalone FMDS fed by the agent).   
+1. The bare metal (BM) tenant process makes HTTP requests to the NICo meta-data service (IMDS) over a link-local address (169.254.169.254). IMDS is running inside the DPU as part of the NICo DPU agent (or standalone FMDS fed by the agent).
 2. IMDS obtains a JWT-SVID for the workload in one of two ways (operator choice on the DPU agent):  
    a. **Default:** mTLS-authenticated `SignMachineIdentity` gRPC to the NICo site controller. Pull keys and machine/org metadata from the database, decrypt the private key, sign the JWT-SVID, return it (implicit path to the host workload).  
    b. **Optional HTTP sign proxy:** when `[machine-identity].sign-proxy-url` is set on the agent, IMDS forwards `GET …/latest/meta-data/identity` (same query string for `aud`, same `Metadata` and `Accept` headers) to `{sign-proxy-url}/latest/meta-data/identity`; the upstream HTTP status and body are returned to the workload. Use this when signing must pass through an in-path HTTP service (e.g. corporate PKI or API gateway) instead of direct agent→NICo gRPC.
@@ -78,11 +79,11 @@ From a high level, the goal for NICo is to issue a JWT-SVID identity to the requ
 
 An additional requirement for NICo is to delegate the issuance of a JWT-SVID to an external system. The solution is to offer a callback API for NICo tenants to intercept the signing request, validate the NICo node identity, and issue new tenant specific JWT-SVID token (Figure-2). The delegation model offers tenants flexibility to customize their machine SVIDs.
 
-![](nico-spiffe-svid-token-exchange-flow.svg)
+![JWT-SVID token exchange delegation flow](nico-spiffe-svid-token-exchange-flow.svg)
 
 *Figure-2 Token exchange delegation flow diagram*
 
-## **2.2 Component Breakdown**
+### 2.2 Component Breakdown
 
 The system is composed of the following major components:
 
@@ -94,7 +95,7 @@ The system is composed of the following major components:
 | Database (Postgres) | Store NICo node-lifecycle and accounting data  |
 | Token Exchange Server | Optional \- hosted by tenants to exchange NICo node JWT-SVIDs with tenant-customized workload JWT-SVIDs. Follows token exchange API model defined in [RFC-8693](https://datatracker.ietf.org/doc/html/rfc8693) |
 
-# **3\. Detailed Design**
+## 3. Detailed Design
 
 There are four operational areas associated with implementing this feature:
 
@@ -105,12 +106,12 @@ There are four operational areas associated with implementing this feature:
 
 Each of these flows are discussed below.
 
-## **3.1 Per-tenant Identity Configuration and Signing Key Provisioning**
+### 3.1 Per-tenant Identity Configuration and Signing Key Provisioning
 
-Per-org signing keys are created when an admin first configures machine identity for an org via `PUT identity/config` (SetTenantIdentityConfiguration).
+Per-org signing keys are created when an admin first configures machine identity for an org via `PUT tenant-identity/config` (SetTenantIdentityConfiguration).
 
-```
-SetTenantIdentityConfiguration (PUT identity/config)
+```text
+SetTenantIdentityConfiguration (PUT tenant-identity/config)
               │
               ▼
 ┌───────────────────────────────┐
@@ -140,11 +141,12 @@ SetTenantIdentityConfiguration (PUT identity/config)
 │ 4. Return IdentityConfigResp  │
 └───────────────────────────────┘
 ```
+
 *Figure-3 Per-tenant identity configuration and signing key provisioning flow*
 
 **Signing key rotation (two slots):** `tenant_identity_config` holds **two** optional encrypted private keys and matching public-key JSON documents (`signing_key_public_*`). Exactly one slot is **current** (`current_signing_key_slot`). On **first** provisioning, material is written to slot 1. On **rotate** (`rotate_key=true`), the new pair goes into the other slot, the current pointer moves, and **`non_active_slot_expires_at`** records when the previous key may be dropped from JWKS. Overlap duration is **not** stored as a column; each **SetTenantIdentityConfiguration** that rotates must supply **`signing_key_overlap_sec`**, which must be **≥ `token_ttl_sec`** (so tokens signed with the old key stay verifiable until `exp`) and **≤** site **`signing_key_overlap_max_sec`**. While two keys are published, **GetTenantIdentityConfiguration** returns **`signing_keys`**: one entry has **`current_signer`** true; the inactive entry may include **`expire_at`** (JSON **`expireAt`**) — the JWKS overlap end.
 
-### **3.1.1 Site master encryption key rotation (KEK re-wrap)**
+#### 3.1.1 Site master encryption key rotation (KEK re-wrap)
 
 Per-org signing private keys and token-delegation credentials are encrypted at rest with a **site master encryption key** (AES-256-GCM envelope, scheme version 1). This is **separate** from per-org **JWT signing key rotation** (§3.1 above).
 
@@ -160,12 +162,12 @@ Per-org signing private keys and token-delegation credentials are encrypted at r
 
 1. Add the new key to site secrets (`machine_identity.encryption_keys.kv2`); **keep** the old key until step 4 completes.
 2. Set `current_encryption_key_id = "kv2"` in site config and **restart** the NICo API (not hot-reloaded).
-3. Call **`ReencryptTenantIdentitySecrets`** with **`dry_run: true`** (optionally scoped to one `organization_id`), then apply with **`dry_run: false`**.
+3. Call **`ReencryptTenantIdentitySecrets`** with **`dry_run: true`** (optionally scoped to one `organization_id` that already has tenant identity configuration), then apply with **`dry_run: false`**.
 4. Verify dry-run shows all rows **`rows_skipped_all_on_target`** / **`fields_skipped_on_target`** only; then optionally remove the retired key from secrets.
 
 Fields re-wrapped per org (when present): `encrypted_signing_key_1`, `encrypted_signing_key_2`, `encrypted_auth_method_config`.
 
-```
+```text
 Add kv2 to secrets ──► current_encryption_key_id=kv2 + restart API
               │
               ▼
@@ -178,11 +180,11 @@ ReencryptTenantIdentitySecrets (dry_run=false)
 (Optional) remove retired key from secrets
 ```
 
-## **3.2 Per-tenant SPIFFE Key Bundle Discovery**
+### 3.2 Per-tenant SPIFFE Key Bundle Discovery
 
 [SPIFFE bundles](https://spiffe.io/docs/latest/spiffe-specs/spiffe_trust_domain_and_bundle/#4-spiffe-bundle-format) are represented as an [RFC 7517](https://tools.ietf.org/html/rfc7517) compliant JWK Set. NICo exposes the signing public keys through NICo-rest OIDC discovery and JWKS endpoints. Services that require JWT-SVID verification pull public keys to verify token signature. Review sequence diagrams Figure-4 and 5 for more details.
 
-```
+```text
 ┌────────┐       ┌───────────────┐       ┌─────────────┐       ┌──────────┐      
 │ Client │       │ NICo-rest  │       │  NICo API   │       │ Database │      
 │(e.g LL)│       │   (REST)      │       │   (gRPC)    │       │(Postgres)│      
@@ -223,9 +225,10 @@ ReencryptTenantIdentitySecrets (dry_run=false)
     │<──────────────────│                       │                   │                    
     │                   │                       │                   │                    
 ```
+
 *Figure-4 Per-tenant OIDC discovery URL flow*
 
-```
+```text
 ┌────────┐       ┌───────────────┐       ┌─────────────┐       ┌──────────┐       
 │ Client │       │ NICo-rest  │       │  NICo API   │       │ Database │       
 │        │       │   (REST)      │       │   (gRPC)    │       │(Postgres)│       
@@ -275,13 +278,15 @@ ReencryptTenantIdentitySecrets (dry_run=false)
     │◄──────────────────│                       │                   │                    
     │                   │                       │                   │                   
 ```
+
 *Figure-5 Per-tenant SPIFFE OIDC JWKS flow*
 
-## **3.3 JWT-SVID Node Identity Request Flow**
+### 3.3 JWT-SVID Node Identity Request Flow
 
 This is the core part of this SDD – issuing JWT-SVID based node identity tokens to the tenant node. The tenant can then use this token to authenticate with other services based on the standard SPIFFE scheme.  
 ​​
-```
+
+```text
 [ Tenant Workload ]
       │
       │ GET http://169.254.169.254:80/latest/meta-data/identity?aud=openbao
@@ -296,9 +301,10 @@ This is the core part of this SDD – issuing JWT-SVID based node identity token
       ▼
 JWT-SVID issued to workload/tenant
 ```
+
 *Figure-6 Node Identity request flow (direct, no callback). The hop from IMDS to NICo may be gRPC `SignMachineIdentity` (default) or an HTTP forward to `sign-proxy-url` when configured on the DPU agent.*
 
-### **3.3.1 DPU agent / FMDS: `[machine-identity]` and optional HTTP sign proxy**
+#### 3.3.1 DPU agent / FMDS: `[machine-identity]` and optional HTTP sign proxy
 
 The embedded IMDS identity handler (`GET …/latest/meta-data/identity` and compatible API versions) shares **rate limits**, **wait**, and **sign** timeouts between both signing modes. These are set in the DPU agent TOML under **`[machine-identity]`** (kebab-case keys), validated at startup:
 
@@ -316,7 +322,7 @@ The embedded IMDS identity handler (`GET …/latest/meta-data/identity` and comp
 | `sign-proxy-url` | When set, the agent issues **`GET {url}/latest/meta-data/identity`** with the same query string as the workload request (e.g. repeated `aud=`). Scheme must be `http` or `https`. Trailing slashes on the base URL are normalized. |
 | `sign-proxy-tls-root-ca` | Optional path to a PEM file (one or more certs) added as trusted roots for **`https`** sign-proxy URLs (e.g. private CA). Ignored for `http:`. Requires `sign-proxy-url`. |
 
-When `sign-proxy-url` is **omitted**, the agent uses **NICo `SignMachineIdentity`** over mTLS as today. When it is **set**, the identity path uses **only** the HTTP forward for that request; the upstream response (status, `Content-Type`, body) is returned to the workload.
+When `sign-proxy-url` is **omitted**, the agent uses **NICo `SignMachineIdentity`** over mTLS by default. When it is **set**, the identity path uses **only** the HTTP forward for that request; the upstream response (status, `Content-Type`, body) is returned to the workload.
 
 **Standalone FMDS:** `nico-dpu-agent` pushes `FmdsConfigUpdate.machine_identity` to the FMDS service as **`FmdsMachineIdentityConfig`** (`crates/rpc/proto/fmds.proto`), mirroring the same numeric fields and optional `sign_proxy_url` / `sign_proxy_tls_root_ca`. If a later `UpdateConfig` **omits** `machine_identity`, FMDS **retains** the previously applied settings.
 
@@ -331,7 +337,7 @@ When `sign-proxy-url` is **omitted**, the agent uses **NICo `SignMachineIdentity
 # sign-proxy-tls-root-ca = "/etc/nico/sign_proxy_root.pem" # optional; HTTPS private CA roots only
 ```
 
-```
+```text
 [ Tenant Workload ]
       │
       │ GET http://169.254.169.254:80/latest/meta-data/identity?aud=openbao
@@ -351,11 +357,13 @@ When `sign-proxy-url` is **omitted**, the agent uses **NICo `SignMachineIdentity
       ▼
 NICo Tenant issue JWT-SVID to tenant workload, routed back through NICo
 ```
+
 *Figure-7 Node Identity request flow with token exchange delegation*
 
-## **3.4 Data Model and Storage**
+### 3.4 Data Model and Storage
 
-### **3.4.1 Database Design**
+#### 3.4.1 Database Design
+
 A new table will be created to store tenant signing key pairs and optional token delegation config. The private key will be encrypted with a master key stored in Vault. Token delegation columns are nullable when an org does not use delegation.
 
 | tenant\_identity\_config |  |  |
@@ -381,13 +389,13 @@ A new table will be created to store tenant signing key pairs and optional token
 | `VARCHAR(255)` | `subject_token_audience` | Subject JWT audience for exchange (optional) |
 | `TIMESTAMPTZ` | `token_delegation_created_at` | First delegation registration (optional) |
 
-_Previous single-column layout (`encrypted_signing_key`, `signing_key_public`, `key_id`, `algorithm`) is replaced by the slotted model above via migration. The per-row **`encryption_key_id`** column was removed; master key selection for **new** encryption uses site **`current_encryption_key_id`**, while **decrypt** uses the **`key_id` field inside each stored envelope** (see §3.1.1)._
+*Previous single-column layout (`encrypted_signing_key`, `signing_key_public`, `key_id`, `algorithm`) is replaced by the slotted model above via migration. The per-row **`encryption_key_id`** column was removed; master key selection for **new** encryption uses site **`current_encryption_key_id`**, while **decrypt** uses the **`key_id` field inside each stored envelope** (see §3.1.1).*
 
-### **3.4.2 Configuration**
+#### 3.4.2 Configuration
 
-The JWT spec and vault related configs are passed to the NICo API server during startup through `site_config.toml` config file. 
+The JWT spec and vault related configs are passed to the NICo API server during startup through `site_config.toml` config file.
 
-```bash
+```toml
 # In site config file (e.g., site_config.toml)
 [machine_identity]
 enabled = true
@@ -408,22 +416,23 @@ token_endpoint_domain_allowlist = []    # token delegation token_endpoint URL ho
 
 **DPU agent / IMDS (separate from site `[machine_identity]`):** Limits and optional HTTP sign-proxy for workload `GET …/meta-data/identity` are configured on the **DPU agent** (and mirrored to **standalone FMDS** via `FmdsConfigUpdate.machine_identity`). They do not live in the API server `site_config.toml`. See **§3.3.1**.
 
-**Global vs per-org:** 
+**Global vs per-org:**
 Global config provides:
-  * the master switch (`enabled`)
-  * site-wide signing algorithm (`algorithm`)
-  * **`current_encryption_key_id`**: selects which master encryption key from site secrets is used for **new** per-org ciphertext (signing private keys and token-delegation auth JSON); required when `enabled` is `true`. Decrypt uses the envelope’s embedded `key_id`. Rotate via §3.1.1 and **`ReencryptTenantIdentitySecrets`**.
-  * optional token TTL bounds (`token_ttl_min_sec`, `token_ttl_max_sec`), and
-  * optional **`signing_key_overlap_max_sec`**: max allowed **`signing_key_overlap_sec`** on a **rotate** request (default in the tens of days range; tune per environment)
-  * optional HTTP proxy for token endpoint calls (`token_endpoint_http_proxy`)
-  * optional **`trust_domain_allowlist`**: when non-empty, each org’s configured JWT `issuer` must resolve to a trust domain (registered host) that matches at least one pattern; patterns are validated at startup
-  * optional **`token_endpoint_domain_allowlist`**: when non-empty, the org’s token delegation `token_endpoint` must be `http://` or `https://` with a host that matches at least one pattern; patterns are validated at startup
-  
-All identity settings (`issuer`, `defaultAudience`, `allowedAudiences`, `tokenTtlSec`, `subjectPrefix` etc.) are **per-org only** and are set when calling PUT identity/config. There is no global fallback for those fields. **`subjectPrefix` is optional:** if omitted, the site controller derives `spiffe://<trust-domain-from-issuer>` from `issuer` (root SPIFFE ID form, no path or trailing slash). Other fields such as `issuer` and `tokenTtlSec` remain required by the API within documented bounds. Per-org `enabled` can further disable an org when global is true (default `true` when unset).
+
+* the master switch (`enabled`)
+* site-wide signing algorithm (`algorithm`)
+* **`current_encryption_key_id`**: selects which master encryption key from site secrets is used for **new** per-org ciphertext (signing private keys and token-delegation auth JSON); required when `enabled` is `true`. Decrypt uses the envelope’s embedded `key_id`. Rotate via §3.1.1 and **`ReencryptTenantIdentitySecrets`**.
+* optional token TTL bounds (`token_ttl_min_sec`, `token_ttl_max_sec`), and
+* optional **`signing_key_overlap_max_sec`**: max allowed **`signing_key_overlap_sec`** on a **rotate** request (default in the tens of days range; tune per environment)
+* optional HTTP proxy for token endpoint calls (`token_endpoint_http_proxy`)
+* optional **`trust_domain_allowlist`**: when non-empty, each org’s configured JWT `issuer` must resolve to a trust domain (registered host) that matches at least one pattern; patterns are validated at startup
+* optional **`token_endpoint_domain_allowlist`**: when non-empty, the org’s token delegation `token_endpoint` must be `http://` or `https://` with a host that matches at least one pattern; patterns are validated at startup
+
+All identity settings (`issuer`, `defaultAudience`, `allowedAudiences`, `tokenTtlSec`, `subjectPrefix` etc.) are **per-org only** and are set when calling PUT tenant-identity/config. There is no global fallback for those fields. **`subjectPrefix` is optional:** if omitted, the site controller derives `spiffe://<trust-domain-from-issuer>` from `issuer` (root SPIFFE ID form, no path or trailing slash). Other fields such as `issuer` and `tokenTtlSec` remain required by the API within documented bounds. Per-org `enabled` can further disable an org when global is true (default `true` when unset).
 
 **PUT prerequisite:** Per-org config can only be created or updated when global `enabled` is `true`; otherwise PUT returns `503 Service Unavailable`.
 
-### **3.4.3 Incomplete or Invalid Global Config**
+#### 3.4.3 Incomplete or Invalid Global Config
 
 When the `[machine_identity]` section exists but is incomplete or invalid, the following behavior applies.
 
@@ -433,18 +442,18 @@ When the `[machine_identity]` section exists but is incomplete or invalid, the f
 | :------- | :------- |
 | Section missing | Feature disabled. Server starts. No machine identity operations available. |
 | Section exists, invalid or incomplete | Server fails to start. Prevents partial or broken state. |
-| Section exists, valid, `enabled` = false | Feature disabled. PUT identity/config returns `503`. |
+| Section exists, valid, `enabled` = false | Feature disabled. PUT tenant-identity/config returns `503`. |
 | Section exists, valid, `enabled` = true | Feature operational. |
 
 **Runtime behavior when global config is incomplete (e.g. config changed after startup):**
 
 | Operation | Behavior |
 | :-------- | :------- |
-| PUT identity/config | Reject with `503 Service Unavailable`. Same as when global is disabled. |
-| GET identity/config | Return `503` when global config is invalid or missing required fields. |
+| PUT tenant-identity/config | Reject with `503 Service Unavailable`. Same as when global is disabled. |
+| GET tenant-identity/config | Return `503` when global config is invalid or missing required fields. |
 | SignMachineIdentity | Return error (e.g. `UNAVAILABLE`). Do not issue tokens. |
 
-### **3.4.4 JWT-SVID Token Format**
+#### 3.4.4 JWT-SVID Token Format
 
 The subject format complies with the SPIFFE ID specification. The `iss` claim comes from the org's identity config `issuer`. The SPIFFE prefix for `sub` comes from the stored `subjectPrefix` (explicit or defaulted from `issuer` as above), combined with the workload path when issuing tokens.
 
@@ -489,17 +498,17 @@ This is a sample JWT-SVID issued by the tenant's token endpoint.
 }
 ```
 
-## **3.5 Component Details**
+### 3.5 Component Details
 
-### **3.5.1 External/User-facing APIs**
+#### 3.5.1 External/User-facing APIs
 
-#### **3.5.1.1 Metadata Identity API**
+##### 3.5.1.1 Metadata Identity API
 
-Both json and plaintext responses are supported depending on the Accept header. Defaults to json. The audience query parameter must be url encoded. Multiple audiences are allowed but discouraged by the SPIFFE spec, so we also support multiple audiences in this API. 
+Both json and plaintext responses are supported depending on the Accept header. Defaults to json. The audience query parameter must be url encoded. Multiple audiences are allowed but discouraged by the SPIFFE spec, so we also support multiple audiences in this API.
 
 Request:
 
-```bash
+```http
 GET http://169.254.169.254:80/latest/meta-data/identity?aud=urlencode(spiffe://your.target.service.com)&aud=urlencode(spiffe://extra.audience.com)
 Accept: application/json (or omitted)
 Metadata: true
@@ -507,7 +516,7 @@ Metadata: true
 
 Response:
 
-```bash
+```http
 200 OK
 Content-Type: application/json
 Content-Length: ...
@@ -521,7 +530,7 @@ Content-Length: ...
 
 Request:
 
-```bash
+```http
 GET http://169.254.169.254:80/latest/meta-data/identity?aud=urlencode(spiffe://your.target.service.com)&aud=urlencode(spiffe://extra.audience.com)
 Accept: text/plain
 Metadata: true
@@ -529,16 +538,16 @@ Metadata: true
 
 Response:
 
-```bash
+```http
 200 OK
 Content-Type: text/plain
 Content-Length: ...
 eyJhbGciOiJSUzI1NiIs...
 ```
 
-#### **3.5.1.2 NICo Identity APIs**
+##### 3.5.1.2 NICo Identity APIs
 
-##### **Org Identity Configuration APIs**
+###### Org Identity Configuration APIs
 
 These APIs manage per-org identity configuration that controls how NICo issues JWT-SVIDs for machines in that org. Admins use them to enable or disable the feature per org, and to set the issuer URI, allowed audiences, token TTL, and SPIFFE subject prefix. The configuration applies to all JWT-SVID tokens issued for the org's machines (via IMDS or token exchange). GET retrieves the current config, PUT creates or replaces it, and DELETE removes it (org no longer has machine identity).
 
@@ -548,14 +557,14 @@ These APIs manage per-org identity configuration that controls how NICo issues J
 
 **PUT when global is disabled:** If the global `enabled` setting in site config is `false`, PUT returns `503 Service Unavailable` with a message indicating that machine identity must be enabled at the site level first. This enforces the deployment order: global config must be enabled before per-org config can be created or updated.
 
-```bash
-PUT identity/config
-GET identity/config
-DELETE identity/config
+```http
+PUT tenant-identity/config
+GET tenant-identity/config
+DELETE tenant-identity/config
 ```
 
-```
-PUT https://{nico-rest}/v2/org/{org-id}/nico/site/{site-id}/identity/config
+```http
+PUT https://{nico-rest}/v2/org/{org-id}/nico/site/{site-id}/tenant-identity/config
 ```
 
 ```json
@@ -634,18 +643,25 @@ Response:
 
 `signingKeys` lists **published** public keys (metadata only). Exactly one object has **`currentSigner`: true**. During rotation overlap, the **inactive** key may include **`expireAt`** (proto: `expire_at`) — end of the JWKS overlap window. With a single active key, only one object is returned and **`expireAt`** is omitted.
 
-##### **Site master encryption key re-wrap (gRPC only)**
+###### Site master encryption key re-wrap
 
 Site operators use this admin RPC after changing **`current_encryption_key_id`** to re-wrap existing ciphertext in `tenant_identity_config` with the new master key. It does **not** rotate per-org JWT signing keys (use **`rotateKey`** on Set identity config for that).
 
-**Auth:** Forge Admin CLI (internal RBAC); not exposed via NICo-rest.
+**Surfaces:** Two entry points invoke the same **`Forge.ReencryptTenantIdentitySecrets`** gRPC:
 
-**Scope:** If **`organization_id`** is set, only that org (must exist). If omitted, all rows in `tenant_identity_config` are examined in stable order.
+* **NICo-rest:** `POST /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/reencrypt` — for provider admins using a bearer token / `nicocli`; the handler dispatches only this operation through the generic Core gRPC proxy.
+* **Forge Admin CLI (gRPC/mTLS):** direct call for internal operators.
 
-**Dry run:** When **`dry_run`** is **`true`**, decrypt and validate only; **no DB writes**. Counters still reflect what would change.
+**Auth:** The NICo-rest endpoint requires the **provider-admin** role (validated by NICo-rest before dispatching to the site); the direct gRPC path uses Forge Admin CLI internal RBAC. This is a site-wide administrative operation, **not** a per-tenant call — it is deliberately gated to provider admins rather than tenant admins.
 
-```bash
-# gRPC (Forge service)
+**Scope:** The NICo-rest URL `{org-id}` identifies the provider whose admin authorizes the operation, while the URL `{site-id}` selects the Site. If **`organizationId`** (REST) or **`organization_id`** (gRPC) is set, only that tenant org is processed, and it must have tenant identity configuration on the Site. NICo-rest additionally requires the tenant org to have an allocation on the selected Site. If the field is omitted, all rows in `tenant_identity_config` on that Site are examined in stable order. (The re-wrap target key comes from the running site API config, not the request; the organization field selects *which* rows, not the key.)
+
+**Dry run:** When **`dryRun`** is **`true`**, decrypt and validate only; **no DB writes**. Counters still reflect what would change. `dryRun` is exposed on both surfaces so operators can preview blast radius and confirm `rowsFailed == 0` before applying a bulk re-wrap of secret material (see the runbook's dry-run → apply → verify flow).
+
+```http
+# NICo-rest (provider-admin)
+POST /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/reencrypt
+# gRPC (Forge service; Forge Admin CLI)
 Forge.ReencryptTenantIdentitySecrets
 ```
 
@@ -661,7 +677,7 @@ Request (single org, apply):
 
 ```json
 {
-  "organizationId": "my-org-id",
+  "organizationId": "org-id",
   "dryRun": false
 }
 ```
@@ -694,7 +710,7 @@ Response:
 
 Partial failures do not fail the whole RPC; check **`rowsFailed`** and **`failures`**.
 
-#### **NICo Token Exchange Server Registration APIs**
+###### NICo Token Exchange Server Registration APIs
 
 These APIs let NICo tenants register a token exchange callback endpoint (RFC 8693). When delegation is enabled, NICo issues a short-lived JWT-SVID to the tenant's exchange service, which validates it and returns a tenant-specific JWT-SVID or access token. This gives tenants control over token structure, lifecycle, and claims, especially when they have more context than NICo (e.g., VM identity, application role) and need to issue tenant-customized tokens for workloads.
 
@@ -702,23 +718,23 @@ These APIs let NICo tenants register a token exchange callback endpoint (RFC 869
 
 | Setting | Scope | Effect on token delegation |
 | :------ | :---- | :------------------------- |
-| `enabled` | Global | Master switch. If false, PUT token-delegation is rejected (same as identity/config). |
+| `enabled` | Global | Master switch. If false, PUT token-delegation is rejected (same as tenant-identity/config). |
 | `token_endpoint_http_proxy` | Global | Outbound calls from NICo to the tenant's token endpoint use this proxy (SSRF mitigation). |
 | Identity config (issuer, audiences, **`tokenTtlSec`**) | Per-org (with global defaults) | The subject JWT sent to the exchange server is signed using the org's effective identity config. Its **`exp` − `iat` equals `tokenTtlSec`** (same knob as directly issued tokens). The **outbound** token response `expires_in` comes from the tenant STS, not from NICo. |
 | Token delegation config | Per-org | Each org registers its own `tokenEndpoint`, `subjectTokenAudience`, and auth method via oneof (`clientSecretBasic`, etc.). |
 
-**PUT token-delegation prerequisites:** Same as PUT identity/config, global `enabled` must be `true` and global config must be complete. If not, PUT returns `503 Service Unavailable`. Token delegation also requires org identity config to exist (the JWT sent to the exchange is built from it); if the org has no identity config, PUT token-delegation returns `404` or `503`.
+**PUT token-delegation prerequisites:** Same as PUT tenant-identity/config, global `enabled` must be `true` and global config must be complete. If not, PUT returns `503 Service Unavailable`. Token delegation also requires org identity config to exist (the JWT sent to the exchange is built from it); if the org has no identity config, PUT token-delegation returns `404` or `503`.
 
-```bash
-PUT identity/token-delegation
-GET identity/token-delegation
-DELETE identity/token-delegation
+```http
+PUT tenant-identity/token-delegation
+GET tenant-identity/token-delegation
+DELETE tenant-identity/token-delegation
 ```
 
 Request:
 
-```bash
-PUT https://{nico-rest}/v2/org/{org-id}/nico/site/{site-id}/identity/token-delegation
+```http
+PUT https://{nico-rest}/v2/org/{org-id}/nico/site/{site-id}/tenant-identity/token-delegation
 {
   "tokenEndpoint": "https://auth.acme.com/oauth2/token",
   "clientSecretBasic": {
@@ -747,21 +763,19 @@ Response:
 
 Note: Auth method is inferred from the oneof. `clientSecretBasic` omits secret keys in response; `client_secret_hash` (SHA256 prefix) is returned for verification. Non-secret fields (e.g. `client_id`) are returned. Omit the oneof entirely for `none`.
 
-Possible ([openid client auth](https://openid.net/specs/openid-connect-core-1_0.html#ClientAuthentication
-)) values (inferred from oneof):
+Possible ([openid client auth](https://openid.net/specs/openid-connect-core-1_0.html#ClientAuthentication)) values (inferred from oneof):
 
 * `client_secret_basic` supported (`clientSecretBasic`: client_id, client_secret)
 * `none` supported; omit oneof entirely
-* `client_secret_post`, `private_key_jwt` extensible (currently unsupported)
+* `client_secret_post` and `private_key_jwt` are unsupported by REST API v2 and require future `oneof` variants
 
+##### 3.5.1.3 Token Exchange Request
 
-#### **3.5.1.3 Token Exchange Request**
-
-Make a request to the `token_endpoint` registered via the `identity/token-delegation` API.
+Make a request to the `token_endpoint` registered via the `tenant-identity/token-delegation` API.
 
 **Request**:
 
-```bash
+```http
 POST https://tenant.example.com/oauth2/token
 Content-Type: application/x-www-form-urlencoded
 
@@ -772,7 +786,7 @@ grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange
 
 **Response**:
 
-```bash
+```http
 200 OK
 Content-Type: application/json
 Content-Length: ...
@@ -789,9 +803,9 @@ Content-Length: ...
 
 The exchange service serves an [RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693) token exchange endpoint for swapping NICo-issued JWT-SVIDs with a tenant-specific issuer SVID or access token.
 
-#### **3.5.1.4 SPIFFE JWKS Endpoint**
+##### 3.5.1.4 SPIFFE JWKS Endpoint
 
-```bash
+```http
 GET
 https://{nico-rest}/v2/org/{org-id}/nico/site/{site-id}/.well-known/jwks.json
 
@@ -808,11 +822,11 @@ https://{nico-rest}/v2/org/{org-id}/nico/site/{site-id}/.well-known/jwks.json
 }
 ```
 
-#### **3.5.1.5 OIDC Discovery URL**
+##### 3.5.1.5 OIDC Discovery URL
 
 Discovery reuses common OpenID Provider field names where helpful, but **NICo does not issue OIDC `id_token`s**—only **JWT bearer** access tokens (machine identity). Verifiers should use `jwks_uri` (or `spiffe_jwks_uri` for SPIFFE-style `use`) and the **`alg`** (and `kid`) on keys from GetJWKS; `id_token_signing_alg_values_supported` stays empty.
 
-```bash
+```http
 GET
 https://{nico-rest}/v2/org/{org-id}/nico/site/{site-id}/.well-known/openid-configuration
 
@@ -830,7 +844,7 @@ https://{nico-rest}/v2/org/{org-id}/nico/site/{site-id}/.well-known/openid-confi
  }
 ```
 
-#### **3.5.1.6 HTTP Response Statuses**
+##### 3.5.1.6 HTTP Response Statuses
 
 **HTTP Method Success Response Matrix**
 
@@ -854,7 +868,7 @@ https://{nico-rest}/v2/org/{org-id}/nico/site/{site-id}/.well-known/openid-confi
 | Machine identity disabled at site level (PUT when global `enabled` is false) | 503 Service Unavailable |
 | Conflict (e.g. immutable field change) | 409 Conflict |
 
-### **3.5.2 Internal gRPC APIs**
+#### 3.5.2 Internal gRPC APIs
 
 ```protobuf
 syntax = "proto3";
@@ -938,11 +952,11 @@ service NICo {
 ```
 
 **Auth method extensibility:** Token delegation uses a strongly-typed `oneof auth_method_config`. Auth method is inferred from the oneof (not sent in request or response):
-- Oneof omitted → auth_method is `none`.
-- `client_secret_basic`: Request uses `ClientSecretBasic` (client_id, client_secret). Response uses `ClientSecretBasicResponse` (client_id, client_secret_hash truncated).
+
+* Oneof omitted → auth_method is `none`.
+* `client_secret_basic`: Request uses `ClientSecretBasic` (client_id, client_secret). Response uses `ClientSecretBasicResponse` (client_id, client_secret_hash truncated).
 
 New auth methods can be added by extending the oneof.
-
 
 ```protobuf
 syntax = "proto3";
@@ -1033,7 +1047,8 @@ message TenantIdentityConfigResponse {
 }
 
 message ReencryptTenantIdentitySecretsRequest {
-  // If set, only this org; otherwise all rows in tenant_identity_config.
+  // If set, re-wrap only this org; it must have tenant identity configuration.
+  // Otherwise, re-wrap all rows in tenant_identity_config.
   optional string organization_id = 1;
   // Decrypt and validate only; no DB writes.
   bool dry_run = 2;
@@ -1068,22 +1083,22 @@ service NICo {
 }
 ```
 
-### **3.5.2.1 Mapping REST \-\> gRPC** 
+##### 3.5.2.1 Mapping REST -> gRPC
 
 | REST Method & Endpoint | gRPC Method | Description |
 | ----- | ----- | ----- |
 | `GET /v2/org/{org-id}/nico/site/{site-id}/.well-known/jwks.json` | `NICo.GetJWKS` | Fetch JSON Web Key Set (public, unauthenticated) |
 | `GET /v2/org/{org-id}/nico/site/{site-id}/.well-known/spiffe/jwks.json` | `NICo.GetJWKS` (`kind=Spiffe`) | Fetch SPIFFE-style JWKS (public, unauthenticated) |
 | `GET /v2/org/{org-id}/nico/site/{site-id}/.well-known/openid-configuration` | `NICo.GetOpenIDConfiguration` | Fetch OpenID Connect config (public, unauthenticated) |
-| `GET /v2/org/{org-id}/nico/site/{site-id}/identity/config` | `NICo.GetTenantIdentityConfiguration` | Retrieve identity configuration |
-| `PUT /v2/org/{org-id}/nico/site/{site-id}/identity/config` | `NICo.SetTenantIdentityConfiguration` | Create or replace identity configuration |
-| `DELETE /v2/org/{org-id}/nico/site/{site-id}/identity/config` | `NICo.DeleteTenantIdentityConfiguration` | Delete identity configuration |
-| `GET /v2/org/{org-id}/nico/site/{site-id}/identity/token-delegation` | `NICo.GetTokenDelegation` | Retrieve token delegation config |
-| `PUT /v2/org/{org-id}/nico/site/{site-id}/identity/token-delegation` | `NICo.SetTokenDelegation` | Create or replace token delegation |
-| `DELETE /v2/org/{org-id}/nico/site/{site-id}/identity/token-delegation` | `NICo.DeleteTokenDelegation` | Delete token delegation |
-| _(gRPC only; Forge Admin CLI)_ | `Forge.ReencryptTenantIdentitySecrets` | Re-wrap tenant identity ciphertext with site **`current_encryption_key_id`** (§3.1.1) |
+| `GET /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/config` | `NICo.GetTenantIdentityConfiguration` | Retrieve identity configuration. **Tenant-admin.** |
+| `PUT /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/config` | `NICo.SetTenantIdentityConfiguration` | Create or replace identity configuration. **Tenant-admin.** |
+| `DELETE /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/config` | `NICo.DeleteTenantIdentityConfiguration` | Delete identity configuration. **Tenant-admin.** |
+| `GET /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/token-delegation` | `NICo.GetTokenDelegation` | Retrieve token delegation config. **Tenant-admin.** |
+| `PUT /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/token-delegation` | `NICo.SetTokenDelegation` | Create or replace token delegation. **Tenant-admin.** |
+| `DELETE /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/token-delegation` | `NICo.DeleteTokenDelegation` | Delete token delegation. **Tenant-admin.** |
+| `POST /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/reencrypt` | `Forge.ReencryptTenantIdentitySecrets` | Re-wrap tenant identity ciphertext with site **`current_encryption_key_id`** (§3.1.1). **Provider-admin only.** Also invokable directly as a Forge Admin CLI gRPC call. |
 
-### **3.5.2.2 Error Handling**
+##### 3.5.2.2 Error Handling
 
 Use standard gRPC `Status` codes, aligned with REST:
 
@@ -1097,19 +1112,19 @@ Use standard gRPC `Status` codes, aligned with REST:
 | 503 Service Unavailable | `UNAVAILABLE` | e.g. PUT identity config when global `enabled` is false |
 | 500 Internal | `INTERNAL` | Unexpected server error |
 
-# **4\. Technical Considerations**
+## 4. Technical Considerations
 
-## **4.1 Security**
+### 4.1 Security
 
-1. All internal API gRPC calls to the NICo API server use (existing) mTLS for authn/z and transport security. A future release also relies on attestation features.     
+1. All internal API gRPC calls to the NICo API server use (existing) mTLS for authn/z and transport security. A future release also relies on attestation features.
 2. NICo-rest is served over HTTPS and supports SSO integration  
 3. The IMDS service is exposed over link-local and is exposed only to the node instance. Short-lived tokens (configurable TTL) limit the replay window. Adding Metadata: true HTTP header to the requests to limit SSRF attacks. In order to ensure that requests are directly intended for IMDS and prevent unintended or unwanted redirection of requests, requests:  
-  * Must contain the header `Metadata: true`  
-  * Must not contain an `X-Forwarded-For` header
+   * Must contain the header `Metadata: true`
+   * Must not contain an `X-Forwarded-For` header
 
-  Any request that doesn't meet both of these requirements is rejected by the service. 
+   Any request that doesn't meet both of these requirements is rejected by the service.
 
 4. Requests to IMDS are limited to 3 requests per second. Requests exceeding this threshold will be rejected with 429 responses. This prevents DoS on DPU-agent and NICo API server due to frequent IMDS calls.  
 5. Input validation: The input such as machine id will be validated using the database before issuing the token.  
 6. HTTPS and optional HTTP proxy support for route token exchange call to limit SSRF attacks on internal systems.
-7. **IMDS HTTP sign proxy (DPU agent):** When `[machine-identity].sign-proxy-url` is set, the agent trusts that endpoint to return a valid identity response to the workload. The proxy must be operated and authenticated on the network path appropriate for your site; optional `sign-proxy-tls-root-ca` pins trust for private CAs only for that HTTP client. This path does not replace NICo mTLS for workloads that still use direct `SignMachineIdentity`—it is an **operator-chosen alternative transport** from IMDS to a signing-capable HTTP service. 
+7. **IMDS HTTP sign proxy (DPU agent):** When `[machine-identity].sign-proxy-url` is set, the agent trusts that endpoint to return a valid identity response to the workload. The proxy must be operated and authenticated on the network path appropriate for your site; optional `sign-proxy-tls-root-ca` pins trust for private CAs only for that HTTP client. This path does not replace NICo mTLS for workloads that still use direct `SignMachineIdentity`—it is an **operator-chosen alternative transport** from IMDS to a signing-capable HTTP service.

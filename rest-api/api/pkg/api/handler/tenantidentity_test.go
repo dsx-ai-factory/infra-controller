@@ -22,12 +22,14 @@ import (
 	tp "go.temporal.io/sdk/temporal"
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -44,8 +46,8 @@ func countMockCalls(m *mock.Mock, method string) int {
 	return n
 }
 
-// TestTenantIdentityHandlers_TimeoutReturns500AndTerminatesWorkflow verifies every tenant-identity handler returns 500 and terminates its workflow when the underlying Temporal workflow times out.
-func TestTenantIdentityHandlers_TimeoutReturns500AndTerminatesWorkflow(t *testing.T) {
+// TestTenantIdentityWorkflowHandlers_TimeoutReturns500AndTerminatesWorkflow verifies the tenant-identity handlers that still use bespoke workflows return 500 and terminate their workflow when the underlying Temporal workflow times out.
+func TestTenantIdentityWorkflowHandlers_TimeoutReturns500AndTerminatesWorkflow(t *testing.T) {
 	dbSession := testSiteInitDB(t)
 	defer dbSession.Close()
 
@@ -195,6 +197,138 @@ func TestTenantIdentityHandlers_TimeoutReturns500AndTerminatesWorkflow(t *testin
 				"expected exactly one TerminateWorkflow call for %s", tt.workflow)
 		})
 	}
+}
+
+// TestReencryptTenantIdentitySecretsHandler_Handle verifies that only the re-encryption endpoint dispatches through the generic Core gRPC proxy and returns the curated REST response.
+func TestReencryptTenantIdentitySecretsHandler_Handle(t *testing.T) {
+	dbSession := testSiteInitDB(t)
+	defer dbSession.Close()
+
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.InfrastructureProvider)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.Tenant)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.Site)(nil)))
+	require.NoError(t, dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantSite)(nil)))
+
+	const (
+		providerOrg        = "test-reencrypt-provider-org"
+		tenantOrg          = "test-reencrypt-tenant-org"
+		otherSiteTenantOrg = "test-reencrypt-other-site-tenant-org"
+		unknownTenantOrg   = "test-reencrypt-unknown-tenant-org"
+	)
+	providerUser := testVPCBuildUser(t, dbSession, "test-reencrypt-provider-user", providerOrg, []string{auth.ProviderAdminRole})
+	infraProvider := testVPCSiteBuildInfrastructureProvider(t, dbSession, "test-reencrypt-ip", providerOrg, providerUser)
+	site := testVPCBuildSite(t, dbSession, infraProvider, "test-reencrypt-site", false, false, cdbm.SiteStatusRegistered, providerUser)
+	otherSite := testVPCBuildSite(t, dbSession, infraProvider, "test-reencrypt-other-site", false, false, cdbm.SiteStatusRegistered, providerUser)
+
+	tenantUser := testVPCBuildUser(t, dbSession, "test-reencrypt-tenant-user", tenantOrg, []string{auth.TenantAdminRole})
+	tenant := testVPCBuildTenant(t, dbSession, "test-reencrypt-tenant", tenantOrg, tenantUser)
+	common.TestBuildTenantSite(t, dbSession, tenant, site, providerUser)
+
+	otherSiteTenantUser := testVPCBuildUser(t, dbSession, "test-reencrypt-other-site-tenant-user", otherSiteTenantOrg, []string{auth.TenantAdminRole})
+	otherSiteTenant := testVPCBuildTenant(t, dbSession, "test-reencrypt-other-site-tenant", otherSiteTenantOrg, otherSiteTenantUser)
+	common.TestBuildTenantSite(t, dbSession, otherSiteTenant, otherSite, providerUser)
+
+	responseJSON, err := protojson.Marshal(&corev1.ReencryptTenantIdentitySecretsResponse{
+		RowsExamined:           3,
+		RowsUpdated:            2,
+		RowsSkippedAllOnTarget: 1,
+		FieldsReencrypted:      4,
+		FieldsSkippedOnTarget:  2,
+		CurrentEncryptionKeyId: "key-2",
+	})
+	require.NoError(t, err)
+
+	var proxiedRequest grpcproxy.Request
+	workflowRun := &tmocks.WorkflowRun{}
+	workflowRun.On("Get", mock.Anything, mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+		response := args.Get(1).(*grpcproxy.Response)
+		response.ResponseJSON = responseJSON
+	})
+
+	temporalClient := &tmocks.Client{}
+	temporalClient.On(
+		"ExecuteWorkflow",
+		mock.Anything,
+		mock.AnythingOfType("internal.StartWorkflowOptions"),
+		grpcproxy.Core.WorkflowName,
+		mock.MatchedBy(func(request grpcproxy.Request) bool {
+			proxiedRequest = request
+			return true
+		}),
+	).Return(workflowRun, nil).Twice()
+
+	testConfig := common.GetTestConfig()
+	temporalConfig, _ := testConfig.GetTemporalConfig()
+	siteClientPool := sc.NewClientPool(temporalConfig)
+	siteClientPool.IDClientMap[site.ID.String()] = temporalClient
+
+	echoServer := echo.New()
+	handler := NewReencryptTenantIdentitySecretsHandler(dbSession, siteClientPool)
+	performRequest := func(apiRequest model.APIReencryptTenantIdentitySecretsRequest) (*httptest.ResponseRecorder, []byte) {
+		requestBody, marshalErr := json.Marshal(apiRequest)
+		require.NoError(t, marshalErr)
+
+		httpRequest := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(requestBody)))
+		httpRequest.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		recorder := httptest.NewRecorder()
+		echoContext := echoServer.NewContext(httpRequest, recorder)
+		echoContext.SetParamNames("orgName", "siteID")
+		echoContext.SetParamValues(providerOrg, site.ID.String())
+		echoContext.Set("user", providerUser)
+
+		require.NoError(t, handler.Handle(echoContext))
+		return recorder, requestBody
+	}
+
+	t.Run("omitted organization targets all organizations", func(t *testing.T) {
+		recorder, requestBody := performRequest(model.APIReencryptTenantIdentitySecretsRequest{DryRun: true})
+		assert.JSONEq(t, `{"dryRun":true}`, string(requestBody))
+		require.Equal(t, http.StatusOK, recorder.Code, "body=%s", recorder.Body.String())
+		assert.Equal(t, corev1.Forge_ReencryptTenantIdentitySecrets_FullMethodName, proxiedRequest.FullMethod)
+
+		var coreRequest corev1.ReencryptTenantIdentitySecretsRequest
+		require.NoError(t, protojson.Unmarshal(proxiedRequest.RequestJSON, &coreRequest))
+		assert.True(t, coreRequest.GetDryRun())
+		assert.Nil(t, coreRequest.OrganizationId)
+
+		var apiResponse model.APIReencryptTenantIdentitySecretsResponse
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &apiResponse))
+		assert.Equal(t, 3, apiResponse.RowsExamined)
+		assert.Equal(t, 2, apiResponse.RowsUpdated)
+		assert.Equal(t, "key-2", apiResponse.CurrentEncryptionKeyID)
+	})
+
+	t.Run("tenant with allocation on selected site is forwarded", func(t *testing.T) {
+		recorder, _ := performRequest(model.APIReencryptTenantIdentitySecretsRequest{
+			OrganizationID: cutil.GetPtr(tenantOrg),
+		})
+		require.Equal(t, http.StatusOK, recorder.Code, "body=%s", recorder.Body.String())
+
+		var coreRequest corev1.ReencryptTenantIdentitySecretsRequest
+		require.NoError(t, protojson.Unmarshal(proxiedRequest.RequestJSON, &coreRequest))
+		assert.Equal(t, tenantOrg, coreRequest.GetOrganizationId())
+	})
+
+	t.Run("unknown tenant organization is rejected before proxy dispatch", func(t *testing.T) {
+		recorder, _ := performRequest(model.APIReencryptTenantIdentitySecretsRequest{
+			OrganizationID: cutil.GetPtr(unknownTenantOrg),
+		})
+		assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), "Could not find Tenant for organizationId specified in request data")
+		assert.Equal(t, 2, countMockCalls(&temporalClient.Mock, "ExecuteWorkflow"))
+	})
+
+	t.Run("tenant allocated only on another site is rejected before proxy dispatch", func(t *testing.T) {
+		recorder, _ := performRequest(model.APIReencryptTenantIdentitySecretsRequest{
+			OrganizationID: cutil.GetPtr(otherSiteTenantOrg),
+		})
+		assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), "Tenant organization does not have an allocation on the Site")
+		assert.Equal(t, 2, countMockCalls(&temporalClient.Mock, "ExecuteWorkflow"))
+	})
+
+	temporalClient.AssertExpectations(t)
 }
 
 // TestGetJWKS_AbsentCasesReturn404AndPresentPassesThrough verifies absent JWKS paths return 404 (including the "tenant has no allocation" case so already-issued JWT-SVIDs remain verifiable) and a present JWKS passes through unchanged.

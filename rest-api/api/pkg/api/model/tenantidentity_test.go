@@ -291,6 +291,75 @@ func TestAPITenantIdentityConfig_FromResponseProto(t *testing.T) {
 	})
 }
 
+// TestAPIReencryptTenantIdentitySecretsRequest_Validate verifies omission targets all organizations and a supplied organization must be non-empty.
+func TestAPIReencryptTenantIdentitySecretsRequest_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     APIReencryptTenantIdentitySecretsRequest
+		wantErr string
+	}{
+		{name: "organization omitted"},
+		{
+			name: "organization supplied",
+			req: APIReencryptTenantIdentitySecretsRequest{
+				OrganizationID: cutil.GetPtr("tenant-corp"),
+				DryRun:         true,
+			},
+		},
+		{
+			name: "organization is empty",
+			req: APIReencryptTenantIdentitySecretsRequest{
+				OrganizationID: cutil.GetPtr(""),
+			},
+			wantErr: "organizationId must not be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.req.Validate()
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestAPIReencryptTenantIdentitySecretsRequest_ToProto verifies optional organization scope and dry-run behavior map directly to the Core request.
+func TestAPIReencryptTenantIdentitySecretsRequest_ToProto(t *testing.T) {
+	tests := []struct {
+		name           string
+		req            APIReencryptTenantIdentitySecretsRequest
+		wantOrg        string
+		wantOrgPresent bool
+		wantDryRun     bool
+	}{
+		{name: "organization omitted"},
+		{
+			name: "organization and dry-run supplied",
+			req: APIReencryptTenantIdentitySecretsRequest{
+				OrganizationID: cutil.GetPtr("acme-corp"),
+				DryRun:         true,
+			},
+			wantOrg:        "acme-corp",
+			wantOrgPresent: true,
+			wantDryRun:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			protoRequest := tt.req.ToProto()
+			require.NotNil(t, protoRequest)
+			assert.Equal(t, tt.wantOrg, protoRequest.GetOrganizationId())
+			assert.Equal(t, tt.wantOrgPresent, protoRequest.OrganizationId != nil)
+			assert.Equal(t, tt.wantDryRun, protoRequest.GetDryRun())
+		})
+	}
+}
+
 // TestAPITenantIdentityTokenDelegationCreateOrUpdateRequest_Validate verifies required fields and clientSecretBasic sub-field validation on the token delegation create-or-update request.
 func TestAPITenantIdentityTokenDelegationCreateOrUpdateRequest_Validate(t *testing.T) {
 	tests := []struct {

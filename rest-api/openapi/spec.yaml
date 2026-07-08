@@ -16600,6 +16600,71 @@ paths:
           $ref: '#/components/responses/GenericHttpError'
         '503':
           $ref: '#/components/responses/TenantIdentityCoreUnavailable'
+  '/v2/org/{org}/nico/site/{siteID}/tenant-identity/reencrypt':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the provider organization authorizing the operation
+      - schema:
+          type: string
+          format: uuid
+        name: siteID
+        in: path
+        required: true
+        description: ID of the target Site
+    post:
+      summary: Reencrypt Tenant Identity Secrets
+      tags:
+        - Tenant Identity
+      operationId: reencrypt-tenant-identity-secrets
+      description: |-
+        Re-wrap stored `tenant_identity_config` ciphertext with the Site's
+        current master encryption key (KEK rotation). This is a
+        site-operator operation, not a per-tenant one.
+
+        User must have authorization role with `PROVIDER_ADMIN` suffix in the URL `{org}`.
+
+        The URL `{org}` identifies the provider whose admin authorizes the
+        operation. Omit `organizationId` to re-wrap every org's secrets on
+        the Site, or set it to a tenant organization that has an allocation
+        on the Site. Set `dryRun` to decrypt and validate without writing any
+        changes.
+
+        Returns `400 Bad Request` when a scoped tenant organization does not
+        exist or has no allocation on the Site. Returns `404 Not Found` when
+        `{org}` has no Infrastructure Provider, or when a scoped organization
+        has no tenant identity configuration on the Site. An unknown, invalid,
+        or unregistered `siteID` returns `400 Bad Request`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantIdentityReencryptSecretsRequest'
+      responses:
+        '200':
+          description: Reencryption completed; counters and any per-field failures are reported in the body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantIdentityReencryptSecretsResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          description: Internal server error while loading the Infrastructure Provider or Site, retrieving the Site Temporal client, dispatching the Core proxy workflow, or decoding its response.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/TenantIdentityCoreUnavailable'
+        '504':
+          description: The Core proxy workflow did not return a result before its execution or caller deadline.
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/site/{siteID}/.well-known/jwks.json':
     parameters:
       - schema:
@@ -31208,6 +31273,70 @@ components:
           type: string
           description: 'Date/time when the token delegation configuration was last updated'
           format: date-time
+    TenantIdentityReencryptSecretsRequest:
+      title: TenantIdentityReencryptSecretsRequest
+      description: |-
+        Request to re-wrap stored tenant identity secrets with the Site's
+        current master encryption key (KEK rotation).
+      type: object
+      properties:
+        organizationId:
+          type: string
+          description: |-
+            If set, this identifies a tenant organization that must have an
+            allocation and tenant identity configuration on the Site; only that
+            organization's secrets are re-wrapped. The URL `{org}` separately
+            identifies the provider authorizing the operation. If omitted, every
+            row in the Site's tenant identity store is processed.
+        dryRun:
+          type: boolean
+          description: When true, decrypt and validate only; no changes are written.
+          default: false
+    TenantIdentityReencryptFailure:
+      title: TenantIdentityReencryptFailure
+      description: A single per-field re-wrap failure.
+      type: object
+      properties:
+        organizationId:
+          type: string
+          description: Org whose secret failed to re-wrap.
+        field:
+          type: string
+          description: Name of the field that failed to re-wrap.
+        error:
+          type: string
+          description: Error describing why the field could not be re-wrapped.
+    TenantIdentityReencryptSecretsResponse:
+      title: TenantIdentityReencryptSecretsResponse
+      description: Counters and per-field failures from a reencrypt run.
+      type: object
+      properties:
+        rowsExamined:
+          type: integer
+          description: Number of rows examined.
+        rowsUpdated:
+          type: integer
+          description: Number of rows re-wrapped with the current key.
+        rowsSkippedAllOnTarget:
+          type: integer
+          description: Number of rows skipped because all fields were already on the target key.
+        fieldsReencrypted:
+          type: integer
+          description: Number of individual fields re-wrapped.
+        fieldsSkippedOnTarget:
+          type: integer
+          description: Number of fields skipped because they were already on the target key.
+        rowsFailed:
+          type: integer
+          description: Number of rows with at least one field that failed to re-wrap.
+        failures:
+          type: array
+          description: Per-field re-wrap failures, when any occurred.
+          items:
+            $ref: '#/components/schemas/TenantIdentityReencryptFailure'
+        currentEncryptionKeyId:
+          type: string
+          description: Site machine_identity.current_encryption_key_id used as the re-wrap target.
     TenantIdentityJWKS:
       title: TenantIdentityJWKS
       description: |-
