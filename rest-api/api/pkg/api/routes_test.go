@@ -83,6 +83,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"stats":                     4,
 		"identity-config":           3,
 		"identity-token-delegation": 3,
+		"identity-reencrypt":        1,
 		"firmware-config":           2,
 	}
 

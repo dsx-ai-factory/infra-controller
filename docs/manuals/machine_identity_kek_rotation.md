@@ -6,7 +6,7 @@ This is **not** the same as **per-org JWT signing key rotation** (see [JWT Signi
 
 Design background: [SPIFFE JWT-SVID SDD §3.1.1](../design/machine-identity/spiffe-svid-sdd.md).
 
-> **API surface:** Re-wrap is **Core gRPC only today** (`ReencryptTenantIdentitySecrets` via `grpcurl` with a Forge Admin CLI mTLS certificate). A **NICo REST API** for the same operation is planned; this runbook will be updated when it ships. There is no `nico-admin-cli` subcommand for re-wrap.
+> **API surface:** Re-wrap is available through NICo-rest at `POST /v2/org/{org}/nico/site/{siteID}/tenant-identity/reencrypt` for provider admins and directly through Core gRPC (`ReencryptTenantIdentitySecrets`) with a Forge Admin CLI mTLS certificate. There is no `nico-admin-cli` subcommand for re-wrap.
 
 ---
 
@@ -31,7 +31,7 @@ Fields re-wrapped per org (when present):
 ## Prerequisites
 
 - `[machine_identity].enabled = true` and a healthy `nico-api`.
-- Credentials to invoke re-wrap: today, a **Forge Admin CLI** mTLS client certificate (see [Generating client certificates](../manuals/nico-admin-cli.md#generating-client-certificates)). When the REST API is available, provider-admin access via `nicocli` / bearer token will be an alternative.
+- Credentials for the selected surface: provider-admin bearer-token access for NICo-rest, or a **Forge Admin CLI** mTLS client certificate for direct gRPC (see [Generating client certificates](../manuals/nico-admin-cli.md#generating-client-certificates)).
 - Maintenance window: plan for a config change + API restart + one re-encrypt pass. Issuance can continue during re-wrap if old keys remain in secrets.
 
 ---
@@ -80,7 +80,7 @@ Restart `nico-api` (this setting is **not** hot-reloaded). New encrypts (new org
 
 ### Step 3 — Dry-run re-wrap
 
-> **Today (gRPC):** use `grpcurl` as below. **Planned:** equivalent dry-run/apply via NICo REST — watch this page and the REST API reference for updates.
+> The examples below use direct gRPC. For NICo-rest, use the JSON field names `dryRun` and `organizationId`; organization values are passed unchanged. The URL `{org}` identifies the provider, while a supplied `organizationId` identifies a tenant that must have an allocation and tenant identity configuration on the selected Site. NICo-rest returns Bad Request when the tenant is unknown or has no allocation on the selected Site. On either surface, a valid scoped tenant without tenant identity configuration returns Not Found.
 
 Call **`ReencryptTenantIdentitySecrets`** with `dry_run: true`. Optionally scope to one org.
 

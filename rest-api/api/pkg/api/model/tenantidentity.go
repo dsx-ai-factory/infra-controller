@@ -286,3 +286,74 @@ func (resp *APIOpenIDConfiguration) FromResponseProto(proto *corev1.OpenIdConfig
 type APITenantIdentityJWKS struct {
 	Keys []json.RawMessage `json:"keys"`
 }
+
+// APIReencryptTenantIdentitySecretsRequest is the POST /tenant-identity/reencrypt body.
+// Both fields are optional: omitting organizationId targets all orgs; dryRun validates
+// without writing.
+type APIReencryptTenantIdentitySecretsRequest struct {
+	OrganizationID *string `json:"organizationId,omitempty"`
+	DryRun         bool    `json:"dryRun"`
+}
+
+// Validate enforces the request-local REST contract. Omitting organizationId targets
+// all organizations; when supplied, it must be non-empty. The handler validates that
+// the tenant organization has access to the selected Site.
+func (req APIReencryptTenantIdentitySecretsRequest) Validate() error {
+	return validation.ValidateStruct(&req,
+		validation.Field(&req.OrganizationID,
+			validation.When(req.OrganizationID != nil,
+				validation.Required.Error("organizationId must not be empty"))),
+	)
+}
+
+// ToProto converts the request to its gRPC form. organizationId comes from the body
+// (not the path), so no org argument is taken.
+func (req APIReencryptTenantIdentitySecretsRequest) ToProto() *corev1.ReencryptTenantIdentitySecretsRequest {
+	return &corev1.ReencryptTenantIdentitySecretsRequest{
+		OrganizationId: req.OrganizationID,
+		DryRun:         req.DryRun,
+	}
+}
+
+// APIReencryptTenantIdentityFailure describes one per-field re-wrap failure.
+type APIReencryptTenantIdentityFailure struct {
+	OrganizationID string `json:"organizationId"`
+	Field          string `json:"field"`
+	Error          string `json:"error"`
+}
+
+// APIReencryptTenantIdentitySecretsResponse is the POST /tenant-identity/reencrypt response body.
+type APIReencryptTenantIdentitySecretsResponse struct {
+	RowsExamined           int                                 `json:"rowsExamined"`
+	RowsUpdated            int                                 `json:"rowsUpdated"`
+	RowsSkippedAllOnTarget int                                 `json:"rowsSkippedAllOnTarget"`
+	FieldsReencrypted      int                                 `json:"fieldsReencrypted"`
+	FieldsSkippedOnTarget  int                                 `json:"fieldsSkippedOnTarget"`
+	RowsFailed             int                                 `json:"rowsFailed"`
+	Failures               []APIReencryptTenantIdentityFailure `json:"failures,omitempty"`
+	CurrentEncryptionKeyID string                              `json:"currentEncryptionKeyId"`
+}
+
+// FromResponseProto populates the response from the gRPC reply.
+func (resp *APIReencryptTenantIdentitySecretsResponse) FromResponseProto(proto *corev1.ReencryptTenantIdentitySecretsResponse) {
+	if proto == nil {
+		return
+	}
+	resp.RowsExamined = int(proto.GetRowsExamined())
+	resp.RowsUpdated = int(proto.GetRowsUpdated())
+	resp.RowsSkippedAllOnTarget = int(proto.GetRowsSkippedAllOnTarget())
+	resp.FieldsReencrypted = int(proto.GetFieldsReencrypted())
+	resp.FieldsSkippedOnTarget = int(proto.GetFieldsSkippedOnTarget())
+	resp.RowsFailed = int(proto.GetRowsFailed())
+	resp.CurrentEncryptionKeyID = proto.GetCurrentEncryptionKeyId()
+	if failures := proto.GetFailures(); len(failures) > 0 {
+		resp.Failures = make([]APIReencryptTenantIdentityFailure, 0, len(failures))
+		for _, f := range failures {
+			resp.Failures = append(resp.Failures, APIReencryptTenantIdentityFailure{
+				OrganizationID: f.GetOrganizationId(),
+				Field:          f.GetField(),
+				Error:          f.GetError(),
+			})
+		}
+	}
+}
