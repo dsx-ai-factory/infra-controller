@@ -194,6 +194,17 @@ impl<B: Bmc> ExploredChassisCollection<B> {
         })
     }
 
+    pub fn is_mgx_c2(&self) -> bool {
+        self.members.iter().any(|m| {
+            let hardware_id = m.chassis.hardware_id();
+            is_mgx_c2_processor_module(
+                hardware_id.manufacturer.map(|v| v.into_inner()),
+                hardware_id.model.map(|v| v.into_inner()),
+                hardware_id.part_number.map(|v| v.into_inner()),
+            )
+        })
+    }
+
     pub fn is_lenovo(&self) -> bool {
         self.members
             .iter()
@@ -430,6 +441,16 @@ fn is_delta_powershelf_chassis(chassis_id: &str, manufacturer: Option<&str>) -> 
         && manufacturer.is_some_and(|mfg| mfg.to_lowercase().contains("delta"))
 }
 
+fn is_mgx_c2_processor_module(
+    manufacturer: Option<&str>,
+    model: Option<&str>,
+    part_number: Option<&str>,
+) -> bool {
+    manufacturer.is_some_and(|v| v.eq_ignore_ascii_case("NVIDIA"))
+        && (model.is_some_and(|v| v.starts_with("PG535"))
+            || part_number.is_some_and(|v| v.contains("2G535")))
+}
+
 /// Aggregates per-PSU commanded on/off states into a single power-shelf state.
 ///
 /// All PSUs reporting `Some(true)` means the shelf is on; all `Some(false)`
@@ -481,7 +502,46 @@ impl LiteOnSuppliesState<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelPowerState, is_delta_powershelf_chassis, powershelf_power_state};
+    use super::{
+        ModelPowerState, is_delta_powershelf_chassis, is_mgx_c2_processor_module,
+        powershelf_power_state,
+    };
+
+    #[test]
+    fn identifies_mgx_c2_processor_modules() {
+        let cases = [
+            ("PG535 model", Some("NVIDIA"), Some("PG535-B02"), None, true),
+            (
+                "2G535 part number",
+                Some("Nvidia"),
+                None,
+                Some("699-2G535-0200-310"),
+                true,
+            ),
+            (
+                "unrelated NVIDIA module",
+                Some("NVIDIA"),
+                Some("B4240"),
+                Some("900-9D3B4-00CC-EA0"),
+                false,
+            ),
+            (
+                "non-NVIDIA PG535",
+                Some("Supermicro"),
+                Some("PG535-B02"),
+                Some("699-2G535-0200-310"),
+                false,
+            ),
+        ];
+
+        for (case, manufacturer, model, part_number, expected) in cases {
+            assert_eq!(
+                is_mgx_c2_processor_module(manufacturer, model, part_number),
+                expected,
+                "{case}",
+            );
+        }
+    }
 
     // is_delta_powershelf_chassis gates Delta detection: a power-shelf chassis
     // id ("chassis"/"powershelf") AND a Delta manufacturer. The manufacturer
