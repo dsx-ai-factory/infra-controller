@@ -26,10 +26,10 @@ spec:
         - name: {{ include "nico-hardware-health.name" . }}
           image: "{{ include "nico-hardware-health.image" . }}"
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
           securityContext:
-            capabilities:
-              add:
-                - SYS_PTRACE
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command:
             - /bin/sh
             - -c

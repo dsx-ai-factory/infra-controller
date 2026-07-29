@@ -56,10 +56,10 @@ spec:
                 exec /opt/carbide/ssh-console run -c /etc/forge/ssh-console/config.toml
               fi
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
           securityContext:
-            capabilities:
-              add:
-                - IPC_LOCK
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: ssh
               containerPort: {{ .Values.service.port }}

@@ -99,10 +99,10 @@ spec:
         - name: {{ include "nico-api.name" . }}
           image: "{{ include "nico-api.image" . }}"
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
           securityContext:
-            capabilities:
-              add:
-                - SYS_PTRACE
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command:
             - /bin/sh
             - -c

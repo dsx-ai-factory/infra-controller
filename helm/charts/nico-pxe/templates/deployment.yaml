@@ -98,10 +98,10 @@ spec:
                 optional: {{ .Values.envFrom.pxeEnvConfig.optional | default true }}
           {{- end }}
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
           securityContext:
-            capabilities:
-              add:
-                - SYS_PTRACE
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           ports:
