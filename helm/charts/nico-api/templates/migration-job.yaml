@@ -1,3 +1,12 @@
+{{- /* Normalize the migrationJob block: absent or null (a --reuse-values
+       upgrade from before this value existed, or an override that deletes it)
+       falls back to the chart defaults instead of failing the render. */ -}}
+{{- $migrationJob := default (dict) .Values.migrationJob -}}
+{{- $waitForPostgres := default (dict) $migrationJob.waitForPostgres -}}
+{{- /* Default only missing/null — an explicit 0 retry limit must survive
+       (`default` would treat zero as empty). */ -}}
+{{- $backoffLimit := $migrationJob.backoffLimit -}}
+{{- if kindIs "invalid" $backoffLimit -}}{{- $backoffLimit = 30 -}}{{- end -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -14,6 +23,7 @@ metadata:
     helm.sh/hook-delete-policy: before-hook-creation
     helm.sh/hook-weight: "-5"
 spec:
+  backoffLimit: {{ $backoffLimit }}
   template:
     metadata:
       name: {{ include "nico-api.name" . }}-migrate
@@ -26,6 +36,49 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if $waitForPostgres.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ $waitForPostgres.image | default "postgres:14.4-alpine" }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          env:
+            - name: PGHOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.envFrom.databaseConfig.configMapName }}
+                  key: DB_HOST
+            - name: PGPORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.envFrom.databaseConfig.configMapName }}
+                  key: DB_PORT
+            # pg_isready falls back to the OS user name when PGUSER is unset.
+            # Under OpenShift SCCs the pod runs as a UID without a passwd
+            # entry, so the lookup fails before the server is even contacted.
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  key: {{ .Values.envFrom.databaseCredentials.usernameKey | default "username" | quote }}
+                  name: {{ .Values.envFrom.databaseCredentials.secretName }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # DB_HOST may carry a bracketed IPv6 literal (kept for the
+              # migration URI); pg_isready wants the bare address.
+              pg_host="${PGHOST#[}"
+              pg_host="${pg_host%]}"
+              retries=0
+              until pg_isready -h "$pg_host" -p "$PGPORT"; do
+                retries=$((retries + 1))
+                if [ "$retries" -ge 60 ]; then
+                  echo "PostgreSQL not ready after 60 attempts, giving up"
+                  exit 1
+                fi
+                echo "Waiting for PostgreSQL (attempt $retries/60)..."
+                sleep 5
+              done
+      {{- end }}
       containers:
         - name: {{ include "nico-api.name" . }}-migrate
           image: "{{ include "nico-api.image" . }}"
@@ -36,7 +89,7 @@ spec:
             - |
               {{- include "nico-api.databaseUrlScript" . | nindent 14 }}
               if [ -x /opt/nico/nico-api ]; then BIN=/opt/nico/nico-api; else BIN=/opt/carbide/carbide-api; fi
-              exec "$BIN" migrate --datastore="${DATASTORE_URL}?sslmode={{ .Values.migrationJob.sslMode }}"
+              exec "$BIN" migrate --datastore="${DATASTORE_URL}?sslmode={{ $migrationJob.sslMode | default "require" }}"
           env:
             - name: DATASTORE_USER
               valueFrom:
