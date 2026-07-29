@@ -130,13 +130,10 @@ spec:
                 optional: {{ .Values.envFrom.pxeEnvConfig.optional | default true }}
           {{- end }}
           imagePullPolicy: {{ include "nico-pxe.imagePullPolicy" . }}
+          {{- with .Values.containerSecurityContext }}
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 10001
-            runAsGroup: 10001
-            capabilities:
-              add:
-                - SYS_PTRACE
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           ports:
