@@ -21,6 +21,10 @@ db:
   port: "5432"
   name: nico_rest
   user: nico-rest.nico
+  ## When non-empty, sets PGSSLMODE in the migration container.
+  ## Valid libpq values: disable, allow, prefer, require, verify-ca, verify-full.
+  ## Empty (default) omits the variable, falling back to libpq's "prefer".
+  sslMode: ""
 
 secrets:
   dbCreds: db-creds
