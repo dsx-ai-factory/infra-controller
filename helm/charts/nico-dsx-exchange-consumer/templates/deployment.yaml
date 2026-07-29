@@ -26,10 +26,10 @@ spec:
         - name: {{ include "nico-dsx-exchange-consumer.name" . }}
           image: "{{ include "nico-dsx-exchange-consumer.image" . }}"
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
           securityContext:
-            capabilities:
-              add:
-                - SYS_PTRACE
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command:
             - /bin/sh
             - -c
