@@ -45,6 +45,19 @@ legacyAlias:
 
 replicas: 1
 
+## Container-level security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline. The chart default adds SYS_PTRACE.
+## OpenShift's restricted Security Context Constraints (SCC) do not permit it, so
+## set the value to null there; the baseline is still applied:
+##   containerSecurityContext: null
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  capabilities:
+    add:
+      - SYS_PTRACE
+
 ## Soft open-file limit applied before startup. Clamped to the runtime hard
 ## limit when it exceeds it. null falls back to 65536; non-null values must be
 ## a positive integer (validated at render).
