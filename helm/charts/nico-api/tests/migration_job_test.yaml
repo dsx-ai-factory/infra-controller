@@ -40,6 +40,26 @@ tests:
           path: metadata.annotations["helm.sh/hook-weight"]
           value: "-5"
 
+  - it: wait-for-postgres passes the configured username key to pg_isready as PGUSER
+    template: migration-job.yaml
+    set:
+      migrationJob:
+        waitForPostgres:
+          enabled: true
+      envFrom:
+        databaseCredentials:
+          secretName: db-creds
+          usernameKey: user
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].env
+          content:
+            name: PGUSER
+            valueFrom:
+              secretKeyRef:
+                key: user
+                name: db-creds
+
   - it: should not create database ConfigMap when databaseConfig is empty
     template: configmap.yaml
     documentIndex: 2
