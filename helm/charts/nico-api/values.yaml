@@ -86,6 +86,14 @@ replicas: 1
 # `rollingUpdate` when using the default `RollingUpdate` strategy.
 strategy:
   type: RollingUpdate
+
+## Container-level security context. Override for OpenShift, where the
+## restricted SCC does not permit SYS_PTRACE:
+##   containerSecurityContext: null
+containerSecurityContext:
+  capabilities:
+    add:
+      - SYS_PTRACE
 automountServiceAccountToken: true
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-api.name" . }}-config-files,{{ include "nico-api.name" . }}-site-config-files'
