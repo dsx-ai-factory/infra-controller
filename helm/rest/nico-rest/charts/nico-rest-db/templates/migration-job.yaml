@@ -40,6 +40,7 @@ spec:
       initContainers:
         - name: wait-for-postgres
           image: {{ if and .Values.waitForPostgres.repository .Values.waitForPostgres.tag }}{{ .Values.waitForPostgres.repository }}:{{ .Values.waitForPostgres.tag }}{{ else }}{{ .Values.waitForPostgres.image }}{{ end }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
