@@ -79,6 +79,10 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.dbCreds }}
                   key: password
+            {{- with .Values.db.sslMode }}
+            - name: PGSSLMODE
+              value: {{ . | quote }}
+            {{- end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
