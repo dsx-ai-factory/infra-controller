@@ -27,6 +27,14 @@ namespaceOverride: ""
 
 replicas: 1
 
+## Container-level security context. Override for OpenShift, where the
+## restricted SCC does not permit IPC_LOCK:
+##   containerSecurityContext: null
+containerSecurityContext:
+  capabilities:
+    add:
+      - IPC_LOCK
+
 ## Container resource requests and limits. Empty by default.
 resources: {}
 
