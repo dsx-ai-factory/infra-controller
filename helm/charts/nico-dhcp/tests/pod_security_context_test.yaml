@@ -1,0 +1,55 @@
+suite: pod security context passthrough (podSecurityContext)
+templates:
+  - deployment.yaml
+  - deployment-v6.yaml
+  - configmap-v6.yaml
+  - configmap.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: renders no pod securityContext by default
+    template: deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext
+
+  - it: passes the unprivileged-port-start sysctl through to the pod
+    template: deployment.yaml
+    set:
+      podSecurityContext:
+        sysctls:
+          - name: net.ipv4.ip_unprivileged_port_start
+            value: "67"
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.sysctls[0]
+          value: { name: net.ipv4.ip_unprivileged_port_start, value: "67" }
+
+  - it: passes the sysctl through to the DHCPv6 pod as well
+    template: deployment-v6.yaml
+    set:
+      dhcp:
+        v6Enabled: true
+        v6ServerIdentifier: "0123456789ab"
+      podSecurityContext:
+        sysctls:
+          - name: net.ipv4.ip_unprivileged_port_start
+            value: "67"
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.sysctls[0]
+          value: { name: net.ipv4.ip_unprivileged_port_start, value: "67" }
+
+  - it: applies the container security context baseline to the DHCPv6 container
+    template: deployment-v6.yaml
+    set:
+      dhcp:
+        v6Enabled: true
+        v6ServerIdentifier: "0123456789ab"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          value: [SYS_PTRACE]
