@@ -27,7 +27,7 @@ spec:
       containers:
         - name: {{ include "nico-dhcp.name" . }}
           image: "{{ include "nico-dhcp.image" . }}"
-          command: ['sh', '-c', 'mkdir -vp /var/run/kea /var/lib/kea && /sbin/kea-dhcp4 -c /tmp/kea_config.json']
+          command: ['/sbin/kea-dhcp4', '-c', '/tmp/kea_config.json']
           env:
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
@@ -49,6 +49,10 @@ spec:
               readOnly: true
             - name: config
               mountPath: /tmp
+            - name: kea-run
+              mountPath: /var/run/kea
+            - name: kea-lib
+              mountPath: /var/lib/kea
       volumes:
         - name: spiffe
           secret:
@@ -57,3 +61,7 @@ spec:
           configMap:
             defaultMode: 420
             name: {{ include "nico-dhcp.name" . }}-config
+        - name: kea-run
+          emptyDir: {}
+        - name: kea-lib
+          emptyDir: {}
