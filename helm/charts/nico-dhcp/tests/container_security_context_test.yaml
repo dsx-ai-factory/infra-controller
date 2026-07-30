@@ -1,0 +1,21 @@
+suite: container security context (containerSecurityContext)
+templates:
+  - deployment.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: keeps the allowPrivilegeEscalation baseline when the override sets the key
+    # The hardcoded false baseline is chart-managed; an operator-supplied
+    # allowPrivilegeEscalation must not render a duplicate key (strict YAML
+    # consumers such as Kustomize reject duplicates).
+    set:
+      containerSecurityContext:
+        allowPrivilegeEscalation: true
+        runAsNonRoot: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
