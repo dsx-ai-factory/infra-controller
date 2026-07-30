@@ -30,8 +30,16 @@ replicas: 1
 
 ## Container-level security context, rendered after the always-applied
 ## `allowPrivilegeEscalation: false` baseline. The chart default adds SYS_PTRACE.
-## OpenShift's restricted Security Context Constraints (SCC) do not permit it, so
-## set the value to null there; the baseline is still applied:
+## OpenShift's restricted Security Context Constraints (SCC) do not permit it.
+## Kea binds UDP port 67, which restricted-v2 only allows with an explicit
+## NET_BIND_SERVICE capability (it permits that one). Lists replace rather
+## than merge in Helm, so override the whole add list — for OpenShift:
+##   containerSecurityContext:
+##     capabilities:
+##       add: [NET_BIND_SERVICE]
+## Set the value to null only on clusters (e.g. vanilla Kubernetes with
+## NET_BIND_SERVICE in the default capability set) where privileged ports
+## are already bindable without it; the baseline is still applied:
 ##   containerSecurityContext: null
 containerSecurityContext:
   capabilities:
