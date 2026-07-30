@@ -24,6 +24,10 @@ spec:
         {{- include "nico-dhcp.labels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "nico-dhcp.name" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -31,7 +35,11 @@ spec:
       containers:
         - name: {{ include "nico-dhcp.name" . }}
           image: "{{ include "nico-dhcp.image" . }}"
-          command: ['sh', '-c', 'mkdir -vp /var/run/kea /var/lib/kea && exec /sbin/kea-dhcp4 -c /tmp/kea_config.json']
+          # /var/run/kea is an emptyDir that survives container restarts. If Kea
+          # was killed without cleanup, its stale PID file makes the restarted
+          # process (running as PID 1) refuse to start: Kea sees the recorded
+          # PID as live and exits. Clear it before launching.
+          command: ['/bin/sh', '-c', 'rm -f /var/run/kea/*.pid && exec /sbin/kea-dhcp4 -c /tmp/kea_config.json']
           env:
             {{- range $key, $value := $env }}
             - name: {{ $key }}
@@ -53,6 +61,10 @@ spec:
               readOnly: true
             - name: config
               mountPath: /tmp
+            - name: kea-run
+              mountPath: /var/run/kea
+            - name: kea-lib
+              mountPath: /var/lib/kea
       volumes:
         - name: spiffe
           secret:
@@ -61,3 +73,7 @@ spec:
           configMap:
             defaultMode: 420
             name: {{ include "nico-dhcp.name" . }}-config
+        - name: kea-run
+          emptyDir: {}
+        - name: kea-lib
+          emptyDir: {}
