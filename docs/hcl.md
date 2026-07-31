@@ -1,12 +1,18 @@
 # Hardware Compatibility List
 
+# Hardware Compatibility List
+
+**Last updated July 24, 2026**
+
 This Hardware Compatibility List (HCL) is provided for reference purposes only. Systems listed here have been unit tested or exercised internally in limited scenarios.
 Inclusion in this list does not imply qualification, certification, or support, and does not represent a commitment to ongoing compatibility. For specific hardware support
 inquiries or technical specifications, please contact the original hardware vendor.
 
-## Hosts
+The sections below distinguish platforms maintained by NVIDIA from platforms contributed and maintained by the community.
 
-**Last Updated: 2/20/2026**
+## NVIDIA-Maintained Platforms
+
+### Hosts
 
 | Host Machine                        | BMC/Management Firmware Version     | BIOS/UEFI Version   | Misc. Firmware Version (FPGA, CPLD, LXPM, etc.) |
 |-------------------------------------|-------------------------------------|---------------------|-------------------------------------------------|
@@ -47,7 +53,7 @@ inquiries or technical specifications, please contact the original hardware vend
 
 \* OVX may not show up as an option; check the Server Serial Number to confirm.
 
-### Hosts -- Under Development
+#### Hosts Under Development
 
 This list outlines platforms that are under development and have not undergone full unit testing.
 
@@ -55,13 +61,18 @@ This list outlines platforms that are under development and have not undergone f
 |-------------------------------------|-------------------------------------|---------------------|--------------------------------------------|
 | Lenovo GB300 Compute Tray           | 3.0.0                               | 1.0.0GA             | 1.0.0GA                                    |
 
-## DPUs
+### DPUs
 
 | DPU          | Firmware / Software Version                       |
 |--------------|---------------------------------------------------|
 | BlueField 2  | DOCA 3.2.0                                        |
 | BlueField 3  | DOCA 3.2.0                                        |
 
+## Coming Soon: Community-Added Platforms
+
+Community-added platforms will be listed here separately from NVIDIA-maintained platforms. Each entry will identify a contact for questions and issues and link to the corresponding GitHub contribution for implementation history and ongoing coordination.
+
+No community-added platforms are currently listed.
 ## GPUs
 
 NICo supports all current NVIDIA data center GPUs.
