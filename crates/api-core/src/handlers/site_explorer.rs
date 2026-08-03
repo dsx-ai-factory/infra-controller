@@ -19,7 +19,9 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use ::rpc::forge::{self as rpc, IsBmcInManagedHostResponse};
+use carbide_site_explorer::EndpointExplorationServiceError;
 use config_version::ConfigVersion;
+use model::bmc_suppression::BmcSuppressionSubsystem;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -289,6 +291,23 @@ pub(crate) async fn re_explore_endpoint(
             id: bmc_ip.to_string(),
         }
         .into());
+    }
+
+    if let Some(bmc_interface) = db::machine_interface::find_by_ip(&mut txn, bmc_ip).await?
+        && db::bmc_suppression::is_suppressed(
+            txn.as_pgconn(),
+            bmc_interface.mac_address,
+            BmcSuppressionSubsystem::SiteExplorer,
+        )
+        .await?
+    {
+        return Err(
+            CarbideError::from(EndpointExplorationServiceError::Suppressed {
+                bmc_ip,
+                bmc_mac_address: bmc_interface.mac_address,
+            })
+            .into(),
+        );
     }
 
     for ep in eps.iter() {

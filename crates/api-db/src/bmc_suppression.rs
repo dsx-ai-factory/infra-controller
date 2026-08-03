@@ -138,23 +138,6 @@ pub async fn find(
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
 
-/// Returns every BMC MAC suppressed for `subsystem`.
-pub async fn find_bmc_mac_addresses(
-    db: impl DbReader<'_>,
-    subsystem: BmcSuppressionSubsystem,
-) -> DatabaseResult<Vec<MacAddress>> {
-    const QUERY: &str = "SELECT bmc_mac_address
-        FROM bmc_suppressions
-        WHERE subsystem = $1
-        ORDER BY bmc_mac_address";
-
-    sqlx::query_scalar(QUERY)
-        .bind(subsystem)
-        .fetch_all(db)
-        .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
-}
-
 /// Returns every BMC suppression for `subsystem`.
 pub async fn find_all_by_subsystem(
     db: impl DbReader<'_>,
@@ -173,6 +156,29 @@ pub async fn find_all_by_subsystem(
     sqlx::query_as(QUERY)
         .bind(subsystem)
         .fetch_all(db)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))
+}
+
+/// Acknowledges pending suppression requests for the selected BMC MAC addresses.
+///
+/// Returns the BMC MAC addresses acknowledged by this call.
+pub async fn acknowledge_unacknowledged(
+    txn: &mut PgConnection,
+    bmc_mac_addresses: &[MacAddress],
+    subsystem: BmcSuppressionSubsystem,
+) -> DatabaseResult<Vec<MacAddress>> {
+    const QUERY: &str = "UPDATE bmc_suppressions
+        SET acknowledged_at = statement_timestamp()
+        WHERE bmc_mac_address = ANY($1)
+            AND subsystem = $2
+            AND acknowledged_at IS NULL
+        RETURNING bmc_mac_address";
+
+    sqlx::query_scalar(QUERY)
+        .bind(bmc_mac_addresses)
+        .bind(subsystem)
+        .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
@@ -217,29 +223,6 @@ pub async fn acknowledge(
         .execute(txn)
         .await
         .map(|result| result.rows_affected() > 0)
-        .map_err(|e| DatabaseError::query(QUERY, e))
-}
-
-/// Acknowledges pending suppression requests for the selected BMC MAC addresses.
-///
-/// Returns the BMC MAC addresses acknowledged by this call.
-pub async fn acknowledge_unacknowledged(
-    txn: &mut PgConnection,
-    bmc_mac_addresses: &[MacAddress],
-    subsystem: BmcSuppressionSubsystem,
-) -> DatabaseResult<Vec<MacAddress>> {
-    const QUERY: &str = "UPDATE bmc_suppressions
-        SET acknowledged_at = statement_timestamp()
-        WHERE bmc_mac_address = ANY($1)
-            AND subsystem = $2
-            AND acknowledged_at IS NULL
-        RETURNING bmc_mac_address";
-
-    sqlx::query_scalar(QUERY)
-        .bind(bmc_mac_addresses)
-        .bind(subsystem)
-        .fetch_all(txn)
-        .await
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
 
@@ -315,8 +298,8 @@ mod tests {
     use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
 
     use super::{
-        acknowledge, delete, delete_many, delete_many_with_reason, ensure_present, find,
-        find_bmc_mac_addresses, find_many, is_suppressed, upsert,
+        acknowledge, acknowledge_unacknowledged, delete, delete_many, delete_many_with_reason,
+        ensure_present, find, find_all_by_subsystem, find_many, is_suppressed, upsert,
     };
 
     const SITE_EXPLORER: BmcSuppressionSubsystem = BmcSuppressionSubsystem::SiteExplorer;
@@ -358,14 +341,22 @@ mod tests {
         }
 
         assert_eq!(
-            find_bmc_mac_addresses(txn.as_mut(), SITE_EXPLORER)
+            find_all_by_subsystem(txn.as_mut(), SITE_EXPLORER)
                 .await
-                .unwrap(),
-            vec![mac(1), mac(3)]
+                .unwrap()
+                .into_iter()
+                .map(|suppression| suppression.bmc_mac_address)
+                .collect::<Vec<_>>(),
+            vec![mac(1), mac(3)],
         );
         assert_eq!(
-            find_bmc_mac_addresses(txn.as_mut(), DHCP).await.unwrap(),
-            vec![mac(2), mac(3)]
+            find_all_by_subsystem(txn.as_mut(), DHCP)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|suppression| suppression.bmc_mac_address)
+                .collect::<Vec<_>>(),
+            vec![mac(2), mac(3)],
         );
         assert!(!is_suppressed(txn.as_mut(), mac(1), DHCP).await.unwrap());
         assert!(
@@ -418,6 +409,49 @@ mod tests {
     }
 
     #[crate::sqlx_test]
+    async fn acknowledge_unacknowledged_is_batched_and_idempotent(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        for (last, subsystem) in [(1, SITE_EXPLORER), (2, DHCP), (3, SITE_EXPLORER)] {
+            upsert(
+                txn.as_mut(),
+                &upsert_input(last, subsystem, "decommissioning"),
+            )
+            .await
+            .unwrap();
+        }
+
+        let acknowledged =
+            acknowledge_unacknowledged(txn.as_mut(), &[mac(1), mac(3), mac(4)], SITE_EXPLORER)
+                .await
+                .unwrap();
+        assert_eq!(acknowledged.len(), 2);
+        assert!(acknowledged.contains(&mac(1)));
+        assert!(acknowledged.contains(&mac(3)));
+        assert!(
+            find(txn.as_mut(), mac(1), SITE_EXPLORER)
+                .await
+                .unwrap()
+                .unwrap()
+                .acknowledged_at
+                .is_some()
+        );
+        assert!(
+            find(txn.as_mut(), mac(2), DHCP)
+                .await
+                .unwrap()
+                .unwrap()
+                .acknowledged_at
+                .is_none()
+        );
+        assert!(
+            acknowledge_unacknowledged(txn.as_mut(), &[mac(1), mac(3)], SITE_EXPLORER)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[crate::sqlx_test]
     async fn repeated_requests_and_acknowledgements_are_idempotent(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
 
@@ -427,17 +461,21 @@ mod tests {
         )
         .await
         .unwrap();
-        acknowledge(txn.as_mut(), mac(1), SITE_EXPLORER)
-            .await
-            .unwrap();
+        assert!(
+            acknowledge(txn.as_mut(), mac(1), SITE_EXPLORER)
+                .await
+                .unwrap()
+        );
         let initial = find(txn.as_mut(), mac(1), SITE_EXPLORER)
             .await
             .unwrap()
             .unwrap();
 
-        acknowledge(txn.as_mut(), mac(1), SITE_EXPLORER)
-            .await
-            .unwrap();
+        assert!(
+            acknowledge(txn.as_mut(), mac(1), SITE_EXPLORER)
+                .await
+                .unwrap()
+        );
         let repeated = find(txn.as_mut(), mac(1), SITE_EXPLORER)
             .await
             .unwrap()
