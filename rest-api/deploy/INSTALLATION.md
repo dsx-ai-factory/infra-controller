@@ -60,6 +60,7 @@ deploy/kustomize/
 - `kubectl` configured with cluster-admin access
 - `helm` (v3) — for the vendored Temporal chart at `temporal-helm/temporal/`
 - [cert-manager](https://cert-manager.io/docs/installation/) installed in the cluster (v1.13+)
+- PostgreSQL 13 or newer, if you bring your own instance instead of the reference deployment in Step 3 — migrations call the built-in `gen_random_uuid()`, which earlier versions provide only through the `pgcrypto` extension
 - Container images built and pushed to a registry accessible from the cluster — see [Building and Pushing Images](#building-and-pushing-images)
 
 ---
@@ -674,6 +675,61 @@ keycloak:
   realm: nico-dev
   clientID: nico-api
   clientSecretPath: /var/secrets/keycloak/client-secret
+```
+
+### Authentication modes
+
+The API validates every request against one of three trust sources. This base
+ships the first one.
+
+1. **Keycloak** (`keycloak.enabled: true`, shown above). The realm deployed in
+   Step 3 is the sole issuer, and the `issuers` list must be absent.
+2. **Static issuers** (`keycloak.enabled: false` plus an `issuers` list). Each
+   entry is trusted at deploy time and can only be changed by editing this
+   ConfigMap and restarting the API.
+3. **DB-backed issuers**, registered at runtime through
+   `PUT /v2/org/{org}/nico/auth-issuer`. The routes are registered only when
+   `env.disconnected: true`, `keycloak.enabled: false`, and no static issuer
+   uses a privileged origin (`keycloak`, `kas-legacy`, or `kas-ssa`).
+
+Mode 3 still needs one static issuer as a bootstrap trust anchor. Every issuer
+endpoint requires a validated token whose user holds `PROVIDER_ADMIN` in the
+target org, so an API with no issuer at all answers 401 to the very request
+that would register the first one.
+
+For any shared or production environment, `jwks` must be an HTTPS endpoint and
+the API's trust store must contain the CA that signed it; a plaintext endpoint
+exposes signing-key retrieval to tampering on the network path.
+
+```yaml
+keycloak:
+  enabled: false
+
+issuers:
+  - issuer: https://idp.example.com/realms/nico
+    jwks: https://idp.example.com/realms/nico/protocol/openid-connect/certs
+    origin: custom
+    claimMappings:
+      - orgName: example-org
+        roles:
+          - PROVIDER_ADMIN
+```
+
+On a local kind cluster the in-cluster Keycloak can act as that bootstrap
+issuer over plaintext HTTP. Apply it as a ConfigMap edit rather than checking
+it in, and never use it outside a single-developer cluster:
+
+```bash
+kubectl edit configmap nico-rest-api-config -n nico-rest
+# keycloak.enabled: false, then add:
+#   issuers:
+#     - issuer: http://localhost:8082/realms/nico-dev
+#       jwks: http://keycloak.nico-rest:8082/realms/nico-dev/protocol/openid-connect/certs
+#       origin: custom
+#       claimMappings:
+#         - orgName: test-org
+#           roles: [PROVIDER_ADMIN, TENANT_ADMIN]
+kubectl rollout restart deployment/nico-rest-api -n nico-rest
 ```
 
 ### Secrets mounted at runtime

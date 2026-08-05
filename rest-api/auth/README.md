@@ -11,8 +11,7 @@ Configure external identity providers (IdPs) for JWT authentication in `nico-res
 
 ```yaml
 issuers:
-  - name: "my-idp"                              # Unique identifier (required)
-    issuer: "https://auth.example.com"          # Expected JWT "iss" claim (required)
+  - issuer: "https://auth.example.com"          # Expected JWT "iss" claim, unique (required)
     jwks: "https://auth.example.com/.well-known/jwks.json"  # JWKS URL (required)
     jwksTimeout: "5s"                           # Fetch timeout (default: 5s)
     audiences: ["my-api"]                       # Token must have ≥1 (optional)
@@ -32,6 +31,7 @@ issuers:
 - **Audiences:** token needs at least one match → 401 on failure
 - **Scopes:** token needs all configured → 403 on failure (checks `scope`, `scopes`, `scp` claims)
 - **Mapping audiences:** each mapping may require any one exact `aud` match → 403 for that organization
+- **Mapping scopes:** each mapping may require all of its own scopes, on top of the issuer-level list → 403 for that organization
 
 ---
 
@@ -44,7 +44,7 @@ issuers:
 | **C: Service Account** | `orgName` + `isServiceAccount: true` | 1 global** | M2M with admin roles |
 | **D: Dynamic-Dynamic** | `orgAttribute` + `orgDisplayAttribute` + `rolesAttribute` | 1 global | Multi-tenant IdP |
 
-\*Each `orgName` must be globally unique across all issuers
+\*Each `orgName` maps at most once per issuer, and at most once across all issuers unless `auth.sharedStaticOrgs` is enabled
 \*\*1 per issuer URL in connected mode; 1 total in disconnected mode
 
 ---
@@ -99,8 +99,7 @@ claimMappings:
 
 ```yaml
 issuers:
-  - name: corporate-sso
-    issuer: "https://login.corp.com"
+  - issuer: "https://login.corp.com"
     jwks: "https://login.corp.com/.well-known/jwks.json"
     audiences: ["nico-api"]
     claimMappings:
@@ -113,8 +112,7 @@ issuers:
 
 ```yaml
 issuers:
-  - name: saas-provider
-    issuer: "https://auth.saas.com"
+  - issuer: "https://auth.saas.com"
     jwks: "https://auth.saas.com/.well-known/jwks.json"
     audiences: ["api"]
     scopes: ["nico"]
@@ -142,8 +140,7 @@ Issuer-level and mapping-level `audiences` both use ANY-match semantics. When bo
 
 ```yaml
 issuers:
-  - name: shared-issuer
-    issuer: https://idp.example.com
+  - issuer: https://idp.example.com
     jwks: https://idp.example.com/.well-known/jwks.json
     origin: custom
     audiences: ["nico-api"]
@@ -160,15 +157,38 @@ issuers:
 
 A token with `aud: ["nico-api", "clientA"]` can access only `orgA`; a token with `aud: ["nico-api", "clientB"]` can access only `orgB`.
 
+### Shared Issuer with Per-Org Scopes
+
+Mapping `scopes` gate one organization the way issuer `scopes` gate the whole issuer: the token must carry every configured value, and both levels apply.
+
+```yaml
+issuers:
+  - issuer: https://idp.example.com
+    jwks: https://idp.example.com/.well-known/jwks.json
+    origin: custom
+    scopes: ["openid"]
+    claimMappings:
+      - orgName: orgA
+        orgDisplayName: Organization A
+        roles: ["PROVIDER_ADMIN"]
+        scopes: ["nico:admin"]
+      - orgName: orgB
+        orgDisplayName: Organization B
+        roles: ["TENANT_ADMIN"]
+```
+
+A token with `scope: "openid"` can access only `orgB`; `orgA` additionally requires `nico:admin`.
+
 ---
 
 ## Validation Rules
 
 | Rule | Constraint |
 |------|------------|
-| Issuer name | Must be unique across all configs |
-| Issuer URL | Can only appear once (no merging) |
-| `orgName` | Must be globally unique across all issuers |
+| Issuer URL | Can only appear once (no merging); it is the issuer's identity |
+| JWKS URL | Can only appear once |
+| `orgName` | At most once per issuer; unique across all issuers unless `auth.sharedStaticOrgs` is enabled |
+| Shared `orgName` | Still reserved, so a dynamic (Type D) mapping can never claim it |
 | Type C (Service Account) | 1 total (disconnected) or 1 per issuer (connected) |
 | Type D (Dynamic Org) | Only 1 allowed across all issuers |
 | Static `orgDisplayName` | Required for Types A, B, C |
@@ -188,6 +208,7 @@ A token with `aud: ["nico-api", "clientA"]` can access only `orgA`; a token with
 | Token audience mismatch | Check `aud` claim; update `audiences` or remove to skip |
 | Organization audience mismatch | Check the selected claim mapping's `audiences`; token `aud` must match at least one |
 | Token scopes mismatch | Check `scope`/`scopes`/`scp` claim; ensure all required scopes present |
+| Organization scopes mismatch | Check the selected claim mapping's `scopes`; the token must carry all of them |
 | Invalid token | Verify `jwks` URL accessible; `issuer` matches `iss` claim exactly |
 | Invalid claim mapping | Add `roles`, `rolesAttribute`, or `isServiceAccount` |
 

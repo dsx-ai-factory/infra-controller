@@ -110,8 +110,8 @@ func TestAuthProcessor(t *testing.T) {
 	defer func() { testServer.Close() }()
 
 	toCfg := config2.NewTokenOriginConfig()
-	toCfg.AddConfig("ssa", "ssa.nvidia.com", testServer.URL+"/ssa", config2.TokenOriginKasSsa, false, nil, nil)
-	toCfg.AddConfig("kas", "authn.nvidia.com", testServer.URL+"/kas", config2.TokenOriginKasLegacy, false, nil, nil)
+	toCfg.AddConfig("ssa.nvidia.com", testServer.URL+"/ssa", config2.TokenOriginKasSsa, false, nil, nil)
+	toCfg.AddConfig("authn.nvidia.com", testServer.URL+"/kas", config2.TokenOriginKasLegacy, false, nil, nil)
 
 	// Initialize JWKS data for testing
 	if err := toCfg.UpdateAllJWKS(); err != nil {
@@ -529,8 +529,8 @@ func TestValidateJWTTokens_WithoutExpiration(t *testing.T) {
 	defer func() { testServer.Close() }()
 
 	cfg := config2.NewTokenOriginConfig()
-	cfg.AddConfig("ssa", "ssa.nvidia.com", testServer.URL+"/ssa", config2.TokenOriginKasSsa, false, nil, nil)
-	cfg.AddConfig("kas", "authn.nvidia.com", testServer.URL+"/kas", config2.TokenOriginKasLegacy, false, nil, nil)
+	cfg.AddConfig("ssa.nvidia.com", testServer.URL+"/ssa", config2.TokenOriginKasSsa, false, nil, nil)
+	cfg.AddConfig("authn.nvidia.com", testServer.URL+"/kas", config2.TokenOriginKasLegacy, false, nil, nil)
 
 	// Initialize JWKS data for testing
 	err := cfg.UpdateAllJWKS()
@@ -718,8 +718,8 @@ func TestHandlerInterface_TokenOriginRouting(t *testing.T) {
 
 	// Setup token origin config with multiple token origins
 	toCfg := config2.NewTokenOriginConfig()
-	toCfg.AddConfig("ssa", ssaIssuer, testServer.URL+"/ssa", config2.TokenOriginKasSsa, false, nil, nil)
-	toCfg.AddConfig("kas", kasIssuer, testServer.URL+"/kas", config2.TokenOriginKasLegacy, false, nil, nil)
+	toCfg.AddConfig(ssaIssuer, testServer.URL+"/ssa", config2.TokenOriginKasSsa, false, nil, nil)
+	toCfg.AddConfig(kasIssuer, testServer.URL+"/kas", config2.TokenOriginKasLegacy, false, nil, nil)
 
 	// Initialize JWKS data
 	require.NoError(t, toCfg.UpdateAllJWKS())
@@ -916,11 +916,11 @@ func TestProcessorInterface_ErrorScenarios(t *testing.T) {
 			// Add appropriate config based on the test case origin
 			switch tt.origin {
 			case config2.TokenOriginKasSsa:
-				cfg.AddConfig("ssa", tt.issuer, server.URL, tt.origin, false, nil, nil)
+				cfg.AddConfig(tt.issuer, server.URL, tt.origin, false, nil, nil)
 			case config2.TokenOriginKasLegacy:
-				cfg.AddConfig("kas", tt.issuer, server.URL, tt.origin, false, nil, nil)
+				cfg.AddConfig(tt.issuer, server.URL, tt.origin, false, nil, nil)
 			default:
-				cfg.AddConfig("default", tt.issuer, server.URL, tt.origin, false, nil, nil)
+				cfg.AddConfig(tt.issuer, server.URL, tt.origin, false, nil, nil)
 			}
 
 			require.NoError(t, cfg.UpdateAllJWKS())
@@ -983,9 +983,9 @@ func TestProcessorInterface_Mapping(t *testing.T) {
 
 	// Setup token origin config
 	cfg := config2.NewTokenOriginConfig()
-	cfg.AddConfig("ssa", ssaIssuer, testServer.URL, config2.TokenOriginKasSsa, false, nil, nil)
-	cfg.AddConfig("kas", kasIssuer, testServer.URL, config2.TokenOriginKasLegacy, false, nil, nil)
-	cfg.AddConfig("keycloak", keycloakIssuer, testServer.URL, config2.TokenOriginKeycloak, true, nil, nil)
+	cfg.AddConfig(ssaIssuer, testServer.URL, config2.TokenOriginKasSsa, false, nil, nil)
+	cfg.AddConfig(kasIssuer, testServer.URL, config2.TokenOriginKasLegacy, false, nil, nil)
+	cfg.AddConfig(keycloakIssuer, testServer.URL, config2.TokenOriginKeycloak, true, nil, nil)
 
 	require.NoError(t, cfg.UpdateAllJWKS())
 

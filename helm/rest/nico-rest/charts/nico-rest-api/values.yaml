@@ -161,12 +161,23 @@ config:
         caPath: /var/secrets/dps/ca.crt
         # -- Optional TLS server-name override. Empty uses the endpoint host.
         serverName: ""
+  # -- Deployment-wide auth policy. Durations are Go duration strings.
+  # issuerReloadInterval: how often replicas rebuild DB issuers (default 30s).
+  # jwksRefreshInterval: how often replicas re-fetch signing keys (default 15m).
+  # resolveFlightTimeout: on-demand issuer lookup ceiling (default 30s).
+  # allowInternalIssuerHosts: let API-managed issuers use loopback, private,
+  # link-local, or in-cluster hosts (default false; local development only).
+  auth:
+    sharedStaticOrgs: false
+    issuerReloadInterval: 30s
+    jwksRefreshInterval: 15m
+    resolveFlightTimeout: 30s
+    allowInternalIssuerHosts: false
   # -- JWT issuers for authentication (mutually exclusive with keycloak)
   # When keycloak is disabled, at least one issuer must be configured.
   # Example:
   #   issuers:
-  #     - name: my-idp
-  #       origin: custom
+  #     - origin: custom
   #       jwks: https://my-idp.example.com/.well-known/jwks.json
   #       issuer: "my-idp.example.com"
   issuers: []

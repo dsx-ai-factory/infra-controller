@@ -50,7 +50,6 @@ func setupTestEnvironment(t *testing.T, audiences []string, scopes []string) (*C
 
 	// Create JWKS config
 	jwksConfig := config.NewJwksConfig(
-		"custom-provider",
 		jwksServer.URL,
 		"https://custom.example.com",
 		config.TokenOriginCustom,
@@ -668,7 +667,6 @@ func TestValidateAudiences_DirectTest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jwksConfig := &config.JwksConfig{
-				Name:      "test",
 				Audiences: tt.configuredAudiences,
 			}
 			err := jwksConfig.ValidateAudience(tt.tokenClaims)
@@ -774,7 +772,6 @@ func TestValidateScopes_DirectTest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jwksConfig := &config.JwksConfig{
-				Name:   "test",
 				Scopes: tt.requiredScopes,
 			}
 			err := jwksConfig.ValidateScopes(tt.tokenClaims)
@@ -846,7 +843,6 @@ func TestCombinedValidation_DirectTest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jwksConfig := &config.JwksConfig{
-				Name:      "test",
 				Audiences: tt.configuredAudiences,
 				Scopes:    tt.requiredScopes,
 			}

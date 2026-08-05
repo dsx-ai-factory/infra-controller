@@ -17,6 +17,19 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// SetStaticIssuersForTest replaces the ConfigMap-sourced issuer list for the
+// duration of the test and restores the previous value afterwards. Tests that
+// need DynamicIssuersEnabled to be true cannot get there from the on-disk
+// config.yaml, which pins a privileged kas-legacy origin, and no production
+// setter exposes the list.
+func SetStaticIssuersForTest(t *testing.T, c *Config, issuers []IssuerConfig) {
+	t.Helper()
+
+	previous := c.v.Get("issuers")
+	c.v.Set("issuers", issuers)
+	t.Cleanup(func() { c.v.Set("issuers", previous) })
+}
+
 // SetupTestCerts sets up a test key and cert
 func SetupTestCerts(t *testing.T) (string, string) {
 	keyPath := "/tmp/tls.key"

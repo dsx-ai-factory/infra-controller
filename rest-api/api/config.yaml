@@ -38,8 +38,7 @@ temporal:
   encryptionKey: "local-dev" # Must match encryption key in workflow module
 
 issuers:
-  - name: kas
-    origin: kas-legacy
+  - origin: kas-legacy
     jwks: https://authn.nvidia.com/pubJWKS
     issuer: "authn.nvidia.com"
 
@@ -54,6 +53,13 @@ metrics:
 tracing:
   enabled: false
   serviceName: cloud-api
+
+auth:
+  sharedStaticOrgs: false
+  issuerReloadInterval: 30s
+  jwksRefreshInterval: 15m
+  resolveFlightTimeout: 30s
+  allowInternalIssuerHosts: false
 
 keycloak:
   enabled: false
