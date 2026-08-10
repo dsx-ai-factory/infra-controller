@@ -20,6 +20,7 @@ use std::fmt::Write;
 
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge as forgerpc;
+use carbide_uuid::domain::DomainId;
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
 use prettytable::{Cell, Row, Table};
 use rpc::forge::InterfaceAssociationType;
@@ -94,6 +95,18 @@ async fn show_machine_interfaces_information(
     Ok(())
 }
 
+const UNAVAILABLE_DOMAIN_NAME: &str = "NA";
+
+fn resolve_domain_name<'a>(
+    domain_id: Option<&DomainId>,
+    domains: &'a BTreeMap<DomainId, String>,
+) -> &'a str {
+    domain_id
+        .and_then(|id| domains.get(id))
+        .map(String::as_str)
+        .unwrap_or(UNAVAILABLE_DOMAIN_NAME)
+}
+
 fn convert_machines_to_nice_table(
     has_more: bool,
     machine_interfaces: forgerpc::InterfaceList,
@@ -123,7 +136,8 @@ fn convert_machines_to_nice_table(
     ));
 
     for machine_interface in machine_interfaces.interfaces {
-        let domain_name = domainlist_map.get(&machine_interface.domain_id.unwrap_or_default());
+        let domain_name =
+            resolve_domain_name(machine_interface.domain_id.as_ref(), &domainlist_map);
         let mut row = vec![
             machine_interface.id.unwrap_or_default().to_string(),
             machine_interface.mac_address,
@@ -137,7 +151,7 @@ fn convert_machines_to_nice_table(
             machine_interface.vendor.unwrap_or_default(),
         ];
         if has_more {
-            row.extend_from_slice(&[domain_name.unwrap().to_owned()]);
+            row.extend_from_slice(&[domain_name.to_owned()]);
         }
         table.add_row(row.into());
     }
@@ -155,7 +169,7 @@ fn convert_machine_to_nice_format(
         .into_iter()
         .map(|x| (x.id.unwrap_or_default(), x.name))
         .collect::<BTreeMap<_, _>>();
-    let domain_name = domainlist_map.get(&machine_interface.domain_id.unwrap_or_default());
+    let domain_name = resolve_domain_name(machine_interface.domain_id.as_ref(), &domainlist_map);
 
     let width = 13;
 
@@ -202,7 +216,7 @@ fn convert_machine_to_nice_format(
             "Domain Id",
             machine_interface.domain_id.unwrap_or_default().to_string(),
         ),
-        ("Domain Name", domain_name.unwrap().to_string()),
+        ("Domain Name", domain_name.to_owned()),
         ("Hostname", machine_interface.hostname),
         ("Primary", machine_interface.primary_interface.to_string()),
         ("MAC Address", machine_interface.mac_address),
@@ -215,4 +229,102 @@ fn convert_machine_to_nice_format(
         writeln!(&mut lines, "\t{key:<width$}: {value}")?;
     }
     Ok(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use ::rpc::forge as forgerpc;
+    use carbide_test_support::{Check, check_values};
+    use carbide_uuid::domain::DomainId;
+    use uuid::Uuid;
+
+    use super::{
+        UNAVAILABLE_DOMAIN_NAME, convert_machine_to_nice_format, convert_machines_to_nice_table,
+        resolve_domain_name,
+    };
+
+    fn domain_id(value: u128) -> DomainId {
+        Uuid::from_u128(value).into()
+    }
+
+    #[test]
+    fn domain_name_resolution_handles_domain_id_variants() {
+        let known_domain_id = domain_id(1);
+        let unknown_domain_id = domain_id(2);
+        let domains = BTreeMap::from([(known_domain_id, "example.test".to_string())]);
+
+        check_values(
+            [
+                Check {
+                    scenario: "known domain",
+                    input: Some(known_domain_id),
+                    expect: "example.test".to_string(),
+                },
+                Check {
+                    scenario: "missing domain",
+                    input: None,
+                    expect: UNAVAILABLE_DOMAIN_NAME.to_string(),
+                },
+                Check {
+                    scenario: "unknown domain",
+                    input: Some(unknown_domain_id),
+                    expect: UNAVAILABLE_DOMAIN_NAME.to_string(),
+                },
+            ],
+            |domain_id| resolve_domain_name(domain_id.as_ref(), &domains).to_string(),
+        );
+    }
+
+    #[test]
+    fn formatters_render_unavailable_domain_name_for_missing_domains() {
+        check_values(
+            [
+                Check {
+                    scenario: "domainless interface",
+                    input: None,
+                    expect: (true, true),
+                },
+                Check {
+                    scenario: "unknown domain",
+                    input: Some(domain_id(3)),
+                    expect: (true, true),
+                },
+            ],
+            |domain_id| {
+                let interface = forgerpc::MachineInterface {
+                    domain_id,
+                    ..Default::default()
+                };
+
+                let detail = convert_machine_to_nice_format(
+                    interface.clone(),
+                    ::rpc::protos::dns::DomainList::default(),
+                )
+                .expect("interface detail should render");
+                let detail_contains_unavailable_domain = detail
+                    .lines()
+                    .any(|line| line.trim() == "Domain Name  : NA");
+
+                let table = convert_machines_to_nice_table(
+                    true,
+                    forgerpc::InterfaceList {
+                        interfaces: vec![interface],
+                    },
+                    ::rpc::protos::dns::DomainList::default(),
+                )
+                .to_string();
+                let table_contains_unavailable_domain = table
+                    .lines()
+                    .flat_map(|line| line.split('|'))
+                    .any(|cell| cell.trim() == UNAVAILABLE_DOMAIN_NAME);
+
+                (
+                    detail_contains_unavailable_domain,
+                    table_contains_unavailable_domain,
+                )
+            },
+        );
+    }
 }
