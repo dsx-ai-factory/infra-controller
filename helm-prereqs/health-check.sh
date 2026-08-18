@@ -9,7 +9,8 @@
 #   KUBECONFIG=/path/to/kubeconfig ./health-check.sh
 #
 # All namespaces are auto-detected from cluster resources. Override via env:
-#   NICO_NS, VAULT_NS, POSTGRES_NS, CERT_MANAGER_NS, ESO_NS, METALLB_NS
+#   NICO_NS, VAULT_NS, POSTGRES_NS, CERT_MANAGER_NS, ESO_NS, METALLB_NS,
+#   CONTOUR_NS
 # =============================================================================
 set -uo pipefail
 
@@ -67,7 +68,8 @@ section "Namespace Detection"
 
 # NICo namespace: find the namespace containing vault-cluster-info
 if [[ -z "${NICO_NS:-}" ]]; then
-  NICO_NS=$(kubectl get configmap vault-cluster-info -A \
+  NICO_NS=$(kubectl get configmap -A \
+    --field-selector metadata.name=vault-cluster-info \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || true)
   NICO_NS="${NICO_NS:-nico-system}"
 fi
@@ -95,16 +97,24 @@ fi
 
 # cert-manager, ESO, MetalLB: discover by known deployment names
 if [[ -z "${CERT_MANAGER_NS:-}" ]]; then
-  CERT_MANAGER_NS=$(kubectl get deployment cert-manager -A \
+  CERT_MANAGER_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=cert-manager \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || printf 'cert-manager')
 fi
 if [[ -z "${ESO_NS:-}" ]]; then
-  ESO_NS=$(kubectl get deployment external-secrets -A \
+  ESO_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=external-secrets \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || printf 'external-secrets')
 fi
 if [[ -z "${METALLB_NS:-}" ]]; then
-  METALLB_NS=$(kubectl get deployment metallb-controller -A \
+  METALLB_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=metallb-controller \
     -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || printf 'metallb-system')
+fi
+if [[ -z "${CONTOUR_NS:-}" ]]; then
+  CONTOUR_NS=$(kubectl get deployment -A \
+    --field-selector metadata.name=contour-contour \
+    -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || true)
 fi
 
 printf "  %-26s %s\n" "NICo namespace:"     "${NICO_NS}"
@@ -114,6 +124,7 @@ printf "  %-26s %s\n" "postgres namespace:"    "${POSTGRES_NS}"
 printf "  %-26s %s\n" "cert-manager ns:"       "${CERT_MANAGER_NS}"
 printf "  %-26s %s\n" "external-secrets ns:"   "${ESO_NS}"
 printf "  %-26s %s\n" "metallb ns:"            "${METALLB_NS}"
+printf "  %-26s %s\n" "Contour/Envoy ns:"      "${CONTOUR_NS:-not installed}"
 
 # --------------------------------------------------------------------------
 # Test helpers
@@ -239,6 +250,35 @@ if [[ "${_desired}" -gt 0 && "${_ready}" -ge "${_desired}" ]]; then
   pass "daemonset/metallb-speaker: ${_ready}/${_desired} ready"
 else
   fail "daemonset/metallb-speaker: ${_ready:-0}/${_desired} ready"
+fi
+
+if [[ -n "${CONTOUR_NS:-}" ]]; then
+  section "Contour/Envoy"
+  _check_deployment "${CONTOUR_NS}" contour-contour
+  _desired=$(kc get daemonset -n "${CONTOUR_NS}" contour-envoy \
+    -o jsonpath='{.status.desiredNumberScheduled}' || printf '0')
+  _ready=$(kc get daemonset -n "${CONTOUR_NS}" contour-envoy \
+    -o jsonpath='{.status.numberReady}' || printf '0')
+  _desired="${_desired:-0}"; _ready="${_ready:-0}"
+  if [[ "${_desired}" -gt 0 && "${_ready}" -ge "${_desired}" ]]; then
+    pass "daemonset/contour-envoy: ${_ready}/${_desired} ready"
+  else
+    fail "daemonset/contour-envoy: ${_ready}/${_desired} ready"
+  fi
+  _ENVOY_ADDRESS=$(kc get service -n "${CONTOUR_NS}" contour-envoy \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
+  if [[ -z "${_ENVOY_ADDRESS}" ]]; then
+    _ENVOY_ADDRESS=$(kc get service -n "${CONTOUR_NS}" contour-envoy \
+      -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || true)
+  fi
+  if [[ -n "${_ENVOY_ADDRESS}" ]]; then
+    pass "service/contour-envoy: LoadBalancer address ${_ENVOY_ADDRESS}"
+  else
+    fail "service/contour-envoy: LoadBalancer address pending"
+  fi
+else
+  section "Contour/Envoy"
+  skip "not installed"
 fi
 
 # --------------------------------------------------------------------------

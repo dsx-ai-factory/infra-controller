@@ -222,6 +222,43 @@ nico-rest-api:
 
 When `keycloak.enabled: false`, the Keycloak deployment is still created by `setup.sh`, but `nico-rest-api` will not use it for token validation.
 
+#### Optional: Expose NICo REST over TLS with Ingress
+
+By default, `setup.sh` exposes `nico-rest-api` through a NodePort in `helm-prereqs/values/nico-rest.yaml`. To expose it through a fully qualified domain name with TLS, enable the `nico-rest-api` ingress and configure its certificate settings in that file:
+
+```yaml filename="helm-prereqs/values/nico-rest.yaml"
+nico-rest-api:
+  nodePort:
+    enabled: false
+  ingress:
+    enabled: true
+    className: contour
+    hosts:
+      - host: rest-api.mysite.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: rest-api-mysite-example-com-tls
+        hosts:
+          - rest-api.mysite.example.com
+    certificate:
+      enabled: true
+      secretName: rest-api-mysite-example-com-tls
+      commonName: rest-api.mysite.example.com
+```
+
+The chart creates a cert-manager `Certificate` for the ingress TLS Secret when `ingress.certificate.enabled: true`. The certificate is issued by the REST stack's `nico-rest-ca-issuer`, so this is a quick self-signed/private-CA setup suitable for lab and site-local deployments. If your cluster already has a TLS Secret for the domain, set `ingress.certificate.enabled: false` and keep `ingress.tls[].secretName` pointed at that existing Secret.
+
+The ingress routes to the chart-managed `nico-rest-api` Service on `service.port`; the API pod still serves plain HTTP internally and does not need TLS-specific configuration. If your cluster does not already have an ingress controller, run setup with the optional Contour/Envoy controller:
+
+```bash
+./setup.sh --install-contour
+# or
+export NICO_INSTALL_CONTOUR=true
+./setup.sh -y
+```
+
 ### 3f. Review site-agent Config
 
 The defaults in `helm-prereqs/values/nico-site-agent.yaml` point at the Zalando-managed `nico-pg-cluster` (`DB_ADDR: nico-pg-cluster.postgres.svc.cluster.local`, `DB_DATABASE: nico_rest`), which is the same cluster used by `nico-rest-api`. No changes are needed for a standard deployment.
@@ -365,6 +402,7 @@ before continuing.
 | 1 | local-path-provisioner + StorageClasses |
 | 1b | postgres-operator (Zalando) |
 | 1c | MetalLB + site BGP/L2 config |
+| 1d | Optional Contour/Envoy ingress controller (`--install-contour`) |
 | 2 | cert-manager + Vault TLS bootstrap (PKI chain) |
 | 3 | HashiCorp Vault (3-node HA Raft) |
 | 4 | Vault init + unseal + SSH host key |
@@ -381,6 +419,7 @@ The following components are deployed:
 ```text
 local-path-provisioner     (raw manifest - StorageClasses for Vault + PostgreSQL PVCs)
 metallb                    (metallb/metallb 0.14.5 - LoadBalancer IPs via BGP or L2)
+contour + envoy            (optional - Ingress controller for REST API FQDN/TLS)
 postgres-operator          (zalando/postgres-operator 1.11.0 - manages nico-pg-cluster)
 cert-manager               (jetstack/cert-manager v1.17.1)
 vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS)

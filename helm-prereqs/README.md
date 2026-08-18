@@ -58,7 +58,7 @@ helm-prereqs/
 │   ├── nico-site-agent.yaml     # Site-agent deployment values (DB config, gRPC settings)
 │   └── metallb-config.yaml     # MetalLB IP pools, BGP peers, and advertisements
 ├── templates/                  # nico-prereqs Helm chart templates (PKI, ESO, PostgreSQL)
-├── operators/                  # Raw manifests and operator values (local-path, MetalLB, cert-manager, Vault, ESO)
+├── operators/                  # Raw manifests and operator values (local-path, MetalLB, Contour/Envoy, cert-manager, Vault, ESO)
 │   └── dpf/                    # DPF manifests/templates (DPF installs by default; --skip-dpf to opt out)
 ├── keycloak/                   # Dev Keycloak deployment and token helper scripts
 └── observability/              # Optional monitoring stack (Loki, Tempo, OTEL, Prometheus, Grafana)
@@ -173,6 +173,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_SITE_UUID` | No | Stable UUID for this site. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
 | `NICO_MANAGE_DEFAULT_STORAGE_CLASS` | No | Whether `setup.sh` marks `local-path` as the default StorageClass. Defaults to `true`. Set to `false` when the cluster already has an operator-managed default StorageClass. |
 | `NICO_STORAGE_CLASS` | No | StorageClass used by Vault data/audit PVCs. Defaults to `local-path-persistent`. |
+| `NICO_INSTALL_CONTOUR` | No | Install the optional Contour/Envoy ingress controller after MetalLB. Defaults to `false`; set to `true` only when the cluster does not already provide an ingress controller. |
 | `PREFLIGHT_CHECK_IMAGE` | No | Image used for preflight per-node checks. Defaults to `busybox:1.36`; set to a local mirror for air-gapped clusters. |
 | `NICO_SKIP_DPF` | No | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Same as `--skip-dpf`. Defaults to `false`. |
 | `NICO_SKIP_RMS` | No | Skip the Rack Management Service (rack-manager chart, phase 5c), which installs **by default**. Same as `--skip-rms`. Defaults to `false`. |
@@ -275,6 +276,7 @@ It supports these common deployment modes:
 | `--core-values <file>` | Use site-specific Core values instead of `helm-prereqs/values/nico-core.yaml`. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--skip-dpf` | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Use for sites with no DPUs or that still use the deprecated iPXE DPU path. See [DPF](#dpf). |
+| `--install-contour` | Install the optional Contour/Envoy ingress controller. The Envoy Service is `LoadBalancer` and receives its external IP from MetalLB. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Core deploys. |
 | `--with-observability` | Also install the local monitoring stack (metrics + logs + traces) after Core. Runs in every mode, including `--skip-rest`. Can also be run standalone at any time: `observability/install-observability.sh`. See [observability/README.md](observability/README.md). |
 | `--debug` | Enable bash tracing. This can print secrets, so avoid it in shared logs. |
