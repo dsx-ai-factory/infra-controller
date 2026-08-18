@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if and .Values.ingress.enabled .Values.ingress.certificate.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.ingress.certificate.secretName }}
+  namespace: {{ include "nico-rest-api.namespace" . }}
+  labels:
+    {{- include "nico-rest-api.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.ingress.certificate.secretName }}
+  duration: {{ .Values.ingress.certificate.duration }}
+  renewBefore: {{ .Values.ingress.certificate.renewBefore }}
+  {{- if .Values.ingress.certificate.subject.organizations }}
+  subject:
+    organizations:
+      {{- toYaml .Values.ingress.certificate.subject.organizations | nindent 6 }}
+  {{- end }}
+  commonName: {{ .Values.ingress.certificate.commonName }}
+  isCA: false
+  privateKey:
+    algorithm: {{ .Values.ingress.certificate.privateKey.algorithm }}
+    encoding: {{ .Values.ingress.certificate.privateKey.encoding }}
+    size: {{ .Values.ingress.certificate.privateKey.size }}
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    {{- if .Values.ingress.certificate.dnsNames }}
+    {{- toYaml .Values.ingress.certificate.dnsNames | nindent 4 }}
+    {{- else }}
+    {{- range .Values.ingress.hosts }}
+    - {{ .host }}
+    {{- end }}
+    {{- end }}
+  {{- if .Values.ingress.certificate.uris }}
+  uris:
+    {{- toYaml .Values.ingress.certificate.uris | nindent 4 }}
+  {{- end }}
+  issuerRef:
+    name: {{ .Values.global.certificate.issuerRef.name }}
+    kind: {{ .Values.global.certificate.issuerRef.kind }}
+    group: {{ .Values.global.certificate.issuerRef.group }}
+{{- end }}

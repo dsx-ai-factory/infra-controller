@@ -16,8 +16,29 @@ global:
 nico-rest-api:
   replicaCount: 3
   nodePort:
+    # Set false when enabling ingress; the chart rejects exposing plaintext
+    # NodePort alongside TLS ingress.
     enabled: true
     port: 30388
+  # To expose REST through the optional Contour/Envoy controller, run setup.sh
+  # with --install-contour and configure a DNS name here. The ingress
+  # routes to the chart-managed ClusterIP Service on service.port.
+  # ingress:
+  #   enabled: true
+  #   className: contour
+  #   hosts:
+  #     - host: api.example.com
+  #       paths:
+  #         - path: /
+  #           pathType: Prefix
+  #   tls:
+  #     - secretName: api-example-com-tls
+  #       hosts:
+  #         - api.example.com
+  #   certificate:
+  #     enabled: true
+  #     secretName: api-example-com-tls
+  #     commonName: api.example.com
   config:
     keycloak:
       enabled: true

@@ -22,7 +22,7 @@
 #   1. nico core        (separate helm release, if installed)
 #   1b. DPF stack          (DPF CRs, dpf-operator helm release — if installed)
 #   2. helmfile releases   (nico-prereqs, external-secrets, vault, cert-manager,
-#                           postgres-operator, DPF prereqs when installed)
+#                           postgres-operator, Contour/Envoy, DPF prereqs when installed)
 #   3. cluster-scoped hook resources (ClusterIssuers, ClusterSecretStore, etc.)
 #   4. vault init secrets  (vault-cluster-keys, vaultunsealkeys, vaultroottoken)
 #   5. namespaces          (nico-system, cert-manager, vault, external-secrets,
@@ -170,7 +170,7 @@ fi
 # ---------------------------------------------------------------------------
 # 2. All helmfile releases in reverse dependency order:
 #    nico-prereqs → node-feature-discovery → maintenance-operator → kamaji →
-#    argo-cd → external-secrets → vault → cert-manager → metallb
+#    argo-cd → external-secrets → vault → cert-manager → contour → metallb
 # ---------------------------------------------------------------------------
 echo "=== [2/8] Destroying helmfile releases ==="
 
@@ -277,6 +277,14 @@ kubectl delete "clusterrole/cert-manager-policy:dpf-approval-policy" \
     "clusterrolebinding/cert-manager-policy:dpf-approval-policy" \
     --ignore-not-found 2>/dev/null || true
 
+# Contour cluster-scoped resources are normally removed by helm uninstall,
+# but remove stragglers so clean.sh can recover from partial installs.
+echo "Removing Contour cluster-scoped resources..."
+kubectl delete ingressclass contour --ignore-not-found 2>/dev/null || true
+kubectl get clusterrole,clusterrolebinding -o name \
+    | grep -E '(^|[-/])contour([-/]|$)' \
+    | xargs kubectl delete --ignore-not-found 2>/dev/null || true
+
 # ---------------------------------------------------------------------------
 # 3. Cluster-scoped resources created by helm hooks.
 #    These survive helm/helmfile uninstall because hook-delete-policy is
@@ -319,12 +327,12 @@ kubectl delete secret vault-cluster-keys vaultunsealkeys vaultroottoken \
 #    conflict with setup.sh's helmfile install into the external-secrets ns.
 # ---------------------------------------------------------------------------
 echo "=== [5/8] Deleting namespaces ==="
-kubectl delete ns nico-system cert-manager vault external-secrets postgres metallb-system dpf-operator-system \
+kubectl delete ns nico-system cert-manager vault external-secrets postgres projectcontour metallb-system dpf-operator-system \
     --wait=false --ignore-not-found 2>/dev/null || true
 
 echo "Waiting for namespaces to terminate..."
 kubectl wait --for=delete \
-    ns/nico-system ns/cert-manager ns/vault ns/external-secrets ns/postgres ns/metallb-system ns/dpf-operator-system \
+    ns/nico-system ns/cert-manager ns/vault ns/external-secrets ns/postgres ns/projectcontour ns/metallb-system ns/dpf-operator-system \
     --timeout=180s 2>/dev/null || true
 
 echo "Purging default namespace (ESO and other non-kubespray resources)..."
@@ -445,7 +453,7 @@ fi
 # which is the bug this file exists to fix. loki and tempo in particular hold
 # real data. flow is included for the same reason even though it predated this
 # list: step 0 deletes that namespace.
-_STACK_NS="nico-system cert-manager vault external-secrets postgres \
+_STACK_NS="nico-system cert-manager vault external-secrets postgres projectcontour \
 metallb-system dpf-operator-system nico-rest temporal flow \
 loki tempo monitoring otel"
 _STACK_NS="$(printf '%s' "${_STACK_NS}" | tr -s '[:space:]' ' ')"

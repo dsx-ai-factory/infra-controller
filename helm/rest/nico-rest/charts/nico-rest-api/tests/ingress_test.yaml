@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: ingress configurability
+templates:
+  - ingress.yaml
+  - ingress-certificate.yaml
+release:
+  namespace: nico-rest
+set:
+  # Provided by the nico-rest parent chart at render time; set here so the
+  # subchart's certificate template renders standalone under helm-unittest.
+  global.certificate.issuerRef.name: nico-rest-ca-issuer
+  global.certificate.issuerRef.kind: ClusterIssuer
+  global.certificate.issuerRef.group: cert-manager.io
+tests:
+  - it: does not render an ingress by default
+    template: ingress.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: does not render an ingress certificate when ingress is disabled
+    template: ingress-certificate.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rejects enabling ingress and plaintext NodePort together
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+      nodePort:
+        enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-rest-api: ingress and nodePort cannot both be enabled; disable nodePort to avoid exposing plaintext HTTP alongside TLS ingress"
+
+  - it: renders ingress rules, class, annotations, and tls when enabled
+    template: ingress.yaml
+    set:
+      service:
+        port: 9443
+      ingress:
+        enabled: true
+        className: contour
+        annotations:
+          cert-manager.io/cluster-issuer: nico-rest-ca-issuer
+          projectcontour.io/response-timeout: 30s
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+              - path: /v2
+                pathType: ImplementationSpecific
+        tls:
+          - secretName: nico-rest-api-ingress-tls
+            hosts:
+              - api.nico.example.com
+    asserts:
+      - isKind:
+          of: Ingress
+      - equal:
+          path: spec.ingressClassName
+          value: contour
+      - equal:
+          path: metadata.annotations["cert-manager.io/cluster-issuer"]
+          value: nico-rest-ca-issuer
+      - equal:
+          path: metadata.annotations["projectcontour.io/response-timeout"]
+          value: 30s
+      - equal:
+          path: spec.tls
+          value:
+            - secretName: nico-rest-api-ingress-tls
+              hosts:
+                - api.nico.example.com
+      - equal:
+          path: spec.rules[0].host
+          value: api.nico.example.com
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.name
+          value: nico-rest-api
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.port.number
+          value: 9443
+      - equal:
+          path: spec.rules[0].http.paths[1].pathType
+          value: ImplementationSpecific
+
+  - it: renders ingress certificate from ingress host defaults
+    template: ingress-certificate.yaml
+    set:
+      ingress:
+        enabled: true
+        certificate:
+          commonName: api.nico.example.com
+          secretName: nico-rest-api-ingress-tls
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+          - host: api-alt.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+    asserts:
+      - isKind:
+          of: Certificate
+      - equal:
+          path: metadata.name
+          value: nico-rest-api-ingress-tls
+      - equal:
+          path: spec.secretName
+          value: nico-rest-api-ingress-tls
+      - equal:
+          path: spec.commonName
+          value: api.nico.example.com
+      - equal:
+          path: spec.dnsNames
+          value:
+            - api.nico.example.com
+            - api-alt.nico.example.com
+      - equal:
+          path: spec.issuerRef
+          value:
+            name: nico-rest-ca-issuer
+            kind: ClusterIssuer
+            group: cert-manager.io
+
+  - it: skips ingress certificate when using an existing TLS secret
+    template: ingress-certificate.yaml
+    set:
+      ingress:
+        enabled: true
+        certificate:
+          enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

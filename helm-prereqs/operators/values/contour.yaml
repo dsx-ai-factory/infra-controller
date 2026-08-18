@@ -1,0 +1,21 @@
+# =============================================================================
+# operators/values/contour.yaml — Project Contour Helm chart static values
+#
+# Optional cluster-level Ingress controller for NICo REST ingress exposure.
+# Envoy's Service is type LoadBalancer and is expected to receive an external
+# IP from MetalLB.
+#
+# Chart: contour/contour 0.6.0
+# =============================================================================
+
+contour:
+  ingressClass:
+    name: contour
+    create: true
+    default: false
+
+envoy:
+  kind: daemonset
+  service:
+    type: LoadBalancer
+    externalTrafficPolicy: Cluster
