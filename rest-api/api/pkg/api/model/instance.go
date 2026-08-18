@@ -902,7 +902,7 @@ func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 				if len(userDataMap.Content) > 0 {
 					documentRoot = userDataMap.Content[0]
 
-					if documentRoot.Kind == yaml.MappingNode {
+					if util.PhoneHomeSupportsUserDataRoot(documentRoot) {
 						isUserDataValidYAML = true
 					}
 				}
@@ -1284,7 +1284,7 @@ func (bicr *APIBatchInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg
 				if len(userDataMap.Content) > 0 {
 					documentRoot = userDataMap.Content[0]
 
-					if documentRoot.Kind == yaml.MappingNode {
+					if util.PhoneHomeSupportsUserDataRoot(documentRoot) {
 						isUserDataValidYAML = true
 					}
 				}
@@ -1599,7 +1599,7 @@ func (iur *APIInstanceUpdateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 				if len(userDataMap.Content) > 0 {
 					documentRoot = userDataMap.Content[0]
 
-					if documentRoot.Kind == yaml.MappingNode {
+					if util.PhoneHomeSupportsUserDataRoot(documentRoot) {
 						isUserDataValidYAML = true
 					}
 				}

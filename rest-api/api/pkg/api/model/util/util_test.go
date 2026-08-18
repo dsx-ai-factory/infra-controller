@@ -123,12 +123,12 @@ func TestRemovePhoneHomeFromUserData(t *testing.T) {
 		},
 		{
 			name:        "removes matching phone-home blocks from both locations",
-			url:         stringPointer(phoneHomeURL),
+			url:         new(phoneHomeURL),
 			wantRemoved: true,
 		},
 		{
 			name: "preserves non-matching phone-home blocks in both locations",
-			url:  stringPointer("http://different"),
+			url:  new("http://different"),
 		},
 	}
 
@@ -158,6 +158,208 @@ autoinstall:
 			}
 		})
 	}
+}
+
+func TestInsertPhoneHomeIntoArchive(t *testing.T) {
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	const archive = `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    packages:
+    - curl
+- type: text/x-shellscript
+  content: |
+    #!/bin/sh
+    echo hi
+`
+
+	t.Run("appends a phone-home cloud-config entry and preserves the archive", func(t *testing.T) {
+		documentRoot := unmarshalArchiveRoot(t, archive)
+
+		require.NoError(t, InsertPhoneHomeIntoUserData(documentRoot, phoneHomeURL))
+
+		// The original two entries survive and a third is appended.
+		require.Len(t, documentRoot.Content, 3)
+
+		rendered := marshalDocument(t, documentRoot)
+		assert.True(t, strings.HasPrefix(rendered, "#cloud-config-archive\n"),
+			"archive header must be preserved: %s", rendered)
+		assert.Contains(t, rendered, "echo hi", "existing entries must be preserved")
+
+		// The appended entry must be a text/cloud-config part whose content is a
+		// valid #cloud-config carrying the phone-home block.
+		appended := documentRoot.Content[2]
+		assert.Equal(t, archiveContentType, mappingNodeValue(appended, archiveEntryType).Value)
+
+		content := mappingNodeValue(appended, archiveEntryContent).Value
+		phoneHome := phoneHomeFromContent(t, content)
+		require.NotNil(t, phoneHome)
+		assert.Equal(t, phoneHomeURL, mappingNodeValue(phoneHome, SitePhoneHomeUrl).Value)
+		assert.Equal(t, SitePhoneHomePostAll, mappingNodeValue(phoneHome, SitePhoneHomePost).Value)
+	})
+
+	t.Run("replaces a standalone phone-home entry instead of duplicating it", func(t *testing.T) {
+		withPhoneHome := archive + `- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: http://existing
+`
+		documentRoot := unmarshalArchiveRoot(t, withPhoneHome)
+
+		require.NoError(t, InsertPhoneHomeIntoUserData(documentRoot, phoneHomeURL))
+
+		rendered := marshalDocument(t, documentRoot)
+		assert.Contains(t, rendered, phoneHomeURL)
+		assert.NotContains(t, rendered, "http://existing", "the stale phone-home entry must be replaced")
+		assert.Equal(t, 1, strings.Count(rendered, "phone_home:"), "exactly one phone-home entry must remain")
+	})
+
+	t.Run("does not treat a header-less list as a cloud-config-archive", func(t *testing.T) {
+		// A YAML list with no #cloud-config-archive header is not valid cloud-init
+		// user-data, so phone-home must not be enabled on it.
+		headerless := `- type: text/cloud-config
+  content: |
+    #cloud-config
+    packages:
+    - curl
+`
+		documentRoot := unmarshalArchiveRoot(t, headerless)
+
+		assert.False(t, PhoneHomeSupportsUserDataRoot(documentRoot))
+		assert.Error(t, InsertPhoneHomeIntoUserData(documentRoot, phoneHomeURL))
+	})
+}
+
+func TestRemovePhoneHomeFromArchive(t *testing.T) {
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	archive := func() string {
+		return `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: ` + phoneHomeURL + `
+- type: text/x-shellscript
+  content: |
+    #!/bin/sh
+    echo hi
+`
+	}
+
+	tests := []struct {
+		name        string
+		url         *string
+		wantRemoved bool
+	}{
+		{name: "removes any phone-home entry when url is nil", wantRemoved: true},
+		{name: "removes the matching phone-home entry", url: new(phoneHomeURL), wantRemoved: true},
+		{name: "keeps a non-matching phone-home entry", url: new("http://different")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			documentRoot := unmarshalArchiveRoot(t, archive())
+
+			require.NoError(t, RemovePhoneHomeFromUserData(documentRoot, tt.url))
+
+			rendered := marshalDocument(t, documentRoot)
+			assert.True(t, strings.HasPrefix(rendered, "#cloud-config-archive\n"),
+				"archive header must survive removal: %s", rendered)
+			assert.Contains(t, rendered, "echo hi", "unrelated entries must be kept")
+
+			if tt.wantRemoved {
+				assert.NotContains(t, rendered, "phone_home")
+			} else {
+				assert.Contains(t, rendered, "phone_home")
+			}
+		})
+	}
+}
+
+func TestRemovePhoneHomeFromArchivePreservesHeaderWhenEmptied(t *testing.T) {
+	// An archive whose only entry is phone-home becomes empty on removal, but
+	// must keep its #cloud-config-archive header so it stays valid cloud-init.
+	documentRoot := unmarshalArchiveRoot(t, `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: http://169.254.169.254/phone-home
+`)
+
+	require.NoError(t, RemovePhoneHomeFromUserData(documentRoot, nil))
+
+	assert.Empty(t, documentRoot.Content, "the only entry must be removed")
+
+	rendered := marshalDocument(t, documentRoot)
+	assert.True(t, strings.HasPrefix(rendered, "#cloud-config-archive\n"),
+		"header must be preserved on the emptied archive: %s", rendered)
+	assert.NotContains(t, rendered, "phone_home")
+}
+
+func TestPhoneHomeSupportsUserDataRoot(t *testing.T) {
+	tests := []struct {
+		name     string
+		userData string
+		want     bool
+	}{
+		{"#cloud-config mapping", "#cloud-config\npackages:\n- curl\n", true},
+		{"header-less mapping is auto-corrected", "packages:\n- curl\n", true},
+		{"empty mapping", "{}\n", true},
+		{"#cloud-config-archive", "#cloud-config-archive\n- type: text/cloud-config\n  content: x\n", true},
+		{"empty #cloud-config-archive", "#cloud-config-archive\n[]\n", true},
+		{"header-less list is not an archive", "- type: text/cloud-config\n  content: x\n", false},
+		{"#!/bin/bash script parsed as a scalar", "#!/bin/bash\necho hello\nls -la\n", false},
+		{"#!/bin/bash script parsed as a mapping", "#!/bin/bash\nexport FOO: bar\n", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			document := &yaml.Node{}
+			require.NoError(t, yaml.Unmarshal([]byte(tt.userData), document))
+
+			var root *yaml.Node
+			if len(document.Content) > 0 {
+				root = document.Content[0]
+			}
+
+			assert.Equal(t, tt.want, PhoneHomeSupportsUserDataRoot(root))
+		})
+	}
+}
+
+func unmarshalArchiveRoot(t *testing.T, userData string) *yaml.Node {
+	t.Helper()
+
+	document := &yaml.Node{}
+	require.NoError(t, yaml.Unmarshal([]byte(userData), document))
+	require.Len(t, document.Content, 1)
+	require.Equal(t, yaml.SequenceNode, document.Content[0].Kind)
+
+	return document.Content[0]
+}
+
+func marshalDocument(t *testing.T, documentRoot *yaml.Node) string {
+	t.Helper()
+
+	out, err := yaml.Marshal(&yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{documentRoot}})
+	require.NoError(t, err)
+
+	return string(out)
+}
+
+func phoneHomeFromContent(t *testing.T, content string) *yaml.Node {
+	t.Helper()
+
+	inner := &yaml.Node{}
+	require.NoError(t, yaml.Unmarshal([]byte(content), inner))
+	require.Len(t, inner.Content, 1)
+
+	return mappingNodeValue(inner.Content[0], SitePhoneHomeName)
 }
 
 func TestMarshalUserData(t *testing.T) {
@@ -240,10 +442,6 @@ func unmarshalDocumentRoot(t *testing.T, userData string) *yaml.Node {
 	require.Equal(t, yaml.MappingNode, document.Content[0].Kind)
 
 	return document.Content[0]
-}
-
-func stringPointer(value string) *string {
-	return &value
 }
 
 func mappingNodeValue(mappingNode *yaml.Node, key string) *yaml.Node {

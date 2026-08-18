@@ -569,6 +569,54 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 	}
 }
 
+func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData_Archive(t *testing.T) {
+	const phoneHomeURL = "http://localhost/phone-home"
+
+	const archive = `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    packages:
+    - curl
+`
+
+	t.Run("appends phone-home as a new entry in a cloud-config-archive", func(t *testing.T) {
+		req := APIOperatingSystemCreateRequest{
+			Name:             "test-name",
+			TenantID:         cutil.GetPtr(uuid.NewString()),
+			UserData:         cutil.GetPtr(archive),
+			PhoneHomeEnabled: cutil.GetPtr(true),
+		}
+
+		require.NoError(t, req.ValidateAndSetUserData(phoneHomeURL))
+		require.NotNil(t, req.UserData)
+		assert.True(t, strings.HasPrefix(*req.UserData, "#cloud-config-archive\n"),
+			"archive header must be preserved: %s", *req.UserData)
+		assert.Contains(t, *req.UserData, phoneHomeURL)
+	})
+
+	t.Run("replaces a standalone phone-home entry rather than duplicating it", func(t *testing.T) {
+		withPhoneHome := archive + `- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: http://existing
+`
+		req := APIOperatingSystemCreateRequest{
+			Name:             "test-name",
+			TenantID:         cutil.GetPtr(uuid.NewString()),
+			UserData:         cutil.GetPtr(withPhoneHome),
+			PhoneHomeEnabled: cutil.GetPtr(true),
+		}
+
+		require.NoError(t, req.ValidateAndSetUserData(phoneHomeURL))
+		require.NotNil(t, req.UserData)
+		assert.Contains(t, *req.UserData, phoneHomeURL)
+		assert.NotContains(t, *req.UserData, "http://existing")
+		assert.Equal(t, 1, strings.Count(*req.UserData, "phone_home:"))
+	})
+}
+
 func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData(t *testing.T) {
 	type fields struct {
 		Name              string

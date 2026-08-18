@@ -17,13 +17,17 @@ import (
 
 const (
 	// configuration for phone home
-	SitePhoneHomeName    = "phone_home"
-	SitePhoneHomePost    = "post"
-	SitePhoneHomePostAll = "all"
-	SitePhoneHomeUrl     = "url"
-	SiteCloudConfig      = "#cloud-config"
-	autoinstallName      = "autoinstall"
-	autoinstallUserData  = "user-data"
+	SitePhoneHomeName      = "phone_home"
+	SitePhoneHomePost      = "post"
+	SitePhoneHomePostAll   = "all"
+	SitePhoneHomeUrl       = "url"
+	SiteCloudConfig        = "#cloud-config"
+	SiteCloudConfigArchive = "#cloud-config-archive"
+	autoinstallName        = "autoinstall"
+	autoinstallUserData    = "user-data"
+	archiveEntryType       = "type"
+	archiveEntryContent    = "content"
+	archiveContentType     = "text/cloud-config"
 
 	// userDataIndentSpaces matches the indent cloud-config is conventionally
 	// written with. The encoder's default of 4 re-indents every nested line,
@@ -61,8 +65,18 @@ func MarshalUserData(document *yaml.Node) ([]byte, error) {
 // If `url` is non-nil, then the phone-home block will only be removed if
 // the URL matches the value of `url`.
 func RemovePhoneHomeFromUserData(documentRoot *yaml.Node, url *string) error {
-	if documentRoot == nil || documentRoot.Kind != yaml.MappingNode {
-		return fmt.Errorf("node must be non-nil MappingNode for user-data removal")
+	if documentRoot == nil {
+		return fmt.Errorf("node must be non-nil for user-data removal")
+	}
+
+	// A #cloud-config-archive is a YAML sequence: phone-home lives in its own
+	// cloud-config entry rather than at the document root.
+	if isCloudConfigArchive(documentRoot) {
+		return removePhoneHomeFromArchive(documentRoot, url)
+	}
+
+	if !isCloudConfig(documentRoot) {
+		return fmt.Errorf("node must be a #cloud-config mapping or a #cloud-config-archive for user-data removal")
 	}
 
 	removePhoneHomeFromMapping(documentRoot, url)
@@ -146,8 +160,18 @@ func removePhoneHomeFromMapping(mappingNode *yaml.Node, url *string) {
 }
 
 func InsertPhoneHomeIntoUserData(documentRoot *yaml.Node, url string) error {
-	if documentRoot == nil || documentRoot.Kind != yaml.MappingNode {
-		return fmt.Errorf("node must be non-nil MappingNode for user-data insertion")
+	if documentRoot == nil {
+		return fmt.Errorf("node must be non-nil for user-data insertion")
+	}
+
+	// A #cloud-config-archive is a YAML sequence: append phone-home as a new
+	// cloud-config entry instead of inserting into the document root.
+	if isCloudConfigArchive(documentRoot) {
+		return insertPhoneHomeIntoArchive(documentRoot, url)
+	}
+
+	if !isCloudConfig(documentRoot) {
+		return fmt.Errorf("node must be a #cloud-config mapping or a #cloud-config-archive for user-data insertion")
 	}
 
 	if documentRoot.Content == nil {
@@ -216,6 +240,193 @@ func InsertPhoneHomeIntoUserData(documentRoot *yaml.Node, url string) error {
 	}
 
 	return nil
+}
+
+// PhoneHomeSupportsUserDataRoot reports whether a cloud-init user-data document
+// root can carry a phone-home block: a #cloud-config document (mapping) has the
+// block inserted at its root, while a #cloud-config-archive (sequence) gets a
+// dedicated phone-home cloud-config appended as a new archive entry.
+func PhoneHomeSupportsUserDataRoot(documentRoot *yaml.Node) bool {
+	return isCloudConfig(documentRoot) || isCloudConfigArchive(documentRoot)
+}
+
+// isCloudConfig reports whether documentRoot is #cloud-config user-data: a
+// mapping whose header, if present, is the #cloud-config marker. A header-less
+// mapping is accepted (the header is added on output), but a mapping carrying a
+// different header - e.g. a #!/bin/bash script that happens to parse as a map -
+// is rejected.
+func isCloudConfig(documentRoot *yaml.Node) bool {
+	if documentRoot == nil || documentRoot.Kind != yaml.MappingNode {
+		return false
+	}
+
+	header := userDataHeader(documentRoot)
+
+	return header == "" || header == SiteCloudConfig
+}
+
+// isCloudConfigArchive reports whether documentRoot is a #cloud-config-archive:
+// a YAML sequence whose first line carries the cloud-init archive header. A
+// header-less list is not valid cloud-init user-data, so it is not treated as
+// an archive.
+func isCloudConfigArchive(documentRoot *yaml.Node) bool {
+	return documentRoot != nil && documentRoot.Kind == yaml.SequenceNode &&
+		userDataHeader(documentRoot) == SiteCloudConfigArchive
+}
+
+// userDataHeader returns the cloud-init format header that yaml attaches as the
+// head comment of the document's first child (e.g. #cloud-config or
+// #cloud-config-archive), or "" when there is none.
+func userDataHeader(documentRoot *yaml.Node) string {
+	if documentRoot == nil {
+		return ""
+	}
+
+	// yaml attaches the header to the node itself for an empty archive, and to
+	// the first child otherwise.
+	comment := documentRoot.HeadComment
+	if comment == "" && len(documentRoot.Content) > 0 {
+		comment = documentRoot.Content[0].HeadComment
+	}
+
+	firstLine, _, _ := strings.Cut(comment, "\n")
+
+	return strings.TrimSpace(firstLine)
+}
+
+// insertPhoneHomeIntoArchive appends a dedicated phone-home cloud-config entry to
+// a #cloud-config-archive. cloud-init merges each archive part independently, so a
+// standalone phone_home part takes effect on its own. The entry content is built
+// by the same InsertPhoneHomeIntoUserData path used for #cloud-config documents,
+// so both formats share one source of truth for the phone-home block. Any
+// existing phone-home entry is removed first to keep re-enabling idempotent.
+func insertPhoneHomeIntoArchive(archiveRoot *yaml.Node, url string) error {
+	if err := removePhoneHomeFromArchive(archiveRoot, nil); err != nil {
+		return err
+	}
+
+	content := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	if err := InsertPhoneHomeIntoUserData(content, url); err != nil {
+		return err
+	}
+
+	rendered, err := yaml.Marshal(content)
+	if err != nil {
+		return errors.New("failed to render phone-home cloud-config")
+	}
+
+	archiveRoot.Content = append(archiveRoot.Content, newCloudConfigArchiveEntry(string(rendered)))
+
+	return nil
+}
+
+// removePhoneHomeFromArchive strips phone-home from every cloud-config entry of a
+// #cloud-config-archive using the same RemovePhoneHomeFromUserData path as
+// #cloud-config documents. Entries left empty are dropped, entries with no
+// phone-home are left untouched, and the archive header comment yaml attaches to
+// the first element is preserved even when that element is removed.
+func removePhoneHomeFromArchive(archiveRoot *yaml.Node, url *string) error {
+	// Capture the archive header so it survives even when its carrier entry is
+	// removed. yaml attaches it to the first entry, or to the sequence node
+	// itself for an empty archive.
+	header := archiveRoot.HeadComment
+	if header == "" && len(archiveRoot.Content) > 0 {
+		header = archiveRoot.Content[0].HeadComment
+	}
+
+	kept := archiveRoot.Content[:0]
+	for _, entry := range archiveRoot.Content {
+		content := cloudConfigArchiveContent(entry)
+		if content == nil {
+			kept = append(kept, entry)
+			continue
+		}
+
+		document := &yaml.Node{}
+		if err := yaml.Unmarshal([]byte(content.Value), document); err != nil ||
+			len(document.Content) == 0 || document.Content[0].Kind != yaml.MappingNode {
+			kept = append(kept, entry)
+			continue
+		}
+
+		root := document.Content[0]
+		before := len(root.Content)
+		if err := RemovePhoneHomeFromUserData(root, url); err != nil {
+			return err
+		}
+
+		switch {
+		case len(root.Content) == before:
+			// No phone-home here; keep the entry as authored.
+			kept = append(kept, entry)
+		case len(root.Content) == 0:
+			// The entry held only phone-home, so drop it entirely.
+		default:
+			rendered, err := yaml.Marshal(document)
+			if err != nil {
+				return errors.New("failed to re-render archive entry after removing phone-home")
+			}
+			content.SetString(string(rendered))
+			content.Style = yaml.LiteralStyle
+			kept = append(kept, entry)
+		}
+	}
+	archiveRoot.Content = kept
+
+	// Restore the header onto whichever node now carries it: the first entry if
+	// any remain, or the sequence node itself once the last entry is removed.
+	switch {
+	case header == "":
+	case len(archiveRoot.Content) == 0:
+		archiveRoot.HeadComment = header
+	case archiveRoot.Content[0].HeadComment == "":
+		archiveRoot.Content[0].HeadComment = header
+	}
+
+	return nil
+}
+
+// newCloudConfigArchiveEntry builds a {type: text/cloud-config, content: ...}
+// mapping node for inclusion in a #cloud-config-archive sequence.
+func newCloudConfigArchiveEntry(content string) *yaml.Node {
+	typeKey := &yaml.Node{}
+	typeKey.SetString(archiveEntryType)
+	typeValue := &yaml.Node{}
+	typeValue.SetString(archiveContentType)
+
+	contentKey := &yaml.Node{}
+	contentKey.SetString(archiveEntryContent)
+	contentValue := &yaml.Node{}
+	contentValue.SetString(content)
+	contentValue.Style = yaml.LiteralStyle
+
+	return &yaml.Node{
+		Kind:    yaml.MappingNode,
+		Tag:     "!!map",
+		Content: []*yaml.Node{typeKey, typeValue, contentKey, contentValue},
+	}
+}
+
+// cloudConfigArchiveContent returns the content scalar of a cloud-config archive
+// entry, or nil if the entry is not a cloud-config part (e.g. a shell script) or
+// carries no string content. An entry with no explicit type is treated as
+// cloud-config, matching cloud-init's default handling.
+func cloudConfigArchiveContent(entry *yaml.Node) *yaml.Node {
+	if entry == nil || entry.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	if typeNode := mappingValue(entry, archiveEntryType); typeNode != nil &&
+		typeNode.Value != "" && typeNode.Value != archiveContentType {
+		return nil
+	}
+
+	contentNode := mappingValue(entry, archiveEntryContent)
+	if contentNode == nil || contentNode.Kind != yaml.ScalarNode {
+		return nil
+	}
+
+	return contentNode
 }
 
 func mappingValue(mappingNode *yaml.Node, key string) *yaml.Node {
