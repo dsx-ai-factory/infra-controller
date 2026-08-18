@@ -74,7 +74,7 @@ releases:
     namespace: projectcontour
     createNamespace: true
     chart: contour/contour
-    version: "0.6.0"
+    version: "0.7.0"
     wait: true
     timeout: 600
     values:
