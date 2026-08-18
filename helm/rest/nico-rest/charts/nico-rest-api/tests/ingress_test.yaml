@@ -146,6 +146,112 @@ tests:
               hosts:
                 - api.nico.example.com
 
+  # A leading '*' is a YAML alias indicator, so an unquoted wildcard host fails
+  # to render at all rather than producing a wrong value.
+  - it: quotes a wildcard host in the ingress tls block
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        hosts:
+          - host: "*.nico.example.com"
+            paths:
+              - path: /
+                pathType: Prefix
+    asserts:
+      - equal:
+          path: spec.tls[0].hosts[0]
+          value: "*.nico.example.com"
+      - equal:
+          path: spec.rules[0].host
+          value: "*.nico.example.com"
+
+  - it: quotes a wildcard host in the certificate commonName and dnsNames
+    template: ingress-certificate.yaml
+    set:
+      ingress:
+        enabled: true
+        hosts:
+          - host: "*.nico.example.com"
+            paths:
+              - path: /
+                pathType: Prefix
+    asserts:
+      - equal:
+          path: spec.commonName
+          value: "*.nico.example.com"
+      - equal:
+          path: spec.dnsNames
+          value:
+            - "*.nico.example.com"
+
+  - it: rejects an explicit ingress.tls that leaves a host without TLS
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        certificate:
+          enabled: false
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+          - host: admin.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+        tls:
+          - secretName: api-nico-example-com-tls
+            hosts:
+              - api.nico.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: 'nico-rest-api: ingress.hosts entry "admin.nico.example.com" is not covered by any ingress.tls host, so it would be served over plaintext HTTP; add it to ingress.tls[].hosts, or clear ingress.tls to derive the block from ingress.hosts'
+
+  - it: accepts a wildcard ingress.tls host covering one label
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        certificate:
+          enabled: false
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+        tls:
+          - secretName: wildcard-nico-example-com-tls
+            hosts:
+              - "*.nico.example.com"
+    asserts:
+      - equal:
+          path: spec.tls[0].secretName
+          value: wildcard-nico-example-com-tls
+
+  # An Ingress wildcard matches exactly one label, so *.nico.example.com must not
+  # be treated as covering a deeper name.
+  - it: rejects a wildcard ingress.tls host against a two-label host
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        certificate:
+          enabled: false
+        hosts:
+          - host: a.b.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+        tls:
+          - secretName: wildcard-nico-example-com-tls
+            hosts:
+              - "*.nico.example.com"
+    asserts:
+      - failedTemplate:
+          errorMessage: 'nico-rest-api: ingress.hosts entry "a.b.nico.example.com" is not covered by any ingress.tls host, so it would be served over plaintext HTTP; add it to ingress.tls[].hosts, or clear ingress.tls to derive the block from ingress.hosts'
+
   - it: renders ingress certificate from ingress host defaults
     template: ingress-certificate.yaml
     set:

@@ -18,7 +18,7 @@ spec:
     organizations:
       {{- toYaml .Values.ingress.certificate.subject.organizations | nindent 6 }}
   {{- end }}
-  commonName: {{ .Values.ingress.certificate.commonName | default (first .Values.ingress.hosts).host }}
+  commonName: {{ .Values.ingress.certificate.commonName | default (first .Values.ingress.hosts).host | quote }}
   isCA: false
   privateKey:
     algorithm: {{ .Values.ingress.certificate.privateKey.algorithm }}
@@ -31,7 +31,7 @@ spec:
     {{- toYaml .Values.ingress.certificate.dnsNames | nindent 4 }}
     {{- else }}
     {{- range .Values.ingress.hosts }}
-    - {{ .host }}
+    - {{ .host | quote }}
     {{- end }}
     {{- end }}
   {{- if .Values.ingress.certificate.uris }}

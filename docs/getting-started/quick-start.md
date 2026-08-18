@@ -401,6 +401,7 @@ You can combine common options as needed:
 |--------|--------|
 | `--core-values <file>` | Use site-specific NICo Core values for Phase 6. |
 | `--debug` | Enable shell tracing. This may print secrets, so protect the logs. |
+| `--install-contour` | Install the optional Contour/Envoy ingress controller in Phase 1d, for clusters that do not already provide one. Envoy's Service is `LoadBalancer` and takes its external IP from MetalLB. Same as `NICO_INSTALL_CONTOUR=true`; defaults to `false`. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Phase 6. |
 | `--skip-core` | Skip the Phase 6 NICo Core Helm release. |
