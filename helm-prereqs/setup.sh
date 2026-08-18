@@ -719,12 +719,11 @@ echo "MetalLB ready"
 if [[ "${INSTALL_CONTOUR}" == "true" ]]; then
     _SETUP_PHASE="[1d] Contour/Envoy"
     echo "=== [1d] Contour/Envoy ==="
-    helmfile sync -l name=contour --include-needs
-    echo "Waiting for Contour controller and Envoy proxies to be ready..."
-    kubectl rollout status deployment/contour-contour \
-        -n projectcontour --timeout=120s
-    kubectl rollout status daemonset/contour-envoy \
-        -n projectcontour --timeout=120s
+    # No --include-needs. Phase 1c above already installed MetalLB, and pulling
+    # it in here would re-sync that release without the CRD apply/re-apply that
+    # phase 1c wraps around it. The release sets wait: true, so this returns
+    # only once Contour and the Envoy DaemonSet are ready.
+    helmfile sync -l name=contour
     echo "Contour/Envoy ready"
 else
     echo "Skipping Contour/Envoy (set NICO_INSTALL_CONTOUR=true or pass --install-contour to install it)"

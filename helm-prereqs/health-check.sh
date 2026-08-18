@@ -252,8 +252,8 @@ else
   fail "daemonset/metallb-speaker: ${_ready:-0}/${_desired} ready"
 fi
 
+section "Contour/Envoy"
 if [[ -n "${CONTOUR_NS:-}" ]]; then
-  section "Contour/Envoy"
   _check_deployment "${CONTOUR_NS}" contour-contour
   _desired=$(kc get daemonset -n "${CONTOUR_NS}" contour-envoy \
     -o jsonpath='{.status.desiredNumberScheduled}' || printf '0')
@@ -273,11 +273,12 @@ if [[ -n "${CONTOUR_NS:-}" ]]; then
   fi
   if [[ -n "${_ENVOY_ADDRESS}" ]]; then
     pass "service/contour-envoy: LoadBalancer address ${_ENVOY_ADDRESS}"
+    printf "    %s point the nico-rest-api ingress host at %s%s\n" \
+      "${_DIM}" "${_ENVOY_ADDRESS}" "${_RESET}"
   else
     fail "service/contour-envoy: LoadBalancer address pending"
   fi
 else
-  section "Contour/Envoy"
   skip "not installed"
 fi
 

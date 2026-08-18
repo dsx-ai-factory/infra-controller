@@ -238,17 +238,14 @@ nico-rest-api:
         paths:
           - path: /
             pathType: Prefix
-    tls:
-      - secretName: rest-api-mysite-example-com-tls
-        hosts:
-          - rest-api.mysite.example.com
     certificate:
       enabled: true
       secretName: rest-api-mysite-example-com-tls
-      commonName: rest-api.mysite.example.com
 ```
 
-The chart creates a cert-manager `Certificate` for the ingress TLS Secret when `ingress.certificate.enabled: true`. The certificate is issued by the REST stack's `nico-rest-ca-issuer`, so this is a quick self-signed/private-CA setup suitable for lab and site-local deployments. If your cluster already has a TLS Secret for the domain, set `ingress.certificate.enabled: false` and keep `ingress.tls[].secretName` pointed at that existing Secret.
+`ingress.hosts` is the only place the DNS name appears. The chart adds every host to the ingress `spec.tls` block and to the certificate `dnsNames`, and uses the first host as the certificate common name, so a host that is renamed here stays covered by TLS. The chart rejects `ingress.enabled` and `nodePort.enabled` together rather than serving the API over plaintext HTTP alongside TLS.
+
+The chart creates a cert-manager `Certificate` for the ingress TLS Secret when `ingress.certificate.enabled: true`. The certificate is issued by the REST stack's `nico-rest-ca-issuer`, so this is a quick self-signed/private-CA setup suitable for lab and site-local deployments. If your cluster already has a TLS Secret for the domain, set `ingress.certificate.enabled: false` and set `ingress.tls` to point at that existing Secret.
 
 The ingress routes to the chart-managed `nico-rest-api` Service on `service.port`; the API pod still serves plain HTTP internally and does not need TLS-specific configuration. If your cluster does not already have an ingress controller, run setup with the optional Contour/Envoy controller:
 
@@ -258,6 +255,31 @@ The ingress routes to the chart-managed `nico-rest-api` Service on `service.port
 export NICO_INSTALL_CONTOUR=true
 ./setup.sh -y
 ```
+
+##### Point DNS at the ingress and trust the CA
+
+The Ingress does not answer until the host resolves to the Envoy LoadBalancer address. Read that address, which MetalLB assigns from the external pool in `helm-prereqs/values/metallb-config.yaml`:
+
+```bash
+kubectl get service contour-envoy -n projectcontour \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+```
+
+Create an `A` record for `rest-api.mysite.example.com` pointing at it. `health-check.sh` prints the same address under its Contour/Envoy section.
+
+Because `nico-rest-ca-issuer` is a CA issuer backed by the site CA in `ca-signing-secret`, clients reject the certificate until they trust that CA. Export the bundle from the issued Secret and confirm the chain:
+
+```bash
+kubectl get secret rest-api-mysite-example-com-tls -n nico-rest \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > nico-rest-ca.crt
+openssl s_client -connect rest-api.mysite.example.com:443 \
+  -servername rest-api.mysite.example.com \
+  -CAfile nico-rest-ca.crt </dev/null 2>/dev/null | grep 'Verify return code'
+```
+
+`Verify return code: 0 (ok)` confirms Envoy is serving the issued certificate and that the CA bundle validates it. Pass the same file to API clients, for example `curl --cacert nico-rest-ca.crt`, and use `https://rest-api.mysite.example.com` as the base URL in place of the NodePort address.
+
+For a certificate issued by a public CA instead, set `ingress.certificate.enabled: false` and point `ingress.tls` at a Secret your own issuer populates.
 
 ### 3f. Review site-agent Config
 

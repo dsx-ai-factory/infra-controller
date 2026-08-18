@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-{{- if and .Values.ingress.enabled .Values.nodePort.enabled }}
-{{- fail "nico-rest-api: ingress and nodePort cannot both be enabled; disable nodePort to avoid exposing plaintext HTTP alongside TLS ingress" }}
-{{- end }}
+{{- include "nico-rest-api.validateExposure" . }}
 {{- if .Values.ingress.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -20,10 +18,22 @@ spec:
   {{- with .Values.ingress.className }}
   ingressClassName: {{ . }}
   {{- end }}
-  {{- with .Values.ingress.tls }}
+  {{- /*
+  A rule host absent from spec.tls[].hosts is served over plaintext HTTP, so
+  these hosts are derived from ingress.hosts rather than duplicated: renaming a
+  host cannot drop it back to HTTP. ingress.tls overrides the block for a Secret
+  this chart does not manage.
+  */}}
   tls:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- if .Values.ingress.tls }}
+    {{- toYaml .Values.ingress.tls | nindent 4 }}
+    {{- else }}
+    - secretName: {{ .Values.ingress.certificate.secretName }}
+      hosts:
+        {{- range .Values.ingress.hosts }}
+        - {{ .host }}
+        {{- end }}
+    {{- end }}
   rules:
     {{- range .Values.ingress.hosts }}
     - host: {{ .host | quote }}

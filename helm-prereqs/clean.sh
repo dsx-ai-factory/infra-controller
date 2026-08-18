@@ -277,13 +277,27 @@ kubectl delete "clusterrole/cert-manager-policy:dpf-approval-policy" \
     "clusterrolebinding/cert-manager-policy:dpf-approval-policy" \
     --ignore-not-found 2>/dev/null || true
 
-# Contour cluster-scoped resources are normally removed by helm uninstall,
-# but remove stragglers so clean.sh can recover from partial installs.
+# Contour cluster-scoped resources are normally removed by helm uninstall, but
+# remove stragglers so clean.sh can recover from partial installs. Each one is
+# checked against Helm's release annotation first, and the annotation outlives a
+# failed uninstall. --install-contour is opt-in because a site may already run
+# its own ingress controller, and these resources are cluster-scoped: deleting
+# an IngressClass or ClusterRole by name alone would take out that controller's
+# routing even though it lives in another namespace.
+_owned_by_contour_release() {
+    local resource="$1" owner
+    owner=$(kubectl get "${resource}" -o \
+        jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null) || return 1
+    [[ "${owner}" == "contour" ]]
+}
 echo "Removing Contour cluster-scoped resources..."
-kubectl delete ingressclass contour --ignore-not-found 2>/dev/null || true
-kubectl get clusterrole,clusterrolebinding -o name \
-    | grep -E '(^|[-/])contour([-/]|$)' \
-    | xargs kubectl delete --ignore-not-found 2>/dev/null || true
+for _contour_res in ingressclass/contour \
+                    clusterrole/contour-contour \
+                    clusterrolebinding/contour-contour; do
+    if _owned_by_contour_release "${_contour_res}"; then
+        kubectl delete "${_contour_res}" --ignore-not-found 2>/dev/null || true
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # 3. Cluster-scoped resources created by helm hooks.
