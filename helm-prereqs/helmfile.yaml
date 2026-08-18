@@ -65,14 +65,16 @@ releases:
   # Contour — optional Ingress controller for clusters that do not already
   # provide one. setup.sh installs it only when requested; Envoy's Service uses
   # type LoadBalancer and receives an address from MetalLB.
+  #
+  # Deliberately declares no `needs` on metallb. setup.sh phase 1c wraps the
+  # metallb sync in a CRD apply/re-apply, and `needs` plus --include-needs would
+  # re-run that release without those guards. Phase 1c always precedes 1d.
   # ---------------------------------------------------------------------------
   - name: contour
     namespace: projectcontour
     createNamespace: true
     chart: contour/contour
     version: "0.6.0"
-    needs:
-      - metallb-system/metallb
     wait: true
     timeout: 600
     values:

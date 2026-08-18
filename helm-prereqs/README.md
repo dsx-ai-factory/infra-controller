@@ -694,8 +694,9 @@ helm-prereqs/health-check.sh
 ```
 
 The script auto-detects the Core, Vault, Postgres, cert-manager, External
-Secrets, and MetalLB namespaces. Override namespace detection if your deployment
-uses non-default namespaces:
+Secrets, MetalLB, and Contour/Envoy namespaces. Contour is optional, so its
+checks are skipped when no `contour-contour` Deployment is found. Override
+namespace detection if your deployment uses non-default namespaces:
 
 ```bash
 NICO_NS=nico-system \
@@ -704,6 +705,7 @@ POSTGRES_NS=postgres \
 CERT_MANAGER_NS=cert-manager \
 ESO_NS=external-secrets \
 METALLB_NS=metallb-system \
+CONTOUR_NS=projectcontour \
 helm-prereqs/health-check.sh
 ```
 

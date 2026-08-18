@@ -18,7 +18,7 @@ spec:
     organizations:
       {{- toYaml .Values.ingress.certificate.subject.organizations | nindent 6 }}
   {{- end }}
-  commonName: {{ .Values.ingress.certificate.commonName }}
+  commonName: {{ .Values.ingress.certificate.commonName | default (first .Values.ingress.hosts).host }}
   isCA: false
   privateKey:
     algorithm: {{ .Values.ingress.certificate.privateKey.algorithm }}
@@ -26,7 +26,6 @@ spec:
     size: {{ .Values.ingress.certificate.privateKey.size }}
   usages:
     - server auth
-    - client auth
   dnsNames:
     {{- if .Values.ingress.certificate.dnsNames }}
     {{- toYaml .Values.ingress.certificate.dnsNames | nindent 4 }}
