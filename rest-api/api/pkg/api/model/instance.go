@@ -935,7 +935,7 @@ func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 					phoneHomeURLFilter = cutil.GetPtr(cfg.GetSitePhoneHomeUrl())
 				}
 
-				if err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
+				if _, err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
 					return validation.Errors{
 						"userData": errors.New("failed to disable phone-home in userData after processing phone home config"),
 					}
@@ -1312,7 +1312,7 @@ func (bicr *APIBatchInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg
 					phoneHomeURLFilter = cutil.GetPtr(cfg.GetSitePhoneHomeUrl())
 				}
 
-				if err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
+				if _, err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
 					return validation.Errors{
 						"userData": errors.New("failed to disable phone-home in userData after processing phone home config"),
 					}
@@ -1632,7 +1632,7 @@ func (iur *APIInstanceUpdateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 					phoneHomeURLFilter = cutil.GetPtr(cfg.GetSitePhoneHomeUrl())
 				}
 
-				if err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
+				if _, err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
 					return validation.Errors{
 						"userData": errors.New("failed to disable phone-home in userData after processing phone home config"),
 					}

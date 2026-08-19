@@ -143,7 +143,8 @@ autoinstall:
       url: http://169.254.169.254/phone-home
 `)
 
-			require.NoError(t, RemovePhoneHomeFromUserData(documentRoot, tt.url))
+			_, err := RemovePhoneHomeFromUserData(documentRoot, tt.url)
+			require.NoError(t, err)
 
 			rootPhoneHome := mappingNodeValue(documentRoot, SitePhoneHomeName)
 			autoinstallNode := mappingNodeValue(documentRoot, "autoinstall")
@@ -264,7 +265,8 @@ func TestRemovePhoneHomeFromArchive(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			documentRoot := unmarshalArchiveRoot(t, archive())
 
-			require.NoError(t, RemovePhoneHomeFromUserData(documentRoot, tt.url))
+			_, err := RemovePhoneHomeFromUserData(documentRoot, tt.url)
+			require.NoError(t, err)
 
 			rendered := marshalDocument(t, documentRoot)
 			assert.True(t, strings.HasPrefix(rendered, "#cloud-config-archive\n"),
@@ -291,7 +293,8 @@ func TestRemovePhoneHomeFromArchivePreservesHeaderWhenEmptied(t *testing.T) {
       url: http://169.254.169.254/phone-home
 `)
 
-	require.NoError(t, RemovePhoneHomeFromUserData(documentRoot, nil))
+	_, err := RemovePhoneHomeFromUserData(documentRoot, nil)
+	require.NoError(t, err)
 
 	assert.Empty(t, documentRoot.Content, "the only entry must be removed")
 
@@ -299,6 +302,57 @@ func TestRemovePhoneHomeFromArchivePreservesHeaderWhenEmptied(t *testing.T) {
 	assert.True(t, strings.HasPrefix(rendered, "#cloud-config-archive\n"),
 		"header must be preserved on the emptied archive: %s", rendered)
 	assert.NotContains(t, rendered, "phone_home")
+}
+
+func TestRemovePhoneHomeFromArchivePreservesUnsupportedEntry(t *testing.T) {
+	// A text/cloud-config entry whose content is really a script (its header
+	// conflicts) cannot carry phone-home. Disabling must skip it without error
+	// and leave it unchanged, while still removing the genuine phone-home entry.
+	const script = "#!/bin/bash\nexport FOO: bar\n"
+
+	documentRoot := unmarshalArchiveRoot(t, `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #!/bin/bash
+    export FOO: bar
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: http://169.254.169.254/phone-home
+`)
+
+	_, err := RemovePhoneHomeFromUserData(documentRoot, nil)
+	require.NoError(t, err)
+
+	require.Len(t, documentRoot.Content, 1, "only the phone-home entry must be removed")
+	assert.Equal(t, script, mappingNodeValue(documentRoot.Content[0], archiveEntryContent).Value,
+		"the script entry must be left unchanged")
+	assert.NotContains(t, marshalDocument(t, documentRoot), "phone_home")
+}
+
+func TestRemovePhoneHomeFromArchiveRemovesNestedAutoinstall(t *testing.T) {
+	// phone-home nested under autoinstall.user-data inside an archive entry must
+	// be detected and re-rendered out, even though the entry's top-level keys
+	// are unchanged (so a len(root.Content) comparison would miss it).
+	documentRoot := unmarshalArchiveRoot(t, `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    autoinstall:
+      version: 1
+      user-data:
+        phone_home:
+          url: http://169.254.169.254/phone-home
+`)
+
+	_, err := RemovePhoneHomeFromUserData(documentRoot, nil)
+	require.NoError(t, err)
+
+	require.Len(t, documentRoot.Content, 1, "the entry must be kept - autoinstall remains")
+	rendered := marshalDocument(t, documentRoot)
+	assert.NotContains(t, rendered, "phone_home", "nested phone-home must be removed")
+	assert.Contains(t, rendered, "autoinstall", "the rest of the entry must be preserved")
 }
 
 func TestPhoneHomeSupportsUserDataRoot(t *testing.T) {

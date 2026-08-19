@@ -64,9 +64,12 @@ func MarshalUserData(document *yaml.Node) ([]byte, error) {
 // If `url` is nil, then any phone-home block found will be removed.
 // If `url` is non-nil, then the phone-home block will only be removed if
 // the URL matches the value of `url`.
-func RemovePhoneHomeFromUserData(documentRoot *yaml.Node, url *string) error {
+// RemovePhoneHomeFromUserData reports whether it removed any phone-home block,
+// so callers can tell an untouched document from a modified one even when the
+// removal happened in a nested autoinstall.user-data mapping.
+func RemovePhoneHomeFromUserData(documentRoot *yaml.Node, url *string) (bool, error) {
 	if documentRoot == nil {
-		return fmt.Errorf("node must be non-nil for user-data removal")
+		return false, fmt.Errorf("node must be non-nil for user-data removal")
 	}
 
 	// A #cloud-config-archive is a YAML sequence: phone-home lives in its own
@@ -76,25 +79,30 @@ func RemovePhoneHomeFromUserData(documentRoot *yaml.Node, url *string) error {
 	}
 
 	if !isCloudConfig(documentRoot) {
-		return fmt.Errorf("node must be a #cloud-config mapping or a #cloud-config-archive for user-data removal")
+		return false, fmt.Errorf("node must be a #cloud-config mapping or a #cloud-config-archive for user-data removal")
 	}
 
-	removePhoneHomeFromMapping(documentRoot, url)
+	removed := removePhoneHomeFromMapping(documentRoot, url)
 
 	autoinstallNode := mappingValue(documentRoot, autoinstallName)
 	if autoinstallNode == nil || autoinstallNode.Kind != yaml.MappingNode {
-		return nil
+		return removed, nil
 	}
 
 	targetUserDataNode := mappingValue(autoinstallNode, autoinstallUserData)
 	if targetUserDataNode != nil && targetUserDataNode.Kind == yaml.MappingNode {
-		removePhoneHomeFromMapping(targetUserDataNode, url)
+		if removePhoneHomeFromMapping(targetUserDataNode, url) {
+			removed = true
+		}
 	}
 
-	return nil
+	return removed, nil
 }
 
-func removePhoneHomeFromMapping(mappingNode *yaml.Node, url *string) {
+// removePhoneHomeFromMapping removes phone-home from a mapping node and reports
+// whether it removed anything.
+func removePhoneHomeFromMapping(mappingNode *yaml.Node, url *string) bool {
+	removed := false
 	contentLen := len(mappingNode.Content)
 
 	// If phone-home is being disabled, then delete
@@ -132,6 +140,7 @@ func removePhoneHomeFromMapping(mappingNode *yaml.Node, url *string) {
 					// Reduce the loop limit since the
 					// list being worked on is shorter now.
 					contentLen = len(mappingNode.Content)
+					removed = true
 					continue
 				}
 
@@ -149,6 +158,7 @@ func removePhoneHomeFromMapping(mappingNode *yaml.Node, url *string) {
 							mappingNode.Content = append(mappingNode.Content[:i], mappingNode.Content[i+2:]...)
 							i -= 2
 							contentLen = len(mappingNode.Content)
+							removed = true
 							break
 						}
 					}
@@ -157,6 +167,8 @@ func removePhoneHomeFromMapping(mappingNode *yaml.Node, url *string) {
 			}
 		}
 	}
+
+	return removed
 }
 
 func InsertPhoneHomeIntoUserData(documentRoot *yaml.Node, url string) error {
@@ -201,7 +213,7 @@ func InsertPhoneHomeIntoUserData(documentRoot *yaml.Node, url string) error {
 
 	// Remove existing phone-home blocks from both supported locations before
 	// inserting the canonical block.
-	if err := RemovePhoneHomeFromUserData(documentRoot, nil); err != nil {
+	if _, err := RemovePhoneHomeFromUserData(documentRoot, nil); err != nil {
 		return err
 	}
 
@@ -301,7 +313,7 @@ func userDataHeader(documentRoot *yaml.Node) string {
 // so both formats share one source of truth for the phone-home block. Any
 // existing phone-home entry is removed first to keep re-enabling idempotent.
 func insertPhoneHomeIntoArchive(archiveRoot *yaml.Node, url string) error {
-	if err := removePhoneHomeFromArchive(archiveRoot, nil); err != nil {
+	if _, err := removePhoneHomeFromArchive(archiveRoot, nil); err != nil {
 		return err
 	}
 
@@ -325,7 +337,7 @@ func insertPhoneHomeIntoArchive(archiveRoot *yaml.Node, url string) error {
 // #cloud-config documents. Entries left empty are dropped, entries with no
 // phone-home are left untouched, and the archive header comment yaml attaches to
 // the first element is preserved even when that element is removed.
-func removePhoneHomeFromArchive(archiveRoot *yaml.Node, url *string) error {
+func removePhoneHomeFromArchive(archiveRoot *yaml.Node, url *string) (bool, error) {
 	// Capture the archive header so it survives even when its carrier entry is
 	// removed. yaml attaches it to the first entry, or to the sequence node
 	// itself for an empty archive.
@@ -334,6 +346,7 @@ func removePhoneHomeFromArchive(archiveRoot *yaml.Node, url *string) error {
 		header = archiveRoot.Content[0].HeadComment
 	}
 
+	archiveRemoved := false
 	kept := archiveRoot.Content[:0]
 	for _, entry := range archiveRoot.Content {
 		content := cloudConfigArchiveContent(entry)
@@ -343,32 +356,41 @@ func removePhoneHomeFromArchive(archiveRoot *yaml.Node, url *string) error {
 		}
 
 		document := &yaml.Node{}
-		if err := yaml.Unmarshal([]byte(content.Value), document); err != nil ||
-			len(document.Content) == 0 || document.Content[0].Kind != yaml.MappingNode {
+		if err := yaml.Unmarshal([]byte(content.Value), document); err != nil || len(document.Content) == 0 {
 			kept = append(kept, entry)
 			continue
 		}
 
 		root := document.Content[0]
-		before := len(root.Content)
-		if err := RemovePhoneHomeFromUserData(root, url); err != nil {
-			return err
+		if !PhoneHomeSupportsUserDataRoot(root) {
+			// e.g. a script whose content parses as a map; leave it untouched.
+			kept = append(kept, entry)
+			continue
+		}
+
+		removed, err := RemovePhoneHomeFromUserData(root, url)
+		if err != nil {
+			return false, err
 		}
 
 		switch {
-		case len(root.Content) == before:
-			// No phone-home here; keep the entry as authored.
+		case !removed:
+			// Nothing removed here; keep the entry as authored.
 			kept = append(kept, entry)
 		case len(root.Content) == 0:
 			// The entry held only phone-home, so drop it entirely.
+			archiveRemoved = true
 		default:
+			// A nested block was removed (e.g. under autoinstall.user-data);
+			// re-render so the change is persisted.
 			rendered, err := yaml.Marshal(document)
 			if err != nil {
-				return errors.New("failed to re-render archive entry after removing phone-home")
+				return false, errors.New("failed to re-render archive entry after removing phone-home")
 			}
 			content.SetString(string(rendered))
 			content.Style = yaml.LiteralStyle
 			kept = append(kept, entry)
+			archiveRemoved = true
 		}
 	}
 	archiveRoot.Content = kept
@@ -383,7 +405,7 @@ func removePhoneHomeFromArchive(archiveRoot *yaml.Node, url *string) error {
 		archiveRoot.Content[0].HeadComment = header
 	}
 
-	return nil
+	return archiveRemoved, nil
 }
 
 // newCloudConfigArchiveEntry builds a {type: text/cloud-config, content: ...}

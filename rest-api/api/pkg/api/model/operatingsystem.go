@@ -847,7 +847,7 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 			phoneHomeURLFilter = &phonehomeUrl
 		}
 
-		if err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
+		if _, err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
 			return validation.Errors{
 				"userData": errors.New("failed to remove phone home config from userData"),
 			}
