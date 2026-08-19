@@ -395,14 +395,20 @@ func removePhoneHomeFromArchive(archiveRoot *yaml.Node, url *string) (bool, erro
 	}
 	archiveRoot.Content = kept
 
-	// Restore the header onto whichever node now carries it: the first entry if
-	// any remain, or the sequence node itself once the last entry is removed.
+	// Restore the header onto whichever node now carries it: the sequence node
+	// itself once the last entry is removed, otherwise the first remaining
+	// entry - prepending it when that entry already has its own comment so the
+	// header is not lost.
 	switch {
 	case header == "":
 	case len(archiveRoot.Content) == 0:
 		archiveRoot.HeadComment = header
+	case strings.HasPrefix(archiveRoot.Content[0].HeadComment, SiteCloudConfigArchive):
+		// already carries the archive header
 	case archiveRoot.Content[0].HeadComment == "":
 		archiveRoot.Content[0].HeadComment = header
+	default:
+		archiveRoot.Content[0].HeadComment = header + "\n" + archiveRoot.Content[0].HeadComment
 	}
 
 	return archiveRemoved, nil

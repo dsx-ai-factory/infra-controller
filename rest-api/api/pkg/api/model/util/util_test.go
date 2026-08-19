@@ -331,6 +331,35 @@ func TestRemovePhoneHomeFromArchivePreservesUnsupportedEntry(t *testing.T) {
 	assert.NotContains(t, marshalDocument(t, documentRoot), "phone_home")
 }
 
+func TestRemovePhoneHomeFromArchivePreservesHeaderOnCommentedEntry(t *testing.T) {
+	// The header-carrying first entry is removed (it was phone-home only) and the
+	// new first entry already has its own comment; the archive header must still
+	// be restored so the document stays a valid #cloud-config-archive.
+	documentRoot := unmarshalArchiveRoot(t, `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: http://169.254.169.254/phone-home
+# user note
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    packages:
+    - curl
+`)
+
+	_, err := RemovePhoneHomeFromUserData(documentRoot, nil)
+	require.NoError(t, err)
+
+	require.Len(t, documentRoot.Content, 1)
+	rendered := marshalDocument(t, documentRoot)
+	assert.True(t, strings.HasPrefix(rendered, "#cloud-config-archive\n"),
+		"header must survive removal of the first entry: %s", rendered)
+	assert.Contains(t, rendered, "user note", "the entry's own comment must be kept")
+	assert.NotContains(t, rendered, "phone_home")
+}
+
 func TestRemovePhoneHomeFromArchiveRemovesNestedAutoinstall(t *testing.T) {
 	// phone-home nested under autoinstall.user-data inside an archive entry must
 	// be detected and re-rendered out, even though the entry's top-level keys

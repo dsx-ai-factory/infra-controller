@@ -860,11 +860,12 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 		return util.ValidateEffectiveUserData(mergedUserData)
 	}
 
-	if len(documentRoot.Content) == 0 {
+	if documentRoot.Kind == yaml.MappingNode && len(documentRoot.Content) == 0 {
 		// If we've arrived here, then the original user-data
 		// was valid, but phone-home has been disabled, and the
 		// phone-home block was the only thing in the original YAML,
-		// so just blank the DB field.
+		// so just blank the DB field. An emptied #cloud-config-archive is
+		// serialized below instead, so it keeps its header.
 		osur.UserData = cutil.GetPtr("")
 		return nil
 	}

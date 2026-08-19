@@ -617,6 +617,36 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData_Archive(t *testi
 	})
 }
 
+func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData_EmptiedArchiveKeepsHeader(t *testing.T) {
+	const phoneHomeURL = "http://localhost/phone-home"
+
+	// Disabling phone-home on an archive whose only entry was phone-home must
+	// leave a valid (empty) #cloud-config-archive, not blank the field.
+	existing := &cdbm.OperatingSystem{
+		ID:   uuid.New(),
+		Name: "ab",
+		UserData: cutil.GetPtr(`#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: ` + phoneHomeURL + `
+`),
+		PhoneHomeEnabled: true,
+		Status:           cdbm.OperatingSystemStatusReady,
+		Type:             cdbm.OperatingSystemTypeIPXE,
+		CreatedBy:        uuid.New(),
+	}
+
+	req := APIOperatingSystemUpdateRequest{PhoneHomeEnabled: cutil.GetPtr(false)}
+
+	require.NoError(t, req.ValidateAndSetUserData(phoneHomeURL, existing))
+	require.NotNil(t, req.UserData)
+	assert.True(t, strings.HasPrefix(*req.UserData, "#cloud-config-archive"),
+		"emptied archive must keep its header, got: %q", *req.UserData)
+	assert.NotContains(t, *req.UserData, "phone_home")
+}
+
 func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData(t *testing.T) {
 	type fields struct {
 		Name              string
