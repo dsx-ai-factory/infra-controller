@@ -403,7 +403,7 @@ func removePhoneHomeFromArchive(archiveRoot *yaml.Node, url *string) (bool, erro
 	case header == "":
 	case len(archiveRoot.Content) == 0:
 		archiveRoot.HeadComment = header
-	case strings.HasPrefix(archiveRoot.Content[0].HeadComment, SiteCloudConfigArchive):
+	case userDataHeader(archiveRoot.Content[0]) == SiteCloudConfigArchive:
 		// already carries the archive header
 	case archiveRoot.Content[0].HeadComment == "":
 		archiveRoot.Content[0].HeadComment = header
