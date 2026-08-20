@@ -29,6 +29,16 @@ const (
 	archiveEntryContent    = "content"
 	archiveContentType     = "text/cloud-config"
 
+	// jinjaTemplateHeader marks user-data as a Jinja template. cloud-init reads
+	// the format from the line below it, so templated user-data opens with a
+	// two-line header:
+	//
+	//	## template: jinja
+	//	#cloud-config
+	//
+	// See https://docs.cloud-init.io/en/25.1/explanation/format.html#jinja-template
+	jinjaTemplateHeader = "## template: jinja"
+
 	// userDataIndentSpaces matches the indent cloud-config is conventionally
 	// written with. The encoder's default of 4 re-indents every nested line,
 	// which grew realistic cloud-config documents by 9% to 31% and pushed
@@ -59,397 +69,332 @@ func MarshalUserData(document *yaml.Node) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// Removes cloud-init phone-home blocks from the document root and, for
-// autoinstall configurations, from the target system's user-data.
-// If `url` is nil, then any phone-home block found will be removed.
-// If `url` is non-nil, then the phone-home block will only be removed if
-// the URL matches the value of `url`.
-// RemovePhoneHomeFromUserData reports whether it removed any phone-home block,
-// so callers can tell an untouched document from a modified one even when the
-// removal happened in a nested autoinstall.user-data mapping.
-func RemovePhoneHomeFromUserData(documentRoot *yaml.Node, url *string) (bool, error) {
-	if documentRoot == nil {
-		return false, fmt.Errorf("node must be non-nil for user-data removal")
+// ErrUnsupportedUserData reports user-data phone-home cannot live in: not a
+// #cloud-config mapping or a #cloud-config-archive sequence, but a script, a
+// template of one, or text that is not YAML. Enabling phone-home rejects it;
+// disabling leaves it alone, since the block cannot be in there.
+var ErrUnsupportedUserData = errors.New("userData is not a #cloud-config or #cloud-config-archive document")
+
+// EnablePhoneHomeInUserData returns userData with a phone-home block reporting
+// to url, replacing any block already in there. Nil or empty user-data yields a
+// #cloud-config document holding just the block.
+func EnablePhoneHomeInUserData(userData *string, url string) (*string, error) {
+	header, documentRoot, err := parseUserData(userData)
+	if err != nil {
+		return nil, err
+	}
+	if header == "" {
+		// cloud-init needs a header, and user-data written without one is
+		// #cloud-config.
+		header = SiteCloudConfig + "\n"
 	}
 
-	// A #cloud-config-archive is a YAML sequence: phone-home lives in its own
-	// cloud-config entry rather than at the document root.
-	if isCloudConfigArchive(documentRoot) {
-		return removePhoneHomeFromArchive(documentRoot, url)
+	// cloud-init merges archive parts independently, so phone-home is delivered
+	// as a part of its own rather than folded into somebody else's.
+	if documentRoot.Kind == yaml.SequenceNode {
+		removePhoneHomeParts(documentRoot, nil)
+		err = appendPhoneHomePart(documentRoot, url)
+	} else {
+		err = insertPhoneHome(documentRoot, url)
+	}
+	if err != nil {
+		return nil, err
 	}
 
-	if !isCloudConfig(documentRoot) {
-		return false, fmt.Errorf("node must be a #cloud-config mapping or a #cloud-config-archive for user-data removal")
-	}
-
-	removed := removePhoneHomeFromMapping(documentRoot, url)
-
-	autoinstallNode := mappingValue(documentRoot, autoinstallName)
-	if autoinstallNode == nil || autoinstallNode.Kind != yaml.MappingNode {
-		return removed, nil
-	}
-
-	targetUserDataNode := mappingValue(autoinstallNode, autoinstallUserData)
-	if targetUserDataNode != nil && targetUserDataNode.Kind == yaml.MappingNode {
-		if removePhoneHomeFromMapping(targetUserDataNode, url) {
-			removed = true
-		}
-	}
-
-	return removed, nil
+	return renderUserData(header, documentRoot)
 }
 
-// removePhoneHomeFromMapping removes phone-home from a mapping node and reports
-// whether it removed anything.
-func removePhoneHomeFromMapping(mappingNode *yaml.Node, url *string) bool {
+// DisablePhoneHomeInUserData returns userData without the phone-home blocks
+// reporting to url. Blocks reporting elsewhere are somebody else's: user-data
+// with none of ours is handed back exactly as authored. Nil is returned when
+// there is nothing to store: user-data that was empty to begin with.
+func DisablePhoneHomeInUserData(userData *string, url string) (*string, error) {
+	return disablePhoneHome(userData, &url)
+}
+
+// DisableAllPhoneHomeInUserData is DisablePhoneHomeInUserData for every
+// phone-home block, whatever it reports to. It is for user-data we authored the
+// block in: the URL frozen into it may predate a change to the configured one.
+func DisableAllPhoneHomeInUserData(userData *string) (*string, error) {
+	return disablePhoneHome(userData, nil)
+}
+
+// disablePhoneHome is DisablePhoneHomeInUserData; a nil url matches every block.
+func disablePhoneHome(userData *string, url *string) (*string, error) {
+	if userData == nil || *userData == "" {
+		return nil, nil
+	}
+
+	header, documentRoot, err := parseUserData(userData)
+	if err != nil {
+		return nil, err
+	}
+
 	removed := false
-	contentLen := len(mappingNode.Content)
-
-	// If phone-home is being disabled, then delete
-	// any phone-home data that might exist.
-	// Go through the YAML nodes and look for our target.
-	// We've previously determined that mappingNode is a
-	// valid MappingNode, so the contents will be pairs of nodes
-	// representing key/value pairs of the map.
-	//
-	// Note there are no breaks or early returns from outer loop because a user
-	// could have submitted valid but nonsensical YAML with
-	// multiple phone-home blocks.
-	for i := 0; i < contentLen; i += 2 {
-		mapKeyNode := mappingNode.Content[i]
-		mapValueNode := mappingNode.Content[i+1]
-
-		// No breaks or early-returns here from outer loop because the user could have submitted
-		// valid but nonsensical YAML that includes a phone-home block multiple times.
-		if mapKeyNode.Kind == yaml.ScalarNode && mapKeyNode.Value == SitePhoneHomeName {
-			// Check if the next node is a map, which will be the phone_home map itself.
-			if mapValueNode.Kind == yaml.MappingNode {
-
-				if url == nil {
-					// Snip out the target while preserving the order of the nodes.
-					// We have to snip out the key (phone_home) and the value
-					// (the actual map node), so +2
-					// We're working with pairs here, so the second slice-expression
-					// won't violate bounds.
-					mappingNode.Content = append(mappingNode.Content[:i], mappingNode.Content[i+2:]...)
-
-					// Shift the "pointer" backwards since we
-					// just modified mappingNode.Content "in-place"
-					i -= 2
-
-					// Reduce the loop limit since the
-					// list being worked on is shorter now.
-					contentLen = len(mappingNode.Content)
-					removed = true
-					continue
-				}
-
-				// Get the nodes in the map.
-				phoneHomeMapSubNodes := mapValueNode.Content
-
-				// Go through the map nodes and look for the URL key.
-				// Again, MappingNode, so we can expect k/v node pairs.
-				for j := 0; j < len(phoneHomeMapSubNodes); j += 2 {
-
-					phoneHomeMapKeyNode := phoneHomeMapSubNodes[j]
-					phoneHomeMapValueNode := phoneHomeMapSubNodes[j+1]
-					if phoneHomeMapKeyNode.Kind == yaml.ScalarNode && phoneHomeMapKeyNode.Value == SitePhoneHomeUrl {
-						if phoneHomeMapValueNode.Value == *url {
-							mappingNode.Content = append(mappingNode.Content[:i], mappingNode.Content[i+2:]...)
-							i -= 2
-							contentLen = len(mappingNode.Content)
-							removed = true
-							break
-						}
-					}
-				}
-
-			}
-		}
+	if documentRoot.Kind == yaml.SequenceNode {
+		removed = removePhoneHomeParts(documentRoot, url)
+	} else {
+		removed = removePhoneHome(documentRoot, url)
 	}
 
-	return removed
+	switch {
+	case !removed:
+		return userData, nil
+	case documentRoot.Kind == yaml.MappingNode && len(documentRoot.Content) == 0:
+		// Nothing but phone-home was in there, so no user-data is left. An
+		// emptied archive renders instead, keeping its header.
+		return new(""), nil
+	}
+
+	return renderUserData(header, documentRoot)
 }
 
-func InsertPhoneHomeIntoUserData(documentRoot *yaml.Node, url string) error {
-	if documentRoot == nil {
-		return fmt.Errorf("node must be non-nil for user-data insertion")
+// parseUserData splits the cloud-init header off user-data and parses the YAML
+// body below it. Only a #cloud-config mapping or a #cloud-config-archive
+// sequence can carry phone-home; user-data with no header is #cloud-config, and
+// no user-data at all is an empty one.
+func parseUserData(userData *string) (string, *yaml.Node, error) {
+	if userData == nil || *userData == "" {
+		return "", &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}, nil
 	}
 
-	// A #cloud-config-archive is a YAML sequence: append phone-home as a new
-	// cloud-config entry instead of inserting into the document root.
-	if isCloudConfigArchive(documentRoot) {
-		return insertPhoneHomeIntoArchive(documentRoot, url)
+	header, body := splitUserDataHeader(*userData)
+
+	document := &yaml.Node{}
+	if err := yaml.Unmarshal([]byte(body), document); err != nil || len(document.Content) == 0 {
+		return "", nil, ErrUnsupportedUserData
 	}
 
-	if !isCloudConfig(documentRoot) {
-		return fmt.Errorf("node must be a #cloud-config mapping or a #cloud-config-archive for user-data insertion")
+	documentRoot := document.Content[0]
+
+	switch format := headerFormat(header); {
+	case documentRoot.Kind == yaml.SequenceNode && format == SiteCloudConfigArchive:
+	case documentRoot.Kind == yaml.MappingNode && (format == "" || format == SiteCloudConfig):
+	default:
+		return "", nil, ErrUnsupportedUserData
 	}
 
-	if documentRoot.Content == nil {
-		documentRoot.Content = []*yaml.Node{}
+	return header, documentRoot, nil
+}
+
+// renderUserData renders a document below its header. The header is text, the
+// way cloud-config is written from scratch, so no edit to the document can lose
+// it - not even removing the first key or part, which is where yaml would
+// otherwise keep it.
+func renderUserData(header string, documentRoot *yaml.Node) (*string, error) {
+	rendered, err := MarshalUserData(documentRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to render userData: %w", err)
 	}
 
+	return new(header + string(rendered)), nil
+}
+
+// splitUserDataHeader splits user-data into its cloud-init header, newline
+// included, and the YAML body below it. The header is the leading comment line,
+// plus the line after it when that leading line is the jinja marker.
+func splitUserDataHeader(userData string) (header, body string) {
+	line, body, found := strings.Cut(userData, "\n")
+	if !found || !strings.HasPrefix(line, "#") {
+		return "", userData
+	}
+	header = line + "\n"
+
+	if strings.TrimSpace(line) != jinjaTemplateHeader {
+		return header, body
+	}
+
+	line, rest, found := strings.Cut(body, "\n")
+	if !found || !strings.HasPrefix(line, "#") {
+		return header, body
+	}
+
+	return header + line + "\n", rest
+}
+
+// headerFormat returns the format a cloud-init header declares - its last line,
+// e.g. "#cloud-config" - or "" when there is no header.
+func headerFormat(header string) string {
+	header = strings.TrimSpace(header)
+	if _, format, found := strings.Cut(header, "\n"); found {
+		return strings.TrimSpace(format)
+	}
+
+	return header
+}
+
+// insertPhoneHome adds a phone-home block reporting to url to a #cloud-config
+// document: at the root, or under autoinstall.user-data when the document
+// installs a target system, since that is the config the installed system runs.
+// Existing blocks are removed first, so re-enabling is idempotent.
+func insertPhoneHome(documentRoot *yaml.Node, url string) error {
 	insertionNode := documentRoot
-	autoinstallNode := mappingValue(documentRoot, autoinstallName)
-	if autoinstallNode != nil {
+
+	if autoinstallNode := mappingValue(documentRoot, autoinstallName); autoinstallNode != nil {
 		if autoinstallNode.Kind != yaml.MappingNode {
 			return errors.New("autoinstall must be a mapping to insert phone-home")
 		}
 
 		insertionNode = mappingValue(autoinstallNode, autoinstallUserData)
-		if insertionNode == nil {
-			insertionNode = &yaml.Node{
-				Kind: yaml.MappingNode,
-				Tag:  "!!map",
-			}
-			targetUserDataKeyNode := &yaml.Node{}
-			targetUserDataKeyNode.SetString(autoinstallUserData)
-			autoinstallNode.Content = append(autoinstallNode.Content, targetUserDataKeyNode, insertionNode)
-		} else if insertionNode.Kind != yaml.MappingNode {
+		switch {
+		case insertionNode == nil:
+			insertionNode = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			autoinstallNode.Content = append(autoinstallNode.Content,
+				scalarNode(autoinstallUserData), insertionNode)
+		case insertionNode.Kind != yaml.MappingNode:
 			return errors.New("autoinstall user-data must be a mapping to insert phone-home")
 		}
 	}
 
-	// Remove existing phone-home blocks from both supported locations before
-	// inserting the canonical block.
-	if _, err := RemovePhoneHomeFromUserData(documentRoot, nil); err != nil {
-		return err
-	}
+	removePhoneHome(documentRoot, nil)
 
-	// Build the PhoneHome user-data section.
-	phoneHomeConfigMap := map[string]string{}
-	phoneHomeConfigMap[SitePhoneHomeUrl] = url
-	phoneHomeConfigMap[SitePhoneHomePost] = SitePhoneHomePostAll
-
-	// Encode it into a new YAML node so we can
-	// add it to the selected content later.
 	phoneHomeValueNode := &yaml.Node{}
-	if err := phoneHomeValueNode.Encode(phoneHomeConfigMap); err != nil {
-		return errors.New("failed to insert phone-home into userData")
-	}
-	phoneHomeKeyNode := &yaml.Node{}
-	phoneHomeKeyNode.SetString(SitePhoneHomeName)
-
-	// Append the node that we can marshal it back out later.
-	insertionNode.Content = append(insertionNode.Content, phoneHomeKeyNode, phoneHomeValueNode)
-
-	// Ensure #cloud-config is present as a head comment
-	foundCloudConfig := false
-	for _, node := range documentRoot.Content {
-		if node.HeadComment == SiteCloudConfig {
-			foundCloudConfig = true
-			break
-		}
+	if err := phoneHomeValueNode.Encode(map[string]string{
+		SitePhoneHomeUrl:  url,
+		SitePhoneHomePost: SitePhoneHomePostAll,
+	}); err != nil {
+		return fmt.Errorf("failed to encode phone-home block: %w", err)
 	}
 
-	if !foundCloudConfig {
-		if documentRoot.Kind == yaml.MappingNode {
-			if documentRoot.HeadComment == "" {
-				documentRoot.HeadComment = SiteCloudConfig
-			}
-		}
-	}
+	insertionNode.Content = append(insertionNode.Content,
+		scalarNode(SitePhoneHomeName), phoneHomeValueNode)
 
 	return nil
 }
 
-// PhoneHomeSupportsUserDataRoot reports whether a cloud-init user-data document
-// root can carry a phone-home block: a #cloud-config document (mapping) has the
-// block inserted at its root, while a #cloud-config-archive (sequence) gets a
-// dedicated phone-home cloud-config appended as a new archive entry.
-func PhoneHomeSupportsUserDataRoot(documentRoot *yaml.Node) bool {
-	return isCloudConfig(documentRoot) || isCloudConfigArchive(documentRoot)
+// removePhoneHome deletes the phone-home blocks reporting to url - every block
+// when url is nil - from a #cloud-config root and from autoinstall.user-data,
+// reporting whether it deleted any.
+func removePhoneHome(documentRoot *yaml.Node, url *string) bool {
+	removed := removePhoneHomeFromMapping(documentRoot, url)
+
+	autoinstallNode := mappingValue(documentRoot, autoinstallName)
+	if autoinstallNode == nil || autoinstallNode.Kind != yaml.MappingNode {
+		return removed
+	}
+
+	targetUserDataNode := mappingValue(autoinstallNode, autoinstallUserData)
+	if targetUserDataNode != nil && targetUserDataNode.Kind == yaml.MappingNode {
+		removed = removePhoneHomeFromMapping(targetUserDataNode, url) || removed
+	}
+
+	return removed
 }
 
-// isCloudConfig reports whether documentRoot is #cloud-config user-data: a
-// mapping whose header, if present, is the #cloud-config marker. A header-less
-// mapping is accepted (the header is added on output), but a mapping carrying a
-// different header - e.g. a #!/bin/bash script that happens to parse as a map -
-// is rejected.
-func isCloudConfig(documentRoot *yaml.Node) bool {
-	if documentRoot == nil || documentRoot.Kind != yaml.MappingNode {
-		return false
+// removePhoneHomeFromMapping deletes the phone_home keys of one mapping. Valid
+// but nonsensical user-data can repeat the key, so the whole mapping is scanned.
+func removePhoneHomeFromMapping(mappingNode *yaml.Node, url *string) bool {
+	removed := false
+
+	// Mapping content is a flat run of key/value pairs, so a key is dropped by
+	// snipping two entries; the pairs that stay keep their authored order.
+	for i := 0; i+1 < len(mappingNode.Content); {
+		keyNode, valueNode := mappingNode.Content[i], mappingNode.Content[i+1]
+		if keyNode.Value != SitePhoneHomeName || valueNode.Kind != yaml.MappingNode ||
+			!phoneHomeReportsTo(valueNode, url) {
+			i += 2
+			continue
+		}
+
+		mappingNode.Content = append(mappingNode.Content[:i], mappingNode.Content[i+2:]...)
+		removed = true
 	}
 
-	header := userDataHeader(documentRoot)
-
-	return header == "" || header == SiteCloudConfig
+	return removed
 }
 
-// isCloudConfigArchive reports whether documentRoot is a #cloud-config-archive:
-// a YAML sequence whose first line carries the cloud-init archive header. A
-// header-less list is not valid cloud-init user-data, so it is not treated as
-// an archive.
-func isCloudConfigArchive(documentRoot *yaml.Node) bool {
-	return documentRoot != nil && documentRoot.Kind == yaml.SequenceNode &&
-		userDataHeader(documentRoot) == SiteCloudConfigArchive
+// phoneHomeReportsTo reports whether a phone-home block reports to url. A nil
+// url matches any block.
+func phoneHomeReportsTo(phoneHomeNode *yaml.Node, url *string) bool {
+	if url == nil {
+		return true
+	}
+
+	urlNode := mappingValue(phoneHomeNode, SitePhoneHomeUrl)
+
+	return urlNode != nil && urlNode.Value == *url
 }
 
-// userDataHeader returns the cloud-init format header that yaml attaches as the
-// head comment of the document's first child (e.g. #cloud-config or
-// #cloud-config-archive), or "" when there is none.
-func userDataHeader(documentRoot *yaml.Node) string {
-	if documentRoot == nil {
-		return ""
-	}
-
-	// yaml attaches the header to the node itself for an empty archive, and to
-	// the first child otherwise.
-	comment := documentRoot.HeadComment
-	if comment == "" && len(documentRoot.Content) > 0 {
-		comment = documentRoot.Content[0].HeadComment
-	}
-
-	firstLine, _, _ := strings.Cut(comment, "\n")
-
-	return strings.TrimSpace(firstLine)
-}
-
-// insertPhoneHomeIntoArchive appends a dedicated phone-home cloud-config entry to
-// a #cloud-config-archive. cloud-init merges each archive part independently, so a
-// standalone phone_home part takes effect on its own. The entry content is built
-// by the same InsertPhoneHomeIntoUserData path used for #cloud-config documents,
-// so both formats share one source of truth for the phone-home block. Any
-// existing phone-home entry is removed first to keep re-enabling idempotent.
-func insertPhoneHomeIntoArchive(archiveRoot *yaml.Node, url string) error {
-	if _, err := removePhoneHomeFromArchive(archiveRoot, nil); err != nil {
-		return err
-	}
-
-	content := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-	if err := InsertPhoneHomeIntoUserData(content, url); err != nil {
-		return err
-	}
-
-	rendered, err := yaml.Marshal(content)
-	if err != nil {
-		return errors.New("failed to render phone-home cloud-config")
-	}
-
-	archiveRoot.Content = append(archiveRoot.Content, newCloudConfigArchiveEntry(string(rendered)))
-
-	return nil
-}
-
-// removePhoneHomeFromArchive strips phone-home from every cloud-config entry of a
-// #cloud-config-archive using the same RemovePhoneHomeFromUserData path as
-// #cloud-config documents. Entries left empty are dropped, entries with no
-// phone-home are left untouched, and the archive header comment yaml attaches to
-// the first element is preserved even when that element is removed.
-func removePhoneHomeFromArchive(archiveRoot *yaml.Node, url *string) (bool, error) {
-	// Capture the archive header so it survives even when its carrier entry is
-	// removed. yaml attaches it to the first entry, or to the sequence node
-	// itself for an empty archive.
-	header := archiveRoot.HeadComment
-	if header == "" && len(archiveRoot.Content) > 0 {
-		header = archiveRoot.Content[0].HeadComment
-	}
-
-	archiveRemoved := false
+// removePhoneHomeParts strips phone-home from every part of an archive, dropping
+// parts left empty and reporting whether it changed anything. A part is
+// user-data in its own right, so each goes through the same path as a whole
+// document.
+func removePhoneHomeParts(archiveRoot *yaml.Node, url *string) bool {
+	removed := false
 	kept := archiveRoot.Content[:0]
-	for _, entry := range archiveRoot.Content {
-		content := cloudConfigArchiveContent(entry)
+
+	for _, part := range archiveRoot.Content {
+		content := cloudConfigArchiveContent(part)
 		if content == nil {
-			kept = append(kept, entry)
+			kept = append(kept, part)
 			continue
 		}
 
-		document := &yaml.Node{}
-		if err := yaml.Unmarshal([]byte(content.Value), document); err != nil || len(document.Content) == 0 {
-			kept = append(kept, entry)
-			continue
-		}
-
-		root := document.Content[0]
-		if !PhoneHomeSupportsUserDataRoot(root) {
-			// e.g. a script whose content parses as a map; leave it untouched.
-			kept = append(kept, entry)
-			continue
-		}
-
-		removed, err := RemovePhoneHomeFromUserData(root, url)
-		if err != nil {
-			return false, err
-		}
-
+		stripped, err := disablePhoneHome(&content.Value, url)
 		switch {
-		case !removed:
-			// Nothing removed here; keep the entry as authored.
-			kept = append(kept, entry)
-		case len(root.Content) == 0:
-			// The entry held only phone-home, so drop it entirely.
-			archiveRemoved = true
+		case err != nil, stripped == nil, *stripped == content.Value:
+			// Not a part phone-home can live in, or nothing to strip from it:
+			// leave it exactly as authored.
+			kept = append(kept, part)
+		case *stripped == "":
+			// The part held nothing but phone-home, so drop it entirely.
+			removed = true
 		default:
-			// A nested block was removed (e.g. under autoinstall.user-data);
-			// re-render so the change is persisted.
-			rendered, err := yaml.Marshal(document)
-			if err != nil {
-				return false, errors.New("failed to re-render archive entry after removing phone-home")
-			}
-			content.SetString(string(rendered))
+			content.SetString(*stripped)
 			content.Style = yaml.LiteralStyle
-			kept = append(kept, entry)
-			archiveRemoved = true
+			kept = append(kept, part)
+			removed = true
 		}
 	}
 	archiveRoot.Content = kept
 
-	// Restore the header onto whichever node now carries it: the sequence node
-	// itself once the last entry is removed, otherwise the first remaining
-	// entry - prepending it when that entry already has its own comment so the
-	// header is not lost.
-	switch {
-	case header == "":
-	case len(archiveRoot.Content) == 0:
-		archiveRoot.HeadComment = header
-	case userDataHeader(archiveRoot.Content[0]) == SiteCloudConfigArchive:
-		// already carries the archive header
-	case archiveRoot.Content[0].HeadComment == "":
-		archiveRoot.Content[0].HeadComment = header
-	default:
-		archiveRoot.Content[0].HeadComment = header + "\n" + archiveRoot.Content[0].HeadComment
-	}
-
-	return archiveRemoved, nil
+	return removed
 }
 
-// newCloudConfigArchiveEntry builds a {type: text/cloud-config, content: ...}
-// mapping node for inclusion in a #cloud-config-archive sequence.
-func newCloudConfigArchiveEntry(content string) *yaml.Node {
-	typeKey := &yaml.Node{}
-	typeKey.SetString(archiveEntryType)
-	typeValue := &yaml.Node{}
-	typeValue.SetString(archiveContentType)
-
-	contentKey := &yaml.Node{}
-	contentKey.SetString(archiveEntryContent)
-	contentValue := &yaml.Node{}
-	contentValue.SetString(content)
-	contentValue.Style = yaml.LiteralStyle
-
-	return &yaml.Node{
-		Kind:    yaml.MappingNode,
-		Tag:     "!!map",
-		Content: []*yaml.Node{typeKey, typeValue, contentKey, contentValue},
+// appendPhoneHomePart appends the archive part that carries phone-home. Its
+// content is built by the #cloud-config path, so both formats share one source
+// of truth for the block.
+func appendPhoneHomePart(archiveRoot *yaml.Node, url string) error {
+	content := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	if err := insertPhoneHome(content, url); err != nil {
+		return err
 	}
+
+	rendered, err := renderUserData(SiteCloudConfig+"\n", content)
+	if err != nil {
+		return err
+	}
+
+	contentNode := scalarNode(*rendered)
+	contentNode.Style = yaml.LiteralStyle
+
+	archiveRoot.Content = append(archiveRoot.Content, &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  "!!map",
+		Content: []*yaml.Node{
+			scalarNode(archiveEntryType), scalarNode(archiveContentType),
+			scalarNode(archiveEntryContent), contentNode,
+		},
+	})
+
+	return nil
 }
 
 // cloudConfigArchiveContent returns the content scalar of a cloud-config archive
-// entry, or nil if the entry is not a cloud-config part (e.g. a shell script) or
-// carries no string content. An entry with no explicit type is treated as
-// cloud-config, matching cloud-init's default handling.
-func cloudConfigArchiveContent(entry *yaml.Node) *yaml.Node {
-	if entry == nil || entry.Kind != yaml.MappingNode {
+// part, or nil for a part that is not cloud-config (a shell script, say) or
+// carries no string content. A part with no explicit type is cloud-config,
+// matching cloud-init's default.
+func cloudConfigArchiveContent(part *yaml.Node) *yaml.Node {
+	if part == nil || part.Kind != yaml.MappingNode {
 		return nil
 	}
 
-	if typeNode := mappingValue(entry, archiveEntryType); typeNode != nil &&
+	if typeNode := mappingValue(part, archiveEntryType); typeNode != nil &&
 		typeNode.Value != "" && typeNode.Value != archiveContentType {
 		return nil
 	}
 
-	contentNode := mappingValue(entry, archiveEntryContent)
+	contentNode := mappingValue(part, archiveEntryContent)
 	if contentNode == nil || contentNode.Kind != yaml.ScalarNode {
 		return nil
 	}
@@ -466,6 +411,13 @@ func mappingValue(mappingNode *yaml.Node, key string) *yaml.Node {
 	}
 
 	return nil
+}
+
+func scalarNode(value string) *yaml.Node {
+	node := &yaml.Node{}
+	node.SetString(value)
+
+	return node
 }
 
 // ReverseMap swaps unique keys and values using Go generics. The input values

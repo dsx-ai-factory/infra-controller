@@ -3139,11 +3139,12 @@ phone_home:
 				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
 				UserData:          cutil.GetPtr(""),
 			},
-			wantErr:            false,
-			cfg:                cfg1,
-			instance:           instance1,
-			os:                 os1,
-			userDataExactMatch: cutil.GetPtr(fmt.Sprintf(SitePhoneHomeCloudInit, cfg1.GetSitePhoneHomeUrl())),
+			wantErr:  false,
+			cfg:      cfg1,
+			instance: instance1,
+			os:       os1,
+			userDataExactMatch: cutil.GetPtr("#cloud-config\nphone_home:\n  post: all\n  url: " +
+				cfg1.GetSitePhoneHomeUrl() + "\n"),
 		},
 		{
 			name: "PhoneHome enabled in instance and request updates only base OS",
