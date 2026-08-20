@@ -16,7 +16,10 @@
  */
 
 use carbide_test_harness::prelude::*;
-use rpc::forge::{DpaInterfaceCreationRequest, DpaInterfaceType, DpaInterfacesByIdsRequest};
+use rpc::forge::{
+    DpaInterfaceCreationRequest, DpaInterfaceType, DpaInterfacesByIdsRequest,
+    MachineCapabilityDeviceType, MachinesByIdsRequest,
+};
 use rpc::forge_agent_control_response::{self as fac, Action};
 
 async fn init(pool: PgPool) -> (TestHarness, TestManagedHost) {
@@ -91,6 +94,147 @@ async fn dpa_api_test_cases(pool: PgPool) -> Result<(), Box<dyn std::error::Erro
 
     assert!(find_resp.id.unwrap() == intf_id);
     assert!(find_resp.mac_addr == cr_resp.mac_addr);
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn find_machines_includes_spx_capabilities(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool).build().await;
+    let domain = env.test_domain().await;
+    let network_controller = env.network_controller();
+    let underlay_segment = network_controller.create_underlay_segment(&domain).await;
+    network_controller.create_admin_segment(&domain).await;
+    let site_explorer = env.default_test_site_explorer();
+    let (machine_with_devices, _) = env
+        .managed_host_builder(&site_explorer, underlay_segment)
+        .build()
+        .await;
+    let (machine_without_devices, _) = env
+        .managed_host_builder(&site_explorer, underlay_segment)
+        .build()
+        .await;
+    let dpu_machine_id = machine_with_devices.first_dpu().id;
+
+    let cases = [
+        (
+            "00:11:22:33:44:55",
+            "0000:cc:00.1",
+            Some("ConnectX-7"),
+            DpaInterfaceType::Astra,
+        ),
+        (
+            "00:11:22:33:44:56",
+            "0000:cc:00.0",
+            Some("ConnectX-7"),
+            DpaInterfaceType::Svpc,
+        ),
+        (
+            "00:11:22:33:44:57",
+            "0000:dd:00.0",
+            Some("BlueField-3"),
+            DpaInterfaceType::Astra,
+        ),
+        (
+            "00:11:22:33:44:58",
+            "0000:ee:00.0",
+            None,
+            DpaInterfaceType::Astra,
+        ),
+        (
+            "00:11:22:33:44:5a",
+            "0000:ee:00.1",
+            Some(""),
+            DpaInterfaceType::Astra,
+        ),
+        (
+            "00:11:22:33:44:59",
+            "0000:ff:00.0",
+            Some("ConnectX-8"),
+            DpaInterfaceType::Astra,
+        ),
+    ];
+    for (mac_addr, pci_name, device_description, interface_type) in cases {
+        env.api()
+            .create_dpa_interface(tonic::Request::new(DpaInterfaceCreationRequest {
+                mac_addr: mac_addr.to_string(),
+                machine_id: Some(machine_with_devices.host.id),
+                device_type: "test-device".to_string(),
+                pci_name: pci_name.to_string(),
+                device_description: device_description.map(str::to_string),
+                interface_type: interface_type.into(),
+            }))
+            .await?;
+    }
+
+    let response = env
+        .api()
+        .find_machines_by_ids(tonic::Request::new(MachinesByIdsRequest {
+            machine_ids: vec![
+                machine_without_devices.host.id,
+                machine_with_devices.host.id,
+                dpu_machine_id,
+            ],
+            include_history: false,
+        }))
+        .await?
+        .into_inner();
+
+    assert_eq!(response.machines.len(), 3);
+    let get_spx_capabilities = |machine: &rpc::forge::Machine| {
+        machine
+            .status
+            .as_ref()
+            .and_then(|status| status.capabilities.as_ref())
+            .into_iter()
+            .flat_map(|capabilities| &capabilities.network)
+            .filter(|capability| {
+                capability.device_type == Some(MachineCapabilityDeviceType::Spx as i32)
+            })
+            .map(|capability| (capability.name.clone(), capability.count))
+            .collect::<Vec<_>>()
+    };
+
+    let dpu_machine = response
+        .machines
+        .iter()
+        .find(|machine| machine.id == Some(dpu_machine_id))
+        .expect("DPU machine");
+    assert!(get_spx_capabilities(dpu_machine).is_empty());
+
+    let machine_without_devices = response
+        .machines
+        .iter()
+        .find(|machine| machine.id == Some(machine_without_devices.host.id))
+        .expect("machine without devices");
+    assert!(get_spx_capabilities(machine_without_devices).is_empty());
+
+    let machine_with_devices = response
+        .machines
+        .iter()
+        .find(|machine| machine.id == Some(machine_with_devices.host.id))
+        .expect("machine with devices");
+    assert_eq!(
+        get_spx_capabilities(machine_with_devices),
+        vec![
+            ("BlueField-3".to_string(), 1),
+            ("ConnectX-7".to_string(), 2),
+            ("ConnectX-8".to_string(), 1),
+        ]
+    );
+
+    #[allow(deprecated)]
+    {
+        assert_eq!(
+            machine_with_devices.capabilities,
+            machine_with_devices
+                .status
+                .as_ref()
+                .and_then(|status| status.capabilities.clone()),
+        );
+    }
 
     Ok(())
 }

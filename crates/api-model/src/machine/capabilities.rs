@@ -268,6 +268,8 @@ pub enum MachineCapabilityDeviceType {
     Unknown,
     Dpu,
     NvLink,
+    /// Identifies an SPX network capability.
+    Spx,
 }
 
 impl fmt::Display for MachineCapabilityDeviceType {
@@ -276,6 +278,7 @@ impl fmt::Display for MachineCapabilityDeviceType {
             MachineCapabilityDeviceType::Unknown => write!(f, "UNKNOWN"),
             MachineCapabilityDeviceType::Dpu => write!(f, "DPU"),
             MachineCapabilityDeviceType::NvLink => write!(f, "NVLINK"),
+            MachineCapabilityDeviceType::Spx => write!(f, "SPX"),
         }
     }
 }
@@ -741,6 +744,10 @@ mod tests {
 
             "nvlink" {
                 MachineCapabilityDeviceType::NvLink => "NVLINK".to_string(),
+            }
+
+            "spx" {
+                MachineCapabilityDeviceType::Spx => "SPX".to_string(),
             }
         );
     }
