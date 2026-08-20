@@ -18,11 +18,11 @@ import (
 // APIMachineCapabilities is a typed slice that owns the list-level
 // rules across machine capabilities. It both delegates per-element
 // validation to `(APIMachineCapability).Validate` and enforces the
-// `(Type, Name)` uniqueness invariant the proto layer relies on.
+// `(Type, Name, DeviceType)` uniqueness invariant the proto layer relies on.
 type APIMachineCapabilities []APIMachineCapability
 
 // Validate runs `APIMachineCapability.Validate` on each entry and then
-// enforces that no two entries share the same `(Type, Name)` pair.
+// enforces that no two entries share the same `(Type, Name, DeviceType)` tuple.
 func (caps APIMachineCapabilities) Validate() error {
 	if err := validation.Validate([]APIMachineCapability(caps), validation.Each()); err != nil {
 		return err
@@ -31,8 +31,13 @@ func (caps APIMachineCapabilities) Validate() error {
 	for _, mc := range caps {
 		key := mc.MapKey()
 		if seen[key] {
+			if mc.DeviceType == nil || *mc.DeviceType == "" {
+				return validation.Errors{
+					"machineCapabilities": fmt.Errorf("requested Capability type `%s` cannot contain duplicate Capability name: %s", mc.Type, mc.Name),
+				}
+			}
 			return validation.Errors{
-				"machineCapabilities": fmt.Errorf("requested Capability type `%s` cannot contain duplicate Capability name: %s", mc.Type, mc.Name),
+				"machineCapabilities": fmt.Errorf("requested Capability type `%s` cannot contain duplicate Capability name and device type: %s, %s", mc.Type, mc.Name, *mc.DeviceType),
 			}
 		}
 		seen[key] = true
@@ -66,18 +71,18 @@ type APIMachineCapability struct {
 	DeviceType *cdbm.MachineCapabilityDeviceType `json:"deviceType,omitempty"`
 }
 
-// MapKey returns the canonical `Type-Name` string used as a map key
-// for dedup or `(Type, Name)` lookups against the DB-side
+// MapKey returns the canonical identity string used as a map key
+// for dedup or `(Type, Name, DeviceType)` lookups against the DB-side
 // `(*cdbm.MachineCapability).MapKey()`. Both methods produce the same
 // shape so an API request capability and its DB counterpart hash to
 // the same key.
 func (mc APIMachineCapability) MapKey() string {
-	return string(mc.Type) + "-" + mc.Name
+	return cdbm.MachineCapabilityMapKey(mc.Type, mc.Name, mc.DeviceType)
 }
 
 // Validate ensures the values on a single capability are acceptable
 // and that the row will round-trip cleanly into the workflow proto.
-// Per-list concerns (e.g. duplicate `(Type, Name)` pairs across
+// Per-list concerns (e.g. duplicate `(Type, Name, DeviceType)` tuples across
 // capabilities) are enforced at the list level by
 // `APIMachineCapabilities.Validate`.
 //
@@ -112,7 +117,7 @@ func (mc APIMachineCapability) Validate() error {
 }
 
 // validateDeviceType enforces the Type/DeviceType compatibility rules:
-// Network capabilities require DPU, GPU capabilities require NVLink,
+// Network capabilities require DPU or SPX, GPU capabilities require NVLink,
 // every other Type must not carry a DeviceType. A nil DeviceType is
 // always allowed.
 func (mc APIMachineCapability) validateDeviceType(value interface{}) error {
@@ -122,7 +127,7 @@ func (mc APIMachineCapability) validateDeviceType(value interface{}) error {
 	}
 	switch mc.Type {
 	case cdbm.MachineCapabilityTypeNetwork:
-		if *dt != cdbm.MachineCapabilityDeviceTypeDPU {
+		if *dt != cdbm.MachineCapabilityDeviceTypeDPU && *dt != cdbm.MachineCapabilityDeviceTypeSPX {
 			return fmt.Errorf("Unsupported Device Type specified for Network Capability %s", *dt)
 		}
 	case cdbm.MachineCapabilityTypeGPU:

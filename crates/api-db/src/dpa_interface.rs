@@ -375,6 +375,73 @@ pub async fn find_by_machine_ids(
     ))
 }
 
+/// An SPX network-capability group projected from non-deleted DPA interfaces.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpxDeviceCapability {
+    /// The non-empty device description shared by the grouped interfaces.
+    pub device: String,
+    /// The number of non-deleted interfaces in the group.
+    pub count: u32,
+}
+
+/// Batch-load the SPX capability groups for a set of host machines.
+///
+/// This intentionally projects and aggregates only the fields needed by
+/// machine capability discovery instead of loading complete DPA-interface
+/// rows, whose configuration and device-info JSON can be substantially wider.
+pub async fn find_spx_capabilities_by_machine_ids(
+    txn: impl DbReader<'_>,
+    machine_ids: &[MachineId],
+) -> Result<std::collections::HashMap<MachineId, Vec<SpxDeviceCapability>>, DatabaseError> {
+    if machine_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct SpxCapabilityRow {
+        machine_id: MachineId,
+        device: String,
+        count: i64,
+    }
+
+    let query = "SELECT machine_id, device_description AS device, COUNT(*) AS count
+        FROM dpa_interfaces
+        WHERE deleted IS NULL
+          AND machine_id = ANY($1)
+          AND device_description IS NOT NULL
+          AND device_description <> ''
+        GROUP BY machine_id, device_description
+        ORDER BY machine_id, device_description";
+    let rows = sqlx::query_as::<_, SpxCapabilityRow>(query)
+        .bind(machine_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    let mut capabilities_by_machine =
+        std::collections::HashMap::<MachineId, Vec<SpxDeviceCapability>>::new();
+    for row in rows {
+        let count = row
+            .count
+            .try_into()
+            .map_err(|error| DatabaseError::Internal {
+                message: format!(
+                    "SPX interface count {} for machine {} and device {:?} does not fit in u32: {error}",
+                    row.count, row.machine_id, row.device,
+                ),
+            })?;
+        capabilities_by_machine
+            .entry(row.machine_id)
+            .or_default()
+            .push(SpxDeviceCapability {
+                device: row.device,
+                count,
+            });
+    }
+
+    Ok(capabilities_by_machine)
+}
+
 pub async fn find_by_ids(
     txn: impl DbReader<'_>,
     dpa_ids: &[DpaInterfaceId],

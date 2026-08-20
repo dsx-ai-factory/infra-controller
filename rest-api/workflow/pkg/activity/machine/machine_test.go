@@ -412,6 +412,11 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 							Vendor: cutil.GetPtr("0x14e4"),
 						},
 						{
+							Name:       "BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller",
+							Count:      4,
+							DeviceType: corev1.MachineCapabilityDeviceType(corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPX).Enum(),
+						},
+						{
 							Name:       "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller",
 							Count:      2,
 							Vendor:     cutil.GetPtr("0x15b3"),
@@ -1049,13 +1054,14 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 				assert.Equal(t, len(emis1), 1)
 				assert.NotEqual(t, emis1[0].ID, mi1.ID)
 
-				// Machine 1 should have 5 capabilities (1 CPU, 3 Network, 2 Memory, 3 Storage, 1 GPU, 1 InfiniBand, 1 DPU)
+				// Machine 1 should have 14 capabilities (1 CPU, 4 Network, 2 Memory,
+				// 3 Storage, 2 GPU, 1 InfiniBand, and 1 DPU).
 				// NICo will report memory even when it can't determine the capacity.
 				// This is slightly different from Cloud originally, which would track UNKNOWN name but skip unknown capacity.
 				mcDAO := cdbm.NewMachineCapabilityDAO(mm.dbSession)
 				mc1s, mc1Total, serr := mcDAO.GetAll(tt.args.ctx, nil, []string{um1.ID}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 				assert.Nil(t, serr)
-				assert.Equal(t, 13, mc1Total)
+				assert.Equal(t, 14, mc1Total)
 
 				// Verify reported DPU count is correct
 				if tt.args.isDPUCountReported != nil && *tt.args.isDPUCountReported {
@@ -1076,8 +1082,11 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 						assert.Equal(t, 3, *mc.Cores)
 						assert.Equal(t, 6, *mc.Threads)
 					} else if mc.Type == cdbm.MachineCapabilityTypeNetwork {
-						// Each Network Type has 2 Devices
-						assert.Equal(t, 2, *mc.Count)
+						if mc.DeviceType != nil && *mc.DeviceType == cdbm.MachineCapabilityDeviceTypeSPX {
+							assert.Equal(t, 4, *mc.Count)
+						} else {
+							assert.Equal(t, 2, *mc.Count)
+						}
 						if strings.Contains(mc.Name, "BlueField") {
 							assert.Equal(t, *mc.DeviceType, cdbm.MachineCapabilityDeviceTypeDPU)
 						}

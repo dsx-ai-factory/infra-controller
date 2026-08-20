@@ -72,6 +72,39 @@ func TestMachineCapability_Equal(t *testing.T) {
 	})
 }
 
+func TestMachineCapability_MapKey(t *testing.T) {
+	dpu := MachineCapabilityDeviceTypeDPU
+	spx := MachineCapabilityDeviceTypeSPX
+	empty := MachineCapabilityDeviceType("")
+	tests := []struct {
+		name       string
+		deviceType *MachineCapabilityDeviceType
+		want       string
+	}{
+		{name: "generic", want: "Network:10:ConnectX-8"},
+		{name: "generic empty device type", deviceType: &empty, want: "Network:10:ConnectX-8"},
+		{name: "DPU", deviceType: &dpu, want: "Network:10:ConnectX-8:DPU"},
+		{name: "SPX", deviceType: &spx, want: "Network:10:ConnectX-8:SPX"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mc := &MachineCapability{
+				Type:       MachineCapabilityTypeNetwork,
+				Name:       "ConnectX-8",
+				DeviceType: tt.deviceType,
+			}
+			assert.Equal(t, tt.want, mc.MapKey())
+		})
+	}
+
+	t.Run("name delimiter cannot impersonate device type", func(t *testing.T) {
+		generic := MachineCapabilityMapKey(MachineCapabilityTypeNetwork, "ConnectX-8:SPX", nil)
+		typed := MachineCapabilityMapKey(MachineCapabilityTypeNetwork, "ConnectX-8", &spx)
+		assert.NotEqual(t, generic, typed)
+	})
+}
+
 func TestMachineCapabilitySQLDAO_Create(t *testing.T) {
 	ctx := context.Background()
 
@@ -1570,7 +1603,6 @@ func TestMachineCapability_ToProto(t *testing.T) {
 	freq := "3.5GHz"
 	vendor := "ACME"
 	rev := "v1"
-	dpu := MachineCapabilityDeviceTypeDPU
 
 	t.Run("populates all fields from a CPU capability", func(t *testing.T) {
 		mc := &MachineCapability{
@@ -1604,17 +1636,35 @@ func TestMachineCapability_ToProto(t *testing.T) {
 		assert.Nil(t, proto.InactiveDevices)
 	})
 
-	t.Run("maps Network + DPU device type to the proto enum", func(t *testing.T) {
-		mc := &MachineCapability{
-			Type:       MachineCapabilityTypeNetwork,
-			Name:       "net-0",
-			DeviceType: &dpu,
-		}
-		proto := mc.ToProto()
-		assert.Equal(t, corev1.MachineCapabilityType_CAP_TYPE_NETWORK, proto.CapabilityType)
-		require.NotNil(t, proto.DeviceType)
-		assert.Equal(t, corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU, *proto.DeviceType)
-	})
+	deviceTypeCases := []struct {
+		name       string
+		deviceType MachineCapabilityDeviceType
+		want       corev1.MachineCapabilityDeviceType
+	}{
+		{
+			name:       "maps Network + DPU device type to the proto enum",
+			deviceType: MachineCapabilityDeviceTypeDPU,
+			want:       corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU,
+		},
+		{
+			name:       "maps Network + SPX device type to the proto enum",
+			deviceType: MachineCapabilityDeviceTypeSPX,
+			want:       corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPX,
+		},
+	}
+	for _, tc := range deviceTypeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &MachineCapability{
+				Type:       MachineCapabilityTypeNetwork,
+				Name:       "ConnectX-8",
+				DeviceType: &tc.deviceType,
+			}
+			proto := mc.ToProto()
+			assert.Equal(t, corev1.MachineCapabilityType_CAP_TYPE_NETWORK, proto.CapabilityType)
+			require.NotNil(t, proto.DeviceType)
+			assert.Equal(t, tc.want, *proto.DeviceType)
+		})
+	}
 
 	t.Run("maps InfiniBand InactiveDevices into a Uint32List", func(t *testing.T) {
 		mc := &MachineCapability{
@@ -1705,22 +1755,43 @@ func TestMachineCapability_FromProto(t *testing.T) {
 		assert.Equal(t, "", mc.Name)
 	})
 
-	t.Run("unknown DeviceType is preserved (caller must Validate)", func(t *testing.T) {
-		unknown := corev1.MachineCapabilityDeviceType(9999)
-		mc := &MachineCapability{}
-		mc.FromProto(&corev1.InstanceTypeMachineCapabilityFilterAttributes{
-			CapabilityType: corev1.MachineCapabilityType_CAP_TYPE_GPU,
-			Name:           &name,
-			DeviceType:     &unknown,
-		}, 0)
-		require.NotNil(t, mc.DeviceType)
-		assert.Equal(t, MachineCapabilityDeviceType(""), *mc.DeviceType)
-	})
+	deviceTypeCases := []struct {
+		name           string
+		capabilityType corev1.MachineCapabilityType
+		deviceType     corev1.MachineCapabilityDeviceType
+		want           MachineCapabilityDeviceType
+	}{
+		{
+			name:           "unknown DeviceType remains present for caller validation",
+			capabilityType: corev1.MachineCapabilityType_CAP_TYPE_GPU,
+			deviceType:     corev1.MachineCapabilityDeviceType(9999),
+			want:           MachineCapabilityDeviceType(""),
+		},
+		{
+			name:           "SPX DeviceType is preserved",
+			capabilityType: corev1.MachineCapabilityType_CAP_TYPE_NETWORK,
+			deviceType:     corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPX,
+			want:           MachineCapabilityDeviceTypeSPX,
+		},
+	}
+	for _, tc := range deviceTypeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &MachineCapability{}
+			mc.FromProto(&corev1.InstanceTypeMachineCapabilityFilterAttributes{
+				CapabilityType: tc.capabilityType,
+				Name:           &name,
+				DeviceType:     &tc.deviceType,
+			}, 0)
+			require.NotNil(t, mc.DeviceType)
+			assert.Equal(t, tc.want, *mc.DeviceType)
+		})
+	}
 }
 
 func TestMachineCapability_Validate(t *testing.T) {
 	dpu := MachineCapabilityDeviceTypeDPU
 	nvlink := MachineCapabilityDeviceTypeNVLink
+	spx := MachineCapabilityDeviceTypeSPX
 
 	t.Run("populated capability is valid", func(t *testing.T) {
 		mc := &MachineCapability{Type: MachineCapabilityTypeCPU, Name: "cpu-0"}
@@ -1751,26 +1822,31 @@ func TestMachineCapability_Validate(t *testing.T) {
 		assert.Error(t, mc.Validate())
 	})
 
-	t.Run("Network with DPU device type is valid", func(t *testing.T) {
-		mc := &MachineCapability{Type: MachineCapabilityTypeNetwork, Name: "net-0", DeviceType: &dpu}
-		assert.NoError(t, mc.Validate())
-	})
-	t.Run("Network with NVLink device type errors", func(t *testing.T) {
-		mc := &MachineCapability{Type: MachineCapabilityTypeNetwork, Name: "net-0", DeviceType: &nvlink}
-		assert.Error(t, mc.Validate())
-	})
-	t.Run("GPU with NVLink device type is valid", func(t *testing.T) {
-		mc := &MachineCapability{Type: MachineCapabilityTypeGPU, Name: "gpu-0", DeviceType: &nvlink}
-		assert.NoError(t, mc.Validate())
-	})
-	t.Run("GPU with DPU device type errors", func(t *testing.T) {
-		mc := &MachineCapability{Type: MachineCapabilityTypeGPU, Name: "gpu-0", DeviceType: &dpu}
-		assert.Error(t, mc.Validate())
-	})
-	t.Run("CPU with any device type errors", func(t *testing.T) {
-		mc := &MachineCapability{Type: MachineCapabilityTypeCPU, Name: "cpu-0", DeviceType: &dpu}
-		assert.Error(t, mc.Validate())
-	})
+	deviceTypeCases := []struct {
+		name       string
+		capType    MachineCapabilityType
+		capName    string
+		deviceType *MachineCapabilityDeviceType
+		wantError  bool
+	}{
+		{name: "Network with DPU device type is valid", capType: MachineCapabilityTypeNetwork, capName: "net-0", deviceType: &dpu},
+		{name: "Network with SPX device type is valid", capType: MachineCapabilityTypeNetwork, capName: "net-0", deviceType: &spx},
+		{name: "Network with NVLink device type errors", capType: MachineCapabilityTypeNetwork, capName: "net-0", deviceType: &nvlink, wantError: true},
+		{name: "GPU with NVLink device type is valid", capType: MachineCapabilityTypeGPU, capName: "gpu-0", deviceType: &nvlink},
+		{name: "GPU with DPU device type errors", capType: MachineCapabilityTypeGPU, capName: "gpu-0", deviceType: &dpu, wantError: true},
+		{name: "CPU with any device type errors", capType: MachineCapabilityTypeCPU, capName: "cpu-0", deviceType: &dpu, wantError: true},
+	}
+	for _, tc := range deviceTypeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &MachineCapability{Type: tc.capType, Name: tc.capName, DeviceType: tc.deviceType}
+			err := mc.Validate()
+			if tc.wantError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 
 	t.Run("InfiniBand with InactiveDevices is valid", func(t *testing.T) {
 		mc := &MachineCapability{Type: MachineCapabilityTypeInfiniBand, Name: "ib-0", InactiveDevices: []int{0, 1}}
