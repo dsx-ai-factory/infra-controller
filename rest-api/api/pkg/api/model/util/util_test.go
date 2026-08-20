@@ -385,6 +385,9 @@ func TestPhoneHomeSupportsUserData(t *testing.T) {
 		{"#cloud-config-archive", "#cloud-config-archive\n- type: text/cloud-config\n  content: x\n", true},
 		{"empty #cloud-config-archive", "#cloud-config-archive\n[]\n", true},
 		{"header-less list is not an archive", "- type: text/cloud-config\n  content: x\n", false},
+		// cloud-init reads the format from the start of the payload, so a comment
+		// above the header leaves user-data it does not recognize at all.
+		{"a comment above the header", "# a note\n#cloud-config\npackages:\n- curl\n", false},
 		{"#!/bin/bash script parsed as a scalar", "#!/bin/bash\necho hello\nls -la\n", false},
 		{"#!/bin/bash script parsed as a mapping", "#!/bin/bash\nexport FOO: bar\n", false},
 		// A jinja template declares its format on the line below the marker, so
@@ -397,6 +400,9 @@ func TestPhoneHomeSupportsUserData(t *testing.T) {
 		},
 		{"jinja #!/bin/bash script parsed as a scalar", "## template: jinja\n#!/bin/bash\necho hello\nls -la\n", false},
 		{"jinja #!/bin/bash script parsed as a mapping", "## template: jinja\n#!/bin/bash\nexport FOO: bar\n", false},
+		// cloud-init matches the marker on the start of the line, ignoring case.
+		{"#cloud-config with a note after it", "#cloud-config (managed by nico)\npackages:\n- curl\n", true},
+		{"#Cloud-Config", "#Cloud-Config\npackages:\n- curl\n", true},
 	}
 
 	for _, tt := range tests {

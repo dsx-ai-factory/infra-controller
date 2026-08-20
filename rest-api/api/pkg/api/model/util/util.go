@@ -200,7 +200,7 @@ func splitUserDataHeader(userData string) (header, body string) {
 	}
 	header = line + "\n"
 
-	if strings.TrimSpace(line) != jinjaTemplateHeader {
+	if !declaresFormat(line, jinjaTemplateHeader) {
 		return header, body
 	}
 
@@ -212,15 +212,32 @@ func splitUserDataHeader(userData string) (header, body string) {
 	return header + line + "\n", rest
 }
 
-// headerFormat returns the format a cloud-init header declares - its last line,
-// e.g. "#cloud-config" - or "" when there is no header.
+// headerFormat returns the format a cloud-init header declares, as the marker
+// naming it, or "" when there is no header. The format is on the header's last
+// line, since a jinja template declares it below the template marker.
 func headerFormat(header string) string {
-	header = strings.TrimSpace(header)
-	if _, format, found := strings.Cut(header, "\n"); found {
-		return strings.TrimSpace(format)
+	line := strings.TrimSpace(header)
+	if _, lastLine, found := strings.Cut(line, "\n"); found {
+		line = strings.TrimSpace(lastLine)
 	}
 
-	return header
+	// The longer marker is tried first because #cloud-config prefixes
+	// #cloud-config-archive.
+	for _, marker := range []string{SiteCloudConfigArchive, SiteCloudConfig} {
+		if declaresFormat(line, marker) {
+			return marker
+		}
+	}
+
+	// Some other format, e.g. a #!/bin/sh script - or no header at all.
+	return line
+}
+
+// declaresFormat reports whether a header line declares marker, matched the way
+// cloud-init matches it: on the start of the line, ignoring case, so a marker
+// with a note after it still names the format.
+func declaresFormat(line string, marker string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), marker)
 }
 
 // insertPhoneHome adds a phone-home block reporting to url to a #cloud-config
