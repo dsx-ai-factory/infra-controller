@@ -71,8 +71,8 @@ func MarshalUserData(document *yaml.Node) ([]byte, error) {
 
 // ErrUnsupportedUserData reports user-data phone-home cannot live in: not a
 // #cloud-config mapping or a #cloud-config-archive sequence, but a script, a
-// template of one, or text that is not YAML. Enabling phone-home rejects it;
-// disabling leaves it alone, since the block cannot be in there.
+// template cloud-init ignores, or text that is not YAML. Enabling phone-home
+// rejects it; disabling leaves it alone, since the block cannot be in there.
 var ErrUnsupportedUserData = errors.New("userData is not a #cloud-config or #cloud-config-archive document")
 
 // EnablePhoneHomeInUserData returns userData with a phone-home block reporting
@@ -168,6 +168,10 @@ func parseUserData(userData *string) (string, *yaml.Node, error) {
 	documentRoot := document.Content[0]
 
 	switch format := headerFormat(header); {
+	case declaresFormat(header, jinjaTemplateHeader) && format == SiteCloudConfigArchive:
+		// cloud-init's jinja handler dispatches cloud-config, scripts and
+		// boothooks only, so a jinja archive is never run.
+		return "", nil, ErrUnsupportedUserData
 	case documentRoot.Kind == yaml.SequenceNode && format == SiteCloudConfigArchive:
 	case documentRoot.Kind == yaml.MappingNode && (format == "" || format == SiteCloudConfig):
 	default:
@@ -402,12 +406,24 @@ func appendPhoneHomePart(archiveRoot *yaml.Node, url string) error {
 // carries no string content. A part with no explicit type is cloud-config,
 // matching cloud-init's default.
 func cloudConfigArchiveContent(part *yaml.Node) *yaml.Node {
-	if part == nil || part.Kind != yaml.MappingNode {
+	if part == nil {
 		return nil
 	}
 
+	// cloud-init reads a scalar part as the content of a part with no type.
+	if part.Kind == yaml.ScalarNode {
+		return part
+	}
+
+	if part.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	// A structured type is malformed, not an omitted one, so the part is left
+	// alone rather than read as cloud-config.
 	if typeNode := mappingValue(part, archiveEntryType); typeNode != nil &&
-		typeNode.Value != "" && typeNode.Value != archiveContentType {
+		(typeNode.Kind != yaml.ScalarNode ||
+			(typeNode.Value != "" && typeNode.Value != archiveContentType)) {
 		return nil
 	}
 

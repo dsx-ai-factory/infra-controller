@@ -351,6 +351,56 @@ func TestRemovePhoneHomeFromArchivePreservesHeaderOnCommentedEntry(t *testing.T)
 	assert.NotContains(t, rendered, "phone_home")
 }
 
+func TestRemovePhoneHomeFromArchivePreservesStructuredTypeEntry(t *testing.T) {
+	// A structured "type" is malformed, not an omitted one: cloud-init cannot
+	// dispatch the entry, so it must be handed back exactly as authored.
+	const archive = `#cloud-config-archive
+- type: {invalid: value}
+  content: |
+    #cloud-config
+    phone_home:
+      url: http://169.254.169.254/phone-home
+`
+
+	userData, err := disablePhoneHome(new(archive), nil)
+	require.NoError(t, err)
+	assert.Equal(t, archive, *userData)
+}
+
+func TestPhoneHomeInScalarArchiveEntry(t *testing.T) {
+	// cloud-init reads a scalar entry as the content of an entry with no type,
+	// so phone-home in one is live and must be handled like any other entry.
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	archive := `#cloud-config-archive
+- |
+  #cloud-config
+  phone_home:
+    url: ` + phoneHomeURL + `
+- |
+  #cloud-config
+  packages:
+  - curl
+`
+
+	t.Run("disabling removes it", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(archive), phoneHomeURL)
+		require.NoError(t, err)
+
+		require.Len(t, unmarshalArchiveRoot(t, *userData).Content, 1, "the scalar entry must be removed")
+		assert.NotContains(t, *userData, SitePhoneHomeName)
+		assert.Contains(t, *userData, "curl", "unrelated entries must be kept")
+	})
+
+	t.Run("enabling replaces it instead of duplicating it", func(t *testing.T) {
+		userData, err := EnablePhoneHomeInUserData(new(archive), phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.Equal(t, 1, strings.Count(*userData, SitePhoneHomeName), "exactly one phone-home must remain")
+		assert.Contains(t, *userData, phoneHomeURL)
+	})
+}
+
 func TestRemovePhoneHomeFromArchiveRemovesNestedAutoinstall(t *testing.T) {
 	// phone-home nested under autoinstall.user-data inside an archive entry must
 	// be detected and re-rendered out, even though the entry's top-level keys
@@ -393,10 +443,12 @@ func TestPhoneHomeSupportsUserData(t *testing.T) {
 		// A jinja template declares its format on the line below the marker, so
 		// the two-line header decides - not the marker itself.
 		{"jinja #cloud-config", "## template: jinja\n#cloud-config\npackages:\n- curl\n", true},
+		// cloud-init's jinja handler has no archive sub-handler, so it ignores a
+		// jinja archive entirely - phone-home in one would never run.
 		{
 			"jinja #cloud-config-archive",
 			"## template: jinja\n#cloud-config-archive\n- type: text/cloud-config\n  content: x\n",
-			true,
+			false,
 		},
 		{"jinja #!/bin/bash script parsed as a scalar", "## template: jinja\n#!/bin/bash\necho hello\nls -la\n", false},
 		{"jinja #!/bin/bash script parsed as a mapping", "## template: jinja\n#!/bin/bash\nexport FOO: bar\n", false},
@@ -448,9 +500,8 @@ func TestPhoneHomePreservesUserDataHeader(t *testing.T) {
 			wantHeader: "#cloud-config\n",
 		},
 		{
-			name: "jinja #cloud-config-archive carrying the header on the phone-home entry",
-			userData: `## template: jinja
-#cloud-config-archive
+			name: "#cloud-config-archive carrying the header on the phone-home entry",
+			userData: `#cloud-config-archive
 - type: text/cloud-config
   content: |
     #cloud-config
@@ -459,9 +510,10 @@ func TestPhoneHomePreservesUserDataHeader(t *testing.T) {
 - type: text/cloud-config
   content: |
     #cloud-config
-    hostname: "{{ v1.local_hostname }}"
+    packages:
+    - curl
 `,
-			wantHeader: "## template: jinja\n#cloud-config-archive\n",
+			wantHeader: "#cloud-config-archive\n",
 		},
 	}
 
