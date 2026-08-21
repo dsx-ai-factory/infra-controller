@@ -326,9 +326,11 @@ impl ConnectingTcpRemote {
                                 }
                                 Err(e) => {
                                     trace!(
-                                        "Resolved proxy address '{proxy_addr}' unreachable: {}",
-                                        e
-                                    )
+                                        proxy_address = %proxy_addr,
+                                        error = %e,
+                                        "resolved proxy address unreachable"
+                                    );
+                                    err = Some(e);
                                 }
                             }
                         }
