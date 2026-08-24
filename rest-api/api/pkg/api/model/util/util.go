@@ -27,6 +27,7 @@ const (
 	autoinstallUserData    = "user-data"
 	archiveEntryType       = "type"
 	archiveEntryContent    = "content"
+	mergeKey               = "<<"
 	archiveContentType     = "text/cloud-config"
 
 	// jinjaTemplateHeader marks user-data as a Jinja template. cloud-init reads
@@ -92,7 +93,9 @@ func EnablePhoneHomeInUserData(userData *string, url string) (*string, error) {
 	// cloud-init merges archive parts independently, so phone-home is delivered
 	// as a part of its own rather than folded into somebody else's.
 	if documentRoot.Kind == yaml.SequenceNode {
-		removePhoneHomeParts(documentRoot, nil)
+		if _, err := removePhoneHomeParts(documentRoot, nil); err != nil {
+			return nil, err
+		}
 		err = appendPhoneHomePart(documentRoot, url)
 	} else {
 		err = insertPhoneHome(documentRoot, url)
@@ -100,6 +103,8 @@ func EnablePhoneHomeInUserData(userData *string, url string) (*string, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	inlineDanglingAliases(documentRoot)
 
 	return renderUserData(header, documentRoot)
 }
@@ -132,7 +137,9 @@ func disablePhoneHome(userData *string, url *string) (*string, error) {
 
 	removed := false
 	if documentRoot.Kind == yaml.SequenceNode {
-		removed = removePhoneHomeParts(documentRoot, url)
+		if removed, err = removePhoneHomeParts(documentRoot, url); err != nil {
+			return nil, err
+		}
 	} else {
 		removed = removePhoneHome(documentRoot, url)
 	}
@@ -145,6 +152,8 @@ func disablePhoneHome(userData *string, url *string) (*string, error) {
 		// emptied archive renders instead, keeping its header.
 		return new(""), nil
 	}
+
+	inlineDanglingAliases(documentRoot)
 
 	return renderUserData(header, documentRoot)
 }
@@ -189,6 +198,13 @@ func renderUserData(header string, documentRoot *yaml.Node) (*string, error) {
 	rendered, err := MarshalUserData(documentRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render userData: %w", err)
+	}
+
+	// An edit can still strip an anchor an alias elsewhere points at, and yaml
+	// cannot read that back. Not ErrUnsupportedUserData: the block was in there,
+	// so failing beats reporting phone-home disabled over user-data holding it.
+	if err := yaml.Unmarshal(rendered, &yaml.Node{}); err != nil {
+		return nil, fmt.Errorf("rendered userData is not valid yaml: %w", err)
 	}
 
 	return new(header + string(rendered)), nil
@@ -310,7 +326,8 @@ func removePhoneHomeFromMapping(mappingNode *yaml.Node, url *string) bool {
 	// Mapping content is a flat run of key/value pairs, so a key is dropped by
 	// snipping two entries; the pairs that stay keep their authored order.
 	for i := 0; i+1 < len(mappingNode.Content); {
-		keyNode, valueNode := mappingNode.Content[i], mappingNode.Content[i+1]
+		keyNode := resolveAlias(mappingNode.Content[i])
+		valueNode := resolveAlias(mappingNode.Content[i+1])
 		if keyNode.Value != SitePhoneHomeName || valueNode.Kind != yaml.MappingNode ||
 			!phoneHomeReportsTo(valueNode, url) {
 			i += 2
@@ -340,9 +357,10 @@ func phoneHomeReportsTo(phoneHomeNode *yaml.Node, url *string) bool {
 // parts left empty and reporting whether it changed anything. A part is
 // user-data in its own right, so each goes through the same path as a whole
 // document.
-func removePhoneHomeParts(archiveRoot *yaml.Node, url *string) bool {
+func removePhoneHomeParts(archiveRoot *yaml.Node, url *string) (bool, error) {
 	removed := false
 	kept := archiveRoot.Content[:0]
+	var dropped []*yaml.Node
 
 	for _, part := range archiveRoot.Content {
 		content := cloudConfigArchiveContent(part)
@@ -353,23 +371,68 @@ func removePhoneHomeParts(archiveRoot *yaml.Node, url *string) bool {
 
 		stripped, err := disablePhoneHome(&content.Value, url)
 		switch {
-		case err != nil, stripped == nil, *stripped == content.Value:
-			// Not a part phone-home can live in, or nothing to strip from it:
-			// leave it exactly as authored.
+		case errors.Is(err, ErrUnsupportedUserData):
+			// Not a part phone-home can live in: leave it exactly as authored.
+			kept = append(kept, part)
+		case err != nil:
+			// Read before the cases below, since a part that failed carries no
+			// content to compare - which would otherwise keep it, and report the
+			// archive stripped over a part this could not read.
+			return false, err
+		case stripped == nil, *stripped == content.Value:
+			// Nothing to strip from it: leave it exactly as authored.
 			kept = append(kept, part)
 		case *stripped == "":
 			// The part held nothing but phone-home, so drop it entirely.
+			dropped = append(dropped, part)
 			removed = true
 		default:
-			content.SetString(*stripped)
-			content.Style = yaml.LiteralStyle
-			kept = append(kept, part)
+			kept = append(kept, partWithContent(part, *stripped))
 			removed = true
 		}
 	}
 	archiveRoot.Content = kept
 
-	return removed
+	// A part merging a dropped one still reads it, so what it held is emptied -
+	// after the loop, since the parts after it read it to strip themselves.
+	for _, part := range dropped {
+		setPartContent(resolveAlias(part), "")
+	}
+
+	return removed, nil
+}
+
+// partWithContent returns the part to keep in place of one whose content was
+// stripped. It is rewritten where it stands, so a part aliasing or merging it
+// reads the rewrite - unless it is a scalar, which is its own content.
+func partWithContent(part *yaml.Node, text string) *yaml.Node {
+	authored := resolveAlias(part)
+	if authored.Kind == yaml.ScalarNode {
+		return rewrittenContent(authored, text)
+	}
+
+	setPartContent(authored, text)
+
+	return part
+}
+
+// setPartContent points a part's content key - the one mappingValue reads it
+// from - at a node holding text. A part with no content key holds none.
+func setPartContent(part *yaml.Node, text string) {
+	if index := mappingIndex(part, archiveEntryContent); index >= 0 {
+		part.Content[index] = rewrittenContent(part.Content[index], text)
+	}
+}
+
+// rewrittenContent returns a copy of the content node as authored, carrying text
+// and no anchor of its own: a part of another type can alias that node, and
+// keeps what it was authored with.
+func rewrittenContent(authored *yaml.Node, text string) *yaml.Node {
+	content := *authored
+	content.Anchor, content.Alias = "", nil
+	content.SetString(text)
+
+	return &content
 }
 
 // appendPhoneHomePart appends the archive part that carries phone-home. Its
@@ -387,7 +450,6 @@ func appendPhoneHomePart(archiveRoot *yaml.Node, url string) error {
 	}
 
 	contentNode := scalarNode(*rendered)
-	contentNode.Style = yaml.LiteralStyle
 
 	archiveRoot.Content = append(archiveRoot.Content, &yaml.Node{
 		Kind: yaml.MappingNode,
@@ -406,6 +468,7 @@ func appendPhoneHomePart(archiveRoot *yaml.Node, url string) error {
 // carries no string content. A part with no explicit type is cloud-config,
 // matching cloud-init's default.
 func cloudConfigArchiveContent(part *yaml.Node) *yaml.Node {
+	part = resolveAlias(part)
 	if part == nil {
 		return nil
 	}
@@ -416,6 +479,12 @@ func cloudConfigArchiveContent(part *yaml.Node) *yaml.Node {
 	}
 
 	if part.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	// cloud-init resolves `<<` at load, so what a part that merges another ends
+	// up holding - its type included - cannot be told from here.
+	if mappingValue(part, mergeKey) != nil {
 		return nil
 	}
 
@@ -435,15 +504,96 @@ func cloudConfigArchiveContent(part *yaml.Node) *yaml.Node {
 	return contentNode
 }
 
+// inlineDanglingAliases puts the values whose anchor a removal took away back in
+// the document, at the first alias pointing at each. An alias with no anchor
+// cannot be read back at all, so leaving one behind would break the whole
+// document. Aliases whose anchor is still in there are left exactly as authored.
+func inlineDanglingAliases(documentRoot *yaml.Node) {
+	inDocument := map[*yaml.Node]bool{}
+	collectNodes(documentRoot, inDocument)
+	inlineAliasesTo(documentRoot, inDocument, map[*yaml.Node]bool{})
+}
+
+// collectNodes records every node the document still holds. Aliases are not
+// followed, so a value only a removed key or part pointed at stays out.
+func collectNodes(node *yaml.Node, inDocument map[*yaml.Node]bool) {
+	if node == nil || inDocument[node] {
+		return
+	}
+
+	inDocument[node] = true
+	for _, child := range node.Content {
+		collectNodes(child, inDocument)
+	}
+}
+
+// inlineAliasesTo replaces the first alias to a value the document no longer
+// holds with a copy of the value, anchor included. The copy shares the value's
+// children, which is safe because this is the last edit before rendering. walked
+// bounds the walk, since a shared child can point back at the copy.
+func inlineAliasesTo(node *yaml.Node, inDocument, walked map[*yaml.Node]bool) {
+	if node == nil || walked[node] {
+		return
+	}
+	walked[node] = true
+
+	if node.Kind == yaml.AliasNode && node.Alias != nil && !inDocument[node.Alias] {
+		// The value goes back in the document, so the aliases after this one stay
+		// aliases rather than copies of it.
+		collectNodes(node.Alias, inDocument)
+
+		inlined := *node.Alias
+		// Comments stay with the line they were written on.
+		inlined.HeadComment, inlined.LineComment, inlined.FootComment =
+			node.HeadComment, node.LineComment, node.FootComment
+		*node = inlined
+	}
+
+	for _, child := range node.Content {
+		inlineAliasesTo(child, inDocument, walked)
+	}
+}
+
+// resolveAlias reads an alias through to the value it points at, the way
+// cloud-init sees a document once yaml has loaded it. Anything else is itself.
+func resolveAlias(node *yaml.Node) *yaml.Node {
+	if node != nil && node.Kind == yaml.AliasNode && node.Alias != nil {
+		return node.Alias
+	}
+
+	return node
+}
+
+// mappingValue returns the value a mapping holds for key, or nil when it holds
+// none - a mapping that is not there holds nothing, so lookups chain. Aliases
+// are read through, so every lookup sees what cloud-init sees.
 func mappingValue(mappingNode *yaml.Node, key string) *yaml.Node {
+	mappingNode = resolveAlias(mappingNode)
+	if mappingNode == nil {
+		return nil
+	}
+
+	index := mappingIndex(mappingNode, key)
+	if index < 0 {
+		return nil
+	}
+
+	return resolveAlias(mappingNode.Content[index])
+}
+
+// mappingIndex returns where a mapping holds its value for key, or -1 when it
+// holds none. A key written twice is read the way cloud-init's loader reads it,
+// where the last one wins.
+func mappingIndex(mappingNode *yaml.Node, key string) int {
+	index := -1
 	for i := 0; i+1 < len(mappingNode.Content); i += 2 {
-		keyNode := mappingNode.Content[i]
+		keyNode := resolveAlias(mappingNode.Content[i])
 		if keyNode.Kind == yaml.ScalarNode && keyNode.Value == key {
-			return mappingNode.Content[i+1]
+			index = i + 1
 		}
 	}
 
-	return nil
+	return index
 }
 
 func scalarNode(value string) *yaml.Node {

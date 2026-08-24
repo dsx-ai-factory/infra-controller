@@ -367,6 +367,370 @@ func TestRemovePhoneHomeFromArchivePreservesStructuredTypeEntry(t *testing.T) {
 	assert.Equal(t, archive, *userData)
 }
 
+func TestPhoneHomeInAliasedArchiveEntry(t *testing.T) {
+	// An alias entry is the entry it points at, so the two must be kept in step:
+	// a lone alias whose anchor was dropped cannot be parsed back at all.
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	t.Run("drops the alias along with the entry it points at", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- &phone
+  type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: `+phoneHomeURL+`
+- *phone
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		// unmarshalArchiveRoot parses the result, so a dangling alias fails here.
+		assert.Empty(t, unmarshalArchiveRoot(t, *userData).Content, "both entries must be removed")
+	})
+
+	t.Run("strips the entry an alias points at, and keeps the alias", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- &both
+  type: text/cloud-config
+  content: |
+    #cloud-config
+    packages:
+    - curl
+    phone_home:
+      url: `+phoneHomeURL+`
+- *both
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		archiveRoot := unmarshalArchiveRoot(t, *userData)
+		require.Len(t, archiveRoot.Content, 2, "both entries must be kept")
+		assert.NotContains(t, *userData, SitePhoneHomeName)
+		assert.Equal(t, yaml.AliasNode, archiveRoot.Content[1].Kind,
+			"the entry is rewritten where it stands, so the alias to it reads the rewrite")
+	})
+
+	t.Run("strips the entry whose content an alias points at", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/cloud-config
+  content: &c |
+    #cloud-config
+    packages:
+    - curl
+    phone_home:
+      url: `+phoneHomeURL+`
+- content: *c
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.Len(t, unmarshalArchiveRoot(t, *userData).Content, 2, "both entries must be kept")
+		assert.NotContains(t, *userData, SitePhoneHomeName)
+	})
+}
+
+func TestRemovePhoneHomeInlinesAliasesToWhatItRemoves(t *testing.T) {
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	// Removing phone-home takes any anchor inside it away, so an alias to it
+	// elsewhere is replaced by the value itself. unmarshal* parses the result,
+	// so an alias left dangling fails these tests.
+	t.Run("only the url is anchored, and a command reuses it", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config
+phone_home:
+  url: &phonehome `+phoneHomeURL+`
+runcmd:
+- [curl, -sf, *phonehome]
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		documentRoot := unmarshalDocumentRoot(t, *userData)
+		assert.Nil(t, mappingNodeValue(documentRoot, SitePhoneHomeName))
+
+		var runcmd [][]string
+		require.NoError(t, mappingNodeValue(documentRoot, "runcmd").Decode(&runcmd))
+		assert.Equal(t, [][]string{{"curl", "-sf", phoneHomeURL}}, runcmd,
+			"the command must keep the url it was authored with")
+	})
+
+	t.Run("the whole block is anchored", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config
+phone_home: &phone
+  url: `+phoneHomeURL+`
+reuse: *phone
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		documentRoot := unmarshalDocumentRoot(t, *userData)
+		assert.Nil(t, mappingNodeValue(documentRoot, SitePhoneHomeName))
+		assert.Equal(t, phoneHomeURL,
+			mappingNodeValue(mappingNodeValue(documentRoot, "reuse"), SitePhoneHomeUrl).Value)
+	})
+
+	t.Run("an entry of another type aliases the content", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/cloud-config
+  content: &shared |
+    #cloud-config
+    phone_home:
+      url: `+phoneHomeURL+`
+- type: text/x-shellscript
+  content: *shared
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		archiveRoot := unmarshalArchiveRoot(t, *userData)
+		require.Len(t, archiveRoot.Content, 1, "only the cloud-config entry must go")
+		assert.Contains(t, mappingNodeValue(archiveRoot.Content[0], archiveEntryContent).Value, SitePhoneHomeName,
+			"the script entry is not cloud-config, so its text is kept as authored")
+	})
+
+	t.Run("an entry of another type aliases content that survives", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/cloud-config
+  content: &shared |
+    #cloud-config
+    packages:
+    - curl
+    phone_home:
+      url: `+phoneHomeURL+`
+- type: text/x-shellscript
+  content: *shared
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		archiveRoot := unmarshalArchiveRoot(t, *userData)
+		require.Len(t, archiveRoot.Content, 2, "both entries must be kept")
+		assert.NotContains(t, mappingNodeValue(archiveRoot.Content[0], archiveEntryContent).Value, SitePhoneHomeName,
+			"the cloud-config entry must be stripped")
+		assert.Contains(t, mappingNodeValue(archiveRoot.Content[1], archiveEntryContent).Value, SitePhoneHomeName,
+			"the script entry is not cloud-config, so its text is kept as authored")
+	})
+
+	t.Run("a comment sits on the alias", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config
+phone_home:
+  url: &phonehome `+phoneHomeURL+`
+reported_to: *phonehome # keep me
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		// unmarshalDocumentRoot parses the result, so a dangling alias fails here.
+		assert.Nil(t, mappingNodeValue(unmarshalDocumentRoot(t, *userData), SitePhoneHomeName))
+		assert.Contains(t, *userData, "# keep me", "a comment stays on the line it was written on")
+	})
+}
+
+func TestPhoneHomeBehindAnAlias(t *testing.T) {
+	// cloud-init resolves aliases before it reads the document, so a block behind
+	// one is live and has to be read the same way.
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	t.Run("the whole block is an alias", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config
+defaults: &phone
+  url: `+phoneHomeURL+`
+phone_home: *phone
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.Nil(t, mappingNodeValue(unmarshalDocumentRoot(t, *userData), SitePhoneHomeName))
+	})
+
+	t.Run("only the url is an alias", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config
+url: &phonehome `+phoneHomeURL+`
+phone_home:
+  url: *phonehome
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.Nil(t, mappingNodeValue(unmarshalDocumentRoot(t, *userData), SitePhoneHomeName))
+	})
+
+	t.Run("autoinstall is an alias", func(t *testing.T) {
+		const authored = `#cloud-config
+base: &install
+  version: 1
+  user-data:
+    phone_home:
+      url: ` + phoneHomeURL + `
+autoinstall: *install
+`
+
+		userData, err := DisablePhoneHomeInUserData(new(authored), phoneHomeURL)
+		require.NoError(t, err)
+		assert.NotContains(t, *userData, SitePhoneHomeName,
+			"the block under the aliased autoinstall must go")
+
+		userData, err = EnablePhoneHomeInUserData(new(authored), phoneHomeURL)
+		require.NoError(t, err)
+		assert.Equal(t, 1, strings.Count(*userData, SitePhoneHomeName),
+			"the block must be replaced in the mapping the alias points at")
+	})
+}
+
+func TestRemovePhoneHomeBoundsWhatItInlines(t *testing.T) {
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	// Inlining an alias walks the value it copies, and an anchor inside
+	// phone-home can be pointed at from inside the block as well as from outside
+	// it - the block can even point at itself. Both cases below run forever, or
+	// run out of memory, if a value is copied more than once.
+	t.Run("the block points at itself", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config
+phone_home: &phone
+  url: `+phoneHomeURL+`
+  self: *phone
+reuse: *phone
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		// unmarshalDocumentRoot parses the result, so a dangling alias fails here.
+		documentRoot := unmarshalDocumentRoot(t, *userData)
+		assert.Nil(t, mappingNodeValue(documentRoot, SitePhoneHomeName))
+		assert.Equal(t, phoneHomeURL,
+			mappingNodeValue(mappingNodeValue(documentRoot, "reuse"), SitePhoneHomeUrl).Value)
+	})
+
+	t.Run("aliases are nested inside aliases", func(t *testing.T) {
+		authored := strings.Builder{}
+		authored.WriteString("#cloud-config\nphone_home:\n  url: " + phoneHomeURL + "\n  a0: &a0 [x]\n")
+		for level := 1; level <= 20; level++ {
+			fmt.Fprintf(&authored, "  a%d: &a%d [*a%d, *a%d]\n", level, level, level-1, level-1)
+		}
+		authored.WriteString("keep: *a20\n")
+
+		userData, err := DisablePhoneHomeInUserData(new(authored.String()), phoneHomeURL)
+		require.NoError(t, err)
+
+		// Copying a value per alias instead of keeping its anchor doubles the
+		// output per level, which is megabytes of stored user-data by level 20.
+		assert.Less(t, len(*userData), 2*authored.Len(), "the output must not grow with the nesting")
+	})
+}
+
+func TestRenderUserDataReportsWhatYamlCannotReadBack(t *testing.T) {
+	// An alias with no anchor to point at cannot be parsed back.
+	documentRoot := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+		scalarNode("reuse"), {Kind: yaml.AliasNode, Value: "gone"},
+	}}
+
+	// Not unsupported user-data: the callers leave that alone on disable, which
+	// would report phone-home disabled over user-data still carrying it.
+	_, err := renderUserData(SiteCloudConfig+"\n", documentRoot)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrUnsupportedUserData)
+}
+
+func TestPhoneHomeInAMergedArchiveEntry(t *testing.T) {
+	// cloud-init resolves `<<` at load, so an entry merging another entry runs
+	// what that entry holds - including one we drop for holding nothing else.
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	const authored = `#cloud-config-archive
+- &base
+  type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: ` + phoneHomeURL + `
+- <<: *base
+  launch-index: 1
+`
+
+	t.Run("disabling rewrites the entry the merge reads", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- &base
+  type: text/cloud-config
+  content: |
+    #cloud-config
+    packages:
+    - curl
+    phone_home:
+      url: `+phoneHomeURL+`
+- <<: *base
+  launch-index: 1
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.NotContains(t, *userData, SitePhoneHomeName)
+	})
+
+	t.Run("disabling empties the entry the merge reads", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(authored), phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.NotContains(t, *userData, SitePhoneHomeName,
+			"the dropped entry must not come back through the merge")
+	})
+
+	t.Run("leaves alone an entry whose type it cannot tell", func(t *testing.T) {
+		// The merged entry is a script, so its cloud-config-looking content is
+		// text we must not touch.
+		const script = `#cloud-config-archive
+- &base
+  type: text/x-shellscript
+  launch-index: 0
+- <<: *base
+  content: |
+    #cloud-config
+    phone_home:
+      url: ` + phoneHomeURL + `
+`
+
+		userData, err := DisablePhoneHomeInUserData(new(script), phoneHomeURL)
+		require.NoError(t, err)
+		assert.Equal(t, script, *userData)
+	})
+
+	t.Run("enabling does not leave the block it replaced", func(t *testing.T) {
+		stale := strings.ReplaceAll(authored, phoneHomeURL, "http://old.example/phone-home")
+
+		userData, err := EnablePhoneHomeInUserData(new(stale), phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.NotContains(t, *userData, "old.example",
+			"the block that was in there must not report anywhere once it is replaced")
+		assert.Equal(t, 1, strings.Count(*userData, SitePhoneHomeName))
+	})
+}
+
+func TestRemovePhoneHomeReadsTheLastOfADuplicatedKey(t *testing.T) {
+	// yaml's loader keeps the last of a duplicated key, so that is the one the
+	// instance reports to.
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	userData, err := DisablePhoneHomeInUserData(new(`#cloud-config
+packages:
+- curl
+phone_home:
+  url: http://somebody.else/
+  url: `+phoneHomeURL+`
+`), phoneHomeURL)
+	require.NoError(t, err)
+
+	assert.Nil(t, mappingNodeValue(unmarshalDocumentRoot(t, *userData), SitePhoneHomeName))
+}
+
+func TestRemovePhoneHomeKeepsWhatWasWrittenAroundContent(t *testing.T) {
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	// Stripped content is swapped in as a node of its own, so whatever yaml hung
+	// on the node it replaces has to come across with it.
+	userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/cloud-config
+  content: | # the base config
+    #cloud-config
+    packages:
+    - curl
+    phone_home:
+      url: `+phoneHomeURL+`
+`), phoneHomeURL)
+	require.NoError(t, err)
+
+	assert.Contains(t, *userData, "# the base config")
+	assert.NotContains(t, *userData, SitePhoneHomeName)
+}
+
 func TestPhoneHomeInScalarArchiveEntry(t *testing.T) {
 	// cloud-init reads a scalar entry as the content of an entry with no type,
 	// so phone-home in one is live and must be handled like any other entry.
