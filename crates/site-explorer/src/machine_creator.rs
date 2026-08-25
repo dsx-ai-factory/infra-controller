@@ -472,6 +472,7 @@ impl MachineCreator {
         };
 
         txn.commit().await?;
+        drop(_admin_admission);
 
         if let (Some(rack_id), Some(rms_client), Some(node_identity)) = (
             &expected_machine.data.rack_id,
@@ -505,27 +506,12 @@ impl MachineCreator {
             let request = rms::BatchGetNodeDeviceInfoRequest {
                 nodes: Some(rms::NodeSet { nodes: vec![node] }),
             };
-            let (slot_number, tray_index) =
-                crate::fetch_slot_and_tray(rms_client.as_ref(), request).await;
-            let mut update_txn = Transaction::begin(pool).await?;
-            if let Err(e) = db::machine::update_slot_and_tray(
-                &mut update_txn,
-                &host_machine_id,
-                slot_number,
-                tray_index,
-            )
-            .await
-            {
-                emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
-                    e.to_string(),
-                    host_machine_id.to_string(),
-                ));
-                update_txn
-                    .rollback_or_log("site-explorer slot and tray update after operation failure")
-                    .await;
-            } else {
-                update_txn.commit().await?;
-            }
+            let pool = pool.clone();
+            let rms_client = Arc::clone(rms_client);
+            // RMS enrichment is best effort and must not delay subsequent machine creation.
+            drop(tokio::spawn(async move {
+                enrich_machine_slot_and_tray(pool, rms_client, request, host_machine_id).await;
+            }));
         }
 
         Ok(true)
@@ -1466,6 +1452,41 @@ impl MachineCreator {
         .await?;
 
         Ok(PredictedHostMachineId::try_from(predicted_machine_id)?)
+    }
+}
+
+async fn enrich_machine_slot_and_tray(
+    pool: PgPool,
+    rms_client: Arc<dyn RmsApi>,
+    request: rms::BatchGetNodeDeviceInfoRequest,
+    host_machine_id: MachineId,
+) {
+    let (slot_number, tray_index) = crate::fetch_slot_and_tray(rms_client.as_ref(), request).await;
+    let mut txn = match Transaction::begin(&pool).await {
+        Ok(txn) => txn,
+        Err(error) => {
+            emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
+                error.to_string(),
+                host_machine_id.to_string(),
+            ));
+            return;
+        }
+    };
+
+    if let Err(error) =
+        db::machine::update_slot_and_tray(&mut txn, &host_machine_id, slot_number, tray_index).await
+    {
+        emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
+            error.to_string(),
+            host_machine_id.to_string(),
+        ));
+        txn.rollback_or_log("site-explorer slot and tray update after operation failure")
+            .await;
+    } else if let Err(error) = txn.commit().await {
+        emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
+            error.to_string(),
+            host_machine_id.to_string(),
+        ));
     }
 }
 
