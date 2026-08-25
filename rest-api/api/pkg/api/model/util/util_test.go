@@ -4,6 +4,7 @@
 package util
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
@@ -220,6 +221,35 @@ func TestInsertPhoneHomeIntoArchive(t *testing.T) {
 		assert.Equal(t, 1, strings.Count(rendered, "phone_home:"), "exactly one phone-home entry must remain")
 	})
 
+	t.Run("strips a stale block from an entry and keeps the rest of it", func(t *testing.T) {
+		userData, err := EnablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/cloud-config
+  launch-index: 2
+  filename: base.yaml
+  content: |
+    #cloud-config
+    packages:
+    - curl
+    phone_home:
+      url: http://old.example/phone-home
+    runcmd:
+    - [echo, hi]
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		archiveRoot := unmarshalArchiveRoot(t, *userData)
+		require.Len(t, archiveRoot.Content, 2, "the entry is kept and phone-home appended to the archive")
+
+		entry := archiveRoot.Content[0]
+		assert.Equal(t, "2", mappingNodeValue(entry, "launch-index").Value, "the entry's own keys must be kept")
+		assert.Equal(t, "base.yaml", mappingNodeValue(entry, "filename").Value)
+
+		content := mappingNodeValue(entry, archiveEntryContent).Value
+		assert.NotContains(t, content, "old.example", "the stale block must go")
+		assert.Contains(t, content, "curl", "what was written beside it must not")
+		assert.Contains(t, content, "runcmd")
+	})
+
 	t.Run("does not treat a header-less list as a cloud-config-archive", func(t *testing.T) {
 		// A YAML list with no #cloud-config-archive header is not valid cloud-init
 		// user-data, so phone-home must not be enabled on it.
@@ -383,6 +413,11 @@ func TestPhoneHomeInAliasedArchiveEntry(t *testing.T) {
 - *phone
 `), phoneHomeURL)
 		require.NoError(t, err)
+
+		// The alias entry is read through to the entry it points at, so it is
+		// stripped and dropped with it - rather than kept, which would leave
+		// `- *phone` behind with nothing to point at.
+		assert.NotContains(t, *userData, "*phone", "no alias may outlive the entry it points at")
 
 		// unmarshalArchiveRoot parses the result, so a dangling alias fails here.
 		assert.Empty(t, unmarshalArchiveRoot(t, *userData).Content, "both entries must be removed")
@@ -655,7 +690,7 @@ func TestPhoneHomeInAMergedArchiveEntry(t *testing.T) {
 		assert.NotContains(t, *userData, SitePhoneHomeName)
 	})
 
-	t.Run("disabling empties the entry the merge reads", func(t *testing.T) {
+	t.Run("disabling drops the entry the merge reads", func(t *testing.T) {
 		userData, err := DisablePhoneHomeInUserData(new(authored), phoneHomeURL)
 		require.NoError(t, err)
 
@@ -663,7 +698,80 @@ func TestPhoneHomeInAMergedArchiveEntry(t *testing.T) {
 			"the dropped entry must not come back through the merge")
 	})
 
-	t.Run("leaves alone an entry whose type it cannot tell", func(t *testing.T) {
+	t.Run("strips the block an entry merges its type for", func(t *testing.T) {
+		// The type arrives through the merge, so the entry is cloud-config and
+		// the block in it is ours to take out.
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- &base
+  type: text/cloud-config
+- <<: *base
+  content: |
+    #cloud-config
+    packages:
+    - curl
+    phone_home:
+      url: `+phoneHomeURL+`
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.NotContains(t, *userData, SitePhoneHomeName)
+		assert.Contains(t, *userData, "curl", "the rest of the entry must be kept")
+	})
+
+	t.Run("rewrites an entry that merges the content it strips", func(t *testing.T) {
+		// The content is not the entry's own to rewrite, so the entry takes one of
+		// its own: cloud-init resolves the merge, then reads the entry's key over
+		// the merged one.
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/x-shellscript
+  content: |
+    #!/bin/sh
+  base: &base
+    type: text/cloud-config
+    content: |
+      #cloud-config
+      packages:
+      - curl
+      phone_home:
+        url: `+phoneHomeURL+`
+- <<: *base
+  launch-index: 1
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		archiveRoot := unmarshalArchiveRoot(t, *userData)
+		require.Len(t, archiveRoot.Content, 2)
+
+		content := mappingNodeValue(archiveRoot.Content[1], archiveEntryContent)
+		require.NotNil(t, content, "the entry must carry the stripped content itself")
+		assert.NotContains(t, content.Value, SitePhoneHomeName)
+		assert.Contains(t, content.Value, "curl")
+	})
+
+	t.Run("keeps the content an entry of another type merges from a dropped one", func(t *testing.T) {
+		// The merging entry is a script, so what it holds is text we must not
+		// touch - even though the entry it merges is one we drop.
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- &base
+  type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: `+phoneHomeURL+`
+- <<: *base
+  type: text/x-shellscript
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		require.Len(t, unmarshalArchiveRoot(t, *userData).Content, 1, "only the cloud-config entry must go")
+
+		// The text is kept, not run: the entry's own type says script, so what it
+		// merges is a shell script that happens to read like cloud-config.
+		assert.Contains(t, *userData, "url: "+phoneHomeURL,
+			"the script entry keeps the text it merges")
+	})
+
+	t.Run("leaves alone an entry whose type merges to another format", func(t *testing.T) {
 		// The merged entry is a script, so its cloud-config-looking content is
 		// text we must not touch.
 		const script = `#cloud-config-archive
@@ -711,6 +819,76 @@ phone_home:
 	assert.Nil(t, mappingNodeValue(unmarshalDocumentRoot(t, *userData), SitePhoneHomeName))
 }
 
+func TestPhoneHomeMergedIntoADocument(t *testing.T) {
+	// cloud-init reads a block merged in with `<<` as the mapping's own, so it is
+	// taken out of the mapping it is written in - the only place it can be taken
+	// out of, since a merged key cannot be overridden away.
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	t.Run("through more than one merge key", func(t *testing.T) {
+		// yaml applies every `<<` a mapping holds, so a block behind the first of
+		// them is as live as one behind the last.
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config
+reporting: &reporting
+  phone_home:
+    url: `+phoneHomeURL+`
+installed: &installed
+  packages:
+  - curl
+autoinstall:
+  version: 1
+  user-data:
+    <<: *reporting
+    <<: *installed
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.NotContains(t, *userData, SitePhoneHomeName)
+		assert.Contains(t, *userData, "curl", "what the other merge brings in must be kept")
+	})
+
+	userData, err := DisablePhoneHomeInUserData(new(`#cloud-config
+defaults: &shared
+  phone_home:
+    url: `+phoneHomeURL+`
+  packages:
+  - curl
+autoinstall:
+  version: 1
+  user-data:
+    <<: *shared
+`), phoneHomeURL)
+	require.NoError(t, err)
+
+	assert.NotContains(t, *userData, SitePhoneHomeName)
+	assert.Contains(t, *userData, "curl", "the rest of what it merges must be kept")
+}
+
+func TestPhoneHomeInUserDataHoldingMoreThanOneDocument(t *testing.T) {
+	// cloud-init reads one document out of user-data. Rendering back the one we
+	// read would drop the rest, so more than one is not user-data we edit.
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	const authored = `#cloud-config
+packages:
+- curl
+phone_home:
+  url: ` + phoneHomeURL + `
+---
+runcmd:
+- [echo, hi]
+`
+
+	// Unsupported in both directions: the callers leave user-data alone on
+	// disable, which is safe here because cloud-init's loader will not read this
+	// document either, so the block in it never runs.
+	_, err := DisablePhoneHomeInUserData(new(authored), phoneHomeURL)
+	assert.ErrorIs(t, err, ErrUnsupportedUserData)
+
+	_, err = EnablePhoneHomeInUserData(new(authored), phoneHomeURL)
+	assert.ErrorIs(t, err, ErrUnsupportedUserData)
+}
+
 func TestRemovePhoneHomeKeepsWhatWasWrittenAroundContent(t *testing.T) {
 	const phoneHomeURL = "http://169.254.169.254/phone-home"
 
@@ -729,6 +907,188 @@ func TestRemovePhoneHomeKeepsWhatWasWrittenAroundContent(t *testing.T) {
 
 	assert.Contains(t, *userData, "# the base config")
 	assert.NotContains(t, *userData, SitePhoneHomeName)
+}
+
+func TestPhoneHomeInArchiveThatInstallsATargetSystem(t *testing.T) {
+	// An autoinstall entry installs a system of its own, and phone-home belongs
+	// in the config that system runs, not in the installer's. An entry of its own
+	// would report from the installer, so the callback never comes from the
+	// target.
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	const authored = `#cloud-config-archive
+- type: text/x-shellscript
+  content: |
+    #!/bin/sh
+    echo hello
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    autoinstall:
+      version: 1
+      user-data:
+        packages:
+        - curl
+`
+
+	t.Run("enabling puts it under the entry's autoinstall", func(t *testing.T) {
+		userData, err := EnablePhoneHomeInUserData(new(authored), phoneHomeURL)
+		require.NoError(t, err)
+
+		archiveRoot := unmarshalArchiveRoot(t, *userData)
+		require.Len(t, archiveRoot.Content, 2, "phone-home must not be added as an entry of its own")
+
+		content := mappingNodeValue(archiveRoot.Content[1], archiveEntryContent)
+		require.NotNil(t, content)
+
+		installed := mappingNodeValue(
+			mappingNodeValue(phoneHomeInContent(t, content.Value), autoinstallName), autoinstallUserData)
+		require.NotNil(t, installed)
+		assert.Equal(t, phoneHomeURL,
+			mappingNodeValue(mappingNodeValue(installed, SitePhoneHomeName), SitePhoneHomeUrl).Value)
+	})
+
+	t.Run("passes over a templated entry", func(t *testing.T) {
+		// yaml reads `{{ x }}` as a mapping and writes it back as one, so a jinja
+		// entry cannot be rendered back and phone-home goes in an entry of its own.
+		const templated = `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    ## template: jinja
+    #cloud-config
+    autoinstall:
+      version: 1
+      user-data:
+        hostname: {{ v1.local_hostname }}
+`
+
+		userData, err := EnablePhoneHomeInUserData(new(templated), phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.Contains(t, *userData, "hostname: {{ v1.local_hostname }}",
+			"the template must be left as authored")
+		assert.Len(t, unmarshalArchiveRoot(t, *userData).Content, 2)
+	})
+
+	t.Run("passes over an autoinstall it cannot reach into", func(t *testing.T) {
+		// A malformed autoinstall is not a system we can install phone-home into,
+		// so phone-home goes in an entry of its own rather than failing the
+		// request over somebody else's entry.
+		for _, autoinstall := range []string{"not-a-mapping", "\n      version: 1\n      user-data: nope"} {
+			userData, err := EnablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    autoinstall: `+autoinstall+`
+`), phoneHomeURL)
+			require.NoError(t, err)
+
+			assert.Len(t, unmarshalArchiveRoot(t, *userData).Content, 2,
+				"phone-home must be added as an entry of its own")
+		}
+	})
+
+	t.Run("enabling twice does not duplicate it", func(t *testing.T) {
+		userData, err := EnablePhoneHomeInUserData(new(authored), phoneHomeURL)
+		require.NoError(t, err)
+
+		userData, err = EnablePhoneHomeInUserData(userData, phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.Equal(t, 1, strings.Count(*userData, SitePhoneHomeName))
+	})
+
+	t.Run("disabling takes it back out", func(t *testing.T) {
+		userData, err := EnablePhoneHomeInUserData(new(authored), phoneHomeURL)
+		require.NoError(t, err)
+
+		userData, err = DisablePhoneHomeInUserData(userData, phoneHomeURL)
+		require.NoError(t, err)
+
+		// The entry is re-rendered, so yaml's indentation is what comes back, not
+		// the authored text.
+		assert.NotContains(t, *userData, SitePhoneHomeName)
+		assert.Contains(t, *userData, autoinstallName, "the rest of the entry must be kept")
+		assert.Contains(t, *userData, "curl")
+	})
+}
+
+func TestPhoneHomeTogglesInAnArchive(t *testing.T) {
+	// Unchecking the box and checking it again is the flow the UI drives, so what
+	// each direction stores has to be user-data the other can read back.
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	t.Run("enabling, disabling and enabling again", func(t *testing.T) {
+		const authored = `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    packages:
+    - curl
+`
+
+		userData, err := EnablePhoneHomeInUserData(new(authored), phoneHomeURL)
+		require.NoError(t, err)
+
+		userData, err = DisablePhoneHomeInUserData(userData, phoneHomeURL)
+		require.NoError(t, err)
+		assert.Equal(t, authored, *userData, "disabling must give back the archive as authored")
+
+		userData, err = EnablePhoneHomeInUserData(userData, phoneHomeURL)
+		require.NoError(t, err)
+		assert.Equal(t, 1, strings.Count(*userData, SitePhoneHomeName))
+		assert.Contains(t, *userData, "curl", "the entries around it must survive the toggling")
+	})
+
+	t.Run("enabling on an archive that disabling emptied", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: `+phoneHomeURL+`
+`), phoneHomeURL)
+		require.NoError(t, err)
+		require.Empty(t, unmarshalArchiveRoot(t, *userData).Content, "an emptied archive keeps its header")
+
+		userData, err = EnablePhoneHomeInUserData(userData, phoneHomeURL)
+		require.NoError(t, err)
+
+		archiveRoot := unmarshalArchiveRoot(t, *userData)
+		require.Len(t, archiveRoot.Content, 1)
+		phoneHome := phoneHomeFromContent(t, mappingNodeValue(archiveRoot.Content[0], archiveEntryContent).Value)
+		require.NotNil(t, phoneHome)
+		assert.Equal(t, phoneHomeURL, mappingNodeValue(phoneHome, SitePhoneHomeUrl).Value)
+	})
+}
+
+func TestPhoneHomeInAnEncodedArchiveEntry(t *testing.T) {
+	// An entry can carry its content encoded, which is not user-data we can read:
+	// it is left exactly as authored in both directions. Phone-home inside it is
+	// therefore not ours to take out, and enabling adds an entry of our own
+	// rather than rewriting theirs.
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	encoded := base64.StdEncoding.EncodeToString(
+		[]byte("#cloud-config\nphone_home:\n  url: " + phoneHomeURL + "\n"))
+	authored := `#cloud-config-archive
+- type: text/cloud-config
+  encoding: b64
+  content: ` + encoded + "\n"
+
+	t.Run("disabling leaves it as authored", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(authored), phoneHomeURL)
+		require.NoError(t, err)
+		assert.Equal(t, authored, *userData)
+	})
+
+	t.Run("enabling adds an entry of its own", func(t *testing.T) {
+		userData, err := EnablePhoneHomeInUserData(new(authored), phoneHomeURL)
+		require.NoError(t, err)
+
+		require.Len(t, unmarshalArchiveRoot(t, *userData).Content, 2)
+		assert.Contains(t, *userData, encoded, "the encoded entry must be left as authored")
+	})
 }
 
 func TestPhoneHomeInScalarArchiveEntry(t *testing.T) {
@@ -985,14 +1345,20 @@ func unmarshalUserDataRoot(t *testing.T, userData string) *yaml.Node {
 	return document.Content[0]
 }
 
-func phoneHomeFromContent(t *testing.T, content string) *yaml.Node {
+func phoneHomeInContent(t *testing.T, content string) *yaml.Node {
 	t.Helper()
 
 	inner := &yaml.Node{}
 	require.NoError(t, yaml.Unmarshal([]byte(content), inner))
 	require.Len(t, inner.Content, 1)
 
-	return mappingNodeValue(inner.Content[0], SitePhoneHomeName)
+	return inner.Content[0]
+}
+
+func phoneHomeFromContent(t *testing.T, content string) *yaml.Node {
+	t.Helper()
+
+	return mappingNodeValue(phoneHomeInContent(t, content), SitePhoneHomeName)
 }
 
 func TestMarshalUserData(t *testing.T) {

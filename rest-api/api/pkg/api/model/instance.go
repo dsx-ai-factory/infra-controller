@@ -741,6 +741,21 @@ func (icr APIInstanceCreateRequest) ValidateForVpc(vpc *cdbm.Vpc) error {
 	return nil
 }
 
+// phoneHomeUserDataError names the operation that failed, so a failure to take
+// phone-home out does not send whoever reads it looking at the path that puts it
+// in.
+func phoneHomeUserDataError(enabled bool) validation.Errors {
+	if enabled {
+		return validation.Errors{
+			"userData": errors.New("failed to insert phone-home into userData"),
+		}
+	}
+
+	return validation.Errors{
+		"userData": errors.New("failed to remove phone-home from userData"),
+	}
+}
+
 // Validate the OS against any additional option combinations specified.
 func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *config.Config, os *cdbm.OperatingSystem) error {
 	// The OS passed in will either be:
@@ -899,9 +914,7 @@ func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 				}
 			}
 		case err != nil:
-			return validation.Errors{
-				"userData": errors.New("failed to insert phone-home into userData"),
-			}
+			return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
 		case userData != nil:
 			// Empty means phone-home was all the user-data held, so the field is
 			// blanked.
@@ -1225,9 +1238,7 @@ func (bicr *APIBatchInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg
 				}
 			}
 		case err != nil:
-			return validation.Errors{
-				"userData": errors.New("failed to insert phone-home into userData"),
-			}
+			return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
 		case userData != nil:
 			// Empty means phone-home was all the user-data held, so the field is
 			// blanked.
@@ -1497,9 +1508,7 @@ func (iur *APIInstanceUpdateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 				}
 			}
 		case err != nil:
-			return validation.Errors{
-				"userData": errors.New("failed to insert phone-home into userData"),
-			}
+			return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
 		case userData != nil:
 			// Empty means phone-home was all the user-data held, so the field is
 			// blanked.

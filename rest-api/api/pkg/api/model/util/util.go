@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 
@@ -72,7 +73,8 @@ func MarshalUserData(document *yaml.Node) ([]byte, error) {
 
 // ErrUnsupportedUserData reports user-data phone-home cannot live in: not a
 // #cloud-config mapping or a #cloud-config-archive sequence, but a script, a
-// template cloud-init ignores, or text that is not YAML. Enabling phone-home
+// template cloud-init ignores, text that is not YAML, or more than one document,
+// which cloud-init's loader will not read either. Enabling phone-home
 // rejects it; disabling leaves it alone, since the block cannot be in there.
 var ErrUnsupportedUserData = errors.New("userData is not a #cloud-config or #cloud-config-archive document")
 
@@ -96,7 +98,7 @@ func EnablePhoneHomeInUserData(userData *string, url string) (*string, error) {
 		if _, err := removePhoneHomeParts(documentRoot, nil); err != nil {
 			return nil, err
 		}
-		err = appendPhoneHomePart(documentRoot, url)
+		err = insertPhoneHomePart(documentRoot, url)
 	} else {
 		err = insertPhoneHome(documentRoot, url)
 	}
@@ -169,8 +171,16 @@ func parseUserData(userData *string) (string, *yaml.Node, error) {
 
 	header, body := splitUserDataHeader(*userData)
 
+	decoder := yaml.NewDecoder(strings.NewReader(body))
+
 	document := &yaml.Node{}
-	if err := yaml.Unmarshal([]byte(body), document); err != nil || len(document.Content) == 0 {
+	if err := decoder.Decode(document); err != nil || len(document.Content) == 0 {
+		return "", nil, ErrUnsupportedUserData
+	}
+
+	// cloud-init reads one document out of user-data, and rendering back what we
+	// read would drop the rest, so more than one is not user-data we can edit.
+	if err := decoder.Decode(&yaml.Node{}); !errors.Is(err, io.EOF) {
 		return "", nil, ErrUnsupportedUserData
 	}
 
@@ -321,6 +331,20 @@ func removePhoneHome(documentRoot *yaml.Node, url *string) bool {
 // removePhoneHomeFromMapping deletes the phone_home keys of one mapping. Valid
 // but nonsensical user-data can repeat the key, so the whole mapping is scanned.
 func removePhoneHomeFromMapping(mappingNode *yaml.Node, url *string) bool {
+	return removePhoneHomeFromMerged(mappingNode, url, map[*yaml.Node]bool{})
+}
+
+// removePhoneHomeFromMerged deletes the phone_home keys of a mapping and of the
+// mappings it merges in with `<<`: cloud-init reads a merged block as the
+// mapping's own, so taking it out means taking it out where it is written. read
+// bounds the walk, since a merge can point back at a mapping already scanned.
+func removePhoneHomeFromMerged(mappingNode *yaml.Node, url *string, read map[*yaml.Node]bool) bool {
+	mappingNode = resolveAlias(mappingNode)
+	if mappingNode == nil || read[mappingNode] {
+		return false
+	}
+	read[mappingNode] = true
+
 	removed := false
 
 	// Mapping content is a flat run of key/value pairs, so a key is dropped by
@@ -336,6 +360,10 @@ func removePhoneHomeFromMapping(mappingNode *yaml.Node, url *string) bool {
 
 		mappingNode.Content = append(mappingNode.Content[:i], mappingNode.Content[i+2:]...)
 		removed = true
+	}
+
+	for _, merged := range mergedMappings(mappingNode) {
+		removed = removePhoneHomeFromMerged(merged, url, read) || removed
 	}
 
 	return removed
@@ -359,8 +387,7 @@ func phoneHomeReportsTo(phoneHomeNode *yaml.Node, url *string) bool {
 // document.
 func removePhoneHomeParts(archiveRoot *yaml.Node, url *string) (bool, error) {
 	removed := false
-	kept := archiveRoot.Content[:0]
-	var dropped []*yaml.Node
+	kept := make([]*yaml.Node, 0, len(archiveRoot.Content))
 
 	for _, part := range archiveRoot.Content {
 		content := cloudConfigArchiveContent(part)
@@ -384,7 +411,6 @@ func removePhoneHomeParts(archiveRoot *yaml.Node, url *string) (bool, error) {
 			kept = append(kept, part)
 		case *stripped == "":
 			// The part held nothing but phone-home, so drop it entirely.
-			dropped = append(dropped, part)
 			removed = true
 		default:
 			kept = append(kept, partWithContent(part, *stripped))
@@ -392,12 +418,6 @@ func removePhoneHomeParts(archiveRoot *yaml.Node, url *string) (bool, error) {
 		}
 	}
 	archiveRoot.Content = kept
-
-	// A part merging a dropped one still reads it, so what it held is emptied -
-	// after the loop, since the parts after it read it to strip themselves.
-	for _, part := range dropped {
-		setPartContent(resolveAlias(part), "")
-	}
 
 	return removed, nil
 }
@@ -421,6 +441,15 @@ func partWithContent(part *yaml.Node, text string) *yaml.Node {
 func setPartContent(part *yaml.Node, text string) {
 	if index := mappingIndex(part, archiveEntryContent); index >= 0 {
 		part.Content[index] = rewrittenContent(part.Content[index], text)
+
+		return
+	}
+
+	// The content is one the part merges in, so the part takes a content key of
+	// its own: a part's own keys win over the ones it merges.
+	if merged := mappingValue(part, archiveEntryContent); merged != nil {
+		part.Content = append(part.Content,
+			scalarNode(archiveEntryContent), rewrittenContent(merged, text))
 	}
 }
 
@@ -433,6 +462,60 @@ func rewrittenContent(authored *yaml.Node, text string) *yaml.Node {
 	content.SetString(text)
 
 	return &content
+}
+
+// insertPhoneHomePart adds phone-home to an archive: under the autoinstall of
+// the part that installs a target system, since that is the config the installed
+// system runs, and otherwise as a part of its own.
+func insertPhoneHomePart(archiveRoot *yaml.Node, url string) error {
+	for i, part := range archiveRoot.Content {
+		content := cloudConfigArchiveContent(part)
+		if content == nil {
+			continue
+		}
+
+		header, partRoot, err := parseUserData(&content.Value)
+		if err != nil || declaresFormat(header, jinjaTemplateHeader) ||
+			!installsATargetSystem(partRoot) {
+			// A template is not a document to render back: yaml reads `{{ x }}` as
+			// a mapping and would write it back as one, so it is passed over.
+			continue
+		}
+
+		if err := insertPhoneHome(partRoot, url); err != nil {
+			return err
+		}
+		inlineDanglingAliases(partRoot)
+
+		rendered, err := renderUserData(header, partRoot)
+		if err != nil {
+			return err
+		}
+		archiveRoot.Content[i] = partWithContent(part, *rendered)
+
+		return nil
+	}
+
+	return appendPhoneHomePart(archiveRoot, url)
+}
+
+// installsATargetSystem reports whether a document installs a system of its own,
+// which is the document phone-home belongs in. The autoinstall has to be one
+// insertPhoneHome can reach into, so a document it would reject is passed over
+// rather than failing the whole request.
+func installsATargetSystem(documentRoot *yaml.Node) bool {
+	if documentRoot.Kind != yaml.MappingNode {
+		return false
+	}
+
+	autoinstallNode := mappingValue(documentRoot, autoinstallName)
+	if autoinstallNode == nil || autoinstallNode.Kind != yaml.MappingNode {
+		return false
+	}
+
+	targetUserDataNode := mappingValue(autoinstallNode, autoinstallUserData)
+
+	return targetUserDataNode == nil || targetUserDataNode.Kind == yaml.MappingNode
 }
 
 // appendPhoneHomePart appends the archive part that carries phone-home. Its
@@ -479,12 +562,6 @@ func cloudConfigArchiveContent(part *yaml.Node) *yaml.Node {
 	}
 
 	if part.Kind != yaml.MappingNode {
-		return nil
-	}
-
-	// cloud-init resolves `<<` at load, so what a part that merges another ends
-	// up holding - its type included - cannot be told from here.
-	if mappingValue(part, mergeKey) != nil {
 		return nil
 	}
 
@@ -568,23 +645,71 @@ func resolveAlias(node *yaml.Node) *yaml.Node {
 // none - a mapping that is not there holds nothing, so lookups chain. Aliases
 // are read through, so every lookup sees what cloud-init sees.
 func mappingValue(mappingNode *yaml.Node, key string) *yaml.Node {
+	return valueInMapping(mappingNode, key, map[*yaml.Node]bool{})
+}
+
+// valueInMapping reads key out of a mapping and, failing that, out of the
+// mappings it merges in with `<<`, the way yaml's loader resolves a merge: a
+// mapping's own keys win over the ones it merges, and the first mapping it
+// merges wins over the ones after it. read bounds the walk, since a merge can
+// point back at a mapping already read.
+func valueInMapping(mappingNode *yaml.Node, key string, read map[*yaml.Node]bool) *yaml.Node {
 	mappingNode = resolveAlias(mappingNode)
-	if mappingNode == nil {
+	if mappingNode == nil || read[mappingNode] {
+		return nil
+	}
+	read[mappingNode] = true
+
+	if index := mappingIndex(mappingNode, key); index >= 0 {
+		return resolveAlias(mappingNode.Content[index])
+	}
+
+	for _, merged := range mergedMappings(mappingNode) {
+		if value := valueInMapping(merged, key, read); value != nil {
+			return value
+		}
+	}
+
+	return nil
+}
+
+// mergedMappings returns the mappings a mapping merges in with `<<`, in the
+// order yaml applies them: every merge key it holds, each naming one mapping or
+// listing a sequence of them, the first of which wins.
+func mergedMappings(mappingNode *yaml.Node) []*yaml.Node {
+	if mappingNode.Kind != yaml.MappingNode {
 		return nil
 	}
 
-	index := mappingIndex(mappingNode, key)
-	if index < 0 {
-		return nil
+	var merged []*yaml.Node
+	for i := 0; i+1 < len(mappingNode.Content); i += 2 {
+		if keyNode := resolveAlias(mappingNode.Content[i]); keyNode.Value != mergeKey {
+			continue
+		}
+
+		sources := resolveAlias(mappingNode.Content[i+1])
+		if sources.Kind != yaml.SequenceNode {
+			merged = append(merged, sources)
+
+			continue
+		}
+
+		for _, source := range sources.Content {
+			merged = append(merged, resolveAlias(source))
+		}
 	}
 
-	return resolveAlias(mappingNode.Content[index])
+	return merged
 }
 
 // mappingIndex returns where a mapping holds its value for key, or -1 when it
 // holds none. A key written twice is read the way cloud-init's loader reads it,
 // where the last one wins.
 func mappingIndex(mappingNode *yaml.Node, key string) int {
+	if mappingNode.Kind != yaml.MappingNode {
+		return -1
+	}
+
 	index := -1
 	for i := 0; i+1 < len(mappingNode.Content); i += 2 {
 		keyNode := resolveAlias(mappingNode.Content[i])
