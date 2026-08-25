@@ -565,6 +565,8 @@ impl SiteExplorer {
         join_set: &mut JoinSet<()>,
         cancel_token: CancellationToken,
     ) -> io::Result<()> {
+        self.machine_creator
+            .bind_rms_enrichment_cancellation(cancel_token.clone());
         join_set
             .build_task()
             .name("site_explorer")
@@ -595,6 +597,7 @@ impl SiteExplorer {
                 _ = tick.sleep() => {},
                 _ = cancel_token.cancelled() => {
                     tracing::info!("SiteExplorer stop was requested");
+                    self.machine_creator.wait_for_rms_enrichment_tasks().await;
                     return;
                 }
             }
