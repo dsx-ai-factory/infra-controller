@@ -172,6 +172,23 @@ fn machine_creator_with_rms(env: &Env, rms_sim: &RmsSim) -> MachineCreator {
     )
 }
 
+async fn wait_for_node_device_info_request(rms_sim: &RmsSim) -> Result<(), std::io::Error> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !rms_sim
+                .submitted_batch_get_node_device_info_requests()
+                .await
+                .is_empty()
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| std::io::Error::other("RMS node-device-info request was not submitted"))
+}
+
 fn expected_machine(managed_host: &ManagedHostConfig) -> ExpectedMachine {
     ExpectedMachine {
         id: Some(uuid::Uuid::new_v4()),
@@ -237,6 +254,7 @@ async fn test_machine_creator_compute_rms_request_uses_rack_profile(
             )
             .await?
     );
+    wait_for_node_device_info_request(&rms_sim).await?;
 
     let requests = rms_sim
         .submitted_batch_get_node_device_info_requests()
@@ -295,6 +313,104 @@ async fn test_machine_creator_compute_rms_request_uses_rack_profile(
         descriptor.attributes.get("attribute1").map(String::as_str),
         Some("compute-value")
     );
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_machine_creator_rms_lookup_does_not_block_machine_creation(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let rms_sim = RmsSim::default();
+    let creator = machine_creator_with_rms(&env, &rms_sim);
+    let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+    let expected_rack = ExpectedRack {
+        rack_id: rack_id.clone(),
+        rack_profile_id: RackProfileId::new(TEST_RMS_RACK_PROFILE_ID),
+        metadata: Default::default(),
+    };
+
+    let mut txn = env.pool.begin().await?;
+    db::expected_rack::create(txn.as_mut(), &expected_rack).await?;
+    txn.commit().await?;
+
+    rms_sim
+        .queue_batch_get_node_device_info_response(Ok(rms::BatchGetNodeDeviceInfoResponse {
+            node_device_details: vec![rms::NodeDeviceInfo {
+                slot_number: Some(7),
+                tray_index: Some(3),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .await;
+    rms_sim.set_batch_get_node_device_info_blocked(true);
+
+    let managed_host =
+        ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
+            rack_id: Some(rack_id),
+            ..Default::default()
+        });
+    let mut fixture = explored_host_fixture(&env, &managed_host).await;
+    let expected_machine = expected_machine(&managed_host);
+
+    let create_result = {
+        let create = creator.create_managed_host(
+            &fixture.host,
+            &mut fixture.host_report,
+            Some(&expected_machine),
+            &env.pool,
+        );
+        tokio::pin!(create);
+        tokio::select! {
+            result = &mut create => result,
+            request_result = wait_for_node_device_info_request(&rms_sim) => {
+                request_result?;
+                tokio::time::timeout(Duration::from_secs(1), &mut create)
+                    .await
+                    .map_err(|_| std::io::Error::other(
+                        "machine creation remained blocked on RMS slot/tray enrichment",
+                    ))?
+            }
+        }
+    };
+
+    assert!(create_result?);
+    wait_for_node_device_info_request(&rms_sim).await?;
+
+    let machines = db::machine::find(
+        &env.pool,
+        ObjectFilter::All,
+        MachineSearchConfig {
+            include_predicted_host: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let host = machines
+        .iter()
+        .find(|machine| !machine.is_dpu())
+        .ok_or_else(|| std::io::Error::other("created host machine was not found"))?;
+    let host_machine_id = host.id;
+    assert_eq!(host.status.slot_number, None);
+    assert_eq!(host.status.tray_index, None);
+
+    rms_sim.set_batch_get_node_device_info_blocked(false);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let host =
+                db::machine::find_one(&env.pool, &host_machine_id, MachineSearchConfig::default())
+                    .await?
+                    .ok_or_else(|| std::io::Error::other("created host machine disappeared"))?;
+            if host.status.slot_number == Some(7) && host.status.tray_index == Some(3) {
+                return Ok::<(), Box<dyn std::error::Error>>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| std::io::Error::other("RMS slot/tray enrichment was not persisted"))??;
 
     Ok(())
 }
