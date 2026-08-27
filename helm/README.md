@@ -80,14 +80,15 @@ Top-level `global:` values are automatically passed to all subcharts.
 client identity and, optionally, the NVSwitch server identity. Both leaves
 use the existing `nvSwitchTls.issuerRef`, which defaults to
 `vault-nico-issuer`. NMX-C/NVUE must trust the CA behind that issuer when NICo
-connects, and NICo uses the CA returned in its client Secret to verify the
-server certificate presented by the switch.
+connects, and NICo must use an independently managed CA bundle that validates
+the server certificate presented by the switch.
 
 The profiles are deliberately fixed to the capabilities each peer needs:
 
 - `nicoClient` uses `digital signature` and `client auth`. Its Secret is
-  mounted read-only in the nico-api container as `tls.crt`, `tls.key`, and
-  `ca.crt`.
+  mounted read-only in the nico-api container. cert-manager writes `tls.crt`
+  and `tls.key`; the selected issuer can also write `ca.crt`, but that key is
+  not guaranteed.
 - `switchServer` uses `digital signature`, `server auth`, and `client auth`.
   Its Secret is created in the NICo namespace but is never mounted into
   nico-api. A switch installer or operator must copy the certificate, private
@@ -119,11 +120,19 @@ nico-api:
     nicoApiSiteConfig: |
       [nvlink_config]
       enabled = true
-      nmx_c_tls_ca_cert_path = "/var/run/secrets/nvswitch-client/ca.crt"
+      nmx_c_tls_ca_cert_path = "/var/run/secrets/nico-roots/ca.crt"
       nmx_c_tls_client_cert_path = "/var/run/secrets/nvswitch-client/tls.crt"
       nmx_c_tls_client_key_path = "/var/run/secrets/nvswitch-client/tls.key"
       nmx_c_tls_authority = "nmxc.example.internal"
 ```
+
+The chart mounts the independently managed `nico-roots` Secret at
+`/var/run/secrets/nico-roots`. This example requires its `data.ca.crt` to
+validate the NMX-C server chain. If the switch uses a different CA, mount that
+trust bundle separately and point `nmx_c_tls_ca_cert_path` to it; do not assume
+that the generated client Secret contains `ca.crt`. The current `nvSwitchTls`
+values do not add a custom CA volume; provide that mount through the surrounding
+deployment mechanism.
 
 The configured issuer and any cert-manager approver policy must allow both
 requested URI/DNS identities, durations, key profile, and usages. Creating the
