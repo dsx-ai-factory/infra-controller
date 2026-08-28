@@ -255,15 +255,15 @@ fn rms_location_value(value: Option<u32>) -> Result<Option<i32>, u32> {
 
 /// Fetches `slot_number` and `tray_index` from RMS for one rack/node pair.
 /// Each value remains usable when the other is absent or outside `i32`.
-pub async fn fetch_slot_and_tray(
+pub(crate) async fn fetch_slot_and_tray(
     rms_client: &dyn librms::RmsApi,
     request: librms::protos::rack_manager::BatchGetNodeDeviceInfoRequest,
-) -> (Option<i32>, Option<i32>) {
+) -> Result<(Option<i32>, Option<i32>), librms::RackManagerError> {
     match rms_client.batch_get_node_device_info(request).await {
         Ok(info) => {
             let Some(node_device_details) = info.node_device_details.first() else {
                 carbide_instrument::emit(SiteExplorerMachineSlotTrayResponseMissing::new());
-                return (None, None);
+                return Ok((None, None));
             };
 
             let slot_number =
@@ -281,11 +281,11 @@ pub async fn fetch_slot_and_tray(
                     None
                 });
 
-            (slot_number, tray_index)
+            Ok((slot_number, tray_index))
         }
         Err(e) => {
             carbide_instrument::emit(SiteExplorerMachineSlotTrayFetchFailed::new(e.to_string()));
-            (None, None)
+            Err(e)
         }
     }
 }
@@ -565,8 +565,6 @@ impl SiteExplorer {
         join_set: &mut JoinSet<()>,
         cancel_token: CancellationToken,
     ) -> io::Result<()> {
-        self.machine_creator
-            .bind_rms_enrichment_cancellation(cancel_token.clone());
         join_set
             .build_task()
             .name("site_explorer")
@@ -597,7 +595,6 @@ impl SiteExplorer {
                 _ = tick.sleep() => {},
                 _ = cancel_token.cancelled() => {
                     tracing::info!("SiteExplorer stop was requested");
-                    self.machine_creator.wait_for_rms_enrichment_tasks().await;
                     return;
                 }
             }

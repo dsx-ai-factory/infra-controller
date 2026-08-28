@@ -52,9 +52,6 @@ use model::site_explorer::{
     EndpointExplorationReport, ExploredDpu, ExploredManagedHost, HostPrimaryInterfaceSelection,
 };
 use sqlx::{PgConnection, PgPool};
-use tokio::sync::Mutex;
-use tokio::task::JoinSet;
-use tokio_util::sync::CancellationToken;
 
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
 use crate::explored_endpoint_index::ExploredEndpointIndex;
@@ -73,8 +70,6 @@ pub struct MachineCreator {
     rms_client: Option<Arc<dyn RmsApi>>,
     credential_manager: Arc<dyn CredentialManager>,
     dpf_enabled_at_site: bool,
-    rms_enrichment_cancel_token: CancellationToken,
-    rms_enrichment_tasks: Mutex<JoinSet<()>>,
 }
 
 impl MachineCreator {
@@ -96,45 +91,7 @@ impl MachineCreator {
             rms_client,
             credential_manager,
             dpf_enabled_at_site,
-            rms_enrichment_cancel_token: CancellationToken::new(),
-            rms_enrichment_tasks: Mutex::new(JoinSet::new()),
         }
-    }
-
-    /// Binds RMS enrichment work to the Site Explorer service cancellation lifecycle.
-    pub(super) fn bind_rms_enrichment_cancellation(&mut self, cancel_token: CancellationToken) {
-        self.rms_enrichment_cancel_token = cancel_token;
-    }
-
-    /// Waits for all tracked RMS enrichment work to finish after cancellation.
-    pub(super) async fn wait_for_rms_enrichment_tasks(&self) {
-        let mut tasks = self.rms_enrichment_tasks.lock().await;
-        while let Some(result) = tasks.join_next().await {
-            result.expect("Site Explorer RMS enrichment task panicked");
-        }
-    }
-
-    /// Tracks a cancellable best-effort RMS enrichment task.
-    async fn spawn_rms_enrichment(
-        &self,
-        pool: PgPool,
-        rms_client: Arc<dyn RmsApi>,
-        request: rms::BatchGetNodeDeviceInfoRequest,
-        host_machine_id: MachineId,
-    ) {
-        let cancel_token = self.rms_enrichment_cancel_token.clone();
-        let mut tasks = self.rms_enrichment_tasks.lock().await;
-        while let Some(result) = tasks.try_join_next() {
-            result.expect("Site Explorer RMS enrichment task panicked");
-        }
-        if cancel_token.is_cancelled() {
-            return;
-        }
-
-        drop(tasks.spawn(async move {
-            enrich_machine_slot_and_tray(pool, rms_client, request, host_machine_id, cancel_token)
-                .await;
-        }));
     }
 
     /// Creates a new ManagedHost (Host `Machine` and DPU `Machine` pair)
@@ -148,6 +105,7 @@ impl MachineCreator {
         // TODO: Improve the efficiency of this method. Right now we perform 3 database transactions
         // for every identified ManagedHost even if we don't create any objects.
         // We can perform a single query upfront to identify which ManagedHosts don't yet have Machines
+        let mut rms_available = self.rms_client.is_some();
         for identified in explored_managed_hosts {
             let host = &identified.explored_host;
             let expected_machine =
@@ -160,6 +118,7 @@ impl MachineCreator {
                     expected_machine,
                     identified.primary_interface_selection,
                     &self.database_connection,
+                    &mut rms_available,
                 )
                 .await
             {
@@ -243,10 +202,6 @@ impl MachineCreator {
     /// Refuses to create a Managed Host when `expected_machine` is `None`: only hosts
     /// listed in the `expected_machines` table are allowed to become Managed Hosts.
     /// Already ingested hosts are not affected.
-    ///
-    /// RMS slot and tray enrichment is best effort and runs asynchronously after
-    /// machine creation. A successful return does not guarantee that enrichment has
-    /// completed or been persisted.
     pub async fn create_managed_host(
         &self,
         explored_host: &ExploredManagedHost,
@@ -254,8 +209,16 @@ impl MachineCreator {
         expected_machine: Option<&ExpectedMachine>,
         pool: &PgPool,
     ) -> SiteExplorerResult<bool> {
-        self.create_managed_host_with_selection(explored_host, report, expected_machine, None, pool)
-            .await
+        let mut rms_available = self.rms_client.is_some();
+        self.create_managed_host_with_selection(
+            explored_host,
+            report,
+            expected_machine,
+            None,
+            pool,
+            &mut rms_available,
+        )
+        .await
     }
 
     /// Creates a managed host with its transient report selection available for
@@ -270,6 +233,7 @@ impl MachineCreator {
         expected_machine: Option<&ExpectedMachine>,
         primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
         pool: &PgPool,
+        rms_available: &mut bool,
     ) -> SiteExplorerResult<bool> {
         let Some(expected_machine) = expected_machine else {
             tracing::warn!(
@@ -521,7 +485,8 @@ impl MachineCreator {
         txn.commit().await?;
         drop(_admin_admission);
 
-        if let (Some(rack_id), Some(rms_client), Some(node_identity)) = (
+        if let (true, Some(rack_id), Some(rms_client), Some(node_identity)) = (
+            *rms_available,
             &expected_machine.data.rack_id,
             &self.rms_client,
             rms_node_identity,
@@ -553,10 +518,13 @@ impl MachineCreator {
             let request = rms::BatchGetNodeDeviceInfoRequest {
                 nodes: Some(rms::NodeSet { nodes: vec![node] }),
             };
-            let pool = pool.clone();
-            let rms_client = Arc::clone(rms_client);
-            self.spawn_rms_enrichment(pool, rms_client, request, host_machine_id)
-                .await;
+            match crate::fetch_slot_and_tray(rms_client.as_ref(), request).await {
+                Ok((slot_number, tray_index)) => {
+                    persist_machine_slot_and_tray(pool, host_machine_id, slot_number, tray_index)
+                        .await;
+                }
+                Err(_) => *rms_available = false,
+            }
         }
 
         Ok(true)
@@ -1500,20 +1468,14 @@ impl MachineCreator {
     }
 }
 
-/// Fetches optional RMS location data and persists it unless service shutdown cancels the fetch.
-async fn enrich_machine_slot_and_tray(
-    pool: PgPool,
-    rms_client: Arc<dyn RmsApi>,
-    request: rms::BatchGetNodeDeviceInfoRequest,
+/// Persists best-effort RMS location data without changing machine-creation success.
+async fn persist_machine_slot_and_tray(
+    pool: &PgPool,
     host_machine_id: MachineId,
-    cancel_token: CancellationToken,
+    slot_number: Option<i32>,
+    tray_index: Option<i32>,
 ) {
-    let (slot_number, tray_index) = tokio::select! {
-        biased;
-        _ = cancel_token.cancelled() => return,
-        result = crate::fetch_slot_and_tray(rms_client.as_ref(), request) => result,
-    };
-    let mut txn = match Transaction::begin(&pool).await {
+    let mut txn = match Transaction::begin(pool).await {
         Ok(txn) => txn,
         Err(error) => {
             emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(

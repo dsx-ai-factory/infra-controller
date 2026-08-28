@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use carbide_dpa::DpaInfo;
@@ -287,23 +288,37 @@ pub(crate) async fn start_runtime(
         dynamic_settings.bmc_proxy.clone(),
     );
 
-    let (rms_client, switch_system_image_rms_api) = match carbide_config.rms.api_url.clone() {
-        Some(url) if !url.is_empty() => {
-            let rms_client_config = librms::client_config::RmsClientConfig::new(
-                carbide_config.rms.root_ca_path.clone(),
-                carbide_config.rms.client_cert.clone(),
-                carbide_config.rms.client_key.clone(),
-                carbide_config.rms.enforce_tls,
-            );
-            let rms_api_config = librms::client::RmsApiConfig::new(&url, &rms_client_config);
-            let rms_client_pool = librms::RmsClientPool::new(&rms_api_config);
-            let shared_rms_client = rms_client_pool.create_client().await;
-            let switch_system_image_rms_api =
-                Arc::new(librms::RackManagerApi::new(&rms_api_config));
-            (Some(shared_rms_client), Some(switch_system_image_rms_api))
-        }
-        _ => (None, None),
-    };
+    let (rms_client, site_explorer_rms_client, switch_system_image_rms_api) =
+        match carbide_config.rms.api_url.clone() {
+            Some(url) if !url.is_empty() => {
+                let rms_client_config = librms::client_config::RmsClientConfig::new(
+                    carbide_config.rms.root_ca_path.clone(),
+                    carbide_config.rms.client_cert.clone(),
+                    carbide_config.rms.client_key.clone(),
+                    carbide_config.rms.enforce_tls,
+                );
+                let rms_api_config = librms::client::RmsApiConfig::new(&url, &rms_client_config);
+                let rms_client_pool = librms::RmsClientPool::new(&rms_api_config);
+                let shared_rms_client = rms_client_pool.create_client().await;
+                let site_explorer_rms_api_config =
+                    rms_api_config.with_retry_config(librms::client::RetryConfig {
+                        retries: 0,
+                        interval: Duration::ZERO,
+                    });
+                let site_explorer_rms_client =
+                    librms::RmsClientPool::new(&site_explorer_rms_api_config)
+                        .create_client()
+                        .await;
+                let switch_system_image_rms_api =
+                    Arc::new(librms::RackManagerApi::new(&rms_api_config));
+                (
+                    Some(shared_rms_client),
+                    Some(site_explorer_rms_client),
+                    Some(switch_system_image_rms_api),
+                )
+            }
+            _ => (None, None, None),
+        };
     let ib_config = carbide_config.ib_config.clone().unwrap_or_default();
     let fabric_manager_type = match ib_config.enabled {
         true => ib::IBFabricManagerType::Rest,
@@ -630,6 +645,7 @@ pub(crate) async fn start_runtime(
         initialize_and_start_controllers(
             join_set,
             api_service.clone(),
+            site_explorer_rms_client,
             meter.clone(),
             per_object_prometheus_registry,
             ipmi_tool.clone(),
@@ -1216,6 +1232,7 @@ impl<'a> SeedData<'a> {
 async fn initialize_and_start_controllers<'a>(
     join_set: &mut JoinSet<()>,
     api_service: Arc<Api>,
+    site_explorer_rms_client: Option<Arc<dyn librms::RmsApi>>,
     meter: Meter,
     per_object_prometheus_registry: Option<prometheus::Registry>,
     ipmi_tool: Arc<dyn IPMITool>,
@@ -2017,7 +2034,7 @@ async fn initialize_and_start_controllers<'a>(
         common_pools.clone(),
         work_lock_manager_handle.clone(),
         carbide_config.rack_profiles.clone(),
-        rms_client.clone(),
+        site_explorer_rms_client,
         credential_manager.clone(),
         carbide_config.dpf.enabled && dpf_sdk.is_some(),
     )
