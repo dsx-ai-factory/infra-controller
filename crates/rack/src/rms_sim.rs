@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use librms::{RackManagerError, RmsApi};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::Mutex;
 
 /// RMS simulation for testing, similar to RedfishSim
 pub struct RmsSim {
@@ -48,7 +48,6 @@ pub struct RmsSim {
         Arc<Mutex<Vec<rms::BatchGetNodeDeviceInfoRequest>>>,
     queued_batch_get_node_device_info_responses:
         Arc<Mutex<VecDeque<Result<rms::BatchGetNodeDeviceInfoResponse, RackManagerError>>>>,
-    batch_get_node_device_info_blocked: watch::Sender<bool>,
     submitted_batch_get_power_state_requests: Arc<Mutex<Vec<rms::BatchGetPowerStateRequest>>>,
     queued_batch_get_power_state_responses:
         Arc<Mutex<VecDeque<Result<rms::BatchGetPowerStateResponse, RackManagerError>>>>,
@@ -95,7 +94,6 @@ pub struct RmsSim {
 
 impl Default for RmsSim {
     fn default() -> Self {
-        let (batch_get_node_device_info_blocked, _) = watch::channel(false);
         Self {
             fail_create_nodes: Arc::new(AtomicBool::new(false)),
             fail_inventory_get: Arc::new(AtomicBool::new(false)),
@@ -114,7 +112,6 @@ impl Default for RmsSim {
             switch_system_image_job_errors: Arc::new(Mutex::new(HashMap::new())),
             submitted_batch_get_node_device_info_requests: Arc::new(Mutex::new(Vec::new())),
             queued_batch_get_node_device_info_responses: Arc::new(Mutex::new(VecDeque::new())),
-            batch_get_node_device_info_blocked,
             submitted_batch_get_power_state_requests: Arc::new(Mutex::new(Vec::new())),
             queued_batch_get_power_state_responses: Arc::new(Mutex::new(VecDeque::new())),
             submitted_configure_scale_up_fabric_manager_requests: Arc::new(Mutex::new(Vec::new())),
@@ -192,7 +189,6 @@ impl RmsSim {
             queued_batch_get_node_device_info_responses: self
                 .queued_batch_get_node_device_info_responses
                 .clone(),
-            batch_get_node_device_info_blocked: self.batch_get_node_device_info_blocked.clone(),
             submitted_batch_get_power_state_requests: self
                 .submitted_batch_get_power_state_requests
                 .clone(),
@@ -387,12 +383,6 @@ impl RmsSim {
             .lock()
             .await
             .clone()
-    }
-
-    /// Block or release simulated `batch_get_node_device_info` responses.
-    pub fn set_batch_get_node_device_info_blocked(&self, blocked: bool) {
-        self.batch_get_node_device_info_blocked
-            .send_replace(blocked);
     }
 
     /// Queue a `Result` to be returned on the next call to
@@ -632,7 +622,6 @@ pub struct MockRmsClient {
         Arc<Mutex<Vec<rms::BatchGetNodeDeviceInfoRequest>>>,
     queued_batch_get_node_device_info_responses:
         Arc<Mutex<VecDeque<Result<rms::BatchGetNodeDeviceInfoResponse, RackManagerError>>>>,
-    batch_get_node_device_info_blocked: watch::Sender<bool>,
     submitted_batch_get_power_state_requests: Arc<Mutex<Vec<rms::BatchGetPowerStateRequest>>>,
     queued_batch_get_power_state_responses:
         Arc<Mutex<VecDeque<Result<rms::BatchGetPowerStateResponse, RackManagerError>>>>,
@@ -687,14 +676,6 @@ impl RmsApi for MockRmsClient {
             .lock()
             .await
             .push(cmd);
-
-        let mut blocked = self.batch_get_node_device_info_blocked.subscribe();
-        while *blocked.borrow_and_update() {
-            blocked
-                .changed()
-                .await
-                .expect("RMS simulator gate remains open");
-        }
 
         self.queued_batch_get_node_device_info_responses
             .lock()
