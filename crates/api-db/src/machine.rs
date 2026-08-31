@@ -3446,6 +3446,8 @@ pub struct MachineRmsIdentity {
     pub bmc_mac_address: MacAddress,
     pub rack_id: Option<RackId>,
     pub rack_profile_id: Option<RackProfileId>,
+    pub slot_number: Option<i32>,
+    pub tray_index: Option<i32>,
 }
 
 /// Look up RMS identities and rack profile context for compute tray machines by
@@ -3461,7 +3463,9 @@ pub async fn find_rms_identities_by_bmc_ips(
             mia.address AS bmc_ip,
             mi.mac_address AS bmc_mac_address,
             m.rack_id,
-            r.rack_profile_id
+            r.rack_profile_id,
+            m.slot_number,
+            m.tray_index
         FROM machines m
         LEFT JOIN racks r ON r.id = m.rack_id
         JOIN machine_interfaces mi

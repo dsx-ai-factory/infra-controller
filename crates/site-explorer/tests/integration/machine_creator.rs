@@ -219,17 +219,6 @@ async fn test_machine_creator_compute_rms_request_uses_rack_profile(
     let mut txn = env.pool.begin().await?;
     db::expected_rack::create(txn.as_mut(), &expected_rack).await?;
     txn.commit().await?;
-    rms_sim
-        .queue_batch_get_node_device_info_response(Ok(rms::BatchGetNodeDeviceInfoResponse {
-            node_device_details: vec![rms::NodeDeviceInfo {
-                slot_number: Some(7),
-                tray_index: Some(3),
-                ..Default::default()
-            }],
-            ..Default::default()
-        }))
-        .await;
-
     let managed_host =
         ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
             rack_id: Some(rack_id.clone()),
@@ -247,6 +236,41 @@ async fn test_machine_creator_compute_rms_request_uses_rack_profile(
             )
             .await?
     );
+    assert_eq!(
+        rms_sim
+            .submitted_batch_get_node_device_info_requests()
+            .await,
+        Vec::new(),
+        "machine creation must not wait for RMS enrichment"
+    );
+
+    let machines = db::machine::find(
+        &env.pool,
+        ObjectFilter::All,
+        MachineSearchConfig {
+            include_predicted_host: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let host = machines
+        .iter()
+        .find(|machine| !machine.is_dpu())
+        .ok_or_else(|| std::io::Error::other("created host machine was not found"))?;
+    rms_sim
+        .queue_batch_get_node_device_info_response(Ok(rms::BatchGetNodeDeviceInfoResponse {
+            node_device_details: vec![rms::NodeDeviceInfo {
+                node_id: host.id.to_string(),
+                slot_number: Some(7),
+                tray_index: Some(3),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .await;
+    creator
+        .reconcile_machine_locations_for_test(&[fixture.host.host_bmc_ip])
+        .await?;
 
     let requests = rms_sim
         .submitted_batch_get_node_device_info_requests()
@@ -326,7 +350,7 @@ async fn test_machine_creator_compute_rms_request_uses_rack_profile(
 }
 
 #[sqlx_test]
-async fn test_machine_creator_rms_failure_does_not_fail_machine_creation(
+async fn test_machine_creator_retries_rms_enrichment_after_failure(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = Env::new(pool).await;
@@ -374,6 +398,16 @@ async fn test_machine_creator_rms_failure_does_not_fail_machine_creation(
             .submitted_batch_get_node_device_info_requests()
             .await
             .len(),
+        0
+    );
+    creator
+        .reconcile_machine_locations_for_test(&[fixture.host.host_bmc_ip])
+        .await?;
+    assert_eq!(
+        rms_sim
+            .submitted_batch_get_node_device_info_requests()
+            .await
+            .len(),
         1
     );
 
@@ -392,6 +426,44 @@ async fn test_machine_creator_rms_failure_does_not_fail_machine_creation(
         .ok_or_else(|| std::io::Error::other("created host machine was not found"))?;
     assert_eq!(host.status.slot_number, None);
     assert_eq!(host.status.tray_index, None);
+
+    rms_sim
+        .queue_batch_get_node_device_info_response(Ok(rms::BatchGetNodeDeviceInfoResponse {
+            node_device_details: vec![rms::NodeDeviceInfo {
+                node_id: host.id.to_string(),
+                slot_number: Some(9),
+                tray_index: Some(4),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .await;
+    creator
+        .reconcile_machine_locations_for_test(&[fixture.host.host_bmc_ip])
+        .await?;
+    assert_eq!(
+        rms_sim
+            .submitted_batch_get_node_device_info_requests()
+            .await
+            .len(),
+        2
+    );
+
+    let machines = db::machine::find(
+        &env.pool,
+        ObjectFilter::All,
+        MachineSearchConfig {
+            include_predicted_host: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let host = machines
+        .iter()
+        .find(|machine| !machine.is_dpu())
+        .ok_or_else(|| std::io::Error::other("created host machine was not found"))?;
+    assert_eq!(host.status.slot_number, Some(9));
+    assert_eq!(host.status.tray_index, Some(4));
 
     Ok(())
 }
