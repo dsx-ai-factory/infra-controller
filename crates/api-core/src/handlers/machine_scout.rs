@@ -335,6 +335,17 @@ pub(crate) async fn forge_agent_control(
                         ..
                     },
                 ..
+            }
+            | ManagedHostState::Assigned {
+                instance_state:
+                    InstanceState::HostReprovision {
+                        reprovision_state:
+                            HostReprovisionState::WaitingForScoutUpgrade {
+                                task_json,
+                                result: None,
+                                ..
+                            },
+                    },
             } => {
                 tracing::info!(
                     machine_id = %machine.id,
