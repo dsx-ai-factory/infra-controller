@@ -45,7 +45,7 @@ Print help (see a summary with -h)
 
 | Subcommand | Description |
 |---|---|
-| [`show`](./ipxe-template-show.md) | Show iPXE templates (all, or one by name). |
+| [`show`](./ipxe-template-show.md) | Show iPXE templates (all, or one by ID). |
 
 ---
 

@@ -5,7 +5,7 @@
 ## NAME
 
 nico-admin-cli-ipxe-template-show - Show iPXE templates (all, or one by
-name).
+ID).
 
 ## SYNOPSIS
 
@@ -16,7 +16,11 @@ nico-admin-cli ipxe-template show [--extended]
 
 ## DESCRIPTION
 
-Show iPXE templates (all, or one by name).
+Show iPXE templates (all, or one by ID).
+
+For the relationship between templates, Operating System definitions,
+Sites, and Instances, see
+[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md).
 
 ## OPTIONS
 

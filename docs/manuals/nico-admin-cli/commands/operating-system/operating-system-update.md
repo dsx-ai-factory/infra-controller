@@ -22,6 +22,10 @@ nico-admin-cli operating-system update [-n|--name]
 
 Update an existing operating system definition.
 
+For templated iPXE requirements, artifact configuration, and
+synchronization rules, refer to
+[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md).
+
 ## OPTIONS
 
 `-n, --name <NAME>`
