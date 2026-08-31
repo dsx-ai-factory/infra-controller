@@ -3197,13 +3197,16 @@ func (MachineValidationCompleted) EnumDescriptor() ([]byte, []int) {
 	return file_nico_nico_proto_rawDescGZIP(), []int{57}
 }
 
+// Machine capability device categories. SPECTRUM_X identifies DPA-interface
+// inventory that can supply attachment selectors; it does not indicate
+// site-level enablement or full reference-architecture readiness.
 type MachineCapabilityDeviceType int32
 
 const (
-	MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN MachineCapabilityDeviceType = 0
-	MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU     MachineCapabilityDeviceType = 1
-	MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK  MachineCapabilityDeviceType = 2
-	MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPX     MachineCapabilityDeviceType = 3
+	MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN    MachineCapabilityDeviceType = 0
+	MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU        MachineCapabilityDeviceType = 1
+	MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK     MachineCapabilityDeviceType = 2
+	MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X MachineCapabilityDeviceType = 3
 )
 
 // Enum value maps for MachineCapabilityDeviceType.
@@ -3212,13 +3215,13 @@ var (
 		0: "MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN",
 		1: "MACHINE_CAPABILITY_DEVICE_TYPE_DPU",
 		2: "MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK",
-		3: "MACHINE_CAPABILITY_DEVICE_TYPE_SPX",
+		3: "MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X",
 	}
 	MachineCapabilityDeviceType_value = map[string]int32{
-		"MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN": 0,
-		"MACHINE_CAPABILITY_DEVICE_TYPE_DPU":     1,
-		"MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK":  2,
-		"MACHINE_CAPABILITY_DEVICE_TYPE_SPX":     3,
+		"MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN":    0,
+		"MACHINE_CAPABILITY_DEVICE_TYPE_DPU":        1,
+		"MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK":     2,
+		"MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X": 3,
 	}
 )
 
@@ -42936,8 +42939,10 @@ func (x *MachineCapabilityAttributesStorage) GetCapacity() string {
 }
 
 type MachineCapabilityAttributesNetwork struct {
-	state         protoimpl.MessageState       `protogen:"open.v1"`
-	Name          string                       `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// For SPECTRUM_X, the exact value accepted by InstanceSpxAttachment.device.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// For SPECTRUM_X, valid device_instance values are [0, count), resolved in PCI-name order.
 	Count         uint32                       `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
 	Vendor        *string                      `protobuf:"bytes,3,opt,name=vendor,proto3,oneof" json:"vendor,omitempty"`
 	DeviceType    *MachineCapabilityDeviceType `protobuf:"varint,4,opt,name=device_type,json=deviceType,proto3,enum=forge.MachineCapabilityDeviceType,oneof" json:"device_type,omitempty"`
@@ -72039,12 +72044,12 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\aSuccess\x10\x00\x12\n" +
 	"\n" +
 	"\x06Failed\x10\x01\x12\v\n" +
-	"\aSkipped\x10\x02*\xc4\x01\n" +
+	"\aSkipped\x10\x02*\xcb\x01\n" +
 	"\x1bMachineCapabilityDeviceType\x12*\n" +
 	"&MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN\x10\x00\x12&\n" +
 	"\"MACHINE_CAPABILITY_DEVICE_TYPE_DPU\x10\x01\x12)\n" +
-	"%MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK\x10\x02\x12&\n" +
-	"\"MACHINE_CAPABILITY_DEVICE_TYPE_SPX\x10\x03*\xbd\x01\n" +
+	"%MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK\x10\x02\x12-\n" +
+	")MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X\x10\x03*\xbd\x01\n" +
 	"\x15MachineCapabilityType\x12\x14\n" +
 	"\x10CAP_TYPE_INVALID\x10\x00\x12\x10\n" +
 	"\fCAP_TYPE_CPU\x10\x01\x12\x10\n" +

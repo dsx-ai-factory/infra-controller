@@ -117,7 +117,7 @@ func (mc APIMachineCapability) Validate() error {
 }
 
 // validateDeviceType enforces the Type/DeviceType compatibility rules:
-// Network capabilities require DPU or SPX, GPU capabilities require NVLink,
+// Network capabilities require DPU or SpectrumX, GPU capabilities require NVLink,
 // every other Type must not carry a DeviceType. A nil DeviceType is
 // always allowed.
 func (mc APIMachineCapability) validateDeviceType(value interface{}) error {
@@ -127,7 +127,7 @@ func (mc APIMachineCapability) validateDeviceType(value interface{}) error {
 	}
 	switch mc.Type {
 	case cdbm.MachineCapabilityTypeNetwork:
-		if *dt != cdbm.MachineCapabilityDeviceTypeDPU && *dt != cdbm.MachineCapabilityDeviceTypeSPX {
+		if *dt != cdbm.MachineCapabilityDeviceTypeDPU && *dt != cdbm.MachineCapabilityDeviceTypeSpectrumX {
 			return fmt.Errorf("Unsupported Device Type specified for Network Capability %s", *dt)
 		}
 	case cdbm.MachineCapabilityTypeGPU:

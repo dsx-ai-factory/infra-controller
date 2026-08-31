@@ -2582,7 +2582,7 @@ pub(crate) fn sort_spx_by_slot(
         else {
             tracing::debug!(
                 spx = ?spx,
-                "SPX device description is missing or empty",
+                "SpectrumX device description is missing or empty",
             );
             continue;
         };

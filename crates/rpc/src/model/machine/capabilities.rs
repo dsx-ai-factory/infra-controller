@@ -167,7 +167,7 @@ impl From<MachineCapabilityDeviceType> for rpc::MachineCapabilityDeviceType {
             MachineCapabilityDeviceType::Unknown => rpc::MachineCapabilityDeviceType::Unknown,
             MachineCapabilityDeviceType::Dpu => rpc::MachineCapabilityDeviceType::Dpu,
             MachineCapabilityDeviceType::NvLink => rpc::MachineCapabilityDeviceType::Nvlink,
-            MachineCapabilityDeviceType::Spx => rpc::MachineCapabilityDeviceType::Spx,
+            MachineCapabilityDeviceType::SpectrumX => rpc::MachineCapabilityDeviceType::SpectrumX,
         }
     }
 }
@@ -180,7 +180,9 @@ impl TryFrom<rpc::MachineCapabilityDeviceType> for MachineCapabilityDeviceType {
             rpc::MachineCapabilityDeviceType::Unknown => Ok(MachineCapabilityDeviceType::Unknown),
             rpc::MachineCapabilityDeviceType::Dpu => Ok(MachineCapabilityDeviceType::Dpu),
             rpc::MachineCapabilityDeviceType::Nvlink => Ok(MachineCapabilityDeviceType::NvLink),
-            rpc::MachineCapabilityDeviceType::Spx => Ok(MachineCapabilityDeviceType::Spx),
+            rpc::MachineCapabilityDeviceType::SpectrumX => {
+                Ok(MachineCapabilityDeviceType::SpectrumX)
+            }
         }
     }
 }

@@ -2369,7 +2369,7 @@ func TestMatchInstanceTypeCapabilitiesForMachines(t *testing.T) {
 	icap3 := TestCommonBuildMachineCapability(t, dbSession, nil, &inst1.ID, cdbm.MachineCapabilityTypeNetwork, "MT28908 Family [ConnectX-7]", nil, nil, cutil.GetPtr("Mellanox Technologies"), cutil.GetPtr(2), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeDPU), nil)
 	assert.NotNil(t, icap3)
 
-	// An omitted DeviceType is a wildcard. This filter has only an SPX
+	// An omitted DeviceType is a wildcard. This filter has only a SpectrumX
 	// candidate on the matching Machine below.
 	icap4 := TestCommonBuildMachineCapability(t, dbSession, nil, &inst1.ID, cdbm.MachineCapabilityTypeNetwork, "ConnectX-8", nil, nil, nil, cutil.GetPtr(4), nil, nil)
 	assert.NotNil(t, icap4)
@@ -2386,14 +2386,14 @@ func TestMatchInstanceTypeCapabilitiesForMachines(t *testing.T) {
 	mcap3 := TestCommonBuildMachineCapability(t, dbSession, &mc1.ID, nil, cdbm.MachineCapabilityTypeNetwork, "MT28908 Family [ConnectX-7]", nil, nil, cutil.GetPtr("Mellanox Technologies"), cutil.GetPtr(2), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeDPU), nil)
 	assert.NotNil(t, mcap3)
 
-	// The same network description can identify generic, DPU, and SPX
+	// The same network description can identify generic, DPU, and SpectrumX
 	// capabilities. The DPU filter above must match its exact device type rather
 	// than whichever same-name row happens to be loaded last.
 	mcap4 := TestCommonBuildMachineCapability(t, dbSession, &mc1.ID, nil, cdbm.MachineCapabilityTypeNetwork, "MT28908 Family [ConnectX-7]", nil, nil, cutil.GetPtr("Mellanox Technologies"), cutil.GetPtr(1), nil, nil)
 	assert.NotNil(t, mcap4)
-	mcap5 := TestCommonBuildMachineCapability(t, dbSession, &mc1.ID, nil, cdbm.MachineCapabilityTypeNetwork, "MT28908 Family [ConnectX-7]", nil, nil, nil, cutil.GetPtr(4), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSPX), nil)
+	mcap5 := TestCommonBuildMachineCapability(t, dbSession, &mc1.ID, nil, cdbm.MachineCapabilityTypeNetwork, "MT28908 Family [ConnectX-7]", nil, nil, nil, cutil.GetPtr(4), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX), nil)
 	assert.NotNil(t, mcap5)
-	mcap6 := TestCommonBuildMachineCapability(t, dbSession, &mc1.ID, nil, cdbm.MachineCapabilityTypeNetwork, "ConnectX-8", nil, nil, nil, cutil.GetPtr(4), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSPX), nil)
+	mcap6 := TestCommonBuildMachineCapability(t, dbSession, &mc1.ID, nil, cdbm.MachineCapabilityTypeNetwork, "ConnectX-8", nil, nil, nil, cutil.GetPtr(4), cutil.GetPtr(cdbm.MachineCapabilityDeviceTypeSpectrumX), nil)
 	assert.NotNil(t, mcap6)
 
 	mc2 := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(inst1.ID), uuid.New(), nil, nil, nil, cdbm.MachineStatusReady)
@@ -2468,7 +2468,7 @@ func TestMatchInstanceTypeCapabilitiesForMachines(t *testing.T) {
 
 func TestMachineCapabilityMatchesFilter(t *testing.T) {
 	dpu := cdbm.MachineCapabilityDeviceTypeDPU
-	spx := cdbm.MachineCapabilityDeviceTypeSPX
+	spectrumX := cdbm.MachineCapabilityDeviceTypeSpectrumX
 
 	newPair := func() (*cdbm.MachineCapability, *cdbm.MachineCapability) {
 		candidate := &cdbm.MachineCapability{
@@ -2499,7 +2499,7 @@ func TestMachineCapabilityMatchesFilter(t *testing.T) {
 		{
 			name: "omitted optional filters are wildcards",
 			configure: func(candidate, filter *cdbm.MachineCapability) {
-				candidate.DeviceType = &spx
+				candidate.DeviceType = &spectrumX
 				filter.Frequency = nil
 				filter.Capacity = nil
 				filter.HardwareRevision = nil
@@ -2570,7 +2570,7 @@ func TestMachineCapabilityMatchesFilter(t *testing.T) {
 		{
 			name: "explicit device type differs",
 			configure: func(candidate, _ *cdbm.MachineCapability) {
-				candidate.DeviceType = &spx
+				candidate.DeviceType = &spectrumX
 			},
 		},
 		{
