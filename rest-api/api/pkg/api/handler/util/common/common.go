@@ -1033,7 +1033,7 @@ func MatchInstanceTypeCapabilitiesForMachines(ctx context.Context, logger zerolo
 	}
 
 	// Index candidates by the fields that always match exactly. Keep a slice at
-	// each `(Type, Name)` key because generic, DPU, and SPX network capabilities
+	// each `(Type, Name)` key because generic, DPU, and SpectrumX network capabilities
 	// may legitimately share those fields. A full `(Type, Name, DeviceType)` key
 	// is not sufficient: an Instance Type filter with no DeviceType must retain
 	// the existing wildcard behavior and may match any of those candidates.
@@ -1055,7 +1055,7 @@ func MatchInstanceTypeCapabilitiesForMachines(ctx context.Context, logger zerolo
 
 	// Every Instance Type capability must have at least one matching candidate on
 	// every Machine. Which candidate matches is deliberately independent for each
-	// filter; a same-name SPX capability must not hide a matching DPU capability.
+	// filter; a same-name SpectrumX capability must not hide a matching DPU capability.
 	// Iterate the request rather than the index so a requested Machine with no
 	// capability rows is still evaluated and rejected.
 	for _, imc := range instmcs {
@@ -1075,7 +1075,7 @@ func MatchInstanceTypeCapabilitiesForMachines(ctx context.Context, logger zerolo
 // machineCapabilityMatchesFilter performs the asymmetric matching used by
 // Instance Type selection. Type and Name are required identity fields. Every
 // other field is a constraint only when present on the Instance Type filter;
-// in particular, a nil DeviceType is a wildcard, while DPU or SPX requires an
+// in particular, a nil DeviceType is a wildcard, while DPU or SpectrumX requires an
 // exact DeviceType match.
 func machineCapabilityMatchesFilter(machineCapability, filter *cdbm.MachineCapability) bool {
 	if machineCapability.Type != filter.Type || machineCapability.Name != filter.Name {

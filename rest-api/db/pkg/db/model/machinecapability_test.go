@@ -74,7 +74,7 @@ func TestMachineCapability_Equal(t *testing.T) {
 
 func TestMachineCapability_MapKey(t *testing.T) {
 	dpu := MachineCapabilityDeviceTypeDPU
-	spx := MachineCapabilityDeviceTypeSPX
+	spectrumX := MachineCapabilityDeviceTypeSpectrumX
 	empty := MachineCapabilityDeviceType("")
 	tests := []struct {
 		name       string
@@ -84,7 +84,7 @@ func TestMachineCapability_MapKey(t *testing.T) {
 		{name: "generic", want: "Network:10:ConnectX-8"},
 		{name: "generic empty device type", deviceType: &empty, want: "Network:10:ConnectX-8"},
 		{name: "DPU", deviceType: &dpu, want: "Network:10:ConnectX-8:DPU"},
-		{name: "SPX", deviceType: &spx, want: "Network:10:ConnectX-8:SPX"},
+		{name: "SpectrumX", deviceType: &spectrumX, want: "Network:10:ConnectX-8:SpectrumX"},
 	}
 
 	for _, tt := range tests {
@@ -99,8 +99,8 @@ func TestMachineCapability_MapKey(t *testing.T) {
 	}
 
 	t.Run("name delimiter cannot impersonate device type", func(t *testing.T) {
-		generic := MachineCapabilityMapKey(MachineCapabilityTypeNetwork, "ConnectX-8:SPX", nil)
-		typed := MachineCapabilityMapKey(MachineCapabilityTypeNetwork, "ConnectX-8", &spx)
+		generic := MachineCapabilityMapKey(MachineCapabilityTypeNetwork, "ConnectX-8:SpectrumX", nil)
+		typed := MachineCapabilityMapKey(MachineCapabilityTypeNetwork, "ConnectX-8", &spectrumX)
 		assert.NotEqual(t, generic, typed)
 	})
 }
@@ -1647,9 +1647,9 @@ func TestMachineCapability_ToProto(t *testing.T) {
 			want:       corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU,
 		},
 		{
-			name:       "maps Network + SPX device type to the proto enum",
-			deviceType: MachineCapabilityDeviceTypeSPX,
-			want:       corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPX,
+			name:       "maps Network + SpectrumX device type to the proto enum",
+			deviceType: MachineCapabilityDeviceTypeSpectrumX,
+			want:       corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X,
 		},
 	}
 	for _, tc := range deviceTypeCases {
@@ -1768,10 +1768,10 @@ func TestMachineCapability_FromProto(t *testing.T) {
 			want:           MachineCapabilityDeviceType(""),
 		},
 		{
-			name:           "SPX DeviceType is preserved",
+			name:           "SpectrumX DeviceType is preserved",
 			capabilityType: corev1.MachineCapabilityType_CAP_TYPE_NETWORK,
-			deviceType:     corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPX,
-			want:           MachineCapabilityDeviceTypeSPX,
+			deviceType:     corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X,
+			want:           MachineCapabilityDeviceTypeSpectrumX,
 		},
 	}
 	for _, tc := range deviceTypeCases {
@@ -1791,7 +1791,7 @@ func TestMachineCapability_FromProto(t *testing.T) {
 func TestMachineCapability_Validate(t *testing.T) {
 	dpu := MachineCapabilityDeviceTypeDPU
 	nvlink := MachineCapabilityDeviceTypeNVLink
-	spx := MachineCapabilityDeviceTypeSPX
+	spectrumX := MachineCapabilityDeviceTypeSpectrumX
 
 	t.Run("populated capability is valid", func(t *testing.T) {
 		mc := &MachineCapability{Type: MachineCapabilityTypeCPU, Name: "cpu-0"}
@@ -1830,7 +1830,7 @@ func TestMachineCapability_Validate(t *testing.T) {
 		wantError  bool
 	}{
 		{name: "Network with DPU device type is valid", capType: MachineCapabilityTypeNetwork, capName: "net-0", deviceType: &dpu},
-		{name: "Network with SPX device type is valid", capType: MachineCapabilityTypeNetwork, capName: "net-0", deviceType: &spx},
+		{name: "Network with SpectrumX device type is valid", capType: MachineCapabilityTypeNetwork, capName: "net-0", deviceType: &spectrumX},
 		{name: "Network with NVLink device type errors", capType: MachineCapabilityTypeNetwork, capName: "net-0", deviceType: &nvlink, wantError: true},
 		{name: "GPU with NVLink device type is valid", capType: MachineCapabilityTypeGPU, capName: "gpu-0", deviceType: &nvlink},
 		{name: "GPU with DPU device type errors", capType: MachineCapabilityTypeGPU, capName: "gpu-0", deviceType: &dpu, wantError: true},

@@ -930,7 +930,7 @@ impl forge::MachineCapabilityDeviceType {
 
         Ok(Some(match s.to_uppercase().as_str() {
             "DPU" => Self::Dpu as i32,
-            "SPX" => Self::Spx as i32,
+            "SPECTRUMX" => Self::SpectrumX as i32,
             "UNKNOWN" => Self::Unknown as i32,
             _ => 0,
         }))
@@ -956,7 +956,7 @@ impl forge::MachineCapabilityDeviceType {
             forge::MachineCapabilityDeviceType::Dpu => "DPU".to_string(),
             forge::MachineCapabilityDeviceType::Unknown => "UNKNOWN".to_string(),
             forge::MachineCapabilityDeviceType::Nvlink => "NVLINK".to_string(),
-            forge::MachineCapabilityDeviceType::Spx => "SPX".to_string(),
+            forge::MachineCapabilityDeviceType::SpectrumX => "SpectrumX".to_string(),
         })
     }
 }

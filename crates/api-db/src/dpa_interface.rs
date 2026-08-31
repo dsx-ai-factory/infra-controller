@@ -375,31 +375,34 @@ pub async fn find_by_machine_ids(
     ))
 }
 
-/// An SPX network-capability group projected from non-deleted DPA interfaces.
+/// A SpectrumX attachment-selector group projected from non-deleted DPA interfaces.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SpxDeviceCapability {
-    /// The non-empty device description shared by the grouped interfaces.
+pub struct SpectrumXDeviceCapability {
+    /// The non-empty device description used as the attachment `device` selector.
     pub device: String,
-    /// The number of non-deleted interfaces in the group.
+    /// The number of interfaces in the group. Valid `device_instance` selectors
+    /// are `0..count`, resolved in PCI-name order during attachment allocation.
     pub count: u32,
 }
 
-/// Batch-load the SPX capability groups for a set of host machines.
+/// Batch-load SpectrumX attachment-selector inventory for a set of host machines.
 ///
 /// This intentionally projects and aggregates only the fields needed by
-/// machine capability discovery instead of loading complete DPA-interface
-/// rows, whose configuration and device-info JSON can be substantially wider.
-pub async fn find_spx_capabilities_by_machine_ids(
+/// machine capability discovery instead of loading complete DPA-interface rows,
+/// whose configuration and device-info JSON can be substantially wider. This
+/// inventory does not represent site-level SpectrumX enablement or readiness.
+pub async fn find_spectrum_x_capabilities_by_machine_ids(
     txn: impl DbReader<'_>,
-    machine_ids: &[MachineId],
-) -> Result<std::collections::HashMap<MachineId, Vec<SpxDeviceCapability>>, DatabaseError> {
+    machine_ids: &[HostMachineId],
+) -> Result<std::collections::HashMap<HostMachineId, Vec<SpectrumXDeviceCapability>>, DatabaseError>
+{
     if machine_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
 
     #[derive(sqlx::FromRow)]
-    struct SpxCapabilityRow {
-        machine_id: MachineId,
+    struct SpectrumXCapabilityRow {
+        machine_id: HostMachineId,
         device: String,
         count: i64,
     }
@@ -412,28 +415,28 @@ pub async fn find_spx_capabilities_by_machine_ids(
           AND device_description <> ''
         GROUP BY machine_id, device_description
         ORDER BY machine_id, device_description";
-    let rows = sqlx::query_as::<_, SpxCapabilityRow>(query)
+    let rows = sqlx::query_as::<_, SpectrumXCapabilityRow>(query)
         .bind(machine_ids)
         .fetch_all(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
 
     let mut capabilities_by_machine =
-        std::collections::HashMap::<MachineId, Vec<SpxDeviceCapability>>::new();
+        std::collections::HashMap::<HostMachineId, Vec<SpectrumXDeviceCapability>>::new();
     for row in rows {
         let count = row
             .count
             .try_into()
             .map_err(|error| DatabaseError::Internal {
                 message: format!(
-                    "SPX interface count {} for machine {} and device {:?} does not fit in u32: {error}",
+                    "SpectrumX interface count {} for machine {} and device {:?} does not fit in u32: {error}",
                     row.count, row.machine_id, row.device,
                 ),
             })?;
         capabilities_by_machine
             .entry(row.machine_id)
             .or_default()
-            .push(SpxDeviceCapability {
+            .push(SpectrumXDeviceCapability {
                 device: row.device,
                 count,
             });

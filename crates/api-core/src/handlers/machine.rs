@@ -23,7 +23,9 @@ use ::rpc::forge as rpc;
 use ::rpc::model::machine::ManagedHostStateSnapshotRpc;
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
-use carbide_uuid::machine::{DpuMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
+};
 use libredfish::SystemPowerControl;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::hardware_info::MachineNvLinkInfo;
@@ -146,15 +148,18 @@ pub(crate) async fn find_machines_by_ids(
     )
     .await?;
 
-    // SPX capabilities are live machine inventory. Load all requested hosts'
-    // device-description groups in one narrow, aggregated query.
+    // SpectrumX attachment selectors are live DPA-interface inventory, not a
+    // signal that SpectrumX is enabled or fully ready at the site. Load all
+    // requested hosts' device-description groups in one narrow, aggregated query.
     let host_machine_ids = snapshots
         .keys()
-        .filter(|machine_id| !machine_id.machine_type().is_dpu())
-        .copied()
+        .filter_map(|machine_id| match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Host(host_id) => Some(host_id),
+            HostOrDpuId::Dpu(_) => None,
+        })
         .collect::<Vec<_>>();
-    let spx_capabilities_by_machine =
-        db::dpa_interface::find_spx_capabilities_by_machine_ids(&mut txn, &host_machine_ids)
+    let spectrum_x_capabilities_by_machine =
+        db::dpa_interface::find_spectrum_x_capabilities_by_machine_ids(&mut txn, &host_machine_ids)
             .await?;
 
     txn.commit().await?;
@@ -167,7 +172,7 @@ pub(crate) async fn find_machines_by_ids(
     Ok(Response::new(snapshot_map_to_rpc_machines(
         snapshots,
         &sla_config,
-        spx_capabilities_by_machine,
+        spectrum_x_capabilities_by_machine,
     )))
 }
 
@@ -973,9 +978,9 @@ pub(crate) async fn get_dpu_info_list(
 fn snapshot_map_to_rpc_machines(
     snapshots: HashMap<MachineId, ManagedHostStateSnapshot>,
     sla_config: &model::machine::slas::MachineSlaConfig,
-    mut spx_capabilities_by_machine: HashMap<
-        MachineId,
-        Vec<db::dpa_interface::SpxDeviceCapability>,
+    mut spectrum_x_capabilities_by_machine: HashMap<
+        HostMachineId,
+        Vec<db::dpa_interface::SpectrumXDeviceCapability>,
     >,
 ) -> rpc::MachineList {
     let mut result = rpc::MachineList {
@@ -983,22 +988,25 @@ fn snapshot_map_to_rpc_machines(
     };
 
     for (machine_id, snapshot) in snapshots {
-        let spx_capabilities = spx_capabilities_by_machine
-            .remove(&machine_id)
-            .map(spx_capabilities);
         let dpu_machine_id = DpuMachineId::try_from(machine_id).ok();
+        let spectrum_x_capabilities = match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Host(host_id) => spectrum_x_capabilities_by_machine
+                .remove(&host_id)
+                .map(spectrum_x_capabilities),
+            HostOrDpuId::Dpu(_) => None,
+        };
         if let Some(mut rpc_machine) =
             snapshot.into_rpc_machine_state(dpu_machine_id.as_ref(), sla_config)
         {
-            if let Some(spx_capabilities) = spx_capabilities
-                && !spx_capabilities.is_empty()
+            if let Some(spectrum_x_capabilities) = spectrum_x_capabilities
+                && !spectrum_x_capabilities.is_empty()
             {
                 let capabilities = rpc_machine
                     .status
                     .get_or_insert_default()
                     .capabilities
                     .get_or_insert_default();
-                capabilities.network.extend(spx_capabilities);
+                capabilities.network.extend(spectrum_x_capabilities);
                 capabilities.network.sort_unstable_by(|a, b| {
                     a.name.cmp(&b.name).then(a.device_type.cmp(&b.device_type))
                 });
@@ -1016,8 +1024,8 @@ fn snapshot_map_to_rpc_machines(
     result
 }
 
-fn spx_capabilities(
-    devices: Vec<db::dpa_interface::SpxDeviceCapability>,
+fn spectrum_x_capabilities(
+    devices: Vec<db::dpa_interface::SpectrumXDeviceCapability>,
 ) -> Vec<rpc::MachineCapabilityAttributesNetwork> {
     devices
         .into_iter()
@@ -1025,7 +1033,7 @@ fn spx_capabilities(
             name: device.device,
             count: device.count,
             vendor: None,
-            device_type: Some(rpc::MachineCapabilityDeviceType::Spx as i32),
+            device_type: Some(rpc::MachineCapabilityDeviceType::SpectrumX as i32),
         })
         .collect()
 }

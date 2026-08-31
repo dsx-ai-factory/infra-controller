@@ -414,7 +414,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 						{
 							Name:       "BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller",
 							Count:      4,
-							DeviceType: corev1.MachineCapabilityDeviceType(corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPX).Enum(),
+							DeviceType: corev1.MachineCapabilityDeviceType(corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X).Enum(),
 						},
 						{
 							Name:       "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller",
@@ -1082,7 +1082,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 						assert.Equal(t, 3, *mc.Cores)
 						assert.Equal(t, 6, *mc.Threads)
 					} else if mc.Type == cdbm.MachineCapabilityTypeNetwork {
-						if mc.DeviceType != nil && *mc.DeviceType == cdbm.MachineCapabilityDeviceTypeSPX {
+						if mc.DeviceType != nil && *mc.DeviceType == cdbm.MachineCapabilityDeviceTypeSpectrumX {
 							assert.Equal(t, 4, *mc.Count)
 						} else {
 							assert.Equal(t, 2, *mc.Count)

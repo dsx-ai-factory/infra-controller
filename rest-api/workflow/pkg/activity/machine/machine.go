@@ -928,7 +928,7 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 
 	for _, netCap := range controllerCapsNetwork {
 		// Preserve supported network device types so capability identity remains
-		// stable when otherwise identical generic, DPU, and SPX entries coexist.
+		// stable when otherwise identical generic, DPU, and SpectrumX entries coexist.
 		// Unknown wire values are coerced to the empty string with a
 		// warning logged — preserve the explicit `default` branch so
 		// schema drift is surfaced rather than silently swallowed.
@@ -940,8 +940,8 @@ func processMachineCapabilities(ctx context.Context, logger zerolog.Logger, dbSe
 			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU:
 				dt := cdbm.MachineCapabilityDeviceTypeDPU
 				deviceType = &dt
-			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPX:
-				dt := cdbm.MachineCapabilityDeviceTypeSPX
+			case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X:
+				dt := cdbm.MachineCapabilityDeviceTypeSpectrumX
 				deviceType = &dt
 			default:
 				logger.Warn().Str("DeviceType", netCap.DeviceType.String()).Msg("unsupported MachineCapabilityDeviceType for Network capability; defaulting to empty")

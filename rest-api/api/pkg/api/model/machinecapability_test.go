@@ -32,7 +32,7 @@ func TestMachineCapability_NewAPIMachineCapability(t *testing.T) {
 
 func TestAPIMachineCapabilities_Validate(t *testing.T) {
 	dpu := cdbm.MachineCapabilityDeviceTypeDPU
-	spx := cdbm.MachineCapabilityDeviceTypeSPX
+	spectrumX := cdbm.MachineCapabilityDeviceTypeSpectrumX
 	tests := []struct {
 		name               string
 		caps               APIMachineCapabilities
@@ -43,16 +43,16 @@ func TestAPIMachineCapabilities_Validate(t *testing.T) {
 			name: "same type and name with distinct device types",
 			caps: APIMachineCapabilities{
 				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", DeviceType: &dpu},
-				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", DeviceType: &spx},
+				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", DeviceType: &spectrumX},
 			},
 		},
 		{
 			name: "duplicate full identity",
 			caps: APIMachineCapabilities{
-				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", DeviceType: &spx},
-				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", DeviceType: &spx},
+				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", DeviceType: &spectrumX},
+				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", DeviceType: &spectrumX},
 			},
-			wantErrContains: "duplicate Capability name and device type: ConnectX-8, SPX",
+			wantErrContains: "duplicate Capability name and device type: ConnectX-8, SpectrumX",
 		},
 		{
 			name: "duplicate identity without device type",
