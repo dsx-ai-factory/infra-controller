@@ -19,6 +19,7 @@ pub mod api_client;
 pub mod api_throttler;
 mod bmc_mock_wrapper;
 mod config;
+mod console_output;
 mod control_router;
 mod desired_firmware;
 mod device_handle;
@@ -53,6 +54,7 @@ pub use config::{
     MachineATronContext, MachineConfig, PersistedDevice, PersistedDpuMachine, RackConfig,
     RackModelConfig, WiwynnGb200RackConfig,
 };
+pub use console_output::ConsoleOutputController;
 pub use control_router::{ControlState, append as append_control_routes};
 pub use desired_firmware::spawn_desired_firmware_refresher;
 pub use device_handle::DeviceHandle;

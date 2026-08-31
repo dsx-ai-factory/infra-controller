@@ -65,7 +65,10 @@ fn abandon_machine_actions_on_power_change(
     preserve_dhcp_retry: bool,
 ) {
     actions.retain(|action| match action {
-        FsmAction::SetupBmc | FsmAction::Dhcp(DhcpType::Bmc) | FsmAction::CleanupOnPowerOff => true,
+        FsmAction::SetupBmc
+        | FsmAction::ConsoleOutputStop
+        | FsmAction::Dhcp(DhcpType::Bmc)
+        | FsmAction::CleanupOnPowerOff => true,
         FsmAction::ScheduleDhcpRetry { .. } | FsmAction::CancelDhcpRetry => preserve_dhcp_retry,
         FsmAction::SetTimer(
             Timer::PowerCycle
@@ -78,6 +81,7 @@ fn abandon_machine_actions_on_power_change(
         | FsmAction::InitialDiscoveryRequest(_)
         | FsmAction::AgentControlRequest(_)
         | FsmAction::DpuAgentNetworkObservation
+        | FsmAction::ConsoleOutputStart
         | FsmAction::BmcEvent(BmcEvent::PowerOn | BmcEvent::BootCompleted) => false,
     });
 }
@@ -512,6 +516,18 @@ impl MachineStateMachine {
                     }
                     Err(_) => return Some(self.config.run_interval_working),
                 },
+                FsmAction::ConsoleOutputStart => {
+                    if let Some(bmc_mock) = &self.bmc_mock {
+                        bmc_mock.console_output_start();
+                    }
+                    self.actions.pop_front();
+                }
+                FsmAction::ConsoleOutputStop => {
+                    if let Some(bmc_mock) = &self.bmc_mock {
+                        bmc_mock.console_output_stop();
+                    }
+                    self.actions.pop_front();
+                }
                 FsmAction::SetTimer(Timer::PowerCycle) => {
                     tracing::info!(
                         duration = ?self.resolved_timings.power_off_force,
@@ -1632,6 +1648,7 @@ mod tests {
                     input: (
                         queued(&[
                             FsmAction::SetupBmc,
+                            FsmAction::ConsoleOutputStart,
                             FsmAction::Dhcp(DhcpType::Machine),
                             FsmAction::SetTimer(Timer::PowerCycle),
                             FsmAction::SetTimer(Timer::MachineOn),
@@ -1643,12 +1660,14 @@ mod tests {
                             FsmAction::DpuAgentNetworkObservation,
                             FsmAction::BmcEvent(BmcEvent::PowerOn),
                             FsmAction::BmcEvent(BmcEvent::BootCompleted),
+                            FsmAction::ConsoleOutputStop,
                             FsmAction::CleanupOnPowerOff,
                         ]),
                         false,
                     ),
                     expect: vec![
                         format!("{:?}", FsmAction::SetupBmc),
+                        format!("{:?}", FsmAction::ConsoleOutputStop),
                         format!("{:?}", FsmAction::CleanupOnPowerOff),
                     ],
                 },

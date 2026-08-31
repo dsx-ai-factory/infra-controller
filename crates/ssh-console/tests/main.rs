@@ -61,9 +61,19 @@ async fn test_ssh_console() -> eyre::Result<()> {
     else {
         return Ok(());
     };
+    env.start_console_output();
 
     // Run new ssh-console
-    let handle = ssh_console_test_helper::spawn(env.mock_api_server.addr.port(), None).await?;
+    // Keep the complete continuous-output interval so lifecycle markers and all three transport
+    // streams can be checked together. Log rotation has a dedicated integration test below.
+    let handle = ssh_console_test_helper::spawn(
+        env.mock_api_server.addr.port(),
+        Some(ssh_console_test_helper::ConfigOverrides {
+            log_rotate_max_size: Some(size::Size::from_mebibytes(1)),
+            ..Default::default()
+        }),
+    )
+    .await?;
 
     // Run the same assertions we do with legacy ssh-console
     env.run_baseline_assertions(
@@ -156,6 +166,28 @@ async fn test_ssh_console() -> eyre::Result<()> {
             log_path.display(),
             logs
         );
+
+        let own_output_marker = format!("machine={}", mock_host.machine_id);
+        assert!(
+            logs.contains(&own_output_marker),
+            "{} does not contain simulated boot output for its machine:\n{}",
+            log_path.display(),
+            logs
+        );
+        for other_host in env
+            .mock_hosts
+            .iter()
+            .filter(|other_host| other_host.machine_id != mock_host.machine_id)
+        {
+            let other_output_marker = format!("machine={}", other_host.machine_id);
+            assert!(
+                !logs.contains(&other_output_marker),
+                "{} contains simulated boot output for another machine {}:\n{}",
+                log_path.display(),
+                other_host.machine_id,
+                logs
+            );
+        }
     }
 
     Ok(())
@@ -240,6 +272,7 @@ async fn test_ipmi_sol_conflict_recovery_when_enabled() -> eyre::Result<()> {
             reconnect_interval_max: Some(Duration::from_secs(30)),
             successful_connection_minimum_duration: Some(Duration::from_secs(60)),
             force_deactivate_conflicting_ipmi_sol_sessions: Some(true),
+            log_rotate_max_size: None,
         }),
     )
     .await?;

@@ -45,6 +45,7 @@ tokio-util = { workspace = true }
 tonic = { workspace = true }
 dhcproto = { workspace = true }
 base64 = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 axum = { workspace = true }

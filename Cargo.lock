@@ -2485,6 +2485,7 @@ dependencies = [
  "axum",
  "base64",
  "bmc-mock",
+ "bytes",
  "carbide-api-model",
  "carbide-ipmi",
  "carbide-network",
