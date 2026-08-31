@@ -1,6 +1,6 @@
 # `nico-admin-cli compute-allocation show`
 
-_[Tenant commands](../../tenant.md) › [compute-allocation](./compute-allocation.md) › **show**_
+*[Tenant commands](../../tenant.md) › [compute-allocation](./compute-allocation.md) › **show***
 
 ## NAME
 
@@ -63,4 +63,4 @@ nico-admin-cli compute-allocation show --instance-type-id DGX-H100-640GB
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

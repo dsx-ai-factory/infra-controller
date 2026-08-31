@@ -1,6 +1,6 @@
 # `nico-admin-cli machine-validation external-config`
 
-_[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › **external-config**_
+*[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › **external-config***
 
 ## NAME
 
@@ -55,4 +55,4 @@ nico-admin-cli machine-validation external-config remove --name my-config
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

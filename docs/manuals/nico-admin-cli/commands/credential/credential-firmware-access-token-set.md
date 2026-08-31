@@ -1,6 +1,6 @@
 # `nico-admin-cli credential firmware-access-token set`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › [firmware-access-token](./credential-firmware-access-token.md) › **set**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › [firmware-access-token](./credential-firmware-access-token.md) › **set***
 
 ## NAME
 
@@ -28,7 +28,7 @@ File containing the token, or - to read standard input
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -54,4 +54,4 @@ cat ./firmware-token.txt | nico-admin-cli credential firmware-access-token set -
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

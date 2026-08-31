@@ -1,6 +1,6 @@
 # `nico-admin-cli machine-interfaces delete`
 
-_[Hardware commands](../../hardware.md) › [machine-interfaces](./machine-interfaces.md) › **delete**_
+*[Hardware commands](../../hardware.md) › [machine-interfaces](./machine-interfaces.md) › **delete***
 
 ## NAME
 
@@ -14,7 +14,10 @@ nico-admin-cli-machine-interfaces-delete - Delete Machine interface.
 
 ## DESCRIPTION
 
-Delete Machine interface.
+Delete a machine interface.
+
+Exactly one deletion selector must be specified: INTERFACE_ID or
+--mac-address. Providing both selectors is rejected.
 
 ## OPTIONS
 
@@ -54,4 +57,4 @@ nico-admin-cli machine-interfaces delete --mac-address 00:11:22:33:44:55
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli firmware show`
 
-_[Hardware commands](../../hardware.md) › [firmware](./firmware.md) › **show**_
+*[Hardware commands](../../hardware.md) › [firmware](./firmware.md) › **show***
 
 ## NAME
 
@@ -45,4 +45,4 @@ nico-admin-cli firmware show
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

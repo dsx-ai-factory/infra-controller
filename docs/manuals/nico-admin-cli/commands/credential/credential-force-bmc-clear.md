@@ -1,11 +1,11 @@
 # `nico-admin-cli credential force-bmc clear`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-bmc](./credential-force-bmc.md) › **clear**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-bmc](./credential-force-bmc.md) › **clear***
 
 ## NAME
 
 nico-admin-cli-credential-force-bmc-clear - Clear a pending BMC
-force-converge request for a machine, switch, or power shelf.
+force-converge request for a machine, DPU, switch, or power shelf.
 
 ## SYNOPSIS
 
@@ -15,8 +15,8 @@ force-converge request for a machine, switch, or power shelf.
 
 ## DESCRIPTION
 
-Clear a pending BMC force-converge request for a machine, switch, or
-power shelf.
+Clear a pending BMC force-converge request for a machine, DPU, switch,
+or power shelf.
 
 ## OPTIONS
 
@@ -58,4 +58,4 @@ nico-admin-cli credential force-bmc clear --bmc-mac 00:11:22:33:44:55
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

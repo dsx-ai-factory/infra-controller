@@ -1,6 +1,6 @@
 # `nico-admin-cli credential add-host-factory-default`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-host-factory-default**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-host-factory-default***
 
 ## NAME
 
@@ -75,4 +75,4 @@ nico-admin-cli credential add-host-factory-default --vendor nvidia --username ad
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

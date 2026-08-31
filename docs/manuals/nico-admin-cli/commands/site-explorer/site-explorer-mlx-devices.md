@@ -1,6 +1,6 @@
 # `nico-admin-cli site-explorer mlx-devices`
 
-_[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › **mlx-devices**_
+*[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › **mlx-devices***
 
 ## NAME
 
@@ -60,4 +60,4 @@ nico-admin-cli site-explorer mlx-devices --nic-mode-only --expected-version 32.4
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

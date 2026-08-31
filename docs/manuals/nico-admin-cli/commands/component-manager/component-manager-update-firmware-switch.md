@@ -1,6 +1,6 @@
 # `nico-admin-cli component-manager update-firmware switch`
 
-_[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [update-firmware](./component-manager-update-firmware.md) › **switch**_
+*[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [update-firmware](./component-manager-update-firmware.md) › **switch***
 
 ## NAME
 
@@ -10,10 +10,10 @@ on NVLink switches
 ## SYNOPSIS
 
 **nico-admin-cli component-manager update-firmware switch**
-\<**--switch-id**\> \[**--target-version**\] \[**--sot-json-file**\]
-\[**--access-token**\] \[**--force-update**\] \[**--component**\]
-\[**--bypass-state-controller**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+\[**--switch-id**\] \[**--mac-address**\] \[**--target-version**\]
+\[**--sot-json-file**\] \[**--access-token**\] \[**--force-update**\]
+\[**--component**\] \[**--bypass-state-controller**\] \[**--extended**\]
+\[**--sort-by**\] \[**-h**\|**--help**\]
 
 ## DESCRIPTION
 
@@ -23,6 +23,10 @@ Queue firmware on NVLink switches
 
 **--switch-id** *\<SWITCH_IDS\>...*  
 Switch IDs to target
+
+**--mac-address** *\<MAC_ADDRESSES\>...*  
+Device MAC addresses to target (BMC MAC for compute/switch, PMC MAC for
+power shelf)
 
 **--target-version** *\<TARGET_VERSION\>*  
 Firmware target version for legacy direct-update paths
@@ -78,4 +82,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

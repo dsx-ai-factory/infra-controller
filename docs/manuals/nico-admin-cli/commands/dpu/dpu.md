@@ -1,6 +1,6 @@
 # `nico-admin-cli dpu`
 
-_[Hardware commands](../../hardware.md) › **dpu**_
+*[Hardware commands](../../hardware.md) › **dpu***
 
 ## NAME
 
@@ -51,4 +51,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

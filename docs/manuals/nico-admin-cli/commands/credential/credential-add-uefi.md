@@ -1,6 +1,6 @@
 # `nico-admin-cli credential add-uefi`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-uefi**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-uefi***
 
 ## NAME
 
@@ -61,4 +61,4 @@ nico-admin-cli credential add-uefi --kind=host --password=mynewpassword
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

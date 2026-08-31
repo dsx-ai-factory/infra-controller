@@ -1,6 +1,6 @@
 # `nico-admin-cli mlx registry list`
 
-_[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › [registry](./mlx-registry.md) › **list**_
+*[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › [registry](./mlx-registry.md) › **list***
 
 ## NAME
 
@@ -42,4 +42,4 @@ Carbide Machine ID
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

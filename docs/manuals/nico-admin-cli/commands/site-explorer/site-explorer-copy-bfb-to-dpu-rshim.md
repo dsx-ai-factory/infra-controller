@@ -1,6 +1,6 @@
 # `nico-admin-cli site-explorer copy-bfb-to-dpu-rshim`
 
-_[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › **copy-bfb-to-dpu-rshim**_
+*[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › **copy-bfb-to-dpu-rshim***
 
 ## NAME
 
@@ -59,4 +59,4 @@ nico-admin-cli site-explorer copy-bfb-to-dpu-rshim 192.0.2.10 --host-bmc-ip 192.
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

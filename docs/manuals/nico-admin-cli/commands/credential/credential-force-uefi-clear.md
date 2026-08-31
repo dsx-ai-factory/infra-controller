@@ -1,6 +1,6 @@
 # `nico-admin-cli credential force-uefi clear`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-uefi](./credential-force-uefi.md) › **clear**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-uefi](./credential-force-uefi.md) › **clear***
 
 ## NAME
 
@@ -24,7 +24,7 @@ Machine ID whose pending UEFI force-converge request should be cleared.
 Provide this or --bmc-mac.
 
 **--bmc-mac** *\<BMC_MAC\>*  
-MAC of the machines BMC whose pending request should be cleared.
+MAC of the BMC for the machine whose pending request should be cleared.
 
 **--extended**  
 Extended result output.
@@ -55,4 +55,4 @@ nico-admin-cli credential force-uefi clear --bmc-mac 00:11:22:33:44:55
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

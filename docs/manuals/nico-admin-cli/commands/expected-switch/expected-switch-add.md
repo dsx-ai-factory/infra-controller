@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-switch add`
 
-_[Tenant commands](../../tenant.md) › [expected-switch](./expected-switch.md) › **add**_
+*[Tenant commands](../../tenant.md) › [expected-switch](./expected-switch.md) › **add***
 
 ## NAME
 
@@ -109,4 +109,4 @@ nico-admin-cli expected-switch add --bmc-mac-address 00:11:22:33:44:55 --bmc-use
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

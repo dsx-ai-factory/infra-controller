@@ -1,6 +1,6 @@
 # `nico-admin-cli instance-type create`
 
-_[Tenant commands](../../tenant.md) › [instance-type](./instance-type.md) › **create**_
+*[Tenant commands](../../tenant.md) › [instance-type](./instance-type.md) › **create***
 
 ## NAME
 
@@ -66,4 +66,4 @@ nico-admin-cli instance-type create --id 12345678-1234-5678-90ab-cdef01234567 --
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

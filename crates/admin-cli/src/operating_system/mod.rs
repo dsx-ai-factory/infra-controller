@@ -37,11 +37,13 @@ pub(crate) enum Cmd {
     Show(show::Args),
     #[clap(
         about = "Create a new operating system definition.",
+        long_about = "Create a new operating system definition.\n\nExactly one OS variant must be specified: --ipxe-script or --ipxe-template-id.\n\nFor templated iPXE requirements, artifact configuration, and synchronization rules, see docs/configuration/templated-ipxe-operating-systems.md.",
         visible_alias = "c"
     )]
     Create(create::Args),
     #[clap(
         about = "Update an existing operating system definition.",
+        long_about = "Update an existing operating system definition.\n\nFor templated iPXE requirements, artifact configuration, and synchronization rules, see docs/configuration/templated-ipxe-operating-systems.md.",
         visible_alias = "u"
     )]
     Update(update::Args),
@@ -54,6 +56,7 @@ pub(crate) enum Cmd {
     GetArtifacts(get_artifacts::Args),
     #[clap(
         about = "Set or clear cached_url on OS artifacts.",
+        long_about = "Set or clear cached_url on OS artifacts.\n\nFor cache strategies, readiness behavior, and the complete templated iPXE workflow, see docs/configuration/templated-ipxe-operating-systems.md.",
         visible_alias = "scu"
     )]
     SetCachedUrl(set_cached_url::Args),

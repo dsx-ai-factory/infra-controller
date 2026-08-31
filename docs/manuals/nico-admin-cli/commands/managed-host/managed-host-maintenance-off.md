@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host maintenance off`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › [maintenance](./managed-host-maintenance.md) › **off**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › [maintenance](./managed-host-maintenance.md) › **off***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli managed-host maintenance off --host 12345678-1234-5678-90ab-cdef0
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

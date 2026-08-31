@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host power-options update`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › [power-options](./managed-host-power-options.md) › **update**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › [power-options](./managed-host-power-options.md) › **update***
 
 ## NAME
 
@@ -59,4 +59,4 @@ nico-admin-cli managed-host power-options update 12345678-1234-5678-90ab-cdef012
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

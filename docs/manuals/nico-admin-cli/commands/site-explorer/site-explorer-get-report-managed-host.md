@@ -1,6 +1,6 @@
 # `nico-admin-cli site-explorer get-report managed-host`
 
-_[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › [get-report](./site-explorer-get-report.md) › **managed-host**_
+*[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › [get-report](./site-explorer-get-report.md) › **managed-host***
 
 ## NAME
 
@@ -55,4 +55,4 @@ nico-admin-cli site-explorer get-report managed-host --vendor nvidia
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

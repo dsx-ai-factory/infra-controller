@@ -1,6 +1,6 @@
 # `nico-admin-cli credential add-ufm`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-ufm**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-ufm***
 
 ## NAME
 
@@ -51,4 +51,4 @@ nico-admin-cli credential add-ufm --url https://192.0.2.10 --token mypassword
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli extension-service delete`
 
-_[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **delete**_
+*[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **delete***
 
 ## NAME
 
@@ -53,4 +53,4 @@ nico-admin-cli extension-service delete --id 12345678-1234-5678-90ab-cdef0123456
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

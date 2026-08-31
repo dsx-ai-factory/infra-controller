@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host show`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **show**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **show***
 
 ## NAME
 
@@ -41,20 +41,20 @@ Show only hosts in quarantine
 
 **--max-width** *\<\[COLUMN=\]WIDTH\>*  
 Limit displayed column width to WIDTH characters, truncating longer
-values with an ellipsis ('...'). A column never narrows below its
-header's width, so WIDTH is an upper bound on values, not a guaranteed
-rendered width: a WIDTH shorter than the header still lets values fill
-the header's width for free, and the ellipsis is only added when that
-effective width (WIDTH, or the header's length if longer) exceeds 3
-characters; at 3 or fewer there's no room for one, so the value is
-truncated without it. WIDTH 0 means no limit (the same as not
-specifying that column at all; useful as COLUMN=0 to exempt one column
-from a blanket --max-width). Repeatable. A bare WIDTH applies to every
-column; COLUMN=WIDTH limits just that column, where COLUMN must exactly
-match the columns displayed header text (case-insensitive), e.g.
-State=40. For a header containing spaces, quote the whole COLUMN=WIDTH
-argument, e.g. "Machine IDs (H/D)=40". An unmatched COLUMN is ignored
-with a warning listing the valid headers for this invocation.
+values with an ellipsis (...). A column never narrows below its headers
+length, so WIDTH is an upper bound on values, not a guaranteed rendered
+width: a WIDTH shorter than the header still lets values fill the
+headers width for free, and the ellipsis is only added when that
+effective width (WIDTH, or the headers length if longer) exceeds 3
+characters; at 3 or fewer theres no room for one, so the value is
+truncated without it. WIDTH 0 means no limit (the same as not specifying
+that column at all; useful as COLUMN=0 to exempt one column from a
+blanket --max-width). Repeatable. A bare WIDTH applies to every column;
+COLUMN=WIDTH limits just that column, where COLUMN must exactly match
+the columns displayed header text (case-insensitive), e.g. State=40. For
+a header containing spaces, quote the whole COLUMN=WIDTH argument, e.g.
+"COLUMN NAME=40". An unmatched COLUMN is ignored with a warning listing
+the valid headers for this invocation.
 
 **--extended**  
 Extended result output.
@@ -89,4 +89,4 @@ nico-admin-cli managed-host show --max-width "Machine IDs (H/D)=40"
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli component-manager component-power-control power-shelf`
 
-_[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [component-power-control](./component-manager-component-power-control.md) › **power-shelf**_
+*[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [component-power-control](./component-manager-component-power-control.md) › **power-shelf***
 
 ## NAME
 
@@ -44,4 +44,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

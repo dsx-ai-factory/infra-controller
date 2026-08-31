@@ -1,6 +1,6 @@
 # `nico-admin-cli boot-override get`
 
-_[Hardware commands](../../hardware.md) › [boot-override](./boot-override.md) › **get**_
+*[Hardware commands](../../hardware.md) › [boot-override](./boot-override.md) › **get***
 
 ## NAME
 
@@ -45,4 +45,4 @@ nico-admin-cli boot-override get 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli site-explorer get-report endpoint`
 
-_[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › [get-report](./site-explorer-get-report.md) › **endpoint**_
+*[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › [get-report](./site-explorer-get-report.md) › **endpoint***
 
 ## NAME
 
@@ -66,4 +66,4 @@ nico-admin-cli site-explorer get-report endpoint --unpairedonly
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

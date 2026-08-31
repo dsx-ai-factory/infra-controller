@@ -1,6 +1,6 @@
 # `nico-admin-cli mlx connections disconnect`
 
-_[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › [connections](./mlx-connections.md) › **disconnect**_
+*[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › [connections](./mlx-connections.md) › **disconnect***
 
 ## NAME
 
@@ -42,4 +42,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host reset-host-reprovisioning`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **reset-host-reprovisioning**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **reset-host-reprovisioning***
 
 ## NAME
 
@@ -50,4 +50,4 @@ nico-admin-cli managed-host reset-host-reprovisioning --machine 12345678-1234-56
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

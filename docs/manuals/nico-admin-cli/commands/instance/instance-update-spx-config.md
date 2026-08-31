@@ -1,6 +1,6 @@
 # `nico-admin-cli instance update-spx-config`
 
-_[Tenant commands](../../tenant.md) › [instance](./instance.md) › **update-spx-config**_
+*[Tenant commands](../../tenant.md) › [instance](./instance.md) › **update-spx-config***
 
 ## NAME
 
@@ -51,4 +51,4 @@ nico-admin-cli instance update-spx-config --instance 12345678-1234-5678-90ab-cde
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot bundle rename`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [bundle](./attestation-measured-boot-bundle.md) › **rename**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [bundle](./attestation-measured-boot-bundle.md) › **rename***
 
 ## NAME
 
@@ -60,4 +60,4 @@ nico-admin-cli attestation measured-boot bundle rename 12345678-1234-5678-90ab-c
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

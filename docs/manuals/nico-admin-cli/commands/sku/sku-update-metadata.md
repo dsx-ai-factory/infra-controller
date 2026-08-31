@@ -1,6 +1,6 @@
 # `nico-admin-cli sku update-metadata`
 
-_[Hardware commands](../../hardware.md) › [sku](./sku.md) › **update-metadata**_
+*[Hardware commands](../../hardware.md) › [sku](./sku.md) › **update-metadata***
 
 ## NAME
 
@@ -57,4 +57,4 @@ nico-admin-cli sku update-metadata DGX-H100-640GB --description "DGX H100 640GB"
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

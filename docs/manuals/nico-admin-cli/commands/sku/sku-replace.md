@@ -1,6 +1,6 @@
 # `nico-admin-cli sku replace`
 
-_[Hardware commands](../../hardware.md) › [sku](./sku.md) › **replace**_
+*[Hardware commands](../../hardware.md) › [sku](./sku.md) › **replace***
 
 ## NAME
 
@@ -51,4 +51,4 @@ nico-admin-cli sku replace ./skus.json --id DGX-H100-640GB
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

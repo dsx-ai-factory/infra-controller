@@ -1,6 +1,6 @@
 # `nico-admin-cli extension-service show-instances`
 
-_[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **show-instances**_
+*[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **show-instances***
 
 ## NAME
 
@@ -54,4 +54,4 @@ nico-admin-cli extension-service show-instances --service-id 12345678-1234-5678-
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli site-explorer re-explore`
 
-_[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › **re-explore**_
+*[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › **re-explore***
 
 ## NAME
 
@@ -50,4 +50,4 @@ nico-admin-cli site-explorer re-explore 192.0.2.10
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli network-segment show`
 
-_[Network commands](../../network.md) › [network-segment](./network-segment.md) › **show**_
+*[Network commands](../../network.md) › [network-segment](./network-segment.md) › **show***
 
 ## NAME
 
@@ -58,4 +58,4 @@ nico-admin-cli network-segment show --tenant-org-id fds34511233a
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

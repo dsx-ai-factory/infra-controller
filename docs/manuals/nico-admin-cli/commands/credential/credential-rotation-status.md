@@ -1,6 +1,6 @@
 # `nico-admin-cli credential rotation-status`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **rotation-status**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **rotation-status***
 
 ## NAME
 
@@ -70,4 +70,4 @@ nico-admin-cli credential rotation-status --type=bmc --mac-address 00:11:22:33:4
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,11 +1,11 @@
 # `nico-admin-cli credential force-bmc set`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-bmc](./credential-force-bmc.md) › **set**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-bmc](./credential-force-bmc.md) › **set***
 
 ## NAME
 
 nico-admin-cli-credential-force-bmc-set - Request an immediate BMC
-credential rotation of a machine, switch, or power shelf.
+credential rotation of a machine, DPU, switch, or power shelf.
 
 ## SYNOPSIS
 
@@ -15,8 +15,8 @@ credential rotation of a machine, switch, or power shelf.
 
 ## DESCRIPTION
 
-Request an immediate BMC credential rotation of a machine, switch, or
-power shelf.
+Request an immediate BMC credential rotation of a machine, DPU, switch,
+or power shelf.
 
 ## OPTIONS
 
@@ -25,8 +25,8 @@ ID of the machine, DPU, switch, or power shelf that owns the BMC.
 Provide this or --bmc-mac.
 
 **--bmc-mac** *\<BMC_MAC\>*  
-MAC of the BMC to target (machine, switch, or power shelf). Provide this
-or --id; if an id is also given they must identify the same device.
+MAC of the BMC to target (machine, DPU, switch, or power shelf). Provide
+this or --id; if an id is also given they must identify the same device.
 
 **--extended**  
 Extended result output.
@@ -59,4 +59,4 @@ nico-admin-cli credential force-bmc set --bmc-mac 00:11:22:33:44:55
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

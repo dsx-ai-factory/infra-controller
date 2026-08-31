@@ -1,6 +1,6 @@
 # `nico-admin-cli component-manager get-firmware-update-status switch`
 
-_[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [get-firmware-update-status](./component-manager-get-firmware-update-status.md) › **switch**_
+*[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [get-firmware-update-status](./component-manager-get-firmware-update-status.md) › **switch***
 
 ## NAME
 
@@ -10,8 +10,8 @@ Target NVLink switches
 ## SYNOPSIS
 
 **nico-admin-cli component-manager get-firmware-update-status switch**
-\<**--switch-id**\> \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+\[**--switch-id**\] \[**--mac-address**\] \[**--extended**\]
+\[**--sort-by**\] \[**-h**\|**--help**\]
 
 ## DESCRIPTION
 
@@ -21,6 +21,10 @@ Target NVLink switches
 
 **--switch-id** *\<SWITCH_IDS\>...*  
 Switch IDs to target
+
+**--mac-address** *\<MAC_ADDRESSES\>...*  
+Device MAC addresses to target (BMC MAC for compute/switch, PMC MAC for
+power shelf)
 
 **--extended**  
 Extended result output.
@@ -44,4 +48,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

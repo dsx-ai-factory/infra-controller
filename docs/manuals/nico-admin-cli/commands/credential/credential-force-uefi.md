@@ -1,11 +1,11 @@
 # `nico-admin-cli credential force-uefi`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **force-uefi**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **force-uefi***
 
 ## NAME
 
-nico-admin-cli-credential-force-uefi - Force-converge a single machines
-UEFI credential now (operator escape hatch)
+nico-admin-cli-credential-force-uefi - Force-converge the UEFI
+credential for a single machine now (operator escape hatch)
 
 ## SYNOPSIS
 
@@ -14,8 +14,8 @@ UEFI credential now (operator escape hatch)
 
 ## DESCRIPTION
 
-Force-converge a single machines UEFI credential now (operator escape
-hatch)
+Force-converge the UEFI credential for a single machine now (operator
+escape hatch)
 
 ## OPTIONS
 
@@ -56,4 +56,4 @@ nico-admin-cli credential force-uefi clear --id fm100ht038bg3qsho433vkg684heguv2
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

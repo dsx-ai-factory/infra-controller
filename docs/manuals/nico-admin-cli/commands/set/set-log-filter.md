@@ -1,6 +1,6 @@
 # `nico-admin-cli set log-filter`
 
-_[Hardware commands](../../hardware.md) › [set](./set.md) › **log-filter**_
+*[Hardware commands](../../hardware.md) › [set](./set.md) › **log-filter***
 
 ## NAME
 
@@ -23,7 +23,7 @@ Set servers RUST_LOG.
 
 **--expiry** *\<EXPIRY\>* \[default: 1h\]  
 Revert to startup RUST_LOG after this much time, friendly format e.g.
-1h, 3min, https://docs.rs/duration-str/latest/duration_str/
+1h, 3min, [duration-str documentation](https://docs.rs/duration-str/latest/duration_str/)
 
 **--extended**  
 Extended result output.
@@ -54,4 +54,4 @@ nico-admin-cli set log-filter --filter carbide_api=trace,info --expiry 30min
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

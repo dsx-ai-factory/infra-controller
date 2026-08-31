@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host set-primary-dpu`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **set-primary-dpu**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **set-primary-dpu***
 
 ## NAME
 
@@ -24,7 +24,7 @@ Admin segment when the host has a DPU-backed Admin interface. The
 machine-controller converges the BMC to the desired target when the host
 is eligible. Use set-primary-interface with an INTERFACE_ID
 (machine-interface ID):
-https://github.com/NVIDIA/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/managed-host/managed-host-set-primary-interface.md
+[primary-interface command documentation](https://github.com/NVIDIA/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/managed-host/managed-host-set-primary-interface.md)
 
 ## OPTIONS
 
@@ -75,4 +75,4 @@ nico-admin-cli managed-host set-primary-dpu 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

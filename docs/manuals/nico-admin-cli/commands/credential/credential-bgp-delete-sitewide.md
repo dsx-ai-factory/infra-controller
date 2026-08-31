@@ -1,6 +1,6 @@
 # `nico-admin-cli credential bgp delete-sitewide`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › [bgp](./credential-bgp.md) › **delete-sitewide**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › [bgp](./credential-bgp.md) › **delete-sitewide***
 
 ## NAME
 
@@ -40,4 +40,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

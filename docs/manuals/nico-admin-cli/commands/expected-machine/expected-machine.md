@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-machine`
 
-_[Tenant commands](../../tenant.md) › **expected-machine**_
+*[Tenant commands](../../tenant.md) › **expected-machine***
 
 ## NAME
 
@@ -51,4 +51,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

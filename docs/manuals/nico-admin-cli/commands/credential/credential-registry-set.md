@@ -1,6 +1,6 @@
 # `nico-admin-cli credential registry set`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › [registry](./credential-registry.md) › **set**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › [registry](./credential-registry.md) › **set***
 
 ## NAME
 
@@ -59,4 +59,4 @@ unset registry_token
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

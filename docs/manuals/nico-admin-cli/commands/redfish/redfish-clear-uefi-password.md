@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish clear-uefi-password`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **clear-uefi-password**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **clear-uefi-password***
 
 ## NAME
 
@@ -52,4 +52,4 @@ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypasswo
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

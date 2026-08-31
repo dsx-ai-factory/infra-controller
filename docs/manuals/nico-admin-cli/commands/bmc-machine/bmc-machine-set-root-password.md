@@ -1,11 +1,11 @@
 # `nico-admin-cli bmc-machine set-root-password`
 
-_[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **set-root-password**_
+*[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **set-root-password***
 
 ## NAME
 
-nico-admin-cli-bmc-machine-set-root-password - Set a BMCs root password
-out-of-band (for fleet rotation use \`credential rotate\`)
+nico-admin-cli-bmc-machine-set-root-password - Set the root password of
+a BMC out-of-band (for fleet rotation use \`credential rotate\`)
 
 ## SYNOPSIS
 
@@ -16,7 +16,7 @@ out-of-band (for fleet rotation use \`credential rotate\`)
 
 ## DESCRIPTION
 
-Set a BMCs root password out-of-band (for fleet rotation use
+Set the root password of a BMC out-of-band (for fleet rotation use
 \`credential rotate\`)
 
 ## OPTIONS
@@ -63,4 +63,4 @@ nico-admin-cli bmc-machine set-root-password --mac-address 00:11:22:33:44:55 --n
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

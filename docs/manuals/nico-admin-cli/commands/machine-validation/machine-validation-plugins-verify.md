@@ -1,6 +1,6 @@
 # `nico-admin-cli machine-validation plugins verify`
 
-_[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › [plugins](./machine-validation-plugins.md) › **verify**_
+*[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › [plugins](./machine-validation-plugins.md) › **verify***
 
 ## NAME
 
@@ -52,4 +52,4 @@ nico-admin-cli machine-validation plugins disable --test-id gpu-health --version
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli ssh copy-bfb`
 
-_[Admin commands](../../admin.md) › [ssh](./ssh.md) › **copy-bfb**_
+*[Admin commands](../../admin.md) › [ssh](./ssh.md) › **copy-bfb***
 
 ## NAME
 
@@ -58,4 +58,4 @@ nico-admin-cli ssh copy-bfb 192.0.2.10:22 admin mypassword /path/to/image.bfb
 
 ---
 
-**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../README.md)
+**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../index.md)

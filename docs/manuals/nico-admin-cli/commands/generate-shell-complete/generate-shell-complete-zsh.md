@@ -1,6 +1,6 @@
 # `nico-admin-cli generate-shell-complete zsh`
 
-_[Admin commands](../../admin.md) › [generate-shell-complete](./generate-shell-complete.md) › **zsh**_
+*[Admin commands](../../admin.md) › [generate-shell-complete](./generate-shell-complete.md) › **zsh***
 
 ## NAME
 
@@ -37,4 +37,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../README.md)
+**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../index.md)

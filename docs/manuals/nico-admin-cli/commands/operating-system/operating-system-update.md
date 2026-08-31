@@ -1,6 +1,6 @@
 # `nico-admin-cli operating-system update`
 
-_[Tenant commands](../../tenant.md) › [operating-system](./operating-system.md) › **update**_
+*[Tenant commands](../../tenant.md) › [operating-system](./operating-system.md) › **update***
 
 ## NAME
 
@@ -19,6 +19,10 @@ system definition.
 ## DESCRIPTION
 
 Update an existing operating system definition.
+
+For templated iPXE requirements, artifact configuration, and
+synchronization rules, see
+[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md).
 
 ## OPTIONS
 
@@ -39,7 +43,8 @@ Set whether this OS definition is active.\
 - false
 
 **--allow-override** *\<ALLOW_OVERRIDE\>*  
-Set whether users can override OS parameters.\
+Set whether an Instance request can override the user data of this OS
+definition.\
 
 \
 *Possible values:*
@@ -104,4 +109,4 @@ nico-admin-cli operating-system update 12345678-1234-5678-90ab-cdef01234567 --ip
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

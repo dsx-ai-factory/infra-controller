@@ -1,6 +1,6 @@
 # `nico-admin-cli ip find`
 
-_[Network commands](../../network.md) › [ip](./ip.md) › **find**_
+*[Network commands](../../network.md) › [ip](./ip.md) › **find***
 
 ## NAME
 
@@ -47,4 +47,4 @@ nico-admin-cli ip find 2001:db8::1
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

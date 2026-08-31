@@ -1,6 +1,6 @@
 # `nico-admin-cli vpc-prefix show`
 
-_[Network commands](../../network.md) › [vpc-prefix](./vpc-prefix.md) › **show**_
+*[Network commands](../../network.md) › [vpc-prefix](./vpc-prefix.md) › **show***
 
 ## NAME
 
@@ -73,4 +73,4 @@ nico-admin-cli vpc-prefix show --contained-by 10.0.0.0/16
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli credential add-bmc`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-bmc**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-bmc***
 
 ## NAME
 
@@ -68,4 +68,4 @@ nico-admin-cli credential add-bmc --kind=bmc-root --username admin --password my
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

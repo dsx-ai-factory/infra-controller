@@ -1,6 +1,6 @@
 # `nico-admin-cli dpu-remediation enable`
 
-_[Hardware commands](../../hardware.md) › [dpu-remediation](./dpu-remediation.md) › **enable**_
+*[Hardware commands](../../hardware.md) › [dpu-remediation](./dpu-remediation.md) › **enable***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli dpu-remediation enable --id 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

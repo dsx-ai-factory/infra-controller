@@ -1,6 +1,6 @@
 # `nico-admin-cli switch health-history`
 
-_[Hardware commands](../../hardware.md) › [switch](./switch.md) › **health-history**_
+*[Hardware commands](../../hardware.md) › [switch](./switch.md) › **health-history***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli switch health-history sw100nt038bg3qsho433vkg684heguv282qaggmrsh2
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

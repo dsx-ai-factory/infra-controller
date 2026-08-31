@@ -1,6 +1,6 @@
 # `nico-admin-cli machine-validation on-demand start`
 
-_[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › [on-demand](./machine-validation-on-demand.md) › **start**_
+*[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › [on-demand](./machine-validation-on-demand.md) › **start***
 
 ## NAME
 
@@ -55,4 +55,4 @@ Sort output by specified field\
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

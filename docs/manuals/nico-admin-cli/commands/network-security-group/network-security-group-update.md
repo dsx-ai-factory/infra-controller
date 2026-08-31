@@ -1,6 +1,6 @@
 # `nico-admin-cli network-security-group update`
 
-_[Network commands](../../network.md) › [network-security-group](./network-security-group.md) › **update**_
+*[Network commands](../../network.md) › [network-security-group](./network-security-group.md) › **update***
 
 ## NAME
 
@@ -86,4 +86,4 @@ nico-admin-cli network-security-group update --id 12345678-1234-5678-90ab-cdef01
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

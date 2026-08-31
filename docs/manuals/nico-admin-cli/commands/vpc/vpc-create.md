@@ -1,6 +1,6 @@
 # `nico-admin-cli vpc create`
 
-_[Network commands](../../network.md) › [vpc](./vpc.md) › **create**_
+*[Network commands](../../network.md) › [vpc](./vpc.md) › **create***
 
 ## NAME
 
@@ -23,7 +23,7 @@ Create VPC
 Name to give the new VPC
 
 **--description** *\<DESCRIPTION\>*  
-Discription for the new VPC
+Description for the new VPC
 
 **--id** *\<VpcId\>*  
 Optional VPC ID to use instead of allowing the API server to generate
@@ -40,24 +40,18 @@ Network virtualization type\
 
 - ethernet-virtualizer
 
-- ethernet-virtualizer-with-nvue: 1 was previously
-  FORGE_NATIVE_NETWORKING ETHERNET_VIRTUALIZER_WITH_NVUE is deprecated.
-  NVUE is now implied; just use ETHERNET_VIRTUALIZER
+- ethernet-virtualizer-with-nvue: Deprecated. NVUE is implied; use
+  ethernet-virtualizer
 
-- fnn-classic: Deprecated: FN_CLASSIC and FNN_L3 are deprecated now. Use
-  FNN only
+- fnn-classic: Deprecated. Use fnn
 
-- fnn-l3
+- fnn-l3: Deprecated. Use fnn
 
 - fnn
 
-- flat: FLAT is for VPCs whose tenant instances live directly on the
-  underlay (zero-DPU hosts, or hosts with their DPU in NIC mode). Their
-  interfaces are bound to \`HostInband\` network segments rather than a
-  Carbide-managed overlay. Flat VPCs are still real tenant VPCs with a
-  VNI and NSGs, but Carbide doesnt drive their data plane -- routing and
-  ACL enforcement between Flat VPCs and other VPCs is the network
-  operators responsibility
+- flat: Flat networking for instances attached directly to the underlay.
+  NICo does not manage routing or ACL enforcement between Flat VPCs and
+  other VPCs; that is the responsibility of the network operator
 
 **--slaac-enabled** *\<SLAAC_ENABLED\>*  
 Whether Core should allocate an IPv6 /64 for each IPv6-enabled instance
@@ -103,4 +97,4 @@ nico-admin-cli --cloud-unsafe-op=admin vpc create --name tenant-vpc-1 --org-id f
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

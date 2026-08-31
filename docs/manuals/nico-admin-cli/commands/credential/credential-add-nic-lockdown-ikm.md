@@ -1,6 +1,6 @@
 # `nico-admin-cli credential add-nic-lockdown-ikm`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-nic-lockdown-ikm**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-nic-lockdown-ikm***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli credential add-nic-lockdown-ikm --password mypassword
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

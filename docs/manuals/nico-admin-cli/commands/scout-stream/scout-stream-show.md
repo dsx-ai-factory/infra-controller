@@ -1,6 +1,6 @@
 # `nico-admin-cli scout-stream show`
 
-_[Hardware commands](../../hardware.md) › [scout-stream](./scout-stream.md) › **show**_
+*[Hardware commands](../../hardware.md) › [scout-stream](./scout-stream.md) › **show***
 
 ## NAME
 
@@ -46,4 +46,4 @@ nico-admin-cli scout-stream show
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

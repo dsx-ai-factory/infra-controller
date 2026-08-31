@@ -1,6 +1,6 @@
 # `nico-admin-cli dpf service-sync release`
 
-_[Hardware commands](../../hardware.md) › [dpf](./dpf.md) › [service-sync](./dpf-service-sync.md) › **release**_
+*[Hardware commands](../../hardware.md) › [dpf](./dpf.md) › [service-sync](./dpf-service-sync.md) › **release***
 
 ## NAME
 
@@ -57,4 +57,4 @@ nico-admin-cli dpf service-sync release --instance-id 12345678-1234-5678-90ab-cd
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

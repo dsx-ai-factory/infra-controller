@@ -1,6 +1,6 @@
 # `nico-admin-cli tenant-key-set`
 
-_[Tenant commands](../../tenant.md) › **tenant-key-set**_
+*[Tenant commands](../../tenant.md) › **tenant-key-set***
 
 ## NAME
 
@@ -45,4 +45,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli os-image create`
 
-_[Tenant commands](../../tenant.md) › [os-image](./os-image.md) › **create**_
+*[Tenant commands](../../tenant.md) › [os-image](./os-image.md) › **create***
 
 ## NAME
 
@@ -112,4 +112,4 @@ nico-admin-cli os-image create --id 12345678-1234-5678-90ab-cdef01234567 --url h
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

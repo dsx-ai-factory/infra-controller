@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish get-bmc-ethernet-interfaces`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **get-bmc-ethernet-interfaces**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **get-bmc-ethernet-interfaces***
 
 ## NAME
 
@@ -40,4 +40,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

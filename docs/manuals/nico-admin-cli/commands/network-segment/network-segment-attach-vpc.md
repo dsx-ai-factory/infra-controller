@@ -1,6 +1,6 @@
 # `nico-admin-cli network-segment attach-vpc`
 
-_[Network commands](../../network.md) › [network-segment](./network-segment.md) › **attach-vpc**_
+*[Network commands](../../network.md) › [network-segment](./network-segment.md) › **attach-vpc***
 
 ## NAME
 
@@ -20,10 +20,10 @@ Attach Network Segment to VPC
 ## OPTIONS
 
 **--id** *\<ID\>*  
-Id of the network segment
+ID of the network segment
 
 **--vpc-id** *\<VPC_ID\>*  
-Id of the VPC
+ID of the VPC
 
 **--force**  
 Allow reassigning a segment that is attached to another VPC
@@ -51,10 +51,10 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-carbide-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 --vpc-id abcdef01-2345-6789-abcd-ef0123456789
-carbide-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 --vpc-id abcdef01-2345-6789-abcd-ef0123456789 --force
+nico-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 --vpc-id abcdef01-2345-6789-abcd-ef0123456789
+nico-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 --vpc-id abcdef01-2345-6789-abcd-ef0123456789 --force
 ```
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli ib-partition show`
 
-_[Network commands](../../network.md) › [ib-partition](./ib-partition.md) › **show**_
+*[Network commands](../../network.md) › [ib-partition](./ib-partition.md) › **show***
 
 ## NAME
 
@@ -59,4 +59,4 @@ nico-admin-cli ib-partition show --name my-partition
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

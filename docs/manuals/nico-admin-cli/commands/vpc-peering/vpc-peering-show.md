@@ -1,6 +1,6 @@
 # `nico-admin-cli vpc-peering show`
 
-_[Network commands](../../network.md) › [vpc-peering](./vpc-peering.md) › **show**_
+*[Network commands](../../network.md) › [vpc-peering](./vpc-peering.md) › **show***
 
 ## NAME
 
@@ -53,4 +53,4 @@ nico-admin-cli vpc-peering show --vpc-id 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

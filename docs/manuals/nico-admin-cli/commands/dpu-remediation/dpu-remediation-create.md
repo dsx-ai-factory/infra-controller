@@ -1,6 +1,6 @@
 # `nico-admin-cli dpu-remediation create`
 
-_[Hardware commands](../../hardware.md) › [dpu-remediation](./dpu-remediation.md) › **create**_
+*[Hardware commands](../../hardware.md) › [dpu-remediation](./dpu-remediation.md) › **create***
 
 ## NAME
 
@@ -69,4 +69,4 @@ nico-admin-cli dpu-remediation create --script-filename ./remediate.sh --meta-na
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

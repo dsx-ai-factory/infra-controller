@@ -1,6 +1,6 @@
 # `nico-admin-cli extension-service show`
 
-_[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **show**_
+*[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **show***
 
 ## NAME
 
@@ -69,4 +69,4 @@ nico-admin-cli extension-service show --tenant-organization-id fds34511233a
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

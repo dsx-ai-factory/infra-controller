@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot bundle set-state`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [bundle](./attestation-measured-boot-bundle.md) › **set-state**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [bundle](./attestation-measured-boot-bundle.md) › **set-state***
 
 ## NAME
 
@@ -73,4 +73,4 @@ nico-admin-cli attestation measured-boot bundle set-state 12345678-1234-5678-90a
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

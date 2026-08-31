@@ -1,6 +1,6 @@
 # `nico-admin-cli ping`
 
-_[Admin commands](../../admin.md) › **ping**_
+*[Admin commands](../../admin.md) › **ping***
 
 ## NAME
 
@@ -52,4 +52,4 @@ nico-admin-cli ping --interval 0.5
 
 ---
 
-**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../README.md)
+**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../index.md)

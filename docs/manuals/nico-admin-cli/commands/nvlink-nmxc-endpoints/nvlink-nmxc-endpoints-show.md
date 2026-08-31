@@ -1,6 +1,6 @@
 # `nico-admin-cli nvlink-nmxc-endpoints show`
 
-_[Hardware commands](../../hardware.md) › [nvlink-nmxc-endpoints](./nvlink-nmxc-endpoints.md) › **show**_
+*[Hardware commands](../../hardware.md) › [nvlink-nmxc-endpoints](./nvlink-nmxc-endpoints.md) › **show***
 
 ## NAME
 
@@ -50,4 +50,4 @@ nico-admin-cli nvlink-nmxc-endpoints show --chassis-serial 1234567890123
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli network-security-group delete`
 
-_[Network commands](../../network.md) › [network-security-group](./network-security-group.md) › **delete**_
+*[Network commands](../../network.md) › [network-security-group](./network-security-group.md) › **delete***
 
 ## NAME
 
@@ -53,4 +53,4 @@ nico-admin-cli network-security-group delete --id 12345678-1234-5678-90ab-cdef01
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

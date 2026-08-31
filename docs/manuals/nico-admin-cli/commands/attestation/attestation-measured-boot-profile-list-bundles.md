@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot profile list bundles`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [profile](./attestation-measured-boot-profile.md) › [list](./attestation-measured-boot-profile-list.md) › **bundles**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [profile](./attestation-measured-boot-profile.md) › [list](./attestation-measured-boot-profile-list.md) › **bundles***
 
 ## NAME
 
@@ -57,4 +57,4 @@ nico-admin-cli attestation measured-boot profile list bundles 12345678-1234-5678
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

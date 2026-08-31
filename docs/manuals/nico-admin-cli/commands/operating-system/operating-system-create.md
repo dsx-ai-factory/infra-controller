@@ -1,6 +1,6 @@
 # `nico-admin-cli operating-system create`
 
-_[Tenant commands](../../tenant.md) › [operating-system](./operating-system.md) › **create**_
+*[Tenant commands](../../tenant.md) › [operating-system](./operating-system.md) › **create***
 
 ## NAME
 
@@ -20,6 +20,13 @@ definition.
 
 Create a new operating system definition.
 
+Exactly one OS variant must be specified: --ipxe-script or
+--ipxe-template-id.
+
+For templated iPXE requirements, artifact configuration, and
+synchronization rules, see
+[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md).
+
 ## OPTIONS
 
 **-n**, **--name** *\<NAME\>*  
@@ -27,7 +34,7 @@ Name of the operating system definition.
 
 **-o**, **--org** *\<ORG\>*  
 Optional tenant organization identifier for this OS definition. Omit for
-OS definitions owned by provider.
+a provider-owned definition. An explicitly empty value is invalid.
 
 **--id** *\<ID\>*  
 Optional UUID for the new OS definition (default: server-generated).
@@ -46,7 +53,8 @@ Whether this OS definition is active (default: true).\
 - false
 
 **--allow-override**  
-Allow users to override OS parameters.
+Allow an Instance request to override the user data of this OS
+definition.
 
 **--phone-home-enabled**  
 Enable phone-home on first boot.
@@ -86,10 +94,11 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli operating-system create --name ubuntu-22.04 --org fds34511233a
-nico-admin-cli operating-system create --name ubuntu-22.04 --org fds34511233a --description "Ubuntu 22.04 base" --is-active false --allow-override
+nico-admin-cli operating-system create --name provider-ubuntu-22.04 --ipxe-template-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli operating-system create --name tenant-ubuntu-22.04 --org fds34511233a --ipxe-template-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli operating-system create --name tenant-ubuntu-22.04 --org fds34511233a --description "Ubuntu 22.04 base" --is-active false --allow-override --ipxe-template-id 12345678-1234-5678-90ab-cdef01234567
 ```
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

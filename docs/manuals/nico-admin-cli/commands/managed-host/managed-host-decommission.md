@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host decommission`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **decommission**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **decommission***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli managed-host decommission fm100ht038bg3qsho433vkg684heguv282qaggm
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

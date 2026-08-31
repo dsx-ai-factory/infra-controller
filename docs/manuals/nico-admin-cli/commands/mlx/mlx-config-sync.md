@@ -1,6 +1,6 @@
 # `nico-admin-cli mlx config sync`
 
-_[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › [config](./mlx-config.md) › **sync**_
+*[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › [config](./mlx-config.md) › **sync***
 
 ## NAME
 
@@ -50,4 +50,4 @@ Device ID is the PCI or mst path on the target machine
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli power-shelf health-report remove`
 
-_[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › [health-report](./power-shelf-health-report.md) › **remove**_
+*[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › [health-report](./power-shelf-health-report.md) › **remove***
 
 ## NAME
 
@@ -50,4 +50,4 @@ nico-admin-cli power-shelf health-report remove 12345678-1234-5678-90ab-cdef0123
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

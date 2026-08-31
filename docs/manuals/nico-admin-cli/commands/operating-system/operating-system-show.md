@@ -1,6 +1,6 @@
 # `nico-admin-cli operating-system show`
 
-_[Tenant commands](../../tenant.md) › [operating-system](./operating-system.md) › **show**_
+*[Tenant commands](../../tenant.md) › [operating-system](./operating-system.md) › **show***
 
 ## NAME
 
@@ -54,4 +54,4 @@ nico-admin-cli operating-system show --org fds34511233a
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

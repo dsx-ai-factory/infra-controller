@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish get-chassis`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **get-chassis**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **get-chassis***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypasswo
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

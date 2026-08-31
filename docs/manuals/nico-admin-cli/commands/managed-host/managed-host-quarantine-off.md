@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host quarantine off`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › [quarantine](./managed-host-quarantine.md) › **off**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › [quarantine](./managed-host-quarantine.md) › **off***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli managed-host quarantine off --host 12345678-1234-5678-90ab-cdef01
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

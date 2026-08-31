@@ -1,6 +1,6 @@
 # `nico-admin-cli switch metadata show`
 
-_[Hardware commands](../../hardware.md) › [switch](./switch.md) › [metadata](./switch-metadata.md) › **show**_
+*[Hardware commands](../../hardware.md) › [switch](./switch.md) › [metadata](./switch-metadata.md) › **show***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli switch metadata show 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

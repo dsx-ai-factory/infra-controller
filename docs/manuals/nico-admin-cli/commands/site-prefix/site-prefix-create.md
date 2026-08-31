@@ -1,6 +1,6 @@
 # `nico-admin-cli site-prefix create`
 
-_[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **create**_
+*[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **create***
 
 ## NAME
 
@@ -68,4 +68,4 @@ nico-admin-cli site-prefix create --tenant-organization-id fds34511233a --site-p
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

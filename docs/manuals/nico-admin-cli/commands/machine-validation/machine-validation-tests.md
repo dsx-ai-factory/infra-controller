@@ -1,6 +1,6 @@
 # `nico-admin-cli machine-validation tests`
 
-_[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › **tests**_
+*[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › **tests***
 
 ## NAME
 
@@ -59,4 +59,4 @@ nico-admin-cli machine-validation tests disable --test-id gpu_bandwidth --versio
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

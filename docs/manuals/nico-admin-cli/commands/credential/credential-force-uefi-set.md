@@ -1,6 +1,6 @@
 # `nico-admin-cli credential force-uefi set`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-uefi](./credential-force-uefi.md) › **set**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-uefi](./credential-force-uefi.md) › **set***
 
 ## NAME
 
@@ -24,8 +24,8 @@ Machine ID that owns the UEFI credential (a host machine). Provide this
 or --bmc-mac.
 
 **--bmc-mac** *\<BMC_MAC\>*  
-MAC of the machines BMC. Provide this or --id; if both are given they
-must identify the same machine.
+MAC of the BMC for the machine. Provide this or --id; if both are given
+they must identify the same machine.
 
 **--extended**  
 Extended result output.
@@ -56,4 +56,4 @@ nico-admin-cli credential force-uefi set --bmc-mac 00:11:22:33:44:55
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli vpc set-virtualizer`
 
-_[Network commands](../../network.md) › [vpc](./vpc.md) › **set-virtualizer**_
+*[Network commands](../../network.md) › [vpc](./vpc.md) › **set-virtualizer***
 
 ## NAME
 
@@ -64,4 +64,4 @@ nico-admin-cli vpc set-virtualizer 12345678-1234-5678-90ab-cdef01234567 fnn
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

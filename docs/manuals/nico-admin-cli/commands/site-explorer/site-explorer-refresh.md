@@ -1,6 +1,6 @@
 # `nico-admin-cli site-explorer refresh`
 
-_[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › **refresh**_
+*[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › **refresh***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli site-explorer refresh 192.0.2.10
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

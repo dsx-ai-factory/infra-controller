@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot report delete`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [report](./attestation-measured-boot-report.md) › **delete**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [report](./attestation-measured-boot-report.md) › **delete***
 
 ## NAME
 
@@ -50,4 +50,4 @@ nico-admin-cli attestation measured-boot report delete 12345678-1234-5678-90ab-c
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-rack update`
 
-_[Tenant commands](../../tenant.md) › [expected-rack](./expected-rack.md) › **update**_
+*[Tenant commands](../../tenant.md) › [expected-rack](./expected-rack.md) › **update***
 
 ## NAME
 
@@ -66,4 +66,4 @@ nico-admin-cli expected-rack update 12345678-1234-5678-90ab-cdef01234567 --rack-
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

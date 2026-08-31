@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish decommission-controller`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **decommission-controller**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **decommission-controller***
 
 ## NAME
 
@@ -50,4 +50,4 @@ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypasswo
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

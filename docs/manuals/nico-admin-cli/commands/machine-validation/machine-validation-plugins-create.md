@@ -1,6 +1,6 @@
 # `nico-admin-cli machine-validation plugins create`
 
-_[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › [plugins](./machine-validation-plugins.md) › **create**_
+*[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › [plugins](./machine-validation-plugins.md) › **create***
 
 ## NAME
 
@@ -59,4 +59,4 @@ nico-admin-cli machine-validation plugins create --name host-gpu-health --image 
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

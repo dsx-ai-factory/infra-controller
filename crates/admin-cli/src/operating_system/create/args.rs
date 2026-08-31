@@ -16,20 +16,32 @@
  */
 
 use ::rpc::forge::IpxeTemplateParameter;
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 
 use crate::operating_system::common::parse_param;
 
 #[derive(Parser, Debug, Clone)]
+#[command(group(
+    ArgGroup::new("ipxe_variant")
+        .required(true)
+        .multiple(false)
+        .args(["ipxe_script", "ipxe_template_id"])
+))]
 #[command(after_long_help = "\
 EXAMPLES:
 
-Create an OS definition:
-    $ nico-admin-cli operating-system create --name ubuntu-22.04 --org fds34511233a
+Create a provider-owned OS definition:
+    $ nico-admin-cli operating-system create --name provider-ubuntu-22.04 \
+    --ipxe-template-id 12345678-1234-5678-90ab-cdef01234567
+
+Create a tenant-owned OS definition:
+    $ nico-admin-cli operating-system create --name tenant-ubuntu-22.04 --org fds34511233a \
+    --ipxe-template-id 12345678-1234-5678-90ab-cdef01234567
 
 Create one with a description, inactive, allowing parameter overrides:
-    $ nico-admin-cli operating-system create --name ubuntu-22.04 --org fds34511233a \
-    --description \"Ubuntu 22.04 base\" --is-active false --allow-override
+    $ nico-admin-cli operating-system create --name tenant-ubuntu-22.04 --org fds34511233a \
+    --description \"Ubuntu 22.04 base\" --is-active false --allow-override \
+    --ipxe-template-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
 pub(crate) struct Args {
@@ -39,7 +51,7 @@ pub(crate) struct Args {
     #[clap(
         short,
         long,
-        help = "Optional tenant organization identifier for this OS definition. Omit for OS definitions owned by provider."
+        help = "Optional tenant organization identifier for this OS definition. Omit for a provider-owned definition. An explicitly empty value is invalid."
     )]
     pub(super) org: Option<String>,
 
@@ -58,7 +70,7 @@ pub(crate) struct Args {
     #[clap(
         long,
         default_value = "false",
-        help = "Allow users to override OS parameters."
+        help = "Allow an Instance request to override the user data of this OS definition."
     )]
     pub(super) allow_override: bool,
 
@@ -93,4 +105,59 @@ pub(crate) struct Args {
         help = "iPXE parameter in KEY=VALUE format. May be repeated."
     )]
     pub(super) params: Vec<IpxeTemplateParameter>,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Args;
+
+    #[test]
+    fn create_requires_exactly_one_ipxe_variant() {
+        let cases = [
+            (
+                "neither variant",
+                vec!["create", "--name", "test-os"],
+                false,
+            ),
+            (
+                "both variants",
+                vec![
+                    "create",
+                    "--name",
+                    "test-os",
+                    "--ipxe-script",
+                    "#!ipxe",
+                    "--ipxe-template-id",
+                    "12345678-1234-5678-90ab-cdef01234567",
+                ],
+                false,
+            ),
+            (
+                "raw script",
+                vec!["create", "--name", "test-os", "--ipxe-script", "#!ipxe"],
+                true,
+            ),
+            (
+                "template ID",
+                vec![
+                    "create",
+                    "--name",
+                    "test-os",
+                    "--ipxe-template-id",
+                    "12345678-1234-5678-90ab-cdef01234567",
+                ],
+                true,
+            ),
+        ];
+
+        for (name, argv, expected_valid) in cases {
+            assert_eq!(
+                Args::try_parse_from(argv).is_ok(),
+                expected_valid,
+                "case: {name}"
+            );
+        }
+    }
 }

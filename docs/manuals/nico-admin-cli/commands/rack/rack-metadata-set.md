@@ -1,6 +1,6 @@
 # `nico-admin-cli rack metadata set`
 
-_[Hardware commands](../../hardware.md) › [rack](./rack.md) › [metadata](./rack-metadata.md) › **set**_
+*[Hardware commands](../../hardware.md) › [rack](./rack.md) › [metadata](./rack-metadata.md) › **set***
 
 ## NAME
 
@@ -56,4 +56,4 @@ nico-admin-cli rack metadata set 12345678-1234-5678-90ab-cdef01234567 --name rac
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

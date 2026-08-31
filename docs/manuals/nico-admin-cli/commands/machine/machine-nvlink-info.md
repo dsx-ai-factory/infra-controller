@@ -1,6 +1,6 @@
 # `nico-admin-cli machine nvlink-info`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › **nvlink-info**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › **nvlink-info***
 
 ## NAME
 
@@ -54,4 +54,4 @@ nico-admin-cli machine nvlink-info populate 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

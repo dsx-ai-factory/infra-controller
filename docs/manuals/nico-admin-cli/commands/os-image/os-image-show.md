@@ -1,6 +1,6 @@
 # `nico-admin-cli os-image show`
 
-_[Tenant commands](../../tenant.md) › [os-image](./os-image.md) › **show**_
+*[Tenant commands](../../tenant.md) › [os-image](./os-image.md) › **show***
 
 ## NAME
 
@@ -55,4 +55,4 @@ nico-admin-cli os-image show
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli nvl-domain health-report remove`
 
-_[Network commands](../../network.md) › [nvl-domain](./nvl-domain.md) › [health-report](./nvl-domain-health-report.md) › **remove**_
+*[Network commands](../../network.md) › [nvl-domain](./nvl-domain.md) › [health-report](./nvl-domain-health-report.md) › **remove***
 
 ## NAME
 
@@ -44,4 +44,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

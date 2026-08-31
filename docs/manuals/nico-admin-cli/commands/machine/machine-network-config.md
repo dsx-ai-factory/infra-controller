@@ -1,6 +1,6 @@
 # `nico-admin-cli machine network config`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › [network](./machine-network.md) › **config**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › [network](./machine-network.md) › **config***
 
 ## NAME
 
@@ -43,4 +43,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)
