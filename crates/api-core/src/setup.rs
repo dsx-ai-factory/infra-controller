@@ -1229,6 +1229,7 @@ impl<'a> SeedData<'a> {
 ///
 /// All background tasks will be spawned into `join_set`, which can be awaited with
 /// [`JoinSet::join_all`] to wait for them to complete.
+#[allow(clippy::too_many_arguments)]
 async fn initialize_and_start_controllers<'a>(
     join_set: &mut JoinSet<()>,
     api_service: Arc<Api>,
