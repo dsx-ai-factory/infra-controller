@@ -16,6 +16,7 @@
  */
 
 use carbide_test_harness::prelude::*;
+use carbide_uuid::machine::MachineId;
 use rpc::forge::{
     DpaInterfaceCreationRequest, DpaInterfaceType, DpaInterfacesByIdsRequest,
     MachineCapabilityDeviceType, MachinesByIdsRequest,
@@ -99,7 +100,7 @@ async fn dpa_api_test_cases(pool: PgPool) -> Result<(), Box<dyn std::error::Erro
 }
 
 #[sqlx_test]
-async fn find_machines_includes_spx_capabilities(
+async fn find_machines_includes_spectrum_x_capabilities(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = TestHarness::builder(pool).build().await;
@@ -116,7 +117,10 @@ async fn find_machines_includes_spx_capabilities(
         .managed_host_builder(&site_explorer, underlay_segment)
         .build()
         .await;
-    let dpu_machine_id = machine_with_devices.first_dpu().id;
+    let machine_with_devices_host_id = machine_with_devices.host.id;
+    let machine_with_devices_id: MachineId = machine_with_devices_host_id.into();
+    let machine_without_devices_id: MachineId = machine_without_devices.host.id.into();
+    let dpu_machine_id: MachineId = machine_with_devices.first_dpu().id.into();
 
     let cases = [
         (
@@ -160,7 +164,7 @@ async fn find_machines_includes_spx_capabilities(
         env.api()
             .create_dpa_interface(tonic::Request::new(DpaInterfaceCreationRequest {
                 mac_addr: mac_addr.to_string(),
-                machine_id: Some(machine_with_devices.host.id),
+                machine_id: Some(machine_with_devices_host_id),
                 device_type: "test-device".to_string(),
                 pci_name: pci_name.to_string(),
                 device_description: device_description.map(str::to_string),
@@ -173,8 +177,8 @@ async fn find_machines_includes_spx_capabilities(
         .api()
         .find_machines_by_ids(tonic::Request::new(MachinesByIdsRequest {
             machine_ids: vec![
-                machine_without_devices.host.id,
-                machine_with_devices.host.id,
+                machine_without_devices_id,
+                machine_with_devices_id,
                 dpu_machine_id,
             ],
             include_history: false,
@@ -183,7 +187,7 @@ async fn find_machines_includes_spx_capabilities(
         .into_inner();
 
     assert_eq!(response.machines.len(), 3);
-    let get_spx_capabilities = |machine: &rpc::forge::Machine| {
+    let get_spectrum_x_capabilities = |machine: &rpc::forge::Machine| {
         machine
             .status
             .as_ref()
@@ -191,7 +195,7 @@ async fn find_machines_includes_spx_capabilities(
             .into_iter()
             .flat_map(|capabilities| &capabilities.network)
             .filter(|capability| {
-                capability.device_type == Some(MachineCapabilityDeviceType::Spx as i32)
+                capability.device_type == Some(MachineCapabilityDeviceType::SpectrumX as i32)
             })
             .map(|capability| (capability.name.clone(), capability.count))
             .collect::<Vec<_>>()
@@ -202,22 +206,22 @@ async fn find_machines_includes_spx_capabilities(
         .iter()
         .find(|machine| machine.id == Some(dpu_machine_id))
         .expect("DPU machine");
-    assert!(get_spx_capabilities(dpu_machine).is_empty());
+    assert!(get_spectrum_x_capabilities(dpu_machine).is_empty());
 
     let machine_without_devices = response
         .machines
         .iter()
-        .find(|machine| machine.id == Some(machine_without_devices.host.id))
+        .find(|machine| machine.id == Some(machine_without_devices_id))
         .expect("machine without devices");
-    assert!(get_spx_capabilities(machine_without_devices).is_empty());
+    assert!(get_spectrum_x_capabilities(machine_without_devices).is_empty());
 
     let machine_with_devices = response
         .machines
         .iter()
-        .find(|machine| machine.id == Some(machine_with_devices.host.id))
+        .find(|machine| machine.id == Some(machine_with_devices_id))
         .expect("machine with devices");
     assert_eq!(
-        get_spx_capabilities(machine_with_devices),
+        get_spectrum_x_capabilities(machine_with_devices),
         vec![
             ("BlueField-3".to_string(), 1),
             ("ConnectX-7".to_string(), 2),

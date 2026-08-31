@@ -52,12 +52,14 @@ const (
 type MachineCapabilityDeviceType string
 
 // MachineCapabilityDeviceType values. Stored as plain strings in the DB
-// column `machine_capability.device_type`.
+// column `machine_capability.device_type`. The SpectrumX value describes
+// DPA-interface attachment-selector inventory, not site enablement or full
+// reference-architecture readiness.
 const (
-	MachineCapabilityDeviceTypeDPU     MachineCapabilityDeviceType = "DPU"
-	MachineCapabilityDeviceTypeNVLink  MachineCapabilityDeviceType = "NVLink"
-	MachineCapabilityDeviceTypeSPX     MachineCapabilityDeviceType = "SPX"
-	MachineCapabilityDeviceTypeUnknown MachineCapabilityDeviceType = "Unknown"
+	MachineCapabilityDeviceTypeDPU       MachineCapabilityDeviceType = "DPU"
+	MachineCapabilityDeviceTypeNVLink    MachineCapabilityDeviceType = "NVLink"
+	MachineCapabilityDeviceTypeSpectrumX MachineCapabilityDeviceType = "SpectrumX"
+	MachineCapabilityDeviceTypeUnknown   MachineCapabilityDeviceType = "Unknown"
 )
 
 const (
@@ -86,9 +88,9 @@ var (
 
 	// MachineCapabilityDeviceTypeChoiceMap is a map of valid MachineCapability device types
 	MachineCapabilityDeviceTypeChoiceMap = map[MachineCapabilityDeviceType]bool{
-		MachineCapabilityDeviceTypeDPU:    true,
-		MachineCapabilityDeviceTypeNVLink: true,
-		MachineCapabilityDeviceTypeSPX:    true,
+		MachineCapabilityDeviceTypeDPU:       true,
+		MachineCapabilityDeviceTypeNVLink:    true,
+		MachineCapabilityDeviceTypeSpectrumX: true,
 	}
 )
 
@@ -152,8 +154,8 @@ func (d MachineCapabilityDeviceType) ToProto() corev1.MachineCapabilityDeviceTyp
 		return corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_DPU
 	case MachineCapabilityDeviceTypeNVLink:
 		return corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK
-	case MachineCapabilityDeviceTypeSPX:
-		return corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPX
+	case MachineCapabilityDeviceTypeSpectrumX:
+		return corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X
 	}
 	log.Warn().Str("DeviceType", string(d)).Msg("unsupported MachineCapabilityDeviceType requested")
 	return corev1.MachineCapabilityDeviceType(0)
@@ -168,8 +170,8 @@ func (d *MachineCapabilityDeviceType) FromProto(p corev1.MachineCapabilityDevice
 		*d = MachineCapabilityDeviceTypeDPU
 	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK:
 		*d = MachineCapabilityDeviceTypeNVLink
-	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPX:
-		*d = MachineCapabilityDeviceTypeSPX
+	case corev1.MachineCapabilityDeviceType_MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X:
+		*d = MachineCapabilityDeviceTypeSpectrumX
 	default:
 		log.Warn().Str("DeviceType", p.String()).Msg("unsupported MachineCapabilityDeviceType requested")
 		*d = ""
@@ -386,7 +388,7 @@ func (mc *MachineCapability) FromProto(attrs *corev1.InstanceTypeMachineCapabili
 // run `Validate` afterwards to reject unknown CapabilityType enums
 // (which `FromProto` leaves as the empty Type), missing Names, and
 // cross-field combinations the wire shape can't represent — DeviceType
-// must pair with Network (DPU or SPX) or GPU (NVLink), and InactiveDevices is
+// must pair with Network (DPU or SpectrumX) or GPU (NVLink), and InactiveDevices is
 // only valid on InfiniBand. These mirror the API-side
 // `(APIMachineCapability).Validate` rules so the workflow-inventory
 // path and the API path enforce the same invariants.
@@ -423,7 +425,7 @@ func (mc *MachineCapability) validateNameWhitespace(value interface{}) error {
 }
 
 // validateDeviceType enforces the Type/DeviceType compatibility rules:
-// Network capabilities require DPU or SPX, GPU capabilities require NVLink,
+// Network capabilities require DPU or SpectrumX, GPU capabilities require NVLink,
 // every other Type must not carry a DeviceType. A nil DeviceType is
 // always allowed.
 func (mc *MachineCapability) validateDeviceType(value interface{}) error {
@@ -433,7 +435,7 @@ func (mc *MachineCapability) validateDeviceType(value interface{}) error {
 	}
 	switch mc.Type {
 	case MachineCapabilityTypeNetwork:
-		if *dt != MachineCapabilityDeviceTypeDPU && *dt != MachineCapabilityDeviceTypeSPX {
+		if *dt != MachineCapabilityDeviceTypeDPU && *dt != MachineCapabilityDeviceTypeSpectrumX {
 			return fmt.Errorf("Unsupported Device Type specified for Network Capability %s", *dt)
 		}
 	case MachineCapabilityTypeGPU:
@@ -461,7 +463,7 @@ func (mc *MachineCapability) validateInactiveDevices(value interface{}) error {
 
 // MachineCapabilityMapKey returns the canonical identity key for a capability.
 // Device type is part of the identity so a generic network capability and an
-// SPX capability can share the same hardware description without colliding.
+// SpectrumX capability can share the same hardware description without colliding.
 // The capability name is length-prefixed because names may contain colons; a
 // delimiter-only encoding would otherwise make a typed capability ambiguous
 // with a generic capability whose name ends in the device type. Nil and empty
