@@ -500,22 +500,12 @@ func insertPhoneHomePart(archiveRoot *yaml.Node, url string) error {
 }
 
 // installsATargetSystem reports whether a document installs a system of its own,
-// which is the document phone-home belongs in. The autoinstall has to be one
-// insertPhoneHome can reach into, so a document it would reject is passed over
-// rather than failing the whole request.
+// which is the document phone-home belongs in. The autoinstall's shape is
+// insertPhoneHome's to check: an entry of our own would report from the
+// installer, so a malformed one is reported rather than worked around.
 func installsATargetSystem(documentRoot *yaml.Node) bool {
-	if documentRoot.Kind != yaml.MappingNode {
-		return false
-	}
-
-	autoinstallNode := mappingValue(documentRoot, autoinstallName)
-	if autoinstallNode == nil || autoinstallNode.Kind != yaml.MappingNode {
-		return false
-	}
-
-	targetUserDataNode := mappingValue(autoinstallNode, autoinstallUserData)
-
-	return targetUserDataNode == nil || targetUserDataNode.Kind == yaml.MappingNode
+	return documentRoot.Kind == yaml.MappingNode &&
+		mappingValue(documentRoot, autoinstallName) != nil
 }
 
 // appendPhoneHomePart appends the archive part that carries phone-home. Its

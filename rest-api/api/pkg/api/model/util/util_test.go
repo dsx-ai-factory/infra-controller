@@ -970,21 +970,18 @@ func TestPhoneHomeInArchiveThatInstallsATargetSystem(t *testing.T) {
 		assert.Len(t, unmarshalArchiveRoot(t, *userData).Content, 2)
 	})
 
-	t.Run("passes over an autoinstall it cannot reach into", func(t *testing.T) {
-		// A malformed autoinstall is not a system we can install phone-home into,
-		// so phone-home goes in an entry of its own rather than failing the
-		// request over somebody else's entry.
+	t.Run("reports an autoinstall it cannot reach into", func(t *testing.T) {
+		// An entry of our own would report from the installer, not the system being
+		// installed. The non-archive path rejects the same document, so this one
+		// does too rather than report the wrong boot silently.
 		for _, autoinstall := range []string{"not-a-mapping", "\n      version: 1\n      user-data: nope"} {
-			userData, err := EnablePhoneHomeInUserData(new(`#cloud-config-archive
+			_, err := EnablePhoneHomeInUserData(new(`#cloud-config-archive
 - type: text/cloud-config
   content: |
     #cloud-config
     autoinstall: `+autoinstall+`
 `), phoneHomeURL)
-			require.NoError(t, err)
-
-			assert.Len(t, unmarshalArchiveRoot(t, *userData).Content, 2,
-				"phone-home must be added as an entry of its own")
+			require.ErrorContains(t, err, "must be a mapping to insert phone-home")
 		}
 	})
 
