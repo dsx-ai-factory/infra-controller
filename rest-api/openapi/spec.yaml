@@ -4313,6 +4313,159 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       tags:
         - Expected Machine
+  '/v2/org/{org}/nico/expected-machine/label/key':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    get:
+      summary: Retrieve Expected Machine label keys
+      operationId: get-all-expected-machine-label-keys
+      description: |-
+        Retrieve paginated, unique, non-null Expected Machine label keys. Results are ordered by key ascending by default before pagination.
+
+        Infrastructure Provider callers receive keys from their Provider's Sites. Tenant Admin callers receive keys only from Sites where `TargetedInstanceCreation` is effective. The optional siteId parameter further restricts the result.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          description: ID of the Site to filter label keys by
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            example: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+            example: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            enum:
+              - KEY_ASC
+              - KEY_DESC
+            default: KEY_ASC
+          in: query
+          name: orderBy
+          description: Ordering applied before pagination; defaults to KEY_ASC
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                uniqueItems: true
+                items:
+                  type: string
+                example:
+                  - failure-domain
+                  - power-domain
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":2,"orderBy":"KEY_ASC"}'
+              description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Machine
+  '/v2/org/{org}/nico/expected-machine/label/key/{key}/value':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '^[^\u0000]*[^\s\u0000][^\u0000]*$'
+        name: key
+        in: path
+        required: true
+        description: Label key. It must not be empty, consist only of whitespace, or contain the Unicode NUL character (U+0000). Reserved path characters, including `/`, must be percent-encoded.
+    get:
+      summary: Retrieve Expected Machine label values
+      operationId: get-all-expected-machine-label-values
+      description: |-
+        Retrieve paginated, unique, non-null values currently used for an Expected Machine label key. Labels without the requested key are ignored. Results are ordered by value ascending by default before pagination.
+
+        Infrastructure Provider callers receive values from their Provider's Sites. Tenant Admin callers receive values only from Sites where `TargetedInstanceCreation` is effective. The optional siteId parameter further restricts the result.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          description: ID of the Site to filter label values by
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            example: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+            example: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            enum:
+              - VALUE_ASC
+              - VALUE_DESC
+            default: VALUE_ASC
+          in: query
+          name: orderBy
+          description: Ordering applied before pagination; defaults to VALUE_ASC
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                uniqueItems: true
+                items:
+                  type: string
+                example:
+                  - fd-a
+                  - fd-b
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":2,"orderBy":"VALUE_ASC"}'
+              description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Machine
   '/v2/org/{org}/nico/expected-machine/{expectedMachineId}':
     parameters:
       - schema:
@@ -9530,6 +9683,159 @@ paths:
           in: query
           name: orderBy
           description: Ordering for pagination query
+  '/v2/org/{org}/nico/machine/label/key':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    get:
+      summary: Retrieve Machine label keys
+      operationId: get-all-machine-label-keys
+      description: |-
+        Retrieve paginated, unique, non-null Machine label keys. Results are ordered by key ascending by default before pagination.
+
+        Infrastructure Provider callers receive keys from their Provider's Machines. Tenant Admin callers receive keys only from Sites where `TargetedInstanceCreation` is effective. The optional siteId parameter further restricts the result.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          description: ID of the Site to filter label keys by
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            example: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+            example: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            enum:
+              - KEY_ASC
+              - KEY_DESC
+            default: KEY_ASC
+          in: query
+          name: orderBy
+          description: Ordering applied before pagination; defaults to KEY_ASC
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                uniqueItems: true
+                items:
+                  type: string
+                example:
+                  - failure-domain
+                  - power-domain
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":2,"orderBy":"KEY_ASC"}'
+              description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Machine
+  '/v2/org/{org}/nico/machine/label/key/{key}/value':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '^[^\u0000]*[^\s\u0000][^\u0000]*$'
+        name: key
+        in: path
+        required: true
+        description: Label key. It must not be empty, consist only of whitespace, or contain the Unicode NUL character (U+0000). Reserved path characters, including `/`, must be percent-encoded.
+    get:
+      summary: Retrieve Machine label values
+      operationId: get-all-machine-label-values
+      description: |-
+        Retrieve paginated, unique, non-null values currently used for a Machine label key. Labels without the requested key are ignored. Results are ordered by value ascending by default before pagination.
+
+        Infrastructure Provider callers receive values from their Provider's Machines. Tenant Admin callers receive values only from Sites where `TargetedInstanceCreation` is effective. The optional siteId parameter further restricts the result.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          description: ID of the Site to filter label values by
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            example: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+            example: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            enum:
+              - VALUE_ASC
+              - VALUE_DESC
+            default: VALUE_ASC
+          in: query
+          name: orderBy
+          description: Ordering applied before pagination; defaults to VALUE_ASC
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                uniqueItems: true
+                items:
+                  type: string
+                example:
+                  - fd-a
+                  - fd-b
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":2,"orderBy":"VALUE_ASC"}'
+              description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Machine
   '/v2/org/{org}/nico/machine/{machineId}':
     parameters:
       - schema:
@@ -29465,6 +29771,7 @@ components:
       maxProperties: 10
       additionalProperties:
         type: string
+      description: Label keys must not be empty or whitespace-only. Keys and values may contain at most 255 characters and must not contain the Unicode NUL character (U+0000). Empty values are allowed.
     MachineLabelSelector:
       title: Machine Label Selector
       type: object
