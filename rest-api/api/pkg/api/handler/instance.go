@@ -627,6 +627,48 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
 	}
 
+	// Resolve the referenced SpectrumX Partitions before any writes so a bad ID is a 400
+	// rather than a foreign key error when the attachment row is inserted.
+	requestedSxpIDs := make([]uuid.UUID, 0, len(apiRequest.SpectrumXAttachments))
+	seenSxpIDs := make(map[uuid.UUID]struct{}, len(apiRequest.SpectrumXAttachments))
+	for _, sac := range apiRequest.SpectrumXAttachments {
+		partitionID, sxpErr := uuid.Parse(sac.SpectrumXPartitionID)
+		if sxpErr != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition ID: %s specified in spectrumXAttachments data in request is not valid", sac.SpectrumXPartitionID), nil)
+		}
+		if _, ok := seenSxpIDs[partitionID]; !ok {
+			seenSxpIDs[partitionID] = struct{}{}
+			requestedSxpIDs = append(requestedSxpIDs, partitionID)
+		}
+	}
+	if len(requestedSxpIDs) > 0 {
+		requestedSxps, _, sxpErr := cdbm.NewSpectrumXPartitionDAO(cih.dbSession).GetAll(ctx, nil, cdbm.SpectrumXPartitionFilterInput{
+			SpectrumXPartitionIDs: requestedSxpIDs,
+		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if sxpErr != nil {
+			logger.Error().Err(sxpErr).Msg("failed to retrieve SpectrumX Partitions from DB by IDs")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Partitions from DB by IDs", nil)
+		}
+
+		sxpByID := make(map[uuid.UUID]cdbm.SpectrumXPartition, len(requestedSxps))
+		for _, sxp := range requestedSxps {
+			sxpByID[sxp.ID] = sxp
+		}
+
+		for _, partitionID := range requestedSxpIDs {
+			sxp, ok := sxpByID[partitionID]
+			if !ok {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request data is not found in DB", partitionID), nil)
+			}
+			if sxp.TenantID != tenant.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request is not owned by Tenant", partitionID), nil)
+			}
+			if sxp.SiteID != site.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
+			}
+		}
+	}
+
 	dbInterfaces := []cdbm.Interface{}
 	isInterfaceDeviceInfoPresent := false
 
@@ -1105,6 +1147,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	var instance *cdbm.Instance
 	var ifcs []cdbm.Interface
 	var ibifcs []cdbm.InfiniBandInterface
+	var sxas []cdbm.SpectrumXAttachment
 	var desds []cdbm.DpuExtensionServiceDeployment
 	var nvlifcs []cdbm.NVLinkInterface
 	var ssd *cdbm.StatusDetail
@@ -1928,9 +1971,35 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			description = *instance.Description
 		}
 
-		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(apiRequest.SpectrumXAttachments))
+		// Persist the SpectrumX Attachments, then build the Site request from the
+		// persisted rows so inventory has something to reconcile against.
+		sxaInputs := make([]cdbm.SpectrumXAttachmentCreateInput, 0, len(apiRequest.SpectrumXAttachments))
 		for _, sac := range apiRequest.SpectrumXAttachments {
-			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, sac.ToProto())
+			// The Partition ID was parsed during validation, so it cannot fail here.
+			partitionID, _ := uuid.Parse(sac.SpectrumXPartitionID)
+			sxaInputs = append(sxaInputs, cdbm.SpectrumXAttachmentCreateInput{
+				InstanceID:           instance.ID,
+				SiteID:               site.ID,
+				SpectrumXPartitionID: partitionID,
+				Device:               sac.Device,
+				DeviceInstance:       *sac.DeviceInstance,
+				AttachmentType:       sac.AttachmentType,
+				VirtualFunctionID:    sac.VirtualFunctionID,
+				Status:               cdbm.SpectrumXAttachmentStatusPending,
+				CreatedBy:            dbUser.ID,
+			})
+		}
+
+		sxaDAO := cdbm.NewSpectrumXAttachmentDAO(cih.dbSession)
+		sxas, serr = sxaDAO.CreateMultiple(ctx, tx, sxaInputs)
+		if serr != nil {
+			logger.Error().Err(serr).Msg("error creating Instance SpectrumX Attachment DB entries")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SpectrumX Attachments for Instance, DB error", nil)
+		}
+
+		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(sxas))
+		for i := range sxas {
+			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, sxas[i].ToProto())
 		}
 
 		// Prepare the create request workflow object
@@ -2044,7 +2113,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	// ==================== Step 7: Response ====================
 
 	// Create response
-	apiInstance := model.NewAPIInstance(instance, site, ifcs, ibifcs, desds, nvlifcs, skgs, []cdbm.StatusDetail{*ssd})
+	apiInstance := model.NewAPIInstance(instance, site, ifcs, ibifcs, sxas, desds, nvlifcs, skgs, []cdbm.StatusDetail{*ssd})
 
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusCreated, apiInstance)
@@ -2240,7 +2309,7 @@ func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Lo
 	}
 
 	// Create response
-	apiInstance := model.NewAPIInstance(ui, instance.Site, retifc, nil, nil, nil, dbskgs, ssds)
+	apiInstance := model.NewAPIInstance(ui, instance.Site, retifc, nil, nil, nil, nil, dbskgs, ssds)
 	if ui.NetworkSecurityGroupID == nil {
 		err = AttachVpcNsgPropagationDetailsToApiInstance(c, reqCtx, logger, uih.dbSession, ui, retifc, apiInstance)
 		if err != nil {
@@ -2741,6 +2810,48 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	if interfaceVpcErr != nil {
 		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by Instance interfaces")
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
+	}
+
+	// Resolve the referenced SpectrumX Partitions before any writes so a bad ID is a 400
+	// rather than a foreign key error when the attachment row is inserted.
+	requestedSxpIDs := make([]uuid.UUID, 0, len(apiRequest.SpectrumXAttachments))
+	seenSxpIDs := make(map[uuid.UUID]struct{}, len(apiRequest.SpectrumXAttachments))
+	for _, sac := range apiRequest.SpectrumXAttachments {
+		partitionID, sxpErr := uuid.Parse(sac.SpectrumXPartitionID)
+		if sxpErr != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition ID: %s specified in spectrumXAttachments data in request is not valid", sac.SpectrumXPartitionID), nil)
+		}
+		if _, ok := seenSxpIDs[partitionID]; !ok {
+			seenSxpIDs[partitionID] = struct{}{}
+			requestedSxpIDs = append(requestedSxpIDs, partitionID)
+		}
+	}
+	if len(requestedSxpIDs) > 0 {
+		requestedSxps, _, sxpErr := cdbm.NewSpectrumXPartitionDAO(uih.dbSession).GetAll(ctx, nil, cdbm.SpectrumXPartitionFilterInput{
+			SpectrumXPartitionIDs: requestedSxpIDs,
+		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if sxpErr != nil {
+			logger.Error().Err(sxpErr).Msg("failed to retrieve SpectrumX Partitions from DB by IDs")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Partitions from DB by IDs", nil)
+		}
+
+		sxpByID := make(map[uuid.UUID]cdbm.SpectrumXPartition, len(requestedSxps))
+		for _, sxp := range requestedSxps {
+			sxpByID[sxp.ID] = sxp
+		}
+
+		for _, partitionID := range requestedSxpIDs {
+			sxp, ok := sxpByID[partitionID]
+			if !ok {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request data is not found in DB", partitionID), nil)
+			}
+			if sxp.TenantID != tenant.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request is not owned by Tenant", partitionID), nil)
+			}
+			if sxp.SiteID != site.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
+			}
+		}
 	}
 
 	existingSubnetIfcMap := map[uuid.UUID]uint64{}
@@ -3335,6 +3446,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	var existingNvlIfcs []cdbm.NVLinkInterface
 	var newOrExistingIbIfcs []cdbm.InfiniBandInterface
 	var newOrExistingNvlIfcs []cdbm.NVLinkInterface
+	var newOrExistingSxAs []cdbm.SpectrumXAttachment
 	var dbskgs []cdbm.SSHKeyGroup
 	var ssds []cdbm.StatusDetail
 	reqCtx := ctx
@@ -3839,6 +3951,87 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 		}
 
+		// Sync SpectrumX Attachments. A nil request list leaves the persisted rows untouched;
+		// an explicit list replaces them, reusing any row whose partition, device, and device
+		// instance are still requested so an unchanged attachment is not torn down and rebuilt.
+		sxaDAO := cdbm.NewSpectrumXAttachmentDAO(uih.dbSession)
+
+		existingSxAs, _, derr := sxaDAO.GetAll(ctx, tx, cdbm.SpectrumXAttachmentFilterInput{
+			InstanceIDs: []uuid.UUID{instanceID},
+		}, cdbp.PageInput{
+			OrderBy: &cdbp.OrderBy{Field: cdbm.SpectrumXAttachmentOrderByDefault, Order: cdbp.OrderAscending},
+			Limit:   cutil.GetPtr(cdbp.TotalLimit),
+		}, nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to retrieve SpectrumX Attachment details for Instance")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SpectrumX Attachments for Instance, DB error", nil)
+		}
+
+		if apiRequest.SpectrumXAttachments == nil {
+			newOrExistingSxAs = existingSxAs
+		} else {
+			existingSxAByKey := make(map[string]cdbm.SpectrumXAttachment, len(existingSxAs))
+			for i := range existingSxAs {
+				if existingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
+					continue
+				}
+				key := fmt.Sprintf("%s:%s:%d", existingSxAs[i].SpectrumXPartitionID.String(), existingSxAs[i].Device, existingSxAs[i].DeviceInstance)
+				existingSxAByKey[key] = existingSxAs[i]
+			}
+
+			retainedSxAIDs := map[uuid.UUID]bool{}
+			sxaCreateInputs := []cdbm.SpectrumXAttachmentCreateInput{}
+
+			for _, apiSxA := range apiRequest.SpectrumXAttachments {
+				partitionID, perr := uuid.Parse(apiSxA.SpectrumXPartitionID)
+				if perr != nil {
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to parse SpectrumX Partition ID specified in request: %s", apiSxA.SpectrumXPartitionID), nil)
+				}
+
+				key := fmt.Sprintf("%s:%s:%d", partitionID.String(), apiSxA.Device, *apiSxA.DeviceInstance)
+				if existing, ok := existingSxAByKey[key]; ok {
+					retainedSxAIDs[existing.ID] = true
+					newOrExistingSxAs = append(newOrExistingSxAs, existing)
+					continue
+				}
+
+				sxaCreateInputs = append(sxaCreateInputs, cdbm.SpectrumXAttachmentCreateInput{
+					InstanceID:           instanceID,
+					SiteID:               site.ID,
+					SpectrumXPartitionID: partitionID,
+					Device:               apiSxA.Device,
+					DeviceInstance:       *apiSxA.DeviceInstance,
+					AttachmentType:       apiSxA.AttachmentType,
+					VirtualFunctionID:    apiSxA.VirtualFunctionID,
+					Status:               cdbm.SpectrumXAttachmentStatusPending,
+					CreatedBy:            dbUser.ID,
+				})
+			}
+
+			createdSxAs, derr := sxaDAO.CreateMultiple(ctx, tx, sxaCreateInputs)
+			if derr != nil {
+				logger.Error().Err(derr).Msg("failed to create SpectrumX Attachment records in DB")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SpectrumX Attachments for Instance, DB error", nil)
+			}
+			newOrExistingSxAs = append(newOrExistingSxAs, createdSxAs...)
+
+			// Anything no longer requested moves to Deleting. Instance inventory removes the
+			// row once the Site stops reporting the attachment.
+			for i := range existingSxAs {
+				if retainedSxAIDs[existingSxAs[i].ID] || existingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
+					continue
+				}
+				_, derr := sxaDAO.Update(ctx, tx, cdbm.SpectrumXAttachmentUpdateInput{
+					SpectrumXAttachmentID: existingSxAs[i].ID,
+					Status:                cutil.GetPtr(cdbm.SpectrumXAttachmentStatusDeleting),
+				})
+				if derr != nil {
+					logger.Error().Err(derr).Msg("failed to update SpectrumX Attachment record in DB")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+				}
+			}
+		}
+
 		// Fetch existing DPU Extension Service Deployments for the Instance
 		desdDAO := cdbm.NewDpuExtensionServiceDeploymentDAO(uih.dbSession)
 		existingDesds, _, derr := desdDAO.GetAll(ctx, tx, cdbm.DpuExtensionServiceDeploymentFilterInput{
@@ -4224,10 +4417,12 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			},
 		}
 
+		// A nil list leaves the Instance's attachments untouched, so Spxconfig stays unset
+		// and the persisted rows are left alone. An explicit list replaces them.
 		if apiRequest.SpectrumXAttachments != nil {
-			spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(apiRequest.SpectrumXAttachments))
-			for _, sac := range apiRequest.SpectrumXAttachments {
-				spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, sac.ToProto())
+			spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(newOrExistingSxAs))
+			for i := range newOrExistingSxAs {
+				spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, newOrExistingSxAs[i].ToProto())
 			}
 			updateInstanceRequest.Config.Spxconfig = &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs}
 		}
@@ -4310,7 +4505,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	apiInstance := model.NewAPIInstance(ui, site, newdbIfcs, newOrExistingIbIfcs, updateDesds, newOrExistingNvlIfcs, dbskgs, ssds)
+	apiInstance := model.NewAPIInstance(ui, site, newdbIfcs, newOrExistingIbIfcs, newOrExistingSxAs, updateDesds, newOrExistingNvlIfcs, dbskgs, ssds)
 
 	// If the instance has no NSG ID, then we need to check if its parent VPC does.
 	// We'll need to pull that separately because the user might not have asked for
@@ -4560,6 +4755,22 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instance Interfaces for Instance", nil)
 	}
 
+	// Get the instance SpectrumX attachment records from the db
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(gih.dbSession)
+	sxas, _, err := sxaDAO.GetAll(
+		ctx,
+		nil,
+		cdbm.SpectrumXAttachmentFilterInput{
+			InstanceIDs: []uuid.UUID{instanceID},
+		},
+		cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.SpectrumXAttachmentOrderByDefault, Order: cdbp.OrderAscending}, Limit: cutil.GetPtr(cdbp.TotalLimit)},
+		[]string{cdbm.SpectrumXPartitionRelationName},
+	)
+	if err != nil {
+		logger.Error().Err(err).Msg("error retrieving instance SpectrumX Attachment Details from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Attachments for Instance", nil)
+	}
+
 	// Get the instance infiniband interface record from the db
 	ibifcDAO := cdbm.NewInfiniBandInterfaceDAO(gih.dbSession)
 	ibIfcs, _, err := ibifcDAO.GetAll(
@@ -4634,7 +4845,7 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Create response
-	ins := model.NewAPIInstance(instance, site, ifcs, ibIfcs, desds, nvlIfcs, dbskgs, ssds)
+	ins := model.NewAPIInstance(instance, site, ifcs, ibIfcs, sxas, desds, nvlIfcs, dbskgs, ssds)
 
 	// If the instance has no NSG ID, then we need to check if any parent VPC does.
 	if instance.NetworkSecurityGroupID == nil {
@@ -5133,6 +5344,29 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 		ibifcMap[ibifc.InstanceID] = append(ibifcMap[ibifc.InstanceID], cibifc)
 	}
 
+	// Get the instance SpectrumX Attachment records from the db
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(gaih.dbSession)
+	sxas, _, serr := sxaDAO.GetAll(
+		ctx,
+		nil,
+		cdbm.SpectrumXAttachmentFilterInput{
+			InstanceIDs: insIDs,
+		},
+		cdbp.PageInput{
+			Limit: cutil.GetPtr(cdbp.TotalLimit),
+		},
+		[]string{cdbm.SpectrumXPartitionRelationName},
+	)
+	if serr != nil {
+		logger.Error().Err(serr).Msg("error retrieving instance SpectrumX Attachment Details from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instance SpectrumX Attachments for Instance", nil)
+	}
+	sxaMap := map[uuid.UUID][]cdbm.SpectrumXAttachment{}
+	for _, sxa := range sxas {
+		csxa := sxa
+		sxaMap[sxa.InstanceID] = append(sxaMap[sxa.InstanceID], csxa)
+	}
+
 	// Get the instance NVLink Interface record from the db
 	retnvlifc, _, serr := nvlDAO.GetAll(ctx, nil, cdbm.NVLinkInterfaceFilterInput{InstanceIDs: insIDs}, cdbp.PageInput{}, nil)
 	if serr != nil {
@@ -5215,7 +5449,7 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	for _, ins := range dbInstances {
 		// Create response
 		dbInstance := ins
-		apiInstance := model.NewAPIInstance(&dbInstance, sitesByID[dbInstance.SiteID], ifcMap[dbInstance.ID], ibifcMap[dbInstance.ID], desdsMap[dbInstance.ID], nvlifcMap[dbInstance.ID], skgiasMap[dbInstance.ID], ssdMap[ins.ID.String()])
+		apiInstance := model.NewAPIInstance(&dbInstance, sitesByID[dbInstance.SiteID], ifcMap[dbInstance.ID], ibifcMap[dbInstance.ID], sxaMap[dbInstance.ID], desdsMap[dbInstance.ID], nvlifcMap[dbInstance.ID], skgiasMap[dbInstance.ID], ssdMap[ins.ID.String()])
 		apiInstance.Deprecations = queryParamDeprecations
 
 		// If the instance has no NSG applied directly, and there

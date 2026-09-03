@@ -61,7 +61,9 @@ import (
 	sshKeyGroupWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/sshkeygroup"
 
 	ibpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/infinibandpartition"
+	sxpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/spectrumxpartition"
 	ibpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/infinibandpartition"
+	sxpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/spectrumxpartition"
 
 	expectedMachineActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedmachine"
 	expectedMachineWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedmachine"
@@ -295,6 +297,7 @@ func main() {
 
 		// InfiniBandPartition workflows
 		w.RegisterWorkflow(ibpWorkflow.UpdateInfiniBandPartitionInventory)
+		w.RegisterWorkflow(sxpWorkflow.UpdateSpectrumXPartitionInventory)
 
 		// Tenant workflow
 		w.RegisterWorkflow(tenantWorkflow.UpdateTenantInventory)
@@ -404,6 +407,9 @@ func main() {
 
 	ibpManager := ibpActivity.NewManageInfiniBandPartition(dbSession, siteClientPool)
 	w.RegisterActivity(&ibpManager)
+
+	sxpManager := sxpActivity.NewManageSpectrumXPartition(dbSession, siteClientPool)
+	w.RegisterActivity(&sxpManager)
 
 	tenantManager := tenantActivity.NewManageTenant(dbSession, siteClientPool)
 	w.RegisterActivity(&tenantManager)

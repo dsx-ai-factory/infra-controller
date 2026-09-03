@@ -5,22 +5,11 @@ package model
 
 import (
 	"errors"
+	"time"
 
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationIs "github.com/go-ozzo/ozzo-validation/v4/is"
-)
-
-// SpectrumXAttachmentType is how an Instance attaches to a SpectrumX Partition.
-type SpectrumXAttachmentType string
-
-const (
-	// SpectrumXAttachmentTypePhysical attaches the SpectrumX Partition over a physical interface
-	SpectrumXAttachmentTypePhysical SpectrumXAttachmentType = "Physical"
-	// SpectrumXAttachmentTypeVirtual attaches the SpectrumX Partition over a virtual function
-	SpectrumXAttachmentTypeVirtual SpectrumXAttachmentType = "Virtual"
-	// SpectrumXAttachmentTypeOVN attaches the SpectrumX Partition over OVN
-	SpectrumXAttachmentTypeOVN SpectrumXAttachmentType = "OVN"
 )
 
 // APISpectrumXAttachmentCreateOrUpdateRequest is the data structure to capture a user request to attach a SpectrumX Partition to an Instance
@@ -34,7 +23,7 @@ type APISpectrumXAttachmentCreateOrUpdateRequest struct {
 	// property is rejected rather than decoding to 0 and attaching to the first device.
 	DeviceInstance *int `json:"deviceInstance"`
 	// AttachmentType is the type of SpectrumX attachment: Physical, Virtual, or OVN
-	AttachmentType SpectrumXAttachmentType `json:"attachmentType"`
+	AttachmentType cdbm.SpectrumXAttachmentType `json:"attachmentType"`
 	// VirtualFunctionID must be omitted, as virtual functions are not currently supported
 	VirtualFunctionID *int `json:"virtualFunctionId"`
 }
@@ -52,7 +41,7 @@ func (sacr APISpectrumXAttachmentCreateOrUpdateRequest) Validate() error {
 			validation.Min(0).Error("value must be equal or greater than 0")),
 		validation.Field(&sacr.AttachmentType,
 			validation.Required.Error(validationErrorValueRequired),
-			validation.In(SpectrumXAttachmentTypePhysical, SpectrumXAttachmentTypeVirtual, SpectrumXAttachmentTypeOVN).Error("must be one of 'Physical', 'Virtual', or 'OVN'")),
+			validation.In(cdbm.SpectrumXAttachmentTypePhysical, cdbm.SpectrumXAttachmentTypeVirtual, cdbm.SpectrumXAttachmentTypeOVN).Error("must be one of 'Physical', 'Virtual', or 'OVN'")),
 	)
 	if err != nil {
 		return err
@@ -60,7 +49,7 @@ func (sacr APISpectrumXAttachmentCreateOrUpdateRequest) Validate() error {
 
 	// Core's allocate_spx_port_mac rejects a Virtual attachment, so reject it here and give the
 	// caller a 400 rather than a Site failure. Enabling it later only widens what is accepted.
-	if sacr.AttachmentType == SpectrumXAttachmentTypeVirtual {
+	if sacr.AttachmentType == cdbm.SpectrumXAttachmentTypeVirtual {
 		return validation.Errors{
 			"attachmentType": errors.New("virtual functions are currently not supported for SpectrumX attachments"),
 		}
@@ -75,33 +64,71 @@ func (sacr APISpectrumXAttachmentCreateOrUpdateRequest) Validate() error {
 	return nil
 }
 
-// ToProto converts the validated request to forge.InstanceSpxAttachment.
-func (sacr APISpectrumXAttachmentCreateOrUpdateRequest) ToProto() *corev1.InstanceSpxAttachment {
-	attachment := &corev1.InstanceSpxAttachment{
-		Device:         sacr.Device,
-		DeviceInstance: uint32(*sacr.DeviceInstance),
-		SpxPartitionId: &corev1.SpxPartitionId{Value: sacr.SpectrumXPartitionID},
-		AttachmentType: sacr.AttachmentType.ToProto(),
-	}
-	if sacr.VirtualFunctionID != nil {
-		vfID := uint32(*sacr.VirtualFunctionID)
-		attachment.VirtualFunctionId = &vfID
-	}
-	return attachment
+// APISpectrumXAttachment is the data structure to capture the API representation of a
+// SpectrumX Attachment on an Instance.
+//
+// MacAddress and IPAddress are allocated by the Site and reported back through Instance
+// inventory, so they are absent until the attachment reaches Ready.
+type APISpectrumXAttachment struct {
+	// ID is the unique UUID v4 identifier for the SpectrumX Attachment
+	ID string `json:"id"`
+	// InstanceID is the ID of the associated Instance
+	InstanceID string `json:"instanceId"`
+	// Instance is the summary of the Instance
+	Instance *APIInstanceSummary `json:"instance,omitempty"`
+	// SpectrumXPartitionID is the ID of the associated SpectrumX Partition
+	SpectrumXPartitionID string `json:"spectrumXPartitionId"`
+	// SpectrumXPartition is the summary of the SpectrumX Partition
+	SpectrumXPartition *APISpectrumXPartitionSummary `json:"spectrumXPartition,omitempty"`
+	// Device is the SpectrumX device the Partition is attached over
+	Device string `json:"device"`
+	// DeviceInstance is the index of the device the Partition is attached to
+	DeviceInstance int `json:"deviceInstance"`
+	// AttachmentType is the type of SpectrumX attachment
+	AttachmentType cdbm.SpectrumXAttachmentType `json:"attachmentType"`
+	// VirtualFunctionID is the virtual function the attachment uses
+	VirtualFunctionID *int `json:"virtualFunctionId"`
+	// MacAddress is the MAC address the Site allocated for the attachment
+	MacAddress *string `json:"macAddress"`
+	// IPAddress is the IP address the Site allocated for the attachment
+	IPAddress *string `json:"ipAddress"`
+	// Status is the status of the SpectrumX Attachment
+	Status string `json:"status"`
+	// Created is the date and time the entity was created
+	Created time.Time `json:"created"`
+	// Updated is the date and time the entity was last updated
+	Updated time.Time `json:"updated"`
 }
 
-// ToProto converts a SpectrumXAttachmentType into its Core proto enum. An unrecognized
-// value returns Physical, the zero enum, because Validate is the gate that rejects it
-// upstream of the wire.
-func (t SpectrumXAttachmentType) ToProto() corev1.SpxAttachmentType {
-	switch t {
-	case SpectrumXAttachmentTypePhysical:
-		return corev1.SpxAttachmentType_Physical
-	case SpectrumXAttachmentTypeVirtual:
-		return corev1.SpxAttachmentType_Virtual
-	case SpectrumXAttachmentTypeOVN:
-		return corev1.SpxAttachmentType_Ovn
-	default:
-		return corev1.SpxAttachmentType_Physical
+// NewAPISpectrumXAttachment accepts a DB layer SpectrumXAttachment object and returns an
+// API layer object. Returns nil for a nil DB model.
+func NewAPISpectrumXAttachment(dbsxa *cdbm.SpectrumXAttachment) *APISpectrumXAttachment {
+	if dbsxa == nil {
+		return nil
 	}
+
+	apiSxa := &APISpectrumXAttachment{
+		ID:                   dbsxa.ID.String(),
+		InstanceID:           dbsxa.InstanceID.String(),
+		SpectrumXPartitionID: dbsxa.SpectrumXPartitionID.String(),
+		Device:               dbsxa.Device,
+		DeviceInstance:       dbsxa.DeviceInstance,
+		AttachmentType:       dbsxa.AttachmentType,
+		VirtualFunctionID:    dbsxa.VirtualFunctionID,
+		MacAddress:           dbsxa.MacAddress,
+		IPAddress:            dbsxa.IPAddress,
+		Status:               dbsxa.Status,
+		Created:              dbsxa.Created,
+		Updated:              dbsxa.Updated,
+	}
+
+	if dbsxa.Instance != nil {
+		apiSxa.Instance = NewAPIInstanceSummary(dbsxa.Instance)
+	}
+
+	if dbsxa.SpectrumXPartition != nil {
+		apiSxa.SpectrumXPartition = NewAPISpectrumXPartitionSummary(dbsxa.SpectrumXPartition)
+	}
+
+	return apiSxa
 }

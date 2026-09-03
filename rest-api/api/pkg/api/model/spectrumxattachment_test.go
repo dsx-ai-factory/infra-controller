@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,7 +19,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 		spectrumXPartitionID string
 		device               string
 		deviceInstance       *int
-		attachmentType       SpectrumXAttachmentType
+		attachmentType       cdbm.SpectrumXAttachmentType
 		virtualFunctionID    *int
 	}
 	tests := []struct {
@@ -36,7 +36,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(0),
-				attachmentType:       SpectrumXAttachmentTypePhysical,
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 			},
 			wantErr: false,
 		},
@@ -48,7 +48,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(3),
-				attachmentType:       SpectrumXAttachmentTypeVirtual,
+				attachmentType:       cdbm.SpectrumXAttachmentTypeVirtual,
 			},
 			wantErr: true,
 		},
@@ -58,7 +58,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(0),
-				attachmentType:       SpectrumXAttachmentTypeOVN,
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVN,
 			},
 			wantErr: false,
 		},
@@ -68,7 +68,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 				spectrumXPartitionID: "badid",
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(0),
-				attachmentType:       SpectrumXAttachmentTypePhysical,
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 			},
 			wantErr: true,
 		},
@@ -77,7 +77,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 			fields: fields{
 				spectrumXPartitionID: uuid.New().String(),
 				deviceInstance:       cutil.GetPtr(0),
-				attachmentType:       SpectrumXAttachmentTypePhysical,
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 			},
 			wantErr: true,
 		},
@@ -86,7 +86,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 			fields: fields{
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
-				attachmentType:       SpectrumXAttachmentTypePhysical,
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 			},
 			wantErr: true,
 		},
@@ -106,7 +106,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(0),
-				attachmentType:       SpectrumXAttachmentTypePhysical,
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 				virtualFunctionID:    cutil.GetPtr(2),
 			},
 			wantErr: true,

@@ -4301,6 +4301,10 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 	inst1 := testInstanceBuildInstance(t, dbSession, "test-instance-1", tn1.ID, ip.ID, st1.ID, &ist1.ID, vpc1.ID, cutil.GetPtr(mc1.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
 	assert.NotNil(t, inst1)
+
+	sxp1 := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-1", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusReady)
+	assert.NotNil(t, sxp1)
+
 	existingPowerProfile := "balanced"
 	_, updatePowerProfileErr := dbSession.DB.Exec("UPDATE instance SET power_profile = ? WHERE id = ?", existingPowerProfile, inst1.ID)
 	require.NoError(t, updatePowerProfileErr)
@@ -4937,10 +4941,10 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					IpxeScript: os2.IpxeScript,
 					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{
 						{
-							SpectrumXPartitionID: uuid.NewString(),
+							SpectrumXPartitionID: sxp1.ID.String(),
 							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 							DeviceInstance:       cutil.GetPtr(0),
-							AttachmentType:       model.SpectrumXAttachmentTypePhysical,
+							AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 						},
 					},
 				},
@@ -7852,6 +7856,16 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						for i := range siteReq.Config.Spxconfig.SpxAttachments {
 							assert.Equal(t, siteReq.Config.Spxconfig.SpxAttachments[i].SpxPartitionId.Value, tt.args.reqData.SpectrumXAttachments[i].SpectrumXPartitionID)
 							assert.Equal(t, siteReq.Config.Spxconfig.SpxAttachments[i].Device, tt.args.reqData.SpectrumXAttachments[i].Device)
+						}
+
+						// The Site request is built from persisted rows, so the response has to
+						// carry the same attachments back.
+						require.Len(t, rst.SpectrumXAttachments, len(tt.args.reqData.SpectrumXAttachments))
+						for i, apiSxA := range rst.SpectrumXAttachments {
+							assert.Equal(t, tt.args.reqData.SpectrumXAttachments[i].SpectrumXPartitionID, apiSxA.SpectrumXPartitionID)
+							assert.Equal(t, tt.args.reqData.SpectrumXAttachments[i].Device, apiSxA.Device)
+							assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, apiSxA.Status)
+							assert.Equal(t, rst.ID, apiSxA.InstanceID)
 						}
 					}
 
