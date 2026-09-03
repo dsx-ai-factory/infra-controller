@@ -617,51 +617,17 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData_Archive(t *testi
 	})
 }
 
-func TestAPIOperatingSystemRequest_ValidateAndSetUserData_JinjaTemplate(t *testing.T) {
+func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData_JinjaTemplate(t *testing.T) {
 	const phoneHomeURL = "http://localhost/phone-home"
 
-	// cloud-init templated user-data opens with a two-line header: the template
-	// marker, then the format it renders into.
-	const jinjaUserData = `## template: jinja
-#cloud-config
-hostname: "{{ v1.local_hostname }}"
-`
-	const jinjaHeader = "## template: jinja\n#cloud-config\n"
-
-	t.Run("enabling phone-home keeps the jinja template header", func(t *testing.T) {
-		req := APIOperatingSystemCreateRequest{
-			Name:             "test-name",
-			TenantID:         cutil.GetPtr(uuid.NewString()),
-			UserData:         cutil.GetPtr(jinjaUserData),
-			PhoneHomeEnabled: cutil.GetPtr(true),
-		}
-
-		require.NoError(t, req.ValidateAndSetUserData(phoneHomeURL))
-		require.NotNil(t, req.UserData)
-		assert.True(t, strings.HasPrefix(*req.UserData, jinjaHeader),
-			"jinja header must be preserved: %s", *req.UserData)
-		assert.Contains(t, *req.UserData, phoneHomeURL)
-	})
-
-	t.Run("rejects a jinja shell script", func(t *testing.T) {
-		// The template marker says the payload is rendered, not that it is
-		// cloud-config; a script must still be rejected.
-		req := APIOperatingSystemCreateRequest{
-			Name:             "test-name",
-			TenantID:         cutil.GetPtr(uuid.NewString()),
-			UserData:         cutil.GetPtr("## template: jinja\n#!/bin/bash\nexport FOO: {{ v1.local_hostname }}\n"),
-			PhoneHomeEnabled: cutil.GetPtr(true),
-		}
-
-		assert.Error(t, req.ValidateAndSetUserData(phoneHomeURL))
-	})
-
-	t.Run("disabling phone-home keeps the jinja template header", func(t *testing.T) {
+	// A template is not a document to render back - yaml reads `{{ x }}` as a
+	// mapping - so disabling leaves the stored blob alone rather than rewriting
+	// it. Enabling reports it, which the create table already covers for
+	// user-data phone-home cannot be edited into.
+	t.Run("disabling phone-home leaves a template alone", func(t *testing.T) {
 		existing := &cdbm.OperatingSystem{
 			ID:   uuid.New(),
 			Name: "ab",
-			// phone-home sits on the document's first key, where yaml keeps the
-			// header, so removing it must not take the header along.
 			UserData: cutil.GetPtr(`## template: jinja
 #cloud-config
 phone_home:
@@ -677,11 +643,8 @@ hostname: "{{ v1.local_hostname }}"
 		req := APIOperatingSystemUpdateRequest{PhoneHomeEnabled: cutil.GetPtr(false)}
 
 		require.NoError(t, req.ValidateAndSetUserData(phoneHomeURL, existing))
-		require.NotNil(t, req.UserData)
-		assert.True(t, strings.HasPrefix(*req.UserData, jinjaHeader),
-			"jinja header must survive removal: %s", *req.UserData)
-		assert.NotContains(t, *req.UserData, phoneHomeURL)
-		assert.Contains(t, *req.UserData, "{{ v1.local_hostname }}", "the rest of the template must be kept")
+		assert.Nil(t, req.UserData,
+			"the stored template must be left untouched, the block it holds included")
 	})
 }
 

@@ -328,30 +328,40 @@ func TestRemovePhoneHomeFromArchivePreservesHeaderWhenEmptied(t *testing.T) {
 		"header must be preserved on the emptied archive")
 }
 
-func TestRemovePhoneHomeFromArchivePreservesUnsupportedEntry(t *testing.T) {
-	// A text/cloud-config entry whose content is really a script (its header
-	// conflicts) cannot carry phone-home. Disabling must skip it without error
-	// and leave it unchanged, while still removing the genuine phone-home entry.
+func TestRemovePhoneHomeFromArchivePreservesEntriesItCannotEdit(t *testing.T) {
+	// An entry phone-home cannot live in - content that is really a script under a
+	// cloud-config type, or a template yaml would write back as a mapping - must
+	// be skipped without error and left unchanged, while the genuine phone-home
+	// entry is still removed.
 	const script = "#!/bin/bash\nexport FOO: bar\n"
+	const template = "## template: jinja\n#cloud-config\nhostname: {{ v1.local_hostname }}\nphone_home:\n  url: http://169.254.169.254/phone-home\n"
 
 	userData, err := disablePhoneHome(new(`#cloud-config-archive
 - type: text/cloud-config
   content: |
     #!/bin/bash
     export FOO: bar
+- content: |
+    ## template: jinja
+    #cloud-config
+    hostname: {{ v1.local_hostname }}
+    phone_home:
+      url: http://169.254.169.254/phone-home
 - type: text/cloud-config
   content: |
     #cloud-config
     phone_home:
-      url: http://169.254.169.254/phone-home
+      url: http://removed.example/phone-home
 `), nil)
 	require.NoError(t, err)
 
 	archiveRoot := unmarshalArchiveRoot(t, *userData)
-	require.Len(t, archiveRoot.Content, 1, "only the phone-home entry must be removed")
+	require.Len(t, archiveRoot.Content, 2, "only the entry it can edit must be removed")
 	assert.Equal(t, script, mappingNodeValue(archiveRoot.Content[0], archiveEntryContent).Value,
 		"the script entry must be left unchanged")
-	assert.NotContains(t, *userData, "phone_home")
+	assert.Equal(t, template, mappingNodeValue(archiveRoot.Content[1], archiveEntryContent).Value,
+		"the template must be left as authored, block and all")
+	assert.NotContains(t, *userData, "removed.example")
 }
 
 func TestRemovePhoneHomeFromArchivePreservesHeaderOnCommentedEntry(t *testing.T) {
@@ -1159,20 +1169,21 @@ func TestPhoneHomeSupportsUserData(t *testing.T) {
 		// cloud-init reads the format from the start of the payload, so a comment
 		// above the header leaves user-data it does not recognize at all.
 		{"a comment above the header", "# a note\n#cloud-config\npackages:\n- curl\n", false},
+		// yaml reads past a space or a newline before the header, but not a tab:
+		// the document below one cannot be read at all.
+		{"a header behind a tab", "\t#cloud-config\npackages:\n- curl\n", false},
 		{"#!/bin/bash script parsed as a scalar", "#!/bin/bash\necho hello\nls -la\n", false},
 		{"#!/bin/bash script parsed as a mapping", "#!/bin/bash\nexport FOO: bar\n", false},
-		// A jinja template declares its format on the line below the marker, so
-		// the two-line header decides - not the marker itself.
-		{"jinja #cloud-config", "## template: jinja\n#cloud-config\npackages:\n- curl\n", true},
-		// cloud-init's jinja handler has no archive sub-handler, so it ignores a
-		// jinja archive entirely - phone-home in one would never run.
+		// A template is not a document to render back, whatever it declares below
+		// the marker: yaml reads `{{ x }}` as a mapping and writes it back as one.
+		{"jinja #cloud-config", "## template: jinja\n#cloud-config\npackages:\n- curl\n", false},
+		// cloud-init would not run this one at all: its jinja handler dispatches
+		// cloud-config, scripts and boothooks only, never an archive.
 		{
 			"jinja #cloud-config-archive",
 			"## template: jinja\n#cloud-config-archive\n- type: text/cloud-config\n  content: x\n",
 			false,
 		},
-		{"jinja #!/bin/bash script parsed as a scalar", "## template: jinja\n#!/bin/bash\necho hello\nls -la\n", false},
-		{"jinja #!/bin/bash script parsed as a mapping", "## template: jinja\n#!/bin/bash\nexport FOO: bar\n", false},
 		// cloud-init matches the marker on the start of the line, ignoring case.
 		{"#cloud-config with a note after it", "#cloud-config (managed by nico)\npackages:\n- curl\n", true},
 		{"#Cloud-Config", "#Cloud-Config\npackages:\n- curl\n", true},
@@ -1198,27 +1209,24 @@ func TestPhoneHomePreservesUserDataHeader(t *testing.T) {
 	const phoneHomeURL = "http://169.254.169.254/phone-home"
 
 	// yaml keeps the header on the document's first key or archive entry - which
-	// is exactly what a removal can take away - and a jinja template loses its
-	// templating altogether if the "## template: jinja" line goes missing.
+	// is exactly what a removal can take away.
 	tests := []struct {
 		name       string
 		userData   string
 		wantHeader string
 	}{
 		{
-			name:       "jinja #cloud-config",
-			userData:   "## template: jinja\n#cloud-config\nhostname: \"{{ v1.local_hostname }}\"\nphone_home:\n  url: " + phoneHomeURL + "\n",
-			wantHeader: "## template: jinja\n#cloud-config\n",
-		},
-		{
-			name:       "jinja #cloud-config carrying the header on the phone-home key",
-			userData:   "## template: jinja\n#cloud-config\nphone_home:\n  url: " + phoneHomeURL + "\nhostname: \"{{ v1.local_hostname }}\"\n",
-			wantHeader: "## template: jinja\n#cloud-config\n",
-		},
-		{
 			name:       "#cloud-config carrying the header on the phone-home key",
 			userData:   "#cloud-config\nphone_home:\n  url: " + phoneHomeURL + "\npackages:\n- curl\n",
 			wantHeader: "#cloud-config\n",
+		},
+		{
+			// cloud-init reads the header past leading whitespace, so an archive
+			// written behind a blank line is one we edit like any other - and the
+			// blank line is the author's, so it is stored back with it.
+			name:       "#cloud-config-archive behind a blank line",
+			userData:   "\n#cloud-config-archive\n- type: text/cloud-config\n  content: |\n    #cloud-config\n    package_update: true\n    phone_home:\n      url: " + phoneHomeURL + "\n",
+			wantHeader: "\n#cloud-config-archive\n",
 		},
 		{
 			name: "#cloud-config-archive carrying the header on the phone-home entry",
@@ -1285,6 +1293,20 @@ func TestSplitUserDataHeader(t *testing.T) {
 			"packages: []\n",
 		},
 		{
+			// cloud-init matches the header past leading whitespace, which is kept
+			// with the line so the document is stored as its author wrote it.
+			"a header behind whitespace",
+			"\n  #cloud-config\npackages: []\n",
+			"\n  #cloud-config\n",
+			"packages: []\n",
+		},
+		{
+			"jinja takes the line below the marker, blank line and all",
+			"## template: jinja\n\n#cloud-config\npackages: []\n",
+			"## template: jinja\n\n#cloud-config\n",
+			"packages: []\n",
+		},
+		{
 			// An author's own comment is not part of the header: it stays in the
 			// body, where yaml keeps it attached to its key.
 			"a comment below the header stays in the body",
@@ -1299,6 +1321,7 @@ func TestSplitUserDataHeader(t *testing.T) {
 			header, body := splitUserDataHeader(tt.userData)
 			assert.Equal(t, tt.wantHeader, header)
 			assert.Equal(t, tt.wantBody, body)
+			assert.Equal(t, tt.userData, header+body, "the split must not lose a byte")
 		})
 	}
 }

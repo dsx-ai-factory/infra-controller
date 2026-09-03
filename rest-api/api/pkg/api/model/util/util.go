@@ -71,16 +71,18 @@ func MarshalUserData(document *yaml.Node) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// ErrUnsupportedUserData reports user-data phone-home cannot live in: not a
-// #cloud-config mapping or a #cloud-config-archive sequence, but a script, a
-// template cloud-init ignores, text that is not YAML, or more than one document,
-// which cloud-init's loader will not read either. Enabling phone-home
-// rejects it; disabling leaves it alone, since the block cannot be in there.
+// ErrUnsupportedUserData reports user-data phone-home cannot be edited into:
+// not a #cloud-config mapping or a #cloud-config-archive sequence, but a script,
+// a jinja template, text that is not YAML, or more than one document, which
+// cloud-init's loader will not read either. Enabling phone-home rejects it;
+// disabling leaves it alone rather than rewriting it.
 var ErrUnsupportedUserData = errors.New("userData is not a #cloud-config or #cloud-config-archive document")
 
 // EnablePhoneHomeInUserData returns userData with a phone-home block reporting
-// to url, replacing any block already in there. Nil or empty user-data yields a
-// #cloud-config document holding just the block.
+// to url, replacing the blocks it can edit: one in an archive part left as
+// authored stays, and the block delivered last is the one that takes effect.
+// Nil or empty user-data yields a #cloud-config document holding just the
+// block.
 func EnablePhoneHomeInUserData(userData *string, url string) (*string, error) {
 	header, documentRoot, err := parseUserData(userData)
 	if err != nil {
@@ -92,8 +94,9 @@ func EnablePhoneHomeInUserData(userData *string, url string) (*string, error) {
 		header = SiteCloudConfig + "\n"
 	}
 
-	// cloud-init merges archive parts independently, so phone-home is delivered
-	// as a part of its own rather than folded into somebody else's.
+	// cloud-init merges the parts into one config, later keys replacing earlier
+	// ones, so phone-home is delivered as a part of its own rather than folded
+	// into somebody else's.
 	if documentRoot.Kind == yaml.SequenceNode {
 		if _, err := removePhoneHomeParts(documentRoot, nil); err != nil {
 			return nil, err
@@ -187,9 +190,9 @@ func parseUserData(userData *string) (string, *yaml.Node, error) {
 	documentRoot := document.Content[0]
 
 	switch format := headerFormat(header); {
-	case declaresFormat(header, jinjaTemplateHeader) && format == SiteCloudConfigArchive:
-		// cloud-init's jinja handler dispatches cloud-config, scripts and
-		// boothooks only, so a jinja archive is never run.
+	case declaresFormat(header, jinjaTemplateHeader):
+		// A template is not a document to render back: yaml reads `{{ x }}` as a
+		// mapping and would write it back as one.
 		return "", nil, ErrUnsupportedUserData
 	case documentRoot.Kind == yaml.SequenceNode && format == SiteCloudConfigArchive:
 	case documentRoot.Kind == yaml.MappingNode && (format == "" || format == SiteCloudConfig):
@@ -224,31 +227,48 @@ func renderUserData(header string, documentRoot *yaml.Node) (*string, error) {
 // included, and the YAML body below it. The header is the leading comment line,
 // plus the line after it when that leading line is the jinja marker.
 func splitUserDataHeader(userData string) (header, body string) {
-	line, body, found := strings.Cut(userData, "\n")
-	if !found || !strings.HasPrefix(line, "#") {
+	headerLine, body, found := nextUserDataHeaderLine(userData)
+	if !found {
 		return "", userData
 	}
-	header = line + "\n"
 
-	if !declaresFormat(line, jinjaTemplateHeader) {
-		return header, body
+	if declaresFormat(headerLine, jinjaTemplateHeader) {
+		if templated, rest, found := nextUserDataHeaderLine(body); found {
+			return headerLine + templated, rest
+		}
 	}
 
-	line, rest, found := strings.Cut(body, "\n")
-	if !found || !strings.HasPrefix(line, "#") {
-		return header, body
+	return headerLine, body
+}
+
+// nextUserDataHeaderLine cuts the leading comment line, newline included, off
+// text and reports whether it found one. cloud-init reads a header past leading
+// whitespace, so that whitespace is skipped to find the line and returned with
+// it: line and rest hold every byte of text, so a header written behind a blank
+// line declares the format and user-data is stored as its author wrote it. Only
+// the whitespace yaml reads past counts, since a document written behind a tab
+// is not one yaml can read, whatever header cloud-init finds above it.
+func nextUserDataHeaderLine(text string) (line, rest string, found bool) {
+	// remove leading whitespace, spaces and newlines only
+	whitespace := len(text) - len(strings.TrimLeft(text, " \r\n"))
+
+	declaration, rest, found := strings.Cut(text[whitespace:], "\n")
+	if !found || !strings.HasPrefix(declaration, "#") {
+		// header line must start with #, so we just return not found here
+		return "", text, false
 	}
 
-	return header + line + "\n", rest
+	return text[:len(text)-len(rest)], rest, true
 }
 
 // headerFormat returns the format a cloud-init header declares, as the marker
 // naming it, or "" when there is no header. The format is on the header's last
 // line, since a jinja template declares it below the template marker.
 func headerFormat(header string) string {
-	line := strings.TrimSpace(header)
-	if _, lastLine, found := strings.Cut(line, "\n"); found {
-		line = strings.TrimSpace(lastLine)
+	line, rest, _ := nextUserDataHeaderLine(header)
+	// this function receives a valid header, so if there are 2 lines, first one must be a jinja template marker
+	if templated, _, found := nextUserDataHeaderLine(rest); found {
+		line = templated
 	}
 
 	// The longer marker is tried first because #cloud-config prefixes
@@ -260,7 +280,7 @@ func headerFormat(header string) string {
 	}
 
 	// Some other format, e.g. a #!/bin/sh script - or no header at all.
-	return line
+	return strings.TrimSpace(line)
 }
 
 // declaresFormat reports whether a header line declares marker, matched the way
@@ -475,10 +495,9 @@ func insertPhoneHomePart(archiveRoot *yaml.Node, url string) error {
 		}
 
 		header, partRoot, err := parseUserData(&content.Value)
-		if err != nil || declaresFormat(header, jinjaTemplateHeader) ||
-			!installsATargetSystem(partRoot) {
-			// A template is not a document to render back: yaml reads `{{ x }}` as
-			// a mapping and would write it back as one, so it is passed over.
+		if err != nil || !installsATargetSystem(partRoot) {
+			// An entry phone-home cannot be edited into - a template included - is
+			// passed over rather than failing the request over somebody else's.
 			continue
 		}
 
