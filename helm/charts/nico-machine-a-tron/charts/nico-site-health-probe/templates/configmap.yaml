@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{{- $restCaPath := "" }}
+{{- if .Values.restCa.existingSecret.name }}
+{{- $restCaPath = printf "/var/secrets/rest-ca/%s" .Values.restCa.existingSecret.key }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nico-site-health-probe.name" . }}-config
+  namespace: {{ include "nico-site-health-probe.namespace" . }}
+  labels:
+    {{- include "nico-site-health-probe.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    metrics_listen: ":{{ .Values.metrics.port }}"
+    probes:
+      grpc_machines:
+        {{- with .Values.probes.grpcMachines }}
+        enabled: {{ .enabled }}
+        target: {{ .target | quote }}
+        interval: {{ .interval | quote }}
+        timeout: {{ .timeout | quote }}
+        page_size: {{ .pageSize }}
+        tls:
+          ca: /var/run/secrets/spiffe.io/ca.crt
+          cert: /var/run/secrets/spiffe.io/tls.crt
+          key: /var/run/secrets/spiffe.io/tls.key
+        {{- end }}
+      rest_machines:
+        {{- with .Values.probes.restMachines }}
+        enabled: {{ .enabled }}
+        target: {{ .target | quote }}
+        interval: {{ .interval | quote }}
+        timeout: {{ .timeout | quote }}
+        org: {{ .org | quote }}
+        auth:
+          token_url: {{ .auth.tokenUrl | quote }}
+          client_id: {{ .auth.clientId | quote }}
+          client_secret_path: /var/secrets/keycloak-machines/{{ .auth.existingSecret.key }}
+        {{- end }}
+        {{- with $restCaPath }}
+        ca: {{ . | quote }}
+        {{- end }}
+      rest_instances:
+        {{- with .Values.probes.restInstances }}
+        enabled: {{ .enabled }}
+        target: {{ .target | quote }}
+        interval: {{ .interval | quote }}
+        timeout: {{ .timeout | quote }}
+        org: {{ .org | quote }}
+        auth:
+          token_url: {{ .auth.tokenUrl | quote }}
+          client_id: {{ .auth.clientId | quote }}
+          client_secret_path: /var/secrets/keycloak-instances/{{ .auth.existingSecret.key }}
+        {{- end }}
+        {{- with $restCaPath }}
+        ca: {{ . | quote }}
+        {{- end }}

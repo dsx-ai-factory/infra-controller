@@ -438,3 +438,15 @@ mat-k8s-controller:
     syncInterval: "30s"
     insecureSkipVerify: false
     logLevel: "info"
+
+## nico-site-health-probe — synthetic monitoring for NICo APIs (#5360).
+## Enabled by default: wherever machine-a-tron is deployed (test sites), the
+## probe ships with it. Override the image (no registry prefix by default):
+##   nico-site-health-probe:
+##     image:
+##       repository: <registry>/site-health-probe
+##       tag: "<version>"
+## REST probes stay off until the site provides org + Keycloak client secrets —
+## see the subchart's values.yaml.
+nico-site-health-probe:
+  enabled: true

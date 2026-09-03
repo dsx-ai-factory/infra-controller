@@ -15,3 +15,7 @@ dependencies:
     version: "0.1.0"
     condition: mat-k8s-controller.enabled
     repository: ""
+  - name: nico-site-health-probe
+    version: "0.1.0"
+    condition: nico-site-health-probe.enabled
+    repository: ""

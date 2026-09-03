@@ -45,11 +45,12 @@ enum RulePrincipal {
     Flow,
     MaintenanceJobs,
     DsxExchangeConsumer,
-    Anonymous, // Permitted for everything
+    SiteHealthProbe, // synthetic read-only monitoring (#5360)
+    Anonymous,       // Permitted for everything
 }
 use self::RulePrincipal::{
     Agent, Anonymous, BmcProxy, Dhcp, Dns, DsxExchangeConsumer, Flow, ForgeAdminCLI, Health,
-    Machineatron, MaintenanceJobs, Pxe, Scout, SiteAgent, Ssh, SshRs,
+    Machineatron, MaintenanceJobs, Pxe, Scout, SiteAgent, SiteHealthProbe, Ssh, SshRs,
 };
 
 impl InternalRBACRules {
@@ -243,6 +244,7 @@ impl InternalRBACRules {
                 Ssh,
                 SshRs,
                 Flow,
+                SiteHealthProbe,
             ],
         );
         x.perm(
@@ -255,6 +257,7 @@ impl InternalRBACRules {
                 Ssh,
                 SshRs,
                 Flow,
+                SiteHealthProbe,
             ],
         );
         x.perm("FindConnectedDevicesByDpuMachineIds", vec![ForgeAdminCLI]);
@@ -1073,6 +1076,11 @@ impl RuleInfo {
                         "nico-dsx-exchange-consumer",
                         "carbide-dsx-exchange-consumer",
                     ),
+                    // New service (no legacy carbide- alias): the synthetic
+                    // monitoring probe, read-only machine queries only (#5360).
+                    RulePrincipal::SiteHealthProbe => vec![Principal::SpiffeServiceIdentifier(
+                        "nico-site-health-probe".to_string(),
+                    )],
                     RulePrincipal::Anonymous => vec![Principal::Anonymous],
                 })
                 .collect(),
