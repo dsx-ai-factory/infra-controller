@@ -246,7 +246,7 @@ async fn test_machine_creator_compute_rms_request_uses_rack_profile(
 
     let machines = db::machine::find(
         &env.pool,
-        ObjectFilter::All,
+        ObjectFilter::<MachineId>::All,
         MachineSearchConfig {
             include_predicted_host: true,
             ..Default::default()
@@ -332,7 +332,7 @@ async fn test_machine_creator_compute_rms_request_uses_rack_profile(
 
     let machines = db::machine::find(
         &env.pool,
-        ObjectFilter::All,
+        ObjectFilter::<MachineId>::All,
         MachineSearchConfig {
             include_predicted_host: true,
             ..Default::default()
@@ -413,7 +413,7 @@ async fn test_machine_creator_retries_rms_enrichment_after_failure(
 
     let machines = db::machine::find(
         &env.pool,
-        ObjectFilter::All,
+        ObjectFilter::<MachineId>::All,
         MachineSearchConfig {
             include_predicted_host: true,
             ..Default::default()
@@ -451,7 +451,7 @@ async fn test_machine_creator_retries_rms_enrichment_after_failure(
 
     let machines = db::machine::find(
         &env.pool,
-        ObjectFilter::All,
+        ObjectFilter::<MachineId>::All,
         MachineSearchConfig {
             include_predicted_host: true,
             ..Default::default()
