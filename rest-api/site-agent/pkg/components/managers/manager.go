@@ -32,6 +32,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/operatingsystem"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/site"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/sku"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/spectrumxpartition"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/sshkeygroup"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/subnet"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/tenant"
@@ -55,6 +56,7 @@ func NewAPIHandlers() {
 		VPC:                    &vpc.API{},
 		VpcPrefix:              &vpcprefix.API{},
 		VpcPeering:             &vpcpeering.API{},
+		SpectrumXPartition:     &spectrumxpartition.API{},
 		Subnet:                 &subnet.API{},
 		Instance:               &instance.API{},
 		Machine:                &machine.API{},
@@ -123,6 +125,7 @@ func (Managers *Manager) NewInstance() {
 	Managers.NVLinkLogicalPartition()
 	Managers.FlowGrpc()
 	Managers.VpcPeering()
+	Managers.SpectrumXPartition()
 	Managers.TenantIdentity()
 }
 
@@ -174,6 +177,7 @@ func (Managers *Manager) Init() {
 	Managers.NVLinkLogicalPartition().Init()
 	Managers.FlowGrpc().Init()
 	Managers.VpcPeering().Init()
+	Managers.SpectrumXPartition().Init()
 	Managers.TenantIdentity().Init()
 }
 

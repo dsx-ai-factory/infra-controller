@@ -153,6 +153,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 	ethernetInterfacesToDelete := []*cdbm.Interface{}
 	infiniBandInterfacesToDelete := []*cdbm.InfiniBandInterface{}
+	spectrumXAttachmentsToDelete := []*cdbm.SpectrumXAttachment{}
 	nvLinkInterfacesToDelete := []*cdbm.NVLinkInterface{}
 
 	// Iterate through Instances in the inventory and update them in DB
@@ -725,6 +726,132 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 			}
 		}
 
+		// Populate a map of existing SpectrumX Attachments by key
+		sxaDAO := cdbm.NewSpectrumXAttachmentDAO(mi.dbSession)
+		spectrumXAttachments, _, serr := sxaDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SpectrumXAttachmentFilterInput{
+				InstanceIDs: []uuid.UUID{instance.ID},
+			},
+			paginator.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		if serr != nil {
+			slogger.Error().Err(serr).Msg("Failed to get SpectrumX Attachments for Instance, DB error")
+			continue
+		}
+
+		spectrumXAttachmentMap := map[string]*cdbm.SpectrumXAttachment{}
+		deletingSpectrumXAttachments := []*cdbm.SpectrumXAttachment{}
+		for _, sxa := range spectrumXAttachments {
+			curSxA := sxa
+			// Add the SpectrumX Attachment to the list to be deleted if it is in Deleting state
+			if sxa.Status == cdbm.SpectrumXAttachmentStatusDeleting {
+				deletingSpectrumXAttachments = append(deletingSpectrumXAttachments, &curSxA)
+				continue
+			}
+
+			// Key on the Partition ID, device and device instance, which is what Core
+			// reports in the attachment config. An attachment whose Partition the Site has
+			// not created yet simply matches nothing and stays Pending.
+			sxaKey := fmt.Sprintf("%s-%s-%d", sxa.SpectrumXPartitionID.String(), sxa.Device, sxa.DeviceInstance)
+			spectrumXAttachmentMap[sxaKey] = &curSxA
+		}
+
+		isSpectrumXConfigStatusEmpty := true
+		isSpectrumXConfigSynced := false
+		if controllerInstance.Config.Spxconfig != nil && controllerInstance.Status.SpxStatus != nil {
+			for idx, attachmentConfig := range controllerInstance.Config.Spxconfig.SpxAttachments {
+
+				// If the SpectrumX Config as well as Status is not empty, set the flag to false
+				isSpectrumXConfigStatusEmpty = false
+
+				if attachmentConfig == nil {
+					slogger.Warn().Int("Index", idx).Msg("SpectrumX Attachment Config is nil, skipping update")
+					continue
+				}
+
+				sxaKey := fmt.Sprintf("%s-%s-%d", attachmentConfig.GetSpxPartitionId().GetValue(), attachmentConfig.Device, attachmentConfig.DeviceInstance)
+				sxa, ok := spectrumXAttachmentMap[sxaKey]
+				if !ok {
+					continue
+				}
+
+				// Config and status attachment indices are aligned by Core. A partial
+				// inventory must not shift status onto a different attachment.
+				if idx >= len(controllerInstance.Status.SpxStatus.AttachmentStatuses) {
+					slogger.Warn().Int("SpectrumX Attachment Index", idx).Msg("Site Controller Instance is missing matching SpectrumX Attachment status")
+					continue
+				}
+
+				attachmentStatus := controllerInstance.Status.SpxStatus.AttachmentStatuses[idx]
+				if attachmentStatus == nil {
+					continue
+				}
+
+				var macAddress *string
+				if attachmentStatus.MacAddr != nil && (sxa.MacAddress == nil || *sxa.MacAddress != *attachmentStatus.MacAddr) {
+					macAddress = attachmentStatus.MacAddr
+				}
+
+				var ipAddress *string
+				if attachmentStatus.IpAddress != nil && (sxa.IPAddress == nil || *sxa.IPAddress != *attachmentStatus.IpAddress) {
+					ipAddress = attachmentStatus.IpAddress
+				}
+
+				// VirtualFunctionId is not optional on the wire, so 0 cannot be told apart
+				// from unset. Only a non-zero value is taken, which keeps a persisted VF
+				// from being clobbered by a Site that reports nothing for it.
+				var virtualFunctionID *int
+				if attachmentStatus.VirtualFunctionId != 0 {
+					reported := int(attachmentStatus.VirtualFunctionId)
+					if sxa.VirtualFunctionID == nil || *sxa.VirtualFunctionID != reported {
+						virtualFunctionID = &reported
+					}
+				}
+
+				var status *string
+				if controllerInstance.Status.SpxStatus.ConfigsSynced == corev1.SyncState_SYNCED {
+					isSpectrumXConfigSynced = true
+					if sxa.Status != cdbm.SpectrumXAttachmentStatusReady {
+						status = cwutil.GetPtr(cdbm.SpectrumXAttachmentStatusReady)
+					}
+				}
+
+				if macAddress == nil && ipAddress == nil && virtualFunctionID == nil && status == nil {
+					continue
+				}
+
+				_, serr := sxaDAO.Update(
+					ctx,
+					nil,
+					cdbm.SpectrumXAttachmentUpdateInput{
+						SpectrumXAttachmentID: sxa.ID,
+						MacAddress:            macAddress,
+						IPAddress:             ipAddress,
+						VirtualFunctionID:     virtualFunctionID,
+						Status:                status,
+					},
+				)
+				if serr != nil {
+					slogger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("failed to update SpectrumX Attachment in DB")
+				}
+			}
+		}
+
+		// Determine which SpectrumX Attachments in Deleting state can be deleted
+		if isSpectrumXConfigStatusEmpty || isSpectrumXConfigSynced {
+			for _, sxa := range deletingSpectrumXAttachments {
+				if site.IsTimeWithinStaleInventoryThreshold(sxa.Updated) {
+					// If the SpectrumX Attachment was modified within stale inventory threshold, defer to next inventory update
+					continue
+				}
+				// Continue with deletion
+				spectrumXAttachmentsToDelete = append(spectrumXAttachmentsToDelete, sxa)
+			}
+		}
+
 		// Process/update DPU Extension Service Deployments in DB
 		desdDAO := cdbm.NewDpuExtensionServiceDeploymentDAO(mi.dbSession)
 		desds, _, serr := desdDAO.GetAll(ctx, nil, cdbm.DpuExtensionServiceDeploymentFilterInput{
@@ -1095,6 +1222,17 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 		}
 	}
 
+	// Delete eligible SpectrumX Attachments which are in Deleting state
+	if len(spectrumXAttachmentsToDelete) > 0 {
+		sxaDeleteDAO := cdbm.NewSpectrumXAttachmentDAO(mi.dbSession)
+		for _, sxa := range spectrumXAttachmentsToDelete {
+			serr := sxaDeleteDAO.Delete(ctx, nil, sxa.ID)
+			if serr != nil {
+				logger.Error().Err(serr).Str("SpectrumX Attachment ID", sxa.ID.String()).Msg("Failed to delete SpectrumX Attachment, DB error")
+			}
+		}
+	}
+
 	// Delete eligible NVLink Interfaces which are in Deleting state
 	if len(nvLinkInterfacesToDelete) > 0 {
 		nvlifcDAO := cdbm.NewNVLinkInterfaceDAO(mi.dbSession)
@@ -1163,6 +1301,29 @@ func (mi ManageInstance) deleteInstanceFromDB(ctx context.Context, tx *cdb.Tx, i
 		serr := ibiDAO.Delete(ctx, tx, ibi.ID)
 		if serr != nil {
 			logger.Error().Err(serr).Msg("failed to delete InfiniBand interface for instance from DB")
+			terr := tx.Rollback()
+			if terr != nil {
+				logger.Error().Err(terr).Msg("failed to rollback transaction")
+			}
+			return serr
+		}
+	}
+
+	// Delete SpectrumX attachment(s) corresponding to instance
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(mi.dbSession)
+	sxas, _, err := sxaDAO.GetAll(ctx, tx, cdbm.SpectrumXAttachmentFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve SpectrumX attachments from DB")
+		terr := tx.Rollback()
+		if terr != nil {
+			logger.Error().Err(terr).Msg("failed to rollback transaction")
+		}
+		return err
+	}
+	for _, sxa := range sxas {
+		serr := sxaDAO.Delete(ctx, tx, sxa.ID)
+		if serr != nil {
+			logger.Error().Err(serr).Msg("failed to delete SpectrumX attachment for instance from DB")
 			terr := tx.Rollback()
 			if terr != nil {
 				logger.Error().Err(terr).Msg("failed to rollback transaction")

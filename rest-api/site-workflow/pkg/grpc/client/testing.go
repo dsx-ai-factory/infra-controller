@@ -250,6 +250,66 @@ func (mcgsc *MockCoreGrpcServiceClient) FindIBPartitionsByIds(ctx context.Contex
 	return out, nil
 }
 
+/* SpectrumX Partition mock methods */
+func (mcgsc *MockCoreGrpcServiceClient) FindSpxPartitionIds(ctx context.Context, in *corev1.SpxPartitionSearchFilter, opts ...grpc.CallOption) (*corev1.SpxPartitionIdList, error) {
+	if err, ok := ctx.Value("wantError").(error); ok {
+		return nil, status.Error(status.Code(err), "failed to retrieve spx partition ids")
+	}
+
+	out := &corev1.SpxPartitionIdList{}
+
+	count, ok := ctx.Value("wantCount").(int)
+	if ok {
+		for range count {
+			out.SpxPartitionIds = append(out.SpxPartitionIds, &corev1.SpxPartitionId{Value: uuid.NewString()})
+		}
+	}
+
+	return out, nil
+}
+
+func (mcgsc *MockCoreGrpcServiceClient) FindSpxPartitionsByIds(ctx context.Context, in *corev1.SpxPartitionsByIdsRequest, opts ...grpc.CallOption) (*corev1.SpxPartitionList, error) {
+	err, ok := ctx.Value("wantError").(error)
+	if ok {
+		return nil, status.Error(status.Code(err), "failed to retrieve spx partitions")
+	}
+
+	out := &corev1.SpxPartitionList{}
+	if in != nil {
+		for _, id := range in.SpxPartitionIds {
+			out.SpxPartitions = append(out.SpxPartitions, &corev1.SpxPartition{
+				Id: id,
+			})
+		}
+	}
+
+	return out, nil
+}
+
+func (mcgsc *MockCoreGrpcServiceClient) CreateSpxPartition(ctx context.Context, in *corev1.SpxPartitionCreationRequest, opts ...grpc.CallOption) (*corev1.SpxPartition, error) {
+	if err, ok := ctx.Value("wantError").(error); ok {
+		return nil, status.Error(status.Code(err), "failed to create spx partition")
+	}
+
+	out := &corev1.SpxPartition{}
+	if in != nil {
+		out.Id = in.GetId()
+		out.Metadata = in.GetMetadata()
+		out.TenantOrganizationId = in.GetTenantOrganizationId()
+		out.Vni = in.GetVni()
+	}
+
+	return out, nil
+}
+
+func (mcgsc *MockCoreGrpcServiceClient) DeleteSpxPartition(ctx context.Context, in *corev1.SpxPartitionDeletionRequest, opts ...grpc.CallOption) (*corev1.SpxPartitionDeletionResult, error) {
+	if err, ok := ctx.Value("wantError").(error); ok {
+		return nil, status.Error(status.Code(err), "failed to delete spx partition")
+	}
+
+	return &corev1.SpxPartitionDeletionResult{}, nil
+}
+
 /* Instance mock methods */
 func (mcgsc *MockCoreGrpcServiceClient) AllocateInstance(ctx context.Context, in *corev1.InstanceAllocationRequest, opts ...grpc.CallOption) (*corev1.Instance, error) {
 	out := new(corev1.Instance)

@@ -551,6 +551,48 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
 	}
 
+	// Resolve the referenced SpectrumX Partitions before any writes so a bad ID is a 400
+	// rather than a foreign key error when the attachment row is inserted.
+	requestedSxpIDs := make([]uuid.UUID, 0, len(apiRequest.SpectrumXAttachments))
+	seenSxpIDs := make(map[uuid.UUID]struct{}, len(apiRequest.SpectrumXAttachments))
+	for _, sac := range apiRequest.SpectrumXAttachments {
+		partitionID, sxpErr := uuid.Parse(sac.SpectrumXPartitionID)
+		if sxpErr != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition ID: %s specified in spectrumXAttachments data in request is not valid", sac.SpectrumXPartitionID), nil)
+		}
+		if _, ok := seenSxpIDs[partitionID]; !ok {
+			seenSxpIDs[partitionID] = struct{}{}
+			requestedSxpIDs = append(requestedSxpIDs, partitionID)
+		}
+	}
+	if len(requestedSxpIDs) > 0 {
+		requestedSxps, _, sxpErr := cdbm.NewSpectrumXPartitionDAO(bcih.dbSession).GetAll(ctx, nil, cdbm.SpectrumXPartitionFilterInput{
+			SpectrumXPartitionIDs: requestedSxpIDs,
+		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if sxpErr != nil {
+			logger.Error().Err(sxpErr).Msg("failed to retrieve SpectrumX Partitions from DB by IDs")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Partitions from DB by IDs", nil)
+		}
+
+		sxpByID := make(map[uuid.UUID]cdbm.SpectrumXPartition, len(requestedSxps))
+		for _, sxp := range requestedSxps {
+			sxpByID[sxp.ID] = sxp
+		}
+
+		for _, partitionID := range requestedSxpIDs {
+			sxp, ok := sxpByID[partitionID]
+			if !ok {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request data is not found in DB", partitionID), nil)
+			}
+			if sxp.TenantID != tenant.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request is not owned by Tenant", partitionID), nil)
+			}
+			if sxp.SiteID != site.ID {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
+			}
+		}
+	}
+
 	// Validate each Interface against fetched data and build dbInterfaces
 	dbInterfaces := []cdbm.Interface{}
 	isDeviceInfoPresent := false
@@ -1263,6 +1305,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		instance *cdbm.Instance
 		ifcs     []cdbm.Interface
 		ibifcs   []cdbm.InfiniBandInterface
+		sxas     []cdbm.SpectrumXAttachment
 		nvlifcs  []cdbm.NVLinkInterface
 		desds    []cdbm.DpuExtensionServiceDeployment
 		ssd      *cdbm.StatusDetail
@@ -1636,6 +1679,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				instance:            &instCopy,
 				ifcs:                make([]cdbm.Interface, 0, len(dbInterfaces)),
 				ibifcs:              make([]cdbm.InfiniBandInterface, 0, len(dbibic)),
+				sxas:                make([]cdbm.SpectrumXAttachment, 0, len(apiRequest.SpectrumXAttachments)),
 				nvlifcs:             make([]cdbm.NVLinkInterface, 0, len(dbnvlic)),
 				desds:               make([]cdbm.DpuExtensionServiceDeployment, 0, len(dpuServiceIDs)),
 				interfaceConfigs:    make([]*corev1.InstanceInterfaceConfig, 0, len(dbInterfaces)),
@@ -1784,14 +1828,43 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			InstanceRequests: make([]*corev1.InstanceAllocationRequest, 0, len(createdInstancesData)),
 		}
 
-		// The request carries one set of SpectrumX attachments for every Instance in the batch.
-		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(apiRequest.SpectrumXAttachments))
-		for _, sac := range apiRequest.SpectrumXAttachments {
-			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, sac.ToProto())
+		// The request carries one set of SpectrumX attachments for every Instance in the
+		// batch, but each Instance owns its own rows, so persist them per Instance and
+		// build that Instance's Site config from its own rows.
+		sxaDAO := cdbm.NewSpectrumXAttachmentDAO(bcih.dbSession)
+		for i := range createdInstancesData {
+			sxaInputs := make([]cdbm.SpectrumXAttachmentCreateInput, 0, len(apiRequest.SpectrumXAttachments))
+			for _, sac := range apiRequest.SpectrumXAttachments {
+				// The Partition ID was parsed during validation, so it cannot fail here.
+				partitionID, _ := uuid.Parse(sac.SpectrumXPartitionID)
+				sxaInputs = append(sxaInputs, cdbm.SpectrumXAttachmentCreateInput{
+					InstanceID:           createdInstancesData[i].instance.ID,
+					SiteID:               site.ID,
+					SpectrumXPartitionID: partitionID,
+					Device:               sac.Device,
+					DeviceInstance:       *sac.DeviceInstance,
+					AttachmentType:       sac.AttachmentType,
+					VirtualFunctionID:    sac.VirtualFunctionID,
+					Status:               cdbm.SpectrumXAttachmentStatusPending,
+					CreatedBy:            dbUser.ID,
+				})
+			}
+
+			instanceSxAs, derr := sxaDAO.CreateMultiple(ctx, tx, sxaInputs)
+			if derr != nil {
+				logger.Error().Err(derr).Msg("error creating Instance SpectrumX Attachment DB entries")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SpectrumX Attachments for Instance, DB error", nil)
+			}
+			createdInstancesData[i].sxas = instanceSxAs
 		}
 
 		for _, data := range createdInstancesData {
 			instance := data.instance
+
+			spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(data.sxas))
+			for i := range data.sxas {
+				spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, data.sxas[i].ToProto())
+			}
 
 			createLabels := util.ProtobufLabelsFromAPILabels(instance.Labels)
 
@@ -1927,7 +2000,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		if data.ssd != nil {
 			sds = append(sds, *data.ssd)
 		}
-		apiInstance := model.NewAPIInstance(data.instance, site, data.ifcs, data.ibifcs, data.desds, data.nvlifcs, sshKeyGroups, sds)
+		apiInstance := model.NewAPIInstance(data.instance, site, data.ifcs, data.ibifcs, data.sxas, data.desds, data.nvlifcs, sshKeyGroups, sds)
 
 		apiInstances = append(apiInstances, *apiInstance)
 	}

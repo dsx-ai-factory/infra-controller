@@ -364,7 +364,7 @@ func TestNewAPIInstance(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NewAPIInstance(tt.args.dbic, tt.args.dbs, tt.args.dbis, tt.args.dbibi, tt.args.dbdesd, tt.args.dbnvl, tt.args.dbskg, tt.args.dbsds)
+			got := NewAPIInstance(tt.args.dbic, tt.args.dbs, tt.args.dbis, tt.args.dbibi, nil, tt.args.dbdesd, tt.args.dbnvl, tt.args.dbskg, tt.args.dbsds)
 			marshalled, err := json.Marshal(got)
 			assert.NoError(t, err)
 			var roundTripped APIInstance
@@ -473,7 +473,7 @@ func TestAPIInstancePowerProfile(t *testing.T) {
 	profile := "performance"
 	instance := &cdbm.Instance{PowerProfile: &profile}
 
-	got := NewAPIInstance(instance, nil, nil, nil, nil, nil, nil, nil)
+	got := NewAPIInstance(instance, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NotNil(t, got.PowerProfile)
 	assert.Equal(t, profile, *got.PowerProfile)
 	assert.True(t, (&APIInstanceUpdateRequest{PowerProfile: &profile}).IsUpdateRequest())
@@ -1134,7 +1134,7 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 						SpectrumXPartitionID: uuid.NewString(),
 						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 						DeviceInstance:       cutil.GetPtr(0),
-						AttachmentType:       SpectrumXAttachmentTypePhysical,
+						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 					},
 				},
 			},
@@ -1345,7 +1345,7 @@ func TestAPIBatchInstanceCreateRequest_Validate(t *testing.T) {
 						SpectrumXPartitionID: uuid.NewString(),
 						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 						DeviceInstance:       cutil.GetPtr(0),
-						AttachmentType:       SpectrumXAttachmentTypePhysical,
+						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 					},
 				},
 			},
@@ -2460,7 +2460,7 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 						SpectrumXPartitionID: uuid.NewString(),
 						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 						DeviceInstance:       cutil.GetPtr(0),
-						AttachmentType:       SpectrumXAttachmentTypeOVN,
+						AttachmentType:       cdbm.SpectrumXAttachmentTypeOVN,
 					},
 				},
 			},
@@ -2474,7 +2474,7 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 					{
 						SpectrumXPartitionID: uuid.NewString(),
 						DeviceInstance:       cutil.GetPtr(0),
-						AttachmentType:       SpectrumXAttachmentTypePhysical,
+						AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 					},
 				},
 			},
@@ -3699,7 +3699,7 @@ func TestValidateInfiniBandRequestForMachineCapability(t *testing.T) {
 
 func TestValidateSpectrumXAttachments(t *testing.T) {
 	device := "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC"
-	attachment := func(deviceInstance int, attachmentType SpectrumXAttachmentType, virtualFunctionID *int) APISpectrumXAttachmentCreateOrUpdateRequest {
+	attachment := func(deviceInstance int, attachmentType cdbm.SpectrumXAttachmentType, virtualFunctionID *int) APISpectrumXAttachmentCreateOrUpdateRequest {
 		return APISpectrumXAttachmentCreateOrUpdateRequest{
 			SpectrumXPartitionID: uuid.NewString(),
 			Device:               device,
@@ -3710,7 +3710,7 @@ func TestValidateSpectrumXAttachments(t *testing.T) {
 	}
 	overCap := make([]APISpectrumXAttachmentCreateOrUpdateRequest, 0, MaxSpectrumXAttachmentCount+1)
 	for i := range MaxSpectrumXAttachmentCount + 1 {
-		overCap = append(overCap, attachment(i, SpectrumXAttachmentTypePhysical, nil))
+		overCap = append(overCap, attachment(i, cdbm.SpectrumXAttachmentTypePhysical, nil))
 	}
 
 	tests := []struct {
@@ -3725,23 +3725,23 @@ func TestValidateSpectrumXAttachments(t *testing.T) {
 		{
 			name: "distinct device instances are valid",
 			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
-				attachment(0, SpectrumXAttachmentTypePhysical, nil),
-				attachment(1, SpectrumXAttachmentTypePhysical, nil),
+				attachment(0, cdbm.SpectrumXAttachmentTypePhysical, nil),
+				attachment(1, cdbm.SpectrumXAttachmentTypePhysical, nil),
 			},
 		},
 		{
 			name: "duplicate device instance is rejected",
 			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
-				attachment(0, SpectrumXAttachmentTypePhysical, nil),
-				attachment(0, SpectrumXAttachmentTypeOVN, nil),
+				attachment(0, cdbm.SpectrumXAttachmentTypePhysical, nil),
+				attachment(0, cdbm.SpectrumXAttachmentTypeOVN, nil),
 			},
 			wantErr: true,
 		},
 		{
 			name: "same device at distinct device instances is valid",
 			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
-				attachment(0, SpectrumXAttachmentTypePhysical, nil),
-				attachment(1, SpectrumXAttachmentTypeOVN, nil),
+				attachment(0, cdbm.SpectrumXAttachmentTypePhysical, nil),
+				attachment(1, cdbm.SpectrumXAttachmentTypeOVN, nil),
 			},
 		},
 		{

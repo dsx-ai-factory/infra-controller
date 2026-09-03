@@ -456,6 +456,28 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteInfiniBandPartitionHandler(dbSession, tc, scp, cfg),
 		},
+		// SpectrumXPartition endpoints. These reach Core through the generic gRPC proxy
+		// rather than per-Site workflows, so they take no Temporal client.
+		{
+			Path:    apiPathPrefix + "/spectrumx-partition",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCreateSpectrumXPartitionHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/spectrumx-partition",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllSpectrumXPartitionHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/spectrumx-partition/:id",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetSpectrumXPartitionHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/spectrumx-partition/:id",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteSpectrumXPartitionHandler(dbSession, scp, cfg),
+		},
 		// NVLinkLogicalPartition endpoints
 		{
 			Path:    apiPathPrefix + "/nvlink-logical-partition",

@@ -3075,3 +3075,243 @@ func Test_InstanceMetrics_Delete_NoTerminating(t *testing.T) {
 	// Verify NO metric was emitted (no terminating status found)
 	util.TestAssertMetricExistsTimes(t, reg, "nico_rest_workflow_instance_operation_latency_seconds", 0, nil, 0)
 }
+
+const testSpectrumXDevice = "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC"
+
+type spectrumXInventoryFixture struct {
+	dbSession *cdb.Session
+	manager   ManageInstance
+	site      *cdbm.Site
+	tenant    *cdbm.Tenant
+	instance  *cdbm.Instance
+	partition *cdbm.SpectrumXPartition
+	sxaDAO    cdbm.SpectrumXAttachmentDAO
+}
+
+func newSpectrumXInventoryFixture(t *testing.T) *spectrumXInventoryFixture {
+	t.Helper()
+	ctx := context.Background()
+
+	dbSession := util.TestInitDB(t)
+	t.Cleanup(dbSession.Close)
+	util.TestSetupSchema(t, dbSession)
+
+	ipOrg := "test-provider-org-1"
+	ipu := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{ipOrg}, []string{"FORGE_PROVIDER_ADMIN"})
+	ip := util.TestBuildInfrastructureProvider(t, dbSession, "testIP", ipOrg, ipu)
+
+	tnOrg := "test-tenant-org-1"
+	tnu := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{tnOrg}, []string{"FORGE_TENANT_ADMIN"})
+	tenant := util.TestBuildTenant(t, dbSession, "Test Tenant", tnOrg, nil, tnu)
+
+	site := util.TestBuildSite(t, dbSession, ip, "testSite", cdbm.SiteStatusRegistered, nil, ipu)
+	vpc := util.TestBuildVpc(t, dbSession, ip, site, tenant, "testVpc")
+	machine := util.TestBuildMachine(t, dbSession, ip.ID, site.ID, cutil.GetPtr("mcTypeTest"), cutil.GetPtr(true), cdbm.MachineStatusReady)
+	allocation := util.TestBuildAllocation(t, dbSession, ip, tenant, site, "testAllocation")
+	instanceType := util.TestBuildInstanceType(t, dbSession, ip, site, "testInstanceType")
+	_ = util.TestBuildAllocationContraints(t, dbSession, allocation, cdbm.AllocationResourceTypeInstanceType, instanceType.ID, cdbm.AllocationConstraintTypeReserved, 5, ipu)
+	operatingSystem := util.TestBuildOperatingSystem(t, dbSession, "testOS")
+
+	instance, err := cdbm.NewInstanceDAO(dbSession).Create(ctx, nil, cdbm.InstanceCreateInput{
+		Name:                     "test-instance",
+		TenantID:                 tenant.ID,
+		InfrastructureProviderID: ip.ID,
+		SiteID:                   site.ID,
+		InstanceTypeID:           &instanceType.ID,
+		VpcID:                    vpc.ID,
+		MachineID:                &machine.ID,
+		ControllerInstanceID:     cutil.GetPtr(uuid.New()),
+		Hostname:                 cutil.GetPtr("test.com"),
+		OperatingSystemID:        cutil.GetPtr(operatingSystem.ID),
+		IpxeScript:               cutil.GetPtr("ipxe"),
+		Status:                   cdbm.InstanceStatusReady,
+		PowerStatus:              cutil.GetPtr(cdbm.InstancePowerStatusBootCompleted),
+		CreatedBy:                tnu.ID,
+	})
+	require.NoError(t, err)
+
+	// The activity skips an Instance touched more recently than the inventory it is
+	// processing, so backdate it or none of the attachment branches are reached.
+	past := time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval) * 2)
+	_, err = dbSession.DB.Exec("UPDATE instance SET updated = ? WHERE id = ?", past, instance.ID.String())
+	require.NoError(t, err)
+
+	partition := util.TestBuildSpectrumXPartition(t, dbSession, "east-west-net", site, tenant, cutil.GetPtr(10200), cdbm.SpectrumXPartitionStatusReady, false)
+
+	return &spectrumXInventoryFixture{
+		dbSession: dbSession,
+		manager:   NewManageInstance(dbSession, testTemporalSiteClientPool(t), &tmocks.Client{}, config.GetTestConfig()),
+		site:      site,
+		tenant:    tenant,
+		instance:  instance,
+		partition: partition,
+		sxaDAO:    cdbm.NewSpectrumXAttachmentDAO(dbSession),
+	}
+}
+
+// attachment inserts a SpectrumXAttachment row for the fixture's Instance and Partition.
+func (f *spectrumXInventoryFixture) attachment(t *testing.T, deviceInstance int, status string) *cdbm.SpectrumXAttachment {
+	t.Helper()
+	return util.TestBuildSpectrumXAttachment(t, f.dbSession, f.instance.ID, f.site.ID, f.partition.ID, testSpectrumXDevice, deviceInstance, cdbm.SpectrumXAttachmentTypePhysical, status, false)
+}
+
+// age backdates `updated` past the stale inventory threshold, which is the gate the
+// attachment deletion sweep sits behind.
+func (f *spectrumXInventoryFixture) age(t *testing.T, attachmentID uuid.UUID) {
+	t.Helper()
+	past := time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval) * 2)
+	_, err := f.dbSession.DB.Exec("UPDATE spectrumx_attachment SET updated = ? WHERE id = ?", past, attachmentID.String())
+	require.NoError(t, err)
+}
+
+func (f *spectrumXInventoryFixture) get(t *testing.T, attachmentID uuid.UUID) *cdbm.SpectrumXAttachment {
+	t.Helper()
+	sxa, err := f.sxaDAO.Get(context.Background(), nil, attachmentID, nil)
+	require.NoError(t, err)
+	return sxa
+}
+
+// reportInventory drives one UpdateInstancesInDB iteration with the given SpectrumX config
+// and status, keyed on the fixture Partition's controller ID.
+func (f *spectrumXInventoryFixture) reportInventory(t *testing.T, deviceInstances []uint32, statuses []*corev1.InstanceSpxAttachmentStatus, syncState corev1.SyncState) error {
+	t.Helper()
+
+	attachments := []*corev1.InstanceSpxAttachment{}
+	for _, di := range deviceInstances {
+		attachments = append(attachments, &corev1.InstanceSpxAttachment{
+			SpxPartitionId: &corev1.SpxPartitionId{Value: f.partition.ID.String()},
+			Device:         testSpectrumXDevice,
+			DeviceInstance: di,
+			AttachmentType: corev1.SpxAttachmentType_Physical,
+		})
+	}
+
+	controllerInstance := &corev1.Instance{
+		Id: &corev1.InstanceId{Value: f.instance.ControllerInstanceID.String()},
+		Config: &corev1.InstanceConfig{
+			Spxconfig: &corev1.InstanceSpxConfig{SpxAttachments: attachments},
+		},
+		Status: &corev1.InstanceStatus{
+			SpxStatus: &corev1.InstanceSpxStatus{
+				AttachmentStatuses: statuses,
+				ConfigsSynced:      syncState,
+			},
+		},
+	}
+
+	_, err := f.manager.UpdateInstancesInDB(context.Background(), f.site.ID, &corev1.InstanceInventory{
+		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		Timestamp:       timestamppb.Now(),
+		Instances:       []*corev1.Instance{controllerInstance},
+		InventoryPage: &corev1.InventoryPage{
+			TotalPages: 1, CurrentPage: 1, PageSize: 1, TotalItems: 1,
+			ItemIds: []string{f.instance.ControllerInstanceID.String()},
+		},
+	})
+	return err
+}
+
+// TestUpdateInstancesInDB_SpectrumXAttachmentReconciliation covers the attachment branches
+// the Instance inventory activity owns. Each case reloads the persisted row after the
+// iteration, because status, MAC and IP are the only observable effects.
+func TestUpdateInstancesInDB_SpectrumXAttachmentReconciliation(t *testing.T) {
+	t.Run("a synced attachment records its MAC and IP and becomes Ready", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		sxa := fx.attachment(t, 0, cdbm.SpectrumXAttachmentStatusPending)
+
+		require.NoError(t, fx.reportInventory(t, []uint32{0}, []*corev1.InstanceSpxAttachmentStatus{
+			{MacAddr: cutil.GetPtr("00:11:22:33:44:55"), IpAddress: cutil.GetPtr("192.0.2.15")},
+		}, corev1.SyncState_SYNCED))
+
+		persisted := fx.get(t, sxa.ID)
+		assert.Equal(t, cdbm.SpectrumXAttachmentStatusReady, persisted.Status)
+		require.NotNil(t, persisted.MacAddress)
+		assert.Equal(t, "00:11:22:33:44:55", *persisted.MacAddress)
+		require.NotNil(t, persisted.IPAddress)
+		assert.Equal(t, "192.0.2.15", *persisted.IPAddress)
+	})
+
+	// An unsynced config means the Site has accepted the attachment but not applied it,
+	// so the addresses can be recorded while the status stays Pending.
+	t.Run("an unsynced attachment records addresses but stays Pending", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		sxa := fx.attachment(t, 0, cdbm.SpectrumXAttachmentStatusPending)
+
+		require.NoError(t, fx.reportInventory(t, []uint32{0}, []*corev1.InstanceSpxAttachmentStatus{
+			{MacAddr: cutil.GetPtr("00:11:22:33:44:55")},
+		}, corev1.SyncState_PENDING))
+
+		persisted := fx.get(t, sxa.ID)
+		assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, persisted.Status)
+		require.NotNil(t, persisted.MacAddress)
+		assert.Equal(t, "00:11:22:33:44:55", *persisted.MacAddress)
+	})
+
+	// Config and status attachments are index-aligned by Core. A truncated status list
+	// must not shift another attachment's MAC onto this row.
+	t.Run("a status list shorter than the config list leaves the unmatched row alone", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		first := fx.attachment(t, 0, cdbm.SpectrumXAttachmentStatusPending)
+		second := fx.attachment(t, 1, cdbm.SpectrumXAttachmentStatusPending)
+
+		require.NoError(t, fx.reportInventory(t, []uint32{0, 1}, []*corev1.InstanceSpxAttachmentStatus{
+			{MacAddr: cutil.GetPtr("00:11:22:33:44:55"), IpAddress: cutil.GetPtr("192.0.2.15")},
+		}, corev1.SyncState_SYNCED))
+
+		firstPersisted := fx.get(t, first.ID)
+		require.NotNil(t, firstPersisted.MacAddress)
+		assert.Equal(t, "00:11:22:33:44:55", *firstPersisted.MacAddress)
+
+		secondPersisted := fx.get(t, second.ID)
+		assert.Nil(t, secondPersisted.MacAddress, "the second attachment has no reported status, so it must stay empty")
+		assert.Nil(t, secondPersisted.IPAddress)
+	})
+
+	t.Run("a Deleting attachment is removed once the Site config no longer carries it", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		sxa := fx.attachment(t, 0, cdbm.SpectrumXAttachmentStatusDeleting)
+		fx.age(t, sxa.ID)
+
+		require.NoError(t, fx.reportInventory(t, nil, nil, corev1.SyncState_SYNCED))
+
+		_, err := fx.sxaDAO.Get(context.Background(), nil, sxa.ID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	})
+
+	// A row marked Deleting moments ago has not had time to reach the Site, so this
+	// inventory cycle may predate the request.
+	t.Run("a freshly marked Deleting attachment survives the cycle", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		sxa := fx.attachment(t, 0, cdbm.SpectrumXAttachmentStatusDeleting)
+
+		require.NoError(t, fx.reportInventory(t, nil, nil, corev1.SyncState_SYNCED))
+
+		assert.Equal(t, cdbm.SpectrumXAttachmentStatusDeleting, fx.get(t, sxa.ID).Status)
+	})
+
+	// A Ready attachment the Site still reports must not be swept just because another
+	// attachment on the same Instance is being deleted.
+	t.Run("deleting one attachment leaves the others in place", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		keep := fx.attachment(t, 0, cdbm.SpectrumXAttachmentStatusReady)
+		remove := fx.attachment(t, 1, cdbm.SpectrumXAttachmentStatusDeleting)
+		fx.age(t, remove.ID)
+
+		require.NoError(t, fx.reportInventory(t, []uint32{0}, []*corev1.InstanceSpxAttachmentStatus{
+			{MacAddr: cutil.GetPtr("00:11:22:33:44:55")},
+		}, corev1.SyncState_SYNCED))
+
+		assert.Equal(t, cdbm.SpectrumXAttachmentStatusReady, fx.get(t, keep.ID).Status)
+
+		_, err := fx.sxaDAO.Get(context.Background(), nil, remove.ID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+
+		remaining, total, err := fx.sxaDAO.GetAll(context.Background(), nil, cdbm.SpectrumXAttachmentFilterInput{
+			InstanceIDs: []uuid.UUID{fx.instance.ID},
+		}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 1, total)
+		require.Len(t, remaining, 1)
+		assert.Equal(t, keep.ID, remaining[0].ID)
+	})
+}
