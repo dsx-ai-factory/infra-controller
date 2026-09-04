@@ -80,11 +80,13 @@ func NewSession(client *cli.Client, org, configPath string) *Session {
 
 func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("site", s.fetchSites)
+	s.Resolver.RegisterFetcher("domain", s.fetchDomains)
 	s.Resolver.RegisterFetcher("vpc", s.fetchVPCs)
 	s.Resolver.RegisterFetcher("subnet", s.fetchSubnets)
 	s.Resolver.RegisterFetcher("instance", s.fetchInstances)
 	s.Resolver.RegisterFetcher("operating-system", s.fetchOperatingSystems)
 	s.Resolver.RegisterFetcher("machine", s.fetchMachines)
+	s.Resolver.RegisterFetcher("dpu-machine", s.fetchDPUMachines)
 	s.Resolver.RegisterFetcher("ip-block", s.fetchIPBlocks)
 	s.Resolver.RegisterFetcher("network-security-group", s.fetchNSGs)
 	s.Resolver.RegisterFetcher("audit", s.fetchAudits)
@@ -400,8 +402,43 @@ func (s *Session) fetchSites(_ context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchVPCs(_ context.Context) ([]NamedItem, error) {
-	q := map[string]string{}
+func (s *Session) fetchDomains(ctx context.Context) ([]NamedItem, error) {
+	tenantID, err := s.getTenantID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	query := map[string]string{"tenantId": tenantID}
+	if s.Scope.SiteID != "" {
+		query["siteId"] = s.Scope.SiteID
+	}
+	domains, err := s.fetchAll(apiPath(s, "domain"), query)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]NamedItem, len(domains))
+	for i, domain := range domains {
+		if str(domain, "tenantId") != tenantID {
+			return nil, fmt.Errorf("domain %q is not owned by the current tenant", str(domain, "id"))
+		}
+		result[i] = NamedItem{
+			Name: str(domain, "name"),
+			ID:   str(domain, "id"),
+			Extra: map[string]string{
+				"siteId":   str(domain, "siteId"),
+				"tenantId": str(domain, "tenantId"),
+			},
+			Raw: domain,
+		}
+	}
+	return result, nil
+}
+
+func (s *Session) fetchVPCs(ctx context.Context) ([]NamedItem, error) {
+	tenantID, err := s.getTenantID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := map[string]string{"tenantId": tenantID}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
@@ -411,6 +448,9 @@ func (s *Session) fetchVPCs(_ context.Context) ([]NamedItem, error) {
 	}
 	result := make([]NamedItem, len(items))
 	for i, m := range items {
+		if str(m, "tenantId") != tenantID {
+			return nil, fmt.Errorf("vpc %q is not owned by the current tenant", str(m, "id"))
+		}
 		result[i] = NamedItem{
 			Name:   str(m, "name"),
 			ID:     str(m, "id"),
@@ -419,6 +459,7 @@ func (s *Session) fetchVPCs(_ context.Context) ([]NamedItem, error) {
 			Extra: map[string]string{
 				"networkVirtualizationType": str(m, "networkVirtualizationType"),
 				"siteId":                    str(m, "siteId"),
+				"tenantId":                  str(m, "tenantId"),
 			},
 			Raw: m,
 		}
@@ -427,7 +468,7 @@ func (s *Session) fetchVPCs(_ context.Context) ([]NamedItem, error) {
 }
 
 func (s *Session) fetchSubnets(_ context.Context) ([]NamedItem, error) {
-	q := map[string]string{}
+	q := map[string]string{"includeUsageStats": "true"}
 	if s.Scope.SiteID != "" {
 		q["siteId"] = s.Scope.SiteID
 	}
@@ -440,9 +481,16 @@ func (s *Session) fetchSubnets(_ context.Context) ([]NamedItem, error) {
 	}
 	result := make([]NamedItem, len(items))
 	for i, m := range items {
+		usageStats, _ := m["usageStats"].(map[string]interface{})
+		acquiredIPs, _ := usageStats["acquiredIPs"].(float64)
 		result[i] = NamedItem{
 			Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"),
-			Extra: map[string]string{"vpcId": str(m, "vpcId")}, Raw: m,
+			Extra: map[string]string{
+				"vpcId":       str(m, "vpcId"),
+				"siteId":      str(m, "siteId"),
+				"subdomainId": str(m, "subdomainId"),
+				"acquiredIPs": strconv.FormatFloat(acquiredIPs, 'f', -1, 64),
+			}, Raw: m,
 		}
 	}
 	return result, nil
@@ -510,6 +558,30 @@ func (s *Session) fetchMachines(_ context.Context) ([]NamedItem, error) {
 			Name: name, ID: str(m, "id"), Status: str(m, "status"),
 			Labels: extractLabels(m),
 			Extra:  map[string]string{"siteId": str(m, "siteId")}, Raw: m,
+		}
+	}
+	return result, nil
+}
+
+func (s *Session) fetchDPUMachines(_ context.Context) ([]NamedItem, error) {
+	siteID := strings.TrimSpace(s.Scope.SiteID)
+	if siteID == "" {
+		return nil, fmt.Errorf("select a site before resolving a DPU Machine")
+	}
+	items, err := s.fetchAll(apiPath(s, "dpu"), map[string]string{"siteId": siteID})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]NamedItem, len(items))
+	for i, m := range items {
+		result[i] = NamedItem{
+			Name: machineDisplayName(m), ID: str(m, "id"), Status: str(m, "state"),
+			Labels: extractLabels(m),
+			Extra: map[string]string{
+				"siteId":        str(m, "siteId"),
+				"hostMachineId": str(m, "hostMachineId"),
+			},
+			Raw: m,
 		}
 	}
 	return result, nil

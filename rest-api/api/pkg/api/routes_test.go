@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	apiHandler "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -60,7 +61,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"instance-type":             5,
 		"machine":                   18,
 		"allocation":                6,
-		"subnet":                    5,
+		"subnet":                    6,
 		"machine-instance-type":     3,
 		"user":                      1,
 		"operating-system":          5,
@@ -76,7 +77,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"task":                      3,
 		"rule":                      5,
 		"run":                       8,
-		"domain":                    4,
+		"domain":                    9,
 		"rack":                      13,
 		"tray":                      9,
 		"stats":                     4,
@@ -136,6 +137,8 @@ func TestNewAPIRoutes(t *testing.T) {
 			taskPath := "/org/:orgName/" + cfg.GetAPIName() + "/task"
 			assertRouteExists(t, got, http.MethodGet, taskPath)
 			assertRouteBefore(t, got, http.MethodGet, taskPath, http.MethodGet, taskPath+"/:id")
+			subnetPath := "/org/:orgName/" + cfg.GetAPIName() + "/subnet"
+			assertRouteExists(t, got, http.MethodPost, subnetPath+"/:subnetId/attach-vpc")
 			tenantPath := "/org/:orgName/" + cfg.GetAPIName() + "/tenant"
 			assertRouteExists(t, got, http.MethodGet, tenantPath+"/current/routing-profile")
 
@@ -173,6 +176,15 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodPatch, domainPath+"/:id/power")
 			assertRouteExists(t, got, http.MethodPatch, domainPath+"/:id/firmware")
 
+			dnsDomainPath := "/org/:orgName/" + cfg.GetAPIName() + "/domain"
+			assertRouteExists(t, got, http.MethodPost, dnsDomainPath)
+			assertRouteExists(t, got, http.MethodGet, dnsDomainPath)
+			assertRouteExists(t, got, http.MethodGet, dnsDomainPath+"/:domainId")
+			assertRouteHandlerType(t, got, http.MethodPatch, dnsDomainPath+"/:domainId", apiHandler.UpdateDomainHandler{})
+			assertRouteExists(t, got, http.MethodDelete, dnsDomainPath+"/:domainId")
+			assertRouteBefore(t, got, http.MethodPatch, domainPath+"/power", http.MethodPatch, dnsDomainPath+"/:domainId")
+			assertRouteBefore(t, got, http.MethodPatch, domainPath+"/firmware", http.MethodPatch, dnsDomainPath+"/:domainId")
+
 			skuPath := "/org/:orgName/" + cfg.GetAPIName() + "/sku"
 			assertRouteExists(t, got, http.MethodPost, skuPath)
 			assertRouteExists(t, got, http.MethodGet, skuPath)
@@ -198,6 +210,19 @@ func assertRouteExists(t *testing.T, routes []Route, method, path string) {
 
 	for _, route := range routes {
 		if route.Method == method && route.Path == path {
+			return
+		}
+	}
+
+	assert.Failf(t, "route not found", "missing %s %s", method, path)
+}
+
+func assertRouteHandlerType(t *testing.T, routes []Route, method, path string, expected any) {
+	t.Helper()
+
+	for _, route := range routes {
+		if route.Method == method && route.Path == path {
+			assert.IsType(t, expected, route.Handler)
 			return
 		}
 	}

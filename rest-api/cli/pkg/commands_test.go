@@ -447,6 +447,46 @@ func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
 	}
 }
 
+func TestGeneratedCommandInfos_DomainAndSubnetSurface(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+
+	infos := make(map[string]GeneratedCommandInfo)
+	for _, info := range GeneratedCommandInfos(spec) {
+		infos[info.Name] = info
+	}
+
+	for name, operationID := range map[string]string{
+		"domain create":     "create-domain",
+		"domain list":       "get-all-domain",
+		"domain get":        "get-domain",
+		"domain update":     "update-domain",
+		"domain delete":     "delete-domain",
+		"subnet create":     "create-subnet",
+		"subnet attach-vpc": "attach-vpc-to-subnet",
+	} {
+		info, ok := infos[name]
+		require.Truef(t, ok, "generated command %q is missing", name)
+		assert.Equal(t, operationID, info.OperationID)
+	}
+
+	for name, expectedFlags := range map[string][]string{
+		"domain create":     {"name", "site-id"},
+		"domain list":       {"site-id", "tenant-id", "page-number", "page-size", "order-by"},
+		"domain update":     {"name"},
+		"subnet create":     {"subdomain-id"},
+		"subnet attach-vpc": {"vpc-id", "allow-replace"},
+	} {
+		flagNames := make(map[string]struct{})
+		for _, flag := range infos[name].Flags {
+			flagNames[flag.Name] = struct{}{}
+		}
+		for _, expectedFlag := range expectedFlags {
+			assert.Containsf(t, flagNames, expectedFlag, "%s flag", name)
+		}
+	}
+}
+
 // TestBuildActionCommand_BodyPropertyFlags verifies body-property flag naming
 // for reserved names and scalar-compatible, single-item arrays.
 func TestBuildActionCommand_BodyPropertyFlags(t *testing.T) {

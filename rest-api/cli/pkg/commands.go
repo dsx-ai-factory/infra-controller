@@ -155,6 +155,7 @@ var reservedBodyFlagNames = map[string]bool{
 // commandPathAliases adds concise aliases for generated commands. The original
 // generated paths remain available for compatibility.
 var commandPathAliases = map[string][]string{
+	"attach-vpc-to-subnet":                              {"subnet", "attach-vpc"},
 	"bringup-rack":                                      {"rack", "bringup"},
 	"bringup-racks":                                     {"rack", "bringup-all"},
 	"cancel-task":                                       {"task", "cancel"},

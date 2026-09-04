@@ -359,7 +359,7 @@ func TestSpecializedScopeSelection_ClearsDependentScopeAndCache(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests.Add(1)
 			assert.Equal(t, "/v2/org/acme/nico/vpc", r.URL.Path)
-			_, _ = io.WriteString(w, `[{"name":"VPC One","id":"vpc-1","siteId":"site-1"}]`)
+			_, _ = io.WriteString(w, `[{"name":"VPC One","id":"vpc-1","siteId":"site-1","tenantId":"tenant-1"}]`)
 		}))
 		defer server.Close()
 
@@ -369,6 +369,7 @@ func TestSpecializedScopeSelection_ClearsDependentScopeAndCache(t *testing.T) {
 			"",
 		)
 		session.Cache.Set("site", []NamedItem{{Name: "Site One", ID: "site-1"}})
+		session.Cache.Set("_tenant", []NamedItem{{Name: "acme", ID: "tenant-1"}})
 		session.Cache.Set("machine", []NamedItem{{Name: "host-one", ID: "machine-1"}})
 
 		output := captureStdout(func() {

@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -46,6 +47,8 @@ func AllCommands() []Command {
 		{Name: "subnet list", Description: "List all subnets", Run: cmdSubnetList},
 		{Name: "subnet get", Description: "Get subnet details", Run: cmdSubnetGet},
 		{Name: "subnet create", Description: "Create an IPv4 Subnet in an Ethernet virtualizer VPC", Run: cmdSubnetCreate},
+		{Name: "subnet attach-vpc", Description: "Attach a subnet to a VPC", Run: cmdSubnetAttachVPC},
+		{Name: "subnet attach-vpc-to attach-vpc-to-subnet", Description: "Attach a subnet to a VPC", Run: cmdSubnetAttachVPC},
 		{Name: "subnet update", Description: "Update a subnet", Run: cmdSubnetUpdate},
 		{Name: "subnet delete", Description: "Delete a subnet", Run: cmdSubnetDelete},
 
@@ -206,10 +209,10 @@ func appendScopeFlags(s *Session, parts []string) []string {
 	scopeSiteID := strings.TrimSpace(s.Scope.SiteID)
 	scopeVpcID := strings.TrimSpace(s.Scope.VpcID)
 	switch resource {
-	case "vpc", "allocation", "ip-block", "operating-system", "ssh-key-group",
+	case "vpc", "domain", "allocation", "ip-block", "operating-system", "ssh-key-group",
 		"network-security-group", "sku", "rack", "expected-machine", "instance-type",
 		"expected-rack", "expected-switch", "expected-power-shelf", "tray",
-		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition":
+		"dpu-machine", "dpu-extension-service", "infiniband-partition", "nvlink-logical-partition":
 		if scopeSiteID != "" {
 			out = append(out, "--site-id", scopeSiteID)
 		}
@@ -840,6 +843,91 @@ func filterSubnetVPCs(vpcs []NamedItem) []NamedItem {
 	return filtered
 }
 
+// filterSubnetAttachVPCs keeps Ready tenant-owned Ethernet virtualizer VPCs
+// at the Subnet's Site. Empty virtualization type is the server's legacy
+// Ethernet virtualizer representation. excludedVpcID is omitted from target
+// selection so the interactive operation cannot be used as a no-op attachment.
+func filterSubnetAttachVPCs(vpcs []NamedItem, siteID, tenantID, excludedVpcID, requiredVirtualizationType string) []NamedItem {
+	filtered := make([]NamedItem, 0, len(vpcs))
+	for _, vpc := range vpcs {
+		if !strings.EqualFold(strings.TrimSpace(vpc.Status), "Ready") {
+			continue
+		}
+		virtualizationType := cmp.Or(strings.TrimSpace(vpc.Extra["networkVirtualizationType"]), "ETHERNET_VIRTUALIZER")
+		if virtualizationType != "ETHERNET_VIRTUALIZER" &&
+			virtualizationType != "ETHERNET_VIRTUALIZER_WITH_NVUE" {
+			continue
+		}
+		if requiredVirtualizationType != "" && virtualizationType != requiredVirtualizationType {
+			continue
+		}
+		if strings.TrimSpace(vpc.Extra["siteId"]) != strings.TrimSpace(siteID) {
+			continue
+		}
+		if strings.TrimSpace(vpc.Extra["tenantId"]) != strings.TrimSpace(tenantID) {
+			continue
+		}
+		if strings.TrimSpace(vpc.ID) == strings.TrimSpace(excludedVpcID) {
+			continue
+		}
+		filtered = append(filtered, vpc)
+	}
+	return filtered
+}
+
+// filterSubnetAttachSources keeps unallocated Ready Subnets whose source VPC
+// satisfies the same tenant, Site, and Ethernet virtualizer contract as the
+// target VPC. Two acquired IPs are the Subnet's reserved gateway and broadcast
+// addresses; any higher value means the Subnet has workload Interfaces.
+func filterSubnetAttachSources(subnets, vpcs []NamedItem, siteID, tenantID string) []NamedItem {
+	eligibleVPCs := filterSubnetAttachVPCs(vpcs, siteID, tenantID, "", "")
+	eligibleVPCIDs := make(map[string]struct{}, len(eligibleVPCs))
+	for _, vpc := range eligibleVPCs {
+		eligibleVPCIDs[strings.TrimSpace(vpc.ID)] = struct{}{}
+	}
+
+	filtered := make([]NamedItem, 0, len(subnets))
+	for _, subnet := range subnets {
+		if !strings.EqualFold(strings.TrimSpace(subnet.Status), "Ready") ||
+			strings.TrimSpace(subnet.Extra["siteId"]) != strings.TrimSpace(siteID) ||
+			strings.TrimSpace(subnet.Extra["acquiredIPs"]) != "2" {
+			continue
+		}
+		if _, ok := eligibleVPCIDs[strings.TrimSpace(subnet.Extra["vpcId"])]; !ok {
+			continue
+		}
+		filtered = append(filtered, subnet)
+	}
+	return filtered
+}
+
+func resolveSubnetAttachSource(s *Session, sources []NamedItem, args []string) (*NamedItem, error) {
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		return s.Resolver.SelectFromItems("Ready unallocated tenant Subnet", sources)
+	}
+	matches := matchingGeneratedResourceItems(sources, args[0])
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("ambiguous subnet %q matches %d resources; use an exact ID", args[0], len(matches))
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no eligible subnet matching %q found", args[0])
+	}
+	fmt.Printf("%s %s %s\n", Bold("Subnet to attach:"), Green(matches[0].Name), Dim("(matched)"))
+	return &matches[0], nil
+}
+
+func (s *Session) subnetAttachSources(ctx context.Context, siteID, tenantID string) ([]NamedItem, error) {
+	vpcs, err := s.Resolver.Fetch(ctx, "vpc")
+	if err != nil {
+		return nil, fmt.Errorf("fetching vpc: %w", err)
+	}
+	subnets, err := s.Resolver.Fetch(ctx, "subnet")
+	if err != nil {
+		return nil, fmt.Errorf("fetching subnet: %w", err)
+	}
+	return filterSubnetAttachSources(subnets, vpcs, siteID, tenantID), nil
+}
+
 // buildSubnetIPBlockSelectItems returns Ready, tenant-owned IPv4 allocation
 // blocks at the selected VPC's Site.
 func buildSubnetIPBlockSelectItems(ipBlocks []NamedItem, siteID, tenantID string) []SelectItem {
@@ -920,6 +1008,20 @@ func cmdSubnetCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
+	assignDomain, err := PromptConfirm("Assign a DNS Domain?")
+	if err != nil {
+		return err
+	}
+	var domain *NamedItem
+	if assignDomain {
+		domain, err = s.Resolver.Resolve(context.Background(), "domain", "DNS Domain")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(domain.Extra["siteId"]) != vpcSiteID {
+			return fmt.Errorf("selected Domain is not at the selected VPC site")
+		}
+	}
 
 	body := map[string]interface{}{
 		"name":         name,
@@ -930,7 +1032,12 @@ func cmdSubnetCreate(s *Session, _ []string) error {
 	if strings.TrimSpace(desc) != "" {
 		body["description"] = strings.TrimSpace(desc)
 	}
-	LogCmd(s, "subnet", "create", "--name", name, "--vpc-id", vpc.ID, "--ipv4block-id", block.ID, "--prefix-length", prefixLenText)
+	logArgs := []string{"subnet", "create", "--name", name, "--vpc-id", vpc.ID, "--ipv4-block-id", block.ID, "--prefix-length", prefixLenText}
+	if domain != nil {
+		body["subdomainId"] = domain.ID
+		logArgs = append(logArgs, "--subdomain-id", domain.ID)
+	}
+	LogCmd(s, logArgs...)
 	bodyJSON, _ := json.Marshal(body)
 	resp, _, err := s.Client.Do("POST", apiPath(s, "subnet"), nil, nil, bodyJSON)
 	if err != nil {
@@ -943,6 +1050,92 @@ func cmdSubnetCreate(s *Session, _ []string) error {
 		return err
 	}
 	fmt.Printf("%s IPv4 Subnet created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
+	return nil
+}
+
+func cmdSubnetAttachVPC(s *Session, args []string) error {
+	ctx := context.Background()
+	siteID, err := requireSiteScope(s, "Subnet attachment requires a Site. Select a Site.")
+	if err != nil {
+		return err
+	}
+	tenantID, err := s.getTenantID(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Attachment is Site-wide even when the interactive session has a narrower
+	// VPC scope. Clear that scope for source and target discovery, then restore
+	// it and invalidate filtered caches on every return path.
+	savedVpcID, savedVpcName := s.Scope.VpcID, s.Scope.VpcName
+	s.Scope.VpcID = ""
+	s.Scope.VpcName = ""
+	s.Cache.InvalidateFiltered()
+	defer func() {
+		s.Scope.VpcID = savedVpcID
+		s.Scope.VpcName = savedVpcName
+		s.Cache.InvalidateFiltered()
+	}()
+
+	sources, err := s.subnetAttachSources(ctx, siteID, tenantID)
+	if err != nil {
+		return err
+	}
+	subnet, err := resolveSubnetAttachSource(s, sources, args)
+	if err != nil {
+		return err
+	}
+	sourceVpcID := strings.TrimSpace(subnet.Extra["vpcId"])
+	vpcs, err := s.Resolver.Fetch(ctx, "vpc")
+	if err != nil {
+		return fmt.Errorf("fetching vpc: %w", err)
+	}
+	sourceVirtualizationType := ""
+	for _, vpc := range filterSubnetAttachVPCs(vpcs, siteID, tenantID, "", "") {
+		if strings.TrimSpace(vpc.ID) == sourceVpcID {
+			sourceVirtualizationType = cmp.Or(strings.TrimSpace(vpc.Extra["networkVirtualizationType"]), "ETHERNET_VIRTUALIZER")
+			break
+		}
+	}
+	if sourceVirtualizationType == "" {
+		return fmt.Errorf("source VPC for Subnet %s is no longer eligible for attachment", subnet.ID)
+	}
+	target, err := s.Resolver.SelectFromItems(
+		"Target Ready tenant Ethernet virtualizer VPC",
+		filterSubnetAttachVPCs(vpcs, siteID, tenantID, sourceVpcID, sourceVirtualizationType),
+	)
+	if err != nil {
+		return err
+	}
+	confirmed, err := PromptConfirm(fmt.Sprintf("Allow replacing Subnet %s (%s) attachment with VPC %s (%s)?", subnet.Name, subnet.ID, target.Name, target.ID))
+	if err != nil || !confirmed {
+		return err
+	}
+	bodyJSON, _ := json.Marshal(map[string]interface{}{"vpcId": target.ID, "allowReplace": true})
+	LogCmd(s, "subnet", "attach-vpc", subnet.ID, "--vpc-id", target.ID, "--allow-replace")
+	resp, _, err := s.Client.Do(
+		"POST",
+		apiPath(s, "subnet/{subnetId}/attach-vpc"),
+		map[string]string{"subnetId": subnet.ID},
+		nil,
+		bodyJSON,
+	)
+	if err != nil {
+		return fmt.Errorf("attaching subnet to VPC: %w", err)
+	}
+	s.Cache.Invalidate("subnet")
+	s.Cache.InvalidateFiltered()
+	updated, err := parseMutationResponseRequiringID(resp, "attached subnet")
+	if err != nil {
+		return err
+	}
+	if str(updated, "id") != subnet.ID {
+		return fmt.Errorf("parsing attached subnet response: id does not match selected Subnet")
+	}
+	if str(updated, "vpcId") != target.ID {
+		return fmt.Errorf("parsing attached subnet response: vpcId does not match selected target VPC")
+	}
+	fmt.Printf("%s Subnet attached to VPC: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
 	return nil
 }
 

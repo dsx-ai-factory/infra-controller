@@ -150,6 +150,9 @@ tags:
       Deprecation history:
 
       - `ResourceTypeID` attribute on Allocation Constraint was deprecated in favor of `resourceTypeId` and will be removed on July 9th, 2026 0:00 UTC. Please use `resourceTypeId` instead.
+  - name: Domain
+    description: |-
+      Domain is a tenant-owned DNS zone at a Site. Domains can be assigned to Subnets when the Subnet is created.
   - name: VPC
     x-displayName: VPC
     description: |-
@@ -2893,6 +2896,210 @@ paths:
           in: query
           name: orderBy
           description: Ordering for pagination query
+  '/v2/org/{org}/nico/domain':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    post:
+      summary: Create Domain
+      operationId: create-domain
+      description: |-
+        Create a tenant-owned DNS Domain at a Site.
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DomainCreateRequest'
+            examples:
+              example-1:
+                value:
+                  name: tenant.example.com
+                  siteId: 72771e6a-6f5e-4de4-a5b9-1266c4197811
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Domain'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+      tags:
+        - Domain
+    get:
+      summary: Retrieve all Domains
+      operationId: get-all-domain
+      description: |-
+        Retrieve tenant-owned DNS Domains for the org, optionally confirming the authenticated Tenant ID and filtering by Site. Results are ordered deterministically before pagination, and the `X-Pagination` response header reports the total matching row count.
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: siteId
+          description: Filter Domains by Site
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: tenantId
+          description: ID of the authenticated Tenant that owns the Domains
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            example: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            example: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            enum:
+              - NAME_ASC
+              - NAME_DESC
+              - CREATED_ASC
+              - CREATED_DESC
+              - UPDATED_ASC
+              - UPDATED_DESC
+          in: query
+          name: orderBy
+          description: Ordering for pagination query
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Domain'
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy":"CREATED_DESC"}'
+              description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Domain
+  '/v2/org/{org}/nico/domain/{domainId}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          format: uuid
+        name: domainId
+        in: path
+        required: true
+        description: ID of the Domain
+    get:
+      summary: Retrieve Domain
+      operationId: get-domain
+      description: |-
+        Retrieve a tenant-owned DNS Domain by ID.
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Domain'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+      tags:
+        - Domain
+    patch:
+      summary: Update Domain
+      operationId: update-domain
+      description: |-
+        Update the name of a tenant-owned DNS Domain. Ownership, Site, and the internal Core mapping are immutable.
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DomainUpdateRequest'
+            examples:
+              example-1:
+                value:
+                  name: renamed.example.com
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Domain'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+      tags:
+        - Domain
+    delete:
+      summary: Delete Domain
+      operationId: delete-domain
+      description: |-
+        Delete a tenant-owned DNS Domain by ID.
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+      responses:
+        '204':
+          description: No Content
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+      tags:
+        - Domain
   '/v2/org/{org}/nico/vpc':
     parameters:
       - schema:
@@ -2960,14 +3167,22 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-vpc
       description: |-
-        Retrieve all VPCs for the org.
+        Retrieve all VPCs for the org. When `tenantId` is supplied, it must match the org's current Tenant.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
       parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: tenantId
+          description: Optional ID of the current Tenant. A different Tenant ID is rejected.
         - schema:
             type: string
             format: uuid
@@ -3877,8 +4092,10 @@ paths:
                   value:
                     - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
                       name: spark-gpu-net
+                      description: null
                       siteId: ea144def-d68f-44c3-9485-4b103fa2686f
                       vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
+                      subdomainId: null
                       controllerNetworkSegmentId: abe7b0e8-67db-4e89-903e-fc4f2bd7f034
                       ipv4Prefix: 202.168.16.0
                       ipv4BlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
@@ -3889,6 +4106,7 @@ paths:
                       prefixLength: 20
                       routingType: Public
                       status: Ready
+                      mtu: 1500
                       statusHistory:
                         - status: Ready
                           message: Subnet has been successfully provisioned on Site
@@ -3997,8 +4215,10 @@ paths:
                   value:
                     id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
                     name: spark-gpu-net
+                    description: null
                     siteId: ea144def-d68f-44c3-9485-4b103fa2686f
                     vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
+                    subdomainId: null
                     controllerNetworkSegmentId: null
                     ipv4Prefix: 202.168.16.0
                     ipv4BlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
@@ -4009,6 +4229,7 @@ paths:
                     prefixLength: 20
                     routingType: Public
                     status: Pending
+                    mtu: 1500
                     statusHistory:
                       - status: Pending
                         message: 'Request received, pending processing'
@@ -4071,8 +4292,10 @@ paths:
                   value:
                     id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
                     name: spark-gpu-net
+                    description: null
                     siteId: ea144def-d68f-44c3-9485-4b103fa2686f
                     vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
+                    subdomainId: 3c5a130c-6545-42cf-ae41-14236b70d05a
                     controllerNetworkSegmentId: abe7b0e8-67db-4e89-903e-fc4f2bd7f034
                     ipv4Prefix: 202.168.16.0
                     ipv4BlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
@@ -4083,6 +4306,7 @@ paths:
                     prefixLength: 20
                     routingType: Public
                     status: Ready
+                    mtu: 1500
                     statusHistory:
                       - status: Ready
                         message: Subnet has been successfully provisioned on Site
@@ -4151,6 +4375,7 @@ paths:
                     description: Subnet for dedicated GPU nodes
                     siteId: ea144def-d68f-44c3-9485-4b103fa2686f
                     vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
+                    subdomainId: null
                     controllerNetworkSegmentId: null
                     ipv4Prefix: 212.168.0.250
                     ipv4BlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
@@ -4161,6 +4386,7 @@ paths:
                     prefixLength: 20
                     routingType: Public
                     status: Pending
+                    mtu: 1500
                     statusHistory:
                       - status: Pending
                         message: 'Request received, pending processing'
@@ -4188,6 +4414,58 @@ paths:
                 value:
                   name: spark-gpu-subnet
                   description: Subnet for dedicated GPU nodes
+  '/v2/org/{org}/nico/subnet/{subnetId}/attach-vpc':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          format: uuid
+        name: subnetId
+        in: path
+        required: true
+        description: ID of the Subnet
+    post:
+      summary: Attach Subnet to VPC
+      operationId: attach-vpc-to-subnet
+      description: |-
+        Attach an unused tenant Subnet to an Ethernet virtualizer VPC at the same Site. Set `allowReplace` to `true` to reassign a Subnet that is already attached to a different VPC. Attaching to the current VPC is idempotent. The operation cannot detach a Subnet or move it across network-virtualization modes.
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubnetAttachVpcRequest'
+            examples:
+              example-1:
+                value:
+                  vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
+                  allowReplace: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subnet'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+      tags:
+        - Subnet
   '/v2/org/{org}/nico/expected-machine':
     parameters:
       - schema:
@@ -19720,16 +19998,92 @@ components:
           maxLength: 256
       required:
         - name
+    Domain:
+      title: Domain
+      type: object
+      description: A tenant-owned DNS zone at a Site.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique REST identifier for the Domain
+          readOnly: true
+        name:
+          type: string
+          description: DNS name of the Domain
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site containing the Domain
+        tenantId:
+          type: string
+          format: uuid
+          description: ID of the Tenant that owns the Domain
+        created:
+          type: string
+          format: date-time
+          description: Date/time when the Domain was created
+          readOnly: true
+        updated:
+          type: string
+          format: date-time
+          description: Date/time when the Domain was last updated
+          readOnly: true
+      required:
+        - id
+        - name
+        - siteId
+        - tenantId
+        - created
+        - updated
+    DomainCreateRequest:
+      title: DomainCreateRequest
+      type: object
+      description: Request data for creating a tenant-owned DNS Domain at a Site.
+      properties:
+        name:
+          type: string
+          description: DNS name of the Domain
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site where the Domain will be created
+      required:
+        - name
+        - siteId
+    DomainUpdateRequest:
+      title: DomainUpdateRequest
+      type: object
+      description: Request data for renaming a tenant-owned DNS Domain.
+      properties:
+        name:
+          type: string
+          description: New DNS name of the Domain
+      required:
+        - name
     Subnet:
       title: Subnet
       type: object
       description: Subnets are network grouping constructs for baremetal machines.
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - description
+        - subdomainId
+        - controllerNetworkSegmentId
+        - ipv4Prefix
+        - ipv4BlockId
+        - ipv4Gateway
+        - ipv6Prefix
+        - ipv6BlockId
+        - ipv6Gateway
+        - routingType
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           name: spark-gpu-net
           description: Subnet for GPU nodes
           siteId: ea144def-d68f-44c3-9485-4b103fa2686f
           vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
+          subdomainId: 3c5a130c-6545-42cf-ae41-14236b70d05a
           controllerNetworkSegmentId: abe7b0e8-67db-4e89-903e-fc4f2bd7f034
           ipv4Prefix: 204.168.0.250
           ipv4BlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
@@ -19740,6 +20094,7 @@ components:
           prefixLength: 20
           routingType: Public
           status: Pending
+          mtu: 1500
           statusHistory:
             - status: Pending
               message: 'Request received, pending processing'
@@ -19752,6 +20107,7 @@ components:
           description: Provisioned subnet with IPv4 usage (includeUsageStats=true)
           siteId: ea144def-d68f-44c3-9485-4b103fa2686f
           vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
+          subdomainId: null
           controllerNetworkSegmentId: abe7b0e8-67db-4e89-903e-fc4f2bd7f034
           ipv4Prefix: 10.217.98.64
           ipv4BlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
@@ -19762,6 +20118,7 @@ components:
           prefixLength: 28
           routingType: Public
           status: Ready
+          mtu: 1500
           usageStats:
             availableIPs: 16
             acquiredIPs: 6
@@ -19803,6 +20160,12 @@ components:
         vpcId:
           type: string
           description: 'ID of the VPC containing the Subnet'
+          format: uuid
+        subdomainId:
+          type:
+            - string
+            - 'null'
+          description: 'ID of the tenant-owned REST Domain assigned when the Subnet was created'
           format: uuid
         controllerNetworkSegmentId:
           type:
@@ -19887,6 +20250,26 @@ components:
           description: 'Date/time when the Subnet was last updated'
           format: date-time
           readOnly: true
+      required:
+        - id
+        - name
+        - description
+        - siteId
+        - vpcId
+        - subdomainId
+        - controllerNetworkSegmentId
+        - ipv4Prefix
+        - ipv4BlockId
+        - ipv4Gateway
+        - ipv6Prefix
+        - ipv6BlockId
+        - ipv6Gateway
+        - prefixLength
+        - routingType
+        - status
+        - statusHistory
+        - created
+        - updated
     SubnetStatus:
       title: SubnetStatus
       type: string
@@ -19921,6 +20304,10 @@ components:
           type: string
           description: 'ID of the Ethernet virtualizer VPC containing the Subnet'
           format: uuid
+        subdomainId:
+          type: string
+          description: 'Optional ID of a tenant-owned REST Domain at the same Site. This can only be set when the Subnet is created.'
+          format: uuid
         ipv4BlockId:
           type: string
           description: 'ID of the Ready, derived Tenant IPv4 Block from an Allocation'
@@ -19935,6 +20322,21 @@ components:
         - vpcId
         - ipv4BlockId
         - prefixLength
+    SubnetAttachVpcRequest:
+      title: SubnetAttachVpcRequest
+      type: object
+      description: Request data for attaching a Subnet to a VPC. The operation cannot detach a Subnet from all VPCs.
+      properties:
+        vpcId:
+          type: string
+          format: uuid
+          description: ID of the target Ethernet virtualizer VPC at the same Site and owned by the same Tenant
+        allowReplace:
+          type: boolean
+          default: false
+          description: Whether an existing attachment to a different VPC may be replaced
+      required:
+        - vpcId
     SubnetUpdateRequest:
       title: SubnetUpdateRequest
       type: object

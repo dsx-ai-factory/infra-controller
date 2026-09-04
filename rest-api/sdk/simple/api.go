@@ -280,16 +280,14 @@ func (am *ApiMetadata) SetDefaultSubnet(ctx context.Context, apiClient *standard
 		if apiErr != nil {
 			return apiErr
 		}
-		if subnet.SiteId != nil && *subnet.SiteId != am.SiteID {
+		if subnet.SiteId != "" && subnet.SiteId != am.SiteID {
 			logger.Warn().Msgf("Preset Subnet ID %s does not belong to Site ID %s.", am.SubnetID, am.SiteID)
 			am.SubnetID = ""
-		} else if subnet.VpcId != nil && *subnet.VpcId != am.VpcID {
+		} else if subnet.VpcId != "" && subnet.VpcId != am.VpcID {
 			logger.Warn().Msgf("Preset Subnet ID %s does not belong to VPC ID %s.", am.SubnetID, am.VpcID)
 			am.SubnetID = ""
 		} else {
-			if subnet.Name != nil {
-				am.SubnetName = *subnet.Name
-			}
+			am.SubnetName = subnet.Name
 			logger.Info().Msgf("Default Subnet ID: %s (%s) has been set for Instance creation.", am.SubnetID, am.SubnetName)
 			return nil
 		}
@@ -304,16 +302,14 @@ func (am *ApiMetadata) SetDefaultSubnet(ctx context.Context, apiClient *standard
 		}
 		if len(subnets) == 0 {
 			logger.Warn().Msgf("No Subnets configured for Site: %s. Instance creation will not be available.", am.SiteName)
-		} else if subnets[0].Id == nil {
+		} else if subnets[0].Id == "" {
 			return &ApiError{
 				Code:    http.StatusInternalServerError,
 				Message: fmt.Sprintf("API returned unexpected payload: Subnet at index 0 has no ID for org: %s", am.Organization),
 			}
 		} else {
-			am.SubnetID = *subnets[0].Id
-			if subnets[0].Name != nil {
-				am.SubnetName = *subnets[0].Name
-			}
+			am.SubnetID = subnets[0].Id
+			am.SubnetName = subnets[0].Name
 			if len(subnets) > 1 {
 				logger.Warn().Msgf("Multiple Subnets configured for Site: %s. Will default to Subnet: %s (%s) for Instance creation.", am.SiteName, am.SubnetName, am.SubnetID)
 			} else {

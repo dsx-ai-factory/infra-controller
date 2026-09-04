@@ -557,6 +557,23 @@ pub async fn count_by_segment_id(
     Ok(address_count.max(0) as usize)
 }
 
+/// Prevents machine-interface writers from adding a segment allocation while a
+/// short transaction checks whether that segment can be reassigned.
+///
+/// Ordinary inserts and updates take `ROW EXCLUSIVE`, which conflicts with
+/// this `SHARE` lock. The caller must retain the transaction through the
+/// allocation check and reassignment.
+pub async fn lock_table_for_segment_reassignment(
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError> {
+    let query = "LOCK TABLE machine_interfaces IN SHARE MODE";
+    sqlx::query(query)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
 pub async fn find_one(
     txn: impl DbReader<'_>,
     interface_id: MachineInterfaceId,
@@ -2515,6 +2532,10 @@ async fn insert_machine_interface(
     is_primary_interface: bool,
     interface_type: InterfaceType,
 ) -> DatabaseResult<MachineInterfaceId> {
+    if let Some(domain_id) = domain_id {
+        crate::dns::domain::lock_live_for_reference(txn, domain_id).await?;
+    }
+
     let query = "INSERT INTO machine_interfaces
         (segment_id, mac_address, hostname, domain_id, primary_interface, interface_type)
         VALUES
@@ -3313,6 +3334,10 @@ async fn update_hostname_and_domain(
     hostname: &str,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<bool> {
+    if let Some(domain_id) = domain_id {
+        crate::dns::domain::lock_live_for_reference(txn, domain_id).await?;
+    }
+
     let query = r#"
 UPDATE machine_interfaces
 SET hostname = $1, domain_id = $2
@@ -3411,6 +3436,10 @@ pub async fn update_segment_id(
     segment_id: NetworkSegmentId,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<()> {
+    if let Some(domain_id) = domain_id {
+        crate::dns::domain::lock_live_for_reference(txn, domain_id).await?;
+    }
+
     let query = "UPDATE machine_interfaces SET segment_id = $1, domain_id = $2 WHERE id = $3";
     sqlx::query(query)
         .bind(segment_id)

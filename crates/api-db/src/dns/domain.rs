@@ -224,6 +224,86 @@ pub async fn find_by_uuid(
         .map(|f| f.first().cloned())
 }
 
+/// Locks a live domain identity while a caller creates a reference to it.
+///
+/// The shared advisory lock permits concurrent reference creation but conflicts
+/// with the exclusive lock acquired by [`find_by_uuid_for_delete`]. Callers
+/// must keep the transaction open until the reference is persisted.
+pub async fn lock_live_for_reference(
+    txn: &mut PgConnection,
+    uuid: DomainId,
+) -> Result<(), DatabaseError> {
+    let lock_query = "SELECT pg_advisory_xact_lock_shared(
+                          hashtextextended('domains:id:' || $1::text, 0)
+                      )";
+    sqlx::query(lock_query)
+        .bind(uuid)
+        .execute(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lock_query, error))?;
+
+    let query = "SELECT EXISTS (SELECT 1 FROM domains WHERE id = $1 AND deleted IS NULL)";
+    let exists: bool = sqlx::query_scalar(query)
+        .bind(uuid)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if !exists {
+        return Err(DatabaseError::NotFoundError {
+            kind: "domain",
+            id: uuid.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Exclusively locks a domain identity for deletion, then finds the domain.
+/// Deleted domains are included so repeated deletion remains idempotent.
+pub async fn find_by_uuid_for_delete(
+    txn: &mut PgConnection,
+    uuid: DomainId,
+) -> Result<Option<Domain>, DatabaseError> {
+    let lock_query = "SELECT pg_advisory_xact_lock(
+                          hashtextextended('domains:id:' || $1::text, 0)
+                      )";
+    sqlx::query(lock_query)
+        .bind(uuid)
+        .execute(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lock_query, error))?;
+
+    let query = "SELECT * FROM domains WHERE id = $1";
+    sqlx::query_as::<_, DbDomain>(query)
+        .bind(uuid)
+        .fetch_optional(txn)
+        .await
+        .map(|domain| domain.map(Domain::from))
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Reports whether a live network segment or machine interface references the
+/// domain. The caller must first hold the delete lock for this domain.
+pub async fn has_live_references(
+    txn: &mut PgConnection,
+    uuid: DomainId,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT EXISTS (
+                     SELECT 1
+                     FROM network_segments
+                     WHERE subdomain_id = $1 AND deleted IS NULL
+                 ) OR EXISTS (
+                     SELECT 1
+                     FROM machine_interfaces
+                     WHERE domain_id = $1
+                 )";
+    sqlx::query_scalar(query)
+        .bind(uuid)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Batched counterpart to [`find_by_uuid`]: fetch every domain in `ids` with a single
 /// `WHERE id = ANY($1)` query (deleted entries included, matching `find_by_uuid`), keyed by id.
 ///

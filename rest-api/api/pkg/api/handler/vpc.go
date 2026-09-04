@@ -1569,6 +1569,14 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 
 	// Get and validate includeRelation params
 	qParams := c.QueryParams()
+	var queryTenantID *uuid.UUID
+	if tenantID := c.QueryParam("tenantId"); tenantID != "" {
+		parsedTenantID, parseErr := uuid.Parse(tenantID)
+		if parseErr != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Tenant ID specified in query", nil)
+		}
+		queryTenantID = &parsedTenantID
+	}
 	qIncludeRelations, errMsg := common.GetAndValidateQueryRelations(qParams, cdbm.VpcRelatedEntities)
 	if errMsg != "" {
 		logger.Warn().Msg(errMsg)
@@ -1642,6 +1650,9 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Org does not have a Tenant associated", nil)
 	}
 	tenant := tenants[0]
+	if queryTenantID != nil && *queryTenantID != tenant.ID {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant ID specified in query param is not associated with current org", nil)
+	}
 
 	privilegedSiteIDs, err := common.GetPrivilegedAccessSiteIDsForTenant(ctx, nil, gavh.dbSession, &tenant)
 	if err != nil {

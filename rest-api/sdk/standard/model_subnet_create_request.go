@@ -30,6 +30,8 @@ type SubnetCreateRequest struct {
 	Description NullableString `json:"description,omitempty"`
 	// ID of the Ethernet virtualizer VPC containing the Subnet
 	VpcId string `json:"vpcId"`
+	// Optional ID of a tenant-owned REST Domain at the same Site. This can only be set when the Subnet is created.
+	SubdomainId *string `json:"subdomainId,omitempty"`
 	// ID of the Ready, derived Tenant IPv4 Block from an Allocation
 	Ipv4BlockId string `json:"ipv4BlockId"`
 	// Length of the IPv4 prefix, from 8 through 30
@@ -150,6 +152,38 @@ func (o *SubnetCreateRequest) SetVpcId(v string) {
 	o.VpcId = v
 }
 
+// GetSubdomainId returns the SubdomainId field value if set, zero value otherwise.
+func (o *SubnetCreateRequest) GetSubdomainId() string {
+	if o == nil || IsNil(o.SubdomainId) {
+		var ret string
+		return ret
+	}
+	return *o.SubdomainId
+}
+
+// GetSubdomainIdOk returns a tuple with the SubdomainId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *SubnetCreateRequest) GetSubdomainIdOk() (*string, bool) {
+	if o == nil || IsNil(o.SubdomainId) {
+		return nil, false
+	}
+	return o.SubdomainId, true
+}
+
+// HasSubdomainId returns a boolean if a field has been set.
+func (o *SubnetCreateRequest) HasSubdomainId() bool {
+	if o != nil && !IsNil(o.SubdomainId) {
+		return true
+	}
+
+	return false
+}
+
+// SetSubdomainId gets a reference to the given string and assigns it to the SubdomainId field.
+func (o *SubnetCreateRequest) SetSubdomainId(v string) {
+	o.SubdomainId = &v
+}
+
 // GetIpv4BlockId returns the Ipv4BlockId field value
 func (o *SubnetCreateRequest) GetIpv4BlockId() string {
 	if o == nil {
@@ -213,6 +247,9 @@ func (o SubnetCreateRequest) ToMap() (map[string]interface{}, error) {
 		toSerialize["description"] = o.Description.Get()
 	}
 	toSerialize["vpcId"] = o.VpcId
+	if !IsNil(o.SubdomainId) {
+		toSerialize["subdomainId"] = o.SubdomainId
+	}
 	toSerialize["ipv4BlockId"] = o.Ipv4BlockId
 	toSerialize["prefixLength"] = o.PrefixLength
 	return toSerialize, nil

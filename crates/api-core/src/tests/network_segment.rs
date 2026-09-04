@@ -22,20 +22,24 @@ use std::fmt::Display;
 use std::str::FromStr;
 use std::time::Duration;
 
+use carbide_authn::middleware::{ExternalUserInfo, Principal};
 use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
+use carbide_uuid::instance::InstanceId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use common::network_segment::{
     NetworkSegmentHelper, create_network_segment_with_api, get_segment_state,
 };
+use config_version::ConfigVersion;
 use db::ObjectColumnFilter;
 use db::network_segment::VpcColumn;
 use db::vpc::IdColumn;
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
+use model::instance::config::network::InstanceNetworkConfig;
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment;
 use model::network_segment::{
@@ -50,13 +54,14 @@ use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
 use tonic::Request;
 
+use crate::auth::AuthContext;
 use crate::db_init;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::network_segment::FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS;
 use crate::tests::common::api_fixtures::{
-    TEST_SITE_PREFIXES, TestEnvOverrides, create_test_env, create_test_env_with_overrides,
-    get_vpc_fixture_id,
+    TEST_SITE_PREFIXES, TestEnvOverrides, create_managed_host, create_test_env,
+    create_test_env_with_overrides, get_vpc_fixture_id,
 };
 use crate::tests::common::rpc_builder::VpcCreationRequest;
 
@@ -2276,6 +2281,408 @@ async fn attach_to_different_vpc_requires_force(
     Ok(())
 }
 
+#[crate::sqlx_test]
+async fn site_agent_moves_unallocated_tenant_segment_between_etv_vpcs_with_force(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let source_vpc_id = create_attach_test_vpc(
+        &env,
+        "tenant-etv-source",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let target_vpc_id = create_attach_test_vpc(
+        &env,
+        "tenant-etv-target",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let segment_id = create_live_tenant_segment(&env, source_vpc_id, 0, "TENANT_ETV_MOVE").await;
+
+    let err = attach_tenant_network_segment_to_vpc(&env, segment_id, target_vpc_id, false)
+        .await
+        .expect_err("reassignment without force must fail");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "got: {err}");
+    assert_segment_vpc(&env, segment_id, source_vpc_id).await;
+
+    let attached = attach_tenant_network_segment_to_vpc(&env, segment_id, target_vpc_id, true)
+        .await?
+        .into_inner();
+    assert_eq!(attached.config.unwrap().vpc_id, Some(target_vpc_id));
+    assert_segment_vpc(&env, segment_id, target_vpc_id).await;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn site_agent_tenant_segment_same_target_is_idempotent(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let vpc_id = create_attach_test_vpc(
+        &env,
+        "tenant-etv-idempotent",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let segment_id = create_live_tenant_segment(&env, vpc_id, 0, "TENANT_ETV_IDEMPOTENT").await;
+
+    let first = attach_tenant_network_segment_to_vpc(&env, segment_id, vpc_id, false)
+        .await?
+        .into_inner();
+    let second = attach_tenant_network_segment_to_vpc(&env, segment_id, vpc_id, false)
+        .await?
+        .into_inner();
+
+    assert_eq!(second.config.unwrap().vpc_id, Some(vpc_id));
+    assert_eq!(second.version, first.version);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn attach_network_segment_callers_are_limited_to_their_segment_types(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let (flat_vpc_id, _vpc) =
+        common::api_fixtures::vpc::create_flat_vpc(&env, "caller-flat".to_string(), None).await;
+    let host_inband = create_unattached_segment(
+        &env,
+        "SITE_AGENT_REJECT_HOST_INBAND",
+        "198.51.105.0/24",
+        "198.51.105.1",
+        rpc::forge::NetworkSegmentType::HostInband,
+    )
+    .await?;
+    let err =
+        attach_tenant_network_segment_to_vpc(&env, host_inband.id.unwrap(), flat_vpc_id, true)
+            .await
+            .expect_err("SiteAgent must not gain the admin HostInband attachment path");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "got: {err}");
+
+    let etv_vpc_id = create_attach_test_vpc(
+        &env,
+        "caller-etv",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let tenant_segment_id =
+        create_live_tenant_segment(&env, etv_vpc_id, 0, "ADMIN_REJECT_TENANT").await;
+    let err = attach_network_segment_to_vpc(&env, tenant_segment_id, etv_vpc_id, true)
+        .await
+        .expect_err("admin callers must not gain the SiteAgent Tenant attachment path");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "got: {err}");
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn site_agent_rejects_tenant_segment_moves_across_modes(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::no_network_segments().with_fnn_config(None),
+    )
+    .await;
+    let etv_vpc_id = create_attach_test_vpc(
+        &env,
+        "mode-etv",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let fnn_vpc_id =
+        create_attach_test_vpc(&env, "mode-fnn", rpc::forge::VpcVirtualizationType::Fnn).await;
+    let (flat_vpc_id, _vpc) =
+        common::api_fixtures::vpc::create_flat_vpc(&env, "mode-flat".to_string(), None).await;
+    let etv_segment_id =
+        create_live_tenant_segment(&env, etv_vpc_id, 0, "ETV_MODE_REJECTIONS").await;
+
+    for (mode, target_vpc_id) in [("FNN", fnn_vpc_id), ("Flat", flat_vpc_id)] {
+        let err = attach_tenant_network_segment_to_vpc(&env, etv_segment_id, target_vpc_id, true)
+            .await
+            .expect_err("ETV tenant segments must reject non-ETV targets");
+        assert_eq!(
+            err.code(),
+            tonic::Code::FailedPrecondition,
+            "{mode} target returned: {err}",
+        );
+        assert_segment_vpc(&env, etv_segment_id, etv_vpc_id).await;
+    }
+
+    let fnn_segment_id =
+        create_live_tenant_segment(&env, fnn_vpc_id, 1, "FNN_SOURCE_REJECTION").await;
+    let err = attach_tenant_network_segment_to_vpc(&env, fnn_segment_id, etv_vpc_id, true)
+        .await
+        .expect_err("Tenant segments attached to FNN VPCs must not enter the ETV move path");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "got: {err}");
+    assert_segment_vpc(&env, fnn_segment_id, fnn_vpc_id).await;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn site_agent_rejects_in_use_tenant_segment_and_retains_source_vpc(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let source_vpc_id = create_attach_test_vpc(
+        &env,
+        "in-use-source",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let target_vpc_id = create_attach_test_vpc(
+        &env,
+        "in-use-target",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let segment_id = create_live_tenant_segment(&env, source_vpc_id, 0, "IN_USE_TENANT").await;
+    sqlx::query(
+        "INSERT INTO machine_interfaces \
+         (segment_id, mac_address, primary_interface, hostname) \
+         VALUES ($1, '02:00:00:00:56:01', false, 'tenant-user')",
+    )
+    .bind(segment_id)
+    .execute(&env.pool)
+    .await?;
+
+    let err = attach_tenant_network_segment_to_vpc(&env, segment_id, target_vpc_id, true)
+        .await
+        .expect_err("an in-use Tenant segment must not move");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "got: {err}");
+    assert_segment_vpc(&env, segment_id, source_vpc_id).await;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn site_agent_attach_waits_for_machine_interface_creation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let source_vpc_id = create_attach_test_vpc(
+        &env,
+        "interface-race-source",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let target_vpc_id = create_attach_test_vpc(
+        &env,
+        "interface-race-target",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let segment_id = create_live_tenant_segment(&env, source_vpc_id, 0, "INTERFACE_RACE").await;
+
+    let mut writer = env.pool.begin().await?;
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(writer.as_mut())
+        .await?;
+    sqlx::query(
+        "INSERT INTO machine_interfaces \
+         (segment_id, mac_address, primary_interface, hostname) \
+         VALUES ($1, '02:00:00:00:56:02', false, 'racing-tenant-user')",
+    )
+    .bind(segment_id)
+    .execute(writer.as_mut())
+    .await?;
+
+    let api = env.api.clone();
+    let attach_task = tokio::spawn(async move {
+        api.attach_network_segment_to_vpc(authenticated_attach_request(
+            segment_id,
+            target_vpc_id,
+            true,
+            Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+        ))
+        .await
+    });
+    wait_until_query_blocked_by(
+        &env.pool,
+        writer_pid,
+        "LOCK TABLE machine_interfaces IN SHARE MODE",
+    )
+    .await;
+    writer.commit().await?;
+
+    let err = attach_task
+        .await?
+        .expect_err("the committed machine-interface allocation must defeat reassignment");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "got: {err}");
+    assert_segment_vpc(&env, segment_id, source_vpc_id).await;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn site_agent_attach_waits_for_instance_address_allocation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let source_vpc_id = create_attach_test_vpc(
+        &env,
+        "allocation-race-source",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let target_vpc_id = create_attach_test_vpc(
+        &env,
+        "allocation-race-target",
+        rpc::forge::VpcVirtualizationType::EthernetVirtualizer,
+    )
+    .await;
+    let segment_id = create_live_tenant_segment(&env, source_vpc_id, 0, "ALLOCATION_RACE").await;
+
+    let managed_host = create_managed_host(&env).await;
+    let instance_id = InstanceId::new();
+    let network_config_version = ConfigVersion::initial();
+    let mut setup = env.db_txn().await;
+    let machine = managed_host.host().db_machine(&mut setup).await;
+    sqlx::query(
+        "INSERT INTO instances (id, machine_id, network_config, network_config_version, \
+                                nvlink_config) \
+         VALUES ($1, $2, '{\"interfaces\": []}'::jsonb, $3, \
+                 '{\"gpu_configs\": []}'::jsonb)",
+    )
+    .bind(instance_id)
+    .bind(managed_host.id)
+    .bind(network_config_version)
+    .execute(setup.as_mut())
+    .await?;
+    setup.commit().await?;
+
+    let mut allocation = env.db_txn().await;
+    let allocation_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(allocation.as_mut())
+        .await?;
+    let network_config =
+        InstanceNetworkConfig::for_segment_ids(&[segment_id], &[], &[source_vpc_id]);
+    let allocated =
+        db::instance_address::allocate(allocation.as_mut(), instance_id, network_config, &machine)
+            .await?;
+    db::instance::update_network_config(
+        allocation.as_mut(),
+        instance_id,
+        network_config_version,
+        &allocated,
+        false,
+    )
+    .await?;
+
+    let api = env.api.clone();
+    let attach_task = tokio::spawn(async move {
+        api.attach_network_segment_to_vpc(authenticated_attach_request(
+            segment_id,
+            target_vpc_id,
+            true,
+            Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+        ))
+        .await
+    });
+    wait_until_query_blocked_by(
+        &env.pool,
+        allocation_pid,
+        "FROM machine_interfaces WHERE segment_id = $1",
+    )
+    .await;
+    allocation.commit().await?;
+
+    let err = attach_task
+        .await?
+        .expect_err("the committed address allocation must defeat reassignment");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "got: {err}");
+    assert_segment_vpc(&env, segment_id, source_vpc_id).await;
+
+    Ok(())
+}
+
+async fn create_attach_test_vpc(
+    env: &common::api_fixtures::TestEnv,
+    name: &str,
+    virtualization_type: rpc::forge::VpcVirtualizationType,
+) -> VpcId {
+    env.api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .metadata(Metadata {
+                    name: name.to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(virtualization_type as i32)
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap()
+}
+
+async fn create_live_tenant_segment(
+    env: &common::api_fixtures::TestEnv,
+    vpc_id: VpcId,
+    gateway_index: usize,
+    name: &str,
+) -> NetworkSegmentId {
+    let segment_id = common::api_fixtures::network_segment::create_tenant_network_segment(
+        &env.api,
+        Some(vpc_id),
+        FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[gateway_index],
+        name,
+        true,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    segment_id
+}
+
+async fn assert_segment_vpc(
+    env: &common::api_fixtures::TestEnv,
+    segment_id: NetworkSegmentId,
+    expected_vpc_id: VpcId,
+) {
+    let actual_vpc_id: Option<VpcId> =
+        sqlx::query_scalar("SELECT vpc_id FROM network_segments WHERE id = $1 AND deleted IS NULL")
+            .bind(segment_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("network segment should remain live");
+    assert_eq!(actual_vpc_id, Some(expected_vpc_id));
+}
+
+async fn wait_until_query_blocked_by(pool: &sqlx::PgPool, blocker_pid: i32, query_fragment: &str) {
+    for _ in 0..300 {
+        let blocked: bool = sqlx::query_scalar(
+            r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity AS activity
+                    WHERE activity.datname = current_database()
+                      AND activity.wait_event_type = 'Lock'
+                      AND $1 = ANY(pg_blocking_pids(activity.pid))
+                      AND activity.query ILIKE '%' || $2 || '%'
+                )
+            "#,
+        )
+        .bind(blocker_pid)
+        .bind(query_fragment)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if blocked {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!("query never blocked on {query_fragment}");
+}
+
 async fn create_unattached_segment(
     env: &common::api_fixtures::TestEnv,
     name: &str,
@@ -2314,10 +2721,49 @@ async fn attach_network_segment_to_vpc(
     allow_replace: bool,
 ) -> Result<tonic::Response<rpc::forge::NetworkSegment>, tonic::Status> {
     env.api
-        .attach_network_segment_to_vpc(Request::new(rpc::forge::AttachNetworkSegmentToVpcRequest {
-            network_segment_id: Some(network_segment_id),
-            vpc_id: Some(vpc_id),
+        .attach_network_segment_to_vpc(authenticated_attach_request(
+            network_segment_id,
+            vpc_id,
             allow_replace,
-        }))
+            Principal::ExternalUser(ExternalUserInfo::new(
+                None,
+                "nico-admin-cli".to_string(),
+                None,
+            )),
+        ))
         .await
+}
+
+async fn attach_tenant_network_segment_to_vpc(
+    env: &common::api_fixtures::TestEnv,
+    network_segment_id: NetworkSegmentId,
+    vpc_id: VpcId,
+    allow_replace: bool,
+) -> Result<tonic::Response<rpc::forge::NetworkSegment>, tonic::Status> {
+    env.api
+        .attach_network_segment_to_vpc(authenticated_attach_request(
+            network_segment_id,
+            vpc_id,
+            allow_replace,
+            Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+        ))
+        .await
+}
+
+fn authenticated_attach_request(
+    network_segment_id: NetworkSegmentId,
+    vpc_id: VpcId,
+    allow_replace: bool,
+    principal: Principal,
+) -> Request<rpc::forge::AttachNetworkSegmentToVpcRequest> {
+    let mut request = Request::new(rpc::forge::AttachNetworkSegmentToVpcRequest {
+        network_segment_id: Some(network_segment_id),
+        vpc_id: Some(vpc_id),
+        allow_replace,
+    });
+    request.extensions_mut().insert(AuthContext {
+        principals: vec![principal],
+        authorization: None,
+    });
+    request
 }

@@ -576,6 +576,46 @@ func TestGeneratedCommand_ResolvesNamesAndReturnsAPIErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "history unavailable")
 }
 
+func TestGeneratedCommand_ResolvesDPUMachineFromSiteList(t *testing.T) {
+	var listCalls atomic.Int32
+	var detailCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v2/org/acme/nico/dpu":
+			listCalls.Add(1)
+			assert.Equal(t, "site-1", r.URL.Query().Get("siteId"))
+			assert.Equal(t, "1", r.URL.Query().Get("pageNumber"))
+			assert.Equal(t, "100", r.URL.Query().Get("pageSize"))
+			_, _ = io.WriteString(w, `[{
+				"id":"dpu-1",
+				"siteId":"site-1",
+				"hostMachineId":"host-1",
+				"state":"Ready",
+				"labels":{"ServerName":"dpu-one"}
+			}]`)
+		case "/v2/org/acme/nico/dpu/dpu-1":
+			detailCalls.Add(1)
+			assert.Equal(t, "site-1", r.URL.Query().Get("siteId"))
+			_, _ = io.WriteString(w, `{"id":"dpu-1","siteId":"site-1","hostMachineId":"host-1","state":"Ready"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+	err := requireTUICommand(t, "dpu-machine get").Run(
+		session,
+		[]string{"--site-id", "site-1", "dpu-one"},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "site-1", session.Scope.SiteID)
+	assert.Equal(t, int32(1), listCalls.Load())
+	assert.Equal(t, int32(1), detailCalls.Load())
+}
+
 func TestGeneratedPathResourcePolicy_CoversEveryParameter(t *testing.T) {
 	session := NewSession(
 		appcli.NewClient("http://example.invalid", "acme", "token", nil, false),
@@ -627,6 +667,9 @@ func TestCanonicalGeneratedResourceType_NormalizesSelectorKeys(t *testing.T) {
 		"nvlink acronym": {
 			command: "nvlink-logical-partition delete", parameter: "nvLinkLogicalPartitionId",
 			want: "nvlink-logical-partition",
+		},
+		"dpu machine": {
+			command: "dpu-machine get", parameter: "dpuMachineId", want: "dpu-machine",
 		},
 		"numbered vpc": {
 			command: "vpc-peering create", parameter: "vpc1Id", want: "vpc",

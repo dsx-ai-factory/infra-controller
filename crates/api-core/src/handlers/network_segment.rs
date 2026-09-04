@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
+use carbide_authn::middleware::Principal;
+use carbide_network::virtualization::VpcVirtualizationType;
 use db::resource_pool::ResourcePoolDatabaseError;
 use db::{AnnotatedSqlxError, DatabaseError, ObjectColumnFilter, network_segment};
 use ipnetwork::IpNetwork;
@@ -27,7 +29,19 @@ use sqlx::{PgConnection, PgTransaction};
 use tonic::{Request, Response, Status};
 
 use crate::api::{Api, log_request_data};
+use crate::auth::AuthContext;
 use crate::{CarbideError, CarbideResult};
+
+fn supports_tenant_segment_reassignment(
+    current_type: VpcVirtualizationType,
+    target_type: VpcVirtualizationType,
+) -> bool {
+    matches!(
+        current_type,
+        VpcVirtualizationType::EthernetVirtualizer
+            | VpcVirtualizationType::EthernetVirtualizerWithNvue
+    ) && current_type == target_type
+}
 
 pub(crate) async fn find_ids(
     api: &Api,
@@ -200,6 +214,33 @@ pub(crate) async fn attach_to_vpc(
 ) -> Result<Response<rpc::NetworkSegment>, Status> {
     crate::api::log_request_data(&request);
 
+    let auth_context = request.extensions().get::<AuthContext>().ok_or_else(|| {
+        CarbideError::PermissionDeniedError(
+            "network segment attachment requires an authenticated caller".to_string(),
+        )
+    })?;
+    let is_site_agent = auth_context.principals.iter().any(|principal| {
+        matches!(
+            principal,
+            Principal::SpiffeServiceIdentifier(identifier) if identifier == "elektra-site-agent"
+        )
+    });
+    let is_admin = auth_context
+        .principals
+        .iter()
+        .any(|principal| matches!(principal, Principal::ExternalUser(_)));
+    let site_agent_call = match (is_site_agent, is_admin) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => {
+            return Err(CarbideError::PermissionDeniedError(
+                "network segment attachment requires exactly one supported caller identity"
+                    .to_string(),
+            )
+            .into());
+        }
+    };
+
     let rpc::AttachNetworkSegmentToVpcRequest {
         network_segment_id,
         vpc_id,
@@ -214,17 +255,6 @@ pub(crate) async fn attach_to_vpc(
     let mut txn = api.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
 
-    let vpcs = db::vpc::find_by_with_lock(
-        txn.as_mut(),
-        ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_id),
-        db::vpc::VpcRowLock::Mutation,
-    )
-    .await?;
-    let vpc = vpcs.first().ok_or_else(|| CarbideError::NotFoundError {
-        kind: "vpc",
-        id: vpc_id.to_string(),
-    })?;
-
     let segment = db::network_segment::find_by(
         &mut txn,
         ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
@@ -238,37 +268,156 @@ pub(crate) async fn attach_to_vpc(
         id: segment_id.to_string(),
     })?;
 
-    if segment.config.segment_type != NetworkSegmentType::HostInband {
-        return Err(CarbideError::InvalidArgument(format!(
-            "only host_inband network segments can be attached to a VPC with this API, got {}",
-            segment.config.segment_type
-        ))
-        .into());
-    }
+    let network_segment = match segment.config.segment_type {
+        NetworkSegmentType::HostInband if !site_agent_call => {
+            let vpc = db::vpc::find_by_with_lock(
+                txn.as_mut(),
+                ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_id),
+                db::vpc::VpcRowLock::Mutation,
+            )
+            .await?
+            .pop()
+            .ok_or_else(|| CarbideError::NotFoundError {
+                kind: "vpc",
+                id: vpc_id.to_string(),
+            })?;
+            vpc.config
+                .network_virtualization_type
+                .ensure_supports_segment(&segment)
+                .map_err(CarbideError::from)?;
 
-    vpc.config
-        .network_virtualization_type
-        .ensure_supports_segment(&segment)
-        .map_err(CarbideError::from)?;
+            match segment.config.vpc_id {
+                Some(current_vpc_id) if current_vpc_id == vpc_id => segment,
+                Some(current_vpc_id) if !allow_replace => {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "network segment {} is already attached to VPC {}",
+                        segment.id, current_vpc_id
+                    ))
+                    .into());
+                }
+                _ => {
+                    let prefixes = segment
+                        .prefixes
+                        .iter()
+                        .filter(|prefix| prefix.vpc_prefix_id.is_none())
+                        .map(|prefix| prefix.prefix)
+                        .collect::<Vec<_>>();
+                    reject_vpc_prefix_overlaps(&mut txn, &prefixes).await?;
+                    db::network_segment::attach_to_vpc(&segment, txn.as_mut(), vpc_id).await?
+                }
+            }
+        }
+        NetworkSegmentType::Tenant if site_agent_call => {
+            let current_vpc_id = segment.config.vpc_id.ok_or_else(|| {
+                CarbideError::FailedPrecondition(format!(
+                    "tenant network segment {} must already belong to an Ethernet virtualizer VPC",
+                    segment.id
+                ))
+            })?;
 
-    let network_segment = match segment.config.vpc_id {
-        Some(current_vpc_id) if current_vpc_id == vpc_id => segment,
-        Some(current_vpc_id) if !allow_replace => {
-            return Err(CarbideError::FailedPrecondition(format!(
-                "network segment {} is already attached to VPC {}",
-                segment.id, current_vpc_id
-            ))
+            // Lock both VPCs in stable order so their modes cannot change during
+            // validation and opposing moves cannot deadlock on parent rows.
+            let mut vpc_ids = vec![current_vpc_id, vpc_id];
+            vpc_ids.sort_unstable();
+            vpc_ids.dedup();
+            let mut vpcs = Vec::with_capacity(vpc_ids.len());
+            for locked_vpc_id in vpc_ids {
+                let locked_vpc = db::vpc::find_by_with_lock(
+                    txn.as_mut(),
+                    ObjectColumnFilter::One(db::vpc::IdColumn, &locked_vpc_id),
+                    db::vpc::VpcRowLock::Mutation,
+                )
+                .await?
+                .pop()
+                .ok_or_else(|| CarbideError::NotFoundError {
+                    kind: "vpc",
+                    id: locked_vpc_id.to_string(),
+                })?;
+                vpcs.push(locked_vpc);
+            }
+
+            // Re-read after locking the source VPC so another attachment using
+            // this path cannot change the source between validation and update.
+            let segment = db::network_segment::find_by(
+                &mut txn,
+                ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
+                NetworkSegmentSearchConfig::default(),
+            )
+            .await?
+            .pop()
+            .ok_or_else(|| CarbideError::NotFoundError {
+                kind: "network_segment",
+                id: segment_id.to_string(),
+            })?;
+            if segment.config.segment_type != NetworkSegmentType::Tenant
+                || segment.config.vpc_id != Some(current_vpc_id)
+            {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "network segment {} changed while its VPC attachment was being validated",
+                    segment.id
+                ))
+                .into());
+            }
+
+            let current_vpc = vpcs
+                .iter()
+                .find(|candidate| candidate.id == current_vpc_id)
+                .expect("current VPC was loaded above");
+            let target_vpc = vpcs
+                .iter()
+                .find(|candidate| candidate.id == vpc_id)
+                .expect("target VPC was loaded above");
+            let current_type = current_vpc.config.network_virtualization_type;
+            let target_type = target_vpc.config.network_virtualization_type;
+            if !supports_tenant_segment_reassignment(current_type, target_type) {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "tenant network segment {} can only move between VPCs using the same Ethernet virtualizer mode",
+                    segment.id
+                ))
+                .into());
+            }
+            target_type
+                .ensure_supports_segment(&segment)
+                .map_err(CarbideError::from)?;
+
+            if current_vpc_id == vpc_id {
+                segment
+            } else {
+                if !allow_replace {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "network segment {} is already attached to VPC {}",
+                        segment.id, current_vpc_id
+                    ))
+                    .into());
+                }
+
+                // SHARE blocks ordinary machine-interface writers. The broad
+                // predicate then takes ACCESS SHARE on instance_addresses,
+                // which conflicts with the allocator's ACCESS EXCLUSIVE lock.
+                db::machine_interface::lock_table_for_segment_reassignment(txn.as_mut()).await?;
+                if db::instance_address::segment_has_allocations(txn.as_mut(), &segment.id).await? {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "network segment {} cannot move while it has allocations",
+                        segment.id
+                    ))
+                    .into());
+                }
+
+                db::network_segment::attach_to_vpc(&segment, txn.as_mut(), vpc_id).await?
+            }
+        }
+        NetworkSegmentType::HostInband => {
+            return Err(CarbideError::InvalidArgument(
+                "site-agent callers can only attach tenant network segments".to_string(),
+            )
             .into());
         }
         _ => {
-            let prefixes = segment
-                .prefixes
-                .iter()
-                .filter(|prefix| prefix.vpc_prefix_id.is_none())
-                .map(|prefix| prefix.prefix)
-                .collect::<Vec<_>>();
-            reject_vpc_prefix_overlaps(&mut txn, &prefixes).await?;
-            db::network_segment::attach_to_vpc(&segment, txn.as_mut(), vpc_id).await?
+            return Err(CarbideError::InvalidArgument(format!(
+                "admin callers can only attach host_inband network segments, got {}",
+                segment.config.segment_type
+            ))
+            .into());
         }
     };
 
@@ -424,6 +573,10 @@ pub(crate) async fn save_without_reverse_zones(
     set_to_ready: bool,
     allocate_svi_ip: bool,
 ) -> Result<NetworkSegment, CarbideError> {
+    if let Some(domain_id) = ns.subdomain_id {
+        db::dns::domain::lock_live_for_reference(txn.as_mut(), domain_id).await?;
+    }
+
     if ns.segment_type != NetworkSegmentType::Underlay {
         ns.vlan_id = Some(allocate_vlan_id(api, txn, &ns.name).await?);
         ns.vni = Some(allocate_vni(api, txn, &ns.name).await?);
@@ -556,5 +709,31 @@ async fn allocate_vlan_id(
             );
             Err(err.into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_network::virtualization::VpcVirtualizationType;
+
+    use super::supports_tenant_segment_reassignment;
+
+    #[test]
+    fn tenant_segment_reassignment_requires_the_same_etv_mode() {
+        let etv = VpcVirtualizationType::EthernetVirtualizer;
+        let nvue = VpcVirtualizationType::EthernetVirtualizerWithNvue;
+
+        assert!(supports_tenant_segment_reassignment(etv, etv));
+        assert!(supports_tenant_segment_reassignment(nvue, nvue));
+        assert!(!supports_tenant_segment_reassignment(etv, nvue));
+        assert!(!supports_tenant_segment_reassignment(nvue, etv));
+        assert!(!supports_tenant_segment_reassignment(
+            VpcVirtualizationType::Fnn,
+            VpcVirtualizationType::Fnn,
+        ));
+        assert!(!supports_tenant_segment_reassignment(
+            VpcVirtualizationType::Flat,
+            VpcVirtualizationType::Flat,
+        ));
     }
 }

@@ -20,7 +20,7 @@ func TestSession_fetchVPCsPreservesNetworkVirtualizationType(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v2/org/acme/nico/vpc", r.URL.Path)
 		assert.Equal(t, "site-1", r.URL.Query().Get("siteId"))
-		_, err := io.WriteString(w, `[{"id":"vpc-1","name":"ethernet-vpc","siteId":"site-1","status":"Ready","networkVirtualizationType":"ETHERNET_VIRTUALIZER"}]`)
+		_, err := io.WriteString(w, `[{"id":"vpc-1","name":"ethernet-vpc","siteId":"site-1","tenantId":"tenant-1","status":"Ready","networkVirtualizationType":"ETHERNET_VIRTUALIZER"}]`)
 		require.NoError(t, err)
 	}))
 	defer server.Close()
@@ -31,6 +31,7 @@ func TestSession_fetchVPCsPreservesNetworkVirtualizationType(t *testing.T) {
 		"",
 	)
 	session.Scope.SiteID = "site-1"
+	session.Cache.Set("_tenant", []NamedItem{{Name: "acme", ID: "tenant-1"}})
 
 	vpcs, err := session.fetchVPCs(context.Background())
 
@@ -38,6 +39,7 @@ func TestSession_fetchVPCsPreservesNetworkVirtualizationType(t *testing.T) {
 	require.Len(t, vpcs, 1)
 	assert.Equal(t, "ETHERNET_VIRTUALIZER", vpcs[0].Extra["networkVirtualizationType"])
 	assert.Equal(t, "site-1", vpcs[0].Extra["siteId"])
+	assert.Equal(t, "tenant-1", vpcs[0].Extra["tenantId"])
 }
 
 func TestInstanceNetworkConfigForVPC(t *testing.T) {

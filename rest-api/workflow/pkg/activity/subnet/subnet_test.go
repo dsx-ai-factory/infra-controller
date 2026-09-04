@@ -97,6 +97,11 @@ func testSubnetSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create IPBlock table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.IPBlock)(nil))
 	assert.Nil(t, err)
+	// create VPC dependency tables
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NVLinkLogicalPartition)(nil))
+	assert.Nil(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NetworkSecurityGroup)(nil))
+	assert.Nil(t, err)
 	// create VPC table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Vpc)(nil))
 	assert.Nil(t, err)
@@ -341,6 +346,9 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 
 	vpc := testSubnetBuildVPC(t, dbSession, "test-vpc", ip, tn, st, nil, nil, tnu)
 	assert.NotNil(t, vpc)
+	targetControllerVpcID := uuid.New()
+	targetVpc := testSubnetBuildVPC(t, dbSession, "test-vpc-target", ip, tn, st, &targetControllerVpcID, nil, tnu)
+	assert.NotNil(t, targetVpc)
 
 	ipb := testSubnetBuildIPBlock(t, dbSession, "testipb", st, ip, &tn.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.0.8.0", 22, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	assert.NotNil(t, ipb)
@@ -449,6 +457,8 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 	env := temporalsuit.NewTestWorkflowEnvironment()
 
 	mtu := int32(1500)
+	subnet1MovedSegment := testBuildNetworkSegment(subnet1.ControllerNetworkSegmentID.String(), subnet1.Name, &mtu, corev1.TenantState_READY, corev1.NetworkSegmentType_TENANT)
+	subnet1MovedSegment.Config.VpcId = &corev1.VpcId{Value: targetControllerVpcID.String()}
 
 	type fields struct {
 		dbSession      *cdb.Session
@@ -468,6 +478,7 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 		fields          fields
 		args            args
 		updatedSubnet   *cdbm.Subnet
+		updatedVpcID    *uuid.UUID
 		deletedSubnets  []*cdbm.Subnet
 		deletingSubnets []*cdbm.Subnet
 		missingSubnets  []*cdbm.Subnet
@@ -507,7 +518,7 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 				siteID: st.ID,
 				subnetInventory: &corev1.SubnetInventory{
 					Segments: []*corev1.NetworkSegment{
-						testBuildNetworkSegment(subnet1.ControllerNetworkSegmentID.String(), subnet1.Name, &mtu, corev1.TenantState_READY, corev1.NetworkSegmentType_TENANT),
+						subnet1MovedSegment,
 						testBuildNetworkSegment(subnet5.ControllerNetworkSegmentID.String(), subnet5.Name, nil, corev1.TenantState_READY, corev1.NetworkSegmentType_TENANT),
 						testBuildNetworkSegment(subnet10.ControllerNetworkSegmentID.String(), subnet10.Name, nil, corev1.TenantState_TERMINATED, corev1.NetworkSegmentType_TENANT),
 						testBuildNetworkSegment(subnet6.ControllerNetworkSegmentID.String(), subnet6.Name, nil, corev1.TenantState_READY, corev1.NetworkSegmentType_TENANT),
@@ -517,6 +528,7 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 				},
 			},
 			updatedSubnet:   subnet1,
+			updatedVpcID:    &targetVpc.ID,
 			deletedSubnets:  []*cdbm.Subnet{subnet2, subnetFG, subnet7},
 			deletingSubnets: []*cdbm.Subnet{subnet5, subnet10},
 			missingSubnets:  []*cdbm.Subnet{subnet3, subnet4},
@@ -618,6 +630,9 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 				assert.Nil(t, serr)
 				assert.Equal(t, cdbm.SubnetStatusReady, updatedSubnet.Status)
 				assert.Equal(t, *updatedSubnet.MTU, int(mtu))
+				if tt.updatedVpcID != nil {
+					assert.Equal(t, *tt.updatedVpcID, updatedSubnet.VpcID)
+				}
 			}
 
 			for _, subnet := range tt.deletedSubnets {

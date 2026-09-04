@@ -22,42 +22,38 @@ import (
 	"strings"
 )
 
-// VPCAPIService VPCAPI service
-type VPCAPIService service
+// DomainAPIService DomainAPI service
+type DomainAPIService service
 
-type ApiCreateVpcRequest struct {
-	ctx              context.Context
-	ApiService       *VPCAPIService
-	org              string
-	vpcCreateRequest *VpcCreateRequest
+type ApiCreateDomainRequest struct {
+	ctx                 context.Context
+	ApiService          *DomainAPIService
+	org                 string
+	domainCreateRequest *DomainCreateRequest
 }
 
-func (r ApiCreateVpcRequest) VpcCreateRequest(vpcCreateRequest VpcCreateRequest) ApiCreateVpcRequest {
-	r.vpcCreateRequest = &vpcCreateRequest
+func (r ApiCreateDomainRequest) DomainCreateRequest(domainCreateRequest DomainCreateRequest) ApiCreateDomainRequest {
+	r.domainCreateRequest = &domainCreateRequest
 	return r
 }
 
-func (r ApiCreateVpcRequest) Execute() (*VPC, *http.Response, error) {
-	return r.ApiService.CreateVpcExecute(r)
+func (r ApiCreateDomainRequest) Execute() (*Domain, *http.Response, error) {
+	return r.ApiService.CreateDomainExecute(r)
 }
 
 /*
-CreateVpc Create VPC
+CreateDomain Create Domain
 
-Create a VPC for the org.
+Create a tenant-owned DNS Domain at a Site.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-When `slaacEnabled` is true, REST reads `vpcSlaac` from the latest successfully stored configuration inventory for the selected Site before persisting the VPC. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag reports Core support only; it does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. Core can also return 412 after dispatch for another create prerequisite. Failure to resolve the Site client or persist the VPC returns 500, rolls back the REST transaction, and does not request a remote create. An error returned while starting the workflow also returns 500 and may leave remote acceptance unknown. After the start request, an unavailable result returns 503, while a workflow wait timeout returns 500 and triggers an attempted workflow termination. Errors while starting or waiting for the workflow roll back the REST transaction, but do not guarantee that Core did not create the VPC; a later inventory reconciliation may recreate the REST record.
-
-Safe recovery from an ambiguous create result requires supplying a stable `id` in the original request. After an ambiguous error while starting the workflow or after dispatch, callers should allow inventory reconciliation time, then retrieve that `id`. If the VPC is found, do not retry. If no record is found, reuse the same `id` for any retry; reusing the ID prevents a second Core VPC record, but the retry itself is not guaranteed to succeed and can return 409 if reconciliation completes concurrently.
-
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@return ApiCreateVpcRequest
+	@return ApiCreateDomainRequest
 */
-func (a *VPCAPIService) CreateVpc(ctx context.Context, org string) ApiCreateVpcRequest {
-	return ApiCreateVpcRequest{
+func (a *DomainAPIService) CreateDomain(ctx context.Context, org string) ApiCreateDomainRequest {
+	return ApiCreateDomainRequest{
 		ApiService: a,
 		ctx:        ctx,
 		org:        org,
@@ -66,26 +62,29 @@ func (a *VPCAPIService) CreateVpc(ctx context.Context, org string) ApiCreateVpcR
 
 // Execute executes the request
 //
-//	@return VPC
-func (a *VPCAPIService) CreateVpcExecute(r ApiCreateVpcRequest) (*VPC, *http.Response, error) {
+//	@return Domain
+func (a *DomainAPIService) CreateDomainExecute(r ApiCreateDomainRequest) (*Domain, *http.Response, error) {
 	var (
 		localVarHTTPMethod  = http.MethodPost
 		localVarPostBody    interface{}
 		formFiles           []formFile
-		localVarReturnValue *VPC
+		localVarReturnValue *Domain
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.CreateVpc")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.CreateDomain")
 	if err != nil {
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
 
-	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc"
+	localVarPath := localBasePath + "/v2/org/{org}/nico/domain"
 	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
 
 	localVarHeaderParams := make(map[string]string)
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
+	if r.domainCreateRequest == nil {
+		return localVarReturnValue, nil, reportError("domainCreateRequest is required and must be specified")
+	}
 
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{"application/json"}
@@ -105,7 +104,7 @@ func (a *VPCAPIService) CreateVpcExecute(r ApiCreateVpcRequest) (*VPC, *http.Res
 		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
 	}
 	// body params
-	localVarPostBody = r.vpcCreateRequest
+	localVarPostBody = r.domainCreateRequest
 	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
 	if err != nil {
 		return localVarReturnValue, nil, err
@@ -150,7 +149,7 @@ func (a *VPCAPIService) CreateVpcExecute(r ApiCreateVpcRequest) (*VPC, *http.Res
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
-		if localVarHTTPResponse.StatusCode == 409 {
+		if localVarHTTPResponse.StatusCode == 404 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
@@ -172,18 +171,7 @@ func (a *VPCAPIService) CreateVpcExecute(r ApiCreateVpcRequest) (*VPC, *http.Res
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
-		if localVarHTTPResponse.StatusCode == 500 {
-			var v NICoAPIError
-			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
-			if err != nil {
-				newErr.error = err.Error()
-				return localVarReturnValue, localVarHTTPResponse, newErr
-			}
-			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
-			newErr.model = v
-			return localVarReturnValue, localVarHTTPResponse, newErr
-		}
-		if localVarHTTPResponse.StatusCode == 503 {
+		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
@@ -208,57 +196,54 @@ func (a *VPCAPIService) CreateVpcExecute(r ApiCreateVpcRequest) (*VPC, *http.Res
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
-type ApiDeleteVpcRequest struct {
+type ApiDeleteDomainRequest struct {
 	ctx        context.Context
-	ApiService *VPCAPIService
+	ApiService *DomainAPIService
 	org        string
-	vpcId      string
+	domainId   string
 }
 
-func (r ApiDeleteVpcRequest) Execute() (*MessageResponse, *http.Response, error) {
-	return r.ApiService.DeleteVpcExecute(r)
+func (r ApiDeleteDomainRequest) Execute() (*http.Response, error) {
+	return r.ApiService.DeleteDomainExecute(r)
 }
 
 /*
-DeleteVpc Delete a VPC
+DeleteDomain Delete Domain
 
-Delete a specific VPC by ID.
+Delete a tenant-owned DNS Domain by ID.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param vpcId ID of the VPC
-	@return ApiDeleteVpcRequest
+	@param domainId ID of the Domain
+	@return ApiDeleteDomainRequest
 */
-func (a *VPCAPIService) DeleteVpc(ctx context.Context, org string, vpcId string) ApiDeleteVpcRequest {
-	return ApiDeleteVpcRequest{
+func (a *DomainAPIService) DeleteDomain(ctx context.Context, org string, domainId string) ApiDeleteDomainRequest {
+	return ApiDeleteDomainRequest{
 		ApiService: a,
 		ctx:        ctx,
 		org:        org,
-		vpcId:      vpcId,
+		domainId:   domainId,
 	}
 }
 
 // Execute executes the request
-//
-//	@return MessageResponse
-func (a *VPCAPIService) DeleteVpcExecute(r ApiDeleteVpcRequest) (*MessageResponse, *http.Response, error) {
+func (a *DomainAPIService) DeleteDomainExecute(r ApiDeleteDomainRequest) (*http.Response, error) {
 	var (
-		localVarHTTPMethod  = http.MethodDelete
-		localVarPostBody    interface{}
-		formFiles           []formFile
-		localVarReturnValue *MessageResponse
+		localVarHTTPMethod = http.MethodDelete
+		localVarPostBody   interface{}
+		formFiles          []formFile
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.DeleteVpc")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.DeleteDomain")
 	if err != nil {
-		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+		return nil, &GenericOpenAPIError{error: err.Error()}
 	}
 
-	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc/{vpcId}"
+	localVarPath := localBasePath + "/v2/org/{org}/nico/domain/{domainId}"
 	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
-	localVarPath = strings.Replace(localVarPath, "{"+"vpcId"+"}", url.PathEscape(parameterValueToString(r.vpcId, "vpcId")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"domainId"+"}", url.PathEscape(parameterValueToString(r.domainId, "domainId")), -1)
 
 	localVarHeaderParams := make(map[string]string)
 	localVarQueryParams := url.Values{}
@@ -283,19 +268,19 @@ func (a *VPCAPIService) DeleteVpcExecute(r ApiDeleteVpcRequest) (*MessageRespons
 	}
 	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
 	if err != nil {
-		return localVarReturnValue, nil, err
+		return nil, err
 	}
 
 	localVarHTTPResponse, err := a.client.callAPI(req)
 	if err != nil || localVarHTTPResponse == nil {
-		return localVarReturnValue, localVarHTTPResponse, err
+		return localVarHTTPResponse, err
 	}
 
 	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
 	localVarHTTPResponse.Body.Close()
 	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
 	if err != nil {
-		return localVarReturnValue, localVarHTTPResponse, err
+		return localVarHTTPResponse, err
 	}
 
 	if localVarHTTPResponse.StatusCode >= 300 {
@@ -308,119 +293,108 @@ func (a *VPCAPIService) DeleteVpcExecute(r ApiDeleteVpcRequest) (*MessageRespons
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
 				newErr.error = err.Error()
-				return localVarReturnValue, localVarHTTPResponse, newErr
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
 		}
-		return localVarReturnValue, localVarHTTPResponse, newErr
+		return localVarHTTPResponse, newErr
 	}
 
-	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
-	if err != nil {
-		newErr := &GenericOpenAPIError{
-			body:  localVarBody,
-			error: err.Error(),
-		}
-		return localVarReturnValue, localVarHTTPResponse, newErr
-	}
-
-	return localVarReturnValue, localVarHTTPResponse, nil
+	return localVarHTTPResponse, nil
 }
 
-type ApiGetAllVpcRequest struct {
-	ctx                      context.Context
-	ApiService               *VPCAPIService
-	org                      string
-	tenantId                 *string
-	siteId                   *string
-	status                   *string
-	networkSecurityGroupId   *string
-	nvLinkLogicalPartitionId *string
-	query                    *string
-	includeRelation          *string
-	pageNumber               *int32
-	pageSize                 *int32
-	orderBy                  *string
+type ApiGetAllDomainRequest struct {
+	ctx        context.Context
+	ApiService *DomainAPIService
+	org        string
+	siteId     *string
+	tenantId   *string
+	pageNumber *int32
+	pageSize   *int32
+	orderBy    *string
 }
 
-// Optional ID of the current Tenant. A different Tenant ID is rejected.
-func (r ApiGetAllVpcRequest) TenantId(tenantId string) ApiGetAllVpcRequest {
-	r.tenantId = &tenantId
-	return r
-}
-
-// Filter VPCs by Site ID. Can be specified multiple times to filter on more than one Site.
-func (r ApiGetAllVpcRequest) SiteId(siteId string) ApiGetAllVpcRequest {
+// Filter Domains by Site
+func (r ApiGetAllDomainRequest) SiteId(siteId string) ApiGetAllDomainRequest {
 	r.siteId = &siteId
 	return r
 }
 
-// Filter VPCs by Status. Can be specified multiple times to filter on more than one Status.
-func (r ApiGetAllVpcRequest) Status(status string) ApiGetAllVpcRequest {
-	r.status = &status
-	return r
-}
-
-// Filter VPCs by Network Security Group ID. Can be specified multiple times to filter on more than one Network Security Group.
-func (r ApiGetAllVpcRequest) NetworkSecurityGroupId(networkSecurityGroupId string) ApiGetAllVpcRequest {
-	r.networkSecurityGroupId = &networkSecurityGroupId
-	return r
-}
-
-// Filter VPCs by NVLink Logical Partition ID. Can be specified multiple times to filter on more than one NVLink Logical Partition.
-func (r ApiGetAllVpcRequest) NvLinkLogicalPartitionId(nvLinkLogicalPartitionId string) ApiGetAllVpcRequest {
-	r.nvLinkLogicalPartitionId = &nvLinkLogicalPartitionId
-	return r
-}
-
-// Search for matches across all VPCs. Input will be matched against name, description, labels, and status fields
-func (r ApiGetAllVpcRequest) Query(query string) ApiGetAllVpcRequest {
-	r.query = &query
-	return r
-}
-
-// Related entity to expand
-func (r ApiGetAllVpcRequest) IncludeRelation(includeRelation string) ApiGetAllVpcRequest {
-	r.includeRelation = &includeRelation
+// ID of the authenticated Tenant that owns the Domains
+func (r ApiGetAllDomainRequest) TenantId(tenantId string) ApiGetAllDomainRequest {
+	r.tenantId = &tenantId
 	return r
 }
 
 // Page number for pagination query
-func (r ApiGetAllVpcRequest) PageNumber(pageNumber int32) ApiGetAllVpcRequest {
+func (r ApiGetAllDomainRequest) PageNumber(pageNumber int32) ApiGetAllDomainRequest {
 	r.pageNumber = &pageNumber
 	return r
 }
 
 // Page size for pagination query
-func (r ApiGetAllVpcRequest) PageSize(pageSize int32) ApiGetAllVpcRequest {
+func (r ApiGetAllDomainRequest) PageSize(pageSize int32) ApiGetAllDomainRequest {
 	r.pageSize = &pageSize
 	return r
 }
 
 // Ordering for pagination query
-func (r ApiGetAllVpcRequest) OrderBy(orderBy string) ApiGetAllVpcRequest {
+func (r ApiGetAllDomainRequest) OrderBy(orderBy string) ApiGetAllDomainRequest {
 	r.orderBy = &orderBy
 	return r
 }
 
-func (r ApiGetAllVpcRequest) Execute() ([]VPC, *http.Response, error) {
-	return r.ApiService.GetAllVpcExecute(r)
+func (r ApiGetAllDomainRequest) Execute() ([]Domain, *http.Response, error) {
+	return r.ApiService.GetAllDomainExecute(r)
 }
 
 /*
-GetAllVpc Retrieve all VPCs
+GetAllDomain Retrieve all Domains
 
-Retrieve all VPCs for the org. When `tenantId` is supplied, it must match the org's current Tenant.
+Retrieve tenant-owned DNS Domains for the org, optionally confirming the authenticated Tenant ID and filtering by Site. Results are ordered deterministically before pagination, and the `X-Pagination` response header reports the total matching row count.
 
-Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
+Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@return ApiGetAllVpcRequest
+	@return ApiGetAllDomainRequest
 */
-func (a *VPCAPIService) GetAllVpc(ctx context.Context, org string) ApiGetAllVpcRequest {
-	return ApiGetAllVpcRequest{
+func (a *DomainAPIService) GetAllDomain(ctx context.Context, org string) ApiGetAllDomainRequest {
+	return ApiGetAllDomainRequest{
 		ApiService: a,
 		ctx:        ctx,
 		org:        org,
@@ -429,47 +403,32 @@ func (a *VPCAPIService) GetAllVpc(ctx context.Context, org string) ApiGetAllVpcR
 
 // Execute executes the request
 //
-//	@return []VPC
-func (a *VPCAPIService) GetAllVpcExecute(r ApiGetAllVpcRequest) ([]VPC, *http.Response, error) {
+//	@return []Domain
+func (a *DomainAPIService) GetAllDomainExecute(r ApiGetAllDomainRequest) ([]Domain, *http.Response, error) {
 	var (
 		localVarHTTPMethod  = http.MethodGet
 		localVarPostBody    interface{}
 		formFiles           []formFile
-		localVarReturnValue []VPC
+		localVarReturnValue []Domain
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.GetAllVpc")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.GetAllDomain")
 	if err != nil {
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
 
-	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc"
+	localVarPath := localBasePath + "/v2/org/{org}/nico/domain"
 	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
 
 	localVarHeaderParams := make(map[string]string)
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
 
-	if r.tenantId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", r.tenantId, "form", "")
-	}
 	if r.siteId != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
 	}
-	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
-	}
-	if r.networkSecurityGroupId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "networkSecurityGroupId", r.networkSecurityGroupId, "form", "")
-	}
-	if r.nvLinkLogicalPartitionId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkLogicalPartitionId", r.nvLinkLogicalPartitionId, "form", "")
-	}
-	if r.query != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
-	}
-	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+	if r.tenantId != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", r.tenantId, "form", "")
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -559,72 +518,62 @@ func (a *VPCAPIService) GetAllVpcExecute(r ApiGetAllVpcRequest) ([]VPC, *http.Re
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
-type ApiGetVpcRequest struct {
-	ctx             context.Context
-	ApiService      *VPCAPIService
-	org             string
-	vpcId           string
-	includeRelation *string
+type ApiGetDomainRequest struct {
+	ctx        context.Context
+	ApiService *DomainAPIService
+	org        string
+	domainId   string
 }
 
-// Related entity to expand
-func (r ApiGetVpcRequest) IncludeRelation(includeRelation string) ApiGetVpcRequest {
-	r.includeRelation = &includeRelation
-	return r
-}
-
-func (r ApiGetVpcRequest) Execute() (*VPC, *http.Response, error) {
-	return r.ApiService.GetVpcExecute(r)
+func (r ApiGetDomainRequest) Execute() (*Domain, *http.Response, error) {
+	return r.ApiService.GetDomainExecute(r)
 }
 
 /*
-GetVpc Retrieve a VPC
+GetDomain Retrieve Domain
 
-Retrieve a specific VPC by ID.
+Retrieve a tenant-owned DNS Domain by ID.
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param vpcId ID of the VPC
-	@return ApiGetVpcRequest
+	@param domainId ID of the Domain
+	@return ApiGetDomainRequest
 */
-func (a *VPCAPIService) GetVpc(ctx context.Context, org string, vpcId string) ApiGetVpcRequest {
-	return ApiGetVpcRequest{
+func (a *DomainAPIService) GetDomain(ctx context.Context, org string, domainId string) ApiGetDomainRequest {
+	return ApiGetDomainRequest{
 		ApiService: a,
 		ctx:        ctx,
 		org:        org,
-		vpcId:      vpcId,
+		domainId:   domainId,
 	}
 }
 
 // Execute executes the request
 //
-//	@return VPC
-func (a *VPCAPIService) GetVpcExecute(r ApiGetVpcRequest) (*VPC, *http.Response, error) {
+//	@return Domain
+func (a *DomainAPIService) GetDomainExecute(r ApiGetDomainRequest) (*Domain, *http.Response, error) {
 	var (
 		localVarHTTPMethod  = http.MethodGet
 		localVarPostBody    interface{}
 		formFiles           []formFile
-		localVarReturnValue *VPC
+		localVarReturnValue *Domain
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.GetVpc")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.GetDomain")
 	if err != nil {
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
 
-	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc/{vpcId}"
+	localVarPath := localBasePath + "/v2/org/{org}/nico/domain/{domainId}"
 	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
-	localVarPath = strings.Replace(localVarPath, "{"+"vpcId"+"}", url.PathEscape(parameterValueToString(r.vpcId, "vpcId")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"domainId"+"}", url.PathEscape(parameterValueToString(r.domainId, "domainId")), -1)
 
 	localVarHeaderParams := make(map[string]string)
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
 
-	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
-	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
 
@@ -673,6 +622,17 @@ func (a *VPCAPIService) GetVpcExecute(r ApiGetVpcRequest) (*VPC, *http.Response,
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
 		}
 		return localVarReturnValue, localVarHTTPResponse, newErr
 	}
@@ -689,69 +649,70 @@ func (a *VPCAPIService) GetVpcExecute(r ApiGetVpcRequest) (*VPC, *http.Response,
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
-type ApiUpdateVpcRequest struct {
-	ctx              context.Context
-	ApiService       *VPCAPIService
-	org              string
-	vpcId            string
-	vpcUpdateRequest *VpcUpdateRequest
+type ApiUpdateDomainRequest struct {
+	ctx                 context.Context
+	ApiService          *DomainAPIService
+	org                 string
+	domainId            string
+	domainUpdateRequest *DomainUpdateRequest
 }
 
-func (r ApiUpdateVpcRequest) VpcUpdateRequest(vpcUpdateRequest VpcUpdateRequest) ApiUpdateVpcRequest {
-	r.vpcUpdateRequest = &vpcUpdateRequest
+func (r ApiUpdateDomainRequest) DomainUpdateRequest(domainUpdateRequest DomainUpdateRequest) ApiUpdateDomainRequest {
+	r.domainUpdateRequest = &domainUpdateRequest
 	return r
 }
 
-func (r ApiUpdateVpcRequest) Execute() (*VPC, *http.Response, error) {
-	return r.ApiService.UpdateVpcExecute(r)
+func (r ApiUpdateDomainRequest) Execute() (*Domain, *http.Response, error) {
+	return r.ApiService.UpdateDomainExecute(r)
 }
 
 /*
-UpdateVpc Update VPC
+UpdateDomain Update Domain
 
-# Update an existing VPC
+Update the name of a tenant-owned DNS Domain. Ownership, Site, and the internal Core mapping are immutable.
 
-Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
-
-A non-empty `powerResourceGroup` requires the Site's `dpsPowerManagement` capability to be `true`; otherwise the request returns 412. Omission or `null` preserves the current association, while an empty string clears it even when DPS power management is disabled.
+Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param vpcId ID of the VPC
-	@return ApiUpdateVpcRequest
+	@param domainId ID of the Domain
+	@return ApiUpdateDomainRequest
 */
-func (a *VPCAPIService) UpdateVpc(ctx context.Context, org string, vpcId string) ApiUpdateVpcRequest {
-	return ApiUpdateVpcRequest{
+func (a *DomainAPIService) UpdateDomain(ctx context.Context, org string, domainId string) ApiUpdateDomainRequest {
+	return ApiUpdateDomainRequest{
 		ApiService: a,
 		ctx:        ctx,
 		org:        org,
-		vpcId:      vpcId,
+		domainId:   domainId,
 	}
 }
 
 // Execute executes the request
 //
-//	@return VPC
-func (a *VPCAPIService) UpdateVpcExecute(r ApiUpdateVpcRequest) (*VPC, *http.Response, error) {
+//	@return Domain
+func (a *DomainAPIService) UpdateDomainExecute(r ApiUpdateDomainRequest) (*Domain, *http.Response, error) {
 	var (
 		localVarHTTPMethod  = http.MethodPatch
 		localVarPostBody    interface{}
 		formFiles           []formFile
-		localVarReturnValue *VPC
+		localVarReturnValue *Domain
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.UpdateVpc")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.UpdateDomain")
 	if err != nil {
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
 
-	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc/{vpcId}"
+	localVarPath := localBasePath + "/v2/org/{org}/nico/domain/{domainId}"
 	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
-	localVarPath = strings.Replace(localVarPath, "{"+"vpcId"+"}", url.PathEscape(parameterValueToString(r.vpcId, "vpcId")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"domainId"+"}", url.PathEscape(parameterValueToString(r.domainId, "domainId")), -1)
 
 	localVarHeaderParams := make(map[string]string)
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
+	if r.domainUpdateRequest == nil {
+		return localVarReturnValue, nil, reportError("domainUpdateRequest is required and must be specified")
+	}
 
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{"application/json"}
@@ -771,7 +732,7 @@ func (a *VPCAPIService) UpdateVpcExecute(r ApiUpdateVpcRequest) (*VPC, *http.Res
 		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
 	}
 	// body params
-	localVarPostBody = r.vpcUpdateRequest
+	localVarPostBody = r.domainUpdateRequest
 	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
 	if err != nil {
 		return localVarReturnValue, nil, err
@@ -816,7 +777,7 @@ func (a *VPCAPIService) UpdateVpcExecute(r ApiUpdateVpcRequest) (*VPC, *http.Res
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
-		if localVarHTTPResponse.StatusCode == 409 {
+		if localVarHTTPResponse.StatusCode == 404 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
@@ -836,140 +797,9 @@ func (a *VPCAPIService) UpdateVpcExecute(r ApiUpdateVpcRequest) (*VPC, *http.Res
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
-		}
-		return localVarReturnValue, localVarHTTPResponse, newErr
-	}
-
-	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
-	if err != nil {
-		newErr := &GenericOpenAPIError{
-			body:  localVarBody,
-			error: err.Error(),
-		}
-		return localVarReturnValue, localVarHTTPResponse, newErr
-	}
-
-	return localVarReturnValue, localVarHTTPResponse, nil
-}
-
-type ApiUpdateVpcVirtualizationRequest struct {
-	ctx                            context.Context
-	ApiService                     *VPCAPIService
-	org                            string
-	vpcId                          string
-	vpcVirtualizationUpdateRequest *VpcVirtualizationUpdateRequest
-}
-
-func (r ApiUpdateVpcVirtualizationRequest) VpcVirtualizationUpdateRequest(vpcVirtualizationUpdateRequest VpcVirtualizationUpdateRequest) ApiUpdateVpcVirtualizationRequest {
-	r.vpcVirtualizationUpdateRequest = &vpcVirtualizationUpdateRequest
-	return r
-}
-
-func (r ApiUpdateVpcVirtualizationRequest) Execute() (*VPC, *http.Response, error) {
-	return r.ApiService.UpdateVpcVirtualizationExecute(r)
-}
-
-/*
-UpdateVpcVirtualization Update VPC Virtualization
-
-# Update network virtualization type for a VPC
-
-Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
-
-Tenant must own the VPC
-Request is rejected if the VPC already has Subnets or Instances.
-
-	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
-	@param org Name of the Org
-	@param vpcId ID of the VPC
-	@return ApiUpdateVpcVirtualizationRequest
-*/
-func (a *VPCAPIService) UpdateVpcVirtualization(ctx context.Context, org string, vpcId string) ApiUpdateVpcVirtualizationRequest {
-	return ApiUpdateVpcVirtualizationRequest{
-		ApiService: a,
-		ctx:        ctx,
-		org:        org,
-		vpcId:      vpcId,
-	}
-}
-
-// Execute executes the request
-//
-//	@return VPC
-func (a *VPCAPIService) UpdateVpcVirtualizationExecute(r ApiUpdateVpcVirtualizationRequest) (*VPC, *http.Response, error) {
-	var (
-		localVarHTTPMethod  = http.MethodPatch
-		localVarPostBody    interface{}
-		formFiles           []formFile
-		localVarReturnValue *VPC
-	)
-
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.UpdateVpcVirtualization")
-	if err != nil {
-		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
-	}
-
-	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc/{vpcId}/virtualization"
-	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
-	localVarPath = strings.Replace(localVarPath, "{"+"vpcId"+"}", url.PathEscape(parameterValueToString(r.vpcId, "vpcId")), -1)
-
-	localVarHeaderParams := make(map[string]string)
-	localVarQueryParams := url.Values{}
-	localVarFormParams := url.Values{}
-
-	// to determine the Content-Type header
-	localVarHTTPContentTypes := []string{"application/json"}
-
-	// set Content-Type header
-	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
-	if localVarHTTPContentType != "" {
-		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
-	}
-
-	// to determine the Accept header
-	localVarHTTPHeaderAccepts := []string{"application/json"}
-
-	// set Accept header
-	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
-	if localVarHTTPHeaderAccept != "" {
-		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
-	}
-	// body params
-	localVarPostBody = r.vpcVirtualizationUpdateRequest
-	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
-	if err != nil {
-		return localVarReturnValue, nil, err
-	}
-
-	localVarHTTPResponse, err := a.client.callAPI(req)
-	if err != nil || localVarHTTPResponse == nil {
-		return localVarReturnValue, localVarHTTPResponse, err
-	}
-
-	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
-	localVarHTTPResponse.Body.Close()
-	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
-	if err != nil {
-		return localVarReturnValue, localVarHTTPResponse, err
-	}
-
-	if localVarHTTPResponse.StatusCode >= 300 {
-		newErr := &GenericOpenAPIError{
-			body:  localVarBody,
-			error: localVarHTTPResponse.Status,
-		}
-		if localVarHTTPResponse.StatusCode == 400 {
-			var v NICoAPIError
-			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
-			if err != nil {
-				newErr.error = err.Error()
-				return localVarReturnValue, localVarHTTPResponse, newErr
-			}
-			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
-			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
-		if localVarHTTPResponse.StatusCode == 403 {
+		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

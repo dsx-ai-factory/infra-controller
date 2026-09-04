@@ -152,6 +152,68 @@ func TestVpcSlaacEnabledMigration(t *testing.T) {
 	require.True(t, persisted.SlaacEnabled)
 }
 
+func TestDomainOwnershipMigration(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.GetTestDBSession(t, true)
+	defer dbSession.Close()
+
+	model.TestSetupSchema(t, dbSession)
+	user := model.TestBuildUser(t, dbSession, uuid.NewString(), "test-org", []string{authz.TenantAdminRole})
+	domain, err := model.NewDomainDAO(dbSession).Create(ctx, nil, model.DomainCreateInput{
+		Hostname:  "legacy.example.com",
+		Org:       "test-org",
+		Status:    model.DomainStatusReady,
+		CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+
+	_, err = dbSession.DB.ExecContext(ctx, `ALTER TABLE domain DROP COLUMN tenant_id, DROP COLUMN site_id`)
+	require.NoError(t, err)
+	require.NoError(t, domainOwnershipUpMigration(ctx, dbSession.DB))
+
+	var nullableOwnershipColumns int
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'domain'
+		  AND column_name IN ('tenant_id', 'site_id')
+		  AND is_nullable = 'YES'
+	`).Scan(&nullableOwnershipColumns)
+	require.NoError(t, err)
+	assert.Equal(t, 2, nullableOwnershipColumns)
+
+	var legacyTenantID, legacySiteID *uuid.UUID
+	err = dbSession.DB.QueryRowContext(ctx, `SELECT tenant_id, site_id FROM domain WHERE id = ?`, domain.ID).Scan(&legacyTenantID, &legacySiteID)
+	require.NoError(t, err)
+	assert.Nil(t, legacyTenantID)
+	assert.Nil(t, legacySiteID)
+
+	tenantID := uuid.New()
+	siteID := uuid.New()
+	_, err = dbSession.DB.ExecContext(ctx, `UPDATE domain SET tenant_id = ?, site_id = ? WHERE id = ?`, tenantID, siteID, domain.ID)
+	require.NoError(t, err)
+	require.NoError(t, domainOwnershipUpMigration(ctx, dbSession.DB))
+	require.NoError(t, domainOwnershipDownMigration(ctx, dbSession.DB))
+
+	var persistedTenantID, persistedSiteID uuid.UUID
+	err = dbSession.DB.QueryRowContext(ctx, `SELECT tenant_id, site_id FROM domain WHERE id = ?`, domain.ID).Scan(&persistedTenantID, &persistedSiteID)
+	require.NoError(t, err)
+	assert.Equal(t, tenantID, persistedTenantID)
+	assert.Equal(t, siteID, persistedSiteID)
+
+	var ownershipIndexCount int
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM pg_indexes
+		WHERE schemaname = 'public'
+		  AND tablename = 'domain'
+		  AND indexname = 'domain_tenant_site_idx'
+	`).Scan(&ownershipIndexCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, ownershipIndexCount)
+}
+
 func Test_vpcProviderIDUpMigration(t *testing.T) {
 	ctx := context.Background()
 

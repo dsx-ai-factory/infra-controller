@@ -73,6 +73,17 @@ type ClientInterface interface {
 	GetDpuExtensionServiceVersion(ctx context.Context, id string, version string) (*standard.DpuExtensionServiceVersionInfo, *ApiError)
 	DeleteDpuExtensionServiceVersion(ctx context.Context, id string, version string) *ApiError
 
+	// Domain management interfaces
+	CreateDomain(ctx context.Context, request DomainCreateRequest) (*Domain, *ApiError)
+	GetDomains(ctx context.Context, domainFilter *DomainFilter) ([]Domain, *ApiError)
+	GetDomain(ctx context.Context, id string) (*Domain, *ApiError)
+	UpdateDomain(ctx context.Context, id string, request DomainUpdateRequest) (*Domain, *ApiError)
+	DeleteDomain(ctx context.Context, id string) *ApiError
+
+	// Subnet management interfaces
+	CreateSubnet(ctx context.Context, request SubnetCreateRequest) (*standard.Subnet, *ApiError)
+	AttachSubnetToVpc(ctx context.Context, id string, request SubnetAttachVpcRequest) (*standard.Subnet, *ApiError)
+
 	// VPC management interfaces
 	CreateVpc(ctx context.Context, request VpcCreateRequest) (*Vpc, *ApiError)
 	GetVpcs(ctx context.Context, vpcFilter *VpcFilter, paginationFilter *PaginationFilter) ([]Vpc, *standard.PaginationResponse, *ApiError)
@@ -599,6 +610,73 @@ func (c *Client) DeleteDpuExtensionServiceVersion(ctx context.Context, id string
 	logger.Info().Msgf("Deleting DPU Extension Service Version for org: %s", c.Config.Org)
 
 	return NewDpuExtensionServiceManager(c).DeleteDpuExtensionServiceVersion(ctx, id, version)
+}
+
+// Domain
+func (c *Client) CreateDomain(ctx context.Context, request DomainCreateRequest) (*Domain, *ApiError) {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Creating Domain for org: %s", c.Config.Org)
+
+	return NewDomainManager(c).Create(ctx, request)
+}
+func (c *Client) GetDomains(ctx context.Context, domainFilter *DomainFilter) ([]Domain, *ApiError) {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Getting all Domains for org: %s", c.Config.Org)
+
+	return NewDomainManager(c).GetDomains(ctx, domainFilter)
+}
+func (c *Client) GetDomain(ctx context.Context, id string) (*Domain, *ApiError) {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Getting Domain for org: %s", c.Config.Org)
+
+	return NewDomainManager(c).Get(ctx, id)
+}
+func (c *Client) UpdateDomain(ctx context.Context, id string, request DomainUpdateRequest) (*Domain, *ApiError) {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Updating Domain for org: %s", c.Config.Org)
+
+	return NewDomainManager(c).Update(ctx, id, request)
+}
+func (c *Client) DeleteDomain(ctx context.Context, id string) *ApiError {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Deleting Domain for org: %s", c.Config.Org)
+
+	return NewDomainManager(c).Delete(ctx, id)
+}
+
+// Subnet
+func (c *Client) CreateSubnet(ctx context.Context, request SubnetCreateRequest) (*standard.Subnet, *ApiError) {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Creating Subnet for org: %s", c.Config.Org)
+
+	return NewSubnetManager(c).Create(ctx, request)
+}
+func (c *Client) AttachSubnetToVpc(ctx context.Context, id string, request SubnetAttachVpcRequest) (*standard.Subnet, *ApiError) {
+	ctx = WithLogger(ctx, c.Logger)
+	ctx = context.WithValue(ctx, standard.ContextAccessToken, c.Config.Token)
+
+	logger := LoggerFromContext(ctx)
+	logger.Info().Msgf("Attaching Subnet to VPC for org: %s", c.Config.Org)
+
+	return NewSubnetManager(c).AttachVpc(ctx, id, request)
 }
 
 // VPC

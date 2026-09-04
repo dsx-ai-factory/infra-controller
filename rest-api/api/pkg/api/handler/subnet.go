@@ -162,6 +162,34 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where the Subnet is being created must be in Registered state in order to proceed", nil)
 	}
 
+	// Resolve the public REST Domain ID to the Site-facing Core Domain ID.
+	// The local ID remains the persisted Subnet relation.
+	var domain *cdbm.Domain
+	if apiRequest.SubdomainID != nil {
+		domainID, derr := uuid.Parse(*apiRequest.SubdomainID)
+		if derr != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid subdomainId in request data", nil)
+		}
+		domain, derr = cdbm.NewDomainDAO(csh.dbSession).GetByID(ctx, nil, domainID, nil)
+		if derr != nil {
+			if derr == cdb.ErrDoesNotExist {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find Domain specified by subdomainId", nil)
+			}
+			logger.Error().Err(derr).Msg("error retrieving Domain specified by subdomainId")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Domain specified by subdomainId", nil)
+		}
+		if domain.TenantID == nil || *domain.TenantID != tenant.ID {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Domain specified by subdomainId does not belong to the Tenant", nil)
+		}
+		if domain.SiteID == nil || *domain.SiteID != site.ID {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Domain specified by subdomainId does not belong to the VPC Site", nil)
+		}
+		if domain.Status != cdbm.DomainStatusReady || domain.ControllerDomainID == nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Domain specified by subdomainId must be in Ready state", nil)
+		}
+		apiRequest.ControllerDomainID = domain.ControllerDomainID
+	}
+
 	// Validate the Ready, tenant-allocated IPv4 IP block for this Subnet.
 	// Model validation ensures IPv4BlockID is non-nil.
 	ipBlockFilter := cdbm.IPBlockFilterInput{}
@@ -247,6 +275,11 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Could not create IPAM entry for Subnet. Details: %s", derr.Error()), nil)
 		}
 
+		var domainID *uuid.UUID
+		if domain != nil {
+			domainID = &domain.ID
+		}
+
 		// Create Subnet in DB
 		subnet, derr = sDAO.Create(
 			ctx, tx, cdbm.SubnetCreateInput{
@@ -255,6 +288,7 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 				Org:          org,
 				SiteID:       site.ID,
 				VpcID:        vpc.ID,
+				DomainID:     domainID,
 				TenantID:     tenant.ID,
 				RoutingType:  &routingType,
 				IPv4Prefix:   &ipv4Prefix,
@@ -917,6 +951,198 @@ func (ush UpdateSubnetHandler) Handle(c echo.Context) error {
 	apiInstance := model.NewAPISubnet(subnet, ssds, nil)
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusOK, apiInstance)
+}
+
+// ~~~~~ Attach VPC Handler ~~~~~ //
+
+// AttachSubnetVpcHandler reassigns an unallocated tenant Subnet to another Ethernet virtualizer VPC.
+type AttachSubnetVpcHandler struct {
+	dbSession  *cdb.Session
+	scp        *sc.ClientPool
+	tracerSpan *cutil.TracerSpan
+}
+
+// NewAttachSubnetVpcHandler initializes and returns a Subnet VPC attachment handler.
+func NewAttachSubnetVpcHandler(dbSession *cdb.Session, scp *sc.ClientPool) AttachSubnetVpcHandler {
+	return AttachSubnetVpcHandler{
+		dbSession:  dbSession,
+		scp:        scp,
+		tracerSpan: cutil.NewTracerSpan(),
+	}
+}
+
+// Handle godoc
+// @Summary Attach an existing Subnet to a VPC
+// @Description Reassigns an unallocated tenant Subnet between Ethernet virtualizer VPCs at the same Site.
+// @Tags Subnet
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param subnetId path string true "ID of Subnet"
+// @Param message body model.APISubnetAttachVpcRequest true "Subnet attach VPC request"
+// @Success 200 {object} model.APISubnet
+// @Router /v2/org/{org}/nico/subnet/{subnetId}/attach-vpc [post]
+func (asvh AttachSubnetVpcHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Subnet", "AttachVpc", c, asvh.tracerSpan)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+	if dbUser == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	ok, err := auth.ValidateOrgMembership(dbUser, org)
+	if !ok {
+		if err != nil {
+			logger.Error().Err(err).Msg("error validating org membership for User in request")
+		} else {
+			logger.Warn().Msg("could not validate org membership for user, access denied")
+		}
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
+	}
+	if !auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole) {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Tenant Admin role with org", nil)
+	}
+
+	apiRequest := model.APISubnetAttachVpcRequest{}
+	err = c.Bind(&apiRequest)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+	err = apiRequest.Validate()
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating Subnet attach VPC request data", err)
+	}
+
+	subnetID, err := uuid.Parse(c.Param("subnetId"))
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Subnet ID in URL", nil)
+	}
+	tenant, err := common.GetTenantForOrg(ctx, nil, asvh.dbSession, org)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error retrieving Tenant from org", nil)
+	}
+
+	subnetDAO := cdbm.NewSubnetDAO(asvh.dbSession)
+	subnet, err := subnetDAO.GetByID(ctx, nil, subnetID, []string{cdbm.VpcRelationName})
+	if err != nil {
+		if err == cdb.ErrDoesNotExist {
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Subnet to attach to VPC", nil)
+		}
+		logger.Error().Err(err).Msg("error retrieving Subnet to attach to VPC")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Subnet to attach to VPC", nil)
+	}
+	if subnet.TenantID != tenant.ID {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant for Subnet does not match tenant in org", nil)
+	}
+	if subnet.ControllerNetworkSegmentID == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Subnet must have a Controller Network Segment ID to attach to a VPC", nil)
+	}
+	if subnet.Vpc == nil || subnet.Vpc.TenantID != tenant.ID || subnet.Vpc.SiteID != subnet.SiteID {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Subnet must belong to a valid VPC at its Site", nil)
+	}
+	if subnet.Vpc.ControllerVpcID == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Subnet source VPC must have a Controller VPC ID", nil)
+	}
+	// A nil type is the legacy representation of an Ethernet virtualizer VPC.
+	if subnet.Vpc.NetworkVirtualizationType != nil &&
+		*subnet.Vpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizer &&
+		*subnet.Vpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizerWithNVUE {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Subnet must belong to an Ethernet virtualizer VPC", nil)
+	}
+
+	targetVpc, err := common.GetVpcFromIDString(ctx, nil, apiRequest.VpcID, nil, asvh.dbSession)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find VPC specified in request", nil)
+	}
+	if targetVpc.TenantID != tenant.ID {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Target VPC does not belong to the Tenant", nil)
+	}
+	if targetVpc.SiteID != subnet.SiteID {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Target VPC and Subnet must belong to the same Site", nil)
+	}
+	if targetVpc.NetworkVirtualizationType != nil &&
+		*targetVpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizer &&
+		*targetVpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizerWithNVUE {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Target VPC must be an Ethernet virtualizer VPC", nil)
+	}
+	sourceVirtualizationType := cdbm.VpcEthernetVirtualizer
+	if subnet.Vpc.NetworkVirtualizationType != nil {
+		sourceVirtualizationType = *subnet.Vpc.NetworkVirtualizationType
+	}
+	targetVirtualizationType := cdbm.VpcEthernetVirtualizer
+	if targetVpc.NetworkVirtualizationType != nil {
+		targetVirtualizationType = *targetVpc.NetworkVirtualizationType
+	}
+	if sourceVirtualizationType != targetVirtualizationType {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Target VPC must use the same network virtualization type as the Subnet source VPC", nil)
+	}
+	if targetVpc.ControllerVpcID == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Target VPC must have a Controller VPC ID", nil)
+	}
+	_, interfaceCount, err := cdbm.NewInterfaceDAO(asvh.dbSession).GetAll(
+		ctx,
+		nil,
+		cdbm.InterfaceFilterInput{SubnetID: &subnet.ID},
+		paginator.PageInput{Limit: cutil.GetPtr(0)},
+		nil,
+	)
+	if err != nil {
+		logger.Error().Err(err).Msg("error retrieving Interfaces for Subnet")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Interfaces for Subnet", nil)
+	}
+	if interfaceCount > 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Subnet is being used by one or more Instances and cannot be attached to another VPC", nil)
+	}
+
+	stc, err := asvh.scp.GetClientByID(subnet.SiteID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+	apiRequest.ControllerNetworkSegmentID = *subnet.ControllerNetworkSegmentID
+	apiRequest.ControllerVpcID = *targetVpc.ControllerVpcID
+	coreResponse := &corev1.NetworkSegment{}
+	apiErr := common.ExecuteCoreGRPC(
+		ctx,
+		stc,
+		corev1.Forge_AttachNetworkSegmentToVpc_FullMethodName,
+		apiRequest.ToProto(),
+		coreResponse,
+		subnet.SiteID.String(),
+	)
+	if apiErr != nil {
+		logAPIError(logger, apiErr, "failed to attach Subnet to VPC")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+	}
+	if coreResponse.GetId().GetValue() != subnet.ControllerNetworkSegmentID.String() ||
+		coreResponse.GetConfig().GetSegmentType() != corev1.NetworkSegmentType_TENANT ||
+		coreResponse.GetConfig().GetVpcId().GetValue() != targetVpc.ControllerVpcID.String() {
+		logger.Error().Msg("Core returned an unexpected Network Segment after attaching Subnet to VPC")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Core returned an unexpected Subnet attachment response", nil)
+	}
+
+	updatedSubnet, err := cdb.WithTxResult(ctx, asvh.dbSession, func(tx *cdb.Tx) (*cdbm.Subnet, error) {
+		result, derr := subnetDAO.Update(ctx, tx, cdbm.SubnetUpdateInput{SubnetId: subnet.ID, VpcID: &targetVpc.ID})
+		if derr != nil {
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Subnet VPC", nil)
+		}
+		return result, nil
+	})
+	if err != nil {
+		return common.HandleTxError(c, logger, err, "Failed to update Subnet VPC, DB transaction error")
+	}
+	updatedSubnet.Vpc = targetVpc
+
+	statusDetailDAO := cdbm.NewStatusDetailDAO(asvh.dbSession)
+	statusDetails, _, err := statusDetailDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{subnet.ID.String()}}, paginator.PageInput{Limit: cutil.GetPtr(pagination.MaxPageSize)})
+	if err != nil {
+		logger.Warn().Err(err).Msg("error retrieving Status Details for Subnet after VPC attachment")
+		statusDetails = nil
+	}
+
+	return c.JSON(http.StatusOK, model.NewAPISubnet(updatedSubnet, statusDetails, nil))
 }
 
 // ~~~~~ Delete Handler ~~~~~ //

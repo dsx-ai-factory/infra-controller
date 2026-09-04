@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 
 	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
@@ -26,9 +27,14 @@ const (
 	DomainStatusError = "DomainStatusError"
 	// DomainRelationName is the relation name for the Domain model
 	DomainRelationName = "Domain"
+	// DomainOrderByDefault is the default field used to order Domains.
+	DomainOrderByDefault = "created"
 )
 
 var (
+	// DomainOrderByFields is the list of fields supported by Domain pagination.
+	DomainOrderByFields   = []string{"name", "created", "updated"}
+	domainOrderByDBFields = []string{"hostname", "created", "updated"}
 	// DomainStatusMap is a list of valid status for the Domain model
 	DomainStatusMap = map[string]bool{
 		DomainStatusPending:     true,
@@ -42,6 +48,8 @@ var (
 type DomainCreateInput struct {
 	Hostname           string
 	Org                string
+	TenantID           *uuid.UUID
+	SiteID             *uuid.UUID
 	ControllerDomainID *uuid.UUID
 	Status             string
 	CreatedBy          uuid.UUID
@@ -64,8 +72,11 @@ type DomainClearInput struct {
 
 // DomainFilterInput input parameters for GetAll method
 type DomainFilterInput struct {
+	DomainIDs          []uuid.UUID
 	Hostname           *string
 	Org                *string
+	TenantIDs          []uuid.UUID
+	SiteIDs            []uuid.UUID
 	ControllerDomainID *uuid.UUID
 	Status             *string
 }
@@ -78,6 +89,8 @@ type Domain struct {
 	ID                 uuid.UUID  `bun:"type:uuid,pk"`
 	Hostname           string     `bun:"hostname,notnull"`
 	Org                string     `bun:"org,notnull"`
+	TenantID           *uuid.UUID `bun:"tenant_id,type:uuid"`
+	SiteID             *uuid.UUID `bun:"site_id,type:uuid"`
 	ControllerDomainID *uuid.UUID `bun:"controller_domain_id,type:uuid"`
 	Status             string     `bun:"status,notnull"`
 	Created            time.Time  `bun:"created,nullzero,notnull,default:current_timestamp"`
@@ -107,7 +120,7 @@ type DomainDAO interface {
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Domain, error)
 	//
-	GetAll(ctx context.Context, tx *db.Tx, filter DomainFilterInput, includeRelations []string) ([]Domain, error)
+	GetAll(ctx context.Context, tx *db.Tx, filter DomainFilterInput, page paginator.PageInput, includeRelations []string) ([]Domain, int, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input DomainUpdateInput) (*Domain, error)
 	//
@@ -136,6 +149,8 @@ func (dsd DomainSQLDAO) Create(ctx context.Context, tx *db.Tx, input DomainCreat
 		ID:                 uuid.New(),
 		Hostname:           input.Hostname,
 		Org:                input.Org,
+		TenantID:           input.TenantID,
+		SiteID:             input.SiteID,
 		ControllerDomainID: input.ControllerDomainID,
 		Status:             input.Status,
 		CreatedBy:          input.CreatedBy,
@@ -189,7 +204,9 @@ func (dsd DomainSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, in
 // Optional filters can be specified on hostname, org, controllerDomainID
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
-func (dsd DomainSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DomainFilterInput, includeRelations []string) ([]Domain, error) {
+// if orderBy is nil, records are ordered by DomainOrderByDefault and ID in
+// ascending order so pagination remains deterministic when timestamps match.
+func (dsd DomainSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DomainFilterInput, page paginator.PageInput, includeRelations []string) ([]Domain, int, error) {
 	// Create a child span and set the attributes for current request
 	ctx, domainDAOSpan := dsd.tracerSpan.CreateChildInCurrentContext(ctx, "DomainDAO.GetAll")
 	if domainDAOSpan != nil {
@@ -200,6 +217,9 @@ func (dsd DomainSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DomainFilt
 
 	query := db.GetIDB(tx, dsd.dbSession).NewSelect().Model(&d)
 
+	if len(filter.DomainIDs) > 0 {
+		query = query.Where("d.id IN (?)", bun.In(filter.DomainIDs))
+	}
 	if filter.Hostname != nil {
 		query = query.Where("d.hostname = ?", *filter.Hostname)
 
@@ -213,6 +233,12 @@ func (dsd DomainSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DomainFilt
 		if domainDAOSpan != nil {
 			dsd.tracerSpan.SetAttribute(domainDAOSpan, "org", *filter.Org)
 		}
+	}
+	if len(filter.TenantIDs) > 0 {
+		query = query.Where("d.tenant_id IN (?)", bun.In(filter.TenantIDs))
+	}
+	if len(filter.SiteIDs) > 0 {
+		query = query.Where("d.site_id IN (?)", bun.In(filter.SiteIDs))
 	}
 	if filter.ControllerDomainID != nil {
 		query = query.Where("d.controller_domain_id = ?", *filter.ControllerDomainID)
@@ -233,13 +259,23 @@ func (dsd DomainSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DomainFilt
 		query = query.Relation(relation)
 	}
 
-	err := query.Scan(ctx)
-
-	if err != nil {
-		return nil, err
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(DomainOrderByDefault)
+	} else if page.OrderBy.Field == "name" {
+		page.OrderBy = &paginator.OrderBy{Field: "hostname", Order: page.OrderBy.Order}
 	}
 
-	return d, nil
+	domainPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, domainOrderByDBFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = domainPaginator.Query.Order("d.id ASC").Limit(domainPaginator.Limit).Offset(domainPaginator.Offset).Scan(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return d, domainPaginator.Total, nil
 }
 
 // Update updates specified fields of an existing Domain

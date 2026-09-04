@@ -87,6 +87,24 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 		logger.Info().Msg("No Subnets found for Site")
 	}
 
+	vpcs, _, err := cdbm.NewVpcDAO(ms.dbSession).GetAll(
+		ctx,
+		nil,
+		cdbm.VpcFilterInput{SiteIDs: []uuid.UUID{site.ID}},
+		cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+		nil,
+	)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to get VPCs for Site from DB")
+		return nil, err
+	}
+	vpcByControllerID := make(map[string]cdbm.Vpc, len(vpcs))
+	for _, vpc := range vpcs {
+		if vpc.ControllerVpcID != nil {
+			vpcByControllerID[vpc.ControllerVpcID.String()] = vpc
+		}
+	}
+
 	// Construct a map of Controller Segment ID to Subnet
 	existingSubnetIDMap := make(map[string]*cdbm.Subnet)
 	existingSubnetCtrlIDMap := make(map[string]*cdbm.Subnet)
@@ -178,17 +196,37 @@ func (ms ManageSubnet) UpdateSubnetsInDB(ctx context.Context, siteID uuid.UUID, 
 			controllerSegmentID = &ctrlID
 		}
 
-		var mtu *int
 		cfg := controllerSegment.GetConfig()
+		var vpcID *uuid.UUID
+		if cfg.GetVpcId().GetValue() != "" {
+			controllerVpcID := cfg.GetVpcId().GetValue()
+			reportedVpc, found := vpcByControllerID[controllerVpcID]
+			switch {
+			case cfg.GetSegmentType() != corev1.NetworkSegmentType_TENANT:
+				slogger.Error().Str("Controller VPC ID", controllerVpcID).Msg("refusing to reconcile a non-tenant Network Segment to a tenant Subnet")
+			case !found:
+				slogger.Error().Str("Controller VPC ID", controllerVpcID).Msg("could not map the Network Segment VPC to a REST VPC at this Site")
+			case reportedVpc.TenantID != subnet.TenantID:
+				slogger.Error().Str("Controller VPC ID", controllerVpcID).Msg("refusing to reconcile Subnet to a VPC owned by another Tenant")
+			case reportedVpc.NetworkVirtualizationType != nil &&
+				*reportedVpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizer &&
+				*reportedVpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizerWithNVUE:
+				slogger.Error().Str("Controller VPC ID", controllerVpcID).Msg("refusing to reconcile tenant Subnet to a non-Ethernet-virtualizer VPC")
+			case reportedVpc.ID != subnet.VpcID:
+				vpcID = &reportedVpc.ID
+			}
+		}
+
+		var mtu *int
 		if cfg != nil && cfg.Mtu != nil {
 			mtuVal := int(*cfg.Mtu)
 			mtu = &mtuVal
 		}
 
-		if mtu != nil || isMissingOnSite != nil || controllerSegmentID != nil {
-			_, serr := subnetDAO.Update(ctx, nil, cdbm.SubnetUpdateInput{SubnetId: subnet.ID, ControllerNetworkSegmentID: controllerSegmentID, Mtu: mtu, IsMissingOnSite: cwutil.GetPtr(false)})
+		if mtu != nil || isMissingOnSite != nil || controllerSegmentID != nil || vpcID != nil {
+			_, serr := subnetDAO.Update(ctx, nil, cdbm.SubnetUpdateInput{SubnetId: subnet.ID, VpcID: vpcID, ControllerNetworkSegmentID: controllerSegmentID, Mtu: mtu, IsMissingOnSite: cwutil.GetPtr(false)})
 			if serr != nil {
-				slogger.Error().Err(serr).Msg("failed to update MTU/missing on Site flag/controller Segment ID in DB")
+				slogger.Error().Err(serr).Msg("failed to update VPC/MTU/missing on Site flag/controller Segment ID in DB")
 				continue
 			}
 		}

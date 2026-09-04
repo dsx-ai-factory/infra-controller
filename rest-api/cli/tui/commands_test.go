@@ -366,7 +366,7 @@ func TestAppendScopeFlags_SiteOnly(t *testing.T) {
 		"vpc", "allocation", "ip-block", "operating-system", "ssh-key-group",
 		"network-security-group", "sku", "rack", "expected-machine",
 		"expected-rack", "expected-switch", "expected-power-shelf", "tray",
-		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
+		"dpu-machine", "dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 	}
 
 	s := &Session{Scope: Scope{SiteID: "site-1", VpcID: "vpc-1"}}
@@ -448,7 +448,7 @@ func TestAppendScopeFlags_CoversAllRegisteredFetchers(t *testing.T) {
 		"ssh-key-group", "network-security-group",
 		"sku", "rack", "expected-machine", "vpc-prefix",
 		"expected-rack", "expected-switch", "expected-power-shelf", "tray",
-		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
+		"dpu-machine", "dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 	}
 
 	s := &Session{Scope: Scope{SiteID: "site-1", VpcID: "vpc-1"}}
@@ -468,7 +468,7 @@ func TestInvalidateFiltered_MatchesScopeFilteredFetchers(t *testing.T) {
 		"ssh-key-group", "network-security-group",
 		"vpc-prefix", "rack", "expected-machine",
 		"expected-rack", "expected-switch", "expected-power-shelf", "tray", "sku",
-		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
+		"dpu-machine", "dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 	}
 
 	c := NewCache()
@@ -506,7 +506,7 @@ func TestAppendScopeFlags_ScopeFlagCategories_Consistent(t *testing.T) {
 		"ssh-key-group", "network-security-group",
 		"sku", "rack", "expected-machine", "vpc-prefix",
 		"expected-rack", "expected-switch", "expected-power-shelf", "tray",
-		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
+		"dpu-machine", "dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 	}
 
 	for _, resource := range allScoped {
@@ -1167,6 +1167,125 @@ func TestFilterSubnetVPCs(t *testing.T) {
 				return
 			}
 			require.Equal(t, []NamedItem{test.vpc}, got)
+		})
+	}
+}
+
+func TestFilterSubnetAttachVPCs(t *testing.T) {
+	eligible := NamedItem{
+		Name:   "Target VPC",
+		ID:     "vpc-1",
+		Status: "Ready",
+		Extra: map[string]string{
+			"networkVirtualizationType": "ETHERNET_VIRTUALIZER",
+			"siteId":                    "site-1",
+			"tenantId":                  "tenant-1",
+		},
+	}
+	tests := []struct {
+		name                       string
+		mutate                     func(*NamedItem)
+		excludedID                 string
+		requiredVirtualizationType string
+		wantIncluded               bool
+	}{
+		{name: "matching Ready tenant Ethernet virtualizer included", requiredVirtualizationType: "ETHERNET_VIRTUALIZER", wantIncluded: true},
+		{name: "pending excluded", mutate: func(vpc *NamedItem) { vpc.Status = "Pending" }},
+		{name: "legacy untyped matches Ethernet virtualizer", mutate: func(vpc *NamedItem) { delete(vpc.Extra, "networkVirtualizationType") }, requiredVirtualizationType: "ETHERNET_VIRTUALIZER", wantIncluded: true},
+		{name: "Ethernet virtualizer with NVUE matches same mode", mutate: func(vpc *NamedItem) { vpc.Extra["networkVirtualizationType"] = "ETHERNET_VIRTUALIZER_WITH_NVUE" }, requiredVirtualizationType: "ETHERNET_VIRTUALIZER_WITH_NVUE", wantIncluded: true},
+		{name: "Ethernet virtualizer with NVUE excluded for Ethernet virtualizer source", mutate: func(vpc *NamedItem) { vpc.Extra["networkVirtualizationType"] = "ETHERNET_VIRTUALIZER_WITH_NVUE" }, requiredVirtualizationType: "ETHERNET_VIRTUALIZER"},
+		{name: "Ethernet virtualizer excluded for NVUE source", requiredVirtualizationType: "ETHERNET_VIRTUALIZER_WITH_NVUE"},
+		{name: "FNN excluded", mutate: func(vpc *NamedItem) { vpc.Extra["networkVirtualizationType"] = "FNN" }},
+		{name: "other Site excluded", mutate: func(vpc *NamedItem) { vpc.Extra["siteId"] = "site-2" }},
+		{name: "other Tenant excluded", mutate: func(vpc *NamedItem) { vpc.Extra["tenantId"] = "tenant-2" }},
+		{name: "missing Tenant excluded", mutate: func(vpc *NamedItem) { delete(vpc.Extra, "tenantId") }},
+		{name: "source VPC excluded from targets", excludedID: "vpc-1"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			vpc := eligible
+			vpc.Extra = map[string]string{
+				"networkVirtualizationType": eligible.Extra["networkVirtualizationType"],
+				"siteId":                    eligible.Extra["siteId"],
+				"tenantId":                  eligible.Extra["tenantId"],
+			}
+			if test.mutate != nil {
+				test.mutate(&vpc)
+			}
+			got := filterSubnetAttachVPCs([]NamedItem{vpc}, "site-1", "tenant-1", test.excludedID, test.requiredVirtualizationType)
+			if !test.wantIncluded {
+				assert.Empty(t, got)
+				return
+			}
+			require.Equal(t, []NamedItem{vpc}, got)
+		})
+	}
+}
+
+func TestFilterSubnetAttachSources(t *testing.T) {
+	eligibleVPC := NamedItem{
+		ID:     "vpc-1",
+		Status: "Ready",
+		Extra: map[string]string{
+			"networkVirtualizationType": "ETHERNET_VIRTUALIZER",
+			"siteId":                    "site-1",
+			"tenantId":                  "tenant-1",
+		},
+	}
+	eligibleSubnet := NamedItem{
+		ID:     "subnet-1",
+		Status: "Ready",
+		Extra: map[string]string{
+			"siteId":      "site-1",
+			"vpcId":       "vpc-1",
+			"acquiredIPs": "2",
+		},
+	}
+	tests := []struct {
+		name         string
+		mutateVPC    func(*NamedItem)
+		mutateSubnet func(*NamedItem)
+		wantIncluded bool
+	}{
+		{name: "Ready unallocated tenant Subnet included", wantIncluded: true},
+		{name: "pending Subnet excluded", mutateSubnet: func(subnet *NamedItem) { subnet.Status = "Pending" }},
+		{name: "other Site Subnet excluded", mutateSubnet: func(subnet *NamedItem) { subnet.Extra["siteId"] = "site-2" }},
+		{name: "missing usage excluded", mutateSubnet: func(subnet *NamedItem) { delete(subnet.Extra, "acquiredIPs") }},
+		{name: "Subnet with workload IP excluded", mutateSubnet: func(subnet *NamedItem) { subnet.Extra["acquiredIPs"] = "3" }},
+		{name: "Subnet without source VPC excluded", mutateSubnet: func(subnet *NamedItem) { subnet.Extra["vpcId"] = "vpc-missing" }},
+		{name: "pending source VPC excluded", mutateVPC: func(vpc *NamedItem) { vpc.Status = "Pending" }},
+		{name: "other Tenant source VPC excluded", mutateVPC: func(vpc *NamedItem) { vpc.Extra["tenantId"] = "tenant-2" }},
+		{name: "FNN source VPC excluded", mutateVPC: func(vpc *NamedItem) { vpc.Extra["networkVirtualizationType"] = "FNN" }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			vpc := eligibleVPC
+			vpc.Extra = map[string]string{
+				"networkVirtualizationType": eligibleVPC.Extra["networkVirtualizationType"],
+				"siteId":                    eligibleVPC.Extra["siteId"],
+				"tenantId":                  eligibleVPC.Extra["tenantId"],
+			}
+			subnet := eligibleSubnet
+			subnet.Extra = map[string]string{
+				"siteId":      eligibleSubnet.Extra["siteId"],
+				"vpcId":       eligibleSubnet.Extra["vpcId"],
+				"acquiredIPs": eligibleSubnet.Extra["acquiredIPs"],
+			}
+			if test.mutateVPC != nil {
+				test.mutateVPC(&vpc)
+			}
+			if test.mutateSubnet != nil {
+				test.mutateSubnet(&subnet)
+			}
+
+			got := filterSubnetAttachSources([]NamedItem{subnet}, []NamedItem{vpc}, "site-1", "tenant-1")
+			if !test.wantIncluded {
+				assert.Empty(t, got)
+				return
+			}
+			require.Equal(t, []NamedItem{subnet}, got)
 		})
 	}
 }

@@ -137,18 +137,26 @@ pub(crate) async fn delete(
     let req = request.into_inner();
     let uuid = req.id.ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let domain =
-        domain::find_by_uuid(&mut txn, uuid)
-            .await?
-            .ok_or_else(|| CarbideError::NotFoundError {
-                kind: "domain",
-                id: uuid.to_string(),
-            })?;
+    let domain = domain::find_by_uuid_for_delete(txn.as_mut(), uuid)
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "domain",
+            id: uuid.to_string(),
+        })?;
+
+    if domain.deleted.is_some() {
+        txn.commit().await?;
+        return Ok(Response::new(DomainDeletionResult {}));
+    }
 
     db::dns::lock_reverse_zone_names(&mut txn, std::slice::from_ref(&domain.name)).await?;
 
-    // TODO: This needs to validate that nothing references the domain anymore
-    // (like NetworkSegments)
+    if domain::has_live_references(txn.as_mut(), uuid).await? {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "domain {uuid} is still referenced by a network segment or machine interface"
+        ))
+        .into());
+    }
 
     domain::delete(domain, &mut txn).await?;
 

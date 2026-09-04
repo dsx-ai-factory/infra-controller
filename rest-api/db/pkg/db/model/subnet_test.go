@@ -643,6 +643,46 @@ func TestSubnetSQLDAO_Create(t *testing.T) {
 	}
 }
 
+func TestSubnetSQLDAO_UpdateVpcPreservesDomainID(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSubnetInitDB(t)
+	defer dbSession.Close()
+	testSubnetSetupSchema(t, dbSession)
+
+	provider := testSubnetBuildInfrastructureProvider(t, dbSession, "testIP")
+	site := testSubnetBuildSite(t, dbSession, provider, "testSite")
+	tenant := testSubnetBuildTenant(t, dbSession, "testTenant")
+	sourceVpc := testSubnetBuildVpc(t, dbSession, provider, site, tenant, "sourceVpc")
+	targetVpc := testSubnetBuildVpc(t, dbSession, provider, site, tenant, "targetVpc")
+	domain := testSubnetBuildDomain(t, dbSession, "testDomain")
+	user := testSubnetBuildUser(t, dbSession, "testUser")
+
+	subnetDAO := NewSubnetDAO(dbSession)
+	subnet, err := subnetDAO.Create(ctx, nil, SubnetCreateInput{
+		Name:         "testSubnet",
+		Org:          "test",
+		SiteID:       site.ID,
+		VpcID:        sourceVpc.ID,
+		DomainID:     &domain.ID,
+		TenantID:     tenant.ID,
+		PrefixLength: 24,
+		Status:       SubnetStatusReady,
+		CreatedBy:    user.ID,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, subnet.DomainID)
+	assert.Equal(t, domain.ID, *subnet.DomainID)
+
+	updatedSubnet, err := subnetDAO.Update(ctx, nil, SubnetUpdateInput{
+		SubnetId: subnet.ID,
+		VpcID:    &targetVpc.ID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, targetVpc.ID, updatedSubnet.VpcID)
+	require.NotNil(t, updatedSubnet.DomainID)
+	assert.Equal(t, domain.ID, *updatedSubnet.DomainID)
+}
+
 func TestSubnetSQLDAO_GetByID(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testSubnetInitDB(t)

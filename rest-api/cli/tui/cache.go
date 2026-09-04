@@ -54,12 +54,12 @@ func (c *Cache) InvalidateAll() {
 }
 
 func (c *Cache) InvalidateFiltered() {
-	for _, rt := range []string{"vpc", "subnet", "instance", "instance-type",
+	for _, rt := range []string{"vpc", "domain", "subnet", "instance", "instance-type",
 		"allocation", "machine", "ip-block", "operating-system",
 		"ssh-key-group", "network-security-group",
 		"vpc-prefix", "rack", "expected-machine",
 		"expected-rack", "expected-switch", "expected-power-shelf", "tray", "sku",
-		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
+		"dpu-machine", "dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 		"ipxe-template", "rule", "task-run", "vpc-peering", "tray-component"} {
 		delete(c.items, rt)
 		delete(c.fetched, rt)

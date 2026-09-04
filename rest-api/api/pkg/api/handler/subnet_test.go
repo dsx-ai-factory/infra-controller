@@ -26,6 +26,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -140,6 +141,21 @@ func TestSubnetHandler_Create(t *testing.T) {
 	vpc7 := testSubnetBuildVpc(t, dbSession, ip, tenant2, site4, tnOrg2, "testVPC", cutil.GetPtr(cdbm.VpcEthernetVirtualizer), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 	vpc8 := testSubnetBuildVpc(t, dbSession, ip, tenant1, site, tnOrg1, "testVPC", cutil.GetPtr(cdbm.VpcFNN), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 	vpcLegacy := testSubnetBuildVpc(t, dbSession, ip, tenant1, site, tnOrg1, "legacyVPC", nil, cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
+	buildDomain := func(hostname string, tenant *cdbm.Tenant, domainSite *cdbm.Site, status string, controllerDomainID *uuid.UUID) *cdbm.Domain {
+		domain := &cdbm.Domain{
+			ID: uuid.New(), Hostname: hostname, Org: tenant.Org, TenantID: &tenant.ID, SiteID: &domainSite.ID,
+			ControllerDomainID: controllerDomainID, Status: status, CreatedBy: tnu.ID,
+		}
+		_, createErr := dbSession.DB.NewInsert().Model(domain).Exec(ctx)
+		require.NoError(t, createErr)
+		return domain
+	}
+	controllerDomainID := uuid.New()
+	domain := buildDomain("ready.example.com", tenant1, site, cdbm.DomainStatusReady, &controllerDomainID)
+	otherTenantDomain := buildDomain("other-tenant.example.com", tenant2, site, cdbm.DomainStatusReady, cutil.GetPtr(uuid.New()))
+	otherSiteDomain := buildDomain("other-site.example.com", tenant1, site2, cdbm.DomainStatusReady, cutil.GetPtr(uuid.New()))
+	pendingDomain := buildDomain("pending.example.com", tenant1, site, cdbm.DomainStatusPending, cutil.GetPtr(uuid.New()))
+	domainWithoutControllerID := buildDomain("unregistered.example.com", tenant1, site, cdbm.DomainStatusReady, nil)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -224,6 +240,18 @@ func TestSubnetHandler_Create(t *testing.T) {
 	prefixLen := 24
 	okBody, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
+	okBodyWithDomain, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok-domain", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), SubdomainID: cutil.GetPtr(domain.ID.String()), PrefixLength: prefixLen})
+	assert.Nil(t, err)
+	errBodyMissingDomain, err := json.Marshal(model.APISubnetCreateRequest{Name: "missing-domain", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), SubdomainID: cutil.GetPtr(uuid.NewString()), PrefixLength: prefixLen})
+	assert.Nil(t, err)
+	errBodyOtherTenantDomain, err := json.Marshal(model.APISubnetCreateRequest{Name: "other-tenant-domain", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), SubdomainID: cutil.GetPtr(otherTenantDomain.ID.String()), PrefixLength: prefixLen})
+	assert.Nil(t, err)
+	errBodyOtherSiteDomain, err := json.Marshal(model.APISubnetCreateRequest{Name: "other-site-domain", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), SubdomainID: cutil.GetPtr(otherSiteDomain.ID.String()), PrefixLength: prefixLen})
+	assert.Nil(t, err)
+	errBodyPendingDomain, err := json.Marshal(model.APISubnetCreateRequest{Name: "pending-domain", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), SubdomainID: cutil.GetPtr(pendingDomain.ID.String()), PrefixLength: prefixLen})
+	assert.Nil(t, err)
+	errBodyDomainWithoutControllerID, err := json.Marshal(model.APISubnetCreateRequest{Name: "domain-without-controller-id", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), SubdomainID: cutil.GetPtr(domainWithoutControllerID.ID.String()), PrefixLength: prefixLen})
+	assert.Nil(t, err)
 	okBodyLegacyVpc, err := json.Marshal(model.APISubnetCreateRequest{Name: "legacy-vpc", Description: cutil.GetPtr(""), VpcID: vpcLegacy.ID.String(), IPv4BlockID: cutil.GetPtr(ipbLegacy.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 	errBodyPendingIPv4Block, err := json.Marshal(model.APISubnetCreateRequest{Name: "pending-ip-block", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipbPending.ID.String()), PrefixLength: prefixLen})
@@ -292,6 +320,8 @@ func TestSubnetHandler_Create(t *testing.T) {
 		expectedErrMsg     string
 		expectedGateway    string
 		expectedPrefix     string
+		expectedSubdomain  *uuid.UUID
+		expectedCoreDomain *uuid.UUID
 		verifyChildSpanner bool
 	}{
 		{
@@ -453,6 +483,57 @@ func TestSubnetHandler_Create(t *testing.T) {
 			expectedPrefix:  "192.168.0.0",
 		},
 		{
+			name:               "successfully resolves a tenant Site Domain for Core",
+			reqOrgName:         tnOrg1,
+			reqBody:            string(okBodyWithDomain),
+			user:               tnu,
+			expectedStatus:     http.StatusCreated,
+			expectedGateway:    "192.168.1.1",
+			expectedPrefix:     "192.168.1.0",
+			expectedSubdomain:  &domain.ID,
+			expectedCoreDomain: &controllerDomainID,
+		},
+		{
+			name:           "rejects a missing Domain",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyMissingDomain),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "rejects another Tenant's Domain",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyOtherTenantDomain),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "rejects a Domain at another Site",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyOtherSiteDomain),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "rejects a Domain that is not Ready",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyPendingDomain),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "rejects a Domain without a Core ID",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyDomainWithoutControllerID),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
 			name:            "Ready legacy VPC without networkVirtualizationType remains compatible",
 			reqOrgName:      tnOrg1,
 			reqBody:         string(okBodyLegacyVpc),
@@ -480,8 +561,8 @@ func TestSubnetHandler_Create(t *testing.T) {
 			user:            tnu,
 			expectedErr:     false,
 			expectedStatus:  http.StatusCreated,
-			expectedGateway: "192.168.1.1",
-			expectedPrefix:  "192.168.1.0",
+			expectedGateway: "192.168.2.1",
+			expectedPrefix:  "192.168.2.0",
 		},
 		{
 			name:           "error case with /31",
@@ -582,6 +663,20 @@ func TestSubnetHandler_Create(t *testing.T) {
 				assert.Equal(t, tc.expectedGateway, *rsp.IPv4Gateway)
 
 				assert.Equal(t, cdbm.IPBlockRoutingTypeDatacenterOnly, *rsp.RoutingType)
+				if tc.expectedSubdomain != nil {
+					require.NotNil(t, rsp.SubdomainID)
+					assert.Equal(t, tc.expectedSubdomain.String(), *rsp.SubdomainID)
+					persistedSubnet, getErr := cdbm.NewSubnetDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(rsp.ID), nil)
+					require.NoError(t, getErr)
+					require.NotNil(t, persistedSubnet.DomainID)
+					assert.Equal(t, *tc.expectedSubdomain, *persistedSubnet.DomainID)
+				}
+				if tc.expectedCoreDomain != nil {
+					require.NotEmpty(t, tsc.Calls)
+					workflowRequest := tsc.Calls[len(tsc.Calls)-1].Arguments.Get(3).(*corev1.NetworkSegmentCreationRequest)
+					require.NotNil(t, workflowRequest.SubdomainId)
+					assert.Equal(t, tc.expectedCoreDomain.String(), workflowRequest.SubdomainId.Value)
+				}
 
 				// validate ipam exists for subnet
 				if tc.expectedIpam {

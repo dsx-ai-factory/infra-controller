@@ -142,7 +142,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.waitFor(t, "VPC prefix created: tenant-ipv6-prefix")
 
 		// Subnet creation must carry the selected Ethernet virtualizer VPC,
-		// tenant IPv4 block, and prefix length through the real terminal flow.
+		// tenant IPv4 block, Domain, and prefix length through the real terminal flow.
 		terminal.send(t, "subnet create\r")
 		terminal.waitFor(t, "Ready Ethernet virtualizer VPC:")
 		terminal.send(t, "vpc-one\r")
@@ -154,6 +154,9 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		terminal.send(t, "24\r")
 		terminal.waitFor(t, "Tenant IPv4 Block:")
 		terminal.send(t, "tenant-ready\r")
+		terminal.waitFor(t, "Assign a DNS Domain?")
+		terminal.send(t, "y\r")
+		terminal.waitFor(t, "DNS Domain:")
 		terminal.waitFor(t, "IPv4 Subnet created: tenant-subnet-created")
 
 		// Instance creation must stop before the API request when the selected
@@ -494,7 +497,7 @@ func TestCLIRegression_RealTerminalAndNonInteractive(t *testing.T) {
 		require.Len(t, subnetCreateRequests, 1)
 		assert.JSONEq(
 			t,
-			`{"name":"tenant-subnet-created","vpcId":"vpc-1","ipv4BlockId":"tenant-ready-id","prefixLength":24}`,
+			`{"name":"tenant-subnet-created","vpcId":"vpc-1","subdomainId":"domain-1","ipv4BlockId":"tenant-ready-id","prefixLength":24}`,
 			subnetCreateRequests[0].Body,
 		)
 
@@ -749,10 +752,15 @@ func newInteractiveRegressionHandler(recorder *cliRegressionRecorder) http.Handl
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/vpc":
 			_, _ = io.WriteString(w, `[
-				{"id":"vpc-1","name":"vpc-one","siteId":"site-1","status":"Ready","networkVirtualizationType":"ETHERNET_VIRTUALIZER"},
-				{"id":"vpc-2","name":"vpc-two","siteId":"site-1","status":"Ready","networkVirtualizationType":"FNN","slaacEnabled":true},
-				{"id":"vpc-flat","name":"flat-vpc","siteId":"site-1","status":"Ready","networkVirtualizationType":"FLAT"},
-				{"id":"vpc-allocated","name":"allocated-vpc","siteId":"site-2","status":"Ready","networkVirtualizationType":"ETHERNET_VIRTUALIZER"}
+					{"id":"vpc-1","name":"vpc-one","siteId":"site-1","tenantId":"tenant-1","status":"Ready","networkVirtualizationType":"ETHERNET_VIRTUALIZER"},
+					{"id":"vpc-2","name":"vpc-two","siteId":"site-1","tenantId":"tenant-1","status":"Ready","networkVirtualizationType":"FNN","slaacEnabled":true},
+					{"id":"vpc-flat","name":"flat-vpc","siteId":"site-1","tenantId":"tenant-1","status":"Ready","networkVirtualizationType":"FLAT"},
+					{"id":"vpc-allocated","name":"allocated-vpc","siteId":"site-2","tenantId":"tenant-1","status":"Ready","networkVirtualizationType":"ETHERNET_VIRTUALIZER"}
+				]`)
+		case request.Method == http.MethodGet &&
+			request.URL.Path == "/v2/org/acme/nico/domain":
+			_, _ = io.WriteString(w, `[
+				{"id":"domain-1","name":"tenant.example.com","siteId":"site-1","tenantId":"tenant-1"}
 			]`)
 		case request.Method == http.MethodGet &&
 			request.URL.Path == "/v2/org/acme/nico/subnet":
