@@ -435,13 +435,11 @@ func (oscr *APIOperatingSystemCreateRequest) ValidateAndSetUserData(phonehomeUrl
 	userData, err := util.EnablePhoneHomeInUserData(oscr.UserData, phonehomeUrl)
 	if errors.Is(err, util.ErrUnsupportedUserData) {
 		return validation.Errors{
-			"userData": errors.New("userData specified in request must be valid cloud-init YAML to enable phone home"),
+			"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
 		}
 	}
 	if err != nil {
-		return validation.Errors{
-			"userData": errors.New("failed to update userData with phone home config"),
-		}
+		return phoneHomeUserDataError(true)
 	}
 
 	oscr.UserData = userData
@@ -766,16 +764,14 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 	case errors.Is(err, util.ErrUnsupportedUserData):
 		if *mergedPhoneHomeEnabled {
 			return validation.Errors{
-				"userData": errors.New("userData specified in request must be valid cloud-init YAML to enable phone home"),
+				"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
 			}
 		}
 
 		// The UI always sends false when phone-home is unchecked, so user-data
 		// the block cannot be in is left alone rather than rejected.
 	case err != nil:
-		return validation.Errors{
-			"userData": errors.New("failed to update userData with phone home config"),
-		}
+		return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
 	case userData != nil:
 		// Empty means phone-home was all the user-data held, so the DB field is
 		// blanked; an emptied archive keeps its header instead.

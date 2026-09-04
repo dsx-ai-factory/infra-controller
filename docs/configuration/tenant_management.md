@@ -711,15 +711,15 @@ The instance detail response is rich -- it includes `interfaces[]` with assigned
 #cloud-config
 # ... your first-boot setup (SSH keys, passwords, packages, ...) ...
 phone_home:
-  url: http://169.254.169.254/latest/meta-data/phone_home
   post: all
+  url: http://169.254.169.254/latest/meta-data/phone_home
 ```
 
-The injected `url` is the site-configured phone-home endpoint (`site.phoneHomeUrl`; default `http://169.254.169.254/latest/meta-data/phone_home`), which the platform operator can override per deployment. If you supply no `userData`, NICo generates a minimal `#cloud-config` containing only the block above. Disabling phone-home reverses this. If your request supplies `userData`, NICo removes only a `phone_home` block reporting to the site endpoint, leaving one that reports somewhere else alone; if it does not, the document being edited is a stored blob NICo wrote, so every `phone_home` block in it is removed -- the URL frozen into it may predate a change to `site.phoneHomeUrl`.
+The injected `url` is the site-configured phone-home endpoint (`site.phoneHomeUrl`; default `http://169.254.169.254/latest/meta-data/phone_home`), which the platform operator can override per deployment. If you supply no `userData`, NICo generates a minimal `#cloud-config` containing only the block above. Disabling phone-home reverses this. If your request supplies `userData`, NICo removes only a `phone_home` block reporting to the site endpoint, leaving one that reports somewhere else alone; if it does not, the document being edited is a stored blob, and when that blob was stored with phone-home enabled its block is NICo's own, so every `phone_home` block in it is removed -- the URL frozen into it may predate a change to `site.phoneHomeUrl`.
 
-**Which user-data NICo can edit.** Because NICo rewrites your user-data as YAML, **`userData` you provide must be a `#cloud-config` mapping or a `#cloud-config-archive` sequence when phone-home is enabled**. The API rejects anything else -- such as a `#!` script, a `## template: jinja` document (NICo cannot render a template back), more than one YAML document, or text that is not YAML at all. User-data with no header is taken as `#cloud-config`. Disabling phone-home over user-data NICo cannot edit leaves it untouched rather than failing the request, so any `phone_home` block in there stays.
+**Which user-data NICo can edit.** Because NICo rewrites your user-data as YAML, **`userData` you provide must be a `#cloud-config` mapping or a `#cloud-config-archive` sequence when phone-home is enabled**. The API rejects anything else: a `#!` script, a `## template: jinja` document (NICo cannot render a template back), another cloud-init format such as `#cloud-boothook` or `#cloud-config-jsonp`, more than one YAML document, or text that is not YAML. User-data that declares no format at all -- no marker line, or only a comment above your keys -- is taken as `#cloud-config`, and enabling writes that marker at the top, which is what makes cloud-init read the document. Disabling phone-home over user-data NICo cannot edit leaves it untouched rather than failing the request, so any `phone_home` block in there stays.
 
-**Where the block lands.** In a `#cloud-config`, at the top level -- unless the document has an `autoinstall` section, in which case it goes under `autoinstall.user-data`, so the callback comes from the installed system rather than from the installer. In a `#cloud-config-archive`, the block goes into the part that installs a target system, again under its `autoinstall.user-data`. If no part installs one -- or the part that does is a template NICo leaves alone -- NICo appends a `#cloud-config` part holding just the block and leaves your own parts as authored:
+**Where the block lands.** In a `#cloud-config`, at the top level -- unless the document has an `autoinstall` section, in which case it goes under `autoinstall.user-data`, so the callback comes from the installed system rather than from the installer. In a `#cloud-config-archive`, the block goes into the part that installs a target system, again under its `autoinstall.user-data`. A part's format comes from its `type`, which cloud-init dispatches on without reading the content, or else from the content's own first line, and a part declaring neither is cloud-config -- so the first-line rule above is about the document you send, not the parts inside it. A part whose content is a `## template: jinja` document is left as authored either way, since NICo cannot render a template back. If no part installs one -- or the part that does is a template NICo leaves alone -- NICo appends a `#cloud-config` part holding just the block and leaves your own parts as authored:
 
 ```yaml
 #cloud-config-archive
@@ -731,8 +731,8 @@ The injected `url` is the site-configured phone-home endpoint (`site.phoneHomeUr
   content: |
     #cloud-config
     phone_home:
-      url: http://169.254.169.254/latest/meta-data/phone_home
       post: all
+      url: http://169.254.169.254/latest/meta-data/phone_home
 ```
 
 cloud-init runs the `phone_home` module in its final stage, after the rest of your configuration has been applied, so the callback fires only after your setup has completed. When NICo receives the POST, it records the contact and releases the readiness gate, allowing the instance to become `Ready`.

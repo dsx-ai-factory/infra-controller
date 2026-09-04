@@ -31,14 +31,9 @@ const (
 	mergeKey               = "<<"
 	archiveContentType     = "text/cloud-config"
 
-	// jinjaTemplateHeader marks user-data as a Jinja template. cloud-init reads
-	// the format from the line below it, so templated user-data opens with a
-	// two-line header:
-	//
-	//	## template: jinja
-	//	#cloud-config
-	//
-	// See https://docs.cloud-init.io/en/25.1/explanation/format.html#jinja-template
+	// jinjaTemplateHeader marks user-data as a Jinja template, which is not a
+	// document to render back: yaml reads `{{ x }}` as a mapping and would write
+	// it back as one.
 	jinjaTemplateHeader = "## template: jinja"
 
 	// userDataIndentSpaces matches the indent cloud-config is conventionally
@@ -50,9 +45,11 @@ const (
 	userDataIndentSpaces = 2
 )
 
-// MarshalUserData renders a cloud-init document back to YAML. Use it rather
+// marshalUserData renders a cloud-init document back to YAML. Use it rather
 // than yaml.Marshal, whose fixed 4-space indent inflates the stored value.
-func MarshalUserData(document *yaml.Node) ([]byte, error) {
+// renderUserData is its only caller: user-data is rendered below its header,
+// never on its own.
+func marshalUserData(document *yaml.Node) ([]byte, error) {
 	var out bytes.Buffer
 
 	encoder := yaml.NewEncoder(&out)
@@ -84,13 +81,13 @@ var ErrUnsupportedUserData = errors.New("userData is not a #cloud-config or #clo
 // Nil or empty user-data yields a #cloud-config document holding just the
 // block.
 func EnablePhoneHomeInUserData(userData *string, url string) (*string, error) {
-	header, documentRoot, err := parseUserData(userData)
+	header, documentRoot, err := parseUserData(userData, "")
 	if err != nil {
 		return nil, err
 	}
 	if header == "" {
-		// cloud-init needs a header, and user-data written without one is
-		// #cloud-config.
+		// The only user-data reaching here without a header is the empty document
+		// parseUserData hands back for none at all, which is ours to write.
 		header = SiteCloudConfig + "\n"
 	}
 
@@ -119,23 +116,24 @@ func EnablePhoneHomeInUserData(userData *string, url string) (*string, error) {
 // with none of ours is handed back exactly as authored. Nil is returned when
 // there is nothing to store: user-data that was empty to begin with.
 func DisablePhoneHomeInUserData(userData *string, url string) (*string, error) {
-	return disablePhoneHome(userData, &url)
+	return disablePhoneHome(userData, &url, "")
 }
 
 // DisableAllPhoneHomeInUserData is DisablePhoneHomeInUserData for every
 // phone-home block, whatever it reports to. It is for user-data we authored the
 // block in: the URL frozen into it may predate a change to the configured one.
 func DisableAllPhoneHomeInUserData(userData *string) (*string, error) {
-	return disablePhoneHome(userData, nil)
+	return disablePhoneHome(userData, nil, "")
 }
 
 // disablePhoneHome is DisablePhoneHomeInUserData; a nil url matches every block.
-func disablePhoneHome(userData *string, url *string) (*string, error) {
+// contentFormat is parseUserData's.
+func disablePhoneHome(userData *string, url *string, contentFormat string) (*string, error) {
 	if userData == nil || *userData == "" {
 		return nil, nil
 	}
 
-	header, documentRoot, err := parseUserData(userData)
+	header, documentRoot, err := parseUserData(userData, contentFormat)
 	if err != nil {
 		return nil, err
 	}
@@ -165,9 +163,11 @@ func disablePhoneHome(userData *string, url *string) (*string, error) {
 
 // parseUserData splits the cloud-init header off user-data and parses the YAML
 // body below it. Only a #cloud-config mapping or a #cloud-config-archive
-// sequence can carry phone-home; user-data with no header is #cloud-config, and
-// no user-data at all is an empty one.
-func parseUserData(userData *string) (string, *yaml.Node, error) {
+// sequence can carry phone-home. contentFormat is the format when something
+// other than the header decides it, as an archive entry's type does; "" leaves
+// it to the header, which is how top-level user-data declares it. No user-data
+// at all is an empty document, which is ours to write.
+func parseUserData(userData *string, contentFormat string) (string, *yaml.Node, error) {
 	if userData == nil || *userData == "" {
 		return "", &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}, nil
 	}
@@ -189,14 +189,25 @@ func parseUserData(userData *string) (string, *yaml.Node, error) {
 
 	documentRoot := document.Content[0]
 
-	switch format := headerFormat(header); {
-	case declaresFormat(header, jinjaTemplateHeader):
-		// A template is not a document to render back: yaml reads `{{ x }}` as a
-		// mapping and would write it back as one.
+	format := userDataFormat(header)
+
+	switch {
+	case format == jinjaTemplateHeader:
 		return "", nil, ErrUnsupportedUserData
-	case documentRoot.Kind == yaml.SequenceNode && format == SiteCloudConfigArchive:
-	case documentRoot.Kind == yaml.MappingNode && (format == "" || format == SiteCloudConfig):
+	case contentFormat != "":
+		format = contentFormat
+	case format == "":
+		format = SiteCloudConfig
+	}
+
+	switch {
+	case format == SiteCloudConfigArchive && documentRoot.Kind == yaml.SequenceNode:
+	case format == SiteCloudConfig && documentRoot.Kind == yaml.MappingNode:
 	default:
+		// A template is not a document to render back - yaml reads `{{ x }}` as a
+		// mapping and would write it back as one - every other format is one
+		// cloud-init runs elsewhere, and a document declaring none where none is
+		// read is one it runs no part of.
 		return "", nil, ErrUnsupportedUserData
 	}
 
@@ -208,7 +219,7 @@ func parseUserData(userData *string) (string, *yaml.Node, error) {
 // it - not even removing the first key or part, which is where yaml would
 // otherwise keep it.
 func renderUserData(header string, documentRoot *yaml.Node) (*string, error) {
-	rendered, err := MarshalUserData(documentRoot)
+	rendered, err := marshalUserData(documentRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render userData: %w", err)
 	}
@@ -223,71 +234,56 @@ func renderUserData(header string, documentRoot *yaml.Node) (*string, error) {
 	return new(header + string(rendered)), nil
 }
 
-// splitUserDataHeader splits user-data into its cloud-init header, newline
-// included, and the YAML body below it. The header is the leading comment line,
-// plus the line after it when that leading line is the jinja marker.
+// splitUserDataHeader splits user-data into its cloud-init header line, newline
+// included, and the YAML body below it. The whitespace before the header is
+// skipped to find it and returned with it, the way cloud-init reads past it, so
+// header and body hold every byte of text. Only spaces and newlines are
+// skipped: a document written behind a tab is not one yaml can read, whatever
+// header cloud-init finds above it.
 func splitUserDataHeader(userData string) (header, body string) {
-	headerLine, body, found := nextUserDataHeaderLine(userData)
-	if !found {
+	whitespace := len(userData) - len(strings.TrimLeft(userData, " \r\n"))
+
+	line, body, found := strings.Cut(userData[whitespace:], "\n")
+	if !found || !strings.HasPrefix(line, "#") {
 		return "", userData
 	}
 
-	if declaresFormat(headerLine, jinjaTemplateHeader) {
-		if templated, rest, found := nextUserDataHeaderLine(body); found {
-			return headerLine + templated, rest
-		}
-	}
-
-	return headerLine, body
+	return userData[:len(userData)-len(body)], body
 }
 
-// nextUserDataHeaderLine cuts the leading comment line, newline included, off
-// text and reports whether it found one. cloud-init reads a header past leading
-// whitespace, so that whitespace is skipped to find the line and returned with
-// it: line and rest hold every byte of text, so a header written behind a blank
-// line declares the format and user-data is stored as its author wrote it. Only
-// the whitespace yaml reads past counts, since a document written behind a tab
-// is not one yaml can read, whatever header cloud-init finds above it.
-func nextUserDataHeaderLine(text string) (line, rest string, found bool) {
-	// remove leading whitespace, spaces and newlines only
-	whitespace := len(text) - len(strings.TrimLeft(text, " \r\n"))
-
-	declaration, rest, found := strings.Cut(text[whitespace:], "\n")
-	if !found || !strings.HasPrefix(declaration, "#") {
-		// header line must start with #, so we just return not found here
-		return "", text, false
-	}
-
-	return text[:len(text)-len(rest)], rest, true
+// userDataFormatMarkers are the format markers cloud-init matches, longest
+// first because the shorter ones prefix the longer, the way it searches its own
+// list. Every format it dispatches is named, not only the two we edit, so a
+// header declaring one of the others is told apart from one declaring nothing -
+// an author's comment - which an archive entry reads as cloud-config.
+//
+// See https://github.com/canonical/cloud-init/blob/main/cloudinit/handlers/__init__.py
+var userDataFormatMarkers = []string{
+	SiteCloudConfigArchive,
+	"#cloud-config-jsonp",
+	jinjaTemplateHeader,
+	"#cloud-boothook",
+	SiteCloudConfig,
+	"#include-once",
+	"#part-handler",
+	"#include",
+	"#!",
 }
 
-// headerFormat returns the format a cloud-init header declares, as the marker
-// naming it, or "" when there is no header. The format is on the header's last
-// line, since a jinja template declares it below the template marker.
-func headerFormat(header string) string {
-	line, rest, _ := nextUserDataHeaderLine(header)
-	// this function receives a valid header, so if there are 2 lines, first one must be a jinja template marker
-	if templated, _, found := nextUserDataHeaderLine(rest); found {
-		line = templated
-	}
+// userDataFormat reports the format a header declares, as the marker naming it,
+// or "" when it declares none. cloud-init matches a marker on the start of the
+// payload, ignoring case and reading past whatever follows it, so that is how
+// these are matched.
+func userDataFormat(header string) string {
+	header = strings.ToLower(strings.TrimSpace(header))
 
-	// The longer marker is tried first because #cloud-config prefixes
-	// #cloud-config-archive.
-	for _, marker := range []string{SiteCloudConfigArchive, SiteCloudConfig} {
-		if declaresFormat(line, marker) {
+	for _, marker := range userDataFormatMarkers {
+		if strings.HasPrefix(header, marker) {
 			return marker
 		}
 	}
 
-	// Some other format, e.g. a #!/bin/sh script - or no header at all.
-	return strings.TrimSpace(line)
-}
-
-// declaresFormat reports whether a header line declares marker, matched the way
-// cloud-init matches it: on the start of the line, ignoring case, so a marker
-// with a note after it still names the format.
-func declaresFormat(line string, marker string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), marker)
+	return ""
 }
 
 // insertPhoneHome adds a phone-home block reporting to url to a #cloud-config
@@ -314,6 +310,13 @@ func insertPhoneHome(documentRoot *yaml.Node, url string) error {
 	}
 
 	removePhoneHome(documentRoot, nil)
+
+	if len(insertionNode.Content) == 0 {
+		// An emptied mapping renders as `{}`, which reads back flow-styled, and an
+		// entry rewritten through its text goes through exactly that. Nothing was
+		// written in it to preserve, so the block goes in written out.
+		insertionNode.Style = 0
+	}
 
 	phoneHomeValueNode := &yaml.Node{}
 	if err := phoneHomeValueNode.Encode(map[string]string{
@@ -410,13 +413,13 @@ func removePhoneHomeParts(archiveRoot *yaml.Node, url *string) (bool, error) {
 	kept := make([]*yaml.Node, 0, len(archiveRoot.Content))
 
 	for _, part := range archiveRoot.Content {
-		content := cloudConfigArchiveContent(part)
+		content, declaredFormat := cloudConfigArchiveContent(part)
 		if content == nil {
 			kept = append(kept, part)
 			continue
 		}
 
-		stripped, err := disablePhoneHome(&content.Value, url)
+		stripped, err := disablePhoneHome(&content.Value, url, declaredFormat)
 		switch {
 		case errors.Is(err, ErrUnsupportedUserData):
 			// Not a part phone-home can live in: leave it exactly as authored.
@@ -489,12 +492,12 @@ func rewrittenContent(authored *yaml.Node, text string) *yaml.Node {
 // system runs, and otherwise as a part of its own.
 func insertPhoneHomePart(archiveRoot *yaml.Node, url string) error {
 	for i, part := range archiveRoot.Content {
-		content := cloudConfigArchiveContent(part)
+		content, declaredFormat := cloudConfigArchiveContent(part)
 		if content == nil {
 			continue
 		}
 
-		header, partRoot, err := parseUserData(&content.Value)
+		header, partRoot, err := parseUserData(&content.Value, declaredFormat)
 		if err != nil || !installsATargetSystem(partRoot) {
 			// An entry phone-home cannot be edited into - a template included - is
 			// passed over rather than failing the request over somebody else's.
@@ -543,6 +546,12 @@ func appendPhoneHomePart(archiveRoot *yaml.Node, url string) error {
 
 	contentNode := scalarNode(*rendered)
 
+	if len(archiveRoot.Content) == 0 {
+		// An emptied archive renders as `[]` and reads back flow-styled, the same
+		// way an emptied mapping does.
+		archiveRoot.Style = 0
+	}
+
 	archiveRoot.Content = append(archiveRoot.Content, &yaml.Node{
 		Kind: yaml.MappingNode,
 		Tag:  "!!map",
@@ -557,37 +566,42 @@ func appendPhoneHomePart(archiveRoot *yaml.Node, url string) error {
 
 // cloudConfigArchiveContent returns the content scalar of a cloud-config archive
 // part, or nil for a part that is not cloud-config (a shell script, say) or
-// carries no string content. A part with no explicit type is cloud-config,
-// matching cloud-init's default.
-func cloudConfigArchiveContent(part *yaml.Node) *yaml.Node {
+// carries no string content, along with the format the part's type declares -
+// "" when it declares none and the content's own header says.
+func cloudConfigArchiveContent(part *yaml.Node) (*yaml.Node, string) {
 	part = resolveAlias(part)
 	if part == nil {
-		return nil
+		return nil, ""
 	}
 
 	// cloud-init reads a scalar part as the content of a part with no type.
 	if part.Kind == yaml.ScalarNode {
-		return part
+		return part, ""
 	}
 
 	if part.Kind != yaml.MappingNode {
-		return nil
+		return nil, ""
 	}
 
 	// A structured type is malformed, not an omitted one, so the part is left
-	// alone rather than read as cloud-config.
-	if typeNode := mappingValue(part, archiveEntryType); typeNode != nil &&
-		(typeNode.Kind != yaml.ScalarNode ||
-			(typeNode.Value != "" && typeNode.Value != archiveContentType)) {
-		return nil
+	// alone rather than read as cloud-config. cloud-init dispatches on the type
+	// lowercased, so the match is too, and reads the content of a part whose type
+	// is null - which is what an empty one loads as.
+	declaredFormat := ""
+	if typeNode := mappingValue(part, archiveEntryType); typeNode != nil && typeNode.Tag != "!!null" {
+		if typeNode.Kind != yaml.ScalarNode || strings.ToLower(typeNode.Value) != archiveContentType {
+			return nil, ""
+		}
+
+		declaredFormat = SiteCloudConfig
 	}
 
 	contentNode := mappingValue(part, archiveEntryContent)
 	if contentNode == nil || contentNode.Kind != yaml.ScalarNode {
-		return nil
+		return nil, ""
 	}
 
-	return contentNode
+	return contentNode, declaredFormat
 }
 
 // inlineDanglingAliases puts the values whose anchor a removal took away back in

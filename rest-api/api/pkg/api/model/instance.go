@@ -910,7 +910,7 @@ func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 			// user-data is left alone rather than rejected.
 			if *mergedPhoneHomeEnabled {
 				return validation.Errors{
-					"userData": errors.New("userData specified in request must be valid CloudInit YAML to enable phone home"),
+					"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
 				}
 			}
 		case err != nil:
@@ -1234,7 +1234,7 @@ func (bicr *APIBatchInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg
 			// user-data is left alone rather than rejected.
 			if *mergedPhoneHomeEnabled {
 				return validation.Errors{
-					"userData": errors.New("userData specified in request must be valid CloudInit YAML to enable phone home"),
+					"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
 				}
 			}
 		case err != nil:
@@ -1504,7 +1504,7 @@ func (iur *APIInstanceUpdateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 			// user-data is left alone rather than rejected.
 			if *mergedPhoneHomeEnabled {
 				return validation.Errors{
-					"userData": errors.New("must be valid CloudInit YAML to enable phone home"),
+					"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
 				}
 			}
 		case err != nil:

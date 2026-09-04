@@ -16,7 +16,8 @@ import (
 )
 
 func TestInsertedPhoneHomeMatchesCloudInitSchema(t *testing.T) {
-	userData, err := EnablePhoneHomeInUserData(new(`autoinstall:
+	userData, err := EnablePhoneHomeInUserData(new(`#cloud-config
+autoinstall:
   version: 1
 `), "http://169.254.169.254/phone_home")
 	require.NoError(t, err)
@@ -37,7 +38,7 @@ func TestInsertedPhoneHomeMatchesCloudInitSchema(t *testing.T) {
 	require.NoError(t, schema.Validate(targetUserData))
 }
 
-func TestInsertPhoneHomeIntoUserData(t *testing.T) {
+func TestEnablePhoneHomeInUserData(t *testing.T) {
 	const phoneHomeURL = "http://169.254.169.254/phone-home"
 
 	tests := []struct {
@@ -48,11 +49,12 @@ func TestInsertPhoneHomeIntoUserData(t *testing.T) {
 	}{
 		{
 			name:     "ordinary cloud-init inserts at document root",
-			userData: "packages:\n  - curl\n",
+			userData: "#cloud-config\npackages:\n  - curl\n",
 		},
 		{
 			name: "autoinstall inserts into existing target user-data",
-			userData: `autoinstall:
+			userData: `#cloud-config
+autoinstall:
   version: 1
   user-data:
     timezone: Etc/UTC
@@ -63,14 +65,16 @@ phone_home:
 		},
 		{
 			name: "autoinstall creates target user-data",
-			userData: `autoinstall:
+			userData: `#cloud-config
+autoinstall:
   version: 1
 `,
 			wantNested: true,
 		},
 		{
 			name: "rejects non-mapping autoinstall user-data",
-			userData: `autoinstall:
+			userData: `#cloud-config
+autoinstall:
   version: 1
   user-data: invalid
 `,
@@ -110,7 +114,7 @@ phone_home:
 	}
 }
 
-func TestRemovePhoneHomeFromUserData(t *testing.T) {
+func TestDisablePhoneHomeInUserData(t *testing.T) {
 	const phoneHomeURL = "http://169.254.169.254/phone-home"
 
 	tests := []struct {
@@ -135,7 +139,8 @@ func TestRemovePhoneHomeFromUserData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			original := `phone_home:
+			original := `#cloud-config
+phone_home:
   url: http://169.254.169.254/phone-home
 autoinstall:
   version: 1
@@ -144,7 +149,7 @@ autoinstall:
       url: http://169.254.169.254/phone-home
 `
 
-			userData, err := disablePhoneHome(&original, tt.url)
+			userData, err := disablePhoneHome(&original, tt.url, "")
 			require.NoError(t, err)
 
 			documentRoot := unmarshalDocumentRoot(t, *userData)
@@ -293,7 +298,7 @@ func TestRemovePhoneHomeFromArchive(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			userData, err := disablePhoneHome(new(archive()), tt.url)
+			userData, err := disablePhoneHome(new(archive()), tt.url, "")
 			require.NoError(t, err)
 
 			rendered := *userData
@@ -319,7 +324,7 @@ func TestRemovePhoneHomeFromArchivePreservesHeaderWhenEmptied(t *testing.T) {
     #cloud-config
     phone_home:
       url: http://169.254.169.254/phone-home
-`), nil)
+`), nil, "")
 	require.NoError(t, err)
 
 	rendered := *userData
@@ -333,18 +338,25 @@ func TestRemovePhoneHomeFromArchivePreservesEntriesItCannotEdit(t *testing.T) {
 	// cloud-config type, or a template yaml would write back as a mapping - must
 	// be skipped without error and left unchanged, while the genuine phone-home
 	// entry is still removed.
-	const script = "#!/bin/bash\nexport FOO: bar\n"
+	const script = "#!/bin/bash\nexport FOO: bar\nphone_home:\n  url: http://169.254.169.254/phone-home\n"
+	const untypedScript = "#cloud-boothook\nexport BAR: baz\nphone_home:\n  url: http://169.254.169.254/phone-home\n"
 	const template = "## template: jinja\n#cloud-config\nhostname: {{ v1.local_hostname }}\nphone_home:\n  url: http://169.254.169.254/phone-home\n"
 
 	userData, err := disablePhoneHome(new(`#cloud-config-archive
-- type: text/cloud-config
-  content: |
+- content: |
     #!/bin/bash
     export FOO: bar
+    phone_home:
+      url: http://169.254.169.254/phone-home
 - content: |
     ## template: jinja
     #cloud-config
     hostname: {{ v1.local_hostname }}
+    phone_home:
+      url: http://169.254.169.254/phone-home
+- content: |
+    #cloud-boothook
+    export BAR: baz
     phone_home:
       url: http://169.254.169.254/phone-home
 - type: text/cloud-config
@@ -352,15 +364,17 @@ func TestRemovePhoneHomeFromArchivePreservesEntriesItCannotEdit(t *testing.T) {
     #cloud-config
     phone_home:
       url: http://removed.example/phone-home
-`), nil)
+`), nil, "")
 	require.NoError(t, err)
 
 	archiveRoot := unmarshalArchiveRoot(t, *userData)
-	require.Len(t, archiveRoot.Content, 2, "only the entry it can edit must be removed")
+	require.Len(t, archiveRoot.Content, 3, "only the entry it can edit must be removed")
 	assert.Equal(t, script, mappingNodeValue(archiveRoot.Content[0], archiveEntryContent).Value,
 		"the script entry must be left unchanged")
 	assert.Equal(t, template, mappingNodeValue(archiveRoot.Content[1], archiveEntryContent).Value,
 		"the template must be left as authored, block and all")
+	assert.Equal(t, untypedScript, mappingNodeValue(archiveRoot.Content[2], archiveEntryContent).Value,
+		"an entry declaring no type but another format is not cloud-config to rewrite")
 	assert.NotContains(t, *userData, "removed.example")
 }
 
@@ -380,7 +394,7 @@ func TestRemovePhoneHomeFromArchivePreservesHeaderOnCommentedEntry(t *testing.T)
     #cloud-config
     packages:
     - curl
-`), nil)
+`), nil, "")
 	require.NoError(t, err)
 
 	rendered := *userData
@@ -402,9 +416,114 @@ func TestRemovePhoneHomeFromArchivePreservesStructuredTypeEntry(t *testing.T) {
       url: http://169.254.169.254/phone-home
 `
 
-	userData, err := disablePhoneHome(new(archive), nil)
+	userData, err := disablePhoneHome(new(archive), nil, "")
 	require.NoError(t, err)
 	assert.Equal(t, archive, *userData)
+}
+
+func TestPhoneHomeInAnArchiveEntryFormat(t *testing.T) {
+	// cloud-init gives an entry that declares no format the text/cloud-config
+	// type, which is the form its own documentation writes, so a block in one is
+	// live and the entry is where phone-home belongs.
+	const phoneHomeURL = "http://169.254.169.254/phone-home"
+
+	t.Run("disabling strips the block", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    package_update: true
+    phone_home:
+      url: `+phoneHomeURL+`
+      post: all
+`), phoneHomeURL)
+		require.NoError(t, err)
+		assert.NotContains(t, *userData, SitePhoneHomeName)
+		assert.Contains(t, *userData, "package_update", "the rest of the entry must be kept")
+	})
+
+	t.Run("enabling reaches the autoinstall in it", func(t *testing.T) {
+		userData, err := EnablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    autoinstall:
+      version: 1
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		archiveRoot := unmarshalArchiveRoot(t, *userData)
+		require.Len(t, archiveRoot.Content, 1, "phone-home must not be added as an entry of its own")
+		assert.Equal(t, `autoinstall:
+  version: 1
+  user-data:
+    phone_home:
+      post: all
+      url: `+phoneHomeURL+`
+`, mappingNodeValue(archiveRoot.Content[0], archiveEntryContent).Value,
+			"the block belongs under the autoinstall in the entry, which stays as authored")
+	})
+
+	t.Run("a first line declaring no format leaves the entry cloud-config", func(t *testing.T) {
+		// cloud-init reads no format out of a comment, or out of a marker it does
+		// not know, so the entry keeps the type it gives one declaring none.
+		for _, firstLine := range []string{"# my config", "#", "#note"} {
+			userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- content: |
+    `+firstLine+`
+    package_update: true
+    phone_home:
+      url: `+phoneHomeURL+`
+`), phoneHomeURL)
+			require.NoError(t, err)
+			assert.NotContains(t, *userData, SitePhoneHomeName, "first line %q", firstLine)
+			assert.Contains(t, *userData, firstLine, "the line is the author's, so it stays")
+		}
+	})
+
+	t.Run("a declared type wins over a first line contradicting it", func(t *testing.T) {
+		// cloud-init dispatches an entry on the type it declares without reading
+		// the content, so a first line saying otherwise is a comment to it.
+		for _, firstLine := range []string{"#note", "#!/bin/bash", "#cloud-boothook"} {
+			userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    `+firstLine+`
+    phone_home:
+      url: `+phoneHomeURL+`
+`), phoneHomeURL)
+			require.NoError(t, err)
+			assert.NotContains(t, *userData, SitePhoneHomeName, "first line %q", firstLine)
+		}
+	})
+
+	t.Run("a template is left alone whatever the type declares", func(t *testing.T) {
+		// Rendering a template back rewrites the expressions in it, so the entry
+		// keeps its own answer - and cloud-init does not render it under this type
+		// either, so the block in there is one we report rather than remove.
+		const templated = `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    ## template: jinja
+    hostname: {{ v1.local_hostname }}
+    phone_home:
+      url: ` + phoneHomeURL + `
+`
+
+		userData, err := DisablePhoneHomeInUserData(new(templated), phoneHomeURL)
+		require.NoError(t, err)
+		assert.Equal(t, templated, *userData)
+	})
+
+	t.Run("a type in another case is still cloud-config", func(t *testing.T) {
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: TEXT/CLOUD-CONFIG
+  content: |
+    #cloud-config
+    phone_home:
+      url: `+phoneHomeURL+`
+`), phoneHomeURL)
+		require.NoError(t, err)
+		assert.NotContains(t, *userData, SitePhoneHomeName)
+	})
 }
 
 func TestPhoneHomeInAliasedArchiveEntry(t *testing.T) {
@@ -1061,11 +1180,14 @@ func TestPhoneHomeTogglesInAnArchive(t *testing.T) {
 		userData, err = EnablePhoneHomeInUserData(userData, phoneHomeURL)
 		require.NoError(t, err)
 
-		archiveRoot := unmarshalArchiveRoot(t, *userData)
-		require.Len(t, archiveRoot.Content, 1)
-		phoneHome := phoneHomeFromContent(t, mappingNodeValue(archiveRoot.Content[0], archiveEntryContent).Value)
-		require.NotNil(t, phoneHome)
-		assert.Equal(t, phoneHomeURL, mappingNodeValue(phoneHome, SitePhoneHomeUrl).Value)
+		assert.Equal(t, `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      post: all
+      url: `+phoneHomeURL+`
+`, *userData, "the entry must be written out, not in the flow style `[]` reads back as")
 	})
 }
 
@@ -1145,7 +1267,7 @@ func TestRemovePhoneHomeFromArchiveRemovesNestedAutoinstall(t *testing.T) {
       user-data:
         phone_home:
           url: http://169.254.169.254/phone-home
-`), nil)
+`), nil, "")
 	require.NoError(t, err)
 
 	rendered := *userData
@@ -1161,14 +1283,20 @@ func TestPhoneHomeSupportsUserData(t *testing.T) {
 		want     bool
 	}{
 		{"#cloud-config mapping", "#cloud-config\npackages:\n- curl\n", true},
-		{"header-less mapping is auto-corrected", "packages:\n- curl\n", true},
+		// User-data that declares no format is taken as #cloud-config, and
+		// enabling writes that marker so cloud-init reads the document at all.
+		{"a mapping with no header", "packages:\n- curl\n", true},
 		{"empty mapping", "{}\n", true},
 		{"#cloud-config-archive", "#cloud-config-archive\n- type: text/cloud-config\n  content: x\n", true},
 		{"empty #cloud-config-archive", "#cloud-config-archive\n[]\n", true},
 		{"header-less list is not an archive", "- type: text/cloud-config\n  content: x\n", false},
-		// cloud-init reads the format from the start of the payload, so a comment
-		// above the header leaves user-data it does not recognize at all.
-		{"a comment above the header", "# a note\n#cloud-config\npackages:\n- curl\n", false},
+		// A comment declares no format either, so the same applies.
+		{"a comment above the header", "# a note\n#cloud-config\npackages:\n- curl\n", true},
+		{"a comment instead of a header", "# my notes\npackages:\n- curl\n", true},
+		// A format of its own that cloud-init dispatches elsewhere: a jsonp patch
+		// goes to its jsonpatch handler, not the yaml merger.
+		{"#cloud-config-jsonp", "#cloud-config-jsonp\n{\"op\": \"add\", \"path\": \"/a\", \"value\": 1}\n", false},
+		{"#cloud-boothook", "#cloud-boothook\npackages:\n- curl\n", false},
 		// yaml reads past a space or a newline before the header, but not a tab:
 		// the document below one cannot be read at all.
 		{"a header behind a tab", "\t#cloud-config\npackages:\n- curl\n", false},
@@ -1186,6 +1314,9 @@ func TestPhoneHomeSupportsUserData(t *testing.T) {
 		},
 		// cloud-init matches the marker on the start of the line, ignoring case.
 		{"#cloud-config with a note after it", "#cloud-config (managed by nico)\npackages:\n- curl\n", true},
+		// cloud-init reads past whatever follows the marker, space or not.
+		{"#cloud-config with a tab before the note", "#cloud-config\t(managed by nico)\npackages:\n- curl\n", true},
+		{"#cloud-configuration", "#cloud-configuration\npackages:\n- curl\n", true},
 		{"#Cloud-Config", "#Cloud-Config\npackages:\n- curl\n", true},
 	}
 
@@ -1287,10 +1418,12 @@ func TestSplitUserDataHeader(t *testing.T) {
 		{"no header", "packages: []\n", "", "packages: []\n"},
 		{"#cloud-config", "#cloud-config\npackages: []\n", "#cloud-config\n", "packages: []\n"},
 		{
-			"jinja takes the line below the marker",
+			// The marker is the header line; what it declares below is body, and a
+			// template is reported rather than edited anyway.
+			"the jinja marker",
 			"## template: jinja\n#cloud-config\npackages: []\n",
-			"## template: jinja\n#cloud-config\n",
-			"packages: []\n",
+			"## template: jinja\n",
+			"#cloud-config\npackages: []\n",
 		},
 		{
 			// cloud-init matches the header past leading whitespace, which is kept
@@ -1298,12 +1431,6 @@ func TestSplitUserDataHeader(t *testing.T) {
 			"a header behind whitespace",
 			"\n  #cloud-config\npackages: []\n",
 			"\n  #cloud-config\n",
-			"packages: []\n",
-		},
-		{
-			"jinja takes the line below the marker, blank line and all",
-			"## template: jinja\n\n#cloud-config\npackages: []\n",
-			"## template: jinja\n\n#cloud-config\n",
 			"packages: []\n",
 		},
 		{
@@ -1381,7 +1508,7 @@ func phoneHomeFromContent(t *testing.T, content string) *yaml.Node {
 	return mappingNodeValue(phoneHomeInContent(t, content), SitePhoneHomeName)
 }
 
-func TestMarshalUserData(t *testing.T) {
+func TestRenderedUserDataKeepsItsIndent(t *testing.T) {
 	const phoneHomeURL = "http://169.254.169.254/latest/meta-data/phone_home"
 
 	// A nested document at the 2-space indent cloud-config is conventionally
@@ -1416,6 +1543,50 @@ write_files:
 		require.NoError(t, err)
 		assert.Equal(t, nested+"phone_home:\n  post: all\n  url: "+phoneHomeURL+"\n", *userData,
 			"nothing but the block may change")
+	})
+
+	t.Run("an appended archive entry is written at the same indent", func(t *testing.T) {
+		userData, err := EnablePhoneHomeInUserData(new("#cloud-config-archive\n- |\n  #!/bin/sh\n  echo hi\n"), phoneHomeURL)
+		require.NoError(t, err)
+		assert.Equal(t, `#cloud-config-archive
+- |
+  #!/bin/sh
+  echo hi
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      post: all
+      url: `+phoneHomeURL+`
+`, *userData)
+	})
+
+	t.Run("an entry rewritten through its text is written out, not in flow", func(t *testing.T) {
+		// Stripping the block empties the entry's autoinstall user-data, which
+		// renders as `{}` and reads back flow-styled. What goes in it is written
+		// out, so re-enabling stores what the author would have written.
+		userData, err := EnablePhoneHomeInUserData(new(`#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    autoinstall:
+      version: 1
+      user-data:
+        phone_home:
+          url: http://stale/ph
+`), phoneHomeURL)
+		require.NoError(t, err)
+		assert.Equal(t, `#cloud-config-archive
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    autoinstall:
+      version: 1
+      user-data:
+        phone_home:
+          post: all
+          url: `+phoneHomeURL+`
+`, *userData)
 	})
 
 	t.Run("document near the cap still fits once phone-home is inserted", func(t *testing.T) {
