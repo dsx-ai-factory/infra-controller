@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -1126,13 +1125,6 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 func validateMachineLabelSelector(selector map[string]string) error {
 	err := util.ValidateLabels(selector)
 	if err == nil {
-		for key, value := range selector {
-			if strings.ContainsRune(key, '\x00') || strings.ContainsRune(value, '\x00') {
-				return validation.Errors{
-					"machineLabelSelector": errors.New("machine label selector keys and values must not contain NUL characters"),
-				}
-			}
-		}
 		return nil
 	}
 
@@ -1144,6 +1136,11 @@ func validateMachineLabelSelector(selector map[string]string) error {
 	labelErr, found := labelErrors["labels"]
 	if !found {
 		return validation.Errors{"machineLabelSelector": err}
+	}
+	if errors.Is(labelErr, util.ErrValidationLabelNUL) {
+		return validation.Errors{
+			"machineLabelSelector": errors.New("machine label selector keys and values must not contain NUL characters"),
+		}
 	}
 
 	return validation.Errors{"machineLabelSelector": labelErr}

@@ -14,6 +14,11 @@ type APIMessageResponse struct {
 	Message string `json:"message"`
 }
 
+// APILabelGetAllRequest contains the optional scope for a label list query.
+type APILabelGetAllRequest struct {
+	SiteID string `query:"siteId"`
+}
+
 // NewAPIDeletionAcceptedResponse returns the JSON body for accepted async deletes.
 func NewAPIDeletionAcceptedResponse() APIMessageResponse {
 	return APIMessageResponse{

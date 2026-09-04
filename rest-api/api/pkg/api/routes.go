@@ -504,6 +504,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewUpdateExpectedMachinesHandler(dbSession, scp, cfg),
 		},
 		{
+			Path:    apiPathPrefix + "/expected-machine/label/key",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllExpectedMachineLabelKeyHandler(dbSession),
+		},
+		{
+			Path:    apiPathPrefix + "/expected-machine/label/key/:key/value",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllExpectedMachineLabelValueHandler(dbSession),
+		},
+		{
 			Path:    apiPathPrefix + "/expected-machine/:id",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetExpectedMachineHandler(dbSession, cfg),
@@ -622,6 +632,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/machine",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetAllMachineHandler(dbSession, tc, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/label/key",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllMachineLabelKeyHandler(dbSession),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/label/key/:key/value",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllMachineLabelValueHandler(dbSession),
 		},
 		{
 			Path:    apiPathPrefix + "/machine/:id",

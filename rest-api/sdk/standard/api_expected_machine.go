@@ -796,6 +796,374 @@ func (a *ExpectedMachineAPIService) GetAllExpectedMachineExecute(r ApiGetAllExpe
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type ApiGetAllExpectedMachineLabelKeysRequest struct {
+	ctx        context.Context
+	ApiService *ExpectedMachineAPIService
+	org        string
+	siteId     *string
+	pageNumber *int32
+	pageSize   *int32
+	orderBy    *string
+}
+
+// ID of the Site to filter label keys by
+func (r ApiGetAllExpectedMachineLabelKeysRequest) SiteId(siteId string) ApiGetAllExpectedMachineLabelKeysRequest {
+	r.siteId = &siteId
+	return r
+}
+
+// Page number for pagination query
+func (r ApiGetAllExpectedMachineLabelKeysRequest) PageNumber(pageNumber int32) ApiGetAllExpectedMachineLabelKeysRequest {
+	r.pageNumber = &pageNumber
+	return r
+}
+
+// Page size for pagination query
+func (r ApiGetAllExpectedMachineLabelKeysRequest) PageSize(pageSize int32) ApiGetAllExpectedMachineLabelKeysRequest {
+	r.pageSize = &pageSize
+	return r
+}
+
+// Ordering applied before pagination; defaults to KEY_ASC
+func (r ApiGetAllExpectedMachineLabelKeysRequest) OrderBy(orderBy string) ApiGetAllExpectedMachineLabelKeysRequest {
+	r.orderBy = &orderBy
+	return r
+}
+
+func (r ApiGetAllExpectedMachineLabelKeysRequest) Execute() ([]string, *http.Response, error) {
+	return r.ApiService.GetAllExpectedMachineLabelKeysExecute(r)
+}
+
+/*
+GetAllExpectedMachineLabelKeys Retrieve Expected Machine label keys
+
+Retrieve paginated, unique, non-null Expected Machine label keys. Results are ordered by key ascending by default before pagination.
+
+Infrastructure Provider callers receive keys from their Provider's Sites. Tenant Admin callers receive keys only from Sites where `TargetedInstanceCreation` is effective. The optional siteId parameter further restricts the result.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@return ApiGetAllExpectedMachineLabelKeysRequest
+*/
+func (a *ExpectedMachineAPIService) GetAllExpectedMachineLabelKeys(ctx context.Context, org string) ApiGetAllExpectedMachineLabelKeysRequest {
+	return ApiGetAllExpectedMachineLabelKeysRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+	}
+}
+
+// Execute executes the request
+//
+//	@return []string
+func (a *ExpectedMachineAPIService) GetAllExpectedMachineLabelKeysExecute(r ApiGetAllExpectedMachineLabelKeysRequest) ([]string, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue []string
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "ExpectedMachineAPIService.GetAllExpectedMachineLabelKeys")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/expected-machine/label/key"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+
+	if r.siteId != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	}
+	if r.pageNumber != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
+	} else {
+		var defaultValue int32 = 1
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", defaultValue, "form", "")
+		r.pageNumber = &defaultValue
+	}
+	if r.pageSize != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageSize", r.pageSize, "form", "")
+	} else {
+		var defaultValue int32 = 20
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageSize", defaultValue, "form", "")
+		r.pageSize = &defaultValue
+	}
+	if r.orderBy != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", r.orderBy, "form", "")
+	} else {
+		var defaultValue string = "KEY_ASC"
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", defaultValue, "form", "")
+		r.orderBy = &defaultValue
+	}
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type ApiGetAllExpectedMachineLabelValuesRequest struct {
+	ctx        context.Context
+	ApiService *ExpectedMachineAPIService
+	org        string
+	key        string
+	siteId     *string
+	pageNumber *int32
+	pageSize   *int32
+	orderBy    *string
+}
+
+// ID of the Site to filter label values by
+func (r ApiGetAllExpectedMachineLabelValuesRequest) SiteId(siteId string) ApiGetAllExpectedMachineLabelValuesRequest {
+	r.siteId = &siteId
+	return r
+}
+
+// Page number for pagination query
+func (r ApiGetAllExpectedMachineLabelValuesRequest) PageNumber(pageNumber int32) ApiGetAllExpectedMachineLabelValuesRequest {
+	r.pageNumber = &pageNumber
+	return r
+}
+
+// Page size for pagination query
+func (r ApiGetAllExpectedMachineLabelValuesRequest) PageSize(pageSize int32) ApiGetAllExpectedMachineLabelValuesRequest {
+	r.pageSize = &pageSize
+	return r
+}
+
+// Ordering applied before pagination; defaults to VALUE_ASC
+func (r ApiGetAllExpectedMachineLabelValuesRequest) OrderBy(orderBy string) ApiGetAllExpectedMachineLabelValuesRequest {
+	r.orderBy = &orderBy
+	return r
+}
+
+func (r ApiGetAllExpectedMachineLabelValuesRequest) Execute() ([]string, *http.Response, error) {
+	return r.ApiService.GetAllExpectedMachineLabelValuesExecute(r)
+}
+
+/*
+GetAllExpectedMachineLabelValues Retrieve Expected Machine label values
+
+Retrieve paginated, unique, non-null values currently used for an Expected Machine label key. Labels without the requested key are ignored. Results are ordered by value ascending by default before pagination.
+
+Infrastructure Provider callers receive values from their Provider's Sites. Tenant Admin callers receive values only from Sites where `TargetedInstanceCreation` is effective. The optional siteId parameter further restricts the result.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@param key Label key. It must not be empty, consist only of whitespace, or contain the Unicode NUL character (U+0000). Reserved path characters, including `/`, must be percent-encoded.
+	@return ApiGetAllExpectedMachineLabelValuesRequest
+*/
+func (a *ExpectedMachineAPIService) GetAllExpectedMachineLabelValues(ctx context.Context, org string, key string) ApiGetAllExpectedMachineLabelValuesRequest {
+	return ApiGetAllExpectedMachineLabelValuesRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		key:        key,
+	}
+}
+
+// Execute executes the request
+//
+//	@return []string
+func (a *ExpectedMachineAPIService) GetAllExpectedMachineLabelValuesExecute(r ApiGetAllExpectedMachineLabelValuesRequest) ([]string, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue []string
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "ExpectedMachineAPIService.GetAllExpectedMachineLabelValues")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/expected-machine/label/key/{key}/value"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"key"+"}", url.PathEscape(parameterValueToString(r.key, "key")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if strlen(r.key) < 1 {
+		return localVarReturnValue, nil, reportError("key must have at least 1 elements")
+	}
+	if strlen(r.key) > 255 {
+		return localVarReturnValue, nil, reportError("key must have less than 255 elements")
+	}
+
+	if r.siteId != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	}
+	if r.pageNumber != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
+	} else {
+		var defaultValue int32 = 1
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", defaultValue, "form", "")
+		r.pageNumber = &defaultValue
+	}
+	if r.pageSize != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageSize", r.pageSize, "form", "")
+	} else {
+		var defaultValue int32 = 20
+		parameterAddToHeaderOrQuery(localVarQueryParams, "pageSize", defaultValue, "form", "")
+		r.pageSize = &defaultValue
+	}
+	if r.orderBy != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", r.orderBy, "form", "")
+	} else {
+		var defaultValue string = "VALUE_ASC"
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", defaultValue, "form", "")
+		r.orderBy = &defaultValue
+	}
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type ApiGetExpectedMachineRequest struct {
 	ctx               context.Context
 	ApiService        *ExpectedMachineAPIService
