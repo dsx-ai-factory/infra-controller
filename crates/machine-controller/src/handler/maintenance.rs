@@ -157,6 +157,7 @@ async fn invoke_power_operation(
                 bmc_mac: endpoint.bmc_mac,
                 success: false,
                 error: Some("component manager returned no result".into()),
+                backend_job_id: None,
             });
 
             if result.success {
