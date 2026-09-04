@@ -48,6 +48,11 @@ use crate::pci::{UefiPciOrderingKey, UefiPciOrderingKeyParseError, normalize_uef
 use crate::power_shelf::power_shelf_id;
 use crate::switch::switch_id;
 
+/// Recorded as an endpoint's hardware class when exploration completes without
+/// recognising the hardware. Distinguishes that from an endpoint not explored
+/// since the class was introduced, which has no class at all.
+pub const UNRECOGNIZED_HARDWARE_CLASS: &str = "unrecognized";
+
 #[derive(Clone, Debug, Default)]
 pub struct ExploredEndpointSearchFilter {}
 
@@ -70,6 +75,11 @@ pub struct EndpointExplorationReport {
     /// Vendor as reported by Redfish
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<bmc_vendor::BMCVendor>,
+    /// The hardware the endpoint was recognised as, or
+    /// [`UNRECOGNIZED_HARDWARE_CLASS`] if exploration ran and recognised none.
+    /// `None` if no exploration has classified the endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware_class: Option<String>,
     /// `Managers` reported by Redfish
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managers: Vec<Manager>,
@@ -829,6 +839,7 @@ impl EndpointExplorationReport {
             chassis: Vec::new(),
             service: Vec::new(),
             vendor: None,
+            hardware_class: None,
             machine_id: None,
             versions: HashMap::default(),
             model: None,
@@ -3538,6 +3549,7 @@ mod tests {
             last_exploration_error: None,
             last_exploration_latency: None,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
+            hardware_class: None,
             managers: vec![Manager {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),
@@ -3702,6 +3714,7 @@ mod tests {
             last_exploration_error: None,
             last_exploration_latency: None,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
+            hardware_class: None,
             managers: vec![Manager {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),

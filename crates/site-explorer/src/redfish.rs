@@ -464,6 +464,9 @@ impl RedfishClient {
             chassis,
             service,
             vendor,
+            // The libredfish client does not classify hardware, so endpoints
+            // explored through it carry no class.
+            hardware_class: None,
             versions: HashMap::default(),
             model: None,
             power_shelf_id: None,

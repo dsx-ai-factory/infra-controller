@@ -137,6 +137,7 @@ async fn test_site_explorer_power_shelf_discovery(
     explorer.insert_endpoint_result(
         power_shelf.ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
+            hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
@@ -248,6 +249,7 @@ async fn test_site_explorer_power_shelf_discovery_with_static_ip(
     explorer.insert_endpoint_result(
         power_shelf.ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
+            hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
@@ -498,6 +500,7 @@ async fn test_site_explorer_power_shelf_with_expected_config(
     explorer.insert_endpoint_result(
         power_shelf.ip.parse().unwrap(), // Use expected IP address, not DHCP-assigned IP
         Ok(EndpointExplorationReport {
+            hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
@@ -610,6 +613,7 @@ async fn test_site_explorer_power_shelf_creation_limit(
         explorer.insert_endpoint_result(
             power_shelf.ip.parse().unwrap(), // Use expected IP address, not DHCP-assigned IP
             Ok(EndpointExplorationReport {
+                hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
                 last_exploration_latency: None,
@@ -717,6 +721,7 @@ async fn test_site_explorer_power_shelf_disabled(
     explorer.insert_endpoint_result(
         power_shelf.ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
+            hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
@@ -893,6 +898,7 @@ async fn test_power_shelf_state_history_error_handling(
 
     // Create exploration report for power shelf
     let exploration_report = EndpointExplorationReport {
+        hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         last_exploration_error: None,
         last_exploration_latency: None,

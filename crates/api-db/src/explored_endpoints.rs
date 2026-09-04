@@ -369,12 +369,13 @@ pub async fn try_update(
 ) -> Result<bool, DatabaseError> {
     let new_version = old_version.increment();
     let query = "
-UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false
-WHERE address=$4 AND version=$5";
+UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false, hardware_class=$4
+WHERE address=$5 AND version=$6";
     let query_result = sqlx::query(query)
         .bind(new_version)
         .bind(sqlx::types::Json(exploration_report))
         .bind(waiting_for_explorer_refresh)
+        .bind(exploration_report.hardware_class.as_deref())
         .bind(address)
         .bind(old_version)
         .execute(txn)
@@ -770,14 +771,15 @@ pub async fn insert(
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let query = "
-        INSERT INTO explored_endpoints (address, exploration_report, version, exploration_requested, preingestion_state, pause_ingestion_and_poweron)
-        VALUES ($1, $2::json, $3, false, '{\"state\":\"initial\"}', $4)
+        INSERT INTO explored_endpoints (address, exploration_report, version, exploration_requested, preingestion_state, pause_ingestion_and_poweron, hardware_class)
+        VALUES ($1, $2::json, $3, false, '{\"state\":\"initial\"}', $4, $5)
         ON CONFLICT DO NOTHING";
     sqlx::query(query)
         .bind(address)
         .bind(sqlx::types::Json(&exploration_report))
         .bind(ConfigVersion::initial())
         .bind(pause_ingestion_and_poweron)
+        .bind(exploration_report.hardware_class.as_deref())
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -1027,6 +1029,80 @@ mod tests {
         assert_eq!(rows.len(), 2, "two endpoints are installing firmware");
         assert_eq!(count, 2, "count agrees with the row count");
         assert_eq!(count, rows.len() as i64);
+    }
+
+    async fn read_hardware_class(txn: &mut PgConnection, address: IpAddr) -> Option<String> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT hardware_class FROM explored_endpoints WHERE address = $1",
+        )
+        .bind(address)
+        .fetch_one(txn)
+        .await
+        .expect("read hardware_class")
+    }
+
+    async fn read_version(txn: &mut PgConnection, address: IpAddr) -> ConfigVersion {
+        sqlx::query_scalar::<_, ConfigVersion>(
+            "SELECT version FROM explored_endpoints WHERE address = $1",
+        )
+        .bind(address)
+        .fetch_one(txn)
+        .await
+        .expect("read version")
+    }
+
+    fn report_with_class(hardware_class: Option<&str>) -> EndpointExplorationReport {
+        EndpointExplorationReport {
+            hardware_class: hardware_class.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// The column has to carry the class from the report on both write paths,
+    /// and hold no class where exploration determined none — absent is what
+    /// tells an unclassified endpoint apart from one classified as
+    /// unrecognised.
+    #[crate::sqlx_test]
+    async fn hardware_class_is_written_from_the_report(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        let classified: IpAddr = "10.0.2.1".parse().unwrap();
+        let unclassified: IpAddr = "10.0.2.2".parse().unwrap();
+
+        insert(
+            classified,
+            &report_with_class(Some("Gb200")),
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_hardware_class(&mut txn, classified).await.as_deref(),
+            Some("Gb200"),
+        );
+
+        // Re-exploring the endpoint as different hardware replaces the class.
+        let version = read_version(&mut txn, classified).await;
+        assert!(
+            try_update(
+                classified,
+                version,
+                &report_with_class(Some("DgxGb300")),
+                false,
+                &mut txn,
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            read_hardware_class(&mut txn, classified).await.as_deref(),
+            Some("DgxGb300"),
+        );
+
+        insert(unclassified, &report_with_class(None), false, &mut txn)
+            .await
+            .unwrap();
+        assert_eq!(read_hardware_class(&mut txn, unclassified).await, None);
     }
 
     #[crate::sqlx_test]

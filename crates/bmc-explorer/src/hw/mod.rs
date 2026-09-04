@@ -31,7 +31,10 @@ pub mod supermicro_gb300;
 pub mod vera_rubin;
 pub mod viking;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `Display` renders the variant name, which is recorded as an endpoint's
+/// hardware class. Renaming a variant renames the class stored against every
+/// endpoint already explored as it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum_macros::Display, strum_macros::EnumIter)]
 pub enum HwType {
     Ami,
     Bluefield,
@@ -160,10 +163,37 @@ impl fmt::Display for BiosAttrValue<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use bmc_vendor::BMCVendor;
     use carbide_test_support::value_scenarios;
+    use model::site_explorer::UNRECOGNIZED_HARDWARE_CLASS;
+    use strum::IntoEnumIterator;
 
     use super::*;
+
+    /// The rendered name is persisted as an endpoint's hardware class and is
+    /// what an attestation profile is keyed on, so it has to identify exactly
+    /// one variant and stay clear of the markers reserved for a missing class.
+    #[test]
+    fn hw_type_renders_a_distinct_hardware_class_for_every_variant() {
+        let mut rendered = HashSet::new();
+        for hardware_type in HwType::iter() {
+            let class = hardware_type.to_string();
+            assert!(
+                !class.is_empty(),
+                "{hardware_type:?} renders an empty hardware class"
+            );
+            assert!(
+                class != UNRECOGNIZED_HARDWARE_CLASS && class != "any",
+                "{hardware_type:?} renders the reserved hardware class {class}"
+            );
+            assert!(
+                rendered.insert(class.clone()),
+                "more than one variant renders the hardware class {class}"
+            );
+        }
+    }
 
     #[test]
     fn hw_type_bmc_vendor_maps_each_variant() {

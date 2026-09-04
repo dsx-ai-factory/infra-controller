@@ -287,6 +287,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
             last_exploration_error: None,
             last_exploration_latency: None,
             vendor: value.vendor,
+            hardware_class: None,
             managers: vec![Manager {
                 id: "iDRAC.Embedded.1".to_string(),
                 ipmi_port: None,

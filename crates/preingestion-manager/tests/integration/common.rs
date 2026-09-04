@@ -89,6 +89,7 @@ fn build_exploration_report(
     };
 
     let mut report = EndpointExplorationReport {
+        hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         vendor: Some(bmc_vendor::BMCVendor::Dell),
         last_exploration_error: None,

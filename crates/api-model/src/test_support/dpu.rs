@@ -70,6 +70,7 @@ impl From<DpuConfig> for EndpointExplorationReport {
             last_exploration_error: value.last_exploration_error,
             last_exploration_latency: None,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
+            hardware_class: None,
             machine_id: None,
             managers: vec![Manager {
                 id: "bmc".to_string(),

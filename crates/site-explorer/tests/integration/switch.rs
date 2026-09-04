@@ -151,6 +151,7 @@ async fn test_site_explorer_switch_discovery(
     explorer.insert_endpoint_result(
         switch_ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
+            hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
