@@ -60,6 +60,18 @@ spec:
     # the RMS migrations create tables/indexes there and need nothing wider.
     rms.nico: []
     {{- end }}
+    {{- if .Values.temporal.useHaPostgres }}
+    # No role flags: temporal.nico owns only the temporal/temporal_visibility
+    # databases (databases: below); Temporal's own schema-update job creates
+    # tables/indexes there as the owner and needs nothing wider.
+    temporal.nico: []
+    {{- end }}
+    {{- if .Values.keycloak.useHaPostgres }}
+    # No role flags: keycloak.nico owns only the keycloak database (databases:
+    # below); Keycloak's own Liquibase migrations create tables there as the
+    # owner and need nothing wider.
+    keycloak.nico: []
+    {{- end }}
   databases:
     nico_system_nico: nico-system.nico
     {{- if .Values.rest.enabled }}
@@ -70,6 +82,13 @@ spec:
     {{- end }}
     {{- if .Values.rms.enabled }}
     rms: rms.nico
+    {{- end }}
+    {{- if .Values.temporal.useHaPostgres }}
+    temporal: temporal.nico
+    temporal_visibility: temporal.nico
+    {{- end }}
+    {{- if .Values.keycloak.useHaPostgres }}
+    keycloak: keycloak.nico
     {{- end }}
   patroni:
     # Templated (no `| default`): Go templates treat an explicit `false` as empty,
