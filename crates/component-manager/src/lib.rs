@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod nvos_update_manager;
+mod rack_firmware_update_manager;
 #[cfg(test)]
 mod test_support;
 
@@ -21,6 +22,7 @@ pub mod tls;
 pub mod types;
 
 pub use nvos_update_manager::{NvosUpdateManager, NvosUpdateRequest};
+pub use rack_firmware_update_manager::{RackFirmwareUpdateManager, RackFirmwareUpdateRequest};
 
 pub mod proto {
     #[allow(clippy::enum_variant_names)]

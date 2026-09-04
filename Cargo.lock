@@ -2901,7 +2901,6 @@ dependencies = [
  "config-version",
  "duration-str",
  "eyre",
- "librms",
  "mac_address",
  "opentelemetry 0.32.0",
  "reqwest 0.13.4",

@@ -1243,6 +1243,12 @@ async fn initialize_and_start_controllers<'a>(
             as Arc<dyn component_manager::NvosUpdateManager>
     });
 
+    let rack_firmware_update_manager = rms_client.clone().map(|client| {
+        Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
+            client,
+        )) as Arc<dyn component_manager::RackFirmwareUpdateManager>
+    });
+
     // As soon as we get the database up, observe this version of forge so that we know when it was
     // first deployed
     {
@@ -1864,7 +1870,6 @@ async fn initialize_and_start_controllers<'a>(
         .services(
             RackStateHandlerServices {
                 db_pool: db_pool.clone(),
-                rms_client: rms_client.clone(),
                 site_config: RackConfig {
                     rms: carbide_config.rms.clone(),
                     rack_validation_config: carbide_config.rack_validation_config.clone(),
@@ -1872,6 +1877,7 @@ async fn initialize_and_start_controllers<'a>(
                 }
                 .into(),
                 nvos_update_manager: nvos_update_manager.clone(),
+                rack_firmware_update_manager: rack_firmware_update_manager.clone(),
                 credential_manager: credential_manager.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
                 nmx_cluster_switch_mtls_services: carbide_config

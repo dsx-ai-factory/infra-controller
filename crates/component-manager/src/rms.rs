@@ -39,7 +39,10 @@ use model::component_manager::{
     ComputeTrayComponent, ConfigureSwitchCertificateState, FirmwareState, NvSwitchComponent,
     PowerAction, PowerShelfComponent,
 };
-use model::rack::{NvosUpdateJob, NvosUpdateSwitchStatus};
+use model::rack::{
+    FirmwareProgressState, FirmwareUpgradeDeviceInfo, FirmwareUpgradeDeviceStatus,
+    FirmwareUpgradeJob, NvosUpdateJob, NvosUpdateSwitchStatus,
+};
 use model::rack_type::{RackHardwareTopology, RackProfile, RackProfileConfig};
 use model::switch::{FabricManagerState, FabricManagerStatus};
 use serde::Deserialize;
@@ -65,7 +68,9 @@ use crate::power_shelf_manager::{
     PowerShelfPowerStateResult,
 };
 use crate::types::FirmwareUpdateOptions;
-use crate::{NvosUpdateManager, NvosUpdateRequest};
+use crate::{
+    NvosUpdateManager, NvosUpdateRequest, RackFirmwareUpdateManager, RackFirmwareUpdateRequest,
+};
 
 /// Common RMS identity needed to address a device in RMS.
 #[derive(Clone)]
@@ -228,6 +233,432 @@ impl RmsSwitchSystemImageStatusApi for librms::RackManagerApi {
         cmd: rms::GetSwitchSystemImageJobStatusRequest,
     ) -> Result<rms::GetSwitchSystemImageJobStatusResponse, RackManagerError> {
         Ok(self.client.get_switch_system_image_job_status(cmd).await?)
+    }
+}
+
+/// RMS implementation of durable rack-level firmware-object operations.
+struct RmsRackFirmwareUpdateManager {
+    client: Arc<dyn RmsApi>,
+}
+
+impl crate::rack_firmware_update_manager::sealed::Sealed for RmsRackFirmwareUpdateManager {}
+
+#[async_trait::async_trait]
+impl RackFirmwareUpdateManager for RmsRackFirmwareUpdateManager {
+    async fn start_firmware_update(
+        &self,
+        request: RackFirmwareUpdateRequest<'_>,
+    ) -> Result<FirmwareUpgradeJob, ComponentManagerError> {
+        let started_at = chrono::Utc::now();
+        let rack_id = request.rack_id.to_string();
+        let machine_count = request.machines.len();
+        let switch_count = request.switches.len();
+        let firmware_type = firmware_type_for_profile(request.profile);
+        let hardware_type = profile_hardware_type_wire_value(request.profile);
+
+        let hardware_type = if hardware_type.trim().is_empty() {
+            ANY_RACK_HARDWARE_TYPE.to_string()
+        } else {
+            hardware_type
+        };
+
+        tracing::info!(
+            rack_id = %rack_id,
+            firmware_type,
+            hardware_type = %hardware_type,
+            force_update = request.force_update,
+            machine_count,
+            switch_count,
+            "Rack firmware object JSON apply starting",
+        );
+
+        let apply_request = rack_firmware_apply_request(&request, firmware_type, hardware_type)?;
+
+        let response = self
+            .client
+            .apply_firmware_object(apply_request)
+            .await
+            .map_err(|error| match error {
+                RackManagerError::ApiInvocationError(status)
+                    if status.code() == tonic::Code::InvalidArgument =>
+                {
+                    ComponentManagerError::InvalidArgument(format!(
+                        "failed to submit firmware object JSON apply to RMS: {status}"
+                    ))
+                }
+                RackManagerError::ApiInvocationError(status) => ComponentManagerError::Internal(
+                    format!("failed to submit firmware object JSON apply to RMS: {status}"),
+                ),
+                error => ComponentManagerError::Internal(format!(
+                    "failed to submit firmware object JSON apply to RMS: {error}"
+                )),
+            })?;
+
+        let job = rack_firmware_job_from_response(request, started_at, response)?;
+
+        tracing::info!(
+            rack_id = %rack_id,
+            parent_job_id = ?job.job_id,
+            object_id = ?job.firmware_id,
+            machine_count,
+            switch_count,
+            "RMS firmware object JSON apply submitted",
+        );
+
+        Ok(finish_rack_firmware_job(job))
+    }
+
+    async fn get_firmware_update_status(
+        &self,
+        job: &FirmwareUpgradeJob,
+    ) -> Result<FirmwareUpgradeJob, ComponentManagerError> {
+        let mut updated = job.clone();
+
+        for device in updated.all_devices_mut() {
+            if device.status.is_terminal() {
+                continue;
+            }
+
+            let Some(job_id) = device.job_id.clone() else {
+                device.status = FirmwareProgressState::Failed;
+
+                if device.error_message.is_none() {
+                    device.error_message = Some("Device has no firmware job ID to poll".into());
+                }
+
+                continue;
+            };
+
+            let response = self
+                .client
+                .get_firmware_job_status(rms::GetFirmwareJobStatusRequest {
+                    job_id: job_id.clone(),
+                })
+                .await;
+
+            apply_rack_firmware_job_status_response(device, &job_id, response);
+        }
+
+        Ok(finish_rack_firmware_job(updated))
+    }
+}
+
+fn rack_firmware_apply_request(
+    request: &RackFirmwareUpdateRequest<'_>,
+    firmware_type: &str,
+    hardware_type: String,
+) -> Result<rms::ApplyFirmwareObjectRequest, ComponentManagerError> {
+    let mut nodes = Vec::with_capacity(request.machines.len() + request.switches.len());
+
+    // Resolve every identity before dispatch so a mixed-device request
+    // cannot submit a partial rack update.
+    let compute_node_identity = if request.machines.is_empty() {
+        None
+    } else {
+        Some(
+            compute_node_identity_for_profile(request.profile).map_err(|error| {
+                ComponentManagerError::InvalidArgument(format!(
+                    "failed to resolve RMS compute descriptor: {error}"
+                ))
+            })?,
+        )
+    };
+
+    let switch_node_identity = if request.switches.is_empty() {
+        None
+    } else {
+        Some(
+            switch_node_identity_for_profile(request.profile).map_err(|error| {
+                ComponentManagerError::InvalidArgument(format!(
+                    "failed to resolve RMS switch descriptor: {error}"
+                ))
+            })?,
+        )
+    };
+
+    if let Some(node_identity) = &compute_node_identity {
+        nodes.extend(
+            request
+                .machines
+                .iter()
+                .map(|device| build_new_node_info(request.rack_id, device, node_identity)),
+        );
+    }
+
+    if let Some(node_identity) = &switch_node_identity {
+        nodes.extend(
+            request
+                .switches
+                .iter()
+                .map(|device| build_new_node_info(request.rack_id, device, node_identity)),
+        );
+    }
+
+    let (component_filters, node_descriptor_component_filters) =
+        firmware_object_component_filters_for_node_identities(
+            request.components,
+            compute_node_identity
+                .iter()
+                .chain(switch_node_identity.iter()),
+        );
+
+    Ok(rms::ApplyFirmwareObjectRequest {
+        rack_id: request.rack_id.to_string(),
+        config_json: request.config_json.to_string(),
+        access_token: Some(rms_access_token_or_noauth(request.access_token)),
+        firmware_type: firmware_type.to_string(),
+        hardware_type,
+        nodes: Some(rms::NodeSet { nodes }),
+        force_update: request.force_update,
+        component_filters,
+        node_descriptor_component_filters,
+    })
+}
+
+fn rack_firmware_job_from_response(
+    request: RackFirmwareUpdateRequest<'_>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    response: rms::ApplyFirmwareObjectResponse,
+) -> Result<FirmwareUpgradeJob, ComponentManagerError> {
+    let batch_response = response.response.as_ref();
+
+    let batch_status = batch_response
+        .map(|batch_response| batch_response.status)
+        .unwrap_or(rms::ReturnCode::Failure as i32);
+
+    let batch_job_id = batch_response
+        .map(|batch_response| batch_response.job_id.as_str())
+        .unwrap_or_default();
+
+    if batch_status != rms::ReturnCode::Success as i32
+        && batch_job_id.is_empty()
+        && response.jobs.is_empty()
+    {
+        let message = batch_response
+            .map(|batch_response| batch_response.message.as_str())
+            .unwrap_or_default();
+
+        let message = if message.is_empty() {
+            "RMS returned failure for ApplyFirmwareObject".to_string()
+        } else {
+            message.to_string()
+        };
+
+        return Err(ComponentManagerError::RejectedBeforeDispatch(message));
+    }
+
+    let parent_job_id = (!batch_job_id.is_empty()).then(|| batch_job_id.to_string());
+
+    let child_jobs = response
+        .jobs
+        .iter()
+        .map(|child| (child.node_id.clone(), child.job_id.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let node_errors = batch_response
+        .map(|batch_response| {
+            batch_response
+                .node_results
+                .iter()
+                .filter(|result| {
+                    result.status != rms::ReturnCode::Success as i32
+                        || !result.error_message.is_empty()
+                })
+                .map(|result| (result.node_id.clone(), result.error_message.clone()))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let batch_error = batch_response.and_then(|batch_response| {
+        if batch_response.status == rms::ReturnCode::Success as i32
+            || batch_response.message.is_empty()
+        {
+            None
+        } else {
+            Some(batch_response.message.clone())
+        }
+    });
+
+    Ok(FirmwareUpgradeJob {
+        job_id: parent_job_id.clone(),
+        firmware_id: Some(response.object_id),
+        started_at: Some(started_at),
+        batch_job_ids: parent_job_id.iter().cloned().collect(),
+        machines: request
+            .machines
+            .into_iter()
+            .map(|device| {
+                rack_firmware_device_status(
+                    device,
+                    parent_job_id.clone(),
+                    &child_jobs,
+                    &node_errors,
+                    batch_error.as_deref(),
+                )
+            })
+            .collect(),
+        switches: request
+            .switches
+            .into_iter()
+            .map(|device| {
+                rack_firmware_device_status(
+                    device,
+                    parent_job_id.clone(),
+                    &child_jobs,
+                    &node_errors,
+                    batch_error.as_deref(),
+                )
+            })
+            .collect(),
+        ..Default::default()
+    })
+}
+
+fn rack_firmware_device_status(
+    device: FirmwareUpgradeDeviceInfo,
+    parent_job_id: Option<String>,
+    child_jobs: &HashMap<String, String>,
+    node_errors: &HashMap<String, String>,
+    batch_error: Option<&str>,
+) -> FirmwareUpgradeDeviceStatus {
+    let mut status = FirmwareUpgradeDeviceStatus {
+        node_id: device.node_id.clone(),
+        mac: device.mac,
+        bmc_ip: device.bmc_ip,
+        status: FirmwareProgressState::InProgress,
+        job_id: None,
+        parent_job_id,
+        error_message: None,
+    };
+
+    if let Some(error_message) = node_errors.get(&device.node_id) {
+        status.status = FirmwareProgressState::Failed;
+        status.error_message = Some(error_message.clone());
+    } else if let Some(job_id) = child_jobs.get(&device.node_id) {
+        status.job_id = Some(job_id.clone());
+    } else {
+        status.status = FirmwareProgressState::Failed;
+
+        status.error_message = Some(
+            batch_error
+                .unwrap_or("RMS did not return a child firmware job for this device")
+                .to_string(),
+        );
+    }
+
+    status
+}
+
+fn finish_rack_firmware_job(mut job: FirmwareUpgradeJob) -> FirmwareUpgradeJob {
+    let total = job.all_devices().count();
+
+    let completed = job
+        .all_devices()
+        .filter(|device| device.status == FirmwareProgressState::Completed)
+        .count();
+
+    let failed = job
+        .all_devices()
+        .filter(|device| device.status == FirmwareProgressState::Failed)
+        .count();
+
+    let terminal = completed + failed;
+
+    job.status = Some(if total > 0 && terminal < total {
+        FirmwareProgressState::InProgress
+    } else if failed > 0 {
+        FirmwareProgressState::Failed
+    } else {
+        FirmwareProgressState::Completed
+    });
+
+    if total > 0 && terminal == total {
+        job.completed_at.get_or_insert_with(chrono::Utc::now);
+    } else {
+        job.completed_at = None;
+    }
+
+    job
+}
+
+fn apply_rack_firmware_job_status_response(
+    device: &mut FirmwareUpgradeDeviceStatus,
+    job_id: &str,
+    response: Result<rms::GetFirmwareJobStatusResponse, RackManagerError>,
+) {
+    match response {
+        Ok(response) if response.status == rms::ReturnCode::Success as i32 => {
+            if !response.node_id.is_empty() {
+                device.node_id = response.node_id.clone();
+            }
+
+            match rms::FirmwareJobState::try_from(response.job_state) {
+                Ok(rms::FirmwareJobState::Queued) => {
+                    device.status = FirmwareProgressState::Pending;
+                    device.error_message = None;
+                }
+                Ok(rms::FirmwareJobState::Running) => {
+                    device.status = FirmwareProgressState::InProgress;
+                    device.error_message = None;
+                }
+                Ok(rms::FirmwareJobState::Completed) => {
+                    device.status = FirmwareProgressState::Completed;
+                    device.error_message = None;
+                }
+                Ok(rms::FirmwareJobState::Failed) => {
+                    device.status = FirmwareProgressState::Failed;
+
+                    device.error_message = Some(if response.error_message.is_empty() {
+                        response.state_description
+                    } else {
+                        response.error_message
+                    });
+                }
+                Ok(rms::FirmwareJobState::Unspecified) | Err(_) => {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        job_state = response.job_state,
+                        "RMS returned unknown firmware job state; keeping previous device status",
+                    );
+
+                    device.error_message = Some(format!(
+                        "Unknown RMS firmware job state {}",
+                        response.job_state
+                    ));
+                }
+            }
+        }
+        Ok(response) => {
+            let message = if response.error_message.is_empty() {
+                if response.state_description.is_empty() {
+                    format!("RMS could not report status for firmware job {job_id}")
+                } else {
+                    response.state_description
+                }
+            } else {
+                response.error_message
+            };
+
+            tracing::warn!(
+                job_id = %job_id,
+                job_status = response.status,
+                error = %message,
+                "RMS returned a non-success firmware job status lookup; retrying later",
+            );
+
+            device.error_message = Some(message);
+        }
+        Err(error) => {
+            let error = carbide_rack::rack_manager_error("get_firmware_job_status", error);
+
+            tracing::warn!(
+                job_id = %job_id,
+                error = %error,
+                "Transient RMS firmware job polling error; retrying later",
+            );
+
+            device.error_message = Some(error.to_string());
+        }
     }
 }
 
@@ -543,6 +974,11 @@ fn apply_nvos_job_status_response(
 /// Creates the RMS implementation of durable rack-level NVOS operations.
 pub fn rms_nvos_update_manager(client: Arc<dyn RmsApi>) -> impl NvosUpdateManager {
     RmsNvosUpdateManager { client }
+}
+
+/// Creates the RMS implementation of durable rack-level firmware-object operations.
+pub fn rms_rack_firmware_update_manager(client: Arc<dyn RmsApi>) -> impl RackFirmwareUpdateManager {
+    RmsRackFirmwareUpdateManager { client }
 }
 
 impl std::fmt::Debug for RmsBackend {
@@ -3842,6 +4278,103 @@ mod tests {
     };
 
     // ---- Mapping unit tests ----
+
+    #[test]
+    fn rack_firmware_device_status_uses_batch_error_when_child_job_missing() {
+        let status = rack_firmware_device_status(
+            FirmwareUpgradeDeviceInfo {
+                node_id: "node-1".into(),
+                mac: "00:11:22:33:44:55".into(),
+                bmc_ip: "192.0.2.10".into(),
+                bmc_username: "admin".into(),
+                bmc_password: "password".into(),
+                os_mac: None,
+                os_ip: None,
+                os_username: None,
+                os_password: None,
+                os_hostname: None,
+            },
+            Some("parent-job".into()),
+            &HashMap::new(),
+            &HashMap::new(),
+            Some("invalid SOT JSON"),
+        );
+
+        assert_eq!(status.status, FirmwareProgressState::Failed);
+        assert_eq!(status.error_message.as_deref(), Some("invalid SOT JSON"));
+    }
+
+    #[tokio::test]
+    async fn rack_firmware_submission_classifies_invalid_and_rejected_requests() {
+        let mock = Arc::new(MockRmsApi::new());
+
+        let manager = RmsRackFirmwareUpdateManager {
+            client: mock.clone(),
+        };
+
+        let rack_id = RackId::new("rack-1");
+        let profile = test_rms_profile();
+
+        let request = || RackFirmwareUpdateRequest {
+            rack_id: &rack_id,
+            profile: &profile,
+            config_json: r#"{"Id":"fw-default"}"#,
+            access_token: Some("token"),
+            force_update: false,
+            components: &[],
+            machines: Vec::new(),
+            switches: Vec::new(),
+        };
+
+        mock.enqueue_apply_firmware_object(Err(RackManagerError::ApiInvocationError(
+            tonic::Status::invalid_argument("unsupported node descriptor"),
+        )))
+        .await;
+
+        let result = manager.start_firmware_update(request()).await;
+
+        assert!(matches!(
+            result,
+            Err(ComponentManagerError::InvalidArgument(cause))
+                if cause.contains("unsupported node descriptor")
+        ));
+
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_fail(
+            "node-1",
+            "unsupported firmware object",
+        )))
+        .await;
+
+        let result = manager.start_firmware_update(request()).await;
+
+        assert!(matches!(
+            result,
+            Err(ComponentManagerError::RejectedBeforeDispatch(_))
+        ));
+    }
+
+    #[test]
+    fn rack_firmware_repoll_preserves_completion_timestamp() {
+        let completed_at = chrono::Utc::now();
+
+        let job = FirmwareUpgradeJob {
+            completed_at: Some(completed_at),
+            machines: vec![FirmwareUpgradeDeviceStatus {
+                node_id: "node-1".into(),
+                mac: "00:11:22:33:44:55".into(),
+                bmc_ip: "192.0.2.10".into(),
+                status: FirmwareProgressState::Completed,
+                job_id: Some("child-job".into()),
+                parent_job_id: Some("parent-job".into()),
+                error_message: None,
+            }],
+            ..Default::default()
+        };
+
+        let repolled = finish_rack_firmware_job(job);
+
+        assert_eq!(repolled.completed_at, Some(completed_at));
+    }
 
     #[test]
     fn power_action_maps_to_rms_operation() {
