@@ -30,12 +30,26 @@ RUN apt-get update && \
     libssl-dev \
     ca-certificates \
     git \
+    && if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+         DEBIAN_FRONTEND=noninteractive apt-get install -y clang mold; \
+       fi \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Add Rust to PATH
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Native ARM64 Cargo builds use mold without changing the linker selected by
+# other architectures.
+COPY --chmod=0755 dev/linkers/clang-mold /usr/local/bin/clang-mold
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold
+RUN if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+      printf 'int main(void) { return 0; }\n' | \
+        clang-mold -x c - -o /tmp/mold-smoke && \
+      readelf -p .comment /tmp/mold-smoke | grep -q mold && \
+      rm /tmp/mold-smoke; \
+    fi
 
 # Copy workspace configuration files
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
