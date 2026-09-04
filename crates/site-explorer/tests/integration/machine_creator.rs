@@ -257,11 +257,16 @@ async fn test_machine_creator_compute_rms_request_uses_rack_profile(
         .iter()
         .find(|machine| !machine.is_dpu())
         .ok_or_else(|| std::io::Error::other("created host machine was not found"))?;
+
+    let mut txn = env.pool.begin().await?;
+    db::machine::update_slot_and_tray(txn.as_mut(), &host.id, Some(7), None).await?;
+    txn.commit().await?;
+
     rms_sim
         .queue_batch_get_node_device_info_response(Ok(rms::BatchGetNodeDeviceInfoResponse {
             node_device_details: vec![rms::NodeDeviceInfo {
                 node_id: host.id.to_string(),
-                slot_number: Some(7),
+                slot_number: None,
                 tray_index: Some(3),
                 ..Default::default()
             }],

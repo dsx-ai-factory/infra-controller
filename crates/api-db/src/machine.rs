@@ -1901,13 +1901,16 @@ pub async fn update_slot_and_tray(
     slot_number: Option<i32>,
     tray_index: Option<i32>,
 ) -> DatabaseResult<()> {
-    sqlx::query("UPDATE machines SET slot_number = $1, tray_index = $2 WHERE id = $3")
-        .bind(slot_number)
-        .bind(tray_index)
-        .bind(machine_id)
-        .execute(txn)
-        .await
-        .map_err(|e| DatabaseError::new("update_slot_and_tray", e))?;
+    sqlx::query(
+        "UPDATE machines SET slot_number = COALESCE($1, slot_number), \
+         tray_index = COALESCE($2, tray_index) WHERE id = $3",
+    )
+    .bind(slot_number)
+    .bind(tray_index)
+    .bind(machine_id)
+    .execute(txn)
+    .await
+    .map_err(|e| DatabaseError::new("update_slot_and_tray", e))?;
     Ok(())
 }
 
@@ -3446,7 +3449,9 @@ pub struct MachineRmsIdentity {
     pub bmc_mac_address: MacAddress,
     pub rack_id: Option<RackId>,
     pub rack_profile_id: Option<RackProfileId>,
+    /// Physical slot number last reported by RMS, or `None` if none has been recorded.
     pub slot_number: Option<i32>,
+    /// Physical tray index last reported by RMS, or `None` if none has been recorded.
     pub tray_index: Option<i32>,
 }
 
