@@ -221,6 +221,13 @@ type ApiDeleteMachineRequest struct {
 	ApiService *MachineAPIService
 	org        string
 	machineId  string
+	force      *bool
+}
+
+// Force deletion through NICo Core, overriding the assigned Instance Type restriction and deleting the Machine&#39;s host, DPU, and BMC interfaces. A Machine attached to an Instance cannot be force deleted.
+func (r ApiDeleteMachineRequest) Force(force bool) ApiDeleteMachineRequest {
+	r.force = &force
+	return r
 }
 
 func (r ApiDeleteMachineRequest) Execute() (*MessageResponse, *http.Response, error) {
@@ -230,7 +237,7 @@ func (r ApiDeleteMachineRequest) Execute() (*MessageResponse, *http.Response, er
 /*
 DeleteMachine Delete a Machine from a Site
 
-Org must have an Infrastructure Provider entity. Machine must belong to the Provider. User must have authorization role with `PROVIDER_ADMIN` suffix. Machine must meet certain criteria to be eligible for deletion.
+Org must have an Infrastructure Provider entity. Machine must belong to the Provider. User must have authorization role with `PROVIDER_ADMIN` suffix. Without `force=true`, the Machine must have been missing from the Site for at least 24 hours and have no attached Instance or assigned Instance Type. With `force=true`, the Machine can remain assigned to an Instance Type, but it cannot have an attached Instance. NICo Core deletes the Machine and its host, DPU, and BMC interfaces, and the REST API removes the corresponding local records.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -270,6 +277,13 @@ func (a *MachineAPIService) DeleteMachineExecute(r ApiDeleteMachineRequest) (*Me
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
 
+	if r.force != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "force", r.force, "form", "")
+	} else {
+		var defaultValue bool = false
+		parameterAddToHeaderOrQuery(localVarQueryParams, "force", defaultValue, "form", "")
+		r.force = &defaultValue
+	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
 
@@ -342,6 +356,28 @@ func (a *MachineAPIService) DeleteMachineExecute(r ApiDeleteMachineRequest) (*Me
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 429 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 422 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -354,6 +390,28 @@ func (a *MachineAPIService) DeleteMachineExecute(r ApiDeleteMachineRequest) (*Me
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

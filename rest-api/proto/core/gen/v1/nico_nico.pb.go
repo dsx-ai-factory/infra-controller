@@ -28047,8 +28047,17 @@ type AdminForceDeleteMachineRequest struct {
 	// machine can recover its boot target; set this when a clean rediscovery
 	// without prior boot-target memory is intended.
 	DeleteRetainedBootInterfaces bool `protobuf:"varint,7,opt,name=delete_retained_boot_interfaces,json=deleteRetainedBootInterfaces,proto3" json:"delete_retained_boot_interfaces,omitempty"`
-	unknownFields                protoimpl.UnknownFields
-	sizeCache                    protoimpl.SizeCache
+	// False or omitted rejects deletion while the Machine is associated with an
+	// Instance Type. True permits deletion and removes that association with the
+	// Machine.
+	AllowDeleteWithInstanceType bool `protobuf:"varint,8,opt,name=allow_delete_with_instance_type,json=allowDeleteWithInstanceType,proto3" json:"allow_delete_with_instance_type,omitempty"`
+	// False or omitted rejects deletion while an Instance is attached to the
+	// Machine. True permits deletion and removes the attached Instance
+	// control-plane record without first requesting a graceful workload
+	// shutdown; later cleanup may forcibly restart the host.
+	AllowDeleteWithInstance bool `protobuf:"varint,9,opt,name=allow_delete_with_instance,json=allowDeleteWithInstance,proto3" json:"allow_delete_with_instance,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *AdminForceDeleteMachineRequest) Reset() {
@@ -28126,6 +28135,20 @@ func (x *AdminForceDeleteMachineRequest) GetDeleteBmcSuppressions() bool {
 func (x *AdminForceDeleteMachineRequest) GetDeleteRetainedBootInterfaces() bool {
 	if x != nil {
 		return x.DeleteRetainedBootInterfaces
+	}
+	return false
+}
+
+func (x *AdminForceDeleteMachineRequest) GetAllowDeleteWithInstanceType() bool {
+	if x != nil {
+		return x.AllowDeleteWithInstanceType
+	}
+	return false
+}
+
+func (x *AdminForceDeleteMachineRequest) GetAllowDeleteWithInstance() bool {
+	if x != nil {
+		return x.AllowDeleteWithInstance
 	}
 	return false
 }
@@ -67638,7 +67661,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1dDpuAgentUpgradePolicyResponse\x12>\n" +
 	"\ractive_policy\x18\x01 \x01(\x0e2\x19.forge.AgentUpgradePolicyR\factivePolicy\x12\x1d\n" +
 	"\n" +
-	"did_change\x18\x02 \x01(\bR\tdidChange\"\xa2\x03\n" +
+	"did_change\x18\x02 \x01(\bR\tdidChange\"\xa5\x04\n" +
 	"\x1eAdminForceDeleteMachineRequest\x12\x1d\n" +
 	"\n" +
 	"host_query\x18\x01 \x01(\tR\thostQuery\x12+\n" +
@@ -67647,7 +67670,9 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x16delete_bmc_credentials\x18\x04 \x01(\bR\x14deleteBmcCredentials\x12K\n" +
 	"#allow_delete_with_orphaned_dpf_crds\x18\x05 \x01(\bR\x1eallowDeleteWithOrphanedDpfCrds\x126\n" +
 	"\x17delete_bmc_suppressions\x18\x06 \x01(\bR\x15deleteBmcSuppressions\x12E\n" +
-	"\x1fdelete_retained_boot_interfaces\x18\a \x01(\bR\x1cdeleteRetainedBootInterfaces\"R\n" +
+	"\x1fdelete_retained_boot_interfaces\x18\a \x01(\bR\x1cdeleteRetainedBootInterfaces\x12D\n" +
+	"\x1fallow_delete_with_instance_type\x18\b \x01(\bR\x1ballowDeleteWithInstanceType\x12;\n" +
+	"\x1aallow_delete_with_instance\x18\t \x01(\bR\x17allowDeleteWithInstance\"R\n" +
 	"\x1eDecommissionManagedHostRequest\x120\n" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\tmachineId\"!\n" +

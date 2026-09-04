@@ -636,7 +636,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		{
 			Path:    apiPathPrefix + "/machine/:id",
 			Method:  http.MethodDelete,
-			Handler: apiHandler.NewDeleteMachineHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewDeleteMachineHandler(dbSession, scp),
 		},
 		{
 

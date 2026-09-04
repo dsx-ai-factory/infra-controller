@@ -591,7 +591,7 @@ pub(crate) async fn admin_force_delete_machine(
         "Admin force-delete machine request",
     );
 
-    if machine.config.instance_type_id.is_some() {
+    if machine.config.instance_type_id.is_some() && !request.allow_delete_with_instance_type {
         return Err(CarbideError::FailedPrecondition(format!(
             "association with instance type must be removed before deleting machine {}",
             machine.id
@@ -601,7 +601,7 @@ pub(crate) async fn admin_force_delete_machine(
 
     // TODO: This should maybe just use the snapshot loading functionality that the
     // state controller will use - which already contains the combined state
-    let host_machine;
+    let mut host_machine;
     let dpu_machines;
     match machine.id.host_or_dpu_id() {
         HostOrDpuId::Dpu(dpu_machine_id) => {
@@ -635,6 +635,45 @@ pub(crate) async fn admin_force_delete_machine(
             host_machine = Some(machine);
         }
     }
+
+    let instance_id = if let Some(host_machine) = &mut host_machine {
+        let host_machine_id = host_machine.id;
+        *host_machine = db::machine::find_one(
+            &mut txn,
+            &host_machine_id,
+            MachineSearchConfig {
+                for_update: true,
+                ..MachineSearchConfig::default()
+            },
+        )
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "Machine",
+            id: host_machine_id.to_string(),
+        })?;
+
+        if host_machine.config.instance_type_id.is_some()
+            && !request.allow_delete_with_instance_type
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "association with instance type must be removed before deleting machine {}",
+                host_machine.id
+            ))
+            .into());
+        }
+
+        let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?;
+        if instance_id.is_some() && !request.allow_delete_with_instance {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "attached instance must be removed before deleting machine {}",
+                host_machine.id
+            ))
+            .into());
+        }
+        instance_id
+    } else {
+        None
+    };
 
     if let Some(host_machine) = &host_machine {
         response.managed_host_machine_id = host_machine.id.to_string();
@@ -682,9 +721,7 @@ pub(crate) async fn admin_force_delete_machine(
 
     // So far we only inspected state - now we start the deletion process
     // TODO: In the new model we might just need to move one Machine to this state
-    let instance_id = if let Some(host_machine) = &host_machine {
-        // Write to the machine row before fetching the instance, to lock it in case
-        // allocate_instance is running at the same time.
+    if let Some(host_machine) = &host_machine {
         db::machine::advance(
             host_machine,
             &mut txn,
@@ -692,14 +729,10 @@ pub(crate) async fn admin_force_delete_machine(
             None,
         )
         .await?;
-        let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?;
-        if let Some(instance_id) = &instance_id {
-            response.instance_id = instance_id.to_string();
-        }
-        instance_id
-    } else {
-        None
-    };
+    }
+    if let Some(instance_id) = &instance_id {
+        response.instance_id = instance_id.to_string();
+    }
     for dpu_machine in dpu_machines.iter() {
         db::machine::advance(
             dpu_machine,

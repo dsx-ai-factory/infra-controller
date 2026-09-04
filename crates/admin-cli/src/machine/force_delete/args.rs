@@ -25,7 +25,7 @@ EXAMPLES:
 Force delete a machine (by UUID, IPv4, MAC, or hostname):
     $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567
 
-Force delete a machine and its interfaces (redeploy kea afterward):
+Force delete a machine and its interfaces:
     $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
     --delete-interfaces
 
@@ -35,11 +35,21 @@ suppressions, and retained boot targets):
     --delete-interfaces --delete-bmc-interfaces --delete-bmc-suppressions \
     --delete-retained-boot-interfaces
 
+Force delete a machine assigned to an Instance Type:
+    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
+    --allow-delete-with-instance-type
+
+Force delete a machine with an attached Instance. This removes the attached \
+Instance control-plane record without first requesting a graceful workload \
+shutdown; force-delete cleanup may forcibly restart the host:
+    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
+    --allow-delete-with-instance
+
 ")]
 pub(crate) struct Args {
     #[clap(
         long,
-        help = "UUID, IPv4, MAC or hostnmame of the host or DPU machine to delete"
+        help = "UUID, IPv4, MAC or hostname of the host or DPU machine to delete"
     )]
     pub(super) machine: String,
 
@@ -74,7 +84,14 @@ pub(crate) struct Args {
     #[clap(
         long,
         action,
-        help = "Delete machine with allocated instance. This flag acknowledges destroying the user instance as well."
+        help = "Delete Machine with an assigned Instance Type. This flag acknowledges removing the Instance Type association."
+    )]
+    pub(super) allow_delete_with_instance_type: bool,
+
+    #[clap(
+        long,
+        action,
+        help = "Delete Machine with an attached Instance. This flag also allows removing an assigned Instance Type and removes the attached Instance control-plane record without first requesting a graceful workload shutdown; force-delete cleanup may forcibly restart the host."
     )]
     pub(super) allow_delete_with_instance: bool,
 
@@ -96,6 +113,60 @@ impl From<&Args> for AdminForceDeleteMachineRequest {
             allow_delete_with_orphaned_dpf_crds: args.allow_delete_with_orphaned_dpf_crds,
             delete_bmc_suppressions: args.delete_bmc_suppressions,
             delete_retained_boot_interfaces: args.delete_retained_boot_interfaces,
+            allow_delete_with_instance_type: args.allow_delete_with_instance_type
+                || args.allow_delete_with_instance,
+            allow_delete_with_instance: args.allow_delete_with_instance,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_override_maps_to_type_and_instance_permissions() {
+        for (name, argv, expected_type, expected_instance) in [
+            (
+                "omitted",
+                vec!["force-delete", "--machine", "machine-1"],
+                false,
+                false,
+            ),
+            (
+                "instance type only",
+                vec![
+                    "force-delete",
+                    "--machine",
+                    "machine-1",
+                    "--allow-delete-with-instance-type",
+                ],
+                true,
+                false,
+            ),
+            (
+                "instance implies instance type",
+                vec![
+                    "force-delete",
+                    "--machine",
+                    "machine-1",
+                    "--allow-delete-with-instance",
+                ],
+                true,
+                true,
+            ),
+        ] {
+            let args = Args::try_parse_from(argv).unwrap_or_else(|error| panic!("{name}: {error}"));
+            let request = AdminForceDeleteMachineRequest::from(&args);
+
+            assert_eq!(
+                request.allow_delete_with_instance_type, expected_type,
+                "{name}"
+            );
+            assert_eq!(
+                request.allow_delete_with_instance, expected_instance,
+                "{name}"
+            );
         }
     }
 }

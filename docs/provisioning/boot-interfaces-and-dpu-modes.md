@@ -205,11 +205,14 @@ NICo keeps the DPUs explored, linked, and underlay-addressed (running agents for
 
 ### 3.5 Flipping a DPU to NIC mode
 
-To change a host that's already ingested (e.g. from managed-DPU to NIC mode), update its Expected Machine policy with `--dpu-policy`, then force-delete and let it re-ingest so site-explorer re-explores and applies the new physical mode:
+To change a host that's already ingested, first release any attached Instance,
+then update its Expected Machine policy with `--dpu-policy` and force-delete it
+with the Instance Type override so Site Explorer re-explores and applies the
+new physical mode:
 
 ```bash
 nico-admin-cli -a <api-url> em patch --bmc-mac-address <bmc-mac> --dpu-policy nic
-nico-admin-cli -a <api-url> machine force-delete --machine <machine-id> --delete-interfaces
+nico-admin-cli -a <api-url> machine force-delete --machine <machine-id> --delete-interfaces --allow-delete-with-instance-type
 ```
 
 See the [Force Delete playbook](../playbooks/force_delete.md) for the full re-ingest procedure. NICo preserves the host's boot-interface **Redfish id** across the deletion gap via the retained-boot-interface mechanism ([Section 7.4](#74-retained-boot-interfaces)), so the host can be re-targeted for boot before a fresh exploration completes. After a flip, you can re-apply the resolved boot interface with one click via **Restore Boot Interface** in the web UI ([Section 5](#5-web-ui)).
@@ -296,7 +299,7 @@ that the operator already selected the primary interface. Either reconciliation 
 | admin-cli | Forge RPC | Purpose |
 |---|---|---|
 | `site-explorer remediation <bmc-ip> --pause` / `--resume` | `PauseExploredEndpointRemediation` | Pause/resume site-explorer's automatic remediation (and ingestion processing) for an endpoint. |
-| `machine force-delete --machine <id> [--delete-interfaces] [--delete-bmc-interfaces] [--delete-bmc-credentials]` | `AdminForceDeleteMachine` | Remove a machine (and optionally its interfaces/credentials) from the database, bypassing the normal lifecycle. |
+| `machine force-delete --machine <id> [--delete-interfaces] [--delete-bmc-interfaces] [--delete-bmc-credentials] [--allow-delete-with-instance-type] [--allow-delete-with-instance]` | `AdminForceDeleteMachine` | Remove a Machine from the database, bypassing the normal lifecycle. The Instance Type flag removes that association; the Instance flag implies it and removes the attached Instance control-plane record without first requesting a graceful workload shutdown. Force-delete cleanup may forcibly restart the host. |
 | `managed-host show [--all \| <machine-id>]` | (query) | Inspect a host's current state, interfaces, and database primary selection. This does not prove that Redfish matches; use `boot-interface show` for reconciliation. |
 
 ---

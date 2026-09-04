@@ -117,8 +117,9 @@ nico-admin-cli -a <api-url> machine force-delete \
   --delete-bmc-interfaces
 ```
 
-Confirm that the machine has no tenant instance and follow the
-[Force Delete Playbook](../playbooks/force_delete.md).
+Confirm that the Machine has no attached Instance. If it is assigned to an
+Instance Type, add `--allow-delete-with-instance-type` to the command. Then
+follow the [Force Delete Playbook](../playbooks/force_delete.md).
 
 ## Network Segment Selection
 

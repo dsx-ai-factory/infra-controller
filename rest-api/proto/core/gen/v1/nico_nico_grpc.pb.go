@@ -788,9 +788,9 @@ type ForgeClient interface {
 	UpdateMachineHardwareInfo(ctx context.Context, in *UpdateMachineHardwareInfoRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Force deletes a Machine and the associated DPU from NICo databases,
 	// with the intention of rediscovering the host later on.
-	// The command will not stop a running tenant instance. Only a reboot that forces
-	// the NICo PXE boot process again would stop the image and run the discovery
-	// process again.
+	// The attached-Instance override removes the attached Instance control-plane
+	// record without first requesting a graceful workload shutdown. Force-delete
+	// cleanup may forcibly restart the host.
 	//
 	// Due to the not well defined state that hosts are in after calling this command,
 	// it should not be used by Tenants or Site Providers to release instances. Those
@@ -6586,9 +6586,9 @@ type ForgeServer interface {
 	UpdateMachineHardwareInfo(context.Context, *UpdateMachineHardwareInfoRequest) (*emptypb.Empty, error)
 	// Force deletes a Machine and the associated DPU from NICo databases,
 	// with the intention of rediscovering the host later on.
-	// The command will not stop a running tenant instance. Only a reboot that forces
-	// the NICo PXE boot process again would stop the image and run the discovery
-	// process again.
+	// The attached-Instance override removes the attached Instance control-plane
+	// record without first requesting a graceful workload shutdown. Force-delete
+	// cleanup may forcibly restart the host.
 	//
 	// Due to the not well defined state that hosts are in after calling this command,
 	// it should not be used by Tenants or Site Providers to release instances. Those

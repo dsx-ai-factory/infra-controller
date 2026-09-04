@@ -419,7 +419,7 @@ func TestGeneratedCommand_CancelledMutationDoesNotCallAPI(t *testing.T) {
 	session := &Session{Client: client, Cache: cache}
 	command := requireTUICommand(t, "machine delete")
 
-	output, err := withStdin(t, "n\n", func() (string, error) {
+	output, err := withStdin(t, "n\nn\n", func() (string, error) {
 		var runErr error
 		out := captureStdout(func() {
 			runErr = command.Run(session, []string{"machine-1"})
@@ -429,7 +429,67 @@ func TestGeneratedCommand_CancelledMutationDoesNotCallAPI(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, calls.Load())
 	assert.NotNil(t, cache.Get("machine"), "cancelled mutations must preserve the cache")
+	assert.Contains(t, output, "Force delete Machine machine-1?")
 	assert.NotContains(t, output, "INFO:")
+}
+
+func TestGeneratedCommand_MachineDeleteOffersForceMode(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		args            []string
+		input           string
+		wantQuery       string
+		wantForcePrompt bool
+		cancel          bool
+	}{
+		{name: "guided force delete", args: []string{"machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true},
+		{name: "guided standard delete", args: []string{"machine-1"}, input: "n\ny\n", wantForcePrompt: true},
+		{name: "explicit force flag", args: []string{"--force", "machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true},
+		{name: "explicit true value", args: []string{"--force=true", "machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true},
+		{name: "explicit false value", args: []string{"--force=false", "machine-1"}, input: "y\n", wantQuery: "force=false"},
+		{name: "decline explicit force", args: []string{"--force", "machine-1"}, input: "n\n", wantForcePrompt: true, cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queries := make(chan string, 1)
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				queries <- r.URL.RawQuery
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = io.WriteString(w, `{"message":"Deletion request was accepted"}`)
+			}))
+			defer server.Close()
+
+			cache := NewCache()
+			cache.Set("machine", []NamedItem{{Name: "host-one", ID: "machine-1"}})
+			session := &Session{
+				Client: appcli.NewClient(server.URL, "acme", "token", nil, false),
+				Cache:  cache,
+			}
+			command := requireTUICommand(t, "machine delete")
+			output, err := withStdin(t, tc.input, func() (string, error) {
+				var runErr error
+				out := captureStdout(func() {
+					runErr = command.Run(session, tc.args)
+				})
+				return out, runErr
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantForcePrompt, strings.Contains(output, "Force delete Machine machine-1?"))
+			if tc.cancel {
+				assert.Zero(t, calls.Load())
+				assert.NotNil(t, cache.Get("machine"), "cancelled mutations must preserve the cache")
+				assert.NotContains(t, output, "Run machine delete (DELETE)?")
+				assert.NotContains(t, output, "INFO:")
+				return
+			}
+			assert.Equal(t, int32(1), calls.Load())
+			assert.Equal(t, tc.wantQuery, <-queries)
+			assert.Contains(t, output, "Run machine delete (DELETE)?")
+			assert.Contains(t, output, "Deletion request was accepted")
+		})
+	}
 }
 
 func TestGeneratedCommand_HelpLikeValuesDoNotBypassConfirmation(t *testing.T) {

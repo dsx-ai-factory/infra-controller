@@ -10054,6 +10054,13 @@ paths:
         - Machine
       summary: Delete a Machine from a Site
       operationId: delete-machine
+      parameters:
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: force
+          description: Force deletion through NICo Core, overriding the assigned Instance Type restriction and deleting the Machine's host, DPU, and BMC interfaces. A Machine attached to an Instance cannot be force deleted.
       responses:
         '202':
           description: Deletion request was accepted
@@ -10062,7 +10069,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/MessageResponse'
               examples:
-                example-1:
+                normal-deletion:
                   value:
                     message: Deletion request was accepted
         '400':
@@ -10072,13 +10079,33 @@ paths:
         '404':
           description: Describes an error response for 404 Not Found
           $ref: '#/components/responses/GenericHttpError'
+        '412':
+          description: The Machine deletion preconditions were not met.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '429':
+          $ref: '#/components/responses/ResourceExhaustedError'
         '422':
           description: Describes an error response for 422 Unprocessable Content
           $ref: '#/components/responses/GenericHttpError'
         '500':
           description: Describes an error response for 500 Internal Server Error
           $ref: '#/components/responses/GenericHttpError'
-      description: Org must have an Infrastructure Provider entity. Machine must belong to the Provider. User must have authorization role with `PROVIDER_ADMIN` suffix. Machine must meet certain criteria to be eligible for deletion.
+        '503':
+          description: A dependency required to delete the Machine is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '504':
+          description: The Machine deletion request timed out.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+      description: Org must have an Infrastructure Provider entity. Machine must belong to the Provider. User must have authorization role with `PROVIDER_ADMIN` suffix. Without `force=true`, the Machine must have been missing from the Site for at least 24 hours and have no attached Instance or assigned Instance Type. With `force=true`, the Machine can remain assigned to an Instance Type, but it cannot have an attached Instance. NICo Core deletes the Machine and its host, DPU, and BMC interfaces, and the REST API removes the corresponding local records.
   '/v2/org/{org}/nico/machine/{machineId}/bmc/reset':
     parameters:
       - schema:

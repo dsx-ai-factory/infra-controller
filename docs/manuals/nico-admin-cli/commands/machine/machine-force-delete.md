@@ -14,6 +14,7 @@ nico-admin-cli-machine-force-delete - Force delete a machine
 \[**-c**\|**--delete-bmc-credentials**\]
 \[**--delete-bmc-suppressions**\]
 \[**--delete-retained-boot-interfaces**\]
+\[**--allow-delete-with-instance-type**\]
 \[**--allow-delete-with-instance**\]
 \[**--allow-delete-with-orphaned-dpf-crds**\] \[**--extended**\]
 \[**--sort-by**\] \[**-h**\|**--help**\]
@@ -25,13 +26,13 @@ Force delete a machine
 ## OPTIONS
 
 **--machine** *\<MACHINE\>*  
-UUID, IPv4, MAC or hostnmame of the host or DPU machine to delete
+UUID, IPv4, MAC or hostname of the host or DPU machine to delete
 
 **-d**, **--delete-interfaces**  
-Delete interfaces. Redeploy kea after deleting machine interfaces.
+Delete interfaces.
 
 **-b**, **--delete-bmc-interfaces**  
-Delete BMC interfaces. Redeploy kea after deleting machine interfaces.
+Delete BMC interfaces.
 
 **-c**, **--delete-bmc-credentials**  
 Delete BMC credentials. Only applicable if site explorer has configured
@@ -46,9 +47,15 @@ Delete retained boot-interface pairs for the host/DPU BMC and interface
 MACs. Without this, deleted interfaces keep their boot targets for
 re-ingestion.
 
+**--allow-delete-with-instance-type**  
+Delete Machine with an assigned Instance Type. This flag acknowledges
+removing the Instance Type association.
+
 **--allow-delete-with-instance**  
-Delete machine with allocated instance. This flag acknowledges
-destroying the user instance as well.
+Delete Machine with an attached Instance. This flag also allows removing
+an assigned Instance Type and removes the attached Instance
+control-plane record without first requesting a graceful workload
+shutdown; force-delete cleanup may forcibly restart the host.
 
 **--allow-delete-with-orphaned-dpf-crds**  
 Delete machine even if DPF CRDs exist and DPF is disabled at the site
@@ -80,6 +87,8 @@ Print help (see a summary with -h)
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --delete-interfaces
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --delete-interfaces --delete-bmc-interfaces --delete-bmc-suppressions --delete-retained-boot-interfaces
+nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --allow-delete-with-instance-type
+nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --allow-delete-with-instance
 ```
 
 ---

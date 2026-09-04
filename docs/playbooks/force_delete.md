@@ -27,16 +27,21 @@ See nico-admin-cli access on a NICo deployment.
 
 ### 2. Execute the `nico-admin-cli machine force-delete` command
 
-Executing `nico-admin-cli machine force-delete` will wipe most knowledge about
-machines and instances running on top of them from the database, and clean up associated CRDs.
-It accepts the machine-id, hostname,  MAC or IP of either the managed host or DPU as input,
-and will delete information about both of them (since they are heavily coupled).
+Executing `nico-admin-cli machine force-delete` removes most NICo database
+state for the Machine and cleans up associated CRDs. It accepts the Machine ID,
+hostname, MAC address, or IP address of either the managed host or DPU and
+deletes information for both. By default, the command rejects a Machine
+assigned to an Instance Type or attached to an Instance. Add
+`--allow-delete-with-instance-type` to remove the Instance Type association.
+`--allow-delete-with-instance` implies that override and removes the attached
+Instance control-plane record without first requesting a graceful workload
+shutdown. Force-delete cleanup may forcibly restart the host.
 
 It returns all machine-ids and instance-ids it acted on, as well as the BMC information for the host.
 
-Example:
+Example for a Machine with no assigned Instance Type or attached Instance:
 
-```
+```bash
 /opt/nico/nico-admin-cli -a https://127.0.0.1:1079 machine force-delete --machine="60cef902-9779-4666-8362-c9bb4b37184f"
 ```
 

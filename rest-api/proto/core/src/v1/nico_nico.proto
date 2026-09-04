@@ -338,9 +338,9 @@ service Forge {
 
   // Force deletes a Machine and the associated DPU from NICo databases,
   // with the intention of rediscovering the host later on.
-  // The command will not stop a running tenant instance. Only a reboot that forces
-  // the NICo PXE boot process again would stop the image and run the discovery
-  // process again.
+  // The attached-Instance override removes the attached Instance control-plane
+  // record without first requesting a graceful workload shutdown. Force-delete
+  // cleanup may forcibly restart the host.
   //
   // Due to the not well defined state that hosts are in after calling this command,
   // it should not be used by Tenants or Site Providers to release instances. Those
@@ -5095,6 +5095,17 @@ message AdminForceDeleteMachineRequest {
   // machine can recover its boot target; set this when a clean rediscovery
   // without prior boot-target memory is intended.
   bool delete_retained_boot_interfaces = 7;
+
+  // False or omitted rejects deletion while the Machine is associated with an
+  // Instance Type. True permits deletion and removes that association with the
+  // Machine.
+  bool allow_delete_with_instance_type = 8;
+
+  // False or omitted rejects deletion while an Instance is attached to the
+  // Machine. True permits deletion and removes the attached Instance
+  // control-plane record without first requesting a graceful workload
+  // shutdown; later cleanup may forcibly restart the host.
+  bool allow_delete_with_instance = 9;
 }
 
 message DecommissionManagedHostRequest {
