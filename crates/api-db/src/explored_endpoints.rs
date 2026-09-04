@@ -525,6 +525,31 @@ async fn set_preingestion(
     Ok(())
 }
 
+/// Set one preingestion state on every explored address for a physical BMC.
+///
+/// A BMC can have IPv4 and IPv6 endpoint rows. Rack firmware workflow state is
+/// device-scoped, so callers update all known aliases together.
+pub async fn set_preingestion_for_addresses(
+    addresses: &[IpAddr],
+    state: PreingestionState,
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError> {
+    if addresses.is_empty() {
+        return Ok(());
+    }
+
+    let query = "UPDATE explored_endpoints SET preingestion_state = $1 WHERE address = ANY($2)";
+
+    sqlx::query(query)
+        .bind(sqlx::types::Json(&state))
+        .bind(addresses)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(())
+}
+
 pub async fn set_preingestion_recheck_versions(
     address: IpAddr,
     txn: &mut PgConnection,

@@ -1052,7 +1052,9 @@ document. NICo uses the document as the default firmware input during rack
 ingestion. The block contains a `url` and an optional `fetch_timeout`, which
 accepts duration strings such as `30s` and `60s` and defaults to `30s`. Use
 seconds for this request timeout, although the parser accepts other duration
-units such as milliseconds (`ms`), minutes (`m`), and hours (`h`).
+units such as milliseconds (`ms`), minutes (`m`), and hours (`h`). The optional
+`access_token_credential` names a stored firmware artifact access token used by
+compute-tray pre-ingestion. When omitted, NICo sends the RMS no-auth sentinel.
 
 ---
 

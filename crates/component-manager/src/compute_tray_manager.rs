@@ -61,6 +61,12 @@ pub struct ComputeTrayResult {
     pub bmc_mac: MacAddress,
     pub success: bool,
     pub error: Option<String>,
+
+    /// Opaque backend job ID returned for an asynchronous operation.
+    ///
+    /// `None` means the backend returned no durable job handle. Presence does
+    /// not imply success; a failed result may retain the ID for reconciliation.
+    pub backend_job_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +133,23 @@ pub trait ComputeTrayManager: Send + Sync + Debug + 'static {
         &self,
         endpoints: &[ComputeTrayEndpoint],
     ) -> Result<Vec<ComputeTrayFirmwareUpdateStatus>, ComponentManagerError>;
+
+    /// Return the status of one exact backend firmware job.
+    ///
+    /// This avoids selecting a job from device-scoped tracking when the caller
+    /// already owns an exact job ID. Backends without this capability return
+    /// [`ComponentManagerError::Unsupported`].
+    async fn get_firmware_job_status(
+        &self,
+        _bmc_ip: IpAddr,
+        _bmc_mac: MacAddress,
+        _job_id: &str,
+    ) -> Result<ComputeTrayFirmwareUpdateStatus, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "exact firmware job status is not supported by the {} backend",
+            self.name()
+        )))
+    }
 
     async fn list_firmware_bundles(&self) -> Result<Vec<String>, ComponentManagerError>;
 }

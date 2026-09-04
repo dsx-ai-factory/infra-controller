@@ -424,6 +424,7 @@ impl ComputeTrayManager for MockComputeTrayManager {
                 bmc_mac: ep.bmc_mac,
                 success: true,
                 error: None,
+                backend_job_id: None,
             })
             .collect())
     }
@@ -442,6 +443,7 @@ impl ComputeTrayManager for MockComputeTrayManager {
                 bmc_mac: ep.bmc_mac,
                 success: true,
                 error: None,
+                backend_job_id: None,
             })
             .collect())
     }

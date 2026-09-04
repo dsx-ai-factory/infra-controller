@@ -21,7 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use carbide_instrument::{Event, emit, red};
 use carbide_rack::firmware_object::{
-    ANY_RACK_HARDWARE_TYPE, profile_hardware_type_wire_value, rms_access_token_or_noauth,
+    ANY_RACK_HARDWARE_TYPE, RMS_NOAUTH_ACCESS_TOKEN, profile_hardware_type_wire_value,
+    rms_access_token_or_noauth,
 };
 use carbide_rack::firmware_update::{build_new_node_info, firmware_type_for_profile};
 use carbide_rack::rms_node_type::{
@@ -1536,7 +1537,14 @@ fn apply_firmware_object_request(
     options: &FirmwareUpdateOptions,
     components: &[String],
 ) -> Result<rms::ApplyFirmwareObjectRequest, ComponentManagerError> {
-    let access_token = Some(rms_access_token_or_noauth(options.access_token.as_deref()));
+    // Callers normalize interactive API input before constructing the options.
+    // Stored artifact tokens are opaque and must reach RMS byte-for-byte.
+    let access_token = Some(
+        options
+            .access_token
+            .clone()
+            .unwrap_or_else(|| RMS_NOAUTH_ACCESS_TOKEN.to_string()),
+    );
 
     if config_json.trim().is_empty() {
         return Err(ComponentManagerError::InvalidArgument(
@@ -1776,7 +1784,9 @@ async fn query_tracked_firmware_job_status(
                     let state = if status_success {
                         map_rms_firmware_job_state(response.job_state)
                     } else {
-                        FirmwareState::Unknown
+                        // RMS returns a non-success response when the requested
+                        // firmware-object job ID is no longer tracked.
+                        FirmwareState::Failed
                     };
                     let error = if response.error_message.is_empty() {
                         (!status_success).then(|| {
@@ -3410,6 +3420,7 @@ impl RmsBackend {
                     bmc_mac: ep.bmc_mac,
                     success: false,
                     error: Some(error),
+                    backend_job_id: None,
                 };
             }
         };
@@ -3430,6 +3441,7 @@ impl RmsBackend {
                     bmc_mac: ep.bmc_mac,
                     success: false,
                     error: Some(e.to_string()),
+                    backend_job_id: None,
                 };
             }
         };
@@ -3483,6 +3495,7 @@ impl RmsBackend {
                     bmc_mac: ep.bmc_mac,
                     success,
                     error,
+                    backend_job_id: job_id,
                 }
             }
             Err(e) => {
@@ -3496,6 +3509,7 @@ impl RmsBackend {
                     bmc_mac: ep.bmc_mac,
                     success: false,
                     error: Some(e.to_string()),
+                    backend_job_id: None,
                 }
             }
         }
@@ -3554,6 +3568,7 @@ impl ComputeTrayManager for RmsBackend {
                             "could not resolve RMS identity from database or expected inventory"
                                 .into(),
                         ),
+                        backend_job_id: None,
                     });
                     continue;
                 }
@@ -3567,6 +3582,7 @@ impl ComputeTrayManager for RmsBackend {
                         bmc_mac: ep.bmc_mac,
                         success: false,
                         error: Some(error),
+                        backend_job_id: None,
                     });
                     continue;
                 }
@@ -3596,6 +3612,7 @@ impl ComputeTrayManager for RmsBackend {
                         bmc_mac: ep.bmc_mac,
                         success,
                         error,
+                        backend_job_id: None,
                     });
                 }
                 Err(e) => {
@@ -3609,6 +3626,7 @@ impl ComputeTrayManager for RmsBackend {
                         bmc_mac: ep.bmc_mac,
                         success: false,
                         error: Some(e.to_string()),
+                        backend_job_id: None,
                     });
                 }
             }
@@ -3665,6 +3683,7 @@ impl ComputeTrayManager for RmsBackend {
                             "could not resolve RMS identity from database or expected inventory"
                                 .into(),
                         ),
+                        backend_job_id: None,
                     });
                     continue;
                 }
@@ -3743,63 +3762,46 @@ impl ComputeTrayManager for RmsBackend {
                     target_version: String::new(),
                     error: Some("no firmware job tracked for this compute tray".into()),
                 });
+
                 continue;
             };
-            let job_id = &job_id;
 
-            let request = rms::GetFirmwareJobStatusRequest {
-                job_id: job_id.clone(),
-            };
+            let job = RmsTrackedFirmwareJob::FirmwareObject(job_id);
 
-            match red::instrumented(
-                "rms",
-                "get_firmware_job_status",
-                self.client.get_firmware_job_status(request),
-            )
-            .await
-            {
-                Ok(response) => {
-                    let status_success = response.status == rms::ReturnCode::Success as i32;
-                    let state = if status_success {
-                        map_rms_firmware_job_state(response.job_state)
-                    } else {
-                        FirmwareState::Unknown
-                    };
-                    let error = if response.error_message.is_empty() {
-                        (!status_success).then(|| {
-                            format!("RMS could not report status for firmware job {job_id}")
-                        })
-                    } else {
-                        Some(response.error_message)
-                    };
+            let (state, error) =
+                query_tracked_firmware_job_status(self.client.as_ref(), None, &job).await;
 
-                    statuses.push(ComputeTrayFirmwareUpdateStatus {
-                        bmc_ip: ep.bmc_ip,
-                        bmc_mac: ep.bmc_mac,
-                        state,
-                        target_version: String::new(),
-                        error,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        bmc_ip_address = %ep.bmc_ip,
-                        job_id = %job_id,
-                        error = %e,
-                        "RMS firmware job status query failed"
-                    );
-                    statuses.push(ComputeTrayFirmwareUpdateStatus {
-                        bmc_ip: ep.bmc_ip,
-                        bmc_mac: ep.bmc_mac,
-                        state: FirmwareState::Unknown,
-                        target_version: String::new(),
-                        error: Some(e.to_string()),
-                    });
-                }
-            }
+            statuses.push(ComputeTrayFirmwareUpdateStatus {
+                bmc_ip: ep.bmc_ip,
+                bmc_mac: ep.bmc_mac,
+                state,
+                target_version: String::new(),
+                error,
+            });
         }
 
         Ok(statuses)
+    }
+
+    #[instrument(skip(self), fields(backend = "rms", %job_id))]
+    async fn get_firmware_job_status(
+        &self,
+        bmc_ip: IpAddr,
+        bmc_mac: MacAddress,
+        job_id: &str,
+    ) -> Result<ComputeTrayFirmwareUpdateStatus, ComponentManagerError> {
+        let job = RmsTrackedFirmwareJob::FirmwareObject(job_id.to_string());
+
+        let (state, error) =
+            query_tracked_firmware_job_status(self.client.as_ref(), None, &job).await;
+
+        Ok(ComputeTrayFirmwareUpdateStatus {
+            bmc_ip,
+            bmc_mac,
+            state,
+            target_version: String::new(),
+            error,
+        })
     }
 
     #[instrument(skip(self), fields(backend = "rms"))]
@@ -5341,10 +5343,9 @@ mod tests {
     }
 
     #[test]
-    fn direct_rms_firmware_object_json_request_defaults_missing_access_token_to_noauth() {
+    fn direct_rms_firmware_object_json_request_preserves_explicit_access_tokens() {
         let identity = test_rms_identity();
         let profile = test_rms_profile();
-
         let node_identity = switch_node_identity_for_profile(&profile).unwrap();
 
         let resolved = ResolvedRmsNode {
@@ -5352,22 +5353,25 @@ mod tests {
             node_identity,
         };
 
-        let request = apply_firmware_object_request(
-            rms::NodeInfo::default(),
-            &resolved,
-            r#"{"Id":"fw-json"}"#,
-            &FirmwareUpdateOptions {
-                access_token: None,
-                force_update: false,
-            },
-            &[],
-        )
-        .unwrap();
+        for (access_token, expected) in [
+            (None, RMS_NOAUTH_ACCESS_TOKEN),
+            (Some(" \n"), " \n"),
+            (Some(" opaque token\n"), " opaque token\n"),
+        ] {
+            let request = apply_firmware_object_request(
+                rms::NodeInfo::default(),
+                &resolved,
+                r#"{"Id":"fw-json"}"#,
+                &FirmwareUpdateOptions {
+                    access_token: access_token.map(str::to_string),
+                    force_update: false,
+                },
+                &[],
+            )
+            .unwrap();
 
-        assert_eq!(
-            request.access_token.as_deref(),
-            Some(carbide_rack::firmware_object::RMS_NOAUTH_ACCESS_TOKEN)
-        );
+            assert_eq!(request.access_token.as_deref(), Some(expected));
+        }
     }
 
     #[carbide_macros::sqlx_test]
@@ -6856,7 +6860,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(statuses[0].state, FirmwareState::Unknown);
+        assert_eq!(statuses[0].state, FirmwareState::Failed);
+
         assert!(
             statuses[0]
                 .error
@@ -7018,6 +7023,7 @@ mod tests {
         .unwrap();
 
         assert!(results[0].success);
+        assert_eq!(results[0].backend_job_id.as_deref(), Some("ct-pre-job-1"));
 
         let calls = mock.apply_firmware_object_calls().await;
         assert_eq!(calls.len(), 1);
@@ -7103,5 +7109,24 @@ mod tests {
 
         assert_eq!(statuses[0].state, FirmwareState::Completed);
         assert!(statuses[0].error.is_none());
+
+        mock.enqueue_get_firmware_job_status(Ok(rms::GetFirmwareJobStatusResponse {
+            status: rms::ReturnCode::Failure as i32,
+            ..Default::default()
+        }))
+        .await;
+
+        let statuses = ComputeTrayManager::get_firmware_status(&backend, &eps)
+            .await
+            .unwrap();
+
+        assert_eq!(statuses[0].state, FirmwareState::Failed);
+
+        assert!(
+            statuses[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("ct-job-status"))
+        );
     }
 }

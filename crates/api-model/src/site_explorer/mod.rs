@@ -472,6 +472,17 @@ pub enum PreingestionState {
         #[serde(default)]
         attempt: u32,
     },
+
+    /// RMS firmware submission or its resulting job is pending for one rack
+    /// compute tray.
+    ///
+    /// `None` is persisted before dispatch. If NICo restarts before replacing it
+    /// with the RMS job ID, the submission outcome is ambiguous and preingestion
+    /// fails closed instead of submitting the update again.
+    RackFirmwareUpdateWait {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backend_job_id: Option<String>,
+    },
     UpgradeFirmwareWait {
         task_id: String,
         final_version: String,

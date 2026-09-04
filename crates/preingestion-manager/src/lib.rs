@@ -19,6 +19,7 @@ mod bfb_rshim_copier;
 mod config;
 mod errors;
 mod metrics;
+mod rack_firmware;
 
 use std::collections::HashMap;
 use std::default::Default;
@@ -33,6 +34,7 @@ use carbide_firmware::{
     resolve_files_firmware_artifact,
 };
 use carbide_instrument::emit;
+use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::conv::IntoLibredfish;
 use carbide_redfish::libredfish::{RedfishClientCreationError, RedfishClientPool};
 use carbide_secrets::credentials::{
@@ -40,6 +42,7 @@ use carbide_secrets::credentials::{
 };
 use carbide_utils::periodic_timer::PeriodicTimer;
 use chrono::{DateTime, Utc};
+use component_manager::compute_tray_manager::ComputeTrayManager;
 pub use config::PreingestionManagerConfig;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{DatabaseError, WithTransaction};
@@ -48,6 +51,7 @@ use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
 use libredfish::{PowerState, Redfish, RedfishError, SystemPowerControl};
 use model::firmware::{Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry};
+use model::rack_type::RackProfileConfig;
 use model::site_explorer::{
     BlueFieldOperatingMode, ExploredEndpoint, InitialBmcResetPhase, InitialResetPhase,
     PowerDrainState, PreingestionState, TimeSyncResetPhase,
@@ -111,6 +115,14 @@ struct PreingestionManagerStatic {
     bfb_copy_state: Arc<BfbCopyManager>,
     bfb_copy_limiter: Arc<Semaphore>,
     ntp_servers: Vec<Ipv4Addr>,
+    rack_firmware: Option<RackFirmwareDependencies>,
+}
+
+#[derive(Clone)]
+struct RackFirmwareDependencies {
+    rack_profiles: RackProfileConfig,
+    compute_tray: Arc<dyn ComputeTrayManager>,
+    firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
 }
 
 impl PreingestionManager {
@@ -151,11 +163,28 @@ impl PreingestionManager {
                 bfb_copy_state: Default::default(),
                 bfb_copy_limiter: Arc::new(Semaphore::new(config.max_concurrent_bfb_copies)),
                 ntp_servers,
+                rack_firmware: None,
                 config,
             }),
             metric_holder,
             database_connection,
         }
+    }
+
+    /// Enable rack-profile firmware-object handling with an RMS compute-tray backend.
+    pub fn with_rack_firmware(
+        mut self,
+        rack_profiles: RackProfileConfig,
+        compute_tray: Arc<dyn ComputeTrayManager>,
+        firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
+    ) -> Self {
+        Arc::make_mut(&mut self.static_info).rack_firmware = Some(RackFirmwareDependencies {
+            rack_profiles,
+            compute_tray,
+            firmware_object_fetcher,
+        });
+
+        self
     }
 
     pub fn start(
@@ -408,6 +437,10 @@ async fn one_endpoint(
                 .await?;
             false
         }
+        PreingestionState::RackFirmwareUpdateWait { .. } => {
+            static_info.wait_for_rack_firmware(db, endpoint).await?;
+            false
+        }
         PreingestionState::UpgradeFirmwareWait {
             task_id,
             final_version,
@@ -542,6 +575,10 @@ impl PreingestionManagerStatic {
         db: &PgPool,
         endpoint: &ExploredEndpoint,
     ) -> PreingestionManagerResult<bool> {
+        if self.start_rack_firmware(db, endpoint).await? {
+            return Ok(false);
+        }
+
         // First, we need to check if it's appropriate to upgrade at this point or wait until later.
         let fw_info = match self.find_fw_info_for_host(db, endpoint).await? {
             None => {
@@ -616,6 +653,10 @@ impl PreingestionManagerStatic {
         endpoint: &ExploredEndpoint,
         repeat: bool,
     ) -> PreingestionManagerResult<bool> {
+        if self.start_rack_firmware(db, endpoint).await? {
+            return Ok(false);
+        }
+
         if endpoint.waiting_for_explorer_refresh {
             tracing::debug!(
                 bmc_ip_address = %endpoint.address,

@@ -102,6 +102,7 @@ impl crate::compute_tray_manager::ComputeTrayManager for CoreComputeTrayManager 
                 bmc_mac: ep.bmc_mac,
                 success: outcome.is_ok(),
                 error: outcome.err(),
+                backend_job_id: None,
             });
         }
 

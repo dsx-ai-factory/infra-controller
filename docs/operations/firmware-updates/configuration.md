@@ -450,6 +450,7 @@ product_family = "gb200"
 [rack_profiles.NVL72.firmware_object]
 url = "https://firmware.example.com/objects/nvl72.json"
 fetch_timeout = "30s"
+access_token_credential = "nvl72-artifacts"
 
 [rack_profiles.NVL72.rack_capabilities.compute]
 vendor = "NVIDIA"
@@ -468,3 +469,10 @@ The `url` field identifies the document location. The optional `fetch_timeout`
 field accepts duration strings such as `30s` and `60s` and defaults to `30s`.
 Use seconds for this request timeout, although the parser accepts other
 duration units such as milliseconds (`ms`), minutes (`m`), and hours (`h`).
+The optional `access_token_credential` field names a credential that contains a
+firmware artifact access token. Store the token by running
+`nico-admin-cli credential firmware-access-token set`. NICo reads the credential
+when compute-tray pre-ingestion starts and forwards the token to RMS. The rack
+profile contains no secret. When the field is omitted, NICo sends the RMS
+no-auth sentinel. The rack state-machine firmware path keeps its existing token
+behavior.
