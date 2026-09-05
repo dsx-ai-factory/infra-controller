@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1.7
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG RUST_VERSION=1.97.1
+
+FROM rust:${RUST_VERSION}-slim-bookworm AS builder
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+ENV VERSION=${VERSION}
+ENV CI_COMMIT_SHORT_SHA=${CI_COMMIT_SHORT_SHA}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    gcc \
+    libc6-dev \
+    pkg-config \
+    protobuf-compiler \
+    libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add aarch64-unknown-linux-gnu
+
+ENV CARGO_HOME=/cargo-home
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ENV CARGO_TARGET_DIR=/cargo-target
+ENV RUST_BACKTRACE=1
+
+WORKDIR /workspace
+COPY . .
+
+RUN --mount=type=cache,id=nico-mat-arm64-cargo-home,target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-mat-arm64-cargo-target,target=/cargo-target,sharing=locked \
+    cargo build -p carbide-machine-a-tron --bin machine-a-tron --locked --release \
+      --target aarch64-unknown-linux-gnu && \
+    mkdir -p /artifacts && \
+    cp /cargo-target/aarch64-unknown-linux-gnu/release/machine-a-tron /artifacts/machine-a-tron
+
+FROM debian:bookworm-slim
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="machine-a-tron"
+LABEL org.opencontainers.image.description="NICo Hardware Simulation Tool"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    ipmitool \
+    iproute2 \
+    iputils-ping \
+    libssl3 \
+    libudev1 \
+    openipmi \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/machine-a-tron/bin /tmp/machine-a-tron-data
+
+COPY --from=builder /artifacts/machine-a-tron /opt/machine-a-tron/bin/machine-a-tron
+
+WORKDIR /opt/machine-a-tron
+ENTRYPOINT ["/opt/machine-a-tron/bin/machine-a-tron"]

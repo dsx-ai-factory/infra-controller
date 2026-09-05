@@ -78,6 +78,8 @@ bootstrap: ## Set up an Ubuntu/Debian build host: apt deps, rustup, submodules, 
 # registry access is required.
 #
 #   make images        Build the deployable service stack: NICo Core + REST images
+#   make images-arm    Build the deployable service stack for ARM64 only
+#   make images-all-arm Build every ARM64 image and boot artifact natively on ARM64
 #   make images-all    Build everything: the stack plus machine-validation and
 #                       boot-artifact images (needs the full mkosi build host)
 #   make images-core   NICo Core image (nico) only
@@ -116,9 +118,9 @@ CORE_BUILD_CONTAINER_ARM64 ?= $(IMAGE_REGISTRY)/nico-buildcontainer:$(IMAGE_TAG)
 CORE_RUNTIME_CONTAINER_AMD64 ?= $(IMAGE_REGISTRY)/nico-runtime-container:$(IMAGE_TAG)-amd64
 CORE_RUNTIME_CONTAINER_ARM64 ?= $(IMAGE_REGISTRY)/nico-runtime-container:$(IMAGE_TAG)-arm64
 
-.PHONY: images images-all images-validate images-all-validate images-registry \
-        images-base images-core images-rest images-machine-validation \
-        images-boot-artifacts images-bfb
+.PHONY: images images-arm images-all images-all-arm images-validate images-all-validate images-registry \
+        images-base images-core images-rest images-machine-validation images-machine-validation-arm images-machine-a-tron-arm \
+        images-boot-artifacts images-bfb images-bfb-arm
 
 images-validate:
 	$(call check-arches,$(NICO_ARCHES),NICO_ARCHES)
@@ -137,10 +139,24 @@ images: ## Build the deployable service stack (NICo Core + REST images)
 	@echo "  $(IMAGE_REGISTRY)/nico:$(IMAGE_TAG)   (NICo Core)"
 	@echo "  $(IMAGE_REGISTRY)/nico-rest-*:$(IMAGE_TAG)       (REST services)"
 
+images-arm: ## Build the deployable ARM64 service stack natively on an ARM64 Docker host
+	@arch="$$(docker info --format '{{.Architecture}}')"; \
+		case "$$arch" in arm64|aarch64) ;; *) echo "images-arm requires an ARM64 Docker host; got $$arch" >&2; exit 1 ;; esac
+	$(MAKE) images NICO_ARCHES=arm64
+
 images-all: ## Build every image (stack + machine validation + boot artifacts; needs an mkosi build host)
 	# Ensure validation runs before building even with parallel builds.
 	$(MAKE) images-all-validate
 	$(MAKE) images images-machine-validation images-boot-artifacts images-bfb
+
+images-all-arm: ## Build every ARM64 image and boot artifact natively on an ARM64 host
+	@arch="$$(docker info --format '{{.Architecture}}')"; \
+		case "$$arch" in \
+			arm64|aarch64) ;; \
+			*) echo "images-all-arm requires an ARM64 Docker host; got $$arch. Run 'make images-all' for the multi-architecture compatibility build." >&2; exit 1 ;; \
+		esac
+	$(MAKE) images images-machine-validation-arm images-machine-a-tron-arm images-bfb-arm \
+		NICO_ARCHES=arm64 DPU_ARCHES=arm64
 
 # Safe to call concurrently from multiple sibling targets (images-base,
 # images-rest, images-boot-artifacts, images-bfb each invoke this themselves).
@@ -224,6 +240,30 @@ images-machine-validation: ## Build the machine-validation runner + config image
 	done; \
 	docker buildx imagetools create -t $(IMAGE_REGISTRY)/machine-validation:$(IMAGE_TAG) $$tags
 
+images-machine-validation-arm: ## Build the native ARM64 machine-validation runner + config image
+	@arch="$$(docker info --format '{{.Architecture}}')"; \
+		case "$$arch" in arm64|aarch64) ;; *) echo "images-machine-validation-arm requires an ARM64 Docker host; got $$arch" >&2; exit 1 ;; esac
+	$(MAKE) images-base NICO_ARCHES=arm64
+	docker buildx build --platform linux/arm64 --load --build-arg CONTAINER_RUNTIME_AARCH64=$(CORE_RUNTIME_CONTAINER_ARM64) \
+		-t machine-validation-runner:$(IMAGE_TAG) \
+		--file dev/docker/Dockerfile.machine-validation-runner-aarch64 .
+	mkdir -p crates/machine-validation/images
+	docker save --output crates/machine-validation/images/machine-validation-runner.tar machine-validation-runner:$(IMAGE_TAG)
+	docker buildx build --platform linux/arm64 --push \
+		--build-arg CONTAINER_RUNTIME_AARCH64=$(CORE_RUNTIME_CONTAINER_ARM64) \
+		-t $(IMAGE_REGISTRY)/machine-validation:$(IMAGE_TAG)-arm64 \
+		--file dev/docker/Dockerfile.machine-validation-config-aarch64 .
+	docker buildx imagetools create -t $(IMAGE_REGISTRY)/machine-validation:$(IMAGE_TAG) \
+		$(IMAGE_REGISTRY)/machine-validation:$(IMAGE_TAG)-arm64
+
+images-machine-a-tron-arm: ## Build the native ARM64 machine-a-tron image
+	@arch="$$(docker info --format '{{.Architecture}}')"; \
+		case "$$arch" in arm64|aarch64) ;; *) echo "images-machine-a-tron-arm requires an ARM64 Docker host; got $$arch" >&2; exit 1 ;; esac
+	$(MAKE) images-registry
+	docker buildx build --platform linux/arm64 --push \
+		-t $(IMAGE_REGISTRY)/machine-a-tron:$(IMAGE_TAG) \
+		--file crates/machine-a-tron/Dockerfile.arm64 .
+
 images-boot-artifacts: ## Build the x86 boot-artifact image (BOOT_ARTIFACTS_ARCHES="amd64 arm64"; requires mkosi + rust toolchain on the host)
 	$(call check-arches,$(BOOT_ARTIFACTS_ARCHES),BOOT_ARTIFACTS_ARCHES)
 	$(MAKE) images-registry
@@ -251,6 +291,34 @@ images-bfb: ## Build the aarch64 DPU BFB boot-artifact image (DPU_ARCHES="amd64 
 		tags="$$tags $$tag"; \
 	done; \
 	docker buildx imagetools create -t $(IMAGE_REGISTRY)/boot-artifacts-aarch64:$(IMAGE_TAG) $$tags
+
+images-bfb-arm: ## Build the aarch64 DPU BFB boot-artifact image in a native ARM64 build container
+	@arch="$$(docker info --format '{{.Architecture}}')"; \
+		case "$$arch" in arm64|aarch64) ;; *) echo "images-bfb-arm requires an ARM64 Docker host; got $$arch" >&2; exit 1 ;; esac
+	$(MAKE) images-registry
+	docker buildx build --builder default --load -t carbide-pxe-builder -f dev/docker/Dockerfile.pxe-build-container dev/docker
+	docker buildx build --builder default --load -t carbide-pxe-builder-aarch64 -f dev/docker/Dockerfile.pxe-build-container-aarch64 dev/docker
+	@set -e; \
+		cargo_home="$${CARGO_HOME:-$$HOME/.cargo}"; \
+		sccache_home="$${SCCACHE_DIR:-$$HOME/.sccache}"; \
+		mkdir -p "$$cargo_home" "$$sccache_home"; \
+		docker run --rm --privileged \
+			-v /var/run/docker.sock:/var/run/docker.sock \
+			-v "$(CURDIR)":"$(CURDIR)" \
+			-v /dev/null:"$(CURDIR)/pxe/mkosi.profiles/scout-oss-aarch64/mkosi.extra/etc/apt/sources.list.d/forge.list":ro \
+			-v "$$cargo_home":"$$cargo_home" \
+			-v "$$sccache_home":"$$sccache_home" \
+			-w "$(CURDIR)" \
+			-e CARGO_HOME="$$cargo_home" \
+			-e SCCACHE_DIR="$$sccache_home" \
+			-e VERSION="$(VERSION)" \
+			carbide-pxe-builder-aarch64 \
+			sh -c 'git config --global --add safe.directory "$(CURDIR)" && git config --global --add safe.directory "$(CURDIR)/pxe/ipxe/upstream" && cargo make --cwd pxe --env SA_ENABLEMENT=1 build-boot-artifacts-bfb-sa'
+	docker buildx build --platform linux/arm64 --push --build-arg CONTAINER_RUNTIME_AARCH64=$(BOOT_ARTIFACTS_RUNTIME_IMAGE) \
+		-t $(IMAGE_REGISTRY)/boot-artifacts-aarch64:$(IMAGE_TAG)-arm64 \
+		--file dev/docker/Dockerfile.release-artifacts-aarch64 .
+	docker buildx imagetools create -t $(IMAGE_REGISTRY)/boot-artifacts-aarch64:$(IMAGE_TAG) \
+		$(IMAGE_REGISTRY)/boot-artifacts-aarch64:$(IMAGE_TAG)-arm64
 
 # =============================================================================
 # Rest (delegate to rest-api/Makefile)

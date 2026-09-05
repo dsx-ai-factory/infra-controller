@@ -20,6 +20,16 @@ make bootstrap          # or: ./scripts/setup-build-host.sh
 Reboot (or log out and back in) afterwards so the `docker` group membership and the
 userns sysctl change take effect.
 
+For the native ARM64-only workflow, the host only needs Git, Make, curl, Docker,
+and Docker Buildx. Initialize the pinned build sources after cloning:
+
+```sh
+git submodule update --init --recursive
+```
+
+`make images-all-arm` supplies Rust, cargo-make, and mkosi in its native ARM64
+build containers and does not require binfmt registration.
+
 ### Manual setup (what `make bootstrap` does)
 
 `make bootstrap` runs `scripts/setup-build-host.sh`, which is equivalent to the following
@@ -48,8 +58,22 @@ top of the repo with a single `make` command:
 
 ```sh
 make images          # deployable stack: NICo Core (nico) + the REST service images
+make images-arm      # the deployable stack for ARM64 only, built on an ARM64 host
 make images-all      # the above plus machine-validation and both boot-artifact images
+make images-all-arm  # every published image for ARM64, plus required boot payloads
 ```
+
+On an ARM64 Docker host, `make images-arm` builds only the ARM64 Core and REST
+service images. It refuses non-ARM64 Docker hosts, so this path does not use QEMU
+or binfmt to run build commands for another architecture.
+
+`make images-all-arm` is the complete native ARM64 build. It publishes only ARM64
+container manifests and builds the ARM64 Core, REST services, machine-validation
+runner, machine-a-tron, Scout, loader, qcow, iPXE, and DPU artifacts on ARM64 without emulation.
+It refuses non-ARM64 Docker hosts and directs x86_64 users to `make images-all`,
+which remains the multi-architecture compatibility build. The ARM boot payloads
+are built in a native ARM64 container, so this command does not require Rust,
+Cargo, cargo-make, or mkosi to be installed directly on the host.
 
 Images are pushed as `linux/amd64` and `linux/arm64` manifests at
 `localhost:5000/<name>:latest` by default. The Makefile starts a local registry named
@@ -75,12 +99,14 @@ make images-all NICO_ARCHES=amd64 DPU_ARCHES=arm64
 A single-architecture build still produces a valid tag at `$(IMAGE_TAG)` (the multi-arch
 manifest just has one entry). Values other than `amd64`/`arm64` fail fast with an error.
 
-`images-machine-validation` additionally requires `NICO_ARCHES` to include `amd64`:
-the `machine-validation-runner` intermediate image it embeds is always built for
-`amd64` regardless of which architectures you're publishing, and it depends on the
-amd64 Core runtime base container that `images-base` only pushes when `amd64` is
-requested. `NICO_ARCHES=arm64` alone fails fast with an error; use
-`NICO_ARCHES="amd64 arm64"` (the default) or `NICO_ARCHES=amd64`.
+`images-machine-validation` retains its existing x86_64 runner and requires
+`NICO_ARCHES` to include `amd64`. The additive
+`images-machine-validation-arm` target builds the runner and config image for
+ARM64 and is used only by `make images-all-arm`.
+
+The additive `images-machine-a-tron-arm` target builds the machine-a-tron
+simulator for ARM64. The existing machine-a-tron Dockerfile remains the AMD64
+compatibility path.
 
 Each architecture is built separately before the bare tag is assembled. This matches CI
 and is required for the REST Dockerfiles: a single combined Buildx invocation would reuse
@@ -100,13 +126,22 @@ and `DPU_ARCHES` below to whatever you passed to `make` (they default to `amd64 
 matching the Makefile); the script derives each image's expected platform list from its
 group automatically, so a narrowed selection doesn't produce false failures.
 
+After `make images-all-arm`, first run
+`export ARM_ONLY=1 NICO_ARCHES=arm64 DPU_ARCHES=arm64`; the same loop then checks
+the 13 ARM64 manifests and skips the x86 boot-artifact image.
+
 ```bash
 images=(
   nico nico-rest-api nico-rest-workflow nico-rest-site-manager
   nico-rest-site-agent nico-rest-db nico-rest-cert-manager nico-flow
   nico-psm nico-nsm nico-mcp machine-validation
-  boot-artifacts-x86_64 boot-artifacts-aarch64
+  boot-artifacts-aarch64
 )
+
+# Include this image after make images-all; leave it out after make images-all-arm.
+if [ "${ARM_ONLY:-0}" != "1" ]; then
+  images+=(boot-artifacts-x86_64)
+fi
 
 # Mirrors the Makefile defaults; set these to whatever you passed to `make`.
 NICO_ARCHES="${NICO_ARCHES:-amd64 arm64}"
@@ -155,10 +190,14 @@ The loop should print exactly 14 successful checks:
 | `boot-artifacts-x86_64` | `images-boot-artifacts` |
 | `boot-artifacts-aarch64` | `images-bfb` |
 
+`make images-all-arm` produces the same list except for
+`boot-artifacts-x86_64`, so its verification should report exactly 13 ARM64
+manifests.
+
 If the loop exits early, the `FAIL` line identifies which image has an incomplete
-manifest. The three boot/validation images (`machine-validation`,
-`boot-artifacts-x86_64`, `boot-artifacts-aarch64`) require the full mkosi + Rust
-toolchain. Use `make images` instead of `make images-all` to build only the 11-image
+manifest. The multi-architecture build requires the full mkosi + Rust toolchain on
+the host. `make images-all-arm` supplies that toolchain in a native ARM64 build
+container. Use `make images` instead of `make images-all` to build only the 11-image
 deployable stack.
 
 The architecture-specific Core base images and `-amd64`/`-arm64` service tags are build
@@ -185,7 +224,7 @@ docker build --file dev/docker/Dockerfile.runtime-container-x86_64 -t nico-runti
 
 ```sh
 cargo make --cwd pxe --env SA_ENABLEMENT=1 build-boot-artifacts-x86-host-sa
-docker build --build-arg "CONTAINER_RUNTIME_X86_64=alpine:latest" -t boot-artifacts-x86_64 -f dev/docker/Dockerfile.release-artifacts-x86_64 .
+docker build --build-arg "CONTAINER_RUNTIME_X86_64=alpine:3.20.10@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc" -t boot-artifacts-x86_64 -f dev/docker/Dockerfile.release-artifacts-x86_64 .
 ```
 
 ## Building the Machine Validation images
