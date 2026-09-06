@@ -24,7 +24,7 @@ use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::metrics::RackMetrics;
 use carbide_secrets::credentials::{
-    BmcCredentialType, CredentialKey, CredentialReader, Credentials,
+    BmcCredentialType, CredentialKey, CredentialReader, CredentialWriter, Credentials,
 };
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
 use carbide_uuid::rack::{RackId, RackProfileId};
@@ -1378,8 +1378,8 @@ async fn test_firmware_upgrade_start_skips_without_json(
                 matches!(
                     next_state,
                     RackState::Maintenance {
-                        maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
-                            configure_nmx_cluster: _,
+                        maintenance_state: RackMaintenanceState::NVOSUpdate {
+                            nvos_update: NvosUpdateState::Start,
                         },
                     }
                 ),
@@ -3118,6 +3118,538 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
     Ok(())
 }
 
+#[crate::sqlx_test]
+async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = config_with_rack_profiles();
+
+    let profile = config
+        .rack_profiles
+        .rack_profiles
+        .get_mut("NVL72")
+        .expect("NVL72 profile");
+
+    profile.firmware_object = Some(RackFirmwareObjectConfig {
+        url: url::Url::parse("https://firmware.example.invalid/sot/nvl72.json")?,
+        fetch_timeout: std::time::Duration::from_secs(30),
+    });
+
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
+    let started_at = chrono::Utc::now();
+    let job_id = "switch-firmware-job";
+
+    let firmware_job = FirmwareUpgradeJob {
+        job_id: Some("rack-firmware-job".to_string()),
+        status: Some("in_progress".to_string()),
+        started_at: Some(started_at),
+        batch_job_ids: vec!["rack-firmware-job".to_string()],
+        switches: vec![FirmwareUpgradeDeviceStatus {
+            node_id: switch_id.to_string(),
+            mac: "00:11:22:33:44:55".to_string(),
+            bmc_ip: "192.0.2.10".to_string(),
+            status: "in_progress".to_string(),
+            job_id: Some(job_id.to_string()),
+            parent_job_id: Some("rack-firmware-job".to_string()),
+            error_message: None,
+        }],
+        ..Default::default()
+    };
+
+    let mut txn = pool.begin().await?;
+
+    db_rack::update(
+        txn.as_mut(),
+        &rack_id,
+        &RackConfig {
+            maintenance_requested: Some(MaintenanceScope::default()),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    db_rack::update_firmware_upgrade_job(txn.as_mut(), &rack_id, Some(&firmware_job)).await?;
+
+    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+        txn.as_mut(),
+        &rack_id,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::FirmwareUpgrade {
+                rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
+            },
+        },
+    )
+    .await?;
+
+    db_switch::set_switch_reprovisioning_requested(
+        txn.as_mut(),
+        switch_id,
+        &format!("rack-{rack_id}"),
+        Vec::new(),
+    )
+    .await?;
+
+    set_switch_state(
+        txn.as_mut(),
+        &switch_id,
+        model::switch::SwitchControllerState::ReProvisioning {
+            reprovisioning_state: model::switch::ReProvisioningState::WaitingForNVOSUpgrade,
+        },
+    )
+    .await;
+
+    txn.commit().await?;
+
+    env.rms_sim
+        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
+            status: rms::ReturnCode::Success as i32,
+            job_id: job_id.to_string(),
+            job_state: rms::FirmwareJobState::Completed as i32,
+            state_description: "completed".to_string(),
+            node_id: switch_id.to_string(),
+            ..Default::default()
+        })
+        .await;
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::NVOSUpdate {
+                nvos_update: NvosUpdateState::Start,
+            },
+        }
+    ));
+
+    assert_eq!(
+        rack.firmware_upgrade_job
+            .expect("completed firmware job should remain persisted")
+            .status
+            .as_deref(),
+        Some("completed")
+    );
+
+    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+        .await?
+        .expect("switch should exist");
+
+    assert!(matches!(
+        switch.controller_state.value,
+        model::switch::SwitchControllerState::ReProvisioning {
+            reprovisioning_state: model::switch::ReProvisioningState::WaitingForNVOSUpgrade,
+        }
+    ));
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_profile_driven_nvos_start_retries_fetch_and_uses_noauth(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const FIRMWARE_OBJECT_URL: &str = "https://firmware.example.invalid/sot/nvl72.json";
+    const CONFIG_JSON: &str = r#"{"Id":"nvl72-complete"}"#;
+
+    let firmware_object_fetcher = Arc::new(StaticFirmwareObjectFetcher {
+        response: Mutex::new(Err("temporary NVOS SOT fetch failure".to_string())),
+        requested_urls: Mutex::new(Vec::new()),
+        requested_timeouts: Mutex::new(Vec::new()),
+    });
+
+    let mut config = config_with_rack_profiles();
+
+    let profile = config
+        .rack_profiles
+        .rack_profiles
+        .get_mut("NVL72")
+        .expect("NVL72 profile");
+
+    profile.firmware_object = Some(RackFirmwareObjectConfig {
+        url: url::Url::parse(FIRMWARE_OBJECT_URL)?,
+        fetch_timeout: std::time::Duration::from_secs(19),
+    });
+
+    profile.rack_hardware_type = Some(RackHardwareType::from("gb200"));
+    profile.rack_hardware_class = Some(RackHardwareClass::Prod);
+
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config),
+            firmware_object_fetcher: Some(firmware_object_fetcher.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
+
+    let mut txn = pool.begin().await?;
+
+    db_rack::update(
+        txn.as_mut(),
+        &rack_id,
+        &RackConfig {
+            maintenance_requested: Some(MaintenanceScope::default()),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+        txn.as_mut(),
+        &rack_id,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::NVOSUpdate {
+                nvos_update: NvosUpdateState::Start,
+            },
+        },
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    let stale_token = Credentials::UsernamePassword {
+        username: "access_token".to_string(),
+        password: "stale-explicit-token".to_string(),
+    };
+
+    env.test_credential_manager
+        .set_credentials(
+            &CredentialKey::RackMaintenanceAccessToken {
+                rack_id: rack_id.clone(),
+            },
+            &stale_token,
+        )
+        .await
+        .expect("stale maintenance credential should be stored");
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::NVOSUpdate {
+                nvos_update: NvosUpdateState::Start,
+            },
+        }
+    ));
+
+    assert!(
+        env.rms_sim
+            .submitted_apply_switch_system_image_requests()
+            .await
+            .is_empty()
+    );
+
+    *firmware_object_fetcher.response.lock().unwrap() = Ok(CONFIG_JSON.to_string());
+    env.rms_sim
+        .queue_apply_switch_system_image_response(rms::ApplySwitchSystemImageResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                message: "accepted".to_string(),
+                job_id: "nvos-parent-job".to_string(),
+                ..Default::default()
+            }),
+            jobs: vec![rms::SwitchSystemImageUpdateJobInfo {
+                node_id: switch_id.to_string(),
+                job_id: "nvos-child-job".to_string(),
+            }],
+            object_id: "nvl72-complete".to_string(),
+            image_filename: "nvos.img".to_string(),
+        })
+        .await;
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::NVOSUpdate {
+                nvos_update: NvosUpdateState::WaitForComplete,
+            },
+        }
+    ));
+
+    assert_eq!(
+        rack.nvos_update_job
+            .expect("accepted NVOS job should be persisted")
+            .job_id
+            .as_deref(),
+        Some("nvos-parent-job")
+    );
+
+    let requests = env
+        .rms_sim
+        .submitted_apply_switch_system_image_requests()
+        .await;
+
+    let [request] = requests.as_slice() else {
+        panic!("expected one ApplySwitchSystemImage request");
+    };
+
+    assert_eq!(request.config_json, CONFIG_JSON);
+
+    assert_eq!(
+        request.access_token.as_deref(),
+        Some(carbide_rack::firmware_object::RMS_NOAUTH_ACCESS_TOKEN)
+    );
+
+    assert_eq!(request.hardware_type, "gb200");
+    assert_eq!(request.software_type, "prod");
+    let nodes = &request.nodes.as_ref().expect("NVOS request nodes").nodes;
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].node_id, switch_id.to_string());
+
+    assert_eq!(
+        *firmware_object_fetcher.requested_urls.lock().unwrap(),
+        vec![
+            FIRMWARE_OBJECT_URL.to_string(),
+            FIRMWARE_OBJECT_URL.to_string()
+        ]
+    );
+
+    assert_eq!(
+        *firmware_object_fetcher.requested_timeouts.lock().unwrap(),
+        vec![
+            std::time::Duration::from_secs(19),
+            std::time::Duration::from_secs(19),
+        ]
+    );
+
+    assert_eq!(
+        env.test_credential_manager
+            .get_credentials(&CredentialKey::RackMaintenanceAccessToken {
+                rack_id: rack_id.clone(),
+            })
+            .await
+            .expect("stale maintenance credential lookup should succeed"),
+        Some(stale_token)
+    );
+
+    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+        .await?
+        .expect("switch should exist");
+
+    assert!(switch.nvos_update_status.is_none());
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_explicit_nvos_with_no_selected_switches_cleans_token_and_advances(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let firmware_object_fetcher = Arc::new(StaticFirmwareObjectFetcher {
+        response: Mutex::new(Err(
+            "zero-switch scope must not fetch profile SOT".to_string()
+        )),
+        requested_urls: Mutex::new(Vec::new()),
+        requested_timeouts: Mutex::new(Vec::new()),
+    });
+
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_rack_profiles()),
+            firmware_object_fetcher: Some(firmware_object_fetcher.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (rack_id, host) = create_single_compute_rack(&env, &pool).await?;
+
+    let scope = MaintenanceScope {
+        machine_ids: vec![host.host_snapshot.id],
+        activities: vec![MaintenanceActivity::NvosUpdate {
+            config_json: r#"{"Id":"nvos"}"#.to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let mut txn = pool.begin().await?;
+
+    db_rack::update(
+        txn.as_mut(),
+        &rack_id,
+        &RackConfig {
+            maintenance_requested: Some(scope),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+        txn.as_mut(),
+        &rack_id,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::NVOSUpdate {
+                nvos_update: NvosUpdateState::Start,
+            },
+        },
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    env.test_credential_manager
+        .set_credentials(
+            &CredentialKey::RackMaintenanceAccessToken {
+                rack_id: rack_id.clone(),
+            },
+            &Credentials::UsernamePassword {
+                username: "access_token".to_string(),
+                password: "token".to_string(),
+            },
+        )
+        .await
+        .expect("maintenance credential should be stored");
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::Completed,
+        }
+    ));
+
+    assert!(
+        env.test_credential_manager
+            .get_credentials(&CredentialKey::RackMaintenanceAccessToken {
+                rack_id: rack_id.clone(),
+            })
+            .await
+            .expect("maintenance credential lookup should succeed")
+            .is_none()
+    );
+
+    assert!(
+        env.rms_sim
+            .submitted_apply_switch_system_image_requests()
+            .await
+            .is_empty()
+    );
+
+    assert!(
+        firmware_object_fetcher
+            .requested_urls
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_rack_profiles()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
+
+    let mut txn = pool.begin().await?;
+
+    db_rack::update(
+        txn.as_mut(),
+        &rack_id,
+        &RackConfig {
+            maintenance_requested: Some(MaintenanceScope::default()),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+        txn.as_mut(),
+        &rack_id,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::NVOSUpdate {
+                nvos_update: NvosUpdateState::Start,
+            },
+        },
+    )
+    .await?;
+
+    db_switch::set_switch_reprovisioning_requested(
+        txn.as_mut(),
+        switch_id,
+        &format!("rack-{rack_id}"),
+        Vec::new(),
+    )
+    .await?;
+
+    set_switch_state(
+        txn.as_mut(),
+        &switch_id,
+        model::switch::SwitchControllerState::ReProvisioning {
+            reprovisioning_state: model::switch::ReProvisioningState::WaitingForNVOSUpgrade,
+        },
+    )
+    .await;
+
+    txn.commit().await?;
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    let RackState::Error { cause } = rack.controller_state.value else {
+        panic!("missing profile SOT should fail an enrolled NVOS phase");
+    };
+
+    assert!(cause.contains("firmware object is unavailable"));
+    assert!(rack.config.maintenance_requested.is_none());
+
+    assert!(
+        env.rms_sim
+            .submitted_apply_switch_system_image_requests()
+            .await
+            .is_empty()
+    );
+
+    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+        .await?
+        .expect("switch should exist");
+
+    assert!(matches!(
+        switch.controller_state.value,
+        model::switch::SwitchControllerState::ReProvisioning {
+            reprovisioning_state: model::switch::ReProvisioningState::WaitingForNVOSUpgrade,
+        }
+    ));
+
+    Ok(())
+}
+
 /// A retryable RMS rejection preserves the access token so the next
 /// `NVOSUpdate(Start)` iteration can resubmit the request.
 #[crate::sqlx_test]
@@ -3303,7 +3835,7 @@ async fn test_nvos_update_start_retries_rejection_with_access_token(
 }
 
 #[crate::sqlx_test]
-async fn test_nvos_update_wait_for_complete_persists_completed_status(
+async fn test_nvos_update_recovers_password_after_rms_restart(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
@@ -3316,6 +3848,11 @@ async fn test_nvos_update_wait_for_complete_persists_completed_status(
     .await;
 
     let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
+
+    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+        .await?
+        .unwrap();
+
     let started_at = chrono::Utc::now();
     let job_id = "nvos-job-1";
 
@@ -3338,12 +3875,13 @@ async fn test_nvos_update_wait_for_complete_persists_completed_status(
         started_at: Some(started_at),
         switches: vec![NvosUpdateSwitchStatus {
             node_id: switch_id.to_string(),
-            mac: "00:11:22:33:44:55".to_string(),
+            mac: switch.bmc_mac_address.unwrap().to_string(),
             bmc_ip: "192.0.2.10".to_string(),
             nvos_ip: "192.0.2.20".to_string(),
             status: "in_progress".to_string(),
             job_id: Some(job_id.to_string()),
             error_message: None,
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -3390,6 +3928,72 @@ async fn test_nvos_update_wait_for_complete_persists_completed_status(
         txn.commit().await?;
     }
 
+    assert!(matches!(outcome, StateHandlerOutcome::Wait { .. }));
+
+    let persisted_rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        &persisted_rack.nvos_update_job.as_ref().unwrap().switches[0].password_update,
+        model::rack::NvosPasswordUpdateState::InProgress { job_id }
+            if job_id == "rms-sim-password-update"
+    ));
+
+    env.rms_sim
+        .queue_get_job_status_response(Err(librms::RackManagerError::ApiInvocationError(
+            tonic::Status::not_found("password job was lost"),
+        )))
+        .await;
+
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    let mut outcome = handler_instance
+        .handle_object_state(&rack_id, &mut rack, &nvos_state, &mut ctx)
+        .await?;
+
+    if let Some(txn) = outcome.take_transaction() {
+        txn.commit().await?;
+    }
+
+    assert_eq!(
+        get_db_rack(env.db_reader().as_mut(), &rack_id)
+            .await
+            .nvos_update_job
+            .unwrap()
+            .switches[0]
+            .password_update,
+        model::rack::NvosPasswordUpdateState::NotStarted
+    );
+
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    let mut outcome = handler_instance
+        .handle_object_state(&rack_id, &mut rack, &nvos_state, &mut ctx)
+        .await?;
+
+    if let Some(txn) = outcome.take_transaction() {
+        txn.commit().await?;
+    }
+
+    env.rms_sim
+        .queue_get_job_status_response(Ok(rms::GetJobStatusResponse {
+            job_states: vec![rms::JobStatus {
+                job_id: "rms-sim-password-update".into(),
+                execution_state: rms::JobExecutionState::Completed as i32,
+                ..Default::default()
+            }],
+        }))
+        .await;
+
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    let mut outcome = handler_instance
+        .handle_object_state(&rack_id, &mut rack, &nvos_state, &mut ctx)
+        .await?;
+
+    if let Some(txn) = outcome.take_transaction() {
+        txn.commit().await?;
+    }
+
     assert!(matches!(
         outcome,
         StateHandlerOutcome::Transition {
@@ -3408,6 +4012,11 @@ async fn test_nvos_update_wait_for_complete_persists_completed_status(
 
     assert_eq!(persisted_job.status.as_deref(), Some("completed"));
     assert!(persisted_job.completed_at.is_some());
+
+    assert_eq!(
+        persisted_job.switches[0].password_update,
+        model::rack::NvosPasswordUpdateState::Completed
+    );
 
     let mut txn = pool.acquire().await?;
 

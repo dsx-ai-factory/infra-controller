@@ -145,7 +145,7 @@ pub struct ResolvedNvosArtifact {
     pub version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NvosUpdateSwitchStatus {
     #[serde(default)]
     pub node_id: String,
@@ -157,6 +157,34 @@ pub struct NvosUpdateSwitchStatus {
     pub job_id: Option<String>,
     #[serde(default)]
     pub error_message: Option<String>,
+
+    /// Desired-password recovery after the image operation.
+    #[serde(default)]
+    pub password_update: NvosPasswordUpdateState,
+}
+
+/// Persisted desired-password recovery state for one switch in an NVOS update.
+///
+/// The state starts at [`Self::NotStarted`], advances to [`Self::InProgress`]
+/// after the backend accepts a recovery job, and reaches [`Self::Completed`]
+/// after the backend confirms the desired password. If the backend cannot find
+/// the job, the rack controller returns the state to [`Self::NotStarted`] and
+/// resubmits the same credentials.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum NvosPasswordUpdateState {
+    /// No password recovery job has been submitted.
+    #[default]
+    NotStarted,
+
+    /// The backend accepted a password recovery job that has not completed.
+    InProgress {
+        /// Backend-owned job ID used to poll the recovery operation.
+        job_id: String,
+    },
+
+    /// RMS confirmed the desired password.
+    Completed,
 }
 
 /// Per-device input passed to RMS when starting a firmware upgrade.
@@ -1171,6 +1199,16 @@ mod tests {
         let config: RackConfig =
             serde_json::from_str(r#"{"maintenance_termination_requested":true}"#).unwrap();
         assert!(config.maintenance_termination_requested);
+    }
+
+    #[test]
+    fn nvos_switch_status_defaults_missing_password_update_state() {
+        let status: NvosUpdateSwitchStatus = serde_json::from_str(
+            r#"{"mac":"00:11:22:33:44:55","bmc_ip":"192.0.2.10","nvos_ip":"192.0.2.20","status":"completed"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(status.password_update, NvosPasswordUpdateState::NotStarted);
     }
 
     // ── Rack::check_accepts_maintenance ─────────────────────────────────

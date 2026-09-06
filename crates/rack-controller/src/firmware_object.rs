@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! Firmware-object retrieval boundary for rack ingestion.
+//! Firmware-object retrieval boundary for automatic rack maintenance.
 //!
 //! Fetching is separate from the state handler so callers can provide the
 //! production HTTP client or a deterministic implementation for tests.
@@ -29,7 +29,7 @@ use async_trait::async_trait;
 /// compromised.
 const MAX_FIRMWARE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 
-/// Loads a SOT firmware-object document for rack ingestion.
+/// Loads a rack-profile SOT firmware-object document.
 #[async_trait]
 pub trait FirmwareObjectFetcher: std::fmt::Debug + Send + Sync {
     /// Fetches the complete document body from `url` within `timeout`.

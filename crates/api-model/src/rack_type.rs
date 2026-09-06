@@ -421,13 +421,13 @@ pub struct RackCapabilitiesSet {
 
 /// Optional source for a rack-wide SOT firmware-object document.
 ///
-/// When present on a [`RackProfile`], rack ingestion fetches this document and
-/// uses it as the default firmware request for the profile's compute and switch
-/// inventory.
+/// When present on a [`RackProfile`], rack maintenance fetches this complete
+/// document separately for the rack firmware and switch NVOS image phases.
+/// RMS selects the matching artifacts from the document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RackFirmwareObjectConfig {
-    /// URL from which rack ingestion fetches the SOT JSON document.
+    /// URL from which automatic rack maintenance fetches the SOT JSON document.
     pub url: url::Url,
 
     /// Maximum duration for the complete HTTP request.
@@ -457,10 +457,13 @@ pub struct RackProfile {
     #[serde(default)]
     pub product_family: Option<RackProductFamily>,
 
-    /// Default firmware-object source for ingestion.
+    /// Default firmware-object source for automatic rack maintenance.
     ///
-    /// When absent, ingestion skips the automatic firmware update unless an
-    /// explicit maintenance request supplies a firmware object.
+    /// When absent, automatic firmware and NVOS updates are skipped unless an
+    /// explicit maintenance request supplies a firmware object. If no firmware
+    /// object is available while a switch in the maintenance scope is already
+    /// waiting for an NVOS update, maintenance enters `Error` instead of
+    /// skipping the NVOS phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware_object: Option<RackFirmwareObjectConfig>,
 
