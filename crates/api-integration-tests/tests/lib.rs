@@ -1238,6 +1238,7 @@ where
                 scout_run_interval: Duration::from_secs(1),
                 discovery_retry_interval: Duration::from_millis(100),
                 dpus_in_nic_mode,
+                dpf_enabled: true,
                 dpu_firmware_versions: None,
                 host_firmware_versions: None,
                 dpu_agent_version: None,
