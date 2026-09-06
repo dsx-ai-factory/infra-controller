@@ -323,6 +323,7 @@ impl MachineATron {
                                 host_info.serial.clone(),
                                 rack_id,
                                 dpu_policy,
+                                machine_config.dpf_enabled,
                                 interfaces,
                             )
                             .await
