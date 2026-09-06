@@ -37,6 +37,11 @@ func (c *RealK8sServiceClient) List(ctx context.Context, namespace string, label
 	return result, nil
 }
 
+// Get returns the Service with the given name.
+func (c *RealK8sServiceClient) Get(ctx context.Context, namespace, name string) (*corev1.Service, error) {
+	return c.clientset.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
 // Create creates a new Service.
 func (c *RealK8sServiceClient) Create(ctx context.Context, svc *corev1.Service) error {
 	_, err := c.clientset.CoreV1().Services(svc.Namespace).Create(ctx, svc, metav1.CreateOptions{})

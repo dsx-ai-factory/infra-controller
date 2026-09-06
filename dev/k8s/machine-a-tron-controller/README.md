@@ -7,7 +7,9 @@ Services for mock BMC endpoints.
 
 - Auto-discovers machine-a-tron pods via `nvidia-infra-controller/mat-service=true`
   label
-- Creates ClusterIP Services with BMC IP for each mock BMC
+- Creates ClusterIP Services with BMC IP for each mock BMC that has reported
+  one; devices still waiting for DHCP are skipped until their BMC IP is known,
+  so the API server never picks an arbitrary ClusterIP for them
 - Supports Redfish (TCP 443), IPMI (UDP 623), and per-machine SSH ports
 - IPMI and SSH ports are dynamically added when machine-a-tron reports their endpoints in status
 - Multi-pod deployments with pod-specific routing
@@ -103,7 +105,22 @@ make run KUBECONFIG="$HOME/.kube/config"
 
 ### ClusterIP already allocated
 
-BMC IP is outside ServiceCIDR or already in use.
+The API server rejected a Service create because another Service holds the
+requested BMC IP. The controller resolves this on its own where it safely can:
+
+1. The create is retried a few times with backoff within the cycle, which
+   covers an address released by a delete or recreate running in the same
+   cycle.
+2. If a controller-managed Service holds the address without owning it (its
+   `mat-bmc-ip` annotation does not match its ClusterIP, for example a Service
+   created before its device had a BMC IP), that Service is deleted and the
+   create is retried.
+3. If the address is the recorded BMC IP of another managed Service, two
+   devices report the same BMC IP. The conflict is logged with the holder's
+   name and left in place for the duplicate lease to be fixed.
+
+If the error persists across cycles, the BMC IP is outside the ServiceCIDR or
+held by a Service the controller does not manage.
 
 **Solutions:**
 
@@ -111,10 +128,22 @@ BMC IP is outside ServiceCIDR or already in use.
 2. Use a CIDR within the cluster's ServiceCIDR
 3. Delete conflicting Services
 
+### Service name already exists
+
+A Service with the desired name exists but does not carry the
+`app.kubernetes.io/managed-by: mat-k8s-controller` label, so it is invisible to
+the controller's listing. The controller adopts it: the spec and the
+controller-owned labels and annotations are written over it while foreign
+labels and annotations are kept. If its ClusterIP differs from the BMC IP the
+Service is deleted and recreated, since ClusterIP is immutable. Adoptions are
+reported in the `adopted` counter of the reconciliation log line.
+
 ### ClusterIP change detected
 
 BMC IP changed but ClusterIP is immutable. Controller will delete and recreate
-the Service.
+the Service. This runs even when another machine-a-tron instance could not be
+polled in the same cycle; only deletions of Services that are no longer
+reported are held back until every instance answers.
 
 ## Architecture
 

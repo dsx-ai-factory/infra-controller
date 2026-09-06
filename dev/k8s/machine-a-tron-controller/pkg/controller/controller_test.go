@@ -6,12 +6,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -272,6 +274,7 @@ func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 				APIState:   "Ready",
 				PowerState: "On",
 				BMC: matclient.BMCStatus{
+					IP:      ptr("10.0.0.1"),
 					Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8443},
 				},
 				DPUs: []matclient.MachineStatus{
@@ -280,6 +283,7 @@ func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 						APIState:   "Ready",
 						PowerState: "On",
 						BMC: matclient.BMCStatus{
+							IP:      ptr("10.0.0.2"),
 							Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8444},
 						},
 					},
@@ -288,6 +292,7 @@ func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 						APIState:   "Ready",
 						PowerState: "On",
 						BMC: matclient.BMCStatus{
+							IP:      ptr("10.0.0.3"),
 							Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8445},
 						},
 					},
@@ -298,6 +303,7 @@ func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 				APIState:   "Ready",
 				PowerState: "On",
 				BMC: matclient.BMCStatus{
+					IP:      ptr("10.0.0.4"),
 					Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8446},
 				},
 			},
@@ -321,6 +327,39 @@ func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 	for _, svc := range dpuServices {
 		assert.Equal(t, "host-1", svc.Labels[LabelParentMatID])
 	}
+}
+
+func TestServiceBuilder_BuildServicesFromStatus_SkipsMachinesWithoutBMCIP(t *testing.T) {
+	builder := &ServiceBuilder{
+		Namespace:    "test-ns",
+		BaseSelector: map[string]string{"app": "machine-a-tron"},
+	}
+
+	status := &matclient.MachinesStatusResponse{
+		Machines: []matclient.MachineStatus{
+			{
+				MatID: "host-no-ip",
+				BMC:   matclient.BMCStatus{Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8443}},
+				DPUs: []matclient.MachineStatus{
+					{
+						MatID: "dpu-with-ip",
+						BMC:   matclient.BMCStatus{IP: ptr("10.0.0.2"), Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8444}},
+					},
+					{
+						MatID: "dpu-empty-ip",
+						BMC:   matclient.BMCStatus{IP: ptr(""), Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8445}},
+					},
+				},
+			},
+		},
+	}
+
+	services := builder.BuildServicesFromStatus(status, "")
+
+	require.Len(t, services, 1, "only machines with a BMC IP get a Service")
+	assert.Equal(t, "dpu-with-ip", services[0].Labels[LabelMatID])
+	assert.Equal(t, "10.0.0.2", services[0].Spec.ClusterIP)
+	assert.Equal(t, 3, countMachines(status))
 }
 
 func TestComputeServiceDiff(t *testing.T) {
@@ -695,13 +734,19 @@ func makeTestService(name, matID string) *corev1.Service {
 
 // Mock implementations
 
+// trackingK8sClient is an in-memory K8sServiceClient. Like the API server it
+// rejects a create for an existing name and an update or delete for a missing
+// one, so the reconciler's adoption and recreate paths are exercised.
 type trackingK8sClient struct {
+	mu        sync.Mutex
 	services  map[string]*corev1.Service
 	createErr error
 	deleteErr error
 }
 
 func (m *trackingK8sClient) List(ctx context.Context, namespace string, labelSelector string) ([]*corev1.Service, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	result := make([]*corev1.Service, 0)
 	for _, svc := range m.services {
 		if svc.Labels[LabelManagedBy] == LabelManagedByValue {
@@ -711,22 +756,47 @@ func (m *trackingK8sClient) List(ctx context.Context, namespace string, labelSel
 	return result, nil
 }
 
+func (m *trackingK8sClient) Get(ctx context.Context, namespace, name string) (*corev1.Service, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	svc, ok := m.services[name]
+	if !ok {
+		return nil, apierrors.NewNotFound(corev1.Resource("services"), name)
+	}
+	return svc.DeepCopy(), nil
+}
+
 func (m *trackingK8sClient) Create(ctx context.Context, svc *corev1.Service) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.createErr != nil {
 		return m.createErr
+	}
+	if _, exists := m.services[svc.Name]; exists {
+		return apierrors.NewAlreadyExists(corev1.Resource("services"), svc.Name)
 	}
 	m.services[svc.Name] = svc.DeepCopy()
 	return nil
 }
 
 func (m *trackingK8sClient) Update(ctx context.Context, svc *corev1.Service) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.services[svc.Name]; !exists {
+		return apierrors.NewNotFound(corev1.Resource("services"), svc.Name)
+	}
 	m.services[svc.Name] = svc.DeepCopy()
 	return nil
 }
 
 func (m *trackingK8sClient) Delete(ctx context.Context, namespace, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.deleteErr != nil {
 		return m.deleteErr
+	}
+	if _, exists := m.services[name]; !exists {
+		return apierrors.NewNotFound(corev1.Resource("services"), name)
 	}
 	delete(m.services, name)
 	return nil
