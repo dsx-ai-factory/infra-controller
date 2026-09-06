@@ -3,11 +3,16 @@
 
 //! Backend-neutral contracts for durable rack-level NVOS updates.
 
+use std::net::IpAddr;
+
+use carbide_secrets::credentials::Credentials;
 use carbide_uuid::rack::RackId;
+use carbide_uuid::switch::SwitchId;
 use model::rack::{FirmwareUpgradeDeviceInfo, NvosUpdateJob};
 use model::rack_type::RackProfile;
 
 use crate::error::ComponentManagerError;
+use crate::nv_switch_manager::SwitchPasswordRotationState;
 
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -24,7 +29,7 @@ pub struct NvosUpdateRequest<'a> {
     /// Source-of-truth NVOS firmware-object JSON.
     pub config_json: &'a str,
 
-    /// Authorization token supplied with the maintenance request.
+    /// Artifact authorization token or the RMS `NOAUTH` sentinel.
     pub access_token: &'a str,
 
     /// NV-Switch targets and their credentials.
@@ -65,4 +70,45 @@ pub trait NvosUpdateManager: sealed::Sealed + Send + Sync {
         &self,
         job: &NvosUpdateJob,
     ) -> Result<NvosUpdateJob, ComponentManagerError>;
+
+    /// Starts recovery of a switch's desired NVOS password and returns its
+    /// backend job ID.
+    ///
+    /// Retrying is safe only with unchanged `credentials`. RMS verifies the
+    /// desired password before trying recovery credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComponentManagerError::InvalidArgument`] when RMS cannot map
+    /// the profile to a switch identity,
+    /// [`ComponentManagerError::RejectedBeforeDispatch`] for empty credentials
+    /// or rejection before dispatch, [`ComponentManagerError::Unsupported`] for
+    /// an unsupported operation, and
+    /// [`ComponentManagerError::OperationOutcomeUnknown`] when submission does
+    /// not return a durable job ID.
+    async fn start_nvos_password_update(
+        &self,
+        rack_id: &RackId,
+        profile: &RackProfile,
+        switch_id: &SwitchId,
+        nvos_ip: IpAddr,
+        credentials: &Credentials,
+    ) -> Result<String, ComponentManagerError>;
+
+    /// Returns the latest observation of an NVOS password-recovery job.
+    ///
+    /// [`SwitchPasswordRotationState::NotFound`] means the backend cannot
+    /// resolve the job ID; it does not establish whether the password changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComponentManagerError::InvalidArgument`] for an empty or
+    /// rejected job ID, [`ComponentManagerError::Unsupported`] when RMS lacks
+    /// status polling, [`ComponentManagerError::Unavailable`] for retryable
+    /// polling failures, and [`ComponentManagerError::Internal`] for other
+    /// lookup failures.
+    async fn get_nvos_password_update_status(
+        &self,
+        job_id: &str,
+    ) -> Result<SwitchPasswordRotationState, ComponentManagerError>;
 }

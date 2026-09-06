@@ -85,7 +85,7 @@ behavior.
 | `extension_service_state_controller` | `ExtensionServiceStateControllerConfig` | *(see below)* | `machines` | DPU extension service state controller timing. |
 | `ib_partition_state_controller` | `IbPartitionStateControllerConfig` | *(see below)* | `hardware` | IB partition state controller timing. |
 | `dpa_interface_state_controller` | `DpaInterfaceStateControllerConfig` | *(see below)* | `networking` | DPA interface state controller timing. |
-| `rack_state_controller` | `RackStateControllerConfig` | *(see below)* | `hardware` | Rack state controller timing, optional ingestion firmware update, and primary-switch mTLS service selection. |
+| `rack_state_controller` | `RackStateControllerConfig` | *(see below)* | `hardware` | Rack state controller timing, optional automatic rack firmware and switch NVOS updates, and primary-switch mTLS service selection. |
 | `power_shelf_state_controller` | `PowerShelfStateControllerConfig` | *(see below)* | `hardware` | Power shelf state controller timing and optional rack firmware reprovisioning. |
 | `switch_state_controller` | `SwitchStateControllerConfig` | *(see below)* | `hardware` | Switch state controller timing and per-switch mTLS service selection. |
 | `spdm_state_controller` | `SpdmStateControllerConfig` | *(see below)* | `security` | SPDM state controller timing. |
@@ -238,6 +238,18 @@ count = 9
 vendor = "LiteOn"
 count = 8
 ```
+
+`firmware_object` supplies the SOT JSON for automatic rack firmware and switch
+NVOS image updates. When `firmware_object` is configured for a profile with
+switches, the document must include an NVOS image whose firmware type matches
+`rack_hardware_class`. NICo requests `prod` when `rack_hardware_class` is
+omitted. RMS records an asynchronous update failure when the document does not
+contain the required image. If `firmware_object` is omitted, NICo skips both
+automatic update phases. An explicit maintenance request can supply a firmware
+object instead. If no firmware object is available while a switch in the
+maintenance scope is already waiting for an NVOS update, the rack transitions
+to `Error` instead of skipping the NVOS phase.
+`fetch_timeout` defaults to `30s`.
 
 Example: GB300 rack with Lenovo compute trays and Delta power shelves:
 
