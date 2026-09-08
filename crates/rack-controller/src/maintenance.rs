@@ -2810,11 +2810,24 @@ pub async fn handle_maintenance(
                     .all(|switch| matches!(switch.status.as_str(), "completed" | "failed"));
 
                 if images_terminal {
-                    let profile = super::resolve_profile(id, rack_profile_id, ctx).ok_or_else(|| {
-                        StateHandlerError::GenericError(eyre::eyre!(
-                            "rack profile is missing or unknown; cannot recover NVOS credentials"
-                        ))
-                    })?;
+                    let Some(profile) = super::resolve_profile(id, rack_profile_id, ctx) else {
+                        let cause =
+                            "rack profile is missing or unknown; cannot recover NVOS credentials";
+
+                        tracing::warn!(rack_id = %id, %cause, "Rack maintenance failed, transitioning to Error");
+
+                        state.nvos_update_job = Some(job.clone());
+                        state.config.maintenance_requested = None;
+
+                        let mut txn = ctx.services.db_pool.begin().await?;
+                        db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
+                        db_rack::update(txn.as_mut(), id, &state.config).await?;
+
+                        return Ok(StateHandlerOutcome::transition(RackState::Error {
+                            cause: cause.to_string(),
+                        })
+                        .with_txn(txn));
+                    };
 
                     for switch in job.all_switches_mut() {
                         match switch.password_update.clone() {
@@ -2833,8 +2846,20 @@ pub async fn handle_maintenance(
                                         NvosPasswordUpdateState::InProgress { job_id }
                                     }
 
-                                    SwitchPasswordRotationState::Failed
-                                    | SwitchPasswordRotationState::NotFound
+                                    SwitchPasswordRotationState::Failed => {
+                                        return transition_to_rack_error(
+                                            id,
+                                            state,
+                                            format!(
+                                                "NVOS password recovery job {job_id} failed for switch {}",
+                                                switch.node_id
+                                            ),
+                                            ctx,
+                                        )
+                                        .await;
+                                    }
+
+                                    SwitchPasswordRotationState::NotFound
                                     | SwitchPasswordRotationState::Unknown => {
                                         NvosPasswordUpdateState::NotStarted
                                     }

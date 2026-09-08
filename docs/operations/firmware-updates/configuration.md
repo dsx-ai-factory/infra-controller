@@ -468,10 +468,11 @@ When `firmware_object` is configured for a profile with switches, the SOT JSON
 must contain an NVOS image whose firmware type matches `rack_hardware_class`.
 NICo requests `prod` when `rack_hardware_class` is omitted. RMS records an
 asynchronous update failure when the document does not contain the required
-image. After all NVOS image jobs complete or fail, NICo uses RMS to restore the
-desired NVOS admin password on every selected switch before the rack leaves the
-NVOS update phase. Without `firmware_object`, NICo skips both automatic update
-phases. An explicit maintenance request can supply a firmware object instead.
+image. After all NVOS image jobs complete or fail, NICo uses RMS to verify or
+restore the desired NVOS admin password on each selected switch before the rack
+leaves the NVOS update phase. Without `firmware_object`, NICo skips both
+automatic update phases. An explicit maintenance request can supply a firmware
+object instead.
 If no firmware object is available while a switch in the maintenance scope is
 already waiting for an NVOS update, the rack transitions to `Error` instead of
 skipping the NVOS phase.

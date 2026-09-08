@@ -146,23 +146,48 @@ impl StateHandler for TestRackStateHandler {
 }
 
 fn validate_state_change_history(histories: &[StateHistoryRecord], expected: &[&str]) -> bool {
-    let parsed_histories = histories
+    let mut parsed_histories = histories
         .iter()
-        .filter_map(|history| serde_json::from_str::<serde_json::Value>(&history.state).ok())
-        .collect::<Vec<_>>();
+        .filter_map(|history| serde_json::from_str::<serde_json::Value>(&history.state).ok());
 
-    for &state in expected {
+    // Each search resumes after its match. Expected states therefore require
+    // distinct records in order, while unrelated records may appear anywhere.
+    expected.iter().all(|state| {
         let Ok(expected_state) = serde_json::from_str::<serde_json::Value>(state) else {
             return false;
         };
-        if !parsed_histories
-            .iter()
-            .any(|history| history == &expected_state)
-        {
-            return false;
-        }
-    }
-    true
+
+        parsed_histories.any(|history| history == expected_state)
+    })
+}
+
+#[test]
+fn validate_state_change_history_requires_distinct_ordered_records() {
+    const DISCOVERING: &str = r#"{"state":"discovering"}"#;
+    const MAINTENANCE: &str = r#"{"state":"maintenance"}"#;
+
+    let histories = [DISCOVERING, r#"{"state":"unrelated"}"#, MAINTENANCE]
+        .into_iter()
+        .map(|state| StateHistoryRecord {
+            state: state.to_string(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(validate_state_change_history(
+        &histories,
+        &[DISCOVERING, MAINTENANCE]
+    ));
+
+    assert!(!validate_state_change_history(
+        &histories,
+        &[MAINTENANCE, DISCOVERING]
+    ));
+
+    assert!(!validate_state_change_history(
+        &histories,
+        &[DISCOVERING, DISCOVERING]
+    ));
 }
 
 #[crate::sqlx_test]
