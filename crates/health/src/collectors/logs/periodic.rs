@@ -483,20 +483,16 @@ fn entry_to_log(
         redfish_severity.unwrap_or(RedfishSeverity::Unknown),
         nvidia_error_id(entry.base.base.oem.as_ref()),
     );
-    match (&entry.message_id, nullable_str(&entry.message)) {
-        (Some(message_id), _) => {
-            attributes.push((Cow::Borrowed("message_id"), message_id.clone()));
+    if let Some(message_id) = &entry.message_id {
+        attributes.push((Cow::Borrowed("message_id"), message_id.clone()));
+    } else if let Some(message) = nullable_str(&entry.message) {
+        let identity = message_identity(message);
+        if let Some(family) = identity.family {
+            attributes.push((Cow::Borrowed("message_family"), family.to_string()));
         }
-        (None, Some(message)) => {
-            let identity = message_identity(message);
-            if let Some(family) = identity.family {
-                attributes.push((Cow::Borrowed("message_family"), family.to_string()));
-            }
-            if let Some(component) = identity.component {
-                attributes.push((Cow::Borrowed("redfish.component"), component.to_string()));
-            }
+        if let Some(component) = identity.component {
+            attributes.push((Cow::Borrowed("redfish.component"), component.to_string()));
         }
-        (None, None) => {}
     }
     if let Some(args) = &entry.message_args {
         attributes.push((
