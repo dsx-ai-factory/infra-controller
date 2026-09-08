@@ -36,10 +36,13 @@ use crate::endpoint::BmcEndpoint;
 use crate::metrics::MetricLabel;
 use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
 
+/// Configuration for the manager collector.
 pub struct ManagerCollectorConfig {
+    /// Destination for emitted samples. `None` polls the BMC but publishes nothing.
     pub data_sink: Option<Arc<dyn DataSink>>,
 }
 
+/// Manager status collector for a single BMC endpoint.
 pub struct ManagerCollector<B: Bmc> {
     bmc: Arc<B>,
     event_context: EventContext,

@@ -196,6 +196,13 @@ impl EventContext {
         }
     }
 
+    pub fn power_shelf_serial(&self) -> Option<&str> {
+        match &self.metadata {
+            Some(EndpointMetadata::PowerShelf(power_shelf)) => Some(power_shelf.serial.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn health_report_target(&self) -> Option<HealthReportTarget> {
         match self.metadata {
             Some(EndpointMetadata::Machine(_)) => Some(HealthReportTarget::Machine),

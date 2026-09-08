@@ -128,6 +128,15 @@ fn resource_attributes(context: &EventContext) -> Vec<KeyValue> {
     if let Some(is_primary) = context.switch_is_primary() {
         attrs.push(KeyValue::new("switch.is_primary", is_primary));
     }
+    if let Some(power_shelf_id) = context.power_shelf_id() {
+        attrs.push(KeyValue::new("power_shelf.id", power_shelf_id.to_string()));
+    }
+    if let Some(serial) = context.power_shelf_serial() {
+        attrs.push(KeyValue::new(
+            "power_shelf.serial_number",
+            serial.to_string(),
+        ));
+    }
     if let Some(rack_id) = context.rack_id() {
         attrs.push(KeyValue::new("rack.id", rack_id.to_string()));
     }
@@ -679,6 +688,47 @@ mod tests {
         assert_eq!(attr_value(&attrs, "system.uuid"), None);
         assert_eq!(attr_value(&attrs, "driver.version"), None);
         assert_eq!(attr_value(&attrs, "nvlink.domain.uuid"), None);
+    }
+
+    #[test]
+    fn resource_attributes_include_power_shelf_identity_when_present() {
+        let power_shelf_id = carbide_uuid::power_shelf::PowerShelfId::from_str(
+            "ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg",
+        )
+        .expect("valid power shelf id");
+        let power_shelf_id_attr = power_shelf_id.to_string();
+
+        let context = EventContext {
+            endpoint_key: "24:5b:f0:80:ab:55".to_string(),
+            addr: BmcAddr {
+                ip: IpAddr::V4(Ipv4Addr::new(10, 84, 196, 54)),
+                port: Some(443),
+                mac: MacAddress::from_str("24:5b:f0:80:ab:55").expect("valid mac"),
+            },
+            collector_type: "manager_collector",
+            labels: Default::default(),
+            metadata: Some(EndpointMetadata::PowerShelf(
+                crate::endpoint::PowerShelfData {
+                    id: Some(power_shelf_id),
+                    serial: "614MP1RXX03X6510035".to_string(),
+                },
+            )),
+            rack_id: Some(RackId::new("RACK_3")),
+        };
+
+        let attrs = otlp_resource_attributes(&context);
+
+        assert_eq!(
+            attr_value(&attrs, "power_shelf.id"),
+            Some(power_shelf_id_attr.as_str())
+        );
+        assert_eq!(
+            attr_value(&attrs, "power_shelf.serial_number"),
+            Some("614MP1RXX03X6510035")
+        );
+        assert_eq!(attr_value(&attrs, "rack.id"), Some("RACK_3"));
+        assert_eq!(attr_value(&attrs, "machine.id"), None);
+        assert_eq!(attr_value(&attrs, "switch.id"), None);
     }
 
     #[test]

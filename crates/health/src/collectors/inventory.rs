@@ -25,7 +25,7 @@ use nv_redfish::chassis::{Chassis, PowerSupply};
 use nv_redfish::computer_system::{ComputerSystem, Drive, Memory, Processor, Storage};
 use nv_redfish::core::{Bmc, ToSnakeCase};
 use nv_redfish::schema::power_subsystem::PowerSubsystem;
-use nv_redfish::schema::resource::Status;
+use nv_redfish::schema::resource::{PowerState, Status};
 use nv_redfish::sensor::SensorLink;
 
 use crate::metrics::MetricLabel;
@@ -78,6 +78,35 @@ fn status_metric(
     push_status_labels(&mut labels, state_key, health_key, status);
     Some(DerivedMetric {
         metric_type,
+        unit: STATE_UNIT,
+        value: 1.0,
+        labels,
+    })
+}
+
+/// Builds `chassis_status` from `Chassis.Status` and `Chassis.PowerState`.
+///
+/// The two fields are independent in Redfish, so the gauge is emitted when
+/// either is present and each label is attached only when its source exists.
+fn chassis_status_metric(
+    status: Option<&Status>,
+    power_state: Option<PowerState>,
+) -> Option<DerivedMetric> {
+    if status.is_none() && power_state.is_none() {
+        return None;
+    }
+    let mut labels = Vec::with_capacity(3);
+    if let Some(status) = status {
+        push_status_labels(&mut labels, "chassis_state", "chassis_health", status);
+    }
+    if let Some(power_state) = power_state {
+        labels.push((
+            Cow::Borrowed("chassis_power_state"),
+            power_state.to_snake_case().to_string(),
+        ));
+    }
+    Some(DerivedMetric {
+        metric_type: "chassis_status",
         unit: STATE_UNIT,
         value: 1.0,
         labels,
@@ -283,20 +312,10 @@ impl<B: Bmc> DiscoveredEntity<B> {
                         labels: Vec::new(),
                     });
                 }
-                if let Some(mut metric) = status_metric(
-                    "chassis_status",
-                    "chassis_state",
-                    "chassis_health",
+                metrics.extend(chassis_status_metric(
                     raw.status.as_ref(),
-                ) {
-                    if let Some(power_state) = raw.power_state.flatten() {
-                        metric.labels.push((
-                            Cow::Borrowed("chassis_power_state"),
-                            power_state.to_snake_case().to_string(),
-                        ));
-                    }
-                    metrics.push(metric);
-                }
+                    raw.power_state.flatten(),
+                ));
                 metrics.extend(status_metric(
                     "power_subsystem_status",
                     "power_subsystem_state",
@@ -386,6 +405,83 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn observe_chassis_status(
+        (status, power_state): (Option<&str>, Option<&str>),
+    ) -> Option<ObservedDerivedMetric> {
+        let status = status.map(|state| {
+            serde_json::from_value::<Status>(serde_json::json!({
+                "Health": "OK",
+                "State": state
+            }))
+            .expect("valid status")
+        });
+        let power_state = power_state.map(|value| {
+            serde_json::from_value::<PowerState>(serde_json::json!(value))
+                .expect("valid power state")
+        });
+        chassis_status_metric(status.as_ref(), power_state).map(|metric| ObservedDerivedMetric {
+            metric_type: metric.metric_type,
+            unit: metric.unit,
+            value: metric.value,
+            labels: metric
+                .labels
+                .into_iter()
+                .map(|(key, value)| (key.into_owned(), value))
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn chassis_status_metric_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "status and power state both present",
+                    input: (Some("Enabled"), Some("On")),
+                    expect: Some(ObservedDerivedMetric {
+                        metric_type: "chassis_status",
+                        unit: "state",
+                        value: 1.0,
+                        labels: vec![
+                            label("chassis_state", "enabled"),
+                            label("chassis_health", "ok"),
+                            label("chassis_power_state", "on"),
+                        ],
+                    }),
+                },
+                Check {
+                    scenario: "status only",
+                    input: (Some("Enabled"), None),
+                    expect: Some(ObservedDerivedMetric {
+                        metric_type: "chassis_status",
+                        unit: "state",
+                        value: 1.0,
+                        labels: vec![
+                            label("chassis_state", "enabled"),
+                            label("chassis_health", "ok"),
+                        ],
+                    }),
+                },
+                Check {
+                    scenario: "power state only still emits the gauge",
+                    input: (None, Some("Off")),
+                    expect: Some(ObservedDerivedMetric {
+                        metric_type: "chassis_status",
+                        unit: "state",
+                        value: 1.0,
+                        labels: vec![label("chassis_power_state", "off")],
+                    }),
+                },
+                Check {
+                    scenario: "neither present emits nothing",
+                    input: (None, None),
+                    expect: None,
+                },
+            ],
+            observe_chassis_status,
+        );
     }
 
     #[tokio::test]

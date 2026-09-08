@@ -102,6 +102,9 @@ impl PrometheusSink {
         if let Some(switch_id) = context.switch_id() {
             labels.push((Cow::Borrowed("switch_id"), switch_id.to_string()));
         }
+        if let Some(power_shelf_id) = context.power_shelf_id() {
+            labels.push((Cow::Borrowed("power_shelf_id"), power_shelf_id.to_string()));
+        }
         if let Some(serial) = context.serial_number() {
             labels.push((Cow::Borrowed("serial_number"), serial.to_string()));
         }
@@ -323,6 +326,49 @@ mod tests {
             label_value("nvlink_domain_uuid"),
             Some("00000000-0000-0000-0000-000000000000")
         );
+    }
+
+    #[test]
+    fn test_stream_static_labels_includes_power_shelf_identity() {
+        let power_shelf_id = carbide_uuid::power_shelf::PowerShelfId::from_str(
+            "ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg",
+        )
+        .expect("valid power shelf id");
+        let power_shelf_id_label = power_shelf_id.to_string();
+
+        let context = EventContext {
+            endpoint_key: "24:5b:f0:80:ab:55".to_string(),
+            addr: BmcAddr {
+                ip: "10.84.196.54".parse().expect("valid ip"),
+                port: Some(443),
+                mac: MacAddress::from_str("24:5b:f0:80:ab:55").unwrap(),
+            },
+            collector_type: "manager_collector",
+            labels: Default::default(),
+            metadata: Some(EndpointMetadata::PowerShelf(
+                crate::endpoint::PowerShelfData {
+                    id: Some(power_shelf_id),
+                    serial: "614MP1RXX03X6510035".to_string(),
+                },
+            )),
+            rack_id: Some(RackId::new("RACK_3")),
+        };
+
+        let labels = PrometheusSink::stream_static_labels(&context);
+        let label_value = |key: &str| {
+            labels
+                .iter()
+                .find_map(|(label, value)| (label.as_ref() == key).then_some(value.as_str()))
+        };
+
+        assert_eq!(
+            label_value("power_shelf_id"),
+            Some(power_shelf_id_label.as_str())
+        );
+        assert_eq!(label_value("serial_number"), Some("614MP1RXX03X6510035"));
+        assert_eq!(label_value("rack_id"), Some("RACK_3"));
+        assert_eq!(label_value("machine_id"), None);
+        assert_eq!(label_value("switch_id"), None);
     }
 
     #[test]

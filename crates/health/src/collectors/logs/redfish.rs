@@ -85,18 +85,26 @@ pub(super) struct MessageIdentity<'a> {
     pub component: Option<&'a str>,
 }
 
-/// Parses the OpenBMC `Family ( component detail... )` message shape.
+/// Parses the OpenBMC `Family` or `Family ( component detail... )` message shape.
 ///
 /// Vendors that populate `MessageId` do not need this; the LiteOn power-shelf
 /// PMC leaves `MessageId` null on every entry and puts identity in the text.
+/// Prose messages (a second token that is not `(`) yield no identity, so a
+/// free-text message is never mistaken for an event family.
 pub(super) fn message_identity(message: &str) -> MessageIdentity<'_> {
     let mut tokens = message.split_whitespace();
     let family = tokens.next();
-    let component = match tokens.next() {
-        Some("(") => tokens.next(),
-        _ => None,
-    };
-    MessageIdentity { family, component }
+    match tokens.next() {
+        None => MessageIdentity {
+            family,
+            component: None,
+        },
+        Some("(") => MessageIdentity {
+            family,
+            component: tokens.next(),
+        },
+        Some(_) => MessageIdentity::default(),
+    }
 }
 
 pub(super) fn nvidia_error_id(oem: Option<&Oem>) -> Option<&str> {
@@ -288,12 +296,9 @@ mod tests {
                     },
                 },
                 Check {
-                    scenario: "prose message keeps only its first word",
+                    scenario: "prose message yields no identity",
                     input: "Platform event occurred",
-                    expect: MessageIdentity {
-                        family: Some("Platform"),
-                        component: None,
-                    },
+                    expect: MessageIdentity::default(),
                 },
                 Check {
                     scenario: "empty message",

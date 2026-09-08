@@ -117,8 +117,14 @@ your metrics backend can handle the volume and you need sensor-level visibility.
 
 For power-shelf endpoints, the telemetry endpoint also publishes controller and chassis
 power evidence. Status series are informational gauges with a fixed value of `1`; the
-state lives in the labels. Every label value is a Redfish enum rendered in snake case,
-so cardinality stays bounded.
+state lives in the labels. The state and health label values listed below are Redfish
+enums rendered in snake case, so they stay bounded. Identity labels such as `manager_id`
+and `firmware_version` are strings, one value per controller.
+
+Series names are exported as `carbide_hardware_health_hw_<series>_<unit>`, for example
+`carbide_hardware_health_hw_manager_status_state`. Every series also carries the
+endpoint labels shared by all telemetry (`endpoint_key`, `serial_number`, `rack_id`, and
+`power_shelf_id` when the shelf is registered in the NICo API).
 
 | Series | Unit | Labels | Source |
 |---|---|---|---|
@@ -129,16 +135,19 @@ so cardinality stays bounded.
 | `manager_status` | state | `manager_id`, `manager_state`, `manager_health`, `manager_power_state`, `firmware_version` | `Manager.Status`, `Manager.PowerState`, `Manager.FirmwareVersion` |
 | `manager_last_reset` | seconds | `manager_id` | `Manager.LastResetTime`, as seconds since the Unix epoch |
 
-Absent Redfish fields are omitted rather than defaulted. `powersupply_status` is emitted
-for every endpoint that exposes power supplies; the chassis and manager series are
-emitted for power-shelf endpoints only. A vendor value outside the Redfish enum is
-rendered as `unsupported_value`; for example, LiteOn PF-1333-7R firmware r1.3.8 reports
-`Status.State` as `Standby`, which is not a Redfish `State` member.
+Absent Redfish fields are omitted rather than defaulted: a status gauge is emitted when
+any of its source fields is present, and each label appears only when its own field does.
+`powersupply_status` is emitted for every endpoint that exposes power supplies; the
+chassis and manager series are emitted for power-shelf endpoints only. A vendor value
+outside the Redfish enum is rendered as `unsupported_value`; for example, LiteOn
+PF-1333-7R firmware r1.3.8 reports `Status.State` as `Standby`, which is not a Redfish
+`State` member.
 
-Log records whose Redfish `MessageId` is null carry two extra attributes derived from the
-OpenBMC `Family ( component ... )` message shape: `message_family` (for example
-`PowerDevicePresence`) and `redfish.component` (for example `powerdevice1`). Records with
-a `MessageId` keep it unchanged and do not carry these attributes.
+Log records whose Redfish `MessageId` is null carry up to two extra attributes derived
+from the OpenBMC `Family` or `Family ( component ... )` message shape: `message_family`
+(for example `PowerDevicePresence`) and, when the parenthesised form is present,
+`redfish.component` (for example `powerdevice1`). Free-text messages yield neither.
+Records with a `MessageId` keep it unchanged and do not carry these attributes.
 
 ### Network services
 
