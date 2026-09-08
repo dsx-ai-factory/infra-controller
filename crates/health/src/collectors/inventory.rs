@@ -340,15 +340,6 @@ mod tests {
         (key.to_string(), value.to_string())
     }
 
-    fn plain(metric_type: &'static str, unit: &'static str, value: f64) -> ObservedDerivedMetric {
-        ObservedDerivedMetric {
-            metric_type,
-            unit,
-            value,
-            labels: Vec::new(),
-        }
-    }
-
     #[derive(Debug, PartialEq)]
     struct ObservedEntity {
         sensor_ids: Vec<String>,
@@ -492,11 +483,12 @@ mod tests {
                             "NVMe-1".to_string(),
                         )],
                         key: "/redfish/v1/Systems/SYS0/Storage/ST0/Drives/D0".to_string(),
-                        derived_metrics: vec![plain(
-                            "drive_predicted_media_life_left",
-                            "percentage",
-                            80.0,
-                        )],
+                        derived_metrics: vec![ObservedDerivedMetric {
+                            metric_type: "drive_predicted_media_life_left",
+                            unit: "percentage",
+                            value: 80.0,
+                            labels: vec![],
+                        }],
                     },
                 },
                 Check {
@@ -533,7 +525,12 @@ mod tests {
                         )],
                         key: "/redfish/v1/Chassis/CH0/PowerSubsystem/PowerSupplies/PS0".to_string(),
                         derived_metrics: vec![
-                            plain("powersupply_capacity", "watts", 3000.0),
+                            ObservedDerivedMetric {
+                                metric_type: "powersupply_capacity",
+                                unit: "watts",
+                                value: 3000.0,
+                                labels: vec![],
+                            },
                             ObservedDerivedMetric {
                                 metric_type: "powersupply_status",
                                 unit: "state",
@@ -587,7 +584,12 @@ mod tests {
                         entity_specific_attributes: vec![("model".to_string(), "HGX".to_string())],
                         key: "/redfish/v1/Chassis/CH0".to_string(),
                         derived_metrics: vec![
-                            plain("chassis_max_power", "watts", 33000.0),
+                            ObservedDerivedMetric {
+                                metric_type: "chassis_max_power",
+                                unit: "watts",
+                                value: 33000.0,
+                                labels: vec![],
+                            },
                             ObservedDerivedMetric {
                                 metric_type: "chassis_status",
                                 unit: "state",
