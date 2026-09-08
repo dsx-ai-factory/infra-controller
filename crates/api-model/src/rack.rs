@@ -167,9 +167,9 @@ pub struct NvosUpdateSwitchStatus {
 ///
 /// The state starts at [`Self::NotStarted`], advances to [`Self::InProgress`]
 /// after the backend accepts a recovery job, and reaches [`Self::Completed`]
-/// after the backend confirms the desired password. If the backend cannot find
-/// the job, the rack controller returns the state to [`Self::NotStarted`] and
-/// resubmits the same credentials.
+/// after the backend confirms the desired password. A backend-reported failure
+/// transitions the rack to [`RackState::Error`]. An unresolved job returns the
+/// state to [`Self::NotStarted`] so the same credentials can be resubmitted.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum NvosPasswordUpdateState {
