@@ -73,7 +73,6 @@ tracing-subscriber = { features = [
   "local-time",
 ], workspace = true }
 thiserror = { workspace = true }
-time = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true, features = ["tls-native-roots"] }
 tonic-prost = { workspace = true }
@@ -129,6 +128,7 @@ criterion = { workspace = true }
 figment = { workspace = true, features = ["test"] }
 rcgen = { workspace = true }
 tempfile = { workspace = true }
+time = { workspace = true }
 
 [[bench]]
 name = "sink_pipeline"

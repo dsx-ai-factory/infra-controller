@@ -24,6 +24,7 @@
 
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nv_redfish::core::{Bmc, ToSnakeCase};
 use nv_redfish::schema::manager::Manager as ManagerSchema;
@@ -145,14 +146,19 @@ fn manager_metrics(manager: &ManagerSchema, key: &str) -> Vec<MetricSample> {
         context: None,
     }];
 
-    if let Some(last_reset_time) = manager.last_reset_time {
-        let unix_seconds = time::OffsetDateTime::from(last_reset_time).unix_timestamp();
+    // A reset time before the Unix epoch is not a real BMC value; skip it
+    // rather than publish a negative timestamp.
+    if let Some(unix_seconds) = manager
+        .last_reset_time
+        .and_then(|last_reset_time| SystemTime::try_from(last_reset_time).ok())
+        .and_then(|reset| reset.duration_since(UNIX_EPOCH).ok())
+    {
         samples.push(MetricSample {
             key: format!("{key}/manager_last_reset"),
             name: "hw".to_string(),
             metric_type: "manager_last_reset".to_string(),
             unit: "seconds".to_string(),
-            value: unix_seconds as f64,
+            value: unix_seconds.as_secs_f64(),
             labels: vec![(Cow::Borrowed("manager_id"), manager.base.id.clone())],
             context: None,
         });
