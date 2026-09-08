@@ -123,8 +123,8 @@ and `firmware_version` are strings, one value per controller.
 
 Series names are exported as `carbide_hardware_health_hw_<series>_<unit>`, for example
 `carbide_hardware_health_hw_manager_status_state`. Every series also carries the
-endpoint labels shared by all telemetry (`endpoint_key`, `serial_number`, `rack_id`, and
-`power_shelf_id` when the shelf is registered in the NICo API).
+endpoint labels shared by all telemetry: `endpoint_key` always, plus `serial_number`,
+`rack_id`, and `power_shelf_id` when each is known for the endpoint.
 
 | Series | Unit | Labels | Source |
 |---|---|---|---|

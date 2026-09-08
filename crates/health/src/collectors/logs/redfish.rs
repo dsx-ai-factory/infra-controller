@@ -99,10 +99,15 @@ pub(super) fn message_identity(message: &str) -> MessageIdentity<'_> {
             family,
             component: None,
         },
-        Some("(") => MessageIdentity {
-            family,
-            component: tokens.next(),
-        },
+        Some("(") => {
+            let component = tokens.next();
+            // The detail must be closed; an unterminated form is not the
+            // OpenBMC shape and yields no identity.
+            match tokens.last() {
+                Some(")") => MessageIdentity { family, component },
+                _ => MessageIdentity::default(),
+            }
+        }
         Some(_) => MessageIdentity::default(),
     }
 }
@@ -298,6 +303,11 @@ mod tests {
                 Check {
                     scenario: "prose message yields no identity",
                     input: "Platform event occurred",
+                    expect: MessageIdentity::default(),
+                },
+                Check {
+                    scenario: "unterminated detail yields no identity",
+                    input: "PowerDevicePresence ( powerdevice1",
                     expect: MessageIdentity::default(),
                 },
                 Check {

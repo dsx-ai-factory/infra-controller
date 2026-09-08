@@ -43,6 +43,13 @@ pub struct ManagerCollectorConfig {
 }
 
 /// Manager status collector for a single BMC endpoint.
+///
+/// Each iteration fetches every `Manager` and emits `manager_status` (an
+/// informational gauge whose labels carry state, health, power state, and
+/// firmware version) and `manager_last_reset` (seconds since the Unix epoch).
+/// Absent Redfish fields are omitted from the labels rather than defaulted.
+/// Samples are bracketed by `MetricCollectionStart` and `MetricCollectionEnd`
+/// sink events, and `CollectorRemoved` is emitted on stop.
 pub struct ManagerCollector<B: Bmc> {
     bmc: Arc<B>,
     event_context: EventContext,
@@ -245,6 +252,27 @@ mod tests {
                             labels: vec![label("manager_id", "bmc")],
                         },
                     ],
+                },
+                Check {
+                    scenario: "partial manager emits only the labels it reports",
+                    input: r#"{
+                        "@odata.id": "/redfish/v1/Managers/bmc",
+                        "Id": "bmc",
+                        "Name": "OpenBmc Manager",
+                        "FirmwareVersion": "r1.3.8-rc1",
+                        "Status": { "Health": "Warning" }
+                    }"#,
+                    expect: vec![ObservedSample {
+                        key: "/redfish/v1/Managers/bmc/manager_status".to_string(),
+                        metric_type: "manager_status".to_string(),
+                        unit: "state".to_string(),
+                        value: 1.0,
+                        labels: vec![
+                            label("manager_id", "bmc"),
+                            label("manager_health", "warning"),
+                            label("firmware_version", "r1.3.8-rc1"),
+                        ],
+                    }],
                 },
                 Check {
                     scenario: "sparse manager emits status with identity only",
