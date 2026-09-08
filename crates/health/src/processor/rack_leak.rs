@@ -72,6 +72,7 @@ impl RackLeakProcessor {
                 observed_at: Some(chrono::Utc::now()),
                 successes: vec![],
                 alerts: vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                     message: format!(
@@ -87,6 +88,7 @@ impl RackLeakProcessor {
                 target: Some(HealthReportTarget::Rack),
                 observed_at: Some(chrono::Utc::now()),
                 successes: vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                 }],
@@ -210,6 +212,7 @@ mod tests {
                 observed_at: Some(chrono::Utc::now()),
                 successes: vec![],
                 alerts: vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                     message: "tray leaking".to_string(),
@@ -222,6 +225,7 @@ mod tests {
                 target: Some(HealthReportTarget::Machine),
                 observed_at: Some(chrono::Utc::now()),
                 successes: vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                 }],
@@ -283,6 +287,7 @@ mod tests {
             observed_at: Some(chrono::Utc::now()),
             successes: vec![],
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: None,
                 message: "switch leaking".to_string(),

@@ -31,8 +31,8 @@ use super::diagnostic::{
 };
 use super::redfish::{
     RedfishLogFields, RedfishSeverity, add_redfish_analyzer_attributes,
-    log_entry_diagnostic_is_cper, message_identity, nvidia_error_id, redfish_event_type_string,
-    redfish_log_type,
+    log_entry_diagnostic_is_cper, nvidia_error_id, push_message_identity,
+    redfish_event_type_string, redfish_log_type,
 };
 use crate::HealthError;
 use crate::collectors::{IterationResult, PeriodicCollector};
@@ -483,17 +483,11 @@ fn entry_to_log(
         redfish_severity.unwrap_or(RedfishSeverity::Unknown),
         nvidia_error_id(entry.base.base.oem.as_ref()),
     );
-    if let Some(message_id) = &entry.message_id {
-        attributes.push((Cow::Borrowed("message_id"), message_id.clone()));
-    } else if let Some(message) = nullable_str(&entry.message) {
-        let identity = message_identity(message);
-        if let Some(family) = identity.family {
-            attributes.push((Cow::Borrowed("message_family"), family.to_string()));
-        }
-        if let Some(component) = identity.component {
-            attributes.push((Cow::Borrowed("redfish.component"), component.to_string()));
-        }
-    }
+    push_message_identity(
+        &mut attributes,
+        entry.message_id.as_deref(),
+        nullable_str(&entry.message),
+    );
     if let Some(args) = &entry.message_args {
         attributes.push((
             Cow::Borrowed("message_args"),

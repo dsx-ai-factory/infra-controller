@@ -400,6 +400,7 @@ mod tests {
         endpoint.metadata = Some(EndpointMetadata::PowerShelf(PowerShelfData {
             id: None,
             serial: None,
+            nvlink_domain_uuid: None,
         }));
         let key = endpoint.key();
         let mut endpoint = Arc::new(endpoint);

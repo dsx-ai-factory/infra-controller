@@ -351,29 +351,21 @@ fn project_sensor(
     attributes.reserve(6);
     attributes.push((Cow::Borrowed("sensor_name"), sensor.base.id.clone()));
 
+    // An absent threshold is omitted rather than written as `0`: a zero upper
+    // bound would read as "every positive value is critical".
     if let Some(thresholds) = sensor
         .thresholds
         .as_ref()
         .filter(|_| include_sensor_thresholds)
     {
-        attributes.push((
-            Cow::Borrowed("upper_critical_threshold"),
-            thresholds
-                .upper_critical
-                .as_ref()
-                .and_then(|th| th.reading.flatten())
-                .unwrap_or_default()
-                .to_string(),
-        ));
-        attributes.push((
-            Cow::Borrowed("lower_critical_threshold"),
-            thresholds
-                .lower_critical
-                .as_ref()
-                .and_then(|th| th.reading.flatten())
-                .unwrap_or_default()
-                .to_string(),
-        ));
+        for (key, threshold) in [
+            ("upper_critical_threshold", &thresholds.upper_critical),
+            ("lower_critical_threshold", &thresholds.lower_critical),
+        ] {
+            if let Some(reading) = threshold.as_ref().and_then(|th| th.reading.flatten()) {
+                attributes.push((Cow::Borrowed(key), reading.to_string()));
+            }
+        }
     }
 
     let physical_context = sensor
@@ -977,6 +969,40 @@ mod tests {
                             42.5,
                             &threshold_labels_without_exposition,
                             Some(threshold_context()),
+                        ),
+                        ranges: Vec::new(),
+                    }),
+                },
+                Case {
+                    scenario: "partial thresholds omit the absent critical label",
+                    input: ProjectionInput {
+                        sensor: sensor_json_with([(
+                            "Thresholds",
+                            json!({ "UpperCritical": { "Reading": 1.8 } }),
+                        )]),
+                        entity_type: "chassis",
+                        physical_context_fallback: "chassis",
+                        base_attributes: vec![("chassis_id", "CH0")],
+                        entity_attributes: vec![],
+                        include_sensor_thresholds: true,
+                    },
+                    expect: Yields(ObservedProjection {
+                        primary: observed_metric(
+                            SENSOR_PATH,
+                            "hw_sensor",
+                            "temperature",
+                            "celsius",
+                            42.5,
+                            &[
+                                ("chassis_id", "CH0"),
+                                ("sensor_name", "Sensor0"),
+                                ("upper_critical_threshold", "1.8"),
+                                ("physical_context", "chassis"),
+                            ],
+                            Some(ObservedContext {
+                                upper_critical: Some(1.8),
+                                ..empty_context("chassis", "Sensor0", "ok")
+                            }),
                         ),
                         ranges: Vec::new(),
                     }),

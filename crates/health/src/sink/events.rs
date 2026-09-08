@@ -143,7 +143,8 @@ impl EventContext {
         match &self.metadata {
             Some(EndpointMetadata::Machine(machine)) => machine.nvlink_domain_uuid,
             Some(EndpointMetadata::Switch(switch)) => switch.nvlink_domain_uuid,
-            _ => None,
+            Some(EndpointMetadata::PowerShelf(power_shelf)) => power_shelf.nvlink_domain_uuid,
+            None => None,
         }
     }
 
@@ -416,10 +417,22 @@ pub struct FirmwareInfo {
     pub attributes: Vec<MetricLabel>,
 }
 
+/// Placement of the sensor behind a sensor probe result.
+///
+/// Lets a consumer attribute a reading to its power supply without parsing
+/// the sensor name. Each field is present only when the sensor carries it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SensorAttribution {
+    pub powersupply_id: Option<String>,
+    pub physical_context: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct HealthReportSuccess {
     pub probe_id: Probe,
     pub target: Option<String>,
+    /// Sensor placement; `None` for probes that are not sensor readings.
+    pub attribution: Option<SensorAttribution>,
 }
 
 #[derive(Clone, Debug)]
@@ -428,6 +441,8 @@ pub struct HealthReportAlert {
     pub target: Option<String>,
     pub message: String,
     pub classifications: Vec<Classification>,
+    /// Sensor placement; `None` for probes that are not sensor readings.
+    pub attribution: Option<SensorAttribution>,
 }
 
 #[derive(Clone, Debug)]
@@ -761,6 +776,7 @@ mod tests {
             ContextKind::PowerShelf => Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: Some(power_shelf_id()),
                 serial: Some("PS-001".to_string()),
+                nvlink_domain_uuid: None,
             })),
         };
 
@@ -834,12 +850,14 @@ mod tests {
     fn convert_alert(case: AlertCase) -> AlertSummary {
         let alert = match case {
             AlertCase::WithTarget => HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("fan0".to_string()),
                 message: "fan warning".to_string(),
                 classifications: vec![Classification::SensorWarning, Classification::SensorFailure],
             },
             AlertCase::Intrusion => HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::IntrusionSensorTriggered,
                 target: Some("HostBMC".to_string()),
                 message: "Physical Chassis Intrusion Alert".to_string(),
@@ -849,6 +867,7 @@ mod tests {
                 ],
             },
             AlertCase::WithoutClassifications => HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: None,
                 message: "rack leak".to_string(),
@@ -872,10 +891,12 @@ mod tests {
             },
             observed_at: Some(observed_at),
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::LeakDetection,
                 target: Some("tray-1".to_string()),
             }],
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("temp0".to_string()),
                 message: "temperature critical".to_string(),
@@ -1126,6 +1147,7 @@ mod tests {
                     target: Some(HealthReportTarget::Machine),
                     observed_at: None,
                     successes: vec![HealthReportSuccess {
+                        attribution: None,
                         probe_id: Probe::Sensor,
                         target: None,
                     }],
@@ -1140,6 +1162,7 @@ mod tests {
                     observed_at: None,
                     successes: vec![],
                     alerts: vec![HealthReportAlert {
+                        attribution: None,
                         probe_id: Probe::Sensor,
                         target: None,
                         message: "alert".to_string(),
@@ -1159,6 +1182,7 @@ mod tests {
             };
             "success with target" {
                 HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::Sensor,
                     target: Some("fan0".to_string()),
                 } => ("BmcSensor".to_string(), Some("fan0".to_string())),
@@ -1166,6 +1190,7 @@ mod tests {
 
             "success without target" {
                 HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                 } => ("BmcLeakDetection".to_string(), None),

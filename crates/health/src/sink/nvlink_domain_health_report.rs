@@ -223,6 +223,7 @@ mod tests {
             observed_at: None,
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::NmxControllerHealth,
                 target: None,
                 message: "NMX-C controller health is degraded".to_string(),
@@ -235,6 +236,7 @@ mod tests {
             target: Some(HealthReportTarget::NvLinkDomain),
             observed_at: None,
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::NmxControllerHealth,
                 target: None,
             }],

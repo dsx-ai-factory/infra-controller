@@ -231,6 +231,12 @@ pub struct PowerShelfData {
     pub id: Option<PowerShelfId>,
     /// Hardware serial number, when explicitly known.
     pub serial: Option<String>,
+
+    /// NVLink domain UUID of the rack the shelf powers, when known.
+    ///
+    /// The API power shelf record carries no domain, so API discovery resolves
+    /// it from the machines and switches that share the shelf's rack.
+    pub nvlink_domain_uuid: Option<NvLinkDomainId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -427,6 +433,7 @@ mod tests {
                     input: Some(EndpointMetadata::PowerShelf(PowerShelfData {
                         id: None,
                         serial: None,
+                        nvlink_domain_uuid: None,
                     })),
                     expect: true,
                 },
@@ -469,6 +476,7 @@ mod tests {
                 endpoint.metadata = Some(EndpointMetadata::PowerShelf(PowerShelfData {
                     id,
                     serial: None,
+                    nvlink_domain_uuid: None,
                 }));
 
                 endpoint.log_identity().into_owned()

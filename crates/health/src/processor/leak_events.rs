@@ -110,6 +110,7 @@ impl EventProcessor for LeakEventProcessor {
             (
                 vec![],
                 vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                     message: format!(
@@ -126,6 +127,7 @@ impl EventProcessor for LeakEventProcessor {
         } else {
             (
                 vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::LeakDetection,
                     target: None,
                 }],
@@ -173,6 +175,7 @@ mod tests {
 
     fn leak_alert(target: &str) -> HealthReportAlert {
         HealthReportAlert {
+            attribution: None,
             probe_id: Probe::LeakDetection,
             target: Some(target.to_string()),
             message: "LeakDetector found leak".to_string(),
@@ -245,6 +248,7 @@ mod tests {
             observed_at: Some(chrono::Utc::now()),
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::NvueLeakage,
                 target: Some("LEAK1".to_string()),
                 message: "NVUE leakage sensor state".to_string(),
@@ -281,6 +285,7 @@ mod tests {
             target: Some(HealthReportTarget::Switch),
             observed_at: Some(chrono::Utc::now()),
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::NvueLeakage,
                 target: Some("LEAK1".to_string()),
             }],
@@ -312,6 +317,7 @@ mod tests {
             observed_at: Some(chrono::Utc::now()),
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::NvueLeakage,
                 target: Some("LEAK1".to_string()),
                 message: "NVUE leakage sensor state".to_string(),
@@ -327,6 +333,7 @@ mod tests {
 
     fn unreadable_detector_alert(target: &str) -> HealthReportAlert {
         HealthReportAlert {
+            attribution: None,
             probe_id: Probe::LeakDetection,
             target: Some(target.to_string()),
             message: format!("Leak detector '{target}' could not be read"),
@@ -420,6 +427,7 @@ mod tests {
             source: ReportSource::BmcSensors,
             observed_at: Some(chrono::Utc::now()),
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::Sensor,
                 target: Some("Voltage_1".to_string()),
             }],

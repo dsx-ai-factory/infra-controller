@@ -1204,6 +1204,7 @@ mod tests {
                 crate::endpoint::PowerShelfData {
                     id: None,
                     serial: Some("614MP1RXX03X6510035".to_string()),
+                    nvlink_domain_uuid: None,
                 },
             )),
         );

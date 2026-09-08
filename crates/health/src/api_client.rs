@@ -318,6 +318,30 @@ fn switch_endpoint_metadata(
     }))
 }
 
+/// Maps each rack to the NVLink domain its machines and switches report.
+///
+/// The API power shelf record carries no domain, so a shelf inherits the
+/// domain of the rack it powers. The first non-nil domain seen for a rack wins.
+fn rack_nvlink_domains(endpoints: &[Arc<BmcEndpoint>]) -> HashMap<RackId, NvLinkDomainId> {
+    let mut domains = HashMap::new();
+    for endpoint in endpoints {
+        let Some(rack_id) = &endpoint.rack_id else {
+            continue;
+        };
+        let domain_uuid = match &endpoint.metadata {
+            Some(EndpointMetadata::Machine(machine)) => machine.nvlink_domain_uuid,
+            Some(EndpointMetadata::Switch(switch)) => switch.nvlink_domain_uuid,
+            _ => None,
+        };
+        if let Some(domain_uuid) =
+            domain_uuid.filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil())
+        {
+            domains.entry(rack_id.clone()).or_insert(domain_uuid);
+        }
+    }
+    domains
+}
+
 pub struct ApiEndpointSource {
     api: Arc<ApiClientWrapper>,
     reqwest: ReqwestClient,
@@ -374,8 +398,9 @@ impl ApiEndpointSource {
 
     pub async fn fetch_bmc_hosts(&self) -> Result<Vec<Arc<BmcEndpoint>>, HealthError> {
         let mut endpoints = self.fetch_machine_endpoints().await?;
-        endpoints.extend(self.fetch_power_shelf_endpoints().await);
         endpoints.extend(self.fetch_switch_endpoints().await);
+        let rack_domains = rack_nvlink_domains(&endpoints);
+        endpoints.extend(self.fetch_power_shelf_endpoints(&rack_domains).await);
 
         self.prune_bmc_client_cache(&endpoints);
 
@@ -496,7 +521,10 @@ impl ApiEndpointSource {
         }
     }
 
-    async fn fetch_power_shelf_endpoints(&self) -> Vec<Arc<BmcEndpoint>> {
+    async fn fetch_power_shelf_endpoints(
+        &self,
+        rack_domains: &HashMap<RackId, NvLinkDomainId>,
+    ) -> Vec<Arc<BmcEndpoint>> {
         let request = rpc::forge::PowerShelfQuery {
             name: None,
             power_shelf_id: None,
@@ -507,7 +535,7 @@ impl ApiEndpointSource {
                 let mut endpoints = Vec::new();
 
                 for power_shelf in response.power_shelves {
-                    match self.extract_power_shelf_endpoint(&power_shelf) {
+                    match self.extract_power_shelf_endpoint(&power_shelf, rack_domains) {
                         Ok(endpoint) => endpoints.push(endpoint),
                         Err(error) => tracing::warn!(
                             ?power_shelf,
@@ -621,6 +649,7 @@ impl ApiEndpointSource {
     fn extract_power_shelf_endpoint(
         &self,
         power_shelf: &rpc::forge::PowerShelf,
+        rack_domains: &HashMap<RackId, NvLinkDomainId>,
     ) -> Result<Arc<BmcEndpoint>, HealthError> {
         let Some(bmc_info) = &power_shelf.bmc_info else {
             return Err(HealthError::GenericError(
@@ -629,11 +658,24 @@ impl ApiEndpointSource {
         };
         let addr = BmcAddr::try_from(bmc_info)?;
 
+        let nvlink_domain_uuid = power_shelf
+            .rack_id
+            .as_ref()
+            .and_then(|rack_id| rack_domains.get(rack_id).copied());
+        if nvlink_domain_uuid.is_none() {
+            tracing::warn!(
+                power_shelf_id = power_shelf.id.as_ref().map(tracing::field::display),
+                rack_id = power_shelf.rack_id.as_ref().map(tracing::field::display),
+                "Power shelf NVLink domain unresolved: no machine or switch in its rack reports one"
+            );
+        }
+
         self.endpoint_for(
             addr,
             Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: power_shelf.id,
                 serial: None,
+                nvlink_domain_uuid,
             })),
             power_shelf.rack_id.clone(),
             ApiCredentialKind::Bmc,
@@ -984,6 +1026,91 @@ mod tests {
         assert!(switch.nmxc_enabled);
     }
 
+    /// Metadata a rack member contributes to the rack-to-domain map.
+    #[derive(Clone, Copy, Debug)]
+    enum RackMember {
+        Machine(Option<NvLinkDomainId>),
+        Switch(Option<NvLinkDomainId>),
+        PowerShelf,
+    }
+
+    fn rack_member_endpoint(rack_id: Option<&RackId>, member: RackMember) -> Arc<BmcEndpoint> {
+        let metadata = match member {
+            RackMember::Machine(nvlink_domain_uuid) => EndpointMetadata::Machine(MachineData {
+                machine_id: None,
+                machine_serial: None,
+                system_uuid: SharedSystemUuid::default(),
+                slot_number: None,
+                tray_index: None,
+                nvlink_domain_uuid,
+                driver_version: None,
+            }),
+            RackMember::Switch(nvlink_domain_uuid) => EndpointMetadata::Switch(SwitchData {
+                id: None,
+                serial: "SN-SW".to_string(),
+                slot_number: None,
+                tray_index: None,
+                nvlink_domain_uuid,
+                endpoint_role: SwitchEndpointRole::Bmc,
+                is_primary: false,
+                nmxc_enabled: false,
+                nmxt_enabled: false,
+            }),
+            RackMember::PowerShelf => EndpointMetadata::PowerShelf(PowerShelfData {
+                id: None,
+                serial: None,
+                nvlink_domain_uuid: None,
+            }),
+        };
+        let mut endpoint = crate::endpoint::test_support::test_endpoint(test_mac());
+        endpoint.metadata = Some(metadata);
+        endpoint.rack_id = rack_id.cloned();
+        Arc::new(endpoint)
+    }
+
+    #[test]
+    fn rack_nvlink_domains_cases() {
+        let domain = NvLinkDomainId::new();
+        let rack_id = RackId::new("RACK_1");
+        check_values(
+            [
+                Check {
+                    scenario: "machine domain is keyed by its rack",
+                    input: (Some(&rack_id), RackMember::Machine(Some(domain))),
+                    expect: Some(domain),
+                },
+                Check {
+                    scenario: "switch domain is keyed by its rack",
+                    input: (Some(&rack_id), RackMember::Switch(Some(domain))),
+                    expect: Some(domain),
+                },
+                Check {
+                    scenario: "nil machine domain contributes nothing",
+                    input: (
+                        Some(&rack_id),
+                        RackMember::Machine(Some(NvLinkDomainId::nil())),
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "member without a rack contributes nothing",
+                    input: (None, RackMember::Switch(Some(domain))),
+                    expect: None,
+                },
+                Check {
+                    scenario: "power shelf metadata is not a domain source",
+                    input: (Some(&rack_id), RackMember::PowerShelf),
+                    expect: None,
+                },
+            ],
+            |(member_rack, member)| {
+                rack_nvlink_domains(&[rack_member_endpoint(member_rack, member)])
+                    .get(&rack_id)
+                    .copied()
+            },
+        );
+    }
+
     #[test]
     fn power_shelf_endpoint_preserves_api_rack_id()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1003,27 +1130,33 @@ mod tests {
         );
 
         let rack_id = RackId::new("RACK_1");
+        let domain_uuid = NvLinkDomainId::new();
 
-        let endpoint = source.extract_power_shelf_endpoint(&rpc::forge::PowerShelf {
-            config: Some(rpc::forge::PowerShelfConfig {
-                name: "power-shelf-a".to_string(),
+        let rack_domains = HashMap::from([(rack_id.clone(), domain_uuid)]);
+        let endpoint = source.extract_power_shelf_endpoint(
+            &rpc::forge::PowerShelf {
+                config: Some(rpc::forge::PowerShelfConfig {
+                    name: "power-shelf-a".to_string(),
+                    ..Default::default()
+                }),
+                bmc_info: Some(rpc::forge::BmcInfo {
+                    ip: Some("10.0.0.1".to_string()),
+                    mac: Some(test_mac().to_string()),
+                    port: Some(443),
+                    ..Default::default()
+                }),
+                rack_id: Some(rack_id.clone()),
                 ..Default::default()
-            }),
-            bmc_info: Some(rpc::forge::BmcInfo {
-                ip: Some("10.0.0.1".to_string()),
-                mac: Some(test_mac().to_string()),
-                port: Some(443),
-                ..Default::default()
-            }),
-            rack_id: Some(rack_id.clone()),
-            ..Default::default()
-        })?;
+            },
+            &rack_domains,
+        )?;
 
         assert_eq!(endpoint.rack_id.as_ref(), Some(&rack_id));
         let Some(EndpointMetadata::PowerShelf(power_shelf)) = endpoint.metadata.as_ref() else {
             panic!("expected power shelf metadata");
         };
         assert_eq!(power_shelf.serial, None);
+        assert_eq!(power_shelf.nvlink_domain_uuid, Some(domain_uuid));
 
         Ok(())
     }

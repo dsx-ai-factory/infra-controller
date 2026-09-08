@@ -143,11 +143,43 @@ outside the Redfish enum is rendered as `unsupported_value`; for example, LiteOn
 PF-1333-7R firmware r1.3.8 reports `Status.State` as `Standby`, which is not a Redfish
 `State` member.
 
-Log records whose Redfish `MessageId` is null carry up to two extra attributes derived
-from the OpenBMC `Family` or `Family ( component ... )` message shape: `message_family`
-(for example `PowerDevicePresence`) and, when the parenthesised form is present,
-`redfish.component` (for example `powerdevice1`). Free-text messages yield neither.
-Records with a `MessageId` keep it unchanged and do not carry these attributes.
+Sensor series carry the `upper_critical_threshold` and `lower_critical_threshold` labels
+only when the BMC reports that threshold. An absent threshold is omitted rather than
+written as `0`.
+
+The chassis `PowerSubsystem` on LiteOn PF-1333-7R firmware r1.3.8 exposes `Status` only
+and no `PowerSupplyRedundancy` group, so no redundancy series is published. Consumers
+derive redundancy from `power_subsystem_health` and the per-supply series.
+
+Power-shelf health reports exported over OTLP carry per-alert detail only when the target
+sets `include_alert_details = true` on its `[[sinks.otlp.targets]]` entry. A shelf reports
+far fewer than the 64-alert serialization bound, so `health_report.alerts.dropped` is not
+expected. See the
+[OTLP health-report log contract](../architecture/health_aggregation.md#otlp-health-report-log-contract).
+
+Log records whose Redfish `MessageId` is null or empty carry up to two extra attributes
+derived from the OpenBMC `Family` or `Family ( component ... )` message shape:
+`message_family` (for example `PowerDevicePresence`) and, when the parenthesised form is
+present, `redfish.component` (for example `powerdevice1`). Free-text messages yield
+neither. Records with a `MessageId` keep it unchanged and do not carry these attributes.
+The periodic log collector and the SSE collector derive the attributes the same way.
+
+LiteOn PF-1333-7R firmware r1.3.8 leaves `MessageId` null on every event log entry. The
+message families below were observed across four shelves on 2026-09-09, each with the
+listed Redfish `Severity`. Only the `Assert` form of the parenthesised detail appeared;
+no `Deassert` entry was present in the retained log of 400 entries per shelf.
+
+| `message_family` | Observed `Severity` |
+|---|---|
+| `BmcFirmwareUpdateCompleted` | OK |
+| `BmcFirmwareUpdateFailure` | Critical |
+| `BmcSystemBootComplete` | OK |
+| `BmcUnsupportedChassis` | Warning |
+| `PowerDeviceFirmwareUpdate` | OK |
+| `PowerDeviceOff` | OK |
+| `PowerDeviceOn` | OK |
+| `PowerDevicePowerNotGood` | OK |
+| `PowerDevicePresence` | OK |
 
 ### Network services
 

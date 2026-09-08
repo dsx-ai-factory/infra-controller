@@ -187,6 +187,7 @@ impl<B: Bmc + 'static> GpuInventoryCollector<B> {
             observed_at: Some(chrono::Utc::now()),
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::GpuInventory,
                 target: None,
                 message,
@@ -233,6 +234,7 @@ fn gpu_count_report(expected: u32, actual: u32) -> HealthReport {
             observed_at: Some(chrono::Utc::now()),
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::GpuInventory,
                 target: None,
                 message: format!(
@@ -248,6 +250,7 @@ fn gpu_count_report(expected: u32, actual: u32) -> HealthReport {
             target: Some(HealthReportTarget::Machine),
             observed_at: Some(chrono::Utc::now()),
             successes: vec![HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::GpuInventory,
                 target: None,
             }],

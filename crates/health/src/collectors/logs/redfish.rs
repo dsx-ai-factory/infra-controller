@@ -76,6 +76,32 @@ pub(super) fn redfish_log_type(fields: RedfishLogFields<'_>) -> RedfishLogType {
     RedfishLogType::RedfishEvent
 }
 
+/// Pushes `message_id`, or the identity derived from the message text when
+/// the BMC leaves `MessageId` null or empty.
+///
+/// Periodic and SSE log paths share this so a LiteOn event carries the same
+/// `message_family` and `redfish.component` attributes over either path.
+pub(super) fn push_message_identity(
+    attributes: &mut Vec<MetricLabel>,
+    message_id: Option<&str>,
+    message: Option<&str>,
+) {
+    match message_id.filter(|message_id| !message_id.is_empty()) {
+        Some(message_id) => {
+            attributes.push((Cow::Borrowed("message_id"), message_id.to_string()));
+        }
+        None => {
+            let identity = message.map(message_identity).unwrap_or_default();
+            if let Some(family) = identity.family {
+                attributes.push((Cow::Borrowed("message_family"), family.to_string()));
+            }
+            if let Some(component) = identity.component {
+                attributes.push((Cow::Borrowed("redfish.component"), component.to_string()));
+            }
+        }
+    }
+}
+
 /// Identity recovered from a log entry `Message` when `MessageId` is null.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct MessageIdentity<'a> {
