@@ -21,6 +21,7 @@
 //! them to carbide-api via the `lookup_record` RPC.
 
 use std::iter;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,7 +29,7 @@ use carbide_instrument::{Event, LabelValue, emit};
 use dns_record::DnsResourceRecordType;
 use eyre::Report;
 use hickory_resolver::proto::op::ResponseCode;
-use hickory_resolver::proto::rr::rdata::PTR;
+use hickory_resolver::proto::rr::rdata::{CNAME, MX, NS, PTR, SOA, TXT};
 use hickory_resolver::proto::rr::{DNSClass, Name, RData, RecordType};
 use hickory_server::net::runtime::Time;
 use hickory_server::proto::op::Metadata;
@@ -39,7 +40,7 @@ use metrics_endpoint::{MetricsEndpointConfig, new_metrics_setup, run_metrics_end
 use opentelemetry::StringValue;
 use opentelemetry::metrics::{Counter, Meter, ObservableGauge};
 use rpc::forge_tls_client::{ApiConfig, ForgeClientT, ForgeTlsClient};
-use rpc::protos::dns::DnsResourceRecordLookupRequest;
+use rpc::protos::dns::{DnsLookupOutcome, DnsResourceRecordLookupRequest};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
 use tracing::{Instrument, error, info, warn};
@@ -48,7 +49,7 @@ pub mod config;
 mod negative_cache;
 
 use crate::config::Config;
-use crate::negative_cache::{CacheKey, NegativeCache};
+use crate::negative_cache::{CacheKey, NegativeAnswer, NegativeCache};
 
 struct DnsMetrics {
     negative_cache_eviction: Counter<u64>,
@@ -107,7 +108,9 @@ fn classify_failure(code: tonic::Code) -> NegativeClassification {
     use tonic::Code;
 
     let (code, transient) = match code {
-        // The name genuinely does not exist: a stable, authoritative negative.
+        // A missing name. Current carbide-api reports that through the
+        // `outcome` field on a successful reply; this arm remains for older
+        // servers and any handler that still signals absence with NotFound.
         Code::NotFound => (ResponseCode::NXDomain, false),
         // The query itself was malformed (empty qname, unparseable qtype). It
         // will stay malformed on retry, so the answer is stable.
@@ -128,10 +131,151 @@ fn classify_failure(code: tonic::Code) -> NegativeClassification {
     NegativeClassification { code, transient }
 }
 
-/// Builds the hickory `RData` for a supported record type from the API's string
+/// How a successful upstream lookup is surfaced to the DNS client.
+#[derive(Debug, PartialEq)]
+struct OutcomeClassification {
+    /// The DNS response code returned to the client.
+    code: ResponseCode,
+    /// Whether the AA bit is set.
+    authoritative: bool,
+    /// Whether to remember this as a stable negative so repeat queries for
+    /// the name skip the upstream call.
+    cache_negative: bool,
+}
+
+/// Decodes the wire `outcome`. Zero is `Unspecified`, what a server without the
+/// field sends, and keeps the record-list fallback. Any other value this build
+/// does not know comes from a newer server and is an `Internal` failure: the
+/// caller maps that to a briefly cached SERVFAIL through `classify_failure`,
+/// rather than guessing NXDOMAIN for a name whose status could not be read.
+fn decode_outcome(raw: i32) -> Result<DnsLookupOutcome, tonic::Status> {
+    DnsLookupOutcome::try_from(raw).map_err(|_| {
+        warn!(outcome = raw, "Unknown lookup outcome from carbide-api");
+        tonic::Status::internal(format!("unknown lookup outcome {raw}"))
+    })
+}
+
+/// Maps the API's typed lookup outcome to an RCODE and AA bit.
+///
+/// `Unspecified` is what a carbide-api that predates the `outcome` field
+/// sends; for it, the record list is the only signal and an empty list is
+/// NXDOMAIN, as before the field existed. `has_answers` is only consulted in
+/// that case.
+///
+/// `NotAuthoritative` is REFUSED rather than NXDOMAIN: the name may exist in a
+/// zone someone else serves, and this server does not recurse.
+fn classify_outcome(
+    outcome: DnsLookupOutcome,
+    authoritative: bool,
+    has_answers: bool,
+) -> OutcomeClassification {
+    let (code, authoritative, cache_negative) = match outcome {
+        DnsLookupOutcome::Unspecified if has_answers => (ResponseCode::NoError, false, false),
+        DnsLookupOutcome::Unspecified => (ResponseCode::NXDomain, false, true),
+        DnsLookupOutcome::Records => (ResponseCode::NoError, authoritative, false),
+        // NODATA is NOERROR but carries no answers, so it is cached as the
+        // whole negative response rather than by its response code alone.
+        DnsLookupOutcome::NoData => (ResponseCode::NoError, authoritative, true),
+        DnsLookupOutcome::NoSuchName => (ResponseCode::NXDomain, authoritative, true),
+        DnsLookupOutcome::NotAuthoritative | DnsLookupOutcome::Refused => {
+            (ResponseCode::Refused, authoritative, true)
+        }
+        DnsLookupOutcome::NotImplemented => (ResponseCode::NotImp, authoritative, true),
+    };
+    OutcomeClassification {
+        code,
+        authoritative,
+        cache_negative,
+    }
+}
+
+/// Parses the API's presentation-form SOA `content`
+/// (`mname. rname. serial refresh retry expire minimum`), the spelling
+/// `SoaRecord`'s `Display` produces.
+fn parse_soa(content: &str) -> Option<SOA> {
+    let fields: Vec<&str> = content.split_whitespace().collect();
+    let [mname, rname, serial, refresh, retry, expire, minimum] = fields.as_slice() else {
+        return None;
+    };
+    Some(SOA::new(
+        Name::from_str(mname).ok()?,
+        Name::from_str(rname).ok()?,
+        serial.parse().ok()?,
+        refresh.parse().ok()?,
+        retry.parse().ok()?,
+        expire.parse().ok()?,
+        minimum.parse().ok()?,
+    ))
+}
+
+/// Builds the SOA record for the authority section of a negative answer from
+/// the API's presentation-form `content`
+/// (`mname. rname. serial refresh retry expire minimum`). Both ends of that
+/// format are ours, so content that does not parse is an `Internal` failure,
+/// which the caller answers as a briefly cached SERVFAIL.
+fn authority_soa_record(qname: &str, ttl: u32, content: &str) -> Result<Record, tonic::Status> {
+    let (Some(soa), Ok(name)) = (parse_soa(content), Name::from_str(qname)) else {
+        warn!(%qname, %content, "Failed to parse authority SOA");
+        return Err(tonic::Status::internal(format!(
+            "unparsable authority SOA for {qname}"
+        )));
+    };
+    let mut record = Record::from_rdata(name, ttl, RData::SOA(soa));
+    record.dns_class = DNSClass::IN;
+    Ok(record)
+}
+
+/// The authority section for a reply. A NO_DATA or NO_SUCH_NAME answer must
+/// carry the zone SOA, because resolvers cache a negative from it (RFC 2308
+/// §5) and nico-api always sends one for those outcomes. A negative without
+/// it is an `Internal` failure rather than an answer with an empty authority
+/// section. Other outcomes carry an SOA only if the API sent one.
+fn authority_section(
+    outcome: DnsLookupOutcome,
+    authority_soa: Option<rpc::protos::dns::DnsResourceRecord>,
+) -> Result<Vec<Record>, tonic::Status> {
+    let soa = authority_soa
+        .map(|soa| authority_soa_record(&soa.qname, soa.ttl, &soa.content))
+        .transpose()?;
+    let negative = matches!(
+        outcome,
+        DnsLookupOutcome::NoData | DnsLookupOutcome::NoSuchName
+    );
+    if negative && soa.is_none() {
+        warn!(
+            ?outcome,
+            "Negative answer from carbide-api has no authority SOA"
+        );
+        return Err(tonic::Status::internal(
+            "negative answer without an authority SOA",
+        ));
+    }
+    Ok(soa.into_iter().collect())
+}
+
+/// Splits TXT content into character-strings of at most 255 octets (RFC 1035
+/// §3.3.14), cut on UTF-8 boundaries so each piece is still a `String`.
+/// Hickory refuses to encode a longer character-string, and that refusal
+/// surfaces while sending the response.
+fn txt_character_strings(content: &str) -> Vec<String> {
+    const MAX_CHARACTER_STRING_OCTETS: usize = 255;
+    let mut chunks = Vec::new();
+    let mut rest = content;
+    while rest.len() > MAX_CHARACTER_STRING_OCTETS {
+        let mut split = MAX_CHARACTER_STRING_OCTETS;
+        while !rest.is_char_boundary(split) {
+            split -= 1;
+        }
+        let (head, tail) = rest.split_at(split);
+        chunks.push(head.to_string());
+        rest = tail;
+    }
+    chunks.push(rest.to_string());
+    chunks
+}
+
+/// Builds the hickory `RData` for a record type from the API's string
 /// `content`, logging and dropping the record when the content does not parse.
-/// `handle_request` only dispatches the supported types here, so any other qtype
-/// yields `None`.
 fn content_to_rdata(qtype: DnsResourceRecordType, content: &str) -> Option<RData> {
     match qtype {
         DnsResourceRecordType::A => match content.parse::<std::net::Ipv4Addr>() {
@@ -157,30 +301,81 @@ fn content_to_rdata(qtype: DnsResourceRecordType, content: &str) -> Option<RData
                 None
             }
         },
-        _ => None,
+        DnsResourceRecordType::SOA => match parse_soa(content) {
+            Some(soa) => Some(RData::SOA(soa)),
+            None => {
+                warn!(%content, "Failed to parse SOA");
+                None
+            }
+        },
+        DnsResourceRecordType::NS => match content.parse::<Name>() {
+            Ok(name) => Some(RData::NS(NS(name))),
+            Err(e) => {
+                warn!(%content, error = %e, "Failed to parse NS target name");
+                None
+            }
+        },
+        DnsResourceRecordType::CNAME => match content.parse::<Name>() {
+            Ok(name) => Some(RData::CNAME(CNAME(name))),
+            Err(e) => {
+                warn!(%content, error = %e, "Failed to parse CNAME target name");
+                None
+            }
+        },
+        // Presentation form: `<preference> <exchange>`.
+        DnsResourceRecordType::MX => {
+            let parsed = match content.split_once(char::is_whitespace) {
+                Some((preference, exchange)) => preference
+                    .parse::<u16>()
+                    .ok()
+                    .zip(exchange.trim().parse::<Name>().ok()),
+                None => None,
+            };
+            match parsed {
+                Some((preference, exchange)) => Some(RData::MX(MX::new(preference, exchange))),
+                None => {
+                    warn!(%content, "Failed to parse MX preference and exchange");
+                    None
+                }
+            }
+        }
+        DnsResourceRecordType::TXT => Some(RData::TXT(TXT::new(txt_character_strings(content)))),
     }
 }
 
-/// The query-type metric label, bounded by construction: the types the server
-/// resolves each get their own value, and everything else — the types answered
-/// with NotImp, and requests whose question section the handler cannot read
-/// (zero or multiple questions) — collapses into `Other`. Wire-level garbage
+/// The API record type a hickory query type maps to, or `None` when the API's
+/// type enum cannot name it.
+///
+/// This is the qtype gate: whatever the API can name is forwarded to
+/// `lookup_record`, which decides between records, NODATA and NXDOMAIN.
+/// Everything else is answered NOTIMP without an upstream call.
+fn api_record_type(qtype: RecordType) -> Option<DnsResourceRecordType> {
+    DnsResourceRecordType::try_from(qtype.to_string().as_str()).ok()
+}
+
+/// The query-type metric label, bounded by construction: the types the gate
+/// forwards each get their own value (the API type name, lowercased), and
+/// everything else — the types answered with NotImp, and requests whose
+/// question section the handler cannot read — is `other`. Wire-level garbage
 /// never reaches the handler, so it is out of scope for these counters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
-enum Qtype {
-    A,
-    Aaaa,
-    Ptr,
-    Other,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Qtype(Option<DnsResourceRecordType>);
+
+impl Qtype {
+    const OTHER: Self = Self(None);
 }
 
 impl From<RecordType> for Qtype {
     fn from(qtype: RecordType) -> Self {
-        match qtype {
-            RecordType::A => Qtype::A,
-            RecordType::AAAA => Qtype::Aaaa,
-            RecordType::PTR => Qtype::Ptr,
-            _ => Qtype::Other,
+        Self(api_record_type(qtype))
+    }
+}
+
+impl LabelValue for Qtype {
+    fn label_value(&self) -> StringValue {
+        match self.0 {
+            Some(record_type) => StringValue::from(record_type.to_string().to_ascii_lowercase()),
+            None => StringValue::from("other"),
         }
     }
 }
@@ -351,7 +546,7 @@ impl RequestHandler for DnsServer {
                 // counts under `other` so the query and response counters
                 // stay comparable even for malformed traffic.
                 emit(DnsQueryReceived {
-                    qtype: Qtype::Other,
+                    qtype: Qtype::OTHER,
                 });
                 let response_info = response_handle
                     .send_response(
@@ -380,16 +575,13 @@ impl RequestHandler for DnsServer {
         async move {
             let start = Instant::now();
 
-            // Only handle types that DnsResourceRecordType supports and that we can build
-            // RData for; return NotImp for everything else. Currently A, AAAA, and PTR
-            // are supported; add arms here as the API and RData parsing are extended.
-            let dns_qtype = match DnsResourceRecordType::try_from(qtype.to_string().as_str()) {
-                Ok(
-                    t @ (DnsResourceRecordType::A
-                    | DnsResourceRecordType::AAAA
-                    | DnsResourceRecordType::PTR),
-                ) => t,
-                _ => {
+            // Forward every type the API's enum can name and let the API
+            // decide records/NODATA/NXDOMAIN for it. A type it cannot name
+            // (ANY, AXFR, SRV, ...) is one this server does not implement at
+            // all, so it gets NotImp without an upstream call.
+            let dns_qtype = match api_record_type(qtype) {
+                Some(dns_qtype) => dns_qtype,
+                None => {
                     warn!(%qname, %qtype, "Unsupported query type");
                     let response = MessageResponseBuilder::from_message_request(request);
                     let response_info = response_handle
@@ -416,11 +608,12 @@ impl RequestHandler for DnsServer {
             let message = MessageResponseBuilder::from_message_request(request);
             let mut response_header = Metadata::response_from_request(request_info.metadata);
 
-            let (response_code, records) = if let Some(code) = cached {
+            let (response_code, records, authority) = if let Some(answer) = cached {
                 emit(DnsNegativeCacheHit {
-                    response_code: NegativeCacheResponseCode(code),
+                    response_code: NegativeCacheResponseCode(answer.code),
                 });
-                (code, vec![])
+                response_header.authoritative = answer.authoritative;
+                (answer.code, vec![], answer.authority.into_iter().collect())
             } else {
                 // Clone the client out under the lock, then release it so the
                 // upstream RPC runs without serializing other in-flight queries.
@@ -449,9 +642,36 @@ impl RequestHandler for DnsServer {
                     ))),
                 };
                 match result {
-                    Ok(records) => {
-                        tracing::info!(record_count = records.len(), "DNS lookup succeeded");
-                        (ResponseCode::NoError, records)
+                    Ok(UpstreamReply {
+                        classification,
+                        answers,
+                        authority,
+                    }) => {
+                        tracing::info!(
+                            record_count = answers.len(),
+                            response_code = %classification.code,
+                            authoritative = classification.authoritative,
+                            "DNS lookup completed"
+                        );
+                        response_header.authoritative = classification.authoritative;
+                        // Send what was cached, not the upstream original: the
+                        // SOA TTL is clamped to the cache lifetime so this
+                        // answer and every replay of it expire together.
+                        let authority = if classification.cache_negative {
+                            let negative = NegativeAnswer {
+                                code: classification.code,
+                                authoritative: classification.authoritative,
+                                authority: authority.first().cloned(),
+                            };
+                            let recorded = self.negative_cache.record(cache_key, negative, false);
+                            if recorded.evicted {
+                                self.metrics.negative_cache_eviction.add(1, &[]);
+                            }
+                            recorded.answer.authority.into_iter().collect()
+                        } else {
+                            authority
+                        };
+                        (classification.code, answers, authority)
                     }
                     Err(e) => {
                         let NegativeClassification { code, transient } = classify_failure(e.code());
@@ -467,12 +687,23 @@ impl RequestHandler for DnsServer {
                         // a least-recently-used entry was evicted to make room.  Both are
                         // entries leaving the cache — so capacity pressure surfaces as
                         // a rising eviction rate.
-                        if self.negative_cache.record(cache_key, code, transient) {
+                        // A gRPC failure yields no zone data, so the replayed
+                        // answer has neither the AA bit nor an authority SOA.
+                        let negative = NegativeAnswer {
+                            code,
+                            authoritative: false,
+                            authority: None,
+                        };
+                        if self
+                            .negative_cache
+                            .record(cache_key, negative, transient)
+                            .evicted
+                        {
                             self.metrics.negative_cache_eviction.add(1, &[]);
                         }
                         tracing::debug!(response_code = %code, "Caching negative response");
 
-                        (code, vec![])
+                        (code, vec![], vec![])
                     }
                 }
             };
@@ -492,7 +723,7 @@ impl RequestHandler for DnsServer {
                 response_header,
                 records.iter(),
                 iter::empty(),
-                iter::empty(),
+                authority.iter(),
                 iter::empty(),
             );
 
@@ -505,6 +736,16 @@ impl RequestHandler for DnsServer {
         .instrument(span)
         .await
     }
+}
+
+/// A successful upstream lookup, mapped to what goes on the wire.
+struct UpstreamReply {
+    classification: OutcomeClassification,
+    /// Records for the answer section.
+    answers: Vec<Record>,
+    /// The zone SOA for the authority section of a NODATA/NXDOMAIN answer;
+    /// empty otherwise.
+    authority: Vec<Record>,
 }
 
 impl DnsServer {
@@ -537,16 +778,17 @@ impl DnsServer {
     }
 
     /// Queries carbide-api for DNS records matching `qname` and `qtype`, then
-    /// converts the results into hickory `Record` objects ready for the response.
+    /// converts the results into a classified reply with hickory `Record`s
+    /// ready for the answer and authority sections.
     // `#[instrument]` attaches the span to the returned future. skip_all fields by default,
-    // then include only qname and qtype1
+    // then include only qname and qtype
     #[tracing::instrument(level = "debug", skip_all, fields(qname = %qname, qtype = %qtype))]
     async fn retrieve_records(
         mut forge_client: ForgeClientT,
         qname: &str,
         qtype: DnsResourceRecordType,
         record_name: &Name,
-    ) -> Result<Vec<Record>, tonic::Status> {
+    ) -> Result<UpstreamReply, tonic::Status> {
         let request = tonic::Request::new(DnsResourceRecordLookupRequest {
             qtype: qtype.to_string(),
             qname: qname.to_string(),
@@ -586,14 +828,15 @@ impl DnsServer {
             "Records after filtering by qtype"
         );
 
-        if records.is_empty() {
-            return Err(tonic::Status::not_found(format!(
-                "no {} records found for {}",
-                qtype, qname
-            )));
-        }
+        let outcome = decode_outcome(response.outcome)?;
+        let classification = classify_outcome(outcome, response.authoritative, !records.is_empty());
+        let authority = authority_section(outcome, response.authority_soa)?;
 
-        Ok(records)
+        Ok(UpstreamReply {
+            classification,
+            answers: records,
+            authority,
+        })
     }
 
     pub async fn run(config: Config) -> Result<(), Report> {
@@ -739,6 +982,140 @@ mod tests {
     }
 
     #[test]
+    fn classify_outcome_maps_api_outcomes_to_rcode_and_aa() {
+        use carbide_test_support::value_scenarios;
+
+        value_scenarios!(
+            run = |(outcome, authoritative, has_answers)| {
+                classify_outcome(outcome, authoritative, has_answers)
+            };
+            "positive answers are NOERROR and never cached" {
+                (DnsLookupOutcome::Records, true, true) => OutcomeClassification {
+                    code: ResponseCode::NoError, authoritative: true, cache_negative: false,
+                },
+                // An empty Records reply is still NOERROR, never a negative.
+                (DnsLookupOutcome::Records, true, false) => OutcomeClassification {
+                    code: ResponseCode::NoError, authoritative: true, cache_negative: false,
+                },
+            }
+            "stable negatives are cached" {
+                // NODATA is NOERROR yet cacheable: the stored answer, not the
+                // response code, is what tells it apart from a positive reply.
+                (DnsLookupOutcome::NoData, true, false) => OutcomeClassification {
+                    code: ResponseCode::NoError, authoritative: true, cache_negative: true,
+                },
+                (DnsLookupOutcome::NoSuchName, true, false) => OutcomeClassification {
+                    code: ResponseCode::NXDomain, authoritative: true, cache_negative: true,
+                },
+                (DnsLookupOutcome::NotAuthoritative, false, false) => OutcomeClassification {
+                    code: ResponseCode::Refused, authoritative: false, cache_negative: true,
+                },
+                (DnsLookupOutcome::Refused, false, false) => OutcomeClassification {
+                    code: ResponseCode::Refused, authoritative: false, cache_negative: true,
+                },
+                (DnsLookupOutcome::NotImplemented, false, false) => OutcomeClassification {
+                    code: ResponseCode::NotImp, authoritative: false, cache_negative: true,
+                },
+            }
+            "a server without the outcome field falls back to the record list" {
+                (DnsLookupOutcome::Unspecified, false, true) => OutcomeClassification {
+                    code: ResponseCode::NoError, authoritative: false, cache_negative: false,
+                },
+                (DnsLookupOutcome::Unspecified, false, false) => OutcomeClassification {
+                    code: ResponseCode::NXDomain, authoritative: false, cache_negative: true,
+                },
+            }
+        );
+    }
+
+    /// Zero keeps the pre-`outcome` fallback; a value this build has never
+    /// heard of must not be mistaken for it.
+    #[test]
+    fn decode_outcome_keeps_unspecified_and_rejects_unknown_values() {
+        use carbide_test_support::value_scenarios;
+
+        value_scenarios!(
+            run = |raw: i32| decode_outcome(raw).map_err(|status| status.code());
+            "known values" {
+                0 => Ok(DnsLookupOutcome::Unspecified),
+                1 => Ok(DnsLookupOutcome::Records),
+                6 => Ok(DnsLookupOutcome::NotImplemented),
+            }
+            "unknown values are an internal failure, not a fallback" {
+                7 => Err(tonic::Code::Internal),
+                -1 => Err(tonic::Code::Internal),
+            }
+        );
+    }
+
+    #[test]
+    fn authority_soa_record_parses_presentation_form_and_rejects_garbage() {
+        let record = authority_soa_record(
+            "mysite.example.com.",
+            300,
+            "ns1.mysite.example.com. hostmaster.mysite.example.com. 7 3600 900 1209600 300",
+        )
+        .expect("well-formed SOA");
+        assert_eq!(record.name.to_string(), "mysite.example.com.");
+        assert_eq!(record.ttl, 300);
+        let RData::SOA(soa) = &record.data else {
+            panic!("expected SOA rdata, got {:?}", record.data);
+        };
+        assert_eq!(soa.serial, 7);
+        assert_eq!(soa.minimum, 300);
+
+        for garbage in [
+            "not an soa",
+            "ns1.mysite.example.com. hostmaster.mysite.example.com. seven 3600 900 1209600 300",
+        ] {
+            let status = authority_soa_record("mysite.example.com.", 300, garbage)
+                .expect_err("garbage SOA content is rejected");
+            assert_eq!(status.code(), tonic::Code::Internal, "{garbage}");
+        }
+    }
+
+    /// A negative answer without its SOA is a broken reply, not an answer with
+    /// a thinner authority section.
+    #[test]
+    fn authority_section_requires_an_soa_on_negatives() {
+        use carbide_test_support::value_scenarios;
+
+        let soa = || {
+            Some(rpc::protos::dns::DnsResourceRecord {
+                qname: "mysite.example.com.".to_string(),
+                qtype: "SOA".to_string(),
+                ttl: 300,
+                content:
+                    "ns1.mysite.example.com. hostmaster.mysite.example.com. 7 3600 900 1209600 300"
+                        .to_string(),
+                domain_id: None,
+                scope_mask: None,
+                auth: None,
+            })
+        };
+        value_scenarios!(
+            run = |(outcome, authority_soa)| {
+                authority_section(outcome, authority_soa)
+                    .map(|records| records.len())
+                    .map_err(|status| status.code())
+            };
+            "negatives carry the SOA" {
+                (DnsLookupOutcome::NoData, soa()) => Ok(1),
+                (DnsLookupOutcome::NoSuchName, soa()) => Ok(1),
+            }
+            "a negative without an SOA is an internal failure" {
+                (DnsLookupOutcome::NoData, None) => Err(tonic::Code::Internal),
+                (DnsLookupOutcome::NoSuchName, None) => Err(tonic::Code::Internal),
+            }
+            "other outcomes have no SOA to require" {
+                (DnsLookupOutcome::Records, None) => Ok(0),
+                (DnsLookupOutcome::NotAuthoritative, None) => Ok(0),
+                (DnsLookupOutcome::Unspecified, None) => Ok(0),
+            }
+        );
+    }
+
+    #[test]
     fn content_to_rdata_builds_supported_types_and_drops_unparseable() {
         use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -754,33 +1131,81 @@ mod tests {
                 // A PTR's content is the target FQDN, which round-trips into the RData.
                 (DnsResourceRecordType::PTR, "host.example.com.")
                     => Some(RData::PTR(PTR("host.example.com.".parse::<Name>().unwrap()))),
+                (DnsResourceRecordType::NS, "ns1.example.com.")
+                    => Some(RData::NS(NS("ns1.example.com.".parse::<Name>().unwrap()))),
+                (DnsResourceRecordType::SOA,
+                 "ns1.example.com. hostmaster.example.com. 7 3600 900 1209600 300")
+                    => Some(RData::SOA(SOA::new(
+                        "ns1.example.com.".parse::<Name>().unwrap(),
+                        "hostmaster.example.com.".parse::<Name>().unwrap(),
+                        7, 3600, 900, 1209600, 300,
+                    ))),
+                (DnsResourceRecordType::CNAME, "target.example.com.")
+                    => Some(RData::CNAME(CNAME("target.example.com.".parse::<Name>().unwrap()))),
+                (DnsResourceRecordType::MX, "10 mail.example.com.")
+                    => Some(RData::MX(MX::new(10, "mail.example.com.".parse::<Name>().unwrap()))),
+                (DnsResourceRecordType::TXT, "v=spf1 -all")
+                    => Some(RData::TXT(TXT::new(vec!["v=spf1 -all".to_string()]))),
             }
             "unparseable content is dropped rather than panicked on" {
                 (DnsResourceRecordType::A, "not-an-ip") => None,
                 (DnsResourceRecordType::AAAA, "192.0.2.1") => None,
+                (DnsResourceRecordType::SOA, "ns1.example.com. hostmaster.example.com. 7") => None,
+                (DnsResourceRecordType::MX, "mail.example.com.") => None,
             }
-            "a type the gate never dispatches here yields nothing" {
-                (DnsResourceRecordType::SOA, "unused") => None,
+        );
+    }
+
+    /// Each character-string must fit in one length octet, and a multi-byte
+    /// character must never be cut in half.
+    #[test]
+    fn txt_content_is_split_into_encodable_character_strings() {
+        use carbide_test_support::value_scenarios;
+
+        let lengths = |content: &str| -> Vec<usize> {
+            txt_character_strings(content)
+                .iter()
+                .map(String::len)
+                .collect()
+        };
+        value_scenarios!(
+            run = lengths;
+            "fits in one character-string" {
+                "" => vec![0],
+                "v=spf1 -all" => vec![11],
+                "a".repeat(255).as_str() => vec![255],
+            }
+            "longer content is split at 255 octets" {
+                "a".repeat(300).as_str() => vec![255, 45],
+                "a".repeat(510).as_str() => vec![255, 255],
+            }
+            "a multi-byte character straddling the cut moves whole to the next piece" {
+                // 254 ASCII bytes then a 3-byte character: cutting at 255 would split it.
+                format!("{}€", "a".repeat(254)).as_str() => vec![254, 3],
             }
         );
     }
 
     #[test]
-    fn qtype_label_gives_resolvable_types_their_own_value() {
+    fn qtype_label_gives_forwarded_types_their_own_value() {
         use carbide_test_support::value_scenarios;
 
         value_scenarios!(
-            run = |qtype: RecordType| Qtype::from(qtype);
-            "the types the server resolves" {
-                RecordType::A => Qtype::A,
-                RecordType::AAAA => Qtype::Aaaa,
-                RecordType::PTR => Qtype::Ptr,
+            run = |qtype: RecordType| Qtype::from(qtype).label_value().to_string();
+            "the types the gate forwards to the API" {
+                RecordType::SOA => "soa".to_string(),
+                RecordType::NS => "ns".to_string(),
+                RecordType::A => "a".to_string(),
+                RecordType::AAAA => "aaaa".to_string(),
+                RecordType::CNAME => "cname".to_string(),
+                RecordType::MX => "mx".to_string(),
+                RecordType::TXT => "txt".to_string(),
+                RecordType::PTR => "ptr".to_string(),
             }
-            "everything else collapses into Other" {
-                RecordType::MX => Qtype::Other,
-                RecordType::SOA => Qtype::Other,
-                RecordType::TXT => Qtype::Other,
-                RecordType::ANY => Qtype::Other,
+            "types the API cannot name collapse into other" {
+                RecordType::ANY => "other".to_string(),
+                RecordType::AXFR => "other".to_string(),
+                RecordType::SRV => "other".to_string(),
             }
         );
     }
@@ -964,9 +1389,11 @@ mod tests {
 
         let metrics = MetricsCapture::start();
         let logs = capture_logs(|| {
-            emit(DnsQueryReceived { qtype: Qtype::A });
             emit(DnsQueryReceived {
-                qtype: Qtype::Other,
+                qtype: Qtype(Some(DnsResourceRecordType::A)),
+            });
+            emit(DnsQueryReceived {
+                qtype: Qtype::OTHER,
             });
             emit(DnsResponseSent {
                 rcode: Rcode::NoError,
@@ -1045,7 +1472,7 @@ mod tests {
                 Check {
                     scenario: "successful A request",
                     input: RequestCompletedCase {
-                        qtype: Qtype::A,
+                        qtype: Qtype(Some(DnsResourceRecordType::A)),
                         qtype_label: "a",
                         rcode: Rcode::NoError,
                         rcode_label: "no_error",
@@ -1076,7 +1503,7 @@ mod tests {
                 Check {
                     scenario: "event-level NotImp completion",
                     input: RequestCompletedCase {
-                        qtype: Qtype::Other,
+                        qtype: Qtype::OTHER,
                         qtype_label: "other",
                         rcode: Rcode::NotImp,
                         rcode_label: "not_imp",
