@@ -22,6 +22,7 @@ type TargetFetcher interface {
 	GetRackByIdentifier(ctx context.Context, identifier identifier.Identifier, withComponents bool) (*rack.Rack, error)
 	GetRacksForNVLDomain(ctx context.Context, domainIdentifier identifier.Identifier) ([]*rack.Rack, error)
 	GetComponentByID(ctx context.Context, id uuid.UUID) (*component.Component, error)
+	GetComponentByBMCMAC(ctx context.Context, macAddress string) (*component.Component, error)
 	GetComponentsByExternalIDs(ctx context.Context, externalIDs []string) ([]*component.Component, error)
 }
 
@@ -182,16 +183,12 @@ func fetchComponentTarget(
 	}
 
 	if ct.External != nil {
-		comps, err := fetcher.GetComponentsByExternalIDs(ctx, []string{ct.External.ID})
-		if err != nil {
-			return nil, fmt.Errorf("failed to get component by external id %s: %w", ct.External.ID, err)
-		}
-
-		if len(comps) == 0 {
-			return nil, fmt.Errorf("component with external id %s not found", ct.External.ID)
-		}
-
-		return comps[0], nil
+		return inventoryresolver.ResolveComponentIdentifier(
+			ctx,
+			fetcher,
+			ct.External.ID,
+			ct.External.Type,
+		)
 	}
 
 	return nil, fmt.Errorf("invalid component target: %+v", ct)

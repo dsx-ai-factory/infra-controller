@@ -13,7 +13,7 @@ instances:
 title: NVIDIA Infra Controller
 
 announcement:
-  message: "🔔 Infra Controller's GitHub repository is moving on September 4, 2026. Refer to the [front page](https://docs.nvidia.com/infra-controller) for more information."
+  message: "🔔 Infra Controller's GitHub repository has moved to [dsx-ai-factory/infra-controller](https://github.com/dsx-ai-factory/infra-controller). Existing links redirect; update integrations that reference NVIDIA/infra-controller."
 
 metadata:
   canonical-host: "docs.nvidia.com/infra-controller"
@@ -24,7 +24,7 @@ check:
 
 navbar-links:
   - type: github
-    value: https://github.com/NVIDIA/infra-controller
+    value: https://github.com/dsx-ai-factory/infra-controller
 
 products:
   - display-name: NVIDIA Infra Controller

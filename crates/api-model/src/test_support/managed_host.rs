@@ -20,7 +20,7 @@ use std::iter;
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use itertools::Itertools;
 use mac_address::MacAddress;
 
@@ -50,7 +50,7 @@ pub struct ManagedHostExplorationResults {
 }
 
 impl ManagedHostExplorationResults {
-    pub fn dpu_machine_ids(&self) -> HashMap<u8, MachineId> {
+    pub fn dpu_machine_ids(&self) -> HashMap<u8, DpuMachineId> {
         self.dpu_reports
             .iter()
             .map(|dpu_report| {
@@ -59,7 +59,9 @@ impl ManagedHostExplorationResults {
                     dpu_report
                         .report
                         .machine_id
-                        .expect("DPU exploration report should have a generated machine id"),
+                        .expect("DPU exploration report should have a generated machine id")
+                        .try_into()
+                        .expect("should be a valid DPU machine ID"),
                 )
             })
             .collect()
@@ -309,6 +311,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
                 serial_console_ssh_port: None,
             }],
             chassis: vec![Chassis {

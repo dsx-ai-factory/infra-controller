@@ -23,7 +23,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use carbide_firmware::FirmwareConfig;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use db::{self, desired_firmware, host_firmware_config};
 use model::machine::ManagedHostStateSnapshot;
 use model::machine_update_module::HOST_FW_UPDATE_HEALTH_REPORT_SOURCE;
@@ -65,7 +65,7 @@ impl MachineUpdateModule for HostFirmwareUpdate {
         pool: &sqlx::Pool<sqlx::Postgres>,
         available_updates: i32,
         updating_host_machines: &HashSet<MachineId>,
-        _snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+        _snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<HashSet<MachineId>> {
         let mut txn = db::Transaction::begin(pool).await?;
         if let Ok(mut firmware_catalog_last_read) = self.firmware_catalog_last_read.try_lock() {
@@ -142,7 +142,7 @@ impl MachineUpdateModule for HostFirmwareUpdate {
     async fn update_metrics(
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
-        snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+        snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<()> {
         let exhausted_retries = snapshots
             .values()

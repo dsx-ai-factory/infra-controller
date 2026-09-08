@@ -7,15 +7,15 @@ identity contract and the qualification required before separate VPCs may use
 the same overlay address.
 
 The identity investigation is tracked by
-[NVIDIA/infra-controller#3888](https://github.com/NVIDIA/infra-controller/issues/3888),
+[dsx-ai-factory/infra-controller#3888](https://github.com/dsx-ai-factory/infra-controller/issues/3888),
 and final qualification is tracked by
-[NVIDIA/infra-controller#3902](https://github.com/NVIDIA/infra-controller/issues/3902).
+[dsx-ai-factory/infra-controller#3902](https://github.com/dsx-ai-factory/infra-controller/issues/3902).
 Duplicate overlay addresses must remain disabled until the ambiguity rejection
 tracked by
-[NVIDIA/infra-controller#3887](https://github.com/NVIDIA/infra-controller/issues/3887)
+[dsx-ai-factory/infra-controller#3887](https://github.com/dsx-ai-factory/infra-controller/issues/3887)
 is deployed, the production-equivalent evidence described below is complete,
 and
-[NVIDIA/infra-controller#3902](https://github.com/NVIDIA/infra-controller/issues/3902)
+[dsx-ai-factory/infra-controller#3902](https://github.com/dsx-ai-factory/infra-controller/issues/3902)
 records final enablement sign-off.
 
 ## Repository-backed request path
@@ -120,7 +120,7 @@ explicit ambiguous-result contract. After overlapping VPC address space is
 representable, selecting one row would risk returning one tenant's data to
 another tenant.
 
-[NVIDIA/infra-controller#3887](https://github.com/NVIDIA/infra-controller/issues/3887)
+[dsx-ai-factory/infra-controller#3887](https://github.com/dsx-ai-factory/infra-controller/issues/3887)
 must change the raw overlay-address lookup to detect every match. An ambiguous
 request must then:
 
@@ -173,13 +173,13 @@ that the observed identity is non-spoofable.
 Use the non-tenant-specific `/api/v0/tls/root_ca` PXE endpoint for the first
 network-path capture.
 After the ambiguity rejection from
-[NVIDIA/infra-controller#3887](https://github.com/NVIDIA/infra-controller/issues/3887)
+[dsx-ai-factory/infra-controller#3887](https://github.com/dsx-ai-factory/infra-controller/issues/3887)
 is deployed, repeat the test against the instruction endpoints and verify that
 neither VPC receives tenant or discovery material.
 
 ## Enablement decision
 
-[NVIDIA/infra-controller#3887](https://github.com/NVIDIA/infra-controller/issues/3887)
+[dsx-ai-factory/infra-controller#3887](https://github.com/dsx-ai-factory/infra-controller/issues/3887)
 is necessary but is not, by itself, an enablement decision.
 
 - If both VPCs reach `nico-pxe` with the same peer address, or if a shared

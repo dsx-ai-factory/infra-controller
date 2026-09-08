@@ -136,6 +136,7 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm("ReleaseInstance", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ReleaseInstances", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateInstanceOperatingSystem", vec![SiteAgent]);
         x.perm("UpdateInstanceConfig", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindInstanceIds", vec![ForgeAdminCLI, SiteAgent]);
@@ -541,6 +542,7 @@ impl InternalRBACRules {
         x.perm("HeartbeatMachineValidationRun", vec![Scout, SiteAgent]);
         x.perm("AdminBmcReset", vec![ForgeAdminCLI]);
         x.perm("AdminPowerControl", vec![ForgeAdminCLI, SiteAgent, Flow]);
+        x.perm("AdminGpuReset", vec![ForgeAdminCLI, Flow]);
         x.perm("DisableSecureBoot", vec![ForgeAdminCLI]);
         x.perm("MachineSetup", vec![ForgeAdminCLI]);
         x.perm("SetDpuFirstBootOrder", vec![ForgeAdminCLI]);
@@ -583,7 +585,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "MachineValidationTestVerfied",
-            vec![ForgeAdminCLI, Scout, SiteAgent],
+            vec![ForgeAdminCLI, SiteAgent],
         );
         x.perm(
             "MachineValidationTestNextVersion",
@@ -591,7 +593,11 @@ impl InternalRBACRules {
         );
         x.perm(
             "MachineValidationTestEnableDisableTest",
-            vec![ForgeAdminCLI, SiteAgent, Scout],
+            vec![ForgeAdminCLI, SiteAgent],
+        );
+        x.perm(
+            "MachineValidationTestApproveFullHost",
+            vec![ForgeAdminCLI, SiteAgent],
         );
         x.perm("UpdateMachineValidationRun", vec![Scout, SiteAgent]);
         x.perm("FindInstanceTypeIds", vec![SiteAgent, ForgeAdminCLI]);

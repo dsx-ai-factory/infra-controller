@@ -313,6 +313,22 @@ func TestInventoryAgeUpdatedTimestamp(ctx context.Context, t *testing.T, dbSessi
 	}
 }
 
+// TestInventoryAgeDeletedTimestamp backdates a soft-deleted row's delete time past the inventory
+// staleness threshold. The inventory activities refuse to undelete a row deleted more recently
+// than that, so a fixture that soft-deletes a row and then feeds an inventory still reporting it
+// has to age the delete first. Pass a typed nil model, for example (*cdbm.Vpc)(nil).
+func TestInventoryAgeDeletedTimestamp(ctx context.Context, t *testing.T, dbSession *cdb.Session, model any, id any) {
+	t.Helper()
+
+	_, err := dbSession.DB.NewUpdate().
+		Model(model).
+		Set("deleted = ?", time.Now().Add(-2*cutil.DefaultInventoryReceiptInterval)).
+		Where("id = ?", id).
+		WhereAllWithDeleted().
+		Exec(ctx)
+	assert.NoError(t, err)
+}
+
 // TestBuildInfiniBandPartition builds and returns an InfiniBandPartition
 func TestBuildInfiniBandPartition(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, tenant *cdbm.Tenant, controllerIBPartitionID *uuid.UUID, status cdbm.InfiniBandPartitionStatus, isMissingOnSite bool) *cdbm.InfiniBandPartition {
 	ibp := &cdbm.InfiniBandPartition{

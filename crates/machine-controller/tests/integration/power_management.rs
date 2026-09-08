@@ -348,7 +348,7 @@ async fn desired_on_limits_power_on_attempts(
         .test_harness
         .api()
         .get_power_options(Request::new(PowerOptionRequest {
-            machine_id: vec![mh.host.id],
+            machine_id: vec![mh.host.id.into()],
         }))
         .await?
         .into_inner();
@@ -375,7 +375,7 @@ async fn desired_off_persists_observed_off_state(
         .api()
         .set_maintenance(Request::new(MaintenanceRequest {
             operation: MaintenanceOperation::Enable as i32,
-            host_id: Some(mh.host.id),
+            host_id: Some(mh.host.id.into()),
             reference: Some("testing".to_string()),
         }))
         .await?;
@@ -384,7 +384,7 @@ async fn desired_off_persists_observed_off_state(
     env.test_harness
         .api()
         .update_power_option(Request::new(PowerOptionUpdateRequest {
-            machine_id: Some(mh.host.id),
+            machine_id: Some(mh.host.id.into()),
             power_state: rpc::forge::PowerState::Off as i32,
         }))
         .await?;
@@ -440,14 +440,14 @@ async fn queued_power_off_runs_when_power_manager_gates_desired_off(
         .api()
         .set_maintenance(Request::new(MaintenanceRequest {
             operation: MaintenanceOperation::Enable as i32,
-            host_id: Some(mh.host.id),
+            host_id: Some(mh.host.id.into()),
             reference: Some("testing".to_string()),
         }))
         .await?;
     env.test_harness
         .api()
         .update_power_option(Request::new(PowerOptionUpdateRequest {
-            machine_id: Some(mh.host.id),
+            machine_id: Some(mh.host.id.into()),
             power_state: rpc::forge::PowerState::Off as i32,
         }))
         .await?;
@@ -458,7 +458,7 @@ async fn queued_power_off_runs_when_power_manager_gates_desired_off(
         .api()
         .set_maintenance(Request::new(MaintenanceRequest {
             operation: MaintenanceOperation::Disable as i32,
-            host_id: Some(mh.host.id),
+            host_id: Some(mh.host.id.into()),
             reference: Some("testing".to_string()),
         }))
         .await?;
@@ -472,7 +472,7 @@ async fn queued_power_off_runs_when_power_manager_gates_desired_off(
     let mut txn = env.test_harness.db_txn().await;
     db::machine::set_machine_maintenance_requested(
         &mut txn,
-        mh.host.id,
+        mh.host.id.into(),
         "component-manager",
         MachineMaintenanceOperation::PowerOff,
     )

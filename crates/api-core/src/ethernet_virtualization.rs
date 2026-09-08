@@ -20,7 +20,7 @@ use ::rpc::forge as rpc;
 use carbide_network::virtualization::{VpcVirtualizationType, get_svi_ip};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, MachineInterfaceId};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use db::vpc::{self};
@@ -393,7 +393,7 @@ fn build_ipv6_interface_config(
 pub(crate) async fn admin_network(
     txn: &mut PgConnection,
     snapshot: &ManagedHostStateSnapshot,
-    dpu_machine_id: &MachineId,
+    dpu_machine_id: &DpuMachineId,
     options: AdminNetworkOptions<'_>,
 ) -> Result<(rpc::FlatInterfaceConfig, MachineInterfaceId), tonic::Status> {
     let AdminNetworkOptions {

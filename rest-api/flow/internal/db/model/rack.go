@@ -319,3 +319,27 @@ func GetRacksByIDs(
 
 	return racks, nil
 }
+
+// GetRacksByIDsIncludingDeleted retrieves multiple racks by UUID, including
+// soft-deleted rows.
+func GetRacksByIDsIncludingDeleted(
+	ctx context.Context,
+	idb bun.IDB,
+	ids []uuid.UUID,
+	withComponents bool,
+) ([]Rack, error) {
+	var racks []Rack
+	q := idb.NewSelect().Model(&racks).Where("id IN (?)", bun.In(ids)).WhereAllWithDeleted()
+
+	if withComponents {
+		q = q.Relation("Components", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.WhereAllWithDeleted()
+		}).Relation("Components.BMCs")
+	}
+
+	if err := q.Scan(ctx); err != nil {
+		return nil, err
+	}
+
+	return racks, nil
+}

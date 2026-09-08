@@ -1007,6 +1007,9 @@ func TestManageVpc_UpdateVpcsInDB_AutoCreatesAndRestores(t *testing.T) {
 		require.Len(t, deletedVpcs, 1)
 		require.NotNil(t, deletedVpcs[0].Deleted)
 
+		// The undelete is deferred while the delete is newer than the staleness threshold, so
+		// backdate it past that.
+		cwu.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil), controllerVpcID)
 		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil))
 		_, err = manager.UpdateVpcsInDB(ctx, site.ID, inventory)
 		require.NoError(t, err)

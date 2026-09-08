@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
@@ -108,7 +110,7 @@ func TestInventoryTargetLookupTargetsFromComponentSpec(t *testing.T) {
 				{UUID: computeID},
 				{
 					External: &operation.ExternalRef{
-						Type: devicetypes.ComponentTypeNVSwitch,
+						Type: devicetypes.ComponentTypeUnknown,
 						ID:   externalID,
 					},
 				},
@@ -520,6 +522,13 @@ func (s *fakeInventoryTargetSource) GetComponentByID(
 	}
 
 	return nil, fmt.Errorf("component %s not found", id)
+}
+
+func (s *fakeInventoryTargetSource) GetComponentByBMCMAC(
+	_ context.Context,
+	macAddress string,
+) (*inventorycomponent.Component, error) {
+	return nil, status.Errorf(codes.NotFound, "component with BMC MAC %s not found", macAddress)
 }
 
 func (s *fakeInventoryTargetSource) GetComponentsByExternalIDs(

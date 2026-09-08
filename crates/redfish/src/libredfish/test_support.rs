@@ -127,6 +127,22 @@ struct RedfishSimState {
     /// is password-redacted, and to exercise the quarantine-and-return-to-Ready
     /// path in host UEFI rotation.
     uefi_password_change_error: Option<String>,
+    /// When set, every `RedfishClientPool::create_client` fails with a
+    /// [`RedfishError::GenericError`] carrying this message, modeling a
+    /// transient client-creation failure (credential store, TCP, or the
+    /// vendor probe). Drives the [`super::CredentialOpError::ClientCreation`]
+    /// retry paths at credential-op call sites.
+    create_client_error: Option<String>,
+    /// When set, the sim's `BmcCredentialOps::uefi_setup` override fails with
+    /// [`super::CredentialOpError::ClientCreation`] carrying this message,
+    /// modeling a client-creation failure inside the credential op (the sim
+    /// override replaces the default body, so `create_client_error` cannot
+    /// reach it).
+    uefi_setup_client_creation_error: Option<String>,
+    /// BIOS attribute map returned by `bios()` when set; the sim's `bios()`
+    /// is otherwise unimplemented. Lets unit tests drive the default
+    /// `BmcCredentialOps::uefi_setup` DPU body past its attribute probe.
+    bios_attributes: Option<HashMap<String, serde_json::Value>>,
     /// Optional ComputerSystem identifier used to drive platform classification.
     system_id: Option<String>,
     /// Physical-port MAC addresses exposed through the adapter Ports collection.
@@ -283,18 +299,25 @@ impl RedfishSim {
             .unwrap_or_default()
     }
 
-    /// Build a simulator with optional SPDM / firmware-integration test flags.
-    pub fn with_test_overrides(overrides: RedfishSimTestOverrides) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(RedfishSimState {
-                no_component_integrities: overrides.no_component_integrities,
-                firmware_for_component_error: overrides.firmware_for_component_error,
-                get_task_trigger_evidence_returns_interrupted: overrides
-                    .get_task_trigger_evidence_returns_interrupted,
-                ..Default::default()
-            })),
-            credential_manager: TestCredentialManager::default(),
-        }
+    /// Model a BMC that exposes no `ComponentIntegrity` collection, so nothing
+    /// is eligible for SPDM attestation.
+    pub fn set_no_component_integrities(&self, no_component_integrities: bool) {
+        self.state.lock().unwrap().no_component_integrities = no_component_integrities;
+    }
+
+    /// Fail the firmware-inventory lookup an attestation makes while fetching
+    /// component metadata.
+    pub fn set_firmware_for_component_error(&self, error: bool) {
+        self.state.lock().unwrap().firmware_for_component_error = error;
+    }
+
+    /// Return the evidence-collection task as `Interrupted`, modelling a BMC
+    /// that keeps failing to produce evidence.
+    pub fn set_get_task_trigger_evidence_returns_interrupted(&self, interrupted: bool) {
+        self.state
+            .lock()
+            .unwrap()
+            .get_task_trigger_evidence_returns_interrupted = interrupted;
     }
 
     pub fn set_machine_setup_bios_job_id(&self, job_id: Option<String>) {
@@ -446,6 +469,42 @@ impl RedfishSim {
         self.state.lock().unwrap().uefi_password_change_error = Some(message.into());
     }
 
+    /// Force every `create_client` to fail with a
+    /// [`RedfishError::GenericError`] carrying `message`, modeling a transient
+    /// client-creation failure (credential store, TCP, or the vendor probe).
+    /// Clear with [`Self::clear_create_client_error`] to model recovery.
+    pub fn set_create_client_error(&self, message: impl Into<String>) {
+        self.state.lock().unwrap().create_client_error = Some(message.into());
+    }
+
+    /// Let `create_client` succeed again after
+    /// [`Self::set_create_client_error`], modeling the transient failure
+    /// clearing so a retry can be asserted.
+    pub fn clear_create_client_error(&self) {
+        self.state.lock().unwrap().create_client_error = None;
+    }
+
+    /// Force the sim's `uefi_setup` override to fail with
+    /// [`super::CredentialOpError::ClientCreation`] carrying `message`. The
+    /// override replaces the default body, so this (not
+    /// [`Self::set_create_client_error`]) models a client-creation failure
+    /// for callers of `uefi_setup`.
+    pub fn set_uefi_setup_client_creation_error(&self, message: impl Into<String>) {
+        self.state.lock().unwrap().uefi_setup_client_creation_error = Some(message.into());
+    }
+
+    /// Let `uefi_setup` succeed again after
+    /// [`Self::set_uefi_setup_client_creation_error`].
+    pub fn clear_uefi_setup_client_creation_error(&self) {
+        self.state.lock().unwrap().uefi_setup_client_creation_error = None;
+    }
+
+    /// Set the BIOS attribute map returned by the sim client's `bios()`,
+    /// which is otherwise unimplemented.
+    pub fn set_bios_attributes(&self, attributes: HashMap<String, serde_json::Value>) {
+        self.state.lock().unwrap().bios_attributes = Some(attributes);
+    }
+
     /// Override the `Vendor` reported by `get_service_root`. Set it to an
     /// unrecognized value to force `probe_bmc_vendor` past the anonymous
     /// service-root probe and into the Chassis `Manufacturer` fallback.
@@ -501,14 +560,6 @@ impl RedfishSim {
             .await
             .expect("seed redfish-sim credential");
     }
-}
-
-/// Optional simulation flags used by API integration tests.
-#[derive(Clone, Default)]
-pub struct RedfishSimTestOverrides {
-    pub no_component_integrities: bool,
-    pub firmware_for_component_error: bool,
-    pub get_task_trigger_evidence_returns_interrupted: bool,
 }
 
 pub struct RedfishSimTimepoint {
@@ -905,7 +956,12 @@ impl Redfish for RedfishSimClient {
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<HashMap<String, serde_json::Value>, RedfishError>>
     {
-        Box::pin(async move { todo!() })
+        Box::pin(async move {
+            match self.state.lock().unwrap().bios_attributes.clone() {
+                Some(attributes) => Ok(attributes),
+                None => todo!(),
+            }
+        })
     }
 
     fn set_bios<'a>(
@@ -2491,6 +2547,11 @@ impl RedfishClientPool for RedfishSim {
                 host: host.to_string(),
                 vendor,
             });
+            if let Some(error) = state.create_client_error.clone() {
+                return Err(RedfishClientCreationError::RedfishError(
+                    RedfishError::GenericError { error },
+                ));
+            }
             let default_lockdown = state.default_lockdown.unwrap_or(EnabledDisabled::Disabled);
             state
                 .hosts
@@ -2514,16 +2575,26 @@ impl RedfishClientPool for RedfishSim {
     fn credential_reader(&self) -> &dyn CredentialReader {
         &self.credential_manager
     }
+}
 
+impl super::sealed::Sealed for RedfishSim {}
+
+#[async_trait]
+impl super::BmcCredentialOps for RedfishSim {
     async fn uefi_setup(
         &self,
-        _client: &dyn Redfish,
+        _access: &carbide_utils::redfish::BmcAccessInfo,
         dpu: bool,
         _sitewide_uefi_credentials: carbide_secrets::credentials::Credentials,
-    ) -> Result<Option<String>, RedfishClientCreationError> {
-        self.state
-            .lock()
-            .unwrap()
+    ) -> Result<Option<String>, super::CredentialOpError> {
+        let mut state = self.state.lock().unwrap();
+        // Fail before recording the action: the op never reached the device.
+        if let Some(error) = state.uefi_setup_client_creation_error.clone() {
+            return Err(super::CredentialOpError::ClientCreation(
+                RedfishClientCreationError::RedfishError(RedfishError::GenericError { error }),
+            ));
+        }
+        state
             .platform_actions
             .push(RedfishSimPlatformAction::UefiSetup { dpu });
         Ok(None)

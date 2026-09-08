@@ -408,6 +408,26 @@ func TestAPISiteUpdateRequest_Validate(t *testing.T) {
 			wantErr:    false,
 		},
 		{
+			name: "validate update request failure, Provider disabling inventory-managed Flow",
+			fields: fields{
+				Capabilities: &APISiteCapabilitiesUpdateRequest{
+					Flow: cutil.GetPtr(false),
+				},
+			},
+			isProvider: true,
+			wantErr:    true,
+		},
+		{
+			name: "validate update request failure, Provider enabling inventory-managed Flow",
+			fields: fields{
+				Capabilities: &APISiteCapabilitiesUpdateRequest{
+					Flow: cutil.GetPtr(true),
+				},
+			},
+			isProvider: true,
+			wantErr:    true,
+		},
+		{
 			name: "validate update request failure, Provider disabling inventory capability",
 			fields: fields{
 				Capabilities: &APISiteCapabilitiesUpdateRequest{
@@ -491,6 +511,18 @@ func TestAPISiteCapabilitiesUpdateRequest_ToSiteConfig(t *testing.T) {
 		request  APISiteCapabilitiesUpdateRequest
 		want     *cdbm.SiteConfig
 	}{
+		{
+			name: "cannot clear inventory-managed Flow",
+			existing: &cdbm.SiteConfig{
+				NativeNetworking: true,
+				Flow:             true,
+			},
+			request: APISiteCapabilitiesUpdateRequest{
+				NativeNetworking: cutil.GetPtr(false),
+				Flow:             cutil.GetPtr(false),
+			},
+			want: &cdbm.SiteConfig{Flow: true},
+		},
 		{
 			name: "cannot clear inventory-managed VPC SLAAC",
 			existing: &cdbm.SiteConfig{

@@ -1166,7 +1166,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine_id = host_machine_id(1);
-        let initial_machine_version = seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+        let initial_machine_version = seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 1]);
         let initial_target = MachineBootInterfaceTarget::MacOnly(mac_address);
 
@@ -1233,7 +1233,7 @@ mod tests {
         ];
 
         for (index, (machine_id, state, expect_assumed)) in cases.into_iter().enumerate() {
-            seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+            seed_machine(txn.as_mut(), &machine_id).await?;
             set_controller_state(txn.as_mut(), &machine_id, state).await?;
             let target =
                 MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 3, index as u8]));
@@ -1272,7 +1272,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine_id = host_machine_id(34);
-        seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &machine_id).await?;
         let target = MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 3, 4]));
         let initialized =
             initialize_if_unset(txn.as_mut(), &machine_id, &target, RedfishUefiPci).await?;
@@ -1302,13 +1302,10 @@ mod tests {
             (Some(initialized.version), Some(observed_at), false)
         );
 
-        let machine = crate::machine::find_one(
-            txn.as_mut(),
-            machine_id.as_ref(),
-            MachineSearchConfig::default(),
-        )
-        .await?
-        .expect("machine snapshot");
+        let machine =
+            crate::machine::find_one(txn.as_mut(), &machine_id, MachineSearchConfig::default())
+                .await?
+                .expect("machine snapshot");
         let observation = machine
             .status
             .boot_interface_status_observation
@@ -1346,7 +1343,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine_id = host_machine_id(44);
-        seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &machine_id).await?;
         let inspected_target = MachineBootInterfaceTarget::Pair(MachineBootInterface {
             mac_address: MacAddress::new([2, 0, 0, 0, 4, 4]),
             interface_id: "NIC.Slot.4-1-1".to_string(),
@@ -1396,7 +1393,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine_id = host_machine_id(45);
-        let initial_machine_version = seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+        let initial_machine_version = seed_machine(txn.as_mut(), &machine_id).await?;
         let inspected_target = MachineBootInterfaceTarget::Pair(MachineBootInterface {
             mac_address: MacAddress::new([2, 0, 0, 0, 4, 6]),
             interface_id: "NIC.Slot.4-1-2".to_string(),
@@ -1469,7 +1466,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine_id = predicted_host_machine_id(2);
-        seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 3]);
         let pair = MachineBootInterfaceTarget::Pair(MachineBootInterface {
             mac_address,
@@ -1581,7 +1578,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine_id = host_machine_id(5);
-        seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 8]);
         let pair = MachineBootInterfaceTarget::Pair(MachineBootInterface {
             mac_address,
@@ -1671,7 +1668,7 @@ mod tests {
 
         for (index, case) in cases.into_iter().enumerate() {
             let machine_id = predicted_host_machine_id(70 + index as u8);
-            seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+            seed_machine(txn.as_mut(), &machine_id).await?;
             let target =
                 MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 7, index as u8]));
             initialize_if_unset(txn.as_mut(), &machine_id, &target, case.source).await?;
@@ -1719,7 +1716,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine_id = host_machine_id(37);
-        seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 3, 10]);
         let pair = MachineBootInterfaceTarget::Pair(MachineBootInterface {
             mac_address,
@@ -1774,7 +1771,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let attributed_machine_id = host_machine_id(61);
-        seed_machine(txn.as_mut(), attributed_machine_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &attributed_machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 6, 1]);
         let pair = MachineBootInterfaceTarget::Pair(MachineBootInterface {
             mac_address,
@@ -1841,7 +1838,7 @@ mod tests {
         );
 
         let uninitialized_machine_id = host_machine_id(62);
-        seed_machine(txn.as_mut(), uninitialized_machine_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &uninitialized_machine_id).await?;
         let unknown = force_reconcile(
             txn.as_mut(),
             &uninitialized_machine_id,
@@ -1870,7 +1867,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine_id = host_machine_id(63);
-        seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 6, 4]);
         let initial = initialize_if_unset(
             txn.as_mut(),
@@ -1933,7 +1930,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine_id = host_machine_id(3);
-        seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 0, 5]);
         let target = MachineBootInterfaceTarget::MacOnly(mac_address);
         let initialized =
@@ -2008,7 +2005,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut txn = pool.begin().await?;
         let machine_id = host_machine_id(36);
-        seed_machine(txn.as_mut(), machine_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &machine_id).await?;
         let mac_address = MacAddress::new([2, 0, 0, 0, 3, 8]);
         let initialized = initialize_if_unset(
             txn.as_mut(),
@@ -2061,10 +2058,10 @@ mod tests {
         let complete_host = host_machine_id(13);
         let dpu = dpu_machine_id(14);
         for machine_id in [
-            unset_host.as_machine_id(),
-            mac_only_host.as_machine_id(),
-            unset_prediction.as_machine_id(),
-            complete_host.as_machine_id(),
+            &unset_host,
+            &mac_only_host,
+            &unset_prediction,
+            &complete_host,
             &dpu,
         ] {
             seed_machine(txn.as_mut(), machine_id).await?;
@@ -2118,7 +2115,7 @@ mod tests {
         let mut txn = pool.begin().await?;
         let predicted_id = predicted_host_machine_id(20);
         let dpu_id = dpu_machine_id(21);
-        seed_machine(txn.as_mut(), predicted_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &predicted_id).await?;
         seed_machine(txn.as_mut(), &dpu_id).await?;
         txn.commit().await?;
 
@@ -2205,8 +2202,8 @@ mod tests {
         let preexisting_id = predicted_host_machine_id(60);
         let defaulted_insert_id = host_machine_id(61);
         let mut txn = pool.begin().await?;
-        seed_machine(txn.as_mut(), preexisting_id.as_ref()).await?;
-        seed_machine(txn.as_mut(), defaulted_insert_id.as_ref()).await?;
+        seed_machine(txn.as_mut(), &preexisting_id).await?;
+        seed_machine(txn.as_mut(), &defaulted_insert_id).await?;
         txn.commit().await?;
 
         sqlx::raw_sql(MIGRATION).execute(&pool).await?;
@@ -2310,8 +2307,8 @@ mod tests {
         let mut txn = pool.begin().await?;
         let existing_host = host_machine_id(40);
         let in_flight_host = host_machine_id(42);
-        seed_machine(txn.as_mut(), existing_host.as_ref()).await?;
-        seed_machine(txn.as_mut(), in_flight_host.as_ref()).await?;
+        seed_machine(txn.as_mut(), &existing_host).await?;
+        seed_machine(txn.as_mut(), &in_flight_host).await?;
         set_controller_state(txn.as_mut(), &existing_host, ManagedHostState::Ready).await?;
         set_controller_state(
             txn.as_mut(),

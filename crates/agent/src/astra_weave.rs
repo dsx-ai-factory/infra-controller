@@ -149,13 +149,13 @@ async fn create_weave_ew_vpc_virtual_networks(
     let list_vni_req = ListVirtualNetworksRequest { vni: None };
     let list_vni_rsp = weave_ew_vpc_list_virtual_networks(socket_path, list_vni_req).await?;
 
+    // Log virtual networks on the weave server.
     log_virtual_networks(&list_vni_rsp.virtual_networks);
 
     // From the list of virtual networks on the DOCA Weave server, build a
     // seen_virtual_networks HashMap of (vni, (id, state)) for each virtual
-    // network to be used for comparison vs the AstraAttachment status.
-    // Note that we preserve the "Virtual Network exists but is not usable"
-    // locally when the server omits status.
+    // network. If weave does not return a status for a virtual network,
+    // we consider it unusable. Note that seen_virtual_networks may be empty.
     let mut seen_virtual_networks: HashMap<u32, (Option<String>, State)> = list_vni_rsp
         .virtual_networks
         .iter()
@@ -179,21 +179,18 @@ async fn create_weave_ew_vpc_virtual_networks(
         })
         .collect();
 
-    // Lookup the {astra-vni, virtual-network-id} in seen_virtual_networks
-    // from the server. If the astra attachment partially matches (the vni) on
-    // the server, flag this as an error in the astra_attachment_status. Or, if
-    // there is an exact match entry on the server in error state, then update
-    // astra attachment status with this error. Continue to next astra
-    // attachment if there is a valid matching entry on the server.
+    // For each attachment in astra status, compare {vni, virtual-network-id}
+    // against the seen_virtual_network.
     for astra_attachment_status in &mut astra_config_status.astra_attachments_status {
-        // A vni of 0 is the sentinel for a detached / admin-network NIC that
-        // is attached to no virtual network. The Weave server rejects vni 0
-        // (VirtualNetworkSpec requires vni >= 1), so never create a virtual
-        // network for it.
+        // A vni of 0 indicates an admin-network. The Weave server rejects
+        // vni 0, so don't create a virtual network for it.
         if astra_attachment_status.vni == 0 {
             continue;
         }
 
+        // If exact match then this virtual network exists on weave. If
+        // status is in error, copy that status to the astra_attachment_status.
+        // If partial match, then also mark as error in astra_attachment_status.
         let astra_vni = astra_attachment_status.vni as u32;
         let astra_virtual_network_id =
             astra_weave_ew_vpc_virtual_network_id(astra_attachment_status.vni);
@@ -225,7 +222,7 @@ async fn create_weave_ew_vpc_virtual_networks(
         }
 
         // At this point we don't have a matching virtual network for the
-        // astra attachment on the Doca Weave server, create it. Mark
+        // on the Doca Weave server, create it and process response. Mark
         // the astra attachment status with an error if the API fails.
         // Note that we have to insert any newly created virtual networks
         // on the server in the seen_virtual_networks HashMap to avoid
@@ -285,6 +282,13 @@ async fn create_weave_ew_vpc_virtual_networks(
         };
 
         if weave_ew_vpc_state.phase != Phase::Ready as i32 {
+            tracing::info!(
+                ?astra_attachment_status,
+                phase = weave_ew_vpc_state.phase,
+                reason = %weave_ew_vpc_state.reason,
+                message = %weave_ew_vpc_state.message,
+                "Weave EW VPC virtual network created in non-ready phase"
+            );
             set_astra_attachment_status_with_weave_ew_vpc_status(
                 astra_attachment_status,
                 weave_ew_vpc_state,
@@ -360,7 +364,7 @@ fn weave_ew_vpc_virtual_network_matches_astra_config(
         return false;
     };
 
-    // vni 0 is the detached sentinel and never corresponds to a real virtual
+    // vni 0 is the admin network and never corresponds to a real virtual
     // network, so a vni 0 network on the server is always stale.
     if vni == 0 {
         return false;
@@ -412,10 +416,7 @@ async fn update_weave_ew_vpc_astra_attachments(
             continue;
         }
 
-        // A vni of 0 means the NIC is detached (attached to no virtual
-        // network). Never create an attachment for it; any existing
-        // attachment for this NIC is removed by the stale-attachment pass
-        // below, which detaches it because no astra entry matches.
+        // A vni of 0 is for admin network, don't create an attachment for it.
         if astra_attachment_status.vni == 0 {
             continue;
         }
@@ -559,6 +560,13 @@ async fn create_or_recreate_weave_ew_vpc_astra_attachment(
     };
 
     if weave_ew_vpc_state.phase != Phase::Ready as i32 {
+        tracing::info!(
+            ?astra_attachment_status,
+            phase = weave_ew_vpc_state.phase,
+            reason = %weave_ew_vpc_state.reason,
+            message = %weave_ew_vpc_state.message,
+            "Weave EW VPC virtual network attachment creation did not return Phase::Ready"
+        );
         set_astra_attachment_status_with_weave_ew_vpc_status(
             astra_attachment_status,
             weave_ew_vpc_state,
@@ -770,7 +778,7 @@ async fn update_weave_ew_vpc_astra_config_uds(
     // Pre-build astra_config_status as a vector of AstraAttachmentStatus
     // that contains the Astra Attachment info and status is set to
     // Phase::Ready. We will walk this vector and update the status
-    // if we need to update the DOCA Weave server and there are any
+    // as we update the DOCA Weave server and if there are any
     // API failures. We use this vector to avoid unneeded walking of
     // an entry that has encountered an error.
     let mut astra_config_status = build_astra_config_status(astra_config)?;

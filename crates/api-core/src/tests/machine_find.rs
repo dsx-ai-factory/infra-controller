@@ -51,7 +51,7 @@ async fn test_find_machine_by_id(pool: sqlx::PgPool) {
         .await
         .unwrap()
         .expect("expect DPU to be found");
-    assert_eq!(machine.id, dpu_machine_id);
+    assert_eq!(machine.id, dpu_machine_id.into());
     assert!(machine.is_dpu());
 
     // We shouldn't find a machine that doesn't exist
@@ -93,7 +93,7 @@ async fn test_find_machine_by_ip(pool: sqlx::PgPool) {
         .await
         .unwrap()
         .expect("expect DPU to be found");
-    assert_eq!(machine.id, dpu_machine_id);
+    assert_eq!(machine.id, dpu_machine_id.into());
     assert_eq!(&machine.status.interfaces[0].addresses[0], ip);
 
     // We shouldn't find a machine that doesn't exist
@@ -143,7 +143,7 @@ async fn test_find_machine_by_ipv6(pool: sqlx::PgPool) {
         .await
         .unwrap()
         .expect("should find machine by IPv6 address");
-    assert_eq!(machine.id, dpu_machine_id);
+    assert_eq!(machine.id, dpu_machine_id.into());
 }
 
 #[crate::sqlx_test]
@@ -248,7 +248,7 @@ async fn test_find_machine_by_rack_id(pool: sqlx::PgPool) {
         .machine_ids;
 
     assert_eq!(machine_ids.len(), 1);
-    assert_eq!(machine_ids[0], machine_id);
+    assert_eq!(machine_ids[0], machine_id.into());
 }
 
 #[crate::sqlx_test]
@@ -275,7 +275,7 @@ async fn test_find_machine_by_mac(pool: sqlx::PgPool) {
         .await
         .unwrap()
         .expect("expect DPU to be found");
-    assert_eq!(machine.id, dpu_machine_id);
+    assert_eq!(machine.id, dpu_machine_id.into());
     assert_eq!(&machine.status.interfaces[0].mac_address, mac);
     assert!(DPU_OOB_MAC_ADDRESS_POOL.contains(machine.status.interfaces[0].mac_address));
 
@@ -316,7 +316,7 @@ async fn test_find_machine_by_hostname(pool: sqlx::PgPool) {
         .await
         .unwrap()
         .expect("expect DPU to be found");
-    assert_eq!(machine.id, dpu_machine_id);
+    assert_eq!(machine.id, dpu_machine_id.into());
     assert_eq!(&machine.status.interfaces[0].hostname, hostname);
 
     // We shouldn't find a machine that doesn't exist
@@ -375,7 +375,7 @@ async fn test_find_machine_ids_with_and_without_dpus(pool: sqlx::PgPool) {
 async fn test_find_all_machines_when_there_arent_any(pool: sqlx::PgPool) {
     let machines = db::machine::find(
         &pool,
-        ObjectFilter::All,
+        ObjectFilter::<MachineId>::All,
         crate::tests::machine_find::MachineSearchConfig {
             include_history: true,
             ..Default::default()
@@ -451,7 +451,7 @@ async fn test_find_machine_ids(pool: sqlx::PgPool) {
         .unwrap();
 
     assert_eq!(machine_ids.len(), 1);
-    assert_eq!(machine_ids[0], host_machine_id);
+    assert_eq!(machine_ids[0], host_machine_id.into());
 }
 
 #[crate::sqlx_test]
@@ -720,7 +720,7 @@ async fn test_find_machine_by_instance_type(
 
     // Confirm that what we found is the right
     // machine
-    assert_eq!(machines[0], tmp_machine_id);
+    assert_eq!(machines[0], tmp_machine_id.into());
 
     Ok(())
 }

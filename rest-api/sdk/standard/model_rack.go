@@ -24,7 +24,7 @@ var _ MappedNullable = &Rack{}
 
 // Rack Rack represents a physical rack in the datacenter
 type Rack struct {
-	// Unique identifier of the Rack
+	// Rack ID
 	Id *string `json:"id,omitempty"`
 	// Name of the Rack
 	Name *string `json:"name,omitempty"`

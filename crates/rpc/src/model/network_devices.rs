@@ -49,7 +49,7 @@ impl From<NetworkTopologyData> for rpc::forge::NetworkTopologyData {
 impl From<DpuToNetworkDeviceMap> for rpc::forge::ConnectedDevice {
     fn from(value: DpuToNetworkDeviceMap) -> Self {
         Self {
-            id: value.dpu_id.into(),
+            id: Some(value.dpu_id.into()),
             local_port: value.local_port.to_string(),
             remote_port: value.remote_port.clone(),
             network_device_id: Some(value.network_device_id),

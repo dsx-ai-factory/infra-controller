@@ -29,9 +29,10 @@
 //! the queue from overload over admitting work based on a stale, low-latency
 //! estimate.
 //!
-//! Each client and the global scheduler maintain an independent estimator. The
-//! estimates drive predictive queue-delay rejection and bounded, jittered retry
-//! advice; they do not impose execution limits themselves.
+//! Each client and the global scheduler maintain an independent estimator.
+//! Per-client estimates drive predictive queue-delay rejection because each
+//! client has a FIFO queue. Both estimates drive bounded, jittered retry advice;
+//! they do not impose execution limits themselves.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;

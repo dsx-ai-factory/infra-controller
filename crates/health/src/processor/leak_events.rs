@@ -91,41 +91,46 @@ impl EventProcessor for LeakEventProcessor {
             .filter(|alert| alert.classifications.contains(&leak_classification))
             .collect();
 
-        if report.source == ReportSource::NvueLeakage
-            && leak_alerts.is_empty()
-            && !report.alerts.is_empty()
-        {
-            // Non-leak NVUE alerts are sensor or availability failures, not an all-clear.
+        let leaking = self.is_leaking(leak_alerts.len());
+
+        // An alert that is not a leak alert is a read failure: an unavailable
+        // NVUE endpoint, an unknown sensor state, a detector this client could
+        // not decode. The sensors behind it have unknown state, so a report
+        // carrying one can raise a leak but can never clear one. Deriving an
+        // all-clear here would retract a machine or rack leak on evidence that
+        // never arrived, and a read failure also leaves the alert count below
+        // the threshold it would otherwise have met.
+        if !leaking && leak_alerts.len() < report.alerts.len() {
             return Vec::new();
         }
 
-        let alerts = if self.is_leaking(leak_alerts.len()) {
+        let (successes, alerts) = if leaking {
             let details = leak_details(&leak_alerts);
 
-            vec![HealthReportAlert {
-                probe_id: Probe::LeakDetection,
-                target: None,
-                message: format!(
-                    "Leak detected: {} {} alerts reached threshold {} ({}: {})",
-                    leak_alerts.len(),
-                    alert_kind,
-                    self.minimum_alerts_per_report,
-                    detail_kind,
-                    details
-                ),
-                classifications: vec![Classification::Leak],
-            }]
+            (
+                vec![],
+                vec![HealthReportAlert {
+                    probe_id: Probe::LeakDetection,
+                    target: None,
+                    message: format!(
+                        "Leak detected: {} {} alerts reached threshold {} ({}: {})",
+                        leak_alerts.len(),
+                        alert_kind,
+                        self.minimum_alerts_per_report,
+                        detail_kind,
+                        details
+                    ),
+                    classifications: vec![Classification::Leak],
+                }],
+            )
         } else {
-            vec![]
-        };
-
-        let successes = if self.is_leaking(leak_alerts.len()) {
-            vec![]
-        } else {
-            vec![HealthReportSuccess {
-                probe_id: Probe::LeakDetection,
-                target: None,
-            }]
+            (
+                vec![HealthReportSuccess {
+                    probe_id: Probe::LeakDetection,
+                    target: None,
+                }],
+                vec![],
+            )
         };
 
         let leak_report = HealthReport {
@@ -145,6 +150,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
 
+    use carbide_test_support::{Check, check_values};
     use mac_address::MacAddress;
 
     use super::*;
@@ -317,6 +323,75 @@ mod tests {
             processor.process_event(&context(), &CollectorEvent::HealthReport(Arc::new(report)));
 
         assert!(emitted.is_empty());
+    }
+
+    fn unreadable_detector_alert(target: &str) -> HealthReportAlert {
+        HealthReportAlert {
+            probe_id: Probe::LeakDetection,
+            target: Some(target.to_string()),
+            message: format!("Leak detector '{target}' could not be read"),
+            classifications: vec![Classification::SensorFailure],
+        }
+    }
+
+    /// An incomplete read can raise a leak but must never clear one. A detector
+    /// the collector could not decode leaves that detector's state unknown, so
+    /// the surviving alert count is not evidence that the tray is dry.
+    #[test]
+    fn incomplete_read_never_derives_an_all_clear() {
+        check_values(
+            [
+                Check {
+                    scenario: "a complete read below threshold is an all-clear",
+                    input: vec![leak_alert("Detector_0")],
+                    expect: Some("all-clear"),
+                },
+                Check {
+                    scenario: "an unreadable detector alone does not clear the tray",
+                    input: vec![unreadable_detector_alert("Detector_1")],
+                    expect: None,
+                },
+                Check {
+                    scenario: "an unreadable detector can hold the count below threshold",
+                    input: vec![
+                        leak_alert("Detector_0"),
+                        unreadable_detector_alert("Detector_1"),
+                    ],
+                    expect: None,
+                },
+                Check {
+                    scenario: "an incomplete read still raises a leak that meets threshold",
+                    input: vec![
+                        leak_alert("Detector_0"),
+                        leak_alert("Detector_2"),
+                        unreadable_detector_alert("Detector_1"),
+                    ],
+                    expect: Some("leak"),
+                },
+            ],
+            |alerts| {
+                let processor = LeakEventProcessor::new(2);
+                let report = HealthReport {
+                    source: ReportSource::BmcLeakDetectors,
+                    target: Some(HealthReportTarget::Machine),
+                    observed_at: Some(chrono::Utc::now()),
+                    successes: Vec::new(),
+                    alerts,
+                };
+
+                let emitted = processor
+                    .process_event(&context(), &CollectorEvent::HealthReport(Arc::new(report)));
+
+                let [CollectorEvent::HealthReport(derived)] = emitted.as_slice() else {
+                    return None;
+                };
+                Some(if derived.alerts.is_empty() {
+                    "all-clear"
+                } else {
+                    "leak"
+                })
+            },
+        );
     }
 
     #[test]

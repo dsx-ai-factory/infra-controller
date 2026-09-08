@@ -45,13 +45,13 @@ func (r ApiFirmwareUpdateTrayRequest) Execute() (*FirmwareUpdateResponse, *http.
 /*
 FirmwareUpdateTray Firmware update a Tray
 
-Update firmware on a Tray identified by Tray UUID.
+Update firmware on a Tray identified by its component ID or component MAC address.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id ID of the Tray
+	@param id Component ID or component MAC address
 	@return ApiFirmwareUpdateTrayRequest
 */
 func (a *TrayAPIService) FirmwareUpdateTray(ctx context.Context, org string, id string) ApiFirmwareUpdateTrayRequest {
@@ -153,6 +153,17 @@ func (a *TrayAPIService) FirmwareUpdateTrayExecute(r ApiFirmwareUpdateTrayReques
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -201,8 +212,7 @@ Update firmware on Trays with optional filters. If no filter is specified, targe
 
 **Filter constraints:**
 - `rackId` and `rackName` are mutually exclusive
-- `rackId`/`rackName` cannot be combined with `ids`/`componentIds` (rack-level vs component-level targeting)
-- `componentIds` requires `type` to be specified
+- `rackId`/`rackName` cannot be combined with `ids` (rack-level vs component-level targeting)
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -333,19 +343,18 @@ func (a *TrayAPIService) FirmwareUpdateTraysExecute(r ApiFirmwareUpdateTraysRequ
 }
 
 type ApiGetAllTrayRequest struct {
-	ctx         context.Context
-	ApiService  *TrayAPIService
-	siteId      *string
-	org         string
-	rackId      *string
-	rackName    *string
-	type_       *string
-	componentId *string
-	id          *string
-	slotId      *int32
-	pageNumber  *int32
-	pageSize    *int32
-	orderBy     *string
+	ctx        context.Context
+	ApiService *TrayAPIService
+	siteId     *string
+	org        string
+	rackId     *string
+	rackName   *string
+	type_      *string
+	id         *string
+	slotId     *int32
+	pageNumber *int32
+	pageSize   *int32
+	orderBy    *string
 }
 
 // ID of the Site to retrieve Trays from
@@ -366,19 +375,13 @@ func (r ApiGetAllTrayRequest) RackName(rackName string) ApiGetAllTrayRequest {
 	return r
 }
 
-// Filter by tray type
+// Filter by tray type. When &#x60;id&#x60; is specified, the type disambiguates component IDs shared by different component types.
 func (r ApiGetAllTrayRequest) Type_(type_ string) ApiGetAllTrayRequest {
 	r.type_ = &type_
 	return r
 }
 
-// Filter by component ID. Can be specified multiple times to filter on more than one component ID. Requires &#39;type&#39; parameter.
-func (r ApiGetAllTrayRequest) ComponentId(componentId string) ApiGetAllTrayRequest {
-	r.componentId = &componentId
-	return r
-}
-
-// Filter by tray UUID. Can be specified multiple times to filter on more than one tray ID.
+// Filter by component ID. Can be specified multiple times to filter on more than one Tray ID.
 func (r ApiGetAllTrayRequest) Id(id string) ApiGetAllTrayRequest {
 	r.id = &id
 	return r
@@ -421,8 +424,7 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 
 **Filter constraints:**
 - `rackId` and `rackName` are mutually exclusive
-- `rackId`/`rackName` cannot be combined with `id`/`componentId` (rack-level vs component-level targeting)
-- `componentId` requires `type` to be specified
+- `rackId`/`rackName` cannot be combined with `id` (rack-level vs component-level targeting)
 - `slotId` restricts to trays at that rack slot, requires `rackId` or `rackName`, and composes with the rest of the query via AND
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
@@ -472,9 +474,6 @@ func (a *TrayAPIService) GetAllTrayExecute(r ApiGetAllTrayRequest) ([]Tray, *htt
 	}
 	if r.type_ != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "type", r.type_, "form", "")
-	}
-	if r.componentId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "componentId", r.componentId, "form", "")
 	}
 	if r.id != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "id", r.id, "form", "")
@@ -591,13 +590,15 @@ func (r ApiGetTrayRequest) Execute() (*Tray, *http.Response, error) {
 /*
 GetTray Retrieve a Tray
 
-Get a Tray by ID.
+Get a Tray by component ID or component MAC address.
+
+The identifier must resolve to exactly one component. An ambiguous component ID returns `412 Precondition Failed`; use the component MAC address to disambiguate it.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id ID of the Tray
+	@param id Component ID or component MAC address
 	@return ApiGetTrayRequest
 */
 func (a *TrayAPIService) GetTray(ctx context.Context, org string, id string) ApiGetTrayRequest {
@@ -698,6 +699,17 @@ func (a *TrayAPIService) GetTrayExecute(r ApiGetTrayRequest) (*Tray, *http.Respo
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -772,7 +784,7 @@ func (r ApiGetTrayTasksRequest) Execute() ([]Task, *http.Response, error) {
 /*
 GetTrayTasks Retrieve all Tasks for a Tray
 
-List Tasks targeting the specified Tray.
+List Tasks targeting the Tray identified by its component ID or component MAC address.
 
 Tasks are site-scoped; `siteId` must be the Site that owns the Tray. Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -782,7 +794,7 @@ By default the `report` field is omitted from each task in the response. Set `in
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id UUID of the Tray
+	@param id Component ID or component MAC address
 	@return ApiGetTrayTasksRequest
 */
 func (a *TrayAPIService) GetTrayTasks(ctx context.Context, org string, id string) ApiGetTrayTasksRequest {
@@ -918,6 +930,17 @@ func (a *TrayAPIService) GetTrayTasksExecute(r ApiGetTrayTasksRequest) ([]Task, 
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -963,7 +986,7 @@ func (r ApiPowerControlTrayRequest) Execute() (*UpdatePowerStateResponse, *http.
 /*
 PowerControlTray Power control a Tray
 
-Power control a Tray identified by Tray UUID.
+Power control a Tray identified by its component ID or component MAC address.
 
 Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
 
@@ -971,7 +994,7 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id ID of the Tray
+	@param id Component ID or component MAC address
 	@return ApiPowerControlTrayRequest
 */
 func (a *TrayAPIService) PowerControlTray(ctx context.Context, org string, id string) ApiPowerControlTrayRequest {
@@ -1073,6 +1096,17 @@ func (a *TrayAPIService) PowerControlTrayExecute(r ApiPowerControlTrayRequest) (
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -1123,8 +1157,7 @@ Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
 
 **Filter constraints:**
 - `rackId` and `rackName` are mutually exclusive
-- `rackId`/`rackName` cannot be combined with `ids`/`componentIds` (rack-level vs component-level targeting)
-- `componentIds` requires `type` to be specified
+- `rackId`/`rackName` cannot be combined with `ids` (rack-level vs component-level targeting)
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1275,7 +1308,7 @@ func (r ApiValidateTrayRequest) Execute() (*RackValidationResult, *http.Response
 /*
 ValidateTray Validate a Tray
 
-Validate a Tray by comparing expected vs actual state.
+Validate a Tray identified by its component ID or component MAC address by comparing expected vs actual state.
 
 Compares the expected component configuration against the actual state. Returns a detailed diff report showing missing, extra, and mismatched components.
 
@@ -1283,7 +1316,7 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id ID of the Tray
+	@param id Component ID or component MAC address
 	@return ApiValidateTrayRequest
 */
 func (a *TrayAPIService) ValidateTray(ctx context.Context, org string, id string) ApiValidateTrayRequest {
@@ -1384,6 +1417,17 @@ func (a *TrayAPIService) ValidateTrayExecute(r ApiValidateTrayRequest) (*RackVal
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -1419,7 +1463,7 @@ type ApiValidateTraysRequest struct {
 	name         *string
 	manufacturer *string
 	type_        *string
-	componentId  *string
+	id           *string
 	slotId       *int32
 }
 
@@ -1429,7 +1473,7 @@ func (r ApiValidateTraysRequest) SiteId(siteId string) ApiValidateTraysRequest {
 	return r
 }
 
-// Scope to a specific Rack by ID (mutually exclusive with rackName)
+// Scope to a specific Rack by Rack ID (mutually exclusive with rackName)
 func (r ApiValidateTraysRequest) RackId(rackId string) ApiValidateTraysRequest {
 	r.rackId = &rackId
 	return r
@@ -1453,15 +1497,15 @@ func (r ApiValidateTraysRequest) Manufacturer(manufacturer string) ApiValidateTr
 	return r
 }
 
-// Filter trays by type
+// Filter trays by type. When &#x60;id&#x60; is specified, the type disambiguates component IDs shared by different component types.
 func (r ApiValidateTraysRequest) Type_(type_ string) ApiValidateTraysRequest {
 	r.type_ = &type_
 	return r
 }
 
-// Filter by external component ID (requires type; mutually exclusive with rackId/rackName; use repeated params for multiple values)
-func (r ApiValidateTraysRequest) ComponentId(componentId string) ApiValidateTraysRequest {
-	r.componentId = &componentId
+// Filter by component ID (mutually exclusive with rackId/rackName; use repeated params for multiple values)
+func (r ApiValidateTraysRequest) Id(id string) ApiValidateTraysRequest {
+	r.id = &id
 	return r
 }
 
@@ -1540,8 +1584,8 @@ func (a *TrayAPIService) ValidateTraysExecute(r ApiValidateTraysRequest) (*RackV
 	if r.type_ != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "type", r.type_, "form", "")
 	}
-	if r.componentId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "componentId", r.componentId, "form", "")
+	if r.id != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "id", r.id, "form", "")
 	}
 	if r.slotId != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "slotId", r.slotId, "form", "")

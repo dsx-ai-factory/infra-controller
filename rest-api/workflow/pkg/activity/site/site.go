@@ -78,8 +78,8 @@ type ManageSite struct {
 // Activity functions
 
 // UpdateSiteInDB is a Temporal activity that updates the Site metadata in the DB. A nil
-// siteAgentBuildInfo, which is what an older Site Agent reports, leaves the stored Site Agent
-// values alone rather than erasing what an earlier report established.
+// siteAgentBuildInfo, which is what the legacy workflow reports, leaves the stored Site Agent
+// values alone rather than erasing what a newer report established.
 func (mst ManageSite) UpdateSiteInDB(ctx context.Context, siteID uuid.UUID, coreBuildInfo *corev1.BuildInfo,
 	siteAgentBuildInfo *corev1.SiteAgentBuildInfo) error {
 	logger := log.With().Str("Activity", "UpdateSiteInDB").Str("Site ID", siteID.String()).Logger()
@@ -111,6 +111,16 @@ func (mst ManageSite) UpdateSiteInDB(ctx context.Context, siteID uuid.UUID, core
 		updateInput.Config = &cdbm.SiteConfigUpdateInput{
 			VpcSlaac: &vpcSlaac,
 		}
+	}
+
+	// Site Agent inventory owns the Flow enabled flag once it reports the field. An omitted field
+	// preserves the stored value when an inventory queued before an upgrade is processed later.
+	if siteAgentBuildInfo != nil && siteAgentBuildInfo.FlowEnabled != nil &&
+		(site.Config == nil || site.Config.Flow != siteAgentBuildInfo.GetFlowEnabled()) {
+		if updateInput.Config == nil {
+			updateInput.Config = &cdbm.SiteConfigUpdateInput{}
+		}
+		updateInput.Config.Flow = siteAgentBuildInfo.FlowEnabled
 	}
 
 	// Update build version for Site when Core reports a changed, non-empty value.

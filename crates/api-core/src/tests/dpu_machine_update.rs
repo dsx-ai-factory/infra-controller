@@ -16,11 +16,10 @@
  */
 use std::collections::HashMap;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use common::api_fixtures::{create_managed_host, create_managed_host_multi_dpu, create_test_env};
 use db::DatabaseError;
 use model::dpu_machine_update::DpuMachineUpdate;
-use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::network::MachineNetworkStatusObservation;
 use model::machine::{LoadSnapshotOptions, Machine, ManagedHostStateSnapshot};
 use sqlx::PgConnection;
@@ -52,7 +51,7 @@ pub(in crate::tests) async fn update_nic_firmware_version(
 async fn create_machines(
     test_env: &TestEnv,
     machine_count: usize,
-) -> HashMap<MachineId, ManagedHostStateSnapshot> {
+) -> HashMap<HostMachineId, ManagedHostStateSnapshot> {
     let mut machines = Vec::default();
     for _ in 0..machine_count {
         let machine = create_managed_host(test_env).await;
@@ -69,7 +68,10 @@ async fn create_machines(
 
     db::managed_host::load_by_machine_ids(
         &mut test_env.db_reader(),
-        &machines.iter().map(|m| m.id).collect::<Vec<_>>(),
+        &machines
+            .iter()
+            .map(|machine| machine.id)
+            .collect::<Vec<_>>(),
         LoadSnapshotOptions {
             include_history: false,
             include_instance_data: false,
@@ -82,17 +84,9 @@ async fn create_machines(
 
 pub(in crate::tests) async fn get_all_snapshots(
     test_env: &TestEnv,
-) -> HashMap<MachineId, ManagedHostStateSnapshot> {
+) -> HashMap<HostMachineId, ManagedHostStateSnapshot> {
     let mut txn = test_env.pool.begin().await.unwrap();
-    let machine_ids = db::machine::find_machine_ids(
-        txn.as_mut(),
-        MachineSearchConfig {
-            include_predicted_host: true,
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await.unwrap();
 
     db::managed_host::load_by_machine_ids(
         txn.as_mut(),
@@ -237,7 +231,7 @@ async fn test_find_unavailable_outdated_dpus_when_none(
     let dpus = DpuMachineUpdate::find_unavailable_outdated_dpus(
         &env.config.dpu_config.dpu_nic_firmware_update_versions,
         &snapshots,
-    );
+    )?;
 
     assert_eq!(dpus.len(), 0);
     Ok(())
@@ -262,11 +256,11 @@ async fn test_find_unavailable_outdated_dpus(
     let dpus = DpuMachineUpdate::find_unavailable_outdated_dpus(
         &env.config.dpu_config.dpu_nic_firmware_update_versions,
         &snapshots,
-    );
+    )?;
 
     assert_eq!(dpus.len(), 1);
-    assert_eq!(dpus.first().unwrap().dpu_machine_id, mh.dpu().id);
-    assert_eq!(dpus.first().unwrap().host_machine_id, mh.host().id);
+    assert_eq!(dpus.first().unwrap().dpu_machine_id, mh.dpu_ids[0]);
+    assert_eq!(dpus.first().unwrap().host_machine_id, mh.id);
 
     Ok(())
 }
@@ -287,7 +281,7 @@ async fn test_find_available_outdated_dpus_multidpu(
 
     let snapshots = db::managed_host::load_by_machine_ids(
         txn.as_mut(),
-        &[mh.host().id],
+        &[mh.id],
         LoadSnapshotOptions {
             include_history: false,
             include_instance_data: false,
@@ -322,8 +316,8 @@ async fn test_find_available_outdated_dpus_multidpu_one_under_reprov(
     db::dpu_machine_update::trigger_reprovisioning_for_managed_host(
         &mut txn,
         &[DpuMachineUpdate {
-            host_machine_id: mh.host().id,
-            dpu_machine_id: mh.dpu_n(0).id,
+            host_machine_id: mh.id,
+            dpu_machine_id: mh.dpu_ids[0],
             firmware_version: "test_version".to_string(),
             dpf_managed: false,
         }],
@@ -335,7 +329,7 @@ async fn test_find_available_outdated_dpus_multidpu_one_under_reprov(
     let mut txn = env.pool.begin().await?;
     let snapshots = db::managed_host::load_by_machine_ids(
         txn.as_mut(),
-        &[mh.host().id],
+        &[mh.id],
         LoadSnapshotOptions {
             include_history: false,
             include_instance_data: false,
@@ -362,7 +356,7 @@ async fn test_find_available_outdated_dpus_multidpu_one_under_reprov(
         .partition(|x| x.reprovision_requested.is_some());
     assert_eq!(dpu_under_reprov.len(), 1);
     assert_eq!(dpu_not_under_reprov.len(), 1);
-    assert_eq!(dpu_under_reprov[0].id, mh.dpu_n(0).id);
+    assert_eq!(dpu_under_reprov[0].id, *mh.dpu_n(0).id);
 
     Ok(())
 }
@@ -381,14 +375,14 @@ async fn test_find_available_outdated_dpus_multidpu_both_under_reprov(
         &mut txn,
         &[
             DpuMachineUpdate {
-                host_machine_id: mh.host().id,
-                dpu_machine_id: all_dpus[1].id,
+                host_machine_id: mh.id,
+                dpu_machine_id: all_dpus[1].id.try_into()?,
                 firmware_version: "test_version".to_string(),
                 dpf_managed: false,
             },
             DpuMachineUpdate {
-                host_machine_id: mh.host().id,
-                dpu_machine_id: all_dpus[0].id,
+                host_machine_id: mh.id,
+                dpu_machine_id: all_dpus[0].id.try_into()?,
                 firmware_version: "test_version".to_string(),
                 dpf_managed: false,
             },
@@ -401,7 +395,7 @@ async fn test_find_available_outdated_dpus_multidpu_both_under_reprov(
     let mut txn = env.pool.begin().await?;
     let snapshots = db::managed_host::load_by_machine_ids(
         txn.as_mut(),
-        &[mh.host().id],
+        &[mh.id],
         LoadSnapshotOptions {
             include_history: false,
             include_instance_data: false,

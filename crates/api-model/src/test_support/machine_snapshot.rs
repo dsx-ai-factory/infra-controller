@@ -25,7 +25,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 
-use carbide_uuid::machine::{MachineId, MachineIdSource, MachineInterfaceId, MachineType};
+use carbide_uuid::machine::{
+    DpuMachineId, MachineId, MachineIdSource, MachineInterfaceId, MachineType,
+};
 use carbide_uuid::network::NetworkSegmentId;
 use chrono::{DateTime, TimeZone, Utc};
 use config_version::ConfigVersion;
@@ -62,7 +64,7 @@ pub fn host_machine_id() -> MachineId {
 }
 
 /// Deterministic machine ids for the fixture host's DPUs.
-pub fn dpu_machine_id(index: u8) -> MachineId {
+pub fn dpu_machine_id(index: u8) -> DpuMachineId {
     // Widen before adding: `0x20 + index` on a u8 overflows past index 223,
     // the same bound `fixture_dpu_index` documents. Fail with a clear message
     // instead of an overflow panic.
@@ -76,12 +78,14 @@ pub fn dpu_machine_id(index: u8) -> MachineId {
         [hash_byte as u8; 32],
         MachineType::Dpu,
     )
+    .try_into()
+    .unwrap()
 }
 
 /// Recovers the index a [`dpu_machine_id`] was created from, so id-keyed
 /// builders can give each fixture DPU its own hardware identity. `None` for
 /// ids that no fixture index produces.
-fn fixture_dpu_index(machine_id: MachineId) -> Option<u8> {
+fn fixture_dpu_index(machine_id: DpuMachineId) -> Option<u8> {
     // `dpu_machine_id` fills the id bytes with `0x20 + index`, so indexes
     // beyond `u8::MAX - 0x20` are not constructible.
     (0..=u8::MAX - 0x20).find(|&index| dpu_machine_id(index) == machine_id)
@@ -242,7 +246,7 @@ fn interface(
     machine_id: MachineId,
     interface_type: InterfaceType,
     primary: bool,
-    attached_dpu: Option<MachineId>,
+    attached_dpu: Option<carbide_uuid::machine::DpuMachineId>,
     segment_type: Option<NetworkSegmentType>,
 ) -> MachineInterfaceSnapshot {
     MachineInterfaceSnapshot {
@@ -332,11 +336,13 @@ fn health_reports(agent_source: &str) -> HealthReportSources {
 /// `machine_type` decides between the host shape (8 GPUs, 9 NICs) and the
 /// DPU shape (BlueField hardware info, small interface set).
 pub fn machine_snapshot_pg_json(machine_id: MachineId) -> MachineSnapshotPgJson {
-    let is_dpu = machine_id.machine_type().is_dpu();
-    let hardware_info = if is_dpu {
-        dpu_hardware_info(fixture_dpu_index(machine_id).unwrap_or(0))
+    let (hardware_info, is_dpu) = if let Ok(dpu_machine_id) = DpuMachineId::try_from(machine_id) {
+        (
+            dpu_hardware_info(fixture_dpu_index(dpu_machine_id).unwrap_or(0)),
+            true,
+        )
     } else {
-        host_hardware_info()
+        (host_hardware_info(), false)
     };
     let interfaces = if is_dpu {
         vec![interface(
@@ -495,7 +501,6 @@ pub fn machine_snapshot_pg_json(machine_id: MachineId) -> MachineSnapshotPgJson 
         power_options: None,
         hw_sku_device_type: Some("compute".to_string()),
         update_complete: true,
-        backend_firmware_object_job_id: None,
         nvlink_info: None,
         dpf: Dpf {
             enabled: false,
@@ -517,7 +522,7 @@ pub fn host_machine() -> Machine {
 
 /// A fully-populated DPU [`Machine`], as loaded from the database.
 pub fn dpu_machine(index: u8) -> Machine {
-    machine_snapshot_pg_json(dpu_machine_id(index))
+    machine_snapshot_pg_json(dpu_machine_id(index).into())
         .try_into()
         .expect("fixture DPU snapshot converts to Machine")
 }

@@ -251,7 +251,7 @@ async fn create_ib_transition_fixture(pool: sqlx::PgPool) -> IbTransitionFixture
 
     IbTransitionFixture {
         env,
-        machine_id: managed_host.id,
+        machine_id: managed_host.id.into(),
         instance_id,
         initial_config_version,
         requested_config,
@@ -802,7 +802,7 @@ async fn test_create_instance_with_ib_config(pool: sqlx::PgPool) {
         "0"
     );
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id);
+    assert_eq!(instance.machine_id(), mh.id.into());
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 

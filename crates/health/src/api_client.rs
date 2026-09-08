@@ -313,7 +313,7 @@ fn switch_endpoint_metadata(
             .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil()),
         endpoint_role,
         is_primary: switch.is_primary,
-        nmxc_enabled: config.enable_nmxc,
+        nmxc_enabled: config.enable_nmxc || switch.is_primary,
         nmxt_enabled,
     }))
 }
@@ -628,19 +628,12 @@ impl ApiEndpointSource {
             ));
         };
         let addr = BmcAddr::try_from(bmc_info)?;
-        let serial = power_shelf
-            .config
-            .as_ref()
-            .map(|config| config.name.clone())
-            .ok_or(HealthError::GenericError(
-                "Power shelf endpoint does not have serial".to_string(),
-            ))?;
 
         self.endpoint_for(
             addr,
             Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: power_shelf.id,
-                serial,
+                serial: None,
             })),
             power_shelf.rack_id.clone(),
             ApiCredentialKind::Bmc,
@@ -969,6 +962,29 @@ mod tests {
     }
 
     #[test]
+    fn switch_endpoint_metadata_enables_nmxc_for_primary_switch() {
+        let metadata = switch_endpoint_metadata(
+            &rpc::forge::Switch {
+                config: Some(rpc::forge::SwitchConfig {
+                    name: "switch-a".to_string(),
+                    ..Default::default()
+                }),
+                is_primary: true,
+                ..Default::default()
+            },
+            SwitchEndpointRole::Host,
+            false,
+        )
+        .expect("switch metadata");
+
+        let EndpointMetadata::Switch(switch) = metadata else {
+            panic!("expected switch metadata");
+        };
+
+        assert!(switch.nmxc_enabled);
+    }
+
+    #[test]
     fn power_shelf_endpoint_preserves_api_rack_id()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let api_url = Url::parse("https://127.0.0.1:1079")?;
@@ -1004,6 +1020,10 @@ mod tests {
         })?;
 
         assert_eq!(endpoint.rack_id.as_ref(), Some(&rack_id));
+        let Some(EndpointMetadata::PowerShelf(power_shelf)) = endpoint.metadata.as_ref() else {
+            panic!("expected power shelf metadata");
+        };
+        assert_eq!(power_shelf.serial, None);
 
         Ok(())
     }

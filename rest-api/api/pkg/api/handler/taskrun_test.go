@@ -163,7 +163,7 @@ func TestCreateTaskRunHandler_Handle(t *testing.T) {
 
 			// Create must never coalesce onto another request's execution, so
 			// its ID is per-request and it declares no conflict policy.
-			assert.True(t, strings.HasPrefix(started.ID, "flow-grpc-task-run-create-"), "workflow ID = %q", started.ID)
+			assert.True(t, strings.HasPrefix(started.ID, "task-run-create-"), "workflow ID = %q", started.ID)
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, started.WorkflowIDConflictPolicy)
 
 			var got model.APITaskRun
@@ -227,7 +227,7 @@ func TestCreateTaskRunHandler_FreshWorkflowIDPerRequest(t *testing.T) {
 	second := submit(t)
 
 	assert.NotEqual(t, first, second, "two creates shared a workflow ID")
-	assert.True(t, strings.HasPrefix(first, "flow-grpc-task-run-create-"), "workflow ID = %q", first)
+	assert.True(t, strings.HasPrefix(first, "task-run-create-"), "workflow ID = %q", first)
 }
 
 func TestGetTaskRunHandler_Handle(t *testing.T) {
@@ -344,13 +344,13 @@ func TestGetTaskRunHandler_Handle(t *testing.T) {
 				return
 			}
 
-			// Reads coalesce onto an in-flight identical request, so the ID is
-			// derived from the query and namespaced away from the bespoke
-			// per-method workflows that still run on the site. includeStats is
-			// part of it because attaching to an execution started with the
-			// other value would answer with the wrong stats presence.
+			// Reads coalesce onto an in-flight identical request. The original
+			// ID can be reused now that the bespoke workflow is retired.
+			// includeStats is part of it because attaching to an execution
+			// started with the other value would answer with the wrong stats
+			// presence.
 			wantStats := tt.queryParams["includeStats"] == "true"
-			assert.Equal(t, fmt.Sprintf("flow-grpc-task-run-get-%s-%t", runID, wantStats), started.ID)
+			assert.Equal(t, fmt.Sprintf("task-run-get-%s-%t", runID, wantStats), started.ID)
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, started.WorkflowIDConflictPolicy)
 
 			var got model.APITaskRun
@@ -468,7 +468,7 @@ func TestGetAllTaskRunHandler_Handle(t *testing.T) {
 				return
 			}
 
-			assert.True(t, strings.HasPrefix(started.ID, "flow-grpc-task-run-get-all-"), "workflow ID = %q", started.ID)
+			assert.True(t, strings.HasPrefix(started.ID, "task-run-get-all-"), "workflow ID = %q", started.ID)
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, started.WorkflowIDConflictPolicy)
 			listIDs[tt.name] = started.ID
 
@@ -595,7 +595,7 @@ func TestGetAllTaskRunTargetHandler_Handle(t *testing.T) {
 				return
 			}
 
-			assert.True(t, strings.HasPrefix(started.ID, fmt.Sprintf("flow-grpc-task-run-target-get-all-%s-", runID)), "workflow ID = %q", started.ID)
+			assert.True(t, strings.HasPrefix(started.ID, fmt.Sprintf("task-run-target-get-all-%s-", runID)), "workflow ID = %q", started.ID)
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, started.WorkflowIDConflictPolicy)
 
 			var got []*model.APITaskRunTarget
@@ -708,7 +708,7 @@ func TestRunLifecycleHandlers_Handle(t *testing.T) {
 					return
 				}
 
-				assert.Equal(t, fmt.Sprintf("flow-grpc-task-run-%s-%s", act.action, runID), started.ID)
+				assert.Equal(t, fmt.Sprintf("task-run-%s-%s", act.action, runID), started.ID)
 
 				var got model.APITaskRun
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))

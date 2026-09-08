@@ -28,12 +28,12 @@ use rpc::forge::{self as rpc_forge};
 use tonic::Request;
 
 use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
+use crate::test_support::health::{HealthCrud, HealthStatusView, check_health_aggregation};
 use crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder;
 use crate::tests::common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_managed_host, create_managed_host_with_config,
     create_test_env_with_overrides, get_config, send_health_report_entry,
 };
-use crate::tests::common::health_crud::{HealthCrud, HealthStatusView, check_health_aggregation};
 
 fn leak_alert_report(source: &str) -> HealthReport {
     HealthReport {
@@ -78,7 +78,7 @@ async fn new_rack(pool: &sqlx::PgPool) -> Result<RackId, Box<dyn std::error::Err
 }
 
 /// Builds the rack health-override CRUD surface over `env` for `id`. The shared
-/// checks in [`crate::tests::common::health_crud`] drive these closures.
+/// checks in [`crate::test_support::health`] drive these closures.
 // The four `impl AsyncFn` members are intentionally distinct unnameable closure
 // types; there is nothing to factor into a `type` alias.
 #[allow(clippy::type_complexity)]

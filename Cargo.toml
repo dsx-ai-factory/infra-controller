@@ -23,11 +23,11 @@ edition = "2024"
 license = "Apache-2.0"
 license-file = "LICENSE"
 authors = ["NVIDIA Carbide Engineering <carbide-dev@exchange.nvidia.com>"]
-repository = "https://github.com/NVIDIA/infra-controller"
+repository = "https://github.com/dsx-ai-factory/infra-controller"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.47.3" }
+libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.47.4" }
 librms = { git = "https://github.com/dsx-ai-factory/nv-rms-client.git", tag = "v0.10.1" }
 ansi-to-html = "0.2.2"
 

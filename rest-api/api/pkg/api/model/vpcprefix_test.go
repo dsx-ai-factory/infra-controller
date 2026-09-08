@@ -4,25 +4,28 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	ipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 )
 
 func TestAPIVpcPrefixCreateRequest_Validate(t *testing.T) {
-	prefix7 := VpcPrefixBlockSizeMin - 1
-	prefix24 := 24
-	prefix32 := 32
-	prefix31 := VpcPrefixBlockSizeMax + 1
+	prefixBelowMinimum := vpcprefix.PrefixLengthMinimum - 1
+	validPrefixLength := 24
+	prefixAtMaximum := vpcprefix.PrefixLengthMaximum
+	prefixAboveMaximum := vpcprefix.PrefixLengthMaximum + 1
 	tests := []struct {
 		desc      string
 		obj       APIVpcPrefixCreateRequest
@@ -30,58 +33,58 @@ func TestAPIVpcPrefixCreateRequest_Validate(t *testing.T) {
 	}{
 		{
 			desc:      "error when Name is not provided",
-			obj:       APIVpcPrefixCreateRequest{VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix24},
+			obj:       APIVpcPrefixCreateRequest{VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: validPrefixLength},
 			expectErr: true,
 		},
 		{
 			desc:      "error when Name is no valid string",
-			obj:       APIVpcPrefixCreateRequest{Name: "a", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix24},
+			obj:       APIVpcPrefixCreateRequest{Name: "a", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: validPrefixLength},
 			expectErr: true,
 		},
 		{
 			desc:      "ok when description is empty",
-			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix24},
+			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: validPrefixLength},
 			expectErr: false,
 		},
 		{
 			desc:      "error when VpcID is not valid uuid",
-			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: "baduuid", IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix24},
+			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: "baduuid", IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: validPrefixLength},
 			expectErr: true,
 		},
 		{
 			desc:      "error when IPv4Block is not valid uuid",
-			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr("bad"), PrefixLength: prefix24},
+			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr("bad"), PrefixLength: validPrefixLength},
 			expectErr: true,
 		},
 		{
 			desc:      "error when IPBlockID is not provided",
-			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), PrefixLength: prefix24},
+			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), PrefixLength: validPrefixLength},
 			expectErr: true,
 		},
 		{
 			desc:      "error when prefixLength is not valid < min",
-			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix7},
+			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefixBelowMinimum},
 			expectErr: true,
 		},
 		{
 			desc:      "error when prefixLength is not valid > max",
-			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix31},
+			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefixAboveMaximum},
 			expectErr: true,
 		},
 		{
 			desc:      "ok when all fields are specified",
-			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix24},
+			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: validPrefixLength},
 			expectErr: false,
 		},
 		{
 			desc:      "ok when only IPBlockID is specified",
-			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix24},
+			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: validPrefixLength},
 			expectErr: false,
 		},
 		{
-			desc:      "error when /32 VpcPrefix is created",
-			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefix32},
-			expectErr: true,
+			desc:      "ok at structural maximum",
+			obj:       APIVpcPrefixCreateRequest{Name: "ab", VpcID: uuid.New().String(), IPBlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefixAtMaximum},
+			expectErr: false,
 		},
 		{
 			desc:      "error when prefixLength is not specified",
@@ -96,6 +99,44 @@ func TestAPIVpcPrefixCreateRequest_Validate(t *testing.T) {
 			if err != nil {
 				fmt.Println(err.Error())
 			}
+		})
+	}
+}
+
+// TestAPIVpcPrefixCreateRequest_ValidatePrefixLength verifies the resolved
+// maximum is returned as a field validation error.
+func TestAPIVpcPrefixCreateRequest_ValidatePrefixLength(t *testing.T) {
+	tests := []struct {
+		name          string
+		prefixLength  int
+		maximumLength int
+		expectErr     bool
+	}{
+		{
+			name:          "stateful IPv6 accepts /126",
+			prefixLength:  vpcprefix.PrefixLengthMaximum,
+			maximumLength: vpcprefix.IPv6StatefulPrefixLengthMaximum,
+		},
+		{
+			name:          "SLAAC IPv6 rejects /64",
+			prefixLength:  vpcprefix.IPv6SLAACPrefixLengthMaximum + 1,
+			maximumLength: vpcprefix.IPv6SLAACPrefixLengthMaximum,
+			expectErr:     true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := APIVpcPrefixCreateRequest{PrefixLength: tc.prefixLength}
+			err := req.ValidatePrefixLength(tc.maximumLength)
+			assert.Equal(t, tc.expectErr, err != nil)
+			if !tc.expectErr {
+				return
+			}
+
+			var validationErrors validation.Errors
+			require.True(t, errors.As(err, &validationErrors))
+			assert.Error(t, validationErrors["prefixLength"])
 		})
 	}
 }

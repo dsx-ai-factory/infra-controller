@@ -168,10 +168,11 @@ func (csh CreateSiteHandler) Handle(c echo.Context) error {
 			IsSerialConsoleEnabled:   false,
 			Status:                   cdbm.SiteStatusPending,
 			CreatedBy:                dbUser.ID,
-			// New sites default to the v2 networking posture.
+			// New sites use the default feature posture.
 			Config: cdbm.SiteConfig{
 				NativeNetworking:     true,
 				NetworkSecurityGroup: true,
+				Flow:                 true,
 			},
 		}
 		if apiRequest.Location != nil {

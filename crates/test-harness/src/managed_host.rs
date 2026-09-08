@@ -71,7 +71,7 @@ impl TestManagedHost {
                     }),
                     ..Default::default()
                 }),
-                machine_id: Some(self.host.id),
+                machine_id: Some(self.host.id.into()),
             }))
             .await
             .expect("empty host health report should be inserted");
@@ -114,7 +114,7 @@ impl TestManagedHost {
         assert!(
             db::machine_desired_boot_interface::mark_verified(
                 txn.as_mut(),
-                &self.host.id.try_into().unwrap(),
+                &self.host.id,
                 desired_version,
                 Utc::now(),
             )
@@ -290,7 +290,7 @@ impl<'a> TestManagedHostBuilder<'a> {
             })
             .collect();
         let managed_host = TestManagedHost {
-            host: TestHostMachine::new(host_machine_id(&config).into(), api.clone(), &config),
+            host: TestHostMachine::new(host_machine_id(&config), api.clone(), &config),
             dpus,
             api,
         };

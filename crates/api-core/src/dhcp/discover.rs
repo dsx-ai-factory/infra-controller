@@ -18,6 +18,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ::rpc::forge as rpc;
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
+use carbide_uuid::machine::HostMachineId;
 use db::dhcp_entry::DhcpEntry;
 use db::{self, expected_machine, machine_interface};
 use mac_address::MacAddress;
@@ -340,7 +341,7 @@ async fn handle_overlay_from_dpa(
     db::dpa_interface::update_ip(dpa_if.clone(), false, txn).await?;
 
     Ok(Some(Response::new(rpc::DhcpRecord {
-        machine_id: Some(dpa_if.get_machine_id()),
+        machine_id: Some(dpa_if.get_machine_id().into()),
         machine_interface_id: None,
         segment_id: None,
         subdomain_id: None,
@@ -381,7 +382,7 @@ async fn handle_underlay_from_dpa(
     db::dpa_interface::update_ip(dpa_if.clone(), true, txn).await?;
 
     Ok(Some(Response::new(rpc::DhcpRecord {
-        machine_id: Some(dpa_if.get_machine_id()),
+        machine_id: Some(dpa_if.get_machine_id().into()),
         machine_interface_id: None,
         segment_id: None,
         subdomain_id: None,
@@ -809,7 +810,8 @@ pub(crate) async fn discover_dhcp(
     // Only DPU-backed host admin links are dormant when non-primary. Other non-primary admin
     // interfaces can be valid operator-declared host NICs and must still be allowed to DHCP.
     let is_dpu_backed_host_admin_interface = machine_interface.attached_dpu_machine_id.is_some()
-        && machine_interface.attached_dpu_machine_id != machine_interface.machine_id;
+        && machine_interface.attached_dpu_machine_id.map(Into::into)
+            != machine_interface.machine_id;
     if is_dpu_backed_host_admin_interface
         && !machine_interface.primary_interface
         && segment.config.segment_type == NetworkSegmentType::Admin
@@ -844,7 +846,8 @@ pub(crate) async fn discover_dhcp(
         // the DPUs proxy DHCP on its behalf, so we reject the host's direct
         // DHCP request. Zero-DPU hosts have no such intermediary, so let
         // their DHCP proceed.
-        let dpus = db::machine::find_dpus_by_host_machine_id(&mut txn, &machine_id).await?;
+        let host_machine_id = HostMachineId::try_from(machine_id)?;
+        let dpus = db::machine::find_dpus_by_host_machine_id(&mut txn, &host_machine_id).await?;
         if !dpus.is_empty() {
             return Err(CarbideError::internal(format!(
                 "DHCP request received for instance: {instance_id}. ignoring"

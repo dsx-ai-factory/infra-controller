@@ -29,6 +29,9 @@ Create a tenant VPC:
 Create a tenant VPC with flat virtualization and a chosen ID:
     $ nico-admin-cli --cloud-unsafe-op=my_username vpc create --name tenant-vpc-1 --org-id tenant-org-1 --id ad1f9fd5-8438-4407-b259-72fdb7896d42 --virtualization-type flat
 
+Create an FNN VPC with SLAAC enabled:
+    $ nico-admin-cli --cloud-unsafe-op=admin vpc create --name tenant-vpc-1 --org-id fds34511233a --virtualization-type fnn --slaac-enabled true
+
 ")]
 pub(crate) struct Args {
     #[clap(long, help = "Name to give the new VPC")]
@@ -57,6 +60,14 @@ pub(crate) struct Args {
         help = "Network virtualization type"
     )]
     virtualization_type: forge::VpcVirtualizationType,
+
+    #[clap(
+        long,
+        action = clap::ArgAction::Set,
+        value_name = "SLAAC_ENABLED",
+        help = "Whether Core should allocate an IPv6 /64 for each IPv6-enabled instance interface. Supported only for FNN VPCs; NICo does not configure router advertisements. Enabling requires the connected Core to advertise VPC SLAAC support and fails otherwise. Omit or set false to disable. This setting cannot be changed after creation"
+    )]
+    slaac_enabled: Option<bool>,
 }
 
 impl From<Args> for forge::VpcCreationRequest {
@@ -77,7 +88,41 @@ impl From<Args> for forge::VpcCreationRequest {
             routing_profile_type: None,
             routing_profile_overrides: None,
             power_resource_group: None,
-            slaac_enabled: None,
+            slaac_enabled: args.slaac_enabled,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn vpc_creation_request_preserves_slaac_presence() {
+        value_scenarios!(
+            run = |slaac_enabled: Option<&str>| {
+                let mut argv = vec![
+                    "vpc-create",
+                    "--name",
+                    "tenant-vpc",
+                    "--org-id",
+                    "tenant-org",
+                ];
+                if let Some(slaac_enabled) = slaac_enabled {
+                    argv.extend(["--slaac-enabled", slaac_enabled]);
+                }
+                let request: forge::VpcCreationRequest = Args::try_parse_from(argv)
+                    .expect("valid VPC create arguments")
+                    .into();
+                request.slaac_enabled
+            };
+            "presence" {
+                None => None,
+                Some("false") => Some(false),
+                Some("true") => Some(true),
+            }
+        );
     }
 }

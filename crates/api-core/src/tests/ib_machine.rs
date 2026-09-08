@@ -57,11 +57,11 @@ async fn monitor_ib_status_and_fix_incorrect_pkey_associations(pool: sqlx::PgPoo
 
     for host_machine_id in host_machines.iter().copied() {
         println!("Testing host machine {host_machine_id}");
-        let rpc_machine_id: MachineId = host_machine_id;
+        let rpc_machine_id: MachineId = host_machine_id.into();
 
-        let machine = env.find_machine(rpc_machine_id).await.remove(0);
+        let machine = env.find_machine(&rpc_machine_id).await.remove(0);
 
-        let machine_guids = guids.entry(host_machine_id).or_default();
+        let machine_guids = guids.entry(host_machine_id.into()).or_default();
 
         let discovery_info = machine
             .status
@@ -311,9 +311,9 @@ async fn monitor_ib_status_and_fix_incorrect_pkey_associations(pool: sqlx::PgPoo
     active_lids.clear();
     for host_machine_id in host_machines.iter().copied() {
         println!("Testing host machine {host_machine_id}");
-        let rpc_machine_id: MachineId = host_machine_id;
+        let rpc_machine_id: MachineId = host_machine_id.into();
 
-        let machine = env.find_machine(rpc_machine_id).await.remove(0);
+        let machine = env.find_machine(&rpc_machine_id).await.remove(0);
 
         let discovery_info = machine
             .status

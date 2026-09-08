@@ -10,7 +10,7 @@ For background on how NICo uses Redfish end to end, see [Redfish Workflow](../ar
 
 Hardware support has a higher review bar than a software-only change because maintainers and CI might not have access to the device. Before writing code:
 
-1. Open an issue through the [GitHub issue chooser](https://github.com/NVIDIA/infra-controller/issues/new/choose) and agree on scope with the maintainers.
+1. Open an issue through the [GitHub issue chooser](https://github.com/dsx-ai-factory/infra-controller/issues/new/choose) and agree on scope with the maintainers.
 
    Use a Feature/Enhancement request for a new vendor or platform, and a Bug Report for a regression on supported hardware. Include the NICo version, OEM, model or SKU, DPU generation, NICs, BMC firmware, reproduction steps, expected and observed behavior, affected Redfish endpoints, and any time limit on hardware access.
 
@@ -42,7 +42,7 @@ This checklist is the guide to the rest of this page:
 
 1. Include the Hardware Compatibility List update in the same NICo change as the Site Explorer and BMC Explorer integration.
 
-1. Open **one** NICo pull request using the repository [contribution process](https://github.com/NVIDIA/infra-controller/blob/main/CONTRIBUTING.md) and [pull request template](https://github.com/NVIDIA/infra-controller/blob/main/.github/PULL_REQUEST_TEMPLATE.md). Link the agreed issue and upstream nv-redfish or libredfish pull requests and releases, and ensure every commit is both DCO-signed-off and cryptographically signed.
+1. Open **one** NICo pull request using the repository [contribution process](https://github.com/dsx-ai-factory/infra-controller/blob/main/CONTRIBUTING.md) and [pull request template](https://github.com/dsx-ai-factory/infra-controller/blob/main/.github/PULL_REQUEST_TEMPLATE.md). Link the agreed issue and upstream nv-redfish or libredfish pull requests and releases, and ensure every commit is both DCO-signed-off and cryptographically signed.
 
 Include the following evidence in the NICo pull request:
 
@@ -331,7 +331,7 @@ If all of these commands work correctly, there is a good chance the hardware wil
 
 ## Code Structure Reference
 
-```
+```text
 libredfish/
 ├── src/
 │   ├── lib.rs                    # Redfish trait, BiosProfile types, model_coerce()

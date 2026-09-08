@@ -25,7 +25,7 @@
 //! appear in the Redfish simulator.
 
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use chrono::{DateTime, Utc};
 use ipnetwork::IpNetwork;
 use model::machine::{InstanceState, ManagedHostState};
@@ -53,7 +53,7 @@ async fn host_with_moved_primary(
     env: &api_fixtures::TestEnv,
 ) -> Result<
     (
-        MachineId,
+        HostMachineId,
         MachineBootInterfaceTarget,
         MachineBootInterfaceTarget,
     ),
@@ -62,7 +62,7 @@ async fn host_with_moved_primary(
     let host =
         api_fixtures::site_explorer::new_host(env, ManagedHostConfig::default().with_dpu_count(2))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id: HostMachineId = host.host_snapshot.id.try_into()?;
 
     let (original_target, promote_id, promote_target) = {
         let mut txn = env.pool.begin().await?;
@@ -90,7 +90,7 @@ async fn host_with_moved_primary(
 
     env.api
         .set_primary_interface(tonic::Request::new(forge::SetPrimaryInterfaceRequest {
-            host_machine_id: Some(host_id),
+            host_machine_id: Some(host_id.into()),
             interface_id: Some(promote_id),
             force_reconcile: false,
             ..Default::default()
@@ -103,7 +103,7 @@ async fn host_with_moved_primary(
 /// Clears any pending machine-controller wakeup for a test host.
 async fn clear_controller_queue(
     pool: &sqlx::PgPool,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
         .bind(machine_id.to_string())
@@ -115,7 +115,7 @@ async fn clear_controller_queue(
 /// Returns the number of pending machine-controller wakeups for a test host.
 async fn controller_queue_count(
     pool: &sqlx::PgPool,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT count(*) FROM machine_state_controller_queued_objects WHERE object_id = $1",
@@ -134,7 +134,7 @@ async fn test_set_dpu_first_persists_managed_host_intent_without_redfish(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = api_fixtures::create_test_env(pool).await;
     let (host_id, original_target, promote_target) = host_with_moved_primary(&env).await?;
-    let before = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let before = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("moving the primary should persist its target");
     assert_eq!(before.value, promote_target);
@@ -159,10 +159,9 @@ async fn test_set_dpu_first_persists_managed_host_intent_without_redfish(
         queued, 1,
         "an unassigned Ready host should be enqueued after commit",
     );
-    let reapplied =
-        db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
-            .await?
-            .expect("the explicit reapply should leave a desired target");
+    let reapplied = db::machine_desired_boot_interface::get(&env.pool, &host_id)
+        .await?
+        .expect("the explicit reapply should leave a desired target");
     assert_eq!(reapplied.value, promote_target);
     assert_ne!(
         reapplied.version, before.version,
@@ -182,7 +181,7 @@ async fn test_set_dpu_first_persists_managed_host_intent_without_redfish(
         actions.is_empty(),
         "changing managed intent should not make request-path Redfish calls",
     );
-    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("the managed request should persist its selected target");
     assert_eq!(desired.value, original_target);
@@ -360,7 +359,7 @@ async fn test_set_dpu_first_does_not_enqueue_an_assigned_host(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = api_fixtures::create_test_env(pool).await;
     let (host_id, _, target) = host_with_moved_primary(&env).await?;
-    let before = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let before = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("moving the primary should persist its target");
 
@@ -394,7 +393,7 @@ async fn test_set_dpu_first_does_not_enqueue_an_assigned_host(
         queued, 0,
         "an assigned host should not be enqueued for boot reconciliation",
     );
-    let after = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let after = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("the assigned host should retain its desired target");
     assert_eq!(after.value, target);
@@ -415,7 +414,7 @@ async fn test_machine_setup_forces_managed_host_reconciliation_without_redfish(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = api_fixtures::create_test_env(pool).await;
     let (host_id, _, promote_target) = host_with_moved_primary(&env).await?;
-    let before = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let before = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("moving the primary should persist its target");
 
@@ -433,7 +432,7 @@ async fn test_machine_setup_forces_managed_host_reconciliation_without_redfish(
         actions.is_empty(),
         "the machine controller, not machine_setup, should perform Redfish work",
     );
-    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("machine_setup should retain its resolved target");
     assert_eq!(desired.value, promote_target);
@@ -492,7 +491,7 @@ async fn test_set_dpu_first_persists_a_zero_dpu_host_target_without_redfish(
     env.run_network_segment_controller_iteration().await;
 
     let host = api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::zero_dpu()).await?;
-    let host_id = host.host_snapshot.id;
+    let host_id: HostMachineId = host.host_snapshot.id.try_into()?;
 
     let inband_target = {
         let mut txn = env.pool.begin().await?;
@@ -509,7 +508,6 @@ async fn test_set_dpu_first_persists_a_zero_dpu_host_target_without_redfish(
         )
         .expect("the HostInband interface should resolve an exact target")
     };
-
     let timepoint = env.redfish_sim.timepoint();
 
     env.api
@@ -525,7 +523,7 @@ async fn test_set_dpu_first_persists_a_zero_dpu_host_target_without_redfish(
         actions.is_empty(),
         "managed zero-DPU hosts should also defer Redfish to the controller",
     );
-    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let desired = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("the zero-DPU request should persist its resolved target");
     assert_eq!(desired.value, inband_target);
@@ -546,7 +544,7 @@ async fn test_boot_interface_candidates_skips_dpu_machines(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(1))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id = HostMachineId::try_from(host.host_snapshot.id)?;
     let dpu_id = host
         .dpu_snapshots
         .first()
@@ -567,7 +565,7 @@ async fn test_boot_interface_candidates_skips_dpu_machines(
         "an unowned endpoint should not resolve boot-interface rows",
     );
     let (has_primary_interface, predicted_is_empty) =
-        summarize_boot_interface_candidates_for_test(txn.as_mut(), Some(host_id))
+        summarize_boot_interface_candidates_for_test(txn.as_mut(), Some(host_id.into()))
             .await?
             .expect("a host machine should resolve its boot-interface candidates");
     assert!(
@@ -626,13 +624,13 @@ async fn test_machine_setup_keeps_unowned_endpoint_redfish_direct(
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(1))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id = HostMachineId::try_from(host.host_snapshot.id)?;
     let bmc_info = &host.host_snapshot.status.bmc_info;
     let bmc_ip = bmc_info.ip.expect("host should have a BMC IP");
     let bmc_interface_id = bmc_info
         .machine_interface_id
         .expect("host should have a BMC interface");
-    let before = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let before = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("site explorer should initialize the host target");
 
@@ -664,7 +662,7 @@ async fn test_machine_setup_keeps_unowned_endpoint_redfish_direct(
             .any(|action| matches!(action, RedfishSimAction::MachineSetup { .. })),
         "an unowned endpoint should retain direct machine_setup behavior",
     );
-    let after = db::machine_desired_boot_interface::get(&env.pool, &host_id.try_into().unwrap())
+    let after = db::machine_desired_boot_interface::get(&env.pool, &host_id)
         .await?
         .expect("the former owner's desired target should remain");
     assert_eq!(after.value, before.value);
@@ -685,7 +683,7 @@ async fn test_managed_host_without_a_resolvable_target_preserves_action_requirem
     let host =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(1))
             .await?;
-    let host_id = host.host_snapshot.id;
+    let host_id: HostMachineId = host.host_snapshot.id.try_into()?;
 
     let mut txn = env.pool.begin().await?;
     sqlx::query("DELETE FROM machine_boot_interfaces WHERE machine_id = $1")
@@ -769,20 +767,19 @@ async fn test_machine_setup_uses_the_bmc_endpoints_actual_owner(
     let caller_supplied =
         api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(1))
             .await?;
-    let actual_id = actual.host_snapshot.id;
-    let caller_supplied_id = caller_supplied.host_snapshot.id;
+    let actual_id: HostMachineId = actual.host_snapshot.id.try_into()?;
+    let caller_supplied_id: HostMachineId = caller_supplied.host_snapshot.id.try_into()?;
     let actual_bmc_ip = actual
         .host_snapshot
         .status
         .bmc_info
         .ip
         .expect("host should have a BMC IP");
-    let actual_before =
-        db::machine_desired_boot_interface::get(&env.pool, &actual_id.try_into().unwrap())
-            .await?
-            .expect("site explorer should initialize the actual owner");
+    let actual_before = db::machine_desired_boot_interface::get(&env.pool, &actual_id)
+        .await?
+        .expect("site explorer should initialize the actual owner");
     let caller_supplied_before =
-        db::machine_desired_boot_interface::get(&env.pool, &caller_supplied_id.try_into().unwrap())
+        db::machine_desired_boot_interface::get(&env.pool, &caller_supplied_id)
             .await?
             .expect("site explorer should initialize the caller-supplied host");
 
@@ -805,17 +802,16 @@ async fn test_machine_setup_uses_the_bmc_endpoints_actual_owner(
             .is_empty(),
         "the actual managed owner should keep the request declarative",
     );
-    let actual_after =
-        db::machine_desired_boot_interface::get(&env.pool, &actual_id.try_into().unwrap())
-            .await?
-            .expect("the actual owner should retain desired state");
+    let actual_after = db::machine_desired_boot_interface::get(&env.pool, &actual_id)
+        .await?
+        .expect("the actual owner should retain desired state");
     assert_eq!(actual_after.value, actual_before.value);
     assert_ne!(
         actual_after.version, actual_before.version,
         "the actual owner should receive the forced generation",
     );
     let caller_supplied_after =
-        db::machine_desired_boot_interface::get(&env.pool, &caller_supplied_id.try_into().unwrap())
+        db::machine_desired_boot_interface::get(&env.pool, &caller_supplied_id)
             .await?
             .expect("the caller-supplied host should retain desired state");
     assert_eq!(caller_supplied_after.value, caller_supplied_before.value);
@@ -867,6 +863,7 @@ async fn test_set_dpu_first_persists_predicted_host_intent_without_redfish(
         .expect("the prediction always supplies a MAC");
         (predicted.machine_id, target)
     };
+    let machine_id = HostMachineId::try_from(machine_id)?;
 
     let timepoint = env.redfish_sim.timepoint();
 
@@ -883,16 +880,15 @@ async fn test_set_dpu_first_persists_predicted_host_intent_without_redfish(
         actions.is_empty(),
         "a predicted host should defer Redfish work to the machine controller",
     );
-    let desired =
-        db::machine_desired_boot_interface::get(&env.pool, &machine_id.try_into().unwrap())
-            .await?
-            .expect("the predicted host should retain its resolved target");
+    let desired = db::machine_desired_boot_interface::get(&env.pool, &machine_id)
+        .await?
+        .expect("the predicted host should retain its resolved target");
     assert_eq!(desired.value, predicted_target);
     let report = env
         .api
         .get_machine_boot_interfaces(tonic::Request::new(
             forge::GetMachineBootInterfacesRequest {
-                machine_id: Some(machine_id),
+                machine_id: Some(machine_id.into()),
             },
         ))
         .await?

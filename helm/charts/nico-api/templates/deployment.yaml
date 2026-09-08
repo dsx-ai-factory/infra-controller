@@ -104,7 +104,26 @@ spec:
               add:
                 - SYS_PTRACE
           command:
-            {{- toYaml .Values.command | nindent 12 }}
+            - /bin/sh
+            - -c
+            - |
+              {{- /* Native Kubernetes ulimits support: https://github.com/kubernetes/kubernetes/pull/137023 */ -}}
+              {{- $fdLimit := 65536 }}
+              {{- if not (kindIs "invalid" .Values.fileDescriptorLimit) }}
+              {{- $fdLimit = .Values.fileDescriptorLimit | int }}
+              {{- end }}
+              {{- if le $fdLimit 0 }}
+              {{- fail "fileDescriptorLimit must be a positive integer" }}
+              {{- end }}
+              FD_LIMIT={{ $fdLimit }}
+              FD_REQUESTED="$FD_LIMIT"
+              FD_HARD="$(ulimit -Hn)"
+              if [ "$FD_HARD" != "unlimited" ] && [ "$FD_LIMIT" -gt "$FD_HARD" ]; then
+                echo "fileDescriptorLimit ${FD_LIMIT} exceeds the hard limit ${FD_HARD}; clamping" >&2
+                FD_LIMIT="$FD_HARD"
+              fi
+              ulimit -Sn "$FD_LIMIT" || { echo "ulimit -Sn ${FD_LIMIT} failed (requested ${FD_REQUESTED}, hard limit ${FD_HARD})" >&2; exit 1; }
+              {{ .Values.command | nindent 14 }}
           env:
             - name: VAULT_ROLE_ID
               valueFrom:

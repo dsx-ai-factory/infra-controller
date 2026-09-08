@@ -38,7 +38,8 @@ use crate::tests::common::api_fixtures::instance::{
 };
 use crate::tests::common::api_fixtures::test_managed_host::TestManagedHost;
 use crate::tests::common::api_fixtures::{
-    create_test_env, populate_network_security_groups, site_explorer,
+    TestEnvOverrides, create_test_env, create_test_env_with_overrides, get_config,
+    populate_network_security_groups, site_explorer,
 };
 use crate::tests::common::rpc_builder::VpcCreationRequest;
 
@@ -486,6 +487,140 @@ async fn test_network_security_group_create(
 
     //Verify the metadata
     assert_eq!(network_security_group.metadata, metadata);
+
+    Ok(())
+}
+
+/// Verifies disabled site support rejects new stateful intent without mutating persistence.
+///
+/// This prevents accepted NSG state from promising statefulness the site cannot provide.
+#[crate::sqlx_test]
+async fn test_network_security_group_stateful_egress_requires_site_support(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config.network_security_group.stateful_acls_enabled = false;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+
+    let tenant_organization_id = "stateful_nsg_tenant";
+    let rejected_id = "08b4c3fa-bf88-4a61-b435-a2f398545652";
+    let stateless_id = "c34d8b63-2189-4bda-9340-266bf762442d";
+    let metadata = Some(rpc::forge::Metadata {
+        name: "stateful NSG gate".to_string(),
+        description: String::new(),
+        labels: vec![],
+    });
+
+    // Create the tenant required by the public NSG API.
+    env.api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: tenant_organization_id.to_string(),
+            routing_profile_type: None,
+            metadata: Some(rpc::forge::Metadata {
+                name: tenant_organization_id.to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+        }))
+        .await
+        .expect("tenant creation should succeed");
+
+    // Reject a stateful create before it can persist an unusable group.
+    let error = env
+        .api
+        .create_network_security_group(tonic::Request::new(
+            rpc::forge::CreateNetworkSecurityGroupRequest {
+                id: Some(rejected_id.to_string()),
+                tenant_organization_id: tenant_organization_id.to_string(),
+                metadata: metadata.clone(),
+                network_security_group_attributes: Some(
+                    rpc::forge::NetworkSecurityGroupAttributes {
+                        stateful_egress: true,
+                        rules: vec![],
+                    },
+                ),
+            },
+        ))
+        .await
+        .expect_err("stateful creation should require site support");
+    assert_eq!(error.code(), Code::InvalidArgument);
+
+    // Reload through the public API to prove the rejected create left no record.
+    let rejected_groups = env
+        .api
+        .find_network_security_groups_by_ids(tonic::Request::new(
+            rpc::forge::FindNetworkSecurityGroupsByIdsRequest {
+                network_security_group_ids: vec![rejected_id.to_string()],
+                tenant_organization_id: Some(tenant_organization_id.to_string()),
+            },
+        ))
+        .await?
+        .into_inner()
+        .network_security_groups;
+    assert!(rejected_groups.is_empty());
+
+    // Stateless NSGs remain valid while site-level stateful ACLs are disabled.
+    let stateless_network_security_group = env
+        .api
+        .create_network_security_group(tonic::Request::new(
+            rpc::forge::CreateNetworkSecurityGroupRequest {
+                id: Some(stateless_id.to_string()),
+                tenant_organization_id: tenant_organization_id.to_string(),
+                metadata: metadata.clone(),
+                network_security_group_attributes: Some(
+                    rpc::forge::NetworkSecurityGroupAttributes {
+                        stateful_egress: false,
+                        rules: vec![],
+                    },
+                ),
+            },
+        ))
+        .await?
+        .into_inner()
+        .network_security_group
+        .expect("create response should contain the NSG");
+    assert!(
+        !stateless_network_security_group
+            .attributes
+            .as_ref()
+            .expect("created NSG should contain attributes")
+            .stateful_egress
+    );
+
+    // Reject the unsupported false-to-true transition.
+    let error = env
+        .api
+        .update_network_security_group(tonic::Request::new(
+            rpc::forge::UpdateNetworkSecurityGroupRequest {
+                id: stateless_id.to_string(),
+                tenant_organization_id: tenant_organization_id.to_string(),
+                metadata,
+                network_security_group_attributes: Some(
+                    rpc::forge::NetworkSecurityGroupAttributes {
+                        stateful_egress: true,
+                        rules: vec![],
+                    },
+                ),
+                if_version_match: Some(stateless_network_security_group.version.clone()),
+            },
+        ))
+        .await
+        .expect_err("enabling stateful egress should require site support");
+    assert_eq!(error.code(), Code::InvalidArgument);
+
+    // Reload the NSG to prove the rejected update changed neither data nor version.
+    let persisted_groups = env
+        .api
+        .find_network_security_groups_by_ids(tonic::Request::new(
+            rpc::forge::FindNetworkSecurityGroupsByIdsRequest {
+                network_security_group_ids: vec![stateless_id.to_string()],
+                tenant_organization_id: Some(tenant_organization_id.to_string()),
+            },
+        ))
+        .await?
+        .into_inner()
+        .network_security_groups;
+    assert_eq!(persisted_groups, vec![stateless_network_security_group]);
 
     Ok(())
 }

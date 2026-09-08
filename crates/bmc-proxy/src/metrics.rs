@@ -288,7 +288,7 @@ mod tests {
     use std::time::Duration;
 
     use carbide_instrument::emit;
-    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values, value_scenarios};
     use opentelemetry::StringValue;
     use tokio::time::timeout;
@@ -741,9 +741,10 @@ mod tests {
             "carbide_bmc_proxy_upstream_request_duration_milliseconds",
             &[("method", "patch"), ("status", "http5xx")],
         );
-        assert!(
-            (sum - 2000.0).abs() < 1e-9,
-            "1500ms + 500ms record as milliseconds, got {sum}"
+        assert_eq!(
+            sum,
+            ApproxHistogramSum(2000.0),
+            "1500ms + 500ms record as milliseconds"
         );
         assert_eq!(
             metrics.histogram_count_delta(

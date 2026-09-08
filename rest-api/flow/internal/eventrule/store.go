@@ -80,16 +80,16 @@ type ExecutionClaimRequest struct {
 // Validate checks the owner, batch limit, claim duration, and attempt bound.
 func (r ExecutionClaimRequest) Validate() error {
 	if err := ValidateExecutionClaimOwner(r.Owner); err != nil {
-		return err
+		return invalidExecutionInputErrorf("%w", err)
 	}
 	if r.Limit <= 0 {
-		return fmt.Errorf("execution claim limit must be positive")
+		return invalidExecutionInputErrorf("execution claim limit must be positive")
 	}
 	if r.ClaimDuration <= 0 {
-		return fmt.Errorf("execution claim duration must be positive")
+		return invalidExecutionInputErrorf("execution claim duration must be positive")
 	}
 	if r.MaxAttempts <= 0 {
-		return fmt.Errorf("execution claim max attempts must be positive")
+		return invalidExecutionInputErrorf("execution claim max attempts must be positive")
 	}
 
 	return nil
@@ -137,14 +137,33 @@ func (c ClaimedExecution) Validate() error {
 // RuleFilter limits rules returned by a store.
 type RuleFilter struct {
 	EventType *Type
-	Origin    *RuleOrigin
 	Enabled   *bool
 }
 
-// IncludesOrigin reports whether the filter permits rules from origin. A nil
-// origin filter permits every origin.
-func (f RuleFilter) IncludesOrigin(origin RuleOrigin) bool {
-	return f.Origin == nil || *f.Origin == origin
+// RuleListRequest applies filters before selecting one deterministic page.
+type RuleListRequest struct {
+	Filter RuleFilter
+	Offset int
+	Limit  int
+}
+
+// Validate checks the offset-pagination contract.
+func (r RuleListRequest) Validate() error {
+	if r.Offset < 0 {
+		return fmt.Errorf("event rule list offset must not be negative")
+	}
+	if r.Limit <= 0 {
+		return fmt.Errorf("event rule list limit must be positive")
+	}
+
+	return nil
+}
+
+// RuleListPage contains one page and the total number of matching rules before
+// pagination.
+type RuleListPage struct {
+	Rules []*Rule
+	Total int
 }
 
 // Matches reports whether a rule satisfies every configured filter field.
@@ -154,9 +173,6 @@ func (f RuleFilter) Matches(rule *Rule) bool {
 	}
 
 	if f.EventType != nil && rule.EventType != *f.EventType {
-		return false
-	}
-	if !f.IncludesOrigin(rule.Origin) {
 		return false
 	}
 	if f.Enabled != nil && rule.Enabled != *f.Enabled {
@@ -169,7 +185,7 @@ func (f RuleFilter) Matches(rule *Rule) bool {
 // RuleReader is the common read capability for built-in and persisted rules.
 type RuleReader interface {
 	GetByID(context.Context, uuid.UUID) (*Rule, error)
-	List(context.Context, RuleFilter) ([]*Rule, error)
+	List(context.Context, RuleListRequest) (RuleListPage, error)
 }
 
 // BuiltInRuleReader adds unique event-type lookup for built-in rules.
@@ -192,14 +208,17 @@ type RuleStore interface {
 	// Delete atomically deletes a persisted rule and all of its bindings.
 	// Implementations own the transaction that enforces this invariant.
 	Delete(context.Context, uuid.UUID) error
+	// SetEnabled atomically applies the desired state. Repeating the existing
+	// state succeeds without changing UpdatedAt.
 	SetEnabled(context.Context, uuid.UUID, bool) error
 }
 
 // BindingStore manages persisted rule bindings and scope lookup.
 type BindingStore interface {
 	Bind(context.Context, Binding) error
-	// Unbind returns ErrRuleNotFound when the binding ID does not exist.
-	Unbind(context.Context, uuid.UUID) error
+	// Unbind atomically removes the binding for an event type and scope. It
+	// returns ErrBindingNotFound when that resolution slot has no binding.
+	Unbind(context.Context, Type, Scope) error
 	// GetForScope returns the binding for an event type and scope. When no
 	// binding exists, implementations must return (nil, nil).
 	GetForScope(context.Context, Type, Scope) (*Binding, error)

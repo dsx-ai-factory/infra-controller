@@ -60,7 +60,7 @@ async fn test_health_of_nonexisting_machine(pool: sqlx::PgPool) {
 
     assert!(
         env.test_harness
-            .find_machine(host_machine_id)
+            .find_machine(host_machine_id.into())
             .await
             .is_empty()
     );

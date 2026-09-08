@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -512,6 +513,7 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 		UserData                       *string
 		Interfaces                     []APIInterfaceCreateOrUpdateRequest
 		InfiniBandInterfaces           []APIInfiniBandInterfaceCreateOrUpdateRequest
+		SpectrumXAttachments           []APISpectrumXAttachmentCreateOrUpdateRequest
 		DpuExtensionServiceDeployments []APIDpuExtensionServiceDeploymentRequest
 		NVLinkInterfaces               []APINVLinkInterfaceCreateOrUpdateRequest
 		Labels                         map[string]string
@@ -1114,6 +1116,89 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 			wantErr:          true,
 			wantErrorMessage: "deviceInstance: deviceInstance must be between 0 and 3",
 		},
+		{
+			name: "test valid Instance with SpectrumX attachment create request",
+			fields: fields{
+				Name:              "test-name",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    uuid.NewString(),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{
+						SubnetID: cutil.GetPtr(uuid.NewString()),
+					},
+				},
+				SpectrumXAttachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
+					{
+						SpectrumXPartitionID: uuid.NewString(),
+						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+						DeviceInstance:       cutil.GetPtr(0),
+						AttachmentType:       SpectrumXAttachmentTypePhysical,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "test valid Instance create request with userData at max length",
+			fields: fields{
+				Name:              "test-name",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    uuid.NewString(),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				UserData:          cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes)),
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{
+						SubnetID: cutil.GetPtr(uuid.NewString()),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "test Instance create request failed, invalid SpectrumX attachment type",
+			fields: fields{
+				Name:              "test-name",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    uuid.NewString(),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{
+						SubnetID: cutil.GetPtr(uuid.NewString()),
+					},
+				},
+				SpectrumXAttachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
+					{
+						SpectrumXPartitionID: uuid.NewString(),
+						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+						DeviceInstance:       cutil.GetPtr(0),
+						AttachmentType:       "Bogus",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "test invalid Instance create request with userData exceeding max length",
+			fields: fields{
+				Name:              "test-name",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    uuid.NewString(),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				UserData:          cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1)),
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{
+						SubnetID: cutil.GetPtr(uuid.NewString()),
+					},
+				},
+			},
+			wantErr:          true,
+			wantErrorMessage: "userData: " + validationErrorUserDataLength,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1129,6 +1214,7 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 				UserData:                       tt.fields.UserData,
 				Interfaces:                     tt.fields.Interfaces,
 				InfiniBandInterfaces:           tt.fields.InfiniBandInterfaces,
+				SpectrumXAttachments:           tt.fields.SpectrumXAttachments,
 				DpuExtensionServiceDeployments: tt.fields.DpuExtensionServiceDeployments,
 				NVLinkInterfaces:               tt.fields.NVLinkInterfaces,
 				Labels:                         tt.fields.Labels,
@@ -1241,6 +1327,67 @@ func TestAPIBatchInstanceCreateRequest_Validate(t *testing.T) {
 			},
 			wantErr:          true,
 			wantErrorMessage: "batch instance create does not support `ipAddress` on interfaces",
+		},
+		{
+			name: "succeeds with SpectrumX attachment create request",
+			req: APIBatchInstanceCreateRequest{
+				NamePrefix:     "test-batch",
+				Count:          2,
+				TenantID:       uuid.NewString(),
+				InstanceTypeID: uuid.NewString(),
+				VpcID:          uuid.NewString(),
+				IpxeScript:     cutil.GetPtr("test ipxe"),
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{SubnetID: cutil.GetPtr(uuid.NewString())},
+				},
+				SpectrumXAttachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
+					{
+						SpectrumXPartitionID: uuid.NewString(),
+						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+						DeviceInstance:       cutil.GetPtr(0),
+						AttachmentType:       SpectrumXAttachmentTypePhysical,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "fails with invalid SpectrumX attachment type",
+			req: APIBatchInstanceCreateRequest{
+				NamePrefix:     "test-batch",
+				Count:          2,
+				TenantID:       uuid.NewString(),
+				InstanceTypeID: uuid.NewString(),
+				VpcID:          uuid.NewString(),
+				IpxeScript:     cutil.GetPtr("test ipxe"),
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{SubnetID: cutil.GetPtr(uuid.NewString())},
+				},
+				SpectrumXAttachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
+					{
+						SpectrumXPartitionID: uuid.NewString(),
+						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+						DeviceInstance:       cutil.GetPtr(0),
+						AttachmentType:       "Bogus",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "fails with userData exceeding max length",
+			req: APIBatchInstanceCreateRequest{
+				NamePrefix:     "test-batch",
+				Count:          2,
+				TenantID:       uuid.NewString(),
+				InstanceTypeID: uuid.NewString(),
+				VpcID:          uuid.NewString(),
+				IpxeScript:     cutil.GetPtr("test ipxe"),
+				UserData:       cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1)),
+				Interfaces:     []APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(uuid.NewString())}},
+			},
+			wantErr:          true,
+			wantErrorMessage: "userData: " + validationErrorUserDataLength,
 		},
 	}
 
@@ -1571,6 +1718,32 @@ phone_home:
 			os:      osNoOverride,
 			cfg:     cfg1,
 			wantErr: false,
+		},
+		{
+			name: "ipxe os selected, os user-data over max length, user-data not specified, should fail",
+			fields: fields{
+				Name:              "test-name",
+				Description:       cutil.GetPtr("Test description"),
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    uuid.NewString(),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				UserData:          nil,
+			},
+			os: &cdbm.OperatingSystem{
+				ID:               uuid.New(),
+				Name:             "ab",
+				IpxeScript:       cutil.GetPtr("original ipxe"),
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+				PhoneHomeEnabled: false,
+				IsActive:         true,
+				Status:           cdbm.OperatingSystemStatusReady,
+				AllowOverride:    true,
+				Type:             cdbm.OperatingSystemTypeIPXE,
+				CreatedBy:        uuid.New(),
+			},
+			cfg:     cfg1,
+			wantErr: true,
 		},
 		{
 			name: "image os selected, iPXE specified, should fail",
@@ -2018,6 +2191,26 @@ phone_home:
 			userDataNegativeSearches: []string{"169.254.169.254"},
 		},
 		{
+			name: "os user-data over max length inherited fails",
+			request: &APIBatchInstanceCreateRequest{
+				NamePrefix:     "worker",
+				Count:          2,
+				TenantID:       uuid.NewString(),
+				InstanceTypeID: uuid.NewString(),
+				VpcID:          uuid.NewString(),
+			},
+			os: &cdbm.OperatingSystem{
+				ID:            uuid.New(),
+				Name:          "ab",
+				Type:          cdbm.OperatingSystemTypeIPXE,
+				IpxeScript:    cutil.GetPtr("original ipxe"),
+				UserData:      cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+				IsActive:      true,
+				AllowOverride: true,
+			},
+			wantErr: true,
+		},
+		{
 			name: "no OS and no iPXE script fails",
 			request: &APIBatchInstanceCreateRequest{
 				NamePrefix:     "worker",
@@ -2072,6 +2265,7 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 		SecondaryVpcIDs          []string
 		Interfaces               []APIInterfaceCreateOrUpdateRequest
 		InfiniBandInterfaces     []APIInfiniBandInterfaceCreateOrUpdateRequest
+		SpectrumXAttachments     []APISpectrumXAttachmentCreateOrUpdateRequest
 		NVLinkInterfaces         []APINVLinkInterfaceCreateOrUpdateRequest
 		SSHKeyGroupIDs           []string
 		NetworkSecurityGroupID   *string
@@ -2258,6 +2452,43 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 			wantErr:           true,
 			wantUpdateRequest: cutil.GetPtr(true),
 		},
+		{
+			name: "test valid Instance update request, SpectrumX attachments",
+			fields: fields{
+				SpectrumXAttachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
+					{
+						SpectrumXPartitionID: uuid.NewString(),
+						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+						DeviceInstance:       cutil.GetPtr(0),
+						AttachmentType:       SpectrumXAttachmentTypeOVN,
+					},
+				},
+			},
+			wantErr:           false,
+			wantUpdateRequest: cutil.GetPtr(true),
+		},
+		{
+			name: "test invalid Instance update request, SpectrumX attachment missing device",
+			fields: fields{
+				SpectrumXAttachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
+					{
+						SpectrumXPartitionID: uuid.NewString(),
+						DeviceInstance:       cutil.GetPtr(0),
+						AttachmentType:       SpectrumXAttachmentTypePhysical,
+					},
+				},
+			},
+			wantErr:           true,
+			wantUpdateRequest: cutil.GetPtr(true),
+		},
+		{
+			name: "test invalid Instance update request, userData exceeding max length",
+			fields: fields{
+				UserData: cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1)),
+			},
+			wantErr:           true,
+			wantUpdateRequest: cutil.GetPtr(true),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2276,6 +2507,7 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 				SecondaryVpcIDs:          tt.fields.SecondaryVpcIDs,
 				Interfaces:               tt.fields.Interfaces,
 				InfiniBandInterfaces:     tt.fields.InfiniBandInterfaces,
+				SpectrumXAttachments:     tt.fields.SpectrumXAttachments,
 				NVLinkInterfaces:         tt.fields.NVLinkInterfaces,
 				SSHKeyGroupIDs:           tt.fields.SSHKeyGroupIDs,
 				NetworkSecurityGroupID:   tt.fields.NetworkSecurityGroupID,
@@ -2609,6 +2841,41 @@ func TestAPIInstanceUpdateRequest_ValidateAndSetOperatingSystemData(t *testing.T
 			os:       osPxe,
 			instance: instanceNoVals,
 			wantErr:  false,
+		},
+		{
+			name: "os nil, instance user-data over max length inherited, expect failure",
+			request: &APIInstanceUpdateRequest{
+				Name:        cutil.GetPtr("test-name"),
+				Description: cutil.GetPtr("Test description"),
+			},
+			cfg: cfg1,
+			os:  nil,
+			instance: &cdbm.Instance{
+				ID:               uuid.New(),
+				IpxeScript:       cutil.GetPtr("#!ipxe"),
+				PhoneHomeEnabled: false,
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+			},
+			wantErr: true,
+		},
+		{
+			// Same request as the case above, but the Instance has a base OS,
+			// which takes the merge branch that leaves the request's user-data
+			// nil. The stored blob still reaches the Site either way.
+			name: "os nonnil, no OS change, instance user-data over max length inherited, expect failure",
+			request: &APIInstanceUpdateRequest{
+				Name:        cutil.GetPtr("test-name"),
+				Description: cutil.GetPtr("Test description"),
+			},
+			cfg: cfg1,
+			os:  osPxe,
+			instance: &cdbm.Instance{
+				ID:               uuid.New(),
+				IpxeScript:       cutil.GetPtr("#!ipxe"),
+				PhoneHomeEnabled: false,
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+			},
+			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
@@ -3428,4 +3695,76 @@ func TestValidateInfiniBandRequestForMachineCapability(t *testing.T) {
 		assert.True(t, match.CountSatisfiable)
 		assert.Equal(t, []int{0}, match.UnsatisfiedRequestIndices)
 	})
+}
+
+func TestValidateSpectrumXAttachments(t *testing.T) {
+	device := "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC"
+	attachment := func(deviceInstance int, attachmentType SpectrumXAttachmentType, virtualFunctionID *int) APISpectrumXAttachmentCreateOrUpdateRequest {
+		return APISpectrumXAttachmentCreateOrUpdateRequest{
+			SpectrumXPartitionID: uuid.NewString(),
+			Device:               device,
+			DeviceInstance:       cutil.GetPtr(deviceInstance),
+			AttachmentType:       attachmentType,
+			VirtualFunctionID:    virtualFunctionID,
+		}
+	}
+	overCap := make([]APISpectrumXAttachmentCreateOrUpdateRequest, 0, MaxSpectrumXAttachmentCount+1)
+	for i := range MaxSpectrumXAttachmentCount + 1 {
+		overCap = append(overCap, attachment(i, SpectrumXAttachmentTypePhysical, nil))
+	}
+
+	tests := []struct {
+		name        string
+		attachments []APISpectrumXAttachmentCreateOrUpdateRequest
+		wantErr     bool
+	}{
+		{
+			name:        "empty list is valid so an update can clear attachments",
+			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{},
+		},
+		{
+			name: "distinct device instances are valid",
+			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
+				attachment(0, SpectrumXAttachmentTypePhysical, nil),
+				attachment(1, SpectrumXAttachmentTypePhysical, nil),
+			},
+		},
+		{
+			name: "duplicate device instance is rejected",
+			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
+				attachment(0, SpectrumXAttachmentTypePhysical, nil),
+				attachment(0, SpectrumXAttachmentTypeOVN, nil),
+			},
+			wantErr: true,
+		},
+		{
+			name: "same device at distinct device instances is valid",
+			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
+				attachment(0, SpectrumXAttachmentTypePhysical, nil),
+				attachment(1, SpectrumXAttachmentTypeOVN, nil),
+			},
+		},
+		{
+			name:        "attachment count above the cap is rejected",
+			attachments: overCap,
+			wantErr:     true,
+		},
+		{
+			name: "per-attachment error propagates",
+			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
+				attachment(0, "Bogus", nil),
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSpectrumXAttachments(tt.attachments)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }

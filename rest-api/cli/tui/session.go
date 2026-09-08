@@ -604,7 +604,7 @@ func (s *Session) fetchIPBlocks(ctx context.Context) ([]NamedItem, error) {
 	return result, nil
 }
 
-func (s *Session) fetchVPCPrefixIPBlocks(ctx context.Context) ([]NamedItem, string, error) {
+func (s *Session) fetchTenantIPBlocks(ctx context.Context) ([]NamedItem, string, error) {
 	tenantID, err := s.getTenantID(ctx)
 	if err != nil {
 		return nil, "", err
@@ -621,7 +621,12 @@ func (s *Session) fetchVPCPrefixIPBlocks(ctx context.Context) ([]NamedItem, stri
 	for i, m := range items {
 		result[i] = NamedItem{
 			Name: str(m, "name"), ID: str(m, "id"), Status: str(m, "status"),
-			Extra: map[string]string{"siteId": str(m, "siteId"), "tenantId": str(m, "tenantId")}, Raw: m,
+			Extra: map[string]string{
+				"siteId":          str(m, "siteId"),
+				"tenantId":        str(m, "tenantId"),
+				"protocolVersion": str(m, "protocolVersion"),
+			},
+			Raw: m,
 		}
 	}
 	return result, tenantID, nil

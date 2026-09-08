@@ -28,6 +28,7 @@ use crate::endpoint::BmcEndpoint;
 #[derive(Clone, Copy)]
 enum CollectorStopReason {
     EndpointRemoved,
+    PowerShelfIdChanged,
     SwitchEndpointNoLongerEligible,
     SwitchDomainChanged,
 }
@@ -36,6 +37,7 @@ impl std::fmt::Display for CollectorStopReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::EndpointRemoved => "endpoint removed",
+            Self::PowerShelfIdChanged => "PowerShelf ID changed",
             Self::SwitchEndpointNoLongerEligible => "switch endpoint is no longer eligible",
             Self::SwitchDomainChanged => "switch NVLink domain changed",
         })
@@ -102,6 +104,59 @@ pub(super) async fn stop_stale_switch_collectors(
 
     // CollectorRemoved unregisters the old Prometheus label set. Wait for that
     // cleanup before replacement collectors register the new domain UUID.
+    join_all(stale_collectors.into_iter().map(Collector::stop)).await;
+}
+
+/// Restarts PowerShelf collectors when discovery reports a different NICo ID.
+///
+/// The endpoint key remains the BMC MAC address when an ID becomes available,
+/// while collectors retain the metadata captured at startup. Restarting them
+/// allows sinks to replace the old series with the updated identity labels.
+pub(super) async fn stop_stale_power_shelf_collectors(
+    ctx: &mut DiscoveryLoopContext,
+    endpoints: &[Arc<BmcEndpoint>],
+) {
+    let mut active_power_shelf_endpoints = HashSet::with_capacity(endpoints.len());
+    let mut changed_endpoints = HashSet::new();
+
+    for endpoint in endpoints {
+        let Some(crate::endpoint::EndpointMetadata::PowerShelf(power_shelf)) =
+            endpoint.metadata.as_ref()
+        else {
+            continue;
+        };
+
+        let key = Cow::Owned(endpoint.key());
+
+        // Collector spawning uses the first endpoint for a duplicate key.
+        if active_power_shelf_endpoints.contains(&key) {
+            continue;
+        }
+
+        if ctx.collectors.observe_power_shelf_id(&key, power_shelf.id) {
+            changed_endpoints.insert(key.clone());
+        }
+
+        active_power_shelf_endpoints.insert(key);
+    }
+
+    ctx.collectors
+        .retain_power_shelf_ids(&active_power_shelf_endpoints);
+
+    let stale_collectors = CollectorKind::ALL
+        .into_iter()
+        .flat_map(|kind| {
+            take_collectors_for_keys(
+                ctx,
+                kind,
+                &changed_endpoints,
+                CollectorStopReason::PowerShelfIdChanged,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // CollectorRemoved unregisters the old Prometheus label set before the
+    // discovery loop starts replacements with the updated PowerShelf ID.
     join_all(stale_collectors.into_iter().map(Collector::stop)).await;
 }
 
@@ -221,13 +276,16 @@ pub(super) fn stop_ineligible_nmxc_collectors(
 #[cfg(test)]
 mod tests {
 
+    use std::str::FromStr;
     use std::sync::Arc;
+
+    use carbide_uuid::power_shelf::PowerShelfId;
 
     use super::*;
     use crate::collectors::Collector;
     use crate::config::Config;
     use crate::endpoint::test_support::{mac, test_endpoint};
-    use crate::endpoint::{EndpointMetadata, SwitchData, SwitchEndpointRole};
+    use crate::endpoint::{EndpointMetadata, PowerShelfData, SwitchData, SwitchEndpointRole};
     use crate::limiter::{NoopLimiter, RateLimiter};
     use crate::metrics::MetricsManager;
 
@@ -333,6 +391,52 @@ mod tests {
         );
         stop_stale_switch_collectors(&mut ctx, &[endpoint]).await;
         assert!(ctx.collectors.contains(CollectorKind::NvueRest, &key));
+    }
+
+    #[tokio::test]
+    async fn power_shelf_id_change_restarts_collectors_for_same_endpoint_key() {
+        let mut ctx = context("power_shelf_id_change_restarts_collectors");
+        let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+        endpoint.metadata = Some(EndpointMetadata::PowerShelf(PowerShelfData {
+            id: None,
+            serial: None,
+        }));
+        let key = endpoint.key();
+        let mut endpoint = Arc::new(endpoint);
+
+        ctx.collectors.insert(
+            CollectorKind::Sensor,
+            Cow::Owned(key.clone()),
+            noop_collector(),
+        );
+        stop_stale_power_shelf_collectors(&mut ctx, std::slice::from_ref(&endpoint)).await;
+        assert!(ctx.collectors.contains(CollectorKind::Sensor, &key));
+
+        let expected_id =
+            PowerShelfId::from_str("ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg")
+                .expect("valid PowerShelf ID");
+        let Some(EndpointMetadata::PowerShelf(power_shelf)) =
+            Arc::make_mut(&mut endpoint).metadata.as_mut()
+        else {
+            panic!("test endpoint should contain PowerShelf metadata");
+        };
+        power_shelf.id = Some(expected_id);
+
+        stop_stale_power_shelf_collectors(&mut ctx, std::slice::from_ref(&endpoint)).await;
+
+        assert!(!ctx.collectors.contains(CollectorKind::Sensor, &key));
+
+        let updated_context =
+            crate::sink::EventContext::from_endpoint(&endpoint, "sensor_collector");
+        assert_eq!(updated_context.power_shelf_id(), Some(expected_id));
+
+        ctx.collectors.insert(
+            CollectorKind::Sensor,
+            Cow::Owned(key.clone()),
+            noop_collector(),
+        );
+        stop_stale_power_shelf_collectors(&mut ctx, &[endpoint]).await;
+        assert!(ctx.collectors.contains(CollectorKind::Sensor, &key));
     }
 
     #[tokio::test]

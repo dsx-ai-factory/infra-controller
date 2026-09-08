@@ -21,7 +21,7 @@ FROM rust:1.97.1-bookworm
 RUN dpkg --add-architecture arm64 && \
     apt-get update && \
     apt-get upgrade -y && \
-    apt-get -o Dpkg::Options::="--force-overwrite" install --assume-yes unzip libudev-dev:arm64 libssl-dev:arm64 libtss2-dev:arm64 g++-aarch64-linux-gnu libc6-dev-arm64-cross libclang-dev cmake
+    apt-get -o Dpkg::Options::="--force-overwrite" install --assume-yes unzip libudev-dev:arm64 libssl-dev:arm64 libtss2-dev:arm64 g++-aarch64-linux-gnu libc6-dev-arm64-cross libclang-dev cmake mold
 
 # protoc must match the image userspace (FROM rust:… resolves to host arch by default),
 # not the Rust target (aarch64); see prost-build protoc invocation.
@@ -40,5 +40,16 @@ ENV PATH="/protobuf/bin:${PATH}"
 
 RUN rustup target add aarch64-unknown-linux-gnu
 
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ PKG_CONFIG_PATH=/lib/aarch64-linux-gnu/pkgconfig PKG_CONFIG_SYSROOT_DIR=/lib/aarch64-linux-gnu
+# Keep the cross-GCC driver so it supplies the ARM64 sysroot, but make mold an
+# invariant of that driver rather than relying on a mounted checkout's Cargo
+# configuration.
+RUN printf '#!/bin/sh\nexec aarch64-linux-gnu-gcc -fuse-ld=mold "$@"\n' \
+      >/usr/local/bin/aarch64-linux-gnu-gcc-mold && \
+    chmod 0755 /usr/local/bin/aarch64-linux-gnu-gcc-mold && \
+    printf 'int main(void) { return 0; }\n' | \
+      aarch64-linux-gnu-gcc-mold -x c - -o /tmp/mold-smoke && \
+    readelf -p .comment /tmp/mold-smoke | grep -q mold && \
+    rm /tmp/mold-smoke
+
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc-mold CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ PKG_CONFIG_PATH=/lib/aarch64-linux-gnu/pkgconfig PKG_CONFIG_SYSROOT_DIR=/lib/aarch64-linux-gnu
 WORKDIR ./carbide

@@ -1103,7 +1103,7 @@ The NICo REST stack (separate helm release named `nico-rest`, in the
 `nico-rest` namespace) sits on top of NICo Core and provides the public
 REST API, workflow orchestration, optional Keycloak IdP, and the
 per-site agent. Its source lives in the
-[`rest-api/`](https://github.com/NVIDIA/infra-controller/tree/main/rest-api) tree;
+[`rest-api/`](https://github.com/dsx-ai-factory/infra-controller/tree/main/rest-api) tree;
 this guide covers only the *site-side* configuration knobs.
 
 ### nico-rest helm release — `helm-prereqs/values/nico-rest.yaml`
@@ -1145,7 +1145,7 @@ Temporal is deployed by `setup.sh` Phase 7f using the upstream Temporal
 helm chart with mTLS enabled. The mTLS issuer (`nico-rest-ca-issuer`) is
 installed in Phase 7b. Operators usually don't touch Temporal config
 directly; see the temporal subchart values in
-[`rest-api/temporal-helm/temporal/values.yaml`](https://github.com/NVIDIA/infra-controller/tree/main/rest-api/temporal-helm/temporal)
+[`rest-api/temporal-helm/temporal/values.yaml`](https://github.com/dsx-ai-factory/infra-controller/tree/main/rest-api/temporal-helm/temporal)
 if you need to tune retention or task queue counts.
 
 ### Keycloak (dev IdP)

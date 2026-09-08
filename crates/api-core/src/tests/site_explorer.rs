@@ -510,7 +510,7 @@ async fn test_get_machine_position_info(pool: PgPool) -> Result<(), Box<dyn std:
     let (_host_machine_id, dpu_machine_id) =
         common::api_fixtures::create_managed_host(&env).await.into();
 
-    let dpu_machine = env.find_machine(dpu_machine_id).await.remove(0);
+    let dpu_machine = env.find_machine(&dpu_machine_id).await.remove(0);
     let bmc_ip: IpAddr = dpu_machine.bmc_info.as_ref().unwrap().ip().parse().unwrap();
 
     // Get the existing explored endpoint (created by create_managed_host) and update it with position info
@@ -540,7 +540,7 @@ async fn test_get_machine_position_info(pool: PgPool) -> Result<(), Box<dyn std:
     let response = env
         .api
         .get_machine_position_info(tonic::Request::new(rpc::forge::MachinePositionQuery {
-            machine_ids: vec![dpu_machine_id],
+            machine_ids: vec![dpu_machine_id.into()],
         }))
         .await?
         .into_inner();
@@ -548,7 +548,7 @@ async fn test_get_machine_position_info(pool: PgPool) -> Result<(), Box<dyn std:
     // Verify the response
     assert_eq!(response.machine_position_info.len(), 1);
     let info = &response.machine_position_info[0];
-    assert_eq!(info.machine_id, Some(dpu_machine_id));
+    assert_eq!(info.machine_id, Some(dpu_machine_id.into()));
     assert_eq!(info.physical_slot_number, Some(5));
     assert_eq!(info.compute_tray_index, Some(2));
     assert_eq!(info.topology_id, Some(10));
@@ -574,7 +574,7 @@ async fn test_get_machine_position_info_no_endpoint(
     let response = env
         .api
         .get_machine_position_info(tonic::Request::new(rpc::forge::MachinePositionQuery {
-            machine_ids: vec![dpu_machine_id],
+            machine_ids: vec![dpu_machine_id.into()],
         }))
         .await?
         .into_inner();
@@ -582,7 +582,7 @@ async fn test_get_machine_position_info_no_endpoint(
     // Machine should be in the response but with all None position info
     assert_eq!(response.machine_position_info.len(), 1);
     let info = &response.machine_position_info[0];
-    assert_eq!(info.machine_id, Some(dpu_machine_id));
+    assert_eq!(info.machine_id, Some(dpu_machine_id.into()));
     assert_eq!(info.physical_slot_number, None);
     assert_eq!(info.compute_tray_index, None);
     assert_eq!(info.topology_id, None);

@@ -154,7 +154,8 @@ impl Config {
     pub(crate) fn parse(s: &str) -> Result<Config, ConfigError> {
         Figment::new()
             .merge(Toml::string(s))
-            .merge(Env::prefixed("CARBIDE_BMC_PROXY_"))
+            .merge(Env::prefixed("CARBIDE_BMC_PROXY_")) // legacy, will be deprecated
+            .merge(Env::prefixed("NICO_BMC_PROXY__").split("__"))
             .extract()
             .map_err(Into::into)
     }

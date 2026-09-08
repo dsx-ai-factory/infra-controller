@@ -264,7 +264,7 @@ async fn reconcile_admin_addresses_allows_non_dpu_primary_admin_interface(
     .await?;
     db::machine_interface::associate_interface_with_machine(
         &active_interface.id,
-        MachineInterfaceAssociation::Machine(mh.id),
+        MachineInterfaceAssociation::Machine(mh.id.into()),
         &mut txn,
     )
     .await?;
@@ -376,7 +376,7 @@ async fn reconcile_admin_addresses_allows_host_inband_primary_with_dormant_dpu_l
     .await?;
     db::machine_interface::associate_interface_with_machine(
         &host_nic.id,
-        MachineInterfaceAssociation::Machine(mh.id),
+        MachineInterfaceAssociation::Machine(mh.id.into()),
         &mut txn,
     )
     .await?;

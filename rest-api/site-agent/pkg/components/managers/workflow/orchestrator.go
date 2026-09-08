@@ -15,7 +15,9 @@ import (
 	zlogadapter "logur.dev/adapter/zerolog"
 	"logur.dev/logur"
 
+	"go.opentelemetry.io/otel"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 
@@ -70,6 +72,15 @@ func workflowOrchestrator() error {
 
 	var clientInterceptors []interceptor.ClientInterceptor
 	var workerInterceptors []interceptor.WorkerInterceptor
+
+	// otelErr, not err: `var err error` is declared further down.
+	otelInterceptor, otelErr := opentelemetry.NewTracingInterceptor(
+		opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
+	if otelErr != nil {
+		return fmt.Errorf("creating Temporal tracing interceptor: %w", otelErr)
+	}
+	clientInterceptors = append(clientInterceptors, otelInterceptor)
+	workerInterceptors = append(workerInterceptors, otelInterceptor)
 
 	// Create logger for temporal using
 	// zero logger

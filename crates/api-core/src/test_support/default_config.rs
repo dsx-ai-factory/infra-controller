@@ -279,6 +279,8 @@ pub fn get() -> CarbideConfig {
             dpu_nic_firmware_update_versions: vec!["24.42.1000".to_string()],
             dpu_enable_secure_boot: true,
             num_of_vfs: crate::cfg::file::DEFAULT_DPU_NUM_OF_VFS,
+            service_vpc_slot_count: 0,
+            additional_managed_sf: 0,
             restart_ovs_on_use_admin_network_change: false,
         },
         host_models: host_firmware_example(),

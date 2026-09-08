@@ -21,7 +21,9 @@ use std::collections::HashMap;
 use std::ops::Deref;
 
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{MachineId, MachineType};
+use carbide_uuid::machine::{
+    HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait, MachineType,
+};
 use carbide_uuid::rack::RackId;
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -32,16 +34,30 @@ use crate::db_read::DbReader;
 use crate::{DatabaseError, queries};
 
 /// Loads a ManagedHost snapshot from the database
-pub async fn load_snapshot<DB>(
+pub async fn load_snapshot<DB, ID>(
     txn: &mut DB,
-    machine_id: &MachineId,
+    machine_id: &ID,
+    options: LoadSnapshotOptions,
+) -> Result<Option<ManagedHostStateSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+    ID: MachineIdSubtypeTrait,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
+    let mut snapshots = load_by_machine_ids(txn, &[*machine_id], options).await?;
+    Ok(snapshots.remove(machine_id))
+}
+
+/// Loads a managed-host snapshot for a host or predicted-host ID.
+pub async fn load_host_snapshot<DB>(
+    txn: &mut DB,
+    machine_id: &HostMachineId,
     options: LoadSnapshotOptions,
 ) -> Result<Option<ManagedHostStateSnapshot>, DatabaseError>
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    let mut snapshots = load_by_machine_ids(txn, &[*machine_id], options).await?;
-    Ok(snapshots.remove(machine_id))
+    load_snapshot(txn, machine_id, options).await
 }
 
 /// Loads all ManagedHosts, including predicted hosts
@@ -74,8 +90,8 @@ pub async fn load_all(
 /// per-host snapshot JSON aggregation. Callers that need to process a very
 /// large fleet without holding every snapshot in memory can page the IDs and
 /// hydrate snapshots in bounded batches via [`load_by_machine_ids`].
-pub async fn load_host_ids(txn: impl DbReader<'_>) -> Result<Vec<MachineId>, DatabaseError> {
-    sqlx::query_scalar::<_, MachineId>("SELECT id FROM machines WHERE NOT starts_with(id, $1)")
+pub async fn load_host_ids(txn: impl DbReader<'_>) -> Result<Vec<HostMachineId>, DatabaseError> {
+    sqlx::query_scalar::<_, HostMachineId>("SELECT id FROM machines WHERE NOT starts_with(id, $1)")
         .bind(MachineType::Dpu.id_prefix())
         .fetch_all(txn)
         .await
@@ -116,19 +132,25 @@ pub async fn find_assigned_hosts_in_rack(
 /// The method works for Host and DPU Machine IDs
 /// When used for DPU Machine IDs, the returned HashMap will contain an entry
 /// that maps from the DPU Machine ID to the ManagedHost snapshot
-pub async fn load_by_machine_ids<DB>(
+pub async fn load_by_machine_ids<DB, ID>(
     txn: &mut DB,
-    requested_machine_ids: &[MachineId],
+    requested_machine_ids: &[ID],
     options: LoadSnapshotOptions,
-) -> Result<HashMap<MachineId, ManagedHostStateSnapshot>, DatabaseError>
+) -> Result<HashMap<ID, ManagedHostStateSnapshot>, DatabaseError>
 where
     for<'db> &'db mut DB: DbReader<'db>,
+    ID: MachineIdSubtypeTrait,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
 {
     // Partition the ID's by whether or not they're DPU's.
-    let (requested_dpu_ids, requested_host_ids): (Vec<MachineId>, Vec<MachineId>) =
-        requested_machine_ids
-            .iter()
-            .partition(|id| id.machine_type().is_dpu());
+    let mut requested_dpu_ids = Vec::new();
+    let mut requested_host_ids = Vec::new();
+    for machine_id in requested_machine_ids {
+        match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Dpu(dpu_machine_id) => requested_dpu_ids.push(dpu_machine_id),
+            HostOrDpuId::Host(host_machine_id) => requested_host_ids.push(*host_machine_id),
+        }
+    }
 
     // Perf optimization: Joining through machine_interfaces to look up by DPU ID is slower by 100x
     // or so. If we're searching for DPU ID's, resolve their host ID's now.
@@ -203,10 +225,10 @@ where
                 host_ids_by_dpu_id.get(&dpu_id).and_then(|host_id| {
                     snapshots_by_host_id
                         .get(host_id)
-                        .map(|snapshot| (dpu_id, snapshot.clone()))
+                        .map(|snapshot| Ok((dpu_id.to_machine_id().try_into()?, snapshot.clone())))
                 })
             })
-            .collect::<Vec<_>>(),
+            .collect::<Result<Vec<_>, DatabaseError>>()?,
         // Then extract the explicitly requested host snapshots. Since we already scanned through
         // requested DPUs, we can move them out of the map
         requested_host_ids
@@ -214,9 +236,9 @@ where
             .filter_map(|host_id| {
                 snapshots_by_host_id
                     .remove(&host_id)
-                    .map(|snapshot| (host_id, snapshot))
+                    .map(|snapshot| Ok((host_id.to_machine_id().try_into()?, snapshot)))
             })
-            .collect::<Vec<_>>(),
+            .collect::<Result<Vec<_>, DatabaseError>>()?,
     ]
     .concat()
     .into_iter()

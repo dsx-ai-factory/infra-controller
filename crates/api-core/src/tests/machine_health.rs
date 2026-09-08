@@ -716,7 +716,7 @@ async fn test_double_insert(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     let _ = env
         .api
         .insert_machine_health_report(Request::new(rpc::forge::InsertMachineHealthReportRequest {
-            machine_id: Some(host_machine_id),
+            machine_id: Some(host_machine_id.into()),
             health_report_entry: Some(rpc::forge::HealthReportEntry {
                 report: Some(health_report::HealthReport::empty("over".to_string()).into()),
                 mode: health_report::HealthReportApplyMode::Replace as i32,
@@ -738,7 +738,7 @@ async fn test_double_insert(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     let _ = env
         .api
         .insert_machine_health_report(Request::new(rpc::forge::InsertMachineHealthReportRequest {
-            machine_id: Some(host_machine_id),
+            machine_id: Some(host_machine_id.into()),
             health_report_entry: Some(rpc::forge::HealthReportEntry {
                 report: Some(merge_hr.clone().into()),
                 mode: health_report::HealthReportApplyMode::Merge as i32,
@@ -784,7 +784,7 @@ async fn test_insert_machine_health_report_retains_in_alert_since(
         env.api
             .insert_machine_health_report(Request::new(
                 rpc::forge::InsertMachineHealthReportRequest {
-                    machine_id: Some(host_machine_id),
+                    machine_id: Some(host_machine_id.into()),
                     health_report_entry: Some(rpc::forge::HealthReportEntry {
                         report: Some(report.into()),
                         mode: HealthReportApplyMode::Merge as i32,

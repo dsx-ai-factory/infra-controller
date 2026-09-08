@@ -4,8 +4,10 @@
 package manager
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
 	"github.com/google/uuid"
@@ -76,18 +78,48 @@ func (r *builtInRegistry) GetByEventType(_ context.Context, eventType eventrule.
 	return &rule, nil
 }
 
-// List returns built-in rules matching the filter.
-func (r *builtInRegistry) List(_ context.Context, filter eventrule.RuleFilter) ([]*eventrule.Rule, error) {
+// supportsEventType reports whether Flow registered a built-in fallback for
+// the event type. Every supported event type must have one built-in rule.
+func (r *builtInRegistry) supportsEventType(eventType eventrule.Type) bool {
+	if r == nil {
+		return false
+	}
+
+	_, ok := r.byEventType[eventType]
+	return ok
+}
+
+// List returns one stable-ID-ordered page of matching built-in rules.
+func (r *builtInRegistry) List(
+	_ context.Context,
+	request eventrule.RuleListRequest,
+) (eventrule.RuleListPage, error) {
+	if err := request.Validate(); err != nil {
+		return eventrule.RuleListPage{}, err
+	}
+
 	rules := make([]*eventrule.Rule, 0, len(r.byID))
 	for _, stored := range r.byID {
-		if !filter.Matches(&stored) {
+		if !request.Filter.Matches(&stored) {
 			continue
 		}
 		rule := stored.Clone()
 		rules = append(rules, &rule)
 	}
+	slices.SortFunc(rules, func(a, b *eventrule.Rule) int {
+		return cmp.Compare(a.ID.String(), b.ID.String())
+	})
 
-	return rules, nil
+	total := len(rules)
+	if request.Offset >= total {
+		return eventrule.RuleListPage{Total: total}, nil
+	}
+
+	end := min(request.Offset+request.Limit, total)
+	return eventrule.RuleListPage{
+		Rules: rules[request.Offset:end],
+		Total: total,
+	}, nil
 }
 
 var _ eventrule.BuiltInRuleReader = (*builtInRegistry)(nil)

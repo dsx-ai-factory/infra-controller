@@ -402,6 +402,17 @@ else
   skip "flow namespace not present — flow disabled or not yet deployed"
 fi
 
+section "RMS (Rack Manager Service)"
+RMS_NS="${RMS_NS:-rack-manager}"
+if kc get ns "${RMS_NS}" &>/dev/null; then
+  _check_deployment "${RMS_NS}" rms-api-server
+  for _S in rms-api-server-certificate rms.nico.nico-pg-cluster.credentials; do
+    _check_secret_exists "${RMS_NS}" "${_S}"
+  done
+else
+  skip "rack-manager namespace not present — RMS not installed (opt-in via --install-rms)"
+fi
+
 section "NICo Jobs"
 _check_job_complete "${NICO_NS}" vault-pki-config
 # Migration job: find by label (name includes a random suffix)

@@ -20,7 +20,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use carbide_rack::rms_client::test_support::RmsSim;
+use carbide_rack::test_support::RmsSim;
 use carbide_site_explorer::MachineCreator;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::network::segment::TestNetworkSegment;
@@ -28,7 +28,7 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
     DpuConfigExt as _, FixtureDefault as _, ManagedHostConfigExt as _,
 };
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use db::ObjectFilter;
 use librms::protos::rack_manager as rms;
@@ -55,7 +55,7 @@ const ROLE_COMPUTE: &str = "compute";
 struct ExploredHostFixture {
     host: ExploredManagedHost,
     host_report: EndpointExplorationReport,
-    dpu_machine_ids: HashMap<u8, MachineId>,
+    dpu_machine_ids: HashMap<u8, DpuMachineId>,
 }
 
 struct Env {
@@ -176,7 +176,7 @@ fn expected_machine(managed_host: &ManagedHostConfig) -> ExpectedMachine {
 async fn assert_no_machines_created(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let machines = db::machine::find(
         pool,
-        ObjectFilter::All,
+        ObjectFilter::<MachineId>::All,
         MachineSearchConfig {
             include_predicted_host: true,
             ..Default::default()
@@ -563,7 +563,7 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_machine_creation
         db::predicted_machine_interface::find_by_mac_address(&mut txn, mock_dpu.oob_mac_address)
             .await?
             .expect("DPU OOB prediction should exist");
-    assert_eq!(prediction.machine_id, dpu_machine_id);
+    assert_eq!(prediction.machine_id, dpu_machine_id.into());
     assert_eq!(
         prediction.expected_network_segment_type,
         model::network_segment::NetworkSegmentType::Underlay
@@ -580,7 +580,7 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_machine_creation
     let [interface] = interfaces.as_slice() else {
         panic!("expected one promoted DPU OOB interface, got {interfaces:#?}");
     };
-    assert_eq!(interface.machine_id, Some(dpu_machine_id));
+    assert_eq!(interface.machine_id, Some(dpu_machine_id.into()));
     assert_eq!(interface.attached_dpu_machine_id, Some(dpu_machine_id));
     assert!(interface.primary_interface);
     assert!(
@@ -605,7 +605,7 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_machine_creation
         }))
         .await?
         .into_inner();
-    assert_eq!(response.machine_id, Some(dpu_machine_id));
+    assert_eq!(response.machine_id, Some(dpu_machine_id.into()));
 
     Ok(())
 }
@@ -644,7 +644,7 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_multi_dpu_machin
         assert_eq!(interfaces.len(), 1);
         assert_eq!(
             interfaces[0].machine_id,
-            Some(fixture.dpu_machine_ids[&dpu_index])
+            Some(fixture.dpu_machine_ids[&dpu_index].into())
         );
         assert_eq!(
             interfaces[0].attached_dpu_machine_id,
@@ -740,7 +740,7 @@ async fn test_machine_creator_creates_managed_host_with_dpf_disabled(
 
     let machines = db::machine::find(
         &env.pool,
-        ObjectFilter::All,
+        ObjectFilter::<MachineId>::All,
         MachineSearchConfig {
             include_predicted_host: true,
             ..Default::default()
@@ -792,7 +792,7 @@ async fn test_machine_creator_creates_managed_host_with_dpf_enabled(
 
     let machines = db::machine::find(
         &env.pool,
-        ObjectFilter::All,
+        ObjectFilter::<MachineId>::All,
         MachineSearchConfig {
             include_predicted_host: true,
             ..Default::default()
@@ -828,7 +828,7 @@ async fn test_machine_creator_rejects_unexpected_host(
 
     let machines = db::machine::find(
         &env.pool,
-        ObjectFilter::All,
+        ObjectFilter::<MachineId>::All,
         MachineSearchConfig {
             include_predicted_host: true,
             ..Default::default()

@@ -156,13 +156,22 @@ func (vp *VpcPeering) ToDeletionRequestProto() *corev1.VpcPeeringDeletionRequest
 }
 
 type VpcPeeringCreateInput struct {
+	VpcPeeringID             *uuid.UUID
 	Vpc1ID                   uuid.UUID
 	Vpc2ID                   uuid.UUID
 	SiteID                   uuid.UUID
 	IsMultiTenant            bool
 	InfrastructureProviderID *uuid.UUID
 	TenantID                 *uuid.UUID
+	Status                   string
 	CreatedByID              uuid.UUID
+}
+
+// VpcPeeringClearInput input parameters for Clear method
+type VpcPeeringClearInput struct {
+	VpcPeeringID uuid.UUID
+	// Deleted clears the soft-delete timestamp (undelete).
+	Deleted bool
 }
 
 type VpcPeeringFilterInput struct {
@@ -177,6 +186,8 @@ type VpcPeeringFilterInput struct {
 	// scopes results to the caller's authorization context.
 	PeerTenantIDs []uuid.UUID
 	Statuses      []string
+	// IncludeDeleted returns soft-deleted rows in addition to active ones.
+	IncludeDeleted bool
 }
 
 func (vp *VpcPeering) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuery) error {
@@ -200,6 +211,8 @@ type VpcPeeringDAO interface {
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*VpcPeering, error)
 	//
 	UpdateStatusByID(ctx context.Context, tx *db.Tx, id uuid.UUID, newStatus string) error
+	//
+	Clear(ctx context.Context, tx *db.Tx, input VpcPeeringClearInput) (*VpcPeering, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 	//
@@ -231,15 +244,25 @@ func (vpsd VpcPeeringSQLDAO) Create(
 		return nil, errors.New("cannot peer a VPC with itself")
 	}
 
+	vpcPeeringID := uuid.New()
+	if input.VpcPeeringID != nil {
+		vpcPeeringID = *input.VpcPeeringID
+	}
+
+	status := input.Status
+	if status == "" {
+		status = VpcPeeringStatusPending
+	}
+
 	vp := &VpcPeering{
-		ID:                       uuid.New(),
+		ID:                       vpcPeeringID,
 		Vpc1ID:                   vpc1ID,
 		Vpc2ID:                   vpc2ID,
 		SiteID:                   input.SiteID,
 		IsMultiTenant:            input.IsMultiTenant,
 		InfrastructureProviderID: input.InfrastructureProviderID,
 		TenantID:                 input.TenantID,
-		Status:                   VpcPeeringStatusPending,
+		Status:                   status,
 		Created:                  db.GetCurTime(),
 		Updated:                  db.GetCurTime(),
 		CreatedBy:                input.CreatedByID,
@@ -267,6 +290,9 @@ func (vpsd VpcPeeringSQLDAO) GetAll(
 
 	vps := []VpcPeering{}
 	query := db.GetIDB(tx, vpsd.dbSession).NewSelect().Model(&vps)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 	query, err := vpsd.setQueryWithFilter(filter, query, vpDAOSpan)
 	if err != nil {
 		return vps, 0, err
@@ -425,6 +451,36 @@ func (vpsd VpcPeeringSQLDAO) UpdateStatusByID(
 		Exec(ctx)
 
 	return err
+}
+
+// Clear clears VpcPeering attributes based on provided arguments
+func (vpsd VpcPeeringSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcPeeringClearInput) (*VpcPeering, error) {
+	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.Clear")
+	if vpDAOSpan != nil {
+		defer vpDAOSpan.End()
+
+		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", input.VpcPeeringID)
+	}
+
+	if input.Deleted {
+		_, err := db.GetIDB(tx, vpsd.dbSession).
+			NewUpdate().
+			Model((*VpcPeering)(nil)).
+			Set("deleted = NULL").
+			Set("updated = ?", db.GetCurTime()).
+			Where("id = ?", input.VpcPeeringID).
+			WhereAllWithDeleted().
+			Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	vpcPeering, err := vpsd.GetByID(ctx, tx, input.VpcPeeringID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return vpcPeering, nil
 }
 
 func (vpsd VpcPeeringSQLDAO) Delete(

@@ -135,6 +135,10 @@ async fn test_tenant(pool: sqlx::PgPool) {
         .unwrap()
         .into_inner();
 
+    assert_eq!(
+        find_tenant.permitted_routing_profile_types,
+        vec!["EXTERNAL"]
+    );
     let tenant = find_tenant.tenant.unwrap();
 
     // This fixture enables the default FNN config, so the tenant should
@@ -338,6 +342,20 @@ async fn test_tenant(pool: sqlx::PgPool) {
 
     assert_eq!(tenant.routing_profile_type.as_deref(), Some("INTERNAL"));
 
+    let find_tenant = env
+        .api
+        .find_tenant(tonic::Request::new(rpc::forge::FindTenantRequest {
+            tenant_organization_id: "Org".to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(
+        find_tenant.permitted_routing_profile_types,
+        vec!["EXTERNAL", "INTERNAL"]
+    );
+
     // Now perform one more good create just to confirm that we can set
     // the routing profile to something other than default
     let tenant_create = env
@@ -359,6 +377,31 @@ async fn test_tenant(pool: sqlx::PgPool) {
 
     assert_eq!(tenant.routing_profile_type.as_deref(), Some("INTERNAL"));
     assert_eq!(tenant.organization_id, "Org2");
+
+    // A profile can disappear from FNN config after it was persisted. Tenant
+    // lookup must remain usable and expose no selectable profiles in that
+    // stale state.
+    sqlx::query("UPDATE tenants SET routing_profile_type = $1 WHERE organization_id = $2")
+        .bind("REMOVED_PROFILE")
+        .bind("Org2")
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    let find_tenant = env
+        .api
+        .find_tenant(tonic::Request::new(rpc::forge::FindTenantRequest {
+            tenant_organization_id: "Org2".to_string(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert!(find_tenant.permitted_routing_profile_types.is_empty());
+    assert_eq!(
+        find_tenant.tenant.unwrap().routing_profile_type.as_deref(),
+        Some("REMOVED_PROFILE")
+    );
 }
 
 #[crate::sqlx_test]
@@ -470,6 +513,7 @@ async fn test_tenant_create_without_fnn(pool: sqlx::PgPool) {
         .unwrap()
         .into_inner();
 
+    assert!(find_tenant.permitted_routing_profile_types.is_empty());
     let tenant = find_tenant.tenant.unwrap();
     assert_eq!(tenant.organization_id, "PreFnnOrg");
     assert_eq!(tenant.routing_profile_type, None);

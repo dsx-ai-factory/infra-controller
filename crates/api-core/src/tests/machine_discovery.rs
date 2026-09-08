@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use carbide_authn::middleware::ConnectionAttributes;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId, StableHostMachineId};
+use carbide_uuid::machine::{HostMachineId, MachineInterfaceId, StableHostMachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use common::api_fixtures::dpu::create_dpu_machine;
 use common::api_fixtures::host::{host_discover_dhcp, host_discover_machine_with_reporter};
@@ -115,7 +115,7 @@ struct ScoutPciSelectionState {
 /// Loads only the primary, address, network, state, queue, and desired boot interface selection fields.
 async fn load_scout_pci_selection_state(
     pool: &sqlx::PgPool,
-    host_machine_id: MachineId,
+    host_machine_id: HostMachineId,
 ) -> Result<ScoutPciSelectionState, Box<dyn std::error::Error>> {
     let state = sqlx::query_as::<_, ScoutPciSelectionState>(
         "SELECT (
@@ -164,7 +164,7 @@ struct ScoutPciInterfaces {
 
 async fn load_scout_pci_interfaces(
     pool: &sqlx::PgPool,
-    host_machine_id: MachineId,
+    host_machine_id: HostMachineId,
 ) -> Result<ScoutPciInterfaces, Box<dyn std::error::Error>> {
     let machine = db::machine::find_one(pool, &host_machine_id, MachineSearchConfig::default())
         .await?
@@ -232,7 +232,7 @@ fn scout_pci_report(host_config: &ManagedHostConfig, winning_mac: MacAddress) ->
 
 async fn set_scout_test_source(
     pool: &sqlx::PgPool,
-    host_machine_id: MachineId,
+    host_machine_id: HostMachineId,
     source: BootInterfaceSelectionSource,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -250,7 +250,7 @@ async fn set_scout_test_source(
 
 async fn clear_scout_test_queue(
     pool: &sqlx::PgPool,
-    host_machine_id: MachineId,
+    host_machine_id: HostMachineId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
         .bind(host_machine_id.to_string())
@@ -262,7 +262,7 @@ async fn clear_scout_test_queue(
 async fn create_scout_test_host(
     env: &common::api_fixtures::TestEnv,
     source: BootInterfaceSelectionSource,
-) -> Result<(ManagedHostConfig, MachineId, ScoutPciInterfaces), Box<dyn std::error::Error>> {
+) -> Result<(ManagedHostConfig, HostMachineId, ScoutPciInterfaces), Box<dyn std::error::Error>> {
     let host_config = env.managed_host_config().with_dpu_count(2);
     let host = create_managed_host_with_config(env, host_config.clone()).await;
     let host_machine_id = host.host().id;
@@ -274,7 +274,7 @@ async fn create_scout_test_host(
 
 async fn submit_scout_pci_report(
     api: &crate::api::Api,
-    host_machine_id: MachineId,
+    host_machine_id: HostMachineId,
     caller_interface_id: MachineInterfaceId,
     hardware_info: HardwareInfo,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
@@ -296,7 +296,7 @@ async fn submit_scout_pci_report(
     ))
     .await;
     let response = response?.into_inner();
-    assert_eq!(response.machine_id, Some(host_machine_id));
+    assert_eq!(response.machine_id, Some(host_machine_id.into()));
     assert_eq!(response.machine_interface_id, Some(caller_interface_id));
 
     Ok(scout_pci_comparisons(&logs, host_machine_id))
@@ -304,7 +304,7 @@ async fn submit_scout_pci_report(
 
 fn scout_pci_comparisons(
     logs: &[carbide_instrument::testing::CapturedLog],
-    host_machine_id: MachineId,
+    host_machine_id: HostMachineId,
 ) -> Vec<String> {
     let host_machine_id = host_machine_id.to_string();
     logs.iter()
@@ -326,7 +326,7 @@ fn scout_pci_comparisons(
 
 async fn run_scout_pci_reconciliation(
     api: &crate::api::Api,
-    host_machine_id: MachineId,
+    host_machine_id: HostMachineId,
     hardware_info: &HardwareInfo,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let host_machine_id = StableHostMachineId::try_from(host_machine_id)?;
@@ -341,12 +341,12 @@ async fn run_scout_pci_reconciliation(
 }
 
 fn scout_test_allocation_request(
-    host_machine_id: MachineId,
+    host_machine_id: HostMachineId,
     segment_id: NetworkSegmentId,
 ) -> rpc::InstanceAllocationRequest {
     rpc::InstanceAllocationRequest {
         instance_id: None,
-        machine_id: Some(host_machine_id),
+        machine_id: Some(host_machine_id.into()),
         instance_type_id: None,
         config: Some(rpc::InstanceConfig {
             tenant: Some(default_tenant_config()),
@@ -378,7 +378,7 @@ async fn allocated_host_for_secure_discovery(
     let managed_host = create_managed_host_with_config(env, host_config).await;
     assert_eq!(
         from_hardware_info(&hardware_info).unwrap(),
-        managed_host.host().id
+        managed_host.host().id.into()
     );
 
     let instance = managed_host
@@ -558,10 +558,10 @@ async fn test_discover_2_managed_hosts(
     let env: common::api_fixtures::TestEnv = create_test_env(pool).await;
     let (host1_id, dpu1_id) = create_managed_host(&env).await.into();
     let (host2_id, dpu2_id) = create_managed_host(&env).await.into();
-    assert!(host1_id.machine_type().is_host());
-    assert!(host2_id.machine_type().is_host());
-    assert!(dpu1_id.machine_type().is_dpu());
-    assert!(dpu2_id.machine_type().is_dpu());
+    assert!(&host1_id.machine_type().is_host());
+    assert!(&host2_id.machine_type().is_host());
+    assert!(&dpu1_id.machine_type().is_dpu());
+    assert!(&dpu2_id.machine_type().is_dpu());
     assert_ne!(host1_id, host2_id);
     assert_ne!(dpu1_id, dpu2_id);
 
@@ -871,7 +871,7 @@ async fn test_secure_discovery_from_instance_address_accepts_same_machine_interf
             .await?
             .into_inner();
 
-        assert_eq!(response.machine_id, Some(managed_host.host().id));
+        assert_eq!(response.machine_id, Some(managed_host.host().id.into()));
         assert_eq!(
             response.machine_interface_id,
             Some(interface_id),
@@ -1075,7 +1075,7 @@ async fn test_secure_discovery_accepts_zero_dpu_host_inband_owner(
         .discover_machine(discovery_request_from(&hardware_info, None, host_ip))
         .await?
         .into_inner();
-    assert_eq!(response.machine_id, Some(managed_host.host().id));
+    assert_eq!(response.machine_id, Some(managed_host.host().id.into()));
     assert_eq!(response.machine_interface_id, Some(expected_interface_id));
 
     Ok(())

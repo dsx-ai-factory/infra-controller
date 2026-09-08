@@ -247,6 +247,9 @@ The route precedence is:
    shared `firmware_global.max_uploads` slot, uploads asynchronously, and polls
    the returned Redfish task.
 
+For the packaged CX7 Scout route on DGX H100, refer to
+[ConnectX-7 firmware configuration](configuration.md#connectx-7-infiniband-firmware).
+
 All successful routes eventually return to component selection. Scout and
 Redfish updates first pass through NICo's activation and inventory-verification
 states; the legacy script path returns directly to inventory checking.

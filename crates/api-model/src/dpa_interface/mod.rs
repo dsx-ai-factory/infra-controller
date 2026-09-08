@@ -22,7 +22,7 @@ use std::net::IpAddr;
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
 use carbide_uuid::dpa_interface::DpaInterfaceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::spx::NULL_SPX_PARTITION_ID;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
@@ -211,7 +211,7 @@ pub fn state_sla(state: &DpaInterfaceControllerState, state_version: &ConfigVers
 #[derive(Clone, Debug)]
 pub struct DpaInterface {
     pub id: DpaInterfaceId,
-    pub machine_id: MachineId,
+    pub machine_id: HostMachineId,
 
     pub mac_address: MacAddress,
     pub pci_name: String,
@@ -261,7 +261,7 @@ pub struct DpaInterface {
 
 #[derive(Clone, Debug)]
 pub struct NewDpaInterface {
-    pub machine_id: MachineId,
+    pub machine_id: HostMachineId,
     pub mac_address: MacAddress,
     pub device_type: String,
     pub pci_name: String,
@@ -280,7 +280,7 @@ impl NewDpaInterface {
     /// what is effectively a (machine_id, mac_address) compound primary key,
     /// it's kind of important to have.
     pub fn from_device_info(
-        machine_id: MachineId,
+        machine_id: HostMachineId,
         base_mac: Option<MacAddress>,
         device_type: String,
         pci_name: String,
@@ -303,7 +303,7 @@ impl DpaInterface {
         self.network_config.use_admin_network.unwrap_or(true)
     }
 
-    pub fn get_machine_id(&self) -> MachineId {
+    pub fn get_machine_id(&self) -> HostMachineId {
         self.machine_id
     }
 
@@ -388,7 +388,7 @@ impl<'r> FromRow<'r, PgRow> for DpaInterface {
 #[derive(Serialize, Deserialize)]
 pub struct DpaInterfaceSnapshotPgJson {
     pub id: DpaInterfaceId,
-    pub machine_id: MachineId,
+    pub machine_id: HostMachineId,
     pub mac_address: MacAddress,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
@@ -467,6 +467,7 @@ mod tests {
 
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases, scenarios, value_scenarios};
+    use carbide_uuid::machine::HostMachineId as MachineId;
 
     use super::*;
 

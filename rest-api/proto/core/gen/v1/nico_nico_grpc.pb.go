@@ -85,6 +85,7 @@ const (
 	Forge_AllocateInstance_FullMethodName                                   = "/forge.Forge/AllocateInstance"
 	Forge_AllocateInstances_FullMethodName                                  = "/forge.Forge/AllocateInstances"
 	Forge_ReleaseInstance_FullMethodName                                    = "/forge.Forge/ReleaseInstance"
+	Forge_ReleaseInstances_FullMethodName                                   = "/forge.Forge/ReleaseInstances"
 	Forge_UpdateInstanceOperatingSystem_FullMethodName                      = "/forge.Forge/UpdateInstanceOperatingSystem"
 	Forge_UpdateInstanceConfig_FullMethodName                               = "/forge.Forge/UpdateInstanceConfig"
 	Forge_FindInstanceIds_FullMethodName                                    = "/forge.Forge/FindInstanceIds"
@@ -347,9 +348,11 @@ const (
 	Forge_MachineValidationTestVerfied_FullMethodName                       = "/forge.Forge/MachineValidationTestVerfied"
 	Forge_MachineValidationTestNextVersion_FullMethodName                   = "/forge.Forge/MachineValidationTestNextVersion"
 	Forge_MachineValidationTestEnableDisableTest_FullMethodName             = "/forge.Forge/MachineValidationTestEnableDisableTest"
+	Forge_MachineValidationTestApproveFullHost_FullMethodName               = "/forge.Forge/MachineValidationTestApproveFullHost"
 	Forge_UpdateMachineValidationRun_FullMethodName                         = "/forge.Forge/UpdateMachineValidationRun"
 	Forge_AdminBmcReset_FullMethodName                                      = "/forge.Forge/AdminBmcReset"
 	Forge_AdminPowerControl_FullMethodName                                  = "/forge.Forge/AdminPowerControl"
+	Forge_AdminGpuReset_FullMethodName                                      = "/forge.Forge/AdminGpuReset"
 	Forge_DisableSecureBoot_FullMethodName                                  = "/forge.Forge/DisableSecureBoot"
 	Forge_Lockdown_FullMethodName                                           = "/forge.Forge/Lockdown"
 	Forge_LockdownStatus_FullMethodName                                     = "/forge.Forge/LockdownStatus"
@@ -613,6 +616,13 @@ type ForgeClient interface {
 	AllocateInstances(ctx context.Context, in *BatchInstanceAllocationRequest, opts ...grpc.CallOption) (*BatchInstanceAllocationResponse, error)
 	// Releases an instance that has been allocated by a tenant
 	ReleaseInstance(ctx context.Context, in *InstanceReleaseRequest, opts ...grpc.CallOption) (*InstanceReleaseResult, error)
+	// Releases multiple instances in a single call. Best-effort per instance --
+	// one instance failing to release (e.g. already released, or blocked by a
+	// health check) does not roll back or block the release of the rest of the
+	// batch. Compare AllocateInstances, which is all-or-nothing: that semantic
+	// does not fit release, where callers need partial progress rather than a
+	// single bad ID aborting an entire large batch.
+	ReleaseInstances(ctx context.Context, in *BatchInstanceReleaseRequest, opts ...grpc.CallOption) (*BatchInstanceReleaseResponse, error)
 	// Updates the network interface configuration for an instance
 	// The update will take effect asynchronously. Users should monitor `Instance.status.network_status.synced`
 	// to determine whether all updates have been applied.
@@ -1076,17 +1086,27 @@ type ForgeClient interface {
 	RemoveMachineValidationExternalConfig(ctx context.Context, in *RemoveMachineValidationExternalConfigRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Machine-Validation test list
 	GetMachineValidationTests(ctx context.Context, in *MachineValidationTestsGetRequest, opts ...grpc.CallOption) (*MachineValidationTestsGetResponse, error)
+	// A request without plugin creates a legacy test. A plugin creates an immutable
+	// revision that starts unverified and disabled; it must be verified before enablement.
 	AddMachineValidationTest(ctx context.Context, in *MachineValidationTestAddRequest, opts ...grpc.CallOption) (*MachineValidationTestAddUpdateResponse, error)
 	UpdateMachineValidationTest(ctx context.Context, in *MachineValidationTestUpdateRequest, opts ...grpc.CallOption) (*MachineValidationTestAddUpdateResponse, error)
+	// Verifies one immutable plugin revision. Verification is required before enablement.
 	MachineValidationTestVerfied(ctx context.Context, in *MachineValidationTestVerfiedRequest, opts ...grpc.CallOption) (*MachineValidationTestVerfiedResponse, error)
 	MachineValidationTestNextVersion(ctx context.Context, in *MachineValidationTestNextVersionRequest, opts ...grpc.CallOption) (*MachineValidationTestNextVersionResponse, error)
+	// Enables or disables a revision. Plugin enablement requires verification and,
+	// for host_access_full, separate approval of the exact revision.
 	MachineValidationTestEnableDisableTest(ctx context.Context, in *MachineValidationTestEnableDisableTestRequest, opts ...grpc.CallOption) (*MachineValidationTestEnableDisableTestResponse, error)
+	// Approves the writable host-root mount for one verified plugin revision.
+	// The request fails unless that exact immutable revision requests host_access_full.
+	MachineValidationTestApproveFullHost(ctx context.Context, in *MachineValidationTestFullHostApprovalRequest, opts ...grpc.CallOption) (*MachineValidationTestFullHostApprovalResponse, error)
 	UpdateMachineValidationRun(ctx context.Context, in *MachineValidationRunRequest, opts ...grpc.CallOption) (*MachineValidationRunResponse, error)
 	// Bmc Endpoint Explorer Actions
 	// Reset a BMC
 	AdminBmcReset(ctx context.Context, in *AdminBmcResetRequest, opts ...grpc.CallOption) (*AdminBmcResetResponse, error)
 	// Admin Power Control
 	AdminPowerControl(ctx context.Context, in *AdminPowerControlRequest, opts ...grpc.CallOption) (*AdminPowerControlResponse, error)
+	// Reset a GPU baseboard (e.g. HGX) via Redfish Chassis.Reset, resetting all GPUs on it; v1 accepts only ForceRestart and rejects all other actions.
+	AdminGpuReset(ctx context.Context, in *AdminGpuResetRequest, opts ...grpc.CallOption) (*AdminGpuResetResponse, error)
 	// Disable Secure Boot
 	DisableSecureBoot(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*DisableSecureBootResponse, error)
 	// Set Lockdown (Enable or Disable)
@@ -2018,6 +2038,16 @@ func (c *forgeClient) ReleaseInstance(ctx context.Context, in *InstanceReleaseRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InstanceReleaseResult)
 	err := c.cc.Invoke(ctx, Forge_ReleaseInstance_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ReleaseInstances(ctx context.Context, in *BatchInstanceReleaseRequest, opts ...grpc.CallOption) (*BatchInstanceReleaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BatchInstanceReleaseResponse)
+	err := c.cc.Invoke(ctx, Forge_ReleaseInstances_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -4647,6 +4677,16 @@ func (c *forgeClient) MachineValidationTestEnableDisableTest(ctx context.Context
 	return out, nil
 }
 
+func (c *forgeClient) MachineValidationTestApproveFullHost(ctx context.Context, in *MachineValidationTestFullHostApprovalRequest, opts ...grpc.CallOption) (*MachineValidationTestFullHostApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MachineValidationTestFullHostApprovalResponse)
+	err := c.cc.Invoke(ctx, Forge_MachineValidationTestApproveFullHost_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) UpdateMachineValidationRun(ctx context.Context, in *MachineValidationRunRequest, opts ...grpc.CallOption) (*MachineValidationRunResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MachineValidationRunResponse)
@@ -4671,6 +4711,16 @@ func (c *forgeClient) AdminPowerControl(ctx context.Context, in *AdminPowerContr
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AdminPowerControlResponse)
 	err := c.cc.Invoke(ctx, Forge_AdminPowerControl_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) AdminGpuReset(ctx context.Context, in *AdminGpuResetRequest, opts ...grpc.CallOption) (*AdminGpuResetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdminGpuResetResponse)
+	err := c.cc.Invoke(ctx, Forge_AdminGpuReset_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6381,6 +6431,13 @@ type ForgeServer interface {
 	AllocateInstances(context.Context, *BatchInstanceAllocationRequest) (*BatchInstanceAllocationResponse, error)
 	// Releases an instance that has been allocated by a tenant
 	ReleaseInstance(context.Context, *InstanceReleaseRequest) (*InstanceReleaseResult, error)
+	// Releases multiple instances in a single call. Best-effort per instance --
+	// one instance failing to release (e.g. already released, or blocked by a
+	// health check) does not roll back or block the release of the rest of the
+	// batch. Compare AllocateInstances, which is all-or-nothing: that semantic
+	// does not fit release, where callers need partial progress rather than a
+	// single bad ID aborting an entire large batch.
+	ReleaseInstances(context.Context, *BatchInstanceReleaseRequest) (*BatchInstanceReleaseResponse, error)
 	// Updates the network interface configuration for an instance
 	// The update will take effect asynchronously. Users should monitor `Instance.status.network_status.synced`
 	// to determine whether all updates have been applied.
@@ -6844,17 +6901,27 @@ type ForgeServer interface {
 	RemoveMachineValidationExternalConfig(context.Context, *RemoveMachineValidationExternalConfigRequest) (*emptypb.Empty, error)
 	// Machine-Validation test list
 	GetMachineValidationTests(context.Context, *MachineValidationTestsGetRequest) (*MachineValidationTestsGetResponse, error)
+	// A request without plugin creates a legacy test. A plugin creates an immutable
+	// revision that starts unverified and disabled; it must be verified before enablement.
 	AddMachineValidationTest(context.Context, *MachineValidationTestAddRequest) (*MachineValidationTestAddUpdateResponse, error)
 	UpdateMachineValidationTest(context.Context, *MachineValidationTestUpdateRequest) (*MachineValidationTestAddUpdateResponse, error)
+	// Verifies one immutable plugin revision. Verification is required before enablement.
 	MachineValidationTestVerfied(context.Context, *MachineValidationTestVerfiedRequest) (*MachineValidationTestVerfiedResponse, error)
 	MachineValidationTestNextVersion(context.Context, *MachineValidationTestNextVersionRequest) (*MachineValidationTestNextVersionResponse, error)
+	// Enables or disables a revision. Plugin enablement requires verification and,
+	// for host_access_full, separate approval of the exact revision.
 	MachineValidationTestEnableDisableTest(context.Context, *MachineValidationTestEnableDisableTestRequest) (*MachineValidationTestEnableDisableTestResponse, error)
+	// Approves the writable host-root mount for one verified plugin revision.
+	// The request fails unless that exact immutable revision requests host_access_full.
+	MachineValidationTestApproveFullHost(context.Context, *MachineValidationTestFullHostApprovalRequest) (*MachineValidationTestFullHostApprovalResponse, error)
 	UpdateMachineValidationRun(context.Context, *MachineValidationRunRequest) (*MachineValidationRunResponse, error)
 	// Bmc Endpoint Explorer Actions
 	// Reset a BMC
 	AdminBmcReset(context.Context, *AdminBmcResetRequest) (*AdminBmcResetResponse, error)
 	// Admin Power Control
 	AdminPowerControl(context.Context, *AdminPowerControlRequest) (*AdminPowerControlResponse, error)
+	// Reset a GPU baseboard (e.g. HGX) via Redfish Chassis.Reset, resetting all GPUs on it; v1 accepts only ForceRestart and rejects all other actions.
+	AdminGpuReset(context.Context, *AdminGpuResetRequest) (*AdminGpuResetResponse, error)
 	// Disable Secure Boot
 	DisableSecureBoot(context.Context, *BmcEndpointRequest) (*DisableSecureBootResponse, error)
 	// Set Lockdown (Enable or Disable)
@@ -7352,6 +7419,9 @@ func (UnimplementedForgeServer) AllocateInstances(context.Context, *BatchInstanc
 }
 func (UnimplementedForgeServer) ReleaseInstance(context.Context, *InstanceReleaseRequest) (*InstanceReleaseResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReleaseInstance not implemented")
+}
+func (UnimplementedForgeServer) ReleaseInstances(context.Context, *BatchInstanceReleaseRequest) (*BatchInstanceReleaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReleaseInstances not implemented")
 }
 func (UnimplementedForgeServer) UpdateInstanceOperatingSystem(context.Context, *InstanceOperatingSystemUpdateRequest) (*Instance, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateInstanceOperatingSystem not implemented")
@@ -8139,6 +8209,9 @@ func (UnimplementedForgeServer) MachineValidationTestNextVersion(context.Context
 func (UnimplementedForgeServer) MachineValidationTestEnableDisableTest(context.Context, *MachineValidationTestEnableDisableTestRequest) (*MachineValidationTestEnableDisableTestResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MachineValidationTestEnableDisableTest not implemented")
 }
+func (UnimplementedForgeServer) MachineValidationTestApproveFullHost(context.Context, *MachineValidationTestFullHostApprovalRequest) (*MachineValidationTestFullHostApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MachineValidationTestApproveFullHost not implemented")
+}
 func (UnimplementedForgeServer) UpdateMachineValidationRun(context.Context, *MachineValidationRunRequest) (*MachineValidationRunResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateMachineValidationRun not implemented")
 }
@@ -8147,6 +8220,9 @@ func (UnimplementedForgeServer) AdminBmcReset(context.Context, *AdminBmcResetReq
 }
 func (UnimplementedForgeServer) AdminPowerControl(context.Context, *AdminPowerControlRequest) (*AdminPowerControlResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AdminPowerControl not implemented")
+}
+func (UnimplementedForgeServer) AdminGpuReset(context.Context, *AdminGpuResetRequest) (*AdminGpuResetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AdminGpuReset not implemented")
 }
 func (UnimplementedForgeServer) DisableSecureBoot(context.Context, *BmcEndpointRequest) (*DisableSecureBootResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DisableSecureBoot not implemented")
@@ -9760,6 +9836,24 @@ func _Forge_ReleaseInstance_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).ReleaseInstance(ctx, req.(*InstanceReleaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ReleaseInstances_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BatchInstanceReleaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReleaseInstances(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReleaseInstances_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReleaseInstances(ctx, req.(*BatchInstanceReleaseRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -14480,6 +14574,24 @@ func _Forge_MachineValidationTestEnableDisableTest_Handler(srv interface{}, ctx 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_MachineValidationTestApproveFullHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MachineValidationTestFullHostApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).MachineValidationTestApproveFullHost(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_MachineValidationTestApproveFullHost_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).MachineValidationTestApproveFullHost(ctx, req.(*MachineValidationTestFullHostApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_UpdateMachineValidationRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MachineValidationRunRequest)
 	if err := dec(in); err != nil {
@@ -14530,6 +14642,24 @@ func _Forge_AdminPowerControl_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).AdminPowerControl(ctx, req.(*AdminPowerControlRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_AdminGpuReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdminGpuResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).AdminGpuReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_AdminGpuReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).AdminGpuReset(ctx, req.(*AdminGpuResetRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -17659,6 +17789,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_ReleaseInstance_Handler,
 		},
 		{
+			MethodName: "ReleaseInstances",
+			Handler:    _Forge_ReleaseInstances_Handler,
+		},
+		{
 			MethodName: "UpdateInstanceOperatingSystem",
 			Handler:    _Forge_UpdateInstanceOperatingSystem_Handler,
 		},
@@ -18707,6 +18841,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_MachineValidationTestEnableDisableTest_Handler,
 		},
 		{
+			MethodName: "MachineValidationTestApproveFullHost",
+			Handler:    _Forge_MachineValidationTestApproveFullHost_Handler,
+		},
+		{
 			MethodName: "UpdateMachineValidationRun",
 			Handler:    _Forge_UpdateMachineValidationRun_Handler,
 		},
@@ -18717,6 +18855,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AdminPowerControl",
 			Handler:    _Forge_AdminPowerControl_Handler,
+		},
+		{
+			MethodName: "AdminGpuReset",
+			Handler:    _Forge_AdminGpuReset_Handler,
 		},
 		{
 			MethodName: "DisableSecureBoot",

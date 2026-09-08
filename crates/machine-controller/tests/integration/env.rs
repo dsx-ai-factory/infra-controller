@@ -160,7 +160,8 @@ impl EnvBuilder {
         let services = MachineStateHandlerServices {
             db_pool: pool.clone(),
             db_reader: pool.clone().into(),
-            redfish_client_pool: controller_redfish_sim,
+            redfish_client_pool: controller_redfish_sim.clone(),
+            bmc_credential_ops: controller_redfish_sim,
             ipmi_tool: carbide_ipmi::test_support(),
             site_config: runtime_config.machine_state_handler_site_config().into(),
             component_manager,

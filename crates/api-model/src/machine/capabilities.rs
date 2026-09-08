@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use serde::{Deserialize, Serialize};
 
 use super::infiniband::MachineInfinibandStatusObservation;
@@ -301,7 +301,7 @@ impl MachineCapabilitiesSet {
     pub fn from_hardware_info(
         hardware_info: &HardwareInfo,
         ib_status: Option<&MachineInfinibandStatusObservation>,
-        dpu_machine_ids: Vec<MachineId>,
+        dpu_machine_ids: Vec<DpuMachineId>,
         machine_interfaces: &[MachineInterfaceSnapshot],
     ) -> Self {
         //

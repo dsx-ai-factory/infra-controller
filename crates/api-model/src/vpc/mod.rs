@@ -26,7 +26,7 @@ pub use capability::{
 };
 use carbide_network::ip::IpAddressFamily;
 use carbide_network::virtualization::VpcVirtualizationType;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::nvlink::NvLinkLogicalPartitionId;
 use carbide_uuid::vpc::VpcId;
@@ -203,13 +203,13 @@ impl<'r> sqlx::FromRow<'r, PgRow> for Vpc {
 
 #[derive(Clone, Debug, FromRow)]
 pub struct VpcDpuLoopback {
-    pub dpu_id: MachineId,
+    pub dpu_id: DpuMachineId,
     pub vpc_id: VpcId,
     pub loopback_ip: IpAddr,
 }
 
 impl VpcDpuLoopback {
-    pub fn new(dpu_id: MachineId, vpc_id: VpcId, loopback_ip: IpAddr) -> Self {
+    pub fn new(dpu_id: DpuMachineId, vpc_id: VpcId, loopback_ip: IpAddr) -> Self {
         Self {
             dpu_id,
             vpc_id,

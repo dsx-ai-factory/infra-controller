@@ -105,7 +105,7 @@ underlying service. The target switch build must support each selected binding.
 | `rack_id` is `None` | Bring-up skips certificate configuration and advances to `RotateOsPassword`. Maintenance `ReconfigureCertificate` transitions to `Error`. |
 | Component manager not configured | Bring-up skips certificate configuration. Maintenance `ReconfigureCertificate` transitions to `Error`. |
 | `bmc_mac_address` is `None` | Transition to `Error`. |
-| Missing NVOS MAC/IP, vault credentials, or endpoint row | Transition to `Error` with a descriptive cause (no `0.0.0.0` placeholder). |
+| Missing NVOS MAC/IP, credentials, or endpoint row | Transition to `Error` with a descriptive cause (no `0.0.0.0` placeholder). |
 | CM returns error on `configure_switch_certificate` | `StateHandlerError`; remain in `Start` and retry on the next iteration. |
 | CM returns error on `get_configure_switch_certificate_job_status` | `StateHandlerError`; remain in `WaitForComplete` and retry on the next iteration. |
 | RMS job status is `Started` or `InProgress` | Wait; poll again on the next iteration. |
@@ -175,7 +175,7 @@ sequenceDiagram
     autonumber
     participant SCH as Switch State Handler<br/>(configuring.rs)
     participant DB as PostgreSQL
-    participant Vault as Credential Manager
+    participant Creds as Credential Manager
     participant CM as Component Manager
     participant RMS as RmsBackend
     participant RPC as RMS (librms)
@@ -183,7 +183,7 @@ sequenceDiagram
     Note over SCH: State = Configuring::<br/>ConfigureCertificate(Start)
 
     SCH->>DB: find machine interfaces for switch
-    SCH->>Vault: get SwitchNvosAdmin credentials
+    SCH->>Creds: get SwitchNvosAdmin credentials
     SCH->>CM: configure_switch_certificate(endpoint, domain_name=None, services)
 
     CM->>RMS: NvSwitchManager::configure_switch_certificate

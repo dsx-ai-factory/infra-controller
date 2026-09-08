@@ -21,7 +21,7 @@ use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use carbide_machine_controller::dpf::DpfOperations;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use db::dpu_machine_update;
 use model::dpu_machine_update::{DpuMachineUpdate, OutdatedDpfDpu};
 use model::machine::ManagedHostStateSnapshot;
@@ -80,7 +80,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
 
         Ok(current_updating_machines
             .iter()
-            .map(|mu| mu.host_machine_id)
+            .map(|mu| mu.host_machine_id.into())
             .collect())
     }
 
@@ -89,7 +89,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         pool: &sqlx::Pool<sqlx::Postgres>,
         available_updates: i32,
         updating_host_machines: &HashSet<MachineId>,
-        snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+        snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<HashSet<MachineId>> {
         let machine_updates: Vec<DpuMachineUpdate> = self
             .check_for_updates(snapshots, available_updates)
@@ -104,7 +104,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
 
         for machine_update in machine_updates {
             host_machine_updates
-                .entry(machine_update.host_machine_id)
+                .entry(machine_update.host_machine_id.into())
                 .or_default()
                 .push(machine_update);
         }
@@ -197,14 +197,15 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                         "Failed to remove machine update markers",
                     );
                 } else if let Ok(mut reported) = self.reported_wrong_versions.lock() {
-                    reported.retain(|(dpu, _)| *dpu != updated_machine.dpu_machine_id);
+                    reported
+                        .retain(|(dpu, _)| dpu != updated_machine.dpu_machine_id.as_machine_id());
                 }
             } else if self
                 .reported_wrong_versions
                 .lock()
                 .is_ok_and(|mut reported| {
                     reported.insert((
-                        updated_machine.dpu_machine_id,
+                        updated_machine.dpu_machine_id.into(),
                         updated_machine.firmware_version.clone(),
                     ))
                 })
@@ -212,7 +213,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 carbide_instrument::emit(FirmwareUpdateFailed {
                     target: FirmwareUpdateTarget::DpuNic,
                     cause: FirmwareUpdateFailureCause::WrongVersionAfterUpdate,
-                    machine_id: updated_machine.dpu_machine_id,
+                    machine_id: updated_machine.dpu_machine_id.into(),
                     unmatched_dpu_machine_id: String::new(),
                     firmware_version: updated_machine.firmware_version,
                 });
@@ -224,7 +225,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
     async fn update_metrics(
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
-        snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+        snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<()> {
         let dpf_outdated = self.fetch_dpf_outdated().await;
         match DpuMachineUpdate::find_available_outdated_dpus(
@@ -246,7 +247,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         let outdated_dpus = DpuMachineUpdate::find_unavailable_outdated_dpus(
             &self.config.dpu_config.dpu_nic_firmware_update_versions,
             snapshots,
-        );
+        )?;
         if let Some(metrics) = &self.metrics {
             metrics
                 .unavailable_dpu_updates
@@ -298,7 +299,7 @@ impl DpuNicFirmwareUpdate {
 
     pub(crate) async fn check_for_updates(
         &self,
-        snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+        snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
         available_updates: i32,
     ) -> Vec<DpuMachineUpdate> {
         let dpf_outdated = self.fetch_dpf_outdated().await;

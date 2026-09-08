@@ -1928,6 +1928,11 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			description = *instance.Description
 		}
 
+		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(apiRequest.SpectrumXAttachments))
+		for _, sac := range apiRequest.SpectrumXAttachments {
+			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, sac.ToProto())
+		}
+
 		// Prepare the create request workflow object
 		createInstanceRequest := &corev1.InstanceAllocationRequest{
 			InstanceId: &corev1.InstanceId{Value: instance.GetSiteID().String()},
@@ -1955,6 +1960,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				Nvlink: &corev1.InstanceNVLinkConfig{
 					GpuConfigs: nvlInterfaceConfigs,
 				},
+				Spxconfig: &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs},
 			},
 			AllowUnhealthyMachine: allowUnhealthyMachine,
 		}
@@ -4216,6 +4222,14 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					GpuConfigs: nvlInterfaceConfigs,
 				},
 			},
+		}
+
+		if apiRequest.SpectrumXAttachments != nil {
+			spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(apiRequest.SpectrumXAttachments))
+			for _, sac := range apiRequest.SpectrumXAttachments {
+				spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, sac.ToProto())
+			}
+			updateInstanceRequest.Config.Spxconfig = &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs}
 		}
 
 		workflowOptions := temporalClient.StartWorkflowOptions{

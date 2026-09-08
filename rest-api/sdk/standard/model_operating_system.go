@@ -43,8 +43,8 @@ type OperatingSystem struct {
 	ImageAuthType NullableString `json:"imageAuthType,omitempty"`
 	// Auth token to retrieve the image from image URL
 	ImageAuthToken NullableString `json:"imageAuthToken,omitempty"`
-	// Disk path where the image should be mounted
-	ImageDisk NullableString `json:"imageDisk,omitempty"`
+	// Whole-disk target that will be overwritten with the image. Accepts `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest` selects the smallest enumerated whole disk, preferring one with an EFI partition to break a size tie. Partition aliases ending in `-part<digits>` are rejected. An empty stored value means the Site prefers a disk with an EFI partition, then falls back to `/dev/nvme0n1` or `/dev/sda`.
+	ImageDisk NullableString `json:"imageDisk,omitempty" validate:"regexp=^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\\s]+))$"`
 	// Root filesystem UUID, only applicable for image-based Operating System
 	RootFsId NullableString `json:"rootFsId,omitempty"`
 	// Root filesystem label, only applicable for image-based Operating System

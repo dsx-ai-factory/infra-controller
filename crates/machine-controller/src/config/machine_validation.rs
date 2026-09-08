@@ -68,6 +68,17 @@ pub struct MachineValidationConfig {
     /// Per-test enable/disable overrides.
     #[serde(default)]
     pub tests: Vec<MachineValidationTestConfig>,
+
+    /// OCI registries from which Machine Validation plugins may be configured.
+    /// An empty list denies all plugin registrations; legacy tests are unaffected.
+    #[serde(default)]
+    pub approved_plugin_registries: Vec<String>,
+    /// Allows plugin registration with the privileged container profile.
+    #[serde(default)]
+    pub allow_privileged_plugins: bool,
+    /// Allows registration of plugins that request a writable host-root mount.
+    #[serde(default)]
+    pub allow_full_host_plugins: bool,
 }
 
 /// Per-test override for machine validation.
@@ -112,6 +123,9 @@ impl Default for MachineValidationConfig {
             run_interval: Self::default_run_interval(),
             stale_run_timeout: Self::default_stale_run_timeout(),
             tests: Vec::new(),
+            approved_plugin_registries: Vec::new(),
+            allow_privileged_plugins: false,
+            allow_full_host_plugins: false,
         }
     }
 }

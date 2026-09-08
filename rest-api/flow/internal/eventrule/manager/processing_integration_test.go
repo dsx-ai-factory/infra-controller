@@ -22,7 +22,7 @@ import (
 
 func TestManager_Start(t *testing.T) {
 	ctx := context.Background()
-	eventType := eventrule.Type("test.event")
+	eventType := leakage.TypeHardwareLeakDetected
 	rackID := uuid.New()
 	config := testManagerConfig()
 	config.Scheduler.Runtime.PollInterval = time.Hour

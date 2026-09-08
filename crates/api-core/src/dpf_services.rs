@@ -132,8 +132,47 @@ pub(crate) const COMPILE_TIME_IMAGE_TAG: &str = match option_env!("CARBIDE_BUILD
 
 fn doca_hbn_service_interfaces(
     interfaces: &[DpuServiceInterfaceTemplateDefinition],
+    extra_interfaces: &[String],
 ) -> Vec<ServiceInterface> {
-    dpu_service_interfaces(interfaces, DOCA_HBN_SERVICE_NAME, DOCA_HBN_SERVICE_NETWORK)
+    let mut service_interfaces =
+        dpu_service_interfaces(interfaces, DOCA_HBN_SERVICE_NAME, DOCA_HBN_SERVICE_NETWORK);
+    service_interfaces.extend(extra_interfaces.iter().map(|name| ServiceInterface {
+        name: name.clone(),
+        network: DOCA_HBN_SERVICE_NETWORK.to_string(),
+    }));
+    service_interfaces
+}
+
+/// Generates deterministic service-VPC interface names after checking HBN capacity.
+pub(crate) fn service_vpc_interfaces(
+    interfaces: &[DpuServiceInterfaceTemplateDefinition],
+    slot_count: u32,
+) -> Result<Vec<String>, String> {
+    let mut hbn_interface_names = doca_hbn_service_interfaces(interfaces, &[])
+        .into_iter()
+        .map(|interface| interface.name)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let total = usize::try_from(slot_count)
+        .ok()
+        .and_then(|slot_count| hbn_interface_names.len().checked_add(slot_count))
+        .ok_or_else(|| "HBN interface count exceeds usize".to_string())?;
+    if total > 32 {
+        return Err(format!(
+            "HBN interface count {total} exceeds the supported maximum of 32"
+        ));
+    }
+
+    let generated = (0..slot_count)
+        .map(|slot| format!("iface_svc_{slot}"))
+        .collect::<Vec<_>>();
+    for name in &generated {
+        if !hbn_interface_names.insert(name.clone()) {
+            return Err(format!("HBN interface name {name:?} is not unique"));
+        }
+    }
+
+    Ok(generated)
 }
 fn dhcp_server_service_interfaces(
     interfaces: &[DpuServiceInterfaceTemplateDefinition],
@@ -443,8 +482,9 @@ fn reassert_api_owned_value(
 pub(crate) fn doca_hbn_service(
     cfg: &DpfServiceConfig,
     dpu_interfaces: &[DpuServiceInterfaceTemplateDefinition],
+    extra_interfaces: &[String],
 ) -> ServiceDefinition {
-    let interfaces = doca_hbn_service_interfaces(dpu_interfaces);
+    let interfaces = doca_hbn_service_interfaces(dpu_interfaces, extra_interfaces);
     let mut helm_values = serde_json::json!({
         "image": {
             "repository": cfg.docker_repo_url,
@@ -852,11 +892,12 @@ pub(crate) fn mandatory_services(
     resolved: &DpfResolvedMandatoryServicesConfig,
     bootstrap_ca: &DpfDpuAgentBootstrapCa,
     interfaces: &[DpuServiceInterfaceTemplateDefinition],
+    service_vpc_interfaces: &[String],
     node_auth: &NodeAuthConfig,
 ) -> Vec<ServiceDefinition> {
     let mut service_vec = vec![
         dts_service(&resolved.base.dts),
-        doca_hbn_service(&resolved.base.doca_hbn, interfaces),
+        doca_hbn_service(&resolved.base.doca_hbn, interfaces, service_vpc_interfaces),
         dhcp_server_service(&resolved.base.dhcp_server, interfaces),
         dpu_agent_service(&resolved.base.dpu_agent, bootstrap_ca),
         // Not `node_auth.enabled` directly: an operator staging a disable
@@ -931,17 +972,27 @@ mod tests {
         .expect("configured service inventory fixture must be valid");
         let interfaces = build_effective_dpu_interfaces(16, Some(&topology));
 
-        // HBN receives p0, p1, the PF, and the VF; its SF count and startup YAML agree.
-        let hbn = doca_hbn_service(&default_doca_hbn_service(), &interfaces);
-        assert_eq!(hbn.interfaces.len(), 4);
+        // HBN receives p0, p1, the PF, the VF, and the configured external attachment; its SF
+        // count and startup YAML agree.
+        let service_vpc_interfaces = service_vpc_interfaces(&interfaces, 1).unwrap();
+        let hbn = doca_hbn_service(
+            &default_doca_hbn_service(),
+            &interfaces,
+            &service_vpc_interfaces,
+        );
+        assert_eq!(hbn.interfaces.len(), 5);
         assert_eq!(
             hbn.helm_values.as_ref().unwrap()["resources"]["nvidia.com/bf_sf"],
-            4
+            5
         );
         let startup_yaml = hbn.config_values.as_ref().unwrap()["configuration"]["startupYAMLJ2"]
             .as_str()
             .unwrap();
-        assert!(startup_yaml.contains("pf0hpf_if:") && startup_yaml.contains("pf0vf4_if:"));
+        assert!(
+            startup_yaml.contains("pf0hpf_if:")
+                && startup_yaml.contains("pf0vf4_if:")
+                && startup_yaml.contains("iface_svc_0:")
+        );
 
         // DHCP receives both configured entries, while FMDS receives only the PF.
         let dhcp = dhcp_server_service(&default_dhcp_server_service(), &interfaces);
@@ -962,6 +1013,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn service_vpc_interfaces_are_deterministic_and_capacity_checked() {
+        let interfaces = build_effective_dpu_interfaces(16, None);
+        assert_eq!(
+            service_vpc_interfaces(&interfaces, 2).unwrap(),
+            ["iface_svc_0".to_string(), "iface_svc_1".to_string()]
+        );
+        assert!(service_vpc_interfaces(&interfaces, 15).is_err());
+    }
+
     /// Verifies operator Helm values cannot disconnect HBN's SF request from its interfaces.
     #[test]
     fn hbn_sf_count_remains_topology_derived() {
@@ -978,7 +1039,7 @@ mod tests {
         let interfaces = build_dpu_interfaces_vec();
 
         // Ordinary resource overrides remain effective, while the SF count follows inventory.
-        let hbn = doca_hbn_service(&config, &interfaces);
+        let hbn = doca_hbn_service(&config, &interfaces, &[]);
         let helm_values = hbn.helm_values.unwrap();
         assert_eq!(helm_values["resources"]["memory"], "8Gi");
         assert_eq!(
@@ -1098,7 +1159,7 @@ mod tests {
     fn hbn_and_dts_omit_image_pull_secrets_by_default() {
         // HBN and DTS pull from the public DOCA registry: no imagePullSecrets unless configured.
         let interfaces = build_dpu_interfaces_vec();
-        let hbn = doca_hbn_service(&default_doca_hbn_service(), &interfaces);
+        let hbn = doca_hbn_service(&default_doca_hbn_service(), &interfaces, &[]);
         assert!(
             hbn.helm_values.unwrap().get("imagePullSecrets").is_none(),
             "HBN must not emit imagePullSecrets without a configured secret"
@@ -1119,7 +1180,9 @@ mod tests {
         let mut hbn_cfg = default_doca_hbn_service();
         hbn_cfg.docker_image_pull_secret = Some("private-pull-secret".to_string());
         assert_eq!(
-            doca_hbn_service(&hbn_cfg, &interfaces).helm_values.unwrap()["imagePullSecrets"],
+            doca_hbn_service(&hbn_cfg, &interfaces, &[])
+                .helm_values
+                .unwrap()["imagePullSecrets"],
             expected
         );
 
@@ -1583,7 +1646,7 @@ mod tests {
         let bootstrap_ca = DpfDpuAgentBootstrapCa::default();
 
         let fmds_mode = |node_auth: &NodeAuthConfig| {
-            mandatory_services(&resolved, &bootstrap_ca, &[], node_auth)
+            mandatory_services(&resolved, &bootstrap_ca, &[], &[], node_auth)
                 .into_iter()
                 .find(|s| s.name == FMDS_SERVICE_NAME)
                 .and_then(|s| s.helm_values)

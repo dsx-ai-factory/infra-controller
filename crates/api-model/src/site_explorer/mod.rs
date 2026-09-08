@@ -23,7 +23,7 @@ use std::sync::Arc;
 use carbide_network::BaseMac;
 use carbide_utils::arch::CpuArchitecture;
 use carbide_utils::none_if_empty::NoneIfEmpty;
-use carbide_uuid::machine::{MachineId, MachineType};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineType};
 use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
 use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
 use chrono::{DateTime, Utc};
@@ -600,8 +600,8 @@ pub struct ExploredDpu {
 }
 
 impl ExploredDpu {
-    pub fn machine_id_if_valid_report(&self) -> ModelResult<&MachineId> {
-        let Some(machine_id) = self.report.machine_id.as_ref() else {
+    pub fn machine_id_if_valid_report(&self) -> ModelResult<DpuMachineId> {
+        let Some(machine_id) = self.report.machine_id else {
             return Err(ModelError::MissingArgument("Missing Machine ID"));
         };
 
@@ -617,7 +617,7 @@ impl ExploredDpu {
             return Err(ModelError::MissingArgument("Missing Service Info"));
         }
 
-        Ok(machine_id)
+        Ok(machine_id.try_into()?)
     }
 
     pub fn bmc_firmware_version(&self) -> Option<String> {
@@ -1114,6 +1114,32 @@ impl EndpointExplorationReport {
             .unwrap_or_default()
     }
 
+    /// BMC firmware observed directly from the exact `BMC` inventory entry.
+    pub fn observed_host_bmc_version(&self) -> Option<&str> {
+        self.service
+            .iter()
+            .find(|service| service.id == "FirmwareInventory")
+            .and_then(|service| {
+                service
+                    .inventories
+                    .iter()
+                    .find(|inventory| inventory.id == "BMC")
+            })
+            .and_then(|inventory| inventory.version.as_deref())
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+    }
+
+    /// Host BIOS/UEFI version observed on the `System_0` resource.
+    pub fn system_bios_version(&self) -> Option<&str> {
+        self.systems
+            .iter()
+            .find(|system| system.id == "System_0")
+            .and_then(|system| system.bios_version.as_deref())
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+    }
+
     pub fn dpu_component_version(&self, component: FirmwareComponentType) -> Option<String> {
         match component {
             FirmwareComponentType::Bmc => self.dpu_bmc_version(),
@@ -1475,6 +1501,9 @@ pub struct ComputerSystem {
     pub sku: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_order: Option<BootOrder>,
+    /// Version reported by the Redfish `ComputerSystem.BiosVersion` property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bios_version: Option<String>,
     /// SSH port for the system's Redfish serial-console service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_console_ssh_port: Option<u16>,
@@ -3497,6 +3526,7 @@ mod tests {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
                 serial_console_ssh_port: None,
             }],
             chassis: vec![Chassis {
@@ -3544,6 +3574,96 @@ mod tests {
     }
 
     #[test]
+    fn observed_host_bmc_version_requires_exact_non_blank_inventory() {
+        let report_with_inventory = |id: &str, version: &str| EndpointExplorationReport {
+            service: vec![Service {
+                id: "FirmwareInventory".to_string(),
+                inventories: vec![Inventory {
+                    id: id.to_string(),
+                    version: Some(version.to_string()),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            report_with_inventory("BMC-Primary", "1.0.0").observed_host_bmc_version(),
+            None,
+            "only the exact Lenovo GB300 BMC inventory ID is accepted"
+        );
+        assert_eq!(
+            report_with_inventory("BMC", " \t ").observed_host_bmc_version(),
+            None,
+            "blank BMC versions are treated as absent"
+        );
+        assert_eq!(
+            report_with_inventory("BMC", " 1.0.0 ").observed_host_bmc_version(),
+            Some("1.0.0"),
+            "the exact BMC inventory version is trimmed"
+        );
+    }
+
+    #[test]
+    fn system_bios_version_selects_system_0_and_rejects_blank_values() {
+        let report = EndpointExplorationReport {
+            systems: vec![
+                ComputerSystem {
+                    id: "HGX_Baseboard_0".to_string(),
+                    bios_version: Some("wrong-system-version".to_string()),
+                    ..Default::default()
+                },
+                ComputerSystem {
+                    id: "System_0".to_string(),
+                    bios_version: Some(" GBHC01A_01.05.0 ".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            report.system_bios_version(),
+            Some("GBHC01A_01.05.0"),
+            "System_0 must be selected even when the HGX baseboard appears first"
+        );
+
+        let blank_report = EndpointExplorationReport {
+            systems: vec![ComputerSystem {
+                id: "System_0".to_string(),
+                bios_version: Some("  ".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            blank_report.system_bios_version(),
+            None,
+            "blank System_0 BIOS versions are treated as absent"
+        );
+    }
+
+    #[test]
+    fn computer_system_bios_version_is_json_compatible() {
+        let system = ComputerSystem {
+            id: "System_0".to_string(),
+            bios_version: Some("GBHC01A_01.05.0".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&system).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ComputerSystem>(&json).unwrap(),
+            system,
+            "BiosVersion must round-trip through the exploration-report JSON"
+        );
+
+        let without_bios = serde_json::from_str::<ComputerSystem>(r#"{"Id":"System_0"}"#).unwrap();
+        assert_eq!(
+            without_bios.bios_version, None,
+            "older JSON without BiosVersion must remain deserializable"
+        );
+    }
+
+    #[test]
     fn generate_machine_id_for_dpu() {
         let mut report = EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
@@ -3570,6 +3690,7 @@ mod tests {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
                 serial_console_ssh_port: None,
             }],
             chassis: vec![Chassis {

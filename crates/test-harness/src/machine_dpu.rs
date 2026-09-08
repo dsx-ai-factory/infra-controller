@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use carbide_api_core::test_support::Api;
 use carbide_network::virtualization::build_dual_stack_list;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use mac_address::MacAddress;
 use model::hardware_info::HardwareInfo;
 use model::test_support::DpuConfig;
@@ -31,7 +31,7 @@ use crate::rpc::forge::{DhcpDiscovery, DhcpRecord, ManagedHostNetworkConfigReque
 
 #[derive(Clone)]
 pub struct TestDpuMachine {
-    pub id: MachineId,
+    pub id: DpuMachineId,
     pub bmc_mac: MacAddress,
     pub api: Arc<Api>,
     hardware_info: HardwareInfo,
@@ -39,7 +39,7 @@ pub struct TestDpuMachine {
 }
 
 impl TestDpuMachine {
-    pub(crate) fn new(id: MachineId, api: Arc<Api>, config: &DpuConfig) -> Self {
+    pub(crate) fn new(id: DpuMachineId, api: Arc<Api>, config: &DpuConfig) -> Self {
         Self {
             id,
             bmc_mac: config.bmc_mac_address,
@@ -73,7 +73,8 @@ impl TestDpuMachine {
             .machine_id
             .expect("DPU discovery should return a machine id");
         assert_eq!(
-            discovered_id, self.id,
+            discovered_id,
+            self.id.into(),
             "DPU discovery should resolve to the expected test machine"
         );
     }
@@ -86,7 +87,7 @@ impl TestDpuMachine {
 
 impl TestMachine for TestDpuMachine {
     fn id(&self) -> MachineId {
-        self.id
+        self.id.into()
     }
 
     fn api(&self) -> &Api {
@@ -98,10 +99,10 @@ impl TestMachinePrivate for TestDpuMachine {}
 
 // This harness models the compatibility fields consumed by older agents.
 #[allow(deprecated)]
-async fn record_dpu_network_status(api: &Api, dpu_machine_id: MachineId) {
+async fn record_dpu_network_status(api: &Api, dpu_machine_id: DpuMachineId) {
     let network_config = api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .expect("managed host network config should be available")
@@ -114,7 +115,7 @@ async fn record_dpu_network_status(api: &Api, dpu_machine_id: MachineId) {
             Some(network_config.instance_network_config_version.clone())
         };
     let instance_config_version = api
-        .find_instance_by_machine_id(tonic::Request::new(dpu_machine_id))
+        .find_instance_by_machine_id(tonic::Request::new(dpu_machine_id.into()))
         .await
         .expect("instance lookup by machine id should succeed")
         .into_inner()
@@ -205,7 +206,7 @@ async fn record_dpu_network_status(api: &Api, dpu_machine_id: MachineId) {
         .collect();
 
     api.record_dpu_network_status(tonic::Request::new(crate::rpc::forge::DpuNetworkStatus {
-        dpu_machine_id: Some(dpu_machine_id),
+        dpu_machine_id: Some(dpu_machine_id.into()),
         dpu_agent_version: Some("test-dpu-agent-version".to_string()),
         observed_at: None,
         dpu_health: Some(crate::rpc::health::HealthReport {

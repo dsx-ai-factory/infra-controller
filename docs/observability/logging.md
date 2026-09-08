@@ -57,7 +57,7 @@ nico-ssh-console is an exception - in addition to stdout, it writes **machine co
 | **nico-dpu-otel-agent** | `forge-dpu-otel-agent` | full | mTLS cert renewal agent on DPUs. See note below. |
 
 <Note>
-`nico-dpu-otel-agent` currently ignores `RUST_LOG` due to a source bug (`fmt().init()` instead of `fmt::init()`). It logs at INFO level only until this is fixed. See [#3151](https://github.com/NVIDIA/infra-controller/issues/3151).
+`nico-dpu-otel-agent` currently ignores `RUST_LOG` due to a source bug (`fmt().init()` instead of `fmt::init()`). It logs at INFO level only until this is fixed. See [#3151](https://github.com/dsx-ai-factory/infra-controller/issues/3151).
 </Note>
 
 ### 2.1 logfmt format
@@ -66,11 +66,13 @@ Most NICo components use [logfmt](https://brandur.org/logfmt) - a line-oriented 
 space-separated `key=value` pairs, easy for both humans and machines to parse.
 
 **Event lines** — one per log call:
+
 ```text
 level=INFO component=nico-api span_id=0x4f… msg="Starting reconciliation" location="handlers/machine.rs:142"
 ```
 
 **Span lines** — emitted when a unit of work closes (`level=SPAN`), carrying timing data:
+
 ```text
 level=SPAN component=site-explorer span_id=0xf7… span_name=explore_site timing_elapsed_us=1523 timing_busy_ns=1200000 timing_idle_ns=323000
 ```
@@ -119,6 +121,7 @@ nico-scout
 State-controller lines also carry a `controller=<name>` field with the same value.
 
 This enables filtering logs by component in your backend. For example, with Loki:
+
 ```logql
 {namespace="nico-system"} | logfmt | component="site-explorer"
 ```
@@ -210,7 +213,6 @@ logger, meaning:
 - Output goes to Kea's configured destinations (stdout by default in the container)
 
 Example Kea log output:
-
 
 To adjust log levels, modify the Kea configuration in the Helm chart's ConfigMap. The
 `loggers` section controls verbosity:
@@ -685,6 +687,7 @@ processors:
 ```
 
 Query example:
+
 ```text
 {k8s_container_name="nico-api"} | logfmt | level="ERROR"
 ```

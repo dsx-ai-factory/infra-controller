@@ -17,13 +17,12 @@
 
 //! State Controller IO implementation for Machines
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use config_version::{ConfigVersion, Versioned};
 use db::{self, DatabaseError};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpa_interface::DpaSearchConfig;
-use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::slas::MachineSlaConfig;
 use model::machine::{
     self, AttestationMode, ConfigureAstraState, DecommissioningState, DpuDiscoveringState,
@@ -46,7 +45,7 @@ pub struct MachineStateControllerIO {
 
 #[async_trait::async_trait]
 impl StateControllerIO for MachineStateControllerIO {
-    type ObjectId = MachineId;
+    type ObjectId = HostMachineId;
     type State = ManagedHostStateSnapshot;
     type ControllerState = ManagedHostState;
     type MetricsEmitter = MachineMetricsEmitter;
@@ -61,14 +60,7 @@ impl StateControllerIO for MachineStateControllerIO {
         &self,
         txn: &mut PgConnection,
     ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
-        Ok(db::machine::find_machine_ids(
-            txn,
-            MachineSearchConfig {
-                include_predicted_host: true,
-                ..Default::default()
-            },
-        )
-        .await?)
+        db::managed_host::load_host_ids(txn).await
     }
 
     /// Loads a state snapshot from the database
@@ -77,20 +69,7 @@ impl StateControllerIO for MachineStateControllerIO {
         txn: &mut PgConnection,
         machine_id: &Self::ObjectId,
     ) -> Result<Option<Self::State>, DatabaseError> {
-        // Never load state for DPUs
-        // The state machine is only supposed to execute for hosts
-        // If by any accidental chance a DPU ID was enqueued into the system,
-        // we filter it here.
-        if machine_id.machine_type().is_dpu() {
-            return Err(DatabaseError::new(
-                "MachineStateControllerIO::load_object_state",
-                sqlx::Error::InvalidArgument(
-                    "DPU state can not be loaded by state controller".to_string(),
-                ),
-            ));
-        }
-
-        let mut retstate = db::managed_host::load_snapshot(
+        let mut retstate = db::managed_host::load_host_snapshot(
             txn,
             machine_id,
             model::machine::LoadSnapshotOptions {

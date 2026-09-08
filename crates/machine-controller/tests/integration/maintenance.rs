@@ -90,12 +90,14 @@ impl ComputeTrayManager for ReconciliationComputeTrayManager {
         match *self.outcome.lock().unwrap() {
             BackendOutcome::Success => Ok(vec![ComputeTrayResult {
                 bmc_ip: endpoints[0].bmc_ip,
+                bmc_mac: endpoints[0].bmc_mac,
                 success: true,
                 error: None,
             }]),
             BackendOutcome::Empty => Ok(Vec::new()),
             BackendOutcome::NonSuccess => Ok(vec![ComputeTrayResult {
                 bmc_ip: endpoints[0].bmc_ip,
+                bmc_mac: endpoints[0].bmc_mac,
                 success: false,
                 error: Some("test backend rejection".into()),
             }]),
@@ -228,7 +230,7 @@ async fn enter_requested_state(
             .unwrap();
             ManagedHostState::Failed {
                 details,
-                machine_id: host.host.id,
+                machine_id: host.host.id.into(),
                 retry_count: 1,
             }
         }
@@ -236,7 +238,7 @@ async fn enter_requested_state(
 
     db::machine::set_machine_maintenance_requested(
         &mut txn,
-        host.host.id,
+        host.host.id.into(),
         "maintenance-test",
         operation,
     )

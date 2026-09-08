@@ -26,6 +26,8 @@ use crate::tests::common::api_fixtures::instance::{
     TestInstance, default_os_config, default_tenant_config, single_interface_network_config,
 };
 
+const RETRYABLE_CUSTOM_IPXE: &str = "set nico-retry-provisioning 1\nSomeRandomiPxe";
+
 #[crate::sqlx_test]
 async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
@@ -47,9 +49,9 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
             .run_provisioning_instructions_on_every_boot
     );
 
-    // First boot should return custom iPXE instructions
+    // The one-time custom script is marked for retries within this iPXE session.
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
-    assert_eq!(pxe.pxe_script, "SomeRandomiPxe");
+    assert_eq!(pxe.pxe_script, RETRYABLE_CUSTOM_IPXE);
 
     // Second boot should return "exit"
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
@@ -121,7 +123,7 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     })
     .await;
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
-    assert_eq!(pxe.pxe_script, "SomeRandomiPxe");
+    assert_eq!(pxe.pxe_script, RETRYABLE_CUSTOM_IPXE);
     env.run_machine_state_controller_iteration().await;
 
     // The next reboot should again lead to returning "exit"
@@ -174,11 +176,12 @@ async fn test_instance_always_boot_with_custom_ipxe(pool: sqlx::PgPool) {
             .run_provisioning_instructions_on_every_boot
     );
 
-    // First boot should return custom iPXE instructions
+    // The allocation's one-time request is marked for retries within this iPXE session.
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
-    assert_eq!(pxe.pxe_script, "SomeRandomiPxe");
+    assert_eq!(pxe.pxe_script, RETRYABLE_CUSTOM_IPXE);
 
-    // Second boot should also return custom iPXE instructions
+    // Later requests use `run_provisioning_instructions_on_every_boot` without the
+    // one-time retry marker.
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert_eq!(pxe.pxe_script, "SomeRandomiPxe");
 

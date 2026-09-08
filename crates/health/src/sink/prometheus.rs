@@ -262,12 +262,15 @@ mod tests {
     use std::str::FromStr;
 
     use carbide_uuid::nvlink::NvLinkDomainId;
+    use carbide_uuid::power_shelf::PowerShelfId;
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
     use mac_address::MacAddress;
 
     use super::*;
-    use crate::endpoint::{BmcAddr, EndpointMetadata, MachineData, SwitchData, SwitchEndpointRole};
+    use crate::endpoint::{
+        BmcAddr, EndpointMetadata, MachineData, PowerShelfData, SwitchData, SwitchEndpointRole,
+    };
 
     fn test_switch_id(label: &str) -> SwitchId {
         let mut hash = [0u8; 32];
@@ -329,49 +332,6 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_static_labels_includes_power_shelf_identity() {
-        let power_shelf_id = carbide_uuid::power_shelf::PowerShelfId::from_str(
-            "ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg",
-        )
-        .expect("valid power shelf id");
-        let power_shelf_id_label = power_shelf_id.to_string();
-
-        let context = EventContext {
-            endpoint_key: "24:5b:f0:80:ab:55".to_string(),
-            addr: BmcAddr {
-                ip: "10.84.196.54".parse().expect("valid ip"),
-                port: Some(443),
-                mac: MacAddress::from_str("24:5b:f0:80:ab:55").unwrap(),
-            },
-            collector_type: "manager_collector",
-            labels: Default::default(),
-            metadata: Some(EndpointMetadata::PowerShelf(
-                crate::endpoint::PowerShelfData {
-                    id: Some(power_shelf_id),
-                    serial: "614MP1RXX03X6510035".to_string(),
-                },
-            )),
-            rack_id: Some(RackId::new("RACK_3")),
-        };
-
-        let labels = PrometheusSink::stream_static_labels(&context);
-        let label_value = |key: &str| {
-            labels
-                .iter()
-                .find_map(|(label, value)| (label.as_ref() == key).then_some(value.as_str()))
-        };
-
-        assert_eq!(
-            label_value("power_shelf_id"),
-            Some(power_shelf_id_label.as_str())
-        );
-        assert_eq!(label_value("serial_number"), Some("614MP1RXX03X6510035"));
-        assert_eq!(label_value("rack_id"), Some("RACK_3"));
-        assert_eq!(label_value("machine_id"), None);
-        assert_eq!(label_value("switch_id"), None);
-    }
-
-    #[test]
     fn test_stream_static_labels_includes_switch_placement_metadata() {
         let switch_id = test_switch_id("switch-a");
         let switch_id_label = switch_id.to_string();
@@ -417,6 +377,58 @@ mod tests {
         assert_eq!(
             label_value("nvlink_domain_uuid"),
             Some(nvlink_domain_uuid_label.as_str())
+        );
+    }
+
+    #[test]
+    fn test_stream_static_labels_includes_available_power_shelf_metadata() {
+        let power_shelf_id =
+            PowerShelfId::from_str("ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg")
+                .expect("valid power shelf id");
+        let power_shelf_id_label = power_shelf_id.to_string();
+        let context = EventContext {
+            endpoint_key: "22:33:44:55:66:77".to_string(),
+            addr: BmcAddr {
+                ip: "10.0.2.1".parse().expect("valid ip"),
+                port: Some(443),
+                mac: MacAddress::from_str("22:33:44:55:66:77").unwrap(),
+            },
+            collector_type: "sensor_collector",
+            labels: Default::default(),
+            metadata: Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                id: Some(power_shelf_id),
+                serial: Some("SN-PS-001".to_string()),
+            })),
+            rack_id: Some(RackId::new("RACK_3")),
+        };
+
+        let labels = PrometheusSink::stream_static_labels(&context);
+        let label_value = |key: &str| {
+            labels
+                .iter()
+                .find_map(|(label, value)| (label.as_ref() == key).then_some(value.as_str()))
+        };
+
+        assert_eq!(
+            label_value("power_shelf_id"),
+            Some(power_shelf_id_label.as_str())
+        );
+        assert_eq!(label_value("serial_number"), Some("SN-PS-001"));
+        assert_eq!(label_value("rack_id"), Some("RACK_3"));
+
+        let context_without_id = EventContext {
+            metadata: Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                id: None,
+                serial: Some("SN-PS-001".to_string()),
+            })),
+            ..context
+        };
+        let labels_without_id = PrometheusSink::stream_static_labels(&context_without_id);
+
+        assert!(
+            labels_without_id
+                .iter()
+                .all(|(label, _)| label.as_ref() != "power_shelf_id")
         );
     }
 }

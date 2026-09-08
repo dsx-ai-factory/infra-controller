@@ -50,6 +50,8 @@ Org must have an Infrastructure Provider entity. User must have authorization ro
 
 Tenants cannot create Sites.
 
+New Sites enable `nativeNetworking`, `networkSecurityGroup`, and `flow` by default. Other Site capabilities default to `false`.
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@return ApiCreateSiteRequest

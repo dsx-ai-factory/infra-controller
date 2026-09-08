@@ -36,7 +36,7 @@ use db::credential_rotation::{
     record_device_converged, set_next_target_version,
 };
 use mac_address::MacAddress;
-use model::machine::ManagedHostState;
+use model::machine::{ManagedHostState, UefiSetupState};
 use model::test_support::ManagedHostConfig;
 
 use crate::env::Env;
@@ -379,6 +379,85 @@ async fn uefi_change_failure_quarantines_and_returns_to_ready(
             !recorded.contains("uefi-v1"),
             "the recorded rotation error must be password-redacted, got {recorded:?}"
         );
+    }
+
+    Ok(())
+}
+
+/// A client-creation failure during the SET step (credential store, TCP, or
+/// the vendor probe) is transient: the FSM must hold in place with no
+/// quarantine or counted attempt, and a later tick must complete the rotation
+/// once creation succeeds again.
+#[sqlx_test]
+async fn uefi_client_creation_failure_retries_without_quarantine(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cm = Arc::new(TestCredentialManager::default());
+    let mut env = Env::builder(pool.clone())
+        .with_credential_manager(cm.clone())
+        .configure_runtime(|c| c.uefi_rotation_enabled = true)
+        .build()
+        .await;
+
+    let (mh, host_mac) = ready_host(&env, &pool).await;
+    stage_lagging_host_uefi(&env, &pool, host_mac).await?;
+
+    // Drive the FSM to the SET step with a healthy sim, so the injected
+    // failure lands in the dispatch itself rather than an earlier step.
+    let at_set_step = |state: &ManagedHostState| {
+        matches!(
+            state,
+            ManagedHostState::RotatingHostUefi { uefi_setup_info }
+                if uefi_setup_info.uefi_setup_state == UefiSetupState::SetUefiPassword
+        )
+    };
+    for _ in 0..4 {
+        if at_set_step(&mh.host.machine().await.state.value) {
+            break;
+        }
+        env.run_single_iteration().await;
+    }
+    assert!(
+        at_set_step(&mh.host.machine().await.state.value),
+        "FSM should reach the SET step, got {:?}",
+        mh.host.machine().await.state.value,
+    );
+
+    // A tick with client creation failing must hold in place: same step, no
+    // quarantine, no counted attempt.
+    env.redfish_sim.set_create_client_error("bmc unreachable");
+    env.run_single_iteration().await;
+    assert!(
+        at_set_step(&mh.host.machine().await.state.value),
+        "a transient creation failure must not advance or abort the SET step, got {:?}",
+        mh.host.machine().await.state.value,
+    );
+    {
+        let mut conn = pool.acquire().await?;
+        let status = device_rotation_status(&mut conn, HOST_UEFI, host_mac)
+            .await?
+            .expect("device rotation row should exist");
+        assert!(
+            !status.quarantined,
+            "a transient creation failure must not quarantine the device"
+        );
+        assert_eq!(
+            status.rotate_attempts, 0,
+            "a transient creation failure must not count a rotation attempt"
+        );
+    }
+
+    // Once creation succeeds again, a later iteration retries and the
+    // rotation converges normally.
+    env.redfish_sim.clear_create_client_error();
+    run_until_ready(&mut env, &mh).await;
+    {
+        let mut conn = pool.acquire().await?;
+        let status = device_rotation_status(&mut conn, HOST_UEFI, host_mac)
+            .await?
+            .expect("device rotation row should exist");
+        assert!(status.converged, "the retried rotation should converge");
+        assert_eq!(status.current_version, Some(1));
     }
 
     Ok(())

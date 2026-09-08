@@ -174,11 +174,49 @@ rest:
 ## pass --skip-flow on the setup.sh command line, otherwise phase 7h will
 ## try to install a chart whose database credentials are missing and fail.
 ## ---------------------------------------------------------------------------
+## ---------------------------------------------------------------------------
+## rms — NVIDIA Rack Manager Service (rack-manager chart) prerequisites.
+##
+## This toggle controls only the helm-prereqs side of RMS:
+##   - the rms database and rms.nico user on nico-pg-cluster (postgresql.yaml)
+##   - the rms-db-eso ClusterExternalSecret that syncs the credentials into
+##     the rack-manager namespace (eso-external-secrets.yaml)
+##
+## The rack-manager chart itself is installed by setup.sh phase 5c, by
+## DEFAULT (opt out with --skip-rms). Deliberately NOT driven by that flag:
+## --skip-rms skips only the chart install and never deprovisions these
+## prerequisites — removing them would strand a running rack-manager release
+## (same contract as --skip-flow). To skip the prerequisites too, set
+## enabled: false here, paired with --skip-rms.
+## ---------------------------------------------------------------------------
+rms:
+  enabled: true
+
 flow:
   enabled: true
   ## Namespace flow runs in — must match the helm install -n flag for the
   ## flow release. ESO targets this namespace.
   namespace: flow
+
+## ---------------------------------------------------------------------------
+## temporal / keycloak — opt-in Temporal/Keycloak database consolidation onto
+## nico-pg-cluster (the shared, HA Zalando-managed cluster), instead of each
+## staying on the legacy standalone postgres.postgres StatefulSet. Disabled
+## by default; both targets are supported side by side, and existing sites
+## need no changes.
+##
+## Full story (what gets provisioned, migration steps, namespace caveats):
+## see "Consolidating Temporal/Keycloak onto nico-pg-cluster" in README.md.
+## ---------------------------------------------------------------------------
+temporal:
+  useHaPostgres: false
+
+keycloak:
+  useHaPostgres: false
+  ## Namespace Keycloak deploys into — must stay in sync with
+  ## values/nico-rest.yaml's nico-rest-api.config.keycloak.baseURL host.
+  ## See README.md.
+  namespace: nico-rest
 
 ## ---------------------------------------------------------------------------
 ## PostgreSQL — Zalando postgres-operator HA cluster (3-node Patroni)

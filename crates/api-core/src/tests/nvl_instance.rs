@@ -219,7 +219,7 @@ async fn test_create_instance_with_nvl_config(pool: sqlx::PgPool) {
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id);
+    assert_eq!(instance.machine_id(), mh.id.into());
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -395,7 +395,7 @@ async fn test_detach_gpus_from_partition_by_clearing_nvlink_config(pool: sqlx::P
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id);
+    assert_eq!(instance.machine_id(), mh.id.into());
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -614,7 +614,7 @@ async fn test_with_multiple_nv_link_logical_partitions(pool: sqlx::PgPool) {
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id);
+    assert_eq!(instance.machine_id(), mh.id.into());
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -1198,7 +1198,7 @@ async fn test_instance_delete_with_nvl_config(pool: sqlx::PgPool) {
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id);
+    assert_eq!(instance.machine_id(), mh.id.into());
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -1310,7 +1310,7 @@ async fn test_create_instance_add_to_existing_partition(pool: sqlx::PgPool) {
     assert_eq!(&machine1.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh1.id);
+    assert_eq!(instance.machine_id(), mh1.id.into());
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -1390,7 +1390,7 @@ async fn test_create_instance_add_to_existing_partition(pool: sqlx::PgPool) {
     let machine2 = mh2.host().rpc_machine().await;
     assert_eq!(&machine2.state, "Assigned/Ready");
     let check_instance2 = tinstance2.rpc_instance().await;
-    assert_eq!(instance2.machine_id(), mh2.id);
+    assert_eq!(instance2.machine_id(), mh2.id.into());
     assert_eq!(instance2.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance2, check_instance2);
 
@@ -1503,7 +1503,7 @@ async fn test_logical_partition_delete_with_instance_config(pool: sqlx::PgPool) 
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id);
+    assert_eq!(instance.machine_id(), mh.id.into());
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -1837,7 +1837,7 @@ async fn test_create_instance_gpu_in_unknown_partition(pool: sqlx::PgPool) {
     assert_eq!(&machine1.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh1.id);
+    assert_eq!(instance.machine_id(), mh1.id.into());
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -2047,7 +2047,7 @@ async fn run_create_instance_with_nvl_config_nmxc_simulator_scenario(
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id);
+    assert_eq!(instance.machine_id(), mh.id.into());
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -2381,11 +2381,20 @@ async fn test_rack_switch_create_instance_with_nvl_config_use_nmxc_simulator(poo
     .await
     .expect("create managed host");
     let mh = TestManagedHost {
-        id: mh_snapshot.host_snapshot.id,
+        id: mh_snapshot
+            .host_snapshot
+            .id
+            .try_into()
+            .expect("host snapshot ID should be a valid HostMachineId"),
         dpu_ids: mh_snapshot
             .dpu_snapshots
             .into_iter()
-            .map(|snapshot| snapshot.id)
+            .map(|snapshot| {
+                snapshot
+                    .id
+                    .try_into()
+                    .expect("DPU snapshot ID should be a valid DpuMachineId")
+            })
             .collect(),
         api: env.api.clone(),
     };
@@ -2434,7 +2443,7 @@ async fn test_rack_switch_create_instance_with_nvl_config_use_nmxc_simulator(poo
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id);
+    assert_eq!(instance.machine_id(), mh.id.into());
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 
@@ -2897,7 +2906,7 @@ async fn test_instance_delete_with_nvl_config_use_nmxc_simulator(pool: sqlx::PgP
     assert_eq!(&machine.state, "Assigned/Ready");
 
     let check_instance = tinstance.rpc_instance().await;
-    assert_eq!(instance.machine_id(), mh.id);
+    assert_eq!(instance.machine_id(), mh.id.into());
     assert_eq!(instance.status().tenant(), rpc::TenantState::Ready);
     assert_eq!(instance, check_instance);
 

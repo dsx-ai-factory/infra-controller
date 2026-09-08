@@ -42,8 +42,8 @@ use sqlx::types::Json;
 use crate::db_read::DbReader;
 use crate::operating_system::{self, OperatingSystem as OsRow};
 use crate::{
-    ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
-    instance_address,
+    BIND_LIMIT, ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder,
+    ObjectColumnFilter, instance_address,
 };
 
 #[derive(Copy, Clone)]
@@ -1005,6 +1005,15 @@ pub async fn update_extension_services_config(
     }
 }
 
+/// Each `batch_persist` VALUES row binds this many parameters. Postgres caps
+/// a single statement at 65535 bind parameters, so an unchunked INSERT
+/// overflows once `values.len() * BATCH_PERSIST_BINDS_PER_ROW` crosses that
+/// cap (~2.3k rows) -- a single `--transactional` allocate of 4,500 hosts
+/// (126k binds) would fail outright. `batch_persist` chunks the INSERT into
+/// sub-batches of `BIND_LIMIT / BATCH_PERSIST_BINDS_PER_ROW` rows, all issued
+/// on the caller's transaction so the write stays all-or-nothing.
+const BATCH_PERSIST_BINDS_PER_ROW: usize = 28;
+
 /// Batch insert for multiple instances.
 /// This is optimized for inserting many instances in a single database operation.
 ///
@@ -1067,117 +1076,124 @@ pub async fn batch_persist<'a>(
                             vals.power_profile
                     FROM (VALUES ";
 
-    let mut qb = sqlx::QueryBuilder::new(query);
+    let expected_count = values.len() as u64;
+    let mut rows_affected_total: u64 = 0;
 
-    // Build VALUES clause
-    let mut separated = qb.separated(", ");
-    for value in &values {
-        let mut os_ipxe_script = String::new();
-        let os_user_data = value.config.os.user_data.clone();
-        let mut os_image_id: Option<uuid::Uuid> = None;
-        let operating_system_id = match &value.config.os.variant {
-            OperatingSystemVariant::Ipxe(ipxe) => {
-                os_ipxe_script = ipxe.ipxe_script.clone();
-                None
-            }
-            OperatingSystemVariant::OsImage(id) => {
-                os_image_id = Some(*id);
-                None
-            }
-            OperatingSystemVariant::OperatingSystemId(id) => Some(*id),
-        };
+    for chunk in values.chunks(BIND_LIMIT / BATCH_PERSIST_BINDS_PER_ROW) {
+        let mut qb = sqlx::QueryBuilder::new(query);
 
-        separated.push("(");
-        separated.push_bind_unseparated(value.instance_id);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(value.machine_id.to_string());
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(operating_system_id);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(os_user_data);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(os_ipxe_script);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(os_image_id);
-        separated.push_unseparated(",");
-        separated
-            .push_bind_unseparated(value.config.os.run_provisioning_instructions_on_every_boot);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(value.config.tenant.tenant_organization_id.as_str());
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(
-            serde_json::to_string(&value.config.network).unwrap_or_default(),
-        );
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(value.network_config_version);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(
-            serde_json::to_string(&value.config.infiniband).unwrap_or_default(),
-        );
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(value.ib_config_version);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(&value.config.tenant.tenant_keyset_ids);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(value.config.os.phone_home_enabled);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(&value.metadata.name);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(&value.metadata.description);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(
-            serde_json::to_string(&value.metadata.labels).unwrap_or_default(),
-        );
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(value.config_version);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(&value.config.tenant.hostname);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(&value.config.network_security_group_id);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(&value.instance_type_id);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(
-            serde_json::to_string(&value.config.extension_services).unwrap_or_default(),
-        );
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(value.extension_services_config_version);
-        separated.push_unseparated(",");
-        separated
-            .push_bind_unseparated(serde_json::to_string(&value.config.nvlink).unwrap_or_default());
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(value.nvlink_config_version);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(
-            serde_json::to_string(&value.config.spxconfig).unwrap_or_default(),
-        );
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(value.spx_config_version);
-        separated.push_unseparated(",");
-        separated.push_bind_unseparated(&value.config.power_profile);
-        separated.push_unseparated(")");
-    }
+        // Build VALUES clause
+        let mut separated = qb.separated(", ");
+        for value in chunk {
+            let mut os_ipxe_script = String::new();
+            let os_user_data = value.config.os.user_data.clone();
+            let mut os_image_id: Option<uuid::Uuid> = None;
+            let operating_system_id = match &value.config.os.variant {
+                OperatingSystemVariant::Ipxe(ipxe) => {
+                    os_ipxe_script = ipxe.ipxe_script.clone();
+                    None
+                }
+                OperatingSystemVariant::OsImage(id) => {
+                    os_image_id = Some(*id);
+                    None
+                }
+                OperatingSystemVariant::OperatingSystemId(id) => Some(*id),
+            };
 
-    qb.push(") AS vals(id, machine_id, operating_system_id, os_user_data, os_ipxe_script, os_image_id,
+            separated.push("(");
+            separated.push_bind_unseparated(value.instance_id);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.machine_id.to_string());
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(operating_system_id);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(os_user_data);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(os_ipxe_script);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(os_image_id);
+            separated.push_unseparated(",");
+            separated
+                .push_bind_unseparated(value.config.os.run_provisioning_instructions_on_every_boot);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.config.tenant.tenant_organization_id.as_str());
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(
+                serde_json::to_string(&value.config.network).unwrap_or_default(),
+            );
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.network_config_version);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(
+                serde_json::to_string(&value.config.infiniband).unwrap_or_default(),
+            );
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.ib_config_version);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(&value.config.tenant.tenant_keyset_ids);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.config.os.phone_home_enabled);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(&value.metadata.name);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(&value.metadata.description);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(
+                serde_json::to_string(&value.metadata.labels).unwrap_or_default(),
+            );
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.config_version);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(&value.config.tenant.hostname);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(&value.config.network_security_group_id);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(&value.instance_type_id);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(
+                serde_json::to_string(&value.config.extension_services).unwrap_or_default(),
+            );
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.extension_services_config_version);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(
+                serde_json::to_string(&value.config.nvlink).unwrap_or_default(),
+            );
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.nvlink_config_version);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(
+                serde_json::to_string(&value.config.spxconfig).unwrap_or_default(),
+            );
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.spx_config_version);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(&value.config.power_profile);
+            separated.push_unseparated(")");
+        }
+
+        qb.push(") AS vals(id, machine_id, operating_system_id, os_user_data, os_ipxe_script, os_image_id,
                        os_always_boot_with_ipxe, tenant_org, network_config, network_config_version,
-                       ib_config, ib_config_version, keyset_ids, os_phone_home_enabled, name, 
+                       ib_config, ib_config_version, keyset_ids, os_phone_home_enabled, name,
                        description, labels, config_version, hostname, network_security_group_id,
                        instance_type_id, extension_services_config, extension_services_config_version,
                        nvlink_config, nvlink_config_version, spx_config, spx_config_version,
                        power_profile)
-            INNER JOIN machines m ON m.id = vals.machine_id 
+            INNER JOIN machines m ON m.id = vals.machine_id
                 AND (vals.instance_type_id IS NULL OR m.instance_type_id = vals.instance_type_id)");
 
-    let result = qb
-        .build()
-        .execute(&mut *txn)
-        .await
-        .map_err(|e| DatabaseError::new("batch_persist", e))?;
+        let result = qb
+            .build()
+            .execute(&mut *txn)
+            .await
+            .map_err(|e| DatabaseError::new("batch_persist", e))?;
+
+        rows_affected_total += result.rows_affected();
+    }
 
     // Check if all instances were inserted
     // If instance_type_id doesn't match, the row won't be inserted due to the JOIN condition
-    let expected_count = values.len() as u64;
-    if result.rows_affected() != expected_count {
+    if rows_affected_total != expected_count {
         return Err(DatabaseError::FailedPrecondition(
             "expected InstanceTypeId does not match source machine".to_string(),
         ));
@@ -1504,6 +1520,124 @@ mod tests {
         .fetch_one(conn)
         .await
         .unwrap()
+    }
+
+    /// Seeds `n` bare machines (no FK dependents besides `dpf`), each with a
+    /// distinct id derived from its index, in a single multi-row INSERT.
+    async fn seed_machines(conn: &mut PgConnection, n: usize) -> Vec<MachineId> {
+        let machine_ids: Vec<MachineId> = (0..n)
+            .map(|i| {
+                let mut hardware_hash = [0u8; 32];
+                hardware_hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                MachineId::new(
+                    MachineIdSource::ProductBoardChassisSerial,
+                    hardware_hash,
+                    MachineType::Host,
+                )
+            })
+            .collect();
+
+        let mut qb = sqlx::QueryBuilder::new("INSERT INTO machines (id, dpf) ");
+        qb.push_values(machine_ids.iter(), |mut b, machine_id| {
+            b.push_bind(*machine_id).push("'{}'::jsonb");
+        });
+        qb.build().execute(&mut *conn).await.unwrap();
+
+        machine_ids
+    }
+
+    /// Builds a minimal-but-valid `NewInstance` on `machine_id`, distinct from
+    /// every other instance produced by this helper via `instance_id`.
+    fn new_instance(machine_id: MachineId, config: &InstanceConfig) -> NewInstance<'_> {
+        let version = ConfigVersion::initial();
+        NewInstance {
+            instance_id: InstanceId::new(),
+            machine_id,
+            instance_type_id: None,
+            config,
+            metadata: Metadata::default(),
+            config_version: version,
+            network_config_version: version,
+            ib_config_version: version,
+            extension_services_config_version: version,
+            nvlink_config_version: version,
+            spx_config_version: version,
+        }
+    }
+
+    fn minimal_instance_config() -> InstanceConfig {
+        InstanceConfig {
+            tenant: model::instance::config::tenant_config::TenantConfig {
+                tenant_organization_id: TenantOrganizationId::try_from(
+                    "batch-persist-chunking".to_string(),
+                )
+                .unwrap(),
+                tenant_keyset_ids: Vec::new(),
+                hostname: None,
+            },
+            os: OperatingSystem {
+                user_data: None,
+                variant: OperatingSystemVariant::Ipxe(InlineIpxe {
+                    ipxe_script: "#!ipxe".to_string(),
+                }),
+                phone_home_enabled: false,
+                run_provisioning_instructions_on_every_boot: false,
+            },
+            network: InstanceNetworkConfig::default(),
+            infiniband: InstanceInfinibandConfig::default(),
+            network_security_group_id: None,
+            extension_services: InstanceExtensionServicesConfig::default(),
+            nvlink: InstanceNvLinkConfig::default(),
+            spxconfig: InstanceSpxConfig::default(),
+            power_profile: None,
+        }
+    }
+
+    /// `batch_persist` chunks its INSERT at `BIND_LIMIT / BATCH_PERSIST_BINDS_PER_ROW`
+    /// rows to stay under Postgres's bind-parameter ceiling (see the constant's
+    /// doc comment). This is the regression guard for that chunking: a batch
+    /// one row larger than a single chunk must still persist every row --
+    /// each sub-batch INSERT commits on the same caller-supplied transaction,
+    /// so the whole call remains all-or-nothing even though it issues more
+    /// than one statement. Before chunking existed, this row count blew the
+    /// 65535 bind-parameter limit and `batch_persist` failed outright.
+    #[crate::sqlx_test]
+    async fn batch_persist_splits_across_bind_limit_chunks(pool: sqlx::PgPool) {
+        let chunk_size = BIND_LIMIT / BATCH_PERSIST_BINDS_PER_ROW;
+        let row_count = chunk_size + 1; // one row past the first chunk boundary
+
+        let mut txn = pool.begin().await.unwrap();
+        let machine_ids = seed_machines(&mut txn, row_count).await;
+        let config = minimal_instance_config();
+        let values: Vec<NewInstance> = machine_ids
+            .iter()
+            .map(|&machine_id| new_instance(machine_id, &config))
+            .collect();
+
+        let snapshots = batch_persist(values, &mut txn).await.unwrap();
+        assert_eq!(
+            snapshots.len(),
+            row_count,
+            "every row across both chunks should come back in the result"
+        );
+
+        let persisted: i64 = sqlx::query_scalar("SELECT count(*) FROM instances")
+            .fetch_one(&mut *txn)
+            .await
+            .unwrap();
+        assert_eq!(
+            persisted, row_count as i64,
+            "every row across both chunks should be committed, not just the first chunk"
+        );
+    }
+
+    /// `batch_persist(vec![])` must be a no-op rather than building a
+    /// zero-row `VALUES (...)` clause (which is invalid SQL).
+    #[crate::sqlx_test]
+    async fn batch_persist_handles_empty_batch(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        let snapshots = batch_persist(Vec::new(), &mut txn).await.unwrap();
+        assert!(snapshots.is_empty());
     }
 
     /// Pins the SQL NULL semantics the `Option<Json<OsRow>>` decode relies on:

@@ -5,6 +5,10 @@ package main
 
 import (
 	"context"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -21,6 +25,8 @@ import (
 
 	// Imports for API doc generation
 	_ "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/tracing"
 )
 
 const (
@@ -28,6 +34,9 @@ const (
 	ZerologMessageFieldName = "msg"
 	// ZerologLevelFieldName specifies the field name for log level
 	ZerologLevelFieldName = "type"
+
+	// serverShutdownTimeout bounds the drain of in-flight requests on SIGTERM.
+	serverShutdownTimeout = 30 * time.Second
 )
 
 // @title NVIDIA NICo REST API
@@ -44,6 +53,11 @@ const (
 // @in header
 // @name Authorization
 func main() {
+	// First: interceptors and handlers below capture the global propagator.
+	tracing.InstallPropagator()
+	// No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set. Called explicitly below
+	// rather than deferred: log.Fatal exits without running defers.
+	shutdownTracing := tracing.InstallExporter("nico-rest-api")
 	// Initialize logger
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	zerolog.LevelFieldName = ZerologLevelFieldName
@@ -113,5 +127,27 @@ func main() {
 
 	// Start main server
 	log.Info().Msg("starting API server")
-	e.Logger.Fatal(e.Start(":8388"))
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- e.Start(":8388")
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	select {
+	case err := <-errCh:
+		shutdownTracing()
+		log.Fatal().Err(err).Msg("API server stopped")
+	case sig := <-sigCh:
+		log.Info().Stringer("signal", sig).Msg("shutting down API server")
+		ctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+		defer cancel()
+		if err := e.Shutdown(ctx); err != nil {
+			log.Error().Err(err).Msg("API server graceful shutdown failed")
+		}
+		// After the drain, so spans recorded by in-flight requests are exported.
+		shutdownTracing()
+	}
 }

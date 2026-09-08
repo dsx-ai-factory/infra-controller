@@ -107,8 +107,52 @@ config it edits.
    vars only for your own/mirrored registry. See *DPF* below. Sites with no
    DPUs (or still on iPXE) run `./setup.sh -y --skip-dpf` and can ignore these.
 
+9. **[RMS (Rack Management Service)](https://docs.nvidia.com/rms/documentation/home/) - on by default.**
+   Unless you pass `--skip-rms`, export `NICO_RMS_IMAGE_TAG` (required; the
+   image tag is decoupled from the chart).
+
+   Phase 5c installs the rack-manager chart from the `helm-prereqs/nv-rms` git
+   submodule (pinned to a reviewed
+   [nv-rms](https://github.com/dsx-ai-factory/nv-rms) commit; initialized
+   automatically) with mTLS issued from `vault-nico-issuer`, and provisions the
+   `rms` database on `nico-pg-cluster`.
+
+   Airgapped sites clone nv-rms out-of-band and set
+   `NICO_RMS_CHART=<clone>/helm` instead. Refer to *Building the RMS image*
+   below.
+
+   NICo Core's chart defaults already point the component manager at
+   `rms-api-server.rack-manager.svc.cluster.local:8801`; the namespace is fixed
+   to `rack-manager` to match, so no Core config change is needed. Set
+   `NICO_RMS_IMAGE_REPO` only for a mirrored or self-built image (the default
+   NGC image is entitlement-gated).
+
+### Building the RMS image
+
+The default `rms-api` image on NGC is entitlement-gated. Most sites build it
+themselves and push it to the same registry as the other NICo images:
+
+```bash
+git submodule update --init helm-prereqs/nv-rms   # or your own nv-rms clone
+cd helm-prereqs/nv-rms
+# One version for the binary metadata, the image tag, and NICO_RMS_IMAGE_TAG,
+# derived from the pinned checkout (for example, v0.10.0-rc2):
+RMS_VERSION="$(git describe --tags --always)"
+docker build \
+  --build-arg VERGEN_GIT_SHA="$(git rev-parse HEAD)" \
+  --build-arg VERGEN_GIT_DESCRIBE="${RMS_VERSION}" \
+  -t "${NICO_IMAGE_REGISTRY}/rms-api:${RMS_VERSION}" .
+docker push "${NICO_IMAGE_REGISTRY}/rms-api:${RMS_VERSION}"
+export NICO_RMS_IMAGE_REPO="${NICO_IMAGE_REGISTRY}/rms-api"
+export NICO_RMS_IMAGE_TAG="${RMS_VERSION}"
+```
+
+Build from the submodule commit (or your pinned clone) so the image matches
+the chart. The `VERGEN_*` build args stamp version metadata; the build works
+without a `.git` directory because of them.
+
 Once the above is done, run `./setup.sh -y` (DPF installs by default; add
-`--skip-dpf` to opt out).
+`--skip-dpf` / `--skip-rms` to opt out of those stacks).
 
 ## Configuration reference
 
@@ -131,6 +175,8 @@ The tables below summarize the keys that must be set per site.
 | `NICO_STORAGE_CLASS` | No | StorageClass used by Vault data/audit PVCs. Defaults to `local-path-persistent`. |
 | `PREFLIGHT_CHECK_IMAGE` | No | Image used for preflight per-node checks. Defaults to `busybox:1.36`; set to a local mirror for air-gapped clusters. |
 | `NICO_SKIP_DPF` | No | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Same as `--skip-dpf`. Defaults to `false`. |
+| `NICO_SKIP_RMS` | No | Skip the Rack Management Service (rack-manager chart, phase 5c), which installs **by default**. Same as `--skip-rms`. Defaults to `false`. |
+| `NICO_RMS_IMAGE_TAG` | Unless RMS is skipped (`--skip-rms` / `NICO_SKIP_RMS=true`) | RMS API server image tag (git-describe style, e.g. `v0.10.0-rc2`). No default - the chart fails at render without one. See `setup.sh` header for the full `NICO_RMS_*` family (chart override, image repo, NGC key). The namespace is fixed to `rack-manager` - NICo Core dials the service by that name. |
 | `NICO_DPF_VERSION` | No | `NVIDIA/doca-platform` tag that setup.sh clones and installs. Defaults to `v26.4.0`. |
 | `NICO_DPF_SRC_DIR` | No | Cache directory for the doca-platform clone. Defaults to `helm-prereqs/.dpf-src`. |
 | `NICO_DPF_NGC_API_KEY` | No | NGC API key for `dpf-pull-secret` and the Argo CD helm repository secrets. Defaults to `REGISTRY_PULL_SECRET`. |
@@ -158,6 +204,8 @@ The tables below summarize the keys that must be set per site.
 | `postgresql.instances` | `3` | No | Number of PostgreSQL replicas |
 | `postgresql.volumeSize` | `"10Gi"` | No | PVC size per PostgreSQL replica |
 | `postgresql.storageClass` | `"local-path-persistent"` | No | StorageClass for the nico-prereqs PostgreSQL PVCs. Override through Helm values when using a non-local StorageClass. |
+| `temporal.useHaPostgres` | `false` | No | Move Temporal's default/visibility stores onto `nico-pg-cluster` instead of `postgres.postgres`. Named `useHaPostgres`, not `enabled`, because it only moves the database — it doesn't gate whether Temporal is deployed. See [Consolidating Temporal/Keycloak onto nico-pg-cluster](#consolidating-temporalkeycloak-onto-nico-pg-cluster). |
+| `keycloak.useHaPostgres` | `false` | No | Move Keycloak's database onto `nico-pg-cluster` instead of `postgres.postgres`. Distinct from `nico-rest-api.config.keycloak.enabled` in `values/nico-rest.yaml`, which controls whether Keycloak is deployed at all — this toggle provisions the database regardless, so it just goes unused if Keycloak itself isn't deployed. |
 
 ### `values/nico-core.yaml`
 
@@ -340,11 +388,11 @@ NICo Core                  (../helm - nico-core.yaml values)
   └── unbound               (Deployment - .forge zone DNS, opt-in)
 NICo REST                  (../helm/rest/nico-rest)
   ├── nico-rest-ca-issuer   (ClusterIssuer - cert-manager.io)
-  ├── postgres StatefulSet  (temporal + keycloak + NICo databases)
+  ├── postgres StatefulSet  (legacy standalone DB; default target for Temporal when temporal.useHaPostgres is false and for Keycloak when keycloak.useHaPostgres is false — the two are independent)
   ├── keycloak              (dev OIDC IdP, nico-dev realm)
   ├── temporal              (temporal-helm/temporal, mTLS)
-  └── nico-rest             (API, cert-manager, workflow, site-manager)
-NICo Flow                  (../helm/charts/nico-flow)
+  └── nico-rest             (API, cert-manager, workflow, site-manager - DB on nico-pg-cluster)
+NICo Flow                  (../helm/charts/nico-flow - Flow, PSM, and NSM)
 NICo REST site-agent       (../helm/rest/nico-rest-site-agent - StatefulSet, bootstrap via site-manager)
 Observability (opt-in)     (observability/ - only with --with-observability; also standalone)
   ├── kube-prometheus-stack (prometheus-community 59.1.0 - Prometheus + Grafana, release `obs`)
@@ -353,6 +401,85 @@ Observability (opt-in)     (observability/ - only with --with-observability; als
   ├── otel-agent            (opentelemetry-collector 0.106.0 - pod logs -> Loki, spans -> Tempo)
   └── otel-collector-gateway (optional, WITH_DPU=true - DPU OTLP/mTLS receiver)
 ```
+
+## Consolidating Temporal/Keycloak onto nico-pg-cluster
+
+The NICo REST API database was consolidated onto the shared, Zalando-managed
+`nico-pg-cluster` in #3081/#3182. Temporal and Keycloak still default to a
+separate, standalone `postgres.postgres` StatefulSet — both targets are
+supported side by side so existing sites are not forced onto a new database
+on their next `setup.sh` run.
+
+Two toggles in `helm-prereqs/values.yaml` opt a site in:
+
+- `temporal.useHaPostgres`
+- `keycloak.useHaPostgres` (also has a `namespace` field — see the caveat below)
+
+The leaf field is `useHaPostgres`, not `enabled`: these toggles only move
+where the *database* lives, not whether Temporal/Keycloak are deployed at
+all. `keycloak.enabled` already means something else, in
+`values/nico-rest.yaml` (whether Keycloak is deployed) — reusing that name
+here for a different meaning would be confusing.
+
+Sites that don't opt in need no changes: `setup.sh` keeps deploying the
+legacy `postgres.postgres` StatefulSet and pointing Temporal/Keycloak at it,
+exactly as before.
+
+### Migrating an existing site's data
+
+1. Set `temporal.useHaPostgres: true` and/or `keycloak.useHaPostgres: true`, then run
+   `helmfile sync -l name=nico-prereqs` (or `setup.sh` through Phase 6). This
+   provisions the `temporal.nico`/`keycloak.nico` users and empty
+   `temporal`/`temporal_visibility`/`keycloak` databases on `nico-pg-cluster`,
+   and the ESO `ClusterExternalSecret`s that sync their credentials.
+2. Run `helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db temporal`,
+   `--db keycloak`, or `--db both` — matching whichever toggle(s) you just
+   enabled; the default (`both`) fails if you only provisioned one target.
+   This scales the workload(s) to zero, dumps the existing database(s) off
+   `postgres.postgres`, and restores them into `nico-pg-cluster`. It's a
+   stop-the-world cutover: Temporal workflow processing / Keycloak logins are
+   unavailable while it runs, and stay down afterward — see "Why does the
+   migration script leave things scaled down?" below.
+3. Re-run `setup.sh`. Phases 7d/7f detect the enabled toggles, point
+   Temporal/Keycloak at `nico-pg-cluster` instead of `postgres.postgres`, and
+   scale the workloads back up already on the new database.
+
+A fresh site can instead set both toggles to `true` before the first
+`setup.sh` run and skip the migration script — there is no existing data to
+move.
+
+`preflight.sh` guards against skipping step 2 by mistake: if a toggle is
+`true` and `postgres.postgres` still has real Temporal/Keycloak data that the
+matching `nico-pg-cluster` database doesn't fully have yet (missing, empty,
+or fewer rows than the legacy source), it fails with an error pointing at the
+migration script, instead of letting `setup.sh` silently start against an
+empty or incomplete database.
+
+### Why does the migration script leave things scaled down?
+
+Scaling Temporal/Keycloak back up right after the dump/restore would resume
+them against their *old* `postgres.postgres` configuration — they don't
+repoint to `nico-pg-cluster` until the step-3 `setup.sh` run applies that
+config. Any workflow activity or Keycloak login in that window would write to
+`postgres.postgres` and be silently lost once `setup.sh` switches the
+endpoint over. So the migration script leaves a successfully-migrated
+workload at zero replicas, and step 3 is what brings it back up. A *failed*
+migration is the exception: the script restores the original replica count
+immediately, since nothing was cut over.
+
+### Namespace caveats
+
+- **Temporal's namespace is not configurable.** It's hardcoded `temporal`
+  throughout `setup.sh` (TLS bootstrap, rollout waits, admintools execs) and
+  in the vendored `temporal-helm/namespace.yaml` manifest, so there's no
+  `temporal.namespace` value to set.
+- **Keycloak's namespace is `keycloak.namespace`** (default `nico-rest`),
+  consumed consistently by `setup.sh`, the ESO sync, and the migration
+  script. It is **not** propagated automatically to
+  `values/nico-rest.yaml`'s `nico-rest-api.config.keycloak.baseURL` /
+  `externalBaseURL` (a hand-edited site value, not templated) — if you change
+  it from `nico-rest`, update that hostname to match, or REST won't be able
+  to reach Keycloak.
 
 ## DPF
 

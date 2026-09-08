@@ -130,7 +130,7 @@ impl<'a, 'b> TestInstanceBuilder<'a, 'b> {
             .api
             .allocate_instance(tonic::Request::new(rpc::InstanceAllocationRequest {
                 instance_id: None,
-                machine_id: Some(self.mh.host().id),
+                machine_id: Some(self.mh.host().id.into()),
                 instance_type_id: None,
                 config: Some(self.config),
                 metadata: self.metadata,

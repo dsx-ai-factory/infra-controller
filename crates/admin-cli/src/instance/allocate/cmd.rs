@@ -15,13 +15,38 @@
  * limitations under the License.
  */
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+
+use carbide_uuid::machine::MachineId;
 
 use super::args::Args;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::machine;
 use crate::rpc::ApiClient;
+
+/// Batch-resolves an explicit `--machine-id` list into a lookup map via
+/// chunked `find_machines_by_ids` calls, instead of leaving callers to
+/// resolve each id with its own RPC. At fleet scale (thousands of ids) a
+/// per-id resolution loop is itself enough sequential traffic to trip
+/// per-client admission control, independent of whether the final allocate
+/// call is transactional.
+async fn prefetch_machines(
+    api_client: &ApiClient,
+    machine_ids: &[MachineId],
+) -> CarbideCliResult<HashMap<MachineId, rpc::Machine>> {
+    let chunk_size = api_client.effective_chunk_size(machine_ids.len()).await?;
+    let mut machines = HashMap::with_capacity(machine_ids.len());
+    for chunk in machine_ids.chunks(chunk_size.max(1)) {
+        let list = api_client.get_machines_by_ids(chunk).await?;
+        for machine in list.machines {
+            if let Some(id) = machine.id {
+                machines.insert(id, machine);
+            }
+        }
+    }
+    Ok(machines)
+}
 
 pub(super) async fn allocate(
     api_client: &ApiClient,
@@ -38,6 +63,37 @@ pub(super) async fn allocate(
             "--transactional requires --number > 1".to_owned(),
         ));
     }
+
+    // An explicit `--machine-id` list is fully known up front, so resolve it
+    // in a handful of chunked calls instead of one RPC per machine -- at
+    // fleet scale that per-machine loop is itself enough sequential traffic
+    // to trip per-client admission control, regardless of `--transactional`.
+    //
+    // A transient failure partway through the prefetch (e.g. one chunked
+    // `find_machines_by_ids` call erroring out) must not take down sequential
+    // allocation the way it takes down transactional allocation: sequential
+    // mode's whole contract is "keep going, best effort", and the pre-prefetch
+    // code achieved that by resolving one machine at a time and treating a
+    // failed lookup as an ineligible candidate rather than a fatal error. So
+    // on a sequential request we fall back to `None` (per-machine lookup via
+    // `get_next_free_machine`) instead of aborting the command; transactional
+    // mode keeps propagating the error immediately since it's all-or-nothing
+    // regardless.
+    let prefetched_machines = if !allocate_request.machine_id.is_empty() {
+        match prefetch_machines(api_client, &allocate_request.machine_id).await {
+            Ok(machines) => Some(machines),
+            Err(e) if allocate_request.transactional => return Err(e),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "prefetching explicit machine ids failed; falling back to per-machine lookup"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let mut machine_ids: VecDeque<_> = if !allocate_request.machine_id.is_empty() {
         allocate_request.machine_id.iter().copied().collect()
@@ -63,14 +119,28 @@ pub(super) async fn allocate(
         // Batch mode: all-or-nothing
         let mut requests = Vec::new();
         for i in 0..number {
-            let Some(machine) = machine::get_next_free_machine(
-                api_client,
-                &mut machine_ids,
-                min_interface_count,
-                allocate_request.flat_vpc_id,
-            )
-            .await
-            else {
+            let next_machine = match &prefetched_machines {
+                Some(cache) => {
+                    machine::get_next_free_machine_prefetched(
+                        api_client,
+                        &mut machine_ids,
+                        min_interface_count,
+                        allocate_request.flat_vpc_id,
+                        cache,
+                    )
+                    .await
+                }
+                None => {
+                    machine::get_next_free_machine(
+                        api_client,
+                        &mut machine_ids,
+                        min_interface_count,
+                        allocate_request.flat_vpc_id,
+                    )
+                    .await
+                }
+            };
+            let Some(machine) = next_machine else {
                 return Err(CarbideCliError::GenericError(format!(
                     "Need {} machines but only {} available.",
                     number, i
@@ -105,14 +175,28 @@ pub(super) async fn allocate(
     } else {
         // Sequential mode: partial success allowed
         for i in 0..number {
-            let Some(machine) = machine::get_next_free_machine(
-                api_client,
-                &mut machine_ids,
-                min_interface_count,
-                allocate_request.flat_vpc_id,
-            )
-            .await
-            else {
+            let next_machine = match &prefetched_machines {
+                Some(cache) => {
+                    machine::get_next_free_machine_prefetched(
+                        api_client,
+                        &mut machine_ids,
+                        min_interface_count,
+                        allocate_request.flat_vpc_id,
+                        cache,
+                    )
+                    .await
+                }
+                None => {
+                    machine::get_next_free_machine(
+                        api_client,
+                        &mut machine_ids,
+                        min_interface_count,
+                        allocate_request.flat_vpc_id,
+                    )
+                    .await
+                }
+            };
+            let Some(machine) = next_machine else {
                 tracing::error!("No available machines.");
                 break;
             };

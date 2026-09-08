@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::panic::Location;
 use std::sync::Arc;
@@ -262,6 +263,20 @@ pub enum CarbideError {
     AttestationError(String),
 }
 
+// Implement From<Infallible> so that we can write generic code that converts between MachineId
+// representations using TryFrom, while supporting "non-converting" cases where the caller is
+// already passing the right type. (The `impl TryFrom<T> for T` blanket impl uses `Infallible` as
+// its error type.)
+impl From<Infallible> for CarbideError {
+    fn from(_: Infallible) -> Self {
+        // We just crash if this is ever called, because the whole point of `Infallible` is that
+        // it's an error variant that is never actually constructed. Future rust versions will use
+        // `!` as the error type for TryFrom<T> for T, and this whole conversion will become
+        // unnecessary (as the compiler will already determine it to be unreachable.)
+        unreachable!()
+    }
+}
+
 impl From<InvalidMachineType> for CarbideError {
     fn from(err: InvalidMachineType) -> Self {
         Self::InvalidArgument(err.to_string())
@@ -286,6 +301,7 @@ impl From<ModelError> for CarbideError {
             ModelError::MissingArgument(e) => Self::MissingArgument(e),
             ModelError::HardwareInfo(e) => Self::HardwareInfoError(e),
             ModelError::InvalidArgument(e) => Self::InvalidArgument(e),
+            ModelError::InvalidMachindId(e) => Self::InvalidArgument(e),
         }
     }
 }

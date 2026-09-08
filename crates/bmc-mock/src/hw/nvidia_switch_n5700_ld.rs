@@ -74,6 +74,7 @@ impl NvidiaSwitchN5700Ld<'_> {
                 id: Cow::Borrowed("System_0"),
                 manufacturer: Some("NVIDIA".into()),
                 model: Some(SWITCH_MODEL.into()),
+                bios_version: None,
                 eth_interfaces: None,
                 serial_number: Some(self.switch_serial_number.to_string().into()),
                 boot_order_mode: redfish::computer_system::BootOrderMode::Generic,

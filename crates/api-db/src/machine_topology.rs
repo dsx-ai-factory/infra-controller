@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
 use chrono::{TimeDelta, Utc};
 use itertools::Itertools;
 use model::bmc_info::BmcInfo;
@@ -55,15 +55,16 @@ async fn update(
 
 pub async fn create_or_update(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &impl MachineIdSubtypeTrait,
     hardware_info: &HardwareInfo,
 ) -> DatabaseResult<MachineTopology> {
-    let topology_data = find_latest_by_machine_ids(txn, &[*machine_id]).await?;
-    let topology_data = topology_data.get(machine_id);
+    let machine_id = machine_id.to_machine_id();
+    let topology_data = find_latest_by_machine_ids(txn, &[machine_id]).await?;
+    let topology_data = topology_data.get(&machine_id);
 
     if let Some(topology) = topology_data {
         if topology.topology_update_needed {
-            return update(txn, machine_id, hardware_info).await;
+            return update(txn, &machine_id, hardware_info).await;
         }
         return Ok(topology.clone());
     }
@@ -188,10 +189,10 @@ pub async fn lock_by_machine_id(
     Ok(())
 }
 
-pub async fn find_by_machine_ids(
+pub async fn find_by_machine_ids<ID: MachineIdSubtypeTrait>(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
-) -> Result<HashMap<MachineId, Vec<MachineTopology>>, DatabaseError> {
+    machine_ids: &[ID],
+) -> Result<HashMap<ID, Vec<MachineTopology>>, DatabaseError> {
     // TODO: Actually this shouldn't be able to return multiple entries,
     // since there is a check in create that for existing interfaces
     // But due to race conditions we can likely still have multiple of those interfaces
@@ -203,14 +204,15 @@ pub async fn find_by_machine_ids(
         .await
         .map_err(|e| DatabaseError::query(query, e))?
         .into_iter()
-        .into_group_map_by(|t: &MachineTopology| t.machine_id);
+        .filter_map(|t: MachineTopology| Some((ID::try_from(t.machine_id).ok()?, t)))
+        .into_group_map();
     Ok(topologies)
 }
 
-pub async fn find_latest_by_machine_ids(
+pub async fn find_latest_by_machine_ids<ID: MachineIdSubtypeTrait>(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
-) -> Result<HashMap<MachineId, MachineTopology>, DatabaseError> {
+    machine_ids: &[ID],
+) -> Result<HashMap<ID, MachineTopology>, DatabaseError> {
     // TODO: So far this just moved code around
     // This way of doing fetching the latest topology is inefficient, because it will still fetch all
     // information. We can change the query - however if we store information
@@ -387,12 +389,12 @@ pub async fn find_freetext(
 
 pub async fn set_topology_update_needed(
     txn: &mut PgConnection,
-    machine_id: &MachineId,
+    machine_id: &impl MachineIdSubtypeTrait,
     value: bool,
 ) -> Result<(), DatabaseError> {
     let query = "UPDATE machine_topologies SET topology_update_needed=$2 WHERE machine_id=$1 RETURNING machine_id";
     let _id = sqlx::query_as::<_, MachineId>(query)
-        .bind(machine_id)
+        .bind(machine_id.as_machine_id())
         .bind(value)
         .fetch_one(txn)
         .await

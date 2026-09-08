@@ -70,6 +70,7 @@ impl NvidiaSwitchNd5200Ld<'_> {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
+                bios_version: None,
                 eth_interfaces: None,
                 serial_number: None,
                 boot_order_mode: redfish::computer_system::BootOrderMode::Generic,

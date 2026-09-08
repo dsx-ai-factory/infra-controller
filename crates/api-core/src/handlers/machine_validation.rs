@@ -27,8 +27,8 @@ use model::machine::{
     ManagedHostState, ValidationState,
 };
 use model::machine_validation::{
-    MachineValidation, MachineValidationResult, MachineValidationState, MachineValidationStatus,
-    MachineValidationTest as ModelMachineValidationTest,
+    MachineValidation, MachineValidationPlugin, MachineValidationResult, MachineValidationState,
+    MachineValidationStatus, MachineValidationTest as ModelMachineValidationTest,
     MachineValidationTestAddRequest as ModelTestAddRequest,
     MachineValidationTestUpdateRequest as ModelTestUpdateRequest,
     MachineValidationTestsGetRequest as ModelTestsGetRequest,
@@ -53,6 +53,7 @@ use crate::machine_validation::{
 ///
 /// Remove or set `false` once add/update (and external-config update) paths are hardened.
 const MACHINE_VALIDATION_MUTATION_NOOP: bool = true;
+const MAX_PLUGIN_TIMEOUT_SECONDS: i64 = 24 * 60 * 60;
 
 fn machine_validation_mutation_disabled_status() -> Status {
     Status::failed_precondition(
@@ -842,18 +843,148 @@ fn validate_img_name(img_name: &str) -> Result<(), CarbideError> {
     Ok(())
 }
 
+fn plugin_registry(image: &str) -> Result<&str, CarbideError> {
+    let image = image.split_once('@').map_or(image, |(name, _)| name);
+    let Some((registry, _)) = image.split_once('/') else {
+        return Err(CarbideError::InvalidArgument(
+            "plugin image must include an explicit registry hostname".into(),
+        ));
+    };
+    if registry.contains('.') || registry.contains(':') || registry == "localhost" {
+        Ok(registry)
+    } else {
+        Err(CarbideError::InvalidArgument(
+            "plugin image must include an explicit registry hostname".into(),
+        ))
+    }
+}
+
+fn validate_machine_validation_plugin(
+    plugin: &rpc::MachineValidationPlugin,
+    config: &MachineValidationConfig,
+) -> Result<(), CarbideError> {
+    validate_img_name(&plugin.image)?;
+    let registry = plugin_registry(&plugin.image)?;
+    if !config
+        .approved_plugin_registries
+        .iter()
+        .any(|approved| approved.eq_ignore_ascii_case(registry))
+    {
+        return Err(CarbideError::InvalidArgument(format!(
+            "plugin registry {registry:?} is not approved by machine validation site policy"
+        )));
+    }
+    if plugin.entrypoint.is_empty() || plugin.entrypoint.iter().any(|argument| argument.is_empty())
+    {
+        return Err(CarbideError::InvalidArgument(
+            "plugin entrypoint must contain a non-empty executable and arguments".into(),
+        ));
+    }
+    let parameters: serde_json::Value =
+        serde_json::from_str(&plugin.parameters_json).map_err(|error| {
+            CarbideError::InvalidArgument(format!(
+                "plugin parameters_json must be valid JSON: {error}"
+            ))
+        })?;
+    if !parameters.is_object() {
+        return Err(CarbideError::InvalidArgument(
+            "plugin parameters_json must be a JSON object".into(),
+        ));
+    }
+    if plugin.privileged && !config.allow_privileged_plugins {
+        return Err(CarbideError::InvalidArgument(
+            "privileged plugins are not allowed by machine validation site policy".into(),
+        ));
+    }
+    if plugin.host_access_full {
+        if !plugin.privileged {
+            return Err(CarbideError::InvalidArgument(
+                "full host access requires privileged plugin execution".into(),
+            ));
+        }
+        if !config.allow_full_host_plugins {
+            return Err(CarbideError::InvalidArgument(
+                "full host plugins are not allowed by machine validation site policy".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_plugin_timeout(timeout_seconds: Option<i64>) -> Result<(), CarbideError> {
+    let timeout_seconds = timeout_seconds.unwrap_or(7200);
+    if !(1..=MAX_PLUGIN_TIMEOUT_SECONDS).contains(&timeout_seconds) {
+        return Err(CarbideError::InvalidArgument(format!(
+            "plugin timeout must be between 1 and {MAX_PLUGIN_TIMEOUT_SECONDS} seconds"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_plugin_enablement(
+    plugin: Option<&MachineValidationPlugin>,
+    verified: bool,
+    full_host_approved: bool,
+) -> Result<(), CarbideError> {
+    let Some(plugin) = plugin else {
+        return Ok(());
+    };
+    if !verified {
+        return Err(CarbideError::InvalidArgument(
+            "plugin verification is required before enablement".into(),
+        ));
+    }
+    if plugin.host_access_full && !full_host_approved {
+        return Err(CarbideError::InvalidArgument(
+            "full host plugin approval is required before enablement".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn plugin_has_legacy_execution_settings(request: &rpc::MachineValidationTestAddRequest) -> bool {
+    request.img_name.is_some()
+        || request.execute_in_host.is_some()
+        || request.container_arg.is_some()
+        || !request.command.is_empty()
+        || !request.args.is_empty()
+}
+
+fn machine_validation_test_not_found(test_id: &str, version: &str) -> Status {
+    Status::not_found(format!(
+        "machine validation test {test_id} revision {version} was not found"
+    ))
+}
+
 pub(crate) async fn update_machine_validation_test(
     api: &Api,
     request: tonic::Request<rpc::MachineValidationTestUpdateRequest>,
 ) -> Result<tonic::Response<rpc::MachineValidationTestAddUpdateResponse>, Status> {
     log_request_data(&request);
-    if MACHINE_VALIDATION_MUTATION_NOOP {
+    let req = request.into_inner();
+    if MACHINE_VALIDATION_MUTATION_NOOP
+        && req
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.plugin.as_ref())
+            .is_none()
+    {
         tracing::warn!("UpdateMachineValidationTest: rejecting mutation (no-op)");
-        let _ = request.into_inner();
         return Err(machine_validation_mutation_disabled_status());
     }
 
-    let req = request.into_inner();
+    if req
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.plugin.as_ref())
+        .is_some()
+    {
+        return Err(CarbideError::InvalidArgument(
+            "plugin revisions are immutable; create the next revision before changing a plugin"
+                .into(),
+        )
+        .into());
+    }
 
     if let Some(img_name) = req.payload.as_ref().and_then(|p| p.img_name.as_deref()) {
         validate_img_name(img_name).map_err(Status::from)?;
@@ -894,13 +1025,30 @@ pub(crate) async fn add_machine_validation_test(
     request: tonic::Request<rpc::MachineValidationTestAddRequest>,
 ) -> Result<tonic::Response<rpc::MachineValidationTestAddUpdateResponse>, Status> {
     log_request_data(&request);
-    if MACHINE_VALIDATION_MUTATION_NOOP {
+    let req = request.into_inner();
+    if MACHINE_VALIDATION_MUTATION_NOOP && req.plugin.is_none() {
         tracing::warn!("AddMachineValidationTest: rejecting mutation (no-op)");
-        let _ = request.into_inner();
         return Err(machine_validation_mutation_disabled_status());
     }
 
-    let req = request.into_inner();
+    if let Some(plugin) = req.plugin.as_ref() {
+        validate_plugin_timeout(req.timeout).map_err(Status::from)?;
+        validate_machine_validation_plugin(plugin, &api.runtime_config.machine_validation_config)
+            .map_err(Status::from)?;
+        if req.is_enabled.is_some() {
+            return Err(CarbideError::InvalidArgument(
+                "plugin enablement is server-managed; use the enablement operation after verification"
+                    .into(),
+            )
+            .into());
+        }
+        if plugin_has_legacy_execution_settings(&req) {
+            return Err(CarbideError::InvalidArgument(
+                "plugin tests cannot set legacy image, host execution, container arguments, command, or args".into(),
+            )
+            .into());
+        }
+    }
 
     if let Some(img_name) = req.img_name.as_deref() {
         validate_img_name(img_name).map_err(Status::from)?;
@@ -909,18 +1057,40 @@ pub(crate) async fn add_machine_validation_test(
     let mut txn = api.txn_begin().await?;
 
     let model_req: ModelTestAddRequest = req.into();
+    let generated_test_id = machine_validation_suites::generate_test_id(&model_req.name);
+    if model_req.plugin.is_some() {
+        // Lock the revision family before reading its latest version. A row
+        // lock alone cannot protect the first revision because no row exists.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&generated_test_id)
+            .execute(&mut txn)
+            .await
+            .map_err(|error| {
+                CarbideError::internal(format!("lock machine validation plugin revisions: {error}"))
+            })?;
+    }
     let tests = machine_validation_suites::find(
         &mut txn,
         ModelTestsGetRequest {
-            test_id: Some(machine_validation_suites::generate_test_id(&model_req.name)),
+            test_id: Some(generated_test_id),
             ..ModelTestsGetRequest::default()
         },
     )
     .await?;
-    if !tests.is_empty() {
+    if !tests.is_empty() && model_req.plugin.is_none() {
         return Err(CarbideError::InvalidArgument("name already exists".to_string()).into());
     }
-    let version = ConfigVersion::initial();
+    if tests.iter().any(|test| test.plugin.is_none()) {
+        return Err(CarbideError::InvalidArgument(
+            "a plugin cannot replace a legacy machine validation test".into(),
+        )
+        .into());
+    }
+    let version = tests
+        .iter()
+        .max_by_key(|test| test.version.version_nr())
+        .map(|test| test.version.increment())
+        .unwrap_or_else(ConfigVersion::initial);
     let test_id = machine_validation_suites::save(&mut txn, model_req, version).await?;
 
     txn.commit().await?;
@@ -968,8 +1138,13 @@ pub(crate) async fn machine_validation_test_verfied(
         },
     )
     .await?;
-    let _ = machine_validation_suites::mark_verified(&mut txn, req.test_id, existing[0].version)
-        .await?;
+    let Some(test) = existing.first() else {
+        return Err(machine_validation_test_not_found(
+            &req.test_id,
+            &req.version,
+        ));
+    };
+    let _ = machine_validation_suites::mark_verified(&mut txn, req.test_id, test.version).await?;
 
     txn.commit().await?;
 
@@ -994,7 +1169,13 @@ pub(crate) async fn machine_validation_test_next_version(
         },
     )
     .await?;
-    let (test_id, next_version) = machine_validation_suites::clone(&mut txn, &existing[0]).await?;
+    let Some(test) = existing.iter().max_by_key(|test| test.version.version_nr()) else {
+        return Err(Status::not_found(format!(
+            "machine validation test {} was not found",
+            req.test_id
+        )));
+    };
+    let (test_id, next_version) = machine_validation_suites::clone(&mut txn, test).await?;
 
     txn.commit().await?;
 
@@ -1022,12 +1203,31 @@ pub(crate) async fn machine_validation_test_enable_disable_test(
         },
     )
     .await?;
+    let Some(test) = existing.first() else {
+        return Err(machine_validation_test_not_found(
+            &req.test_id,
+            &req.version,
+        ));
+    };
+    if req.is_enabled {
+        if let Some(plugin) = test.plugin.as_ref() {
+            let plugin: rpc::MachineValidationPlugin = plugin.clone().into();
+            validate_machine_validation_plugin(
+                &plugin,
+                &api.runtime_config.machine_validation_config,
+            )
+            .map_err(Status::from)?;
+        }
+        validate_plugin_enablement(test.plugin.as_ref(), test.verified, test.full_host_approved)
+            .map_err(Status::from)?;
+    }
     let _ = machine_validation_suites::enable_disable(
         &mut txn,
         req.test_id,
-        existing[0].version,
+        test.version,
         req.is_enabled,
-        existing[0].verified,
+        test.verified,
+        test.plugin.is_some(),
     )
     .await?;
 
@@ -1036,6 +1236,53 @@ pub(crate) async fn machine_validation_test_enable_disable_test(
     Ok(tonic::Response::new(
         rpc::MachineValidationTestEnableDisableTestResponse {
             message: "Success".to_string(),
+        },
+    ))
+}
+
+pub(crate) async fn machine_validation_test_approve_full_host(
+    api: &Api,
+    request: tonic::Request<rpc::MachineValidationTestFullHostApprovalRequest>,
+) -> Result<tonic::Response<rpc::MachineValidationTestFullHostApprovalResponse>, Status> {
+    log_request_data(&request);
+    let req = request.into_inner();
+    let mut txn = api.txn_begin().await?;
+    let existing = machine_validation_suites::find(
+        &mut txn,
+        ModelTestsGetRequest {
+            test_id: Some(req.test_id.clone()),
+            version: Some(req.version.clone()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let Some(test) = existing.first() else {
+        return Err(machine_validation_test_not_found(
+            &req.test_id,
+            &req.version,
+        ));
+    };
+    let Some(plugin) = test.plugin.as_ref() else {
+        return Err(CarbideError::InvalidArgument(
+            "full host approval is only valid for plugin revisions".into(),
+        )
+        .into());
+    };
+    if !test.verified || !plugin.host_access_full {
+        return Err(CarbideError::InvalidArgument(
+            "only verified full host plugin revisions can receive full host approval".into(),
+        )
+        .into());
+    }
+    let plugin: rpc::MachineValidationPlugin = plugin.clone().into();
+    validate_machine_validation_plugin(&plugin, &api.runtime_config.machine_validation_config)
+        .map_err(Status::from)?;
+    machine_validation_suites::approve_full_host(&mut txn, test.test_id.clone(), test.version)
+        .await?;
+    txn.commit().await?;
+    Ok(tonic::Response::new(
+        rpc::MachineValidationTestFullHostApprovalResponse {
+            message: "Success".to_owned(),
         },
     ))
 }
@@ -1114,7 +1361,10 @@ pub(crate) async fn apply_config_on_startup(
         MachineValidationTestSelectionMode::Default => {
             // Only update tests specified in config
             for test_config in &config.tests {
-                if let Some(test) = tests.iter().find(|t| t.test_id == test_config.id) {
+                if let Some(test) = tests
+                    .iter()
+                    .find(|test| test.test_id == test_config.id && test.plugin.is_none())
+                {
                     tracing::info!(
                         test_id = %test.test_id,
                         enable = test_config.enable,
@@ -1127,6 +1377,7 @@ pub(crate) async fn apply_config_on_startup(
                         test.version,
                         test_config.enable,
                         test.verified,
+                        test.plugin.is_some(),
                     )
                     .await?;
                 }
@@ -1136,6 +1387,9 @@ pub(crate) async fn apply_config_on_startup(
         MachineValidationTestSelectionMode::EnableAll => {
             // First enable all tests
             for test in &tests {
+                if test.plugin.is_some() {
+                    continue;
+                }
                 let should_override = config_test_ids.contains(&test.test_id);
                 let enable_state = if should_override {
                     // If test is in config, use config's enable state
@@ -1162,6 +1416,7 @@ pub(crate) async fn apply_config_on_startup(
                     test.version,
                     enable_state,
                     test.verified,
+                    test.plugin.is_some(),
                 )
                 .await?;
             }
@@ -1170,6 +1425,9 @@ pub(crate) async fn apply_config_on_startup(
         MachineValidationTestSelectionMode::DisableAll => {
             // First disable all tests
             for test in &tests {
+                if test.plugin.is_some() {
+                    continue;
+                }
                 let should_override = config_test_ids.contains(&test.test_id);
                 let enable_state = if should_override {
                     // If test is in config, use config's enable state
@@ -1196,6 +1454,7 @@ pub(crate) async fn apply_config_on_startup(
                     test.version,
                     enable_state,
                     test.verified,
+                    test.plugin.is_some(),
                 )
                 .await?;
             }
@@ -1287,10 +1546,14 @@ mod tests {
 
 #[cfg(test)]
 mod img_name_validation_tests {
+    use carbide_machine_controller::config::machine_validation::MachineValidationConfig;
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases};
+    use model::machine_validation::MachineValidationPlugin;
 
-    use super::validate_img_name;
+    use super::{
+        validate_img_name, validate_machine_validation_plugin, validate_plugin_enablement,
+    };
 
     // A 64-character hex string encoding 32 bytes — the canonical valid digest.
     const VALID_HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1354,5 +1617,43 @@ mod img_name_validation_tests {
             ],
             |img| validate_img_name(&img).map_err(|_| ()),
         );
+    }
+
+    fn plugin(host_access_full: bool) -> MachineValidationPlugin {
+        MachineValidationPlugin {
+            image: format!("registry.example.com/plugins/check@sha256:{VALID_HEX}"),
+            entrypoint: vec!["/plugin/check".to_owned()],
+            parameters_json: "{}".to_owned(),
+            privileged: host_access_full,
+            host_access_full,
+        }
+    }
+
+    #[test]
+    fn plugin_admission_requires_site_policy() {
+        let plugin = plugin(true);
+        assert!(
+            validate_machine_validation_plugin(
+                &plugin.clone().into(),
+                &MachineValidationConfig::default(),
+            )
+            .is_err()
+        );
+
+        let config = MachineValidationConfig {
+            approved_plugin_registries: vec!["registry.example.com".to_owned()],
+            allow_privileged_plugins: true,
+            allow_full_host_plugins: true,
+            ..MachineValidationConfig::default()
+        };
+        assert!(validate_machine_validation_plugin(&plugin.into(), &config).is_ok());
+    }
+
+    #[test]
+    fn full_host_plugin_cannot_be_enabled_without_separate_approval() {
+        let plugin = plugin(true);
+        assert!(validate_plugin_enablement(Some(&plugin), false, false).is_err());
+        assert!(validate_plugin_enablement(Some(&plugin), true, false).is_err());
+        assert!(validate_plugin_enablement(Some(&plugin), true, true).is_ok());
     }
 }

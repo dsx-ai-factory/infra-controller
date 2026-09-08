@@ -33,6 +33,19 @@ type Client struct {
 	AuthRetryNotify func(AuthRetryEvent)
 }
 
+// http2StreamError matches net/http's private stream error through errors.As.
+type http2StreamError struct {
+	StreamID uint32
+	Code     uint32
+	Cause    error
+}
+
+const http2InternalErrorCode uint32 = 0x2
+
+func (hse http2StreamError) Error() string {
+	return fmt.Sprintf("HTTP/2 stream %d failed with code %d", hse.StreamID, hse.Code)
+}
+
 type AuthRetryAction string
 
 const (
@@ -107,7 +120,34 @@ func (c *Client) rewriteAPIName(path string) string {
 
 // Do executes an HTTP request against the API.
 func (c *Client) Do(method, pathTemplate string, pathParams, queryParams map[string]string, body []byte) ([]byte, http.Header, error) {
-	respBody, respHeader, err := c.do(method, pathTemplate, pathParams, queryParams, body)
+	doClient := c
+	respBody, respHeader, err := doClient.do(method, pathTemplate, pathParams, queryParams, body)
+	streamErr, isHTTP2StreamError := errors.AsType[http2StreamError](err)
+	if method == http.MethodGet && isHTTP2StreamError && streamErr.Code == http2InternalErrorCode {
+		var transport *http.Transport
+		switch currentTransport := c.HTTPClient.Transport.(type) {
+		case nil:
+			transport = http.DefaultTransport.(*http.Transport).Clone()
+		case *http.Transport:
+			transport = currentTransport.Clone()
+		}
+		if transport != nil {
+			protocols := new(http.Protocols)
+			protocols.SetHTTP1(true)
+			transport.Protocols = protocols
+			transport.TLSNextProto = nil
+			if transport.TLSClientConfig != nil {
+				transport.TLSClientConfig.NextProtos = nil
+			}
+
+			httpClient := *c.HTTPClient
+			httpClient.Transport = transport
+			retryClient := *c
+			retryClient.HTTPClient = &httpClient
+			doClient = &retryClient
+			respBody, respHeader, err = doClient.do(method, pathTemplate, pathParams, queryParams, body)
+		}
+	}
 	if isUnauthorizedError(err) && c.TokenRefresh != nil && !canReplayAfterAuthRefresh(method) {
 		apiErr := err.(*APIError)
 		c.notifyAuthRetry(AuthRetryEvent{
@@ -140,6 +180,7 @@ func (c *Client) Do(method, pathTemplate string, pathParams, queryParams map[str
 			return nil, nil, fmt.Errorf("refreshing auth token after unauthorized response: no token returned")
 		}
 		c.Token = token
+		doClient.Token = token
 		c.notifyAuthRetry(AuthRetryEvent{
 			Action:      AuthRetryActionRetry,
 			Attempt:     attempt,
@@ -148,7 +189,7 @@ func (c *Client) Do(method, pathTemplate string, pathParams, queryParams map[str
 			Status:      apiErr.Status,
 			Method:      method,
 		})
-		respBody, respHeader, err = c.do(method, pathTemplate, pathParams, queryParams, body)
+		respBody, respHeader, err = doClient.do(method, pathTemplate, pathParams, queryParams, body)
 	}
 	return respBody, respHeader, err
 }

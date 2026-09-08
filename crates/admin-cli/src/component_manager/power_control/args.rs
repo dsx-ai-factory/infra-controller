@@ -17,7 +17,9 @@
 
 use clap::Parser;
 
-use crate::component_manager::common::{PowerActionArg, PowerControlTargetArgs};
+use crate::component_manager::common::{
+    ComputeTraySelection, PowerActionArg, PowerControlTargetArgs,
+};
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
@@ -30,6 +32,10 @@ Power on a switch:
 Force off a compute tray:
     $ nico-admin-cli component-manager component-power-control compute-tray \
     --machine-id 12345678-1234-5678-90ab-cdef01234567 --action force-off
+
+Force off a compute tray by BMC MAC (targets the tray before ingestion):
+    $ nico-admin-cli component-manager component-power-control compute-tray \
+    --mac-address 00:11:22:33:44:55 --action force-off
 
 AC power-cycle a power shelf:
     $ nico-admin-cli component-manager component-power-control power-shelf \
@@ -75,13 +81,21 @@ impl From<Args> for rpc::forge::ComponentPowerControlRequest {
                 action,
                 bypass_state_controller,
             },
-            PowerControlTargetArgs::ComputeTray(target) => Self {
-                target: Some(
-                    rpc::forge::component_power_control_request::Target::MachineIds(target.into()),
-                ),
-                action,
-                bypass_state_controller,
-            },
+            PowerControlTargetArgs::ComputeTray(target) => {
+                let target = match target.into_selection() {
+                    ComputeTraySelection::MachineIds(list) => {
+                        rpc::forge::component_power_control_request::Target::MachineIds(list)
+                    }
+                    ComputeTraySelection::Macs(macs) => {
+                        rpc::forge::component_power_control_request::Target::ComputeBmcMacs(macs)
+                    }
+                };
+                Self {
+                    target: Some(target),
+                    action,
+                    bypass_state_controller,
+                }
+            }
         }
     }
 }

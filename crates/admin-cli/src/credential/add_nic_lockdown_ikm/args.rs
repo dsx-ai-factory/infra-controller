@@ -26,7 +26,7 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 EXAMPLES:
 
 Set the site-wide SuperNIC lockdown IKM (input key material):
-    $ carbide-admin-cli credential add-nic-lockdown-ikm --password mypassword
+    $ nico-admin-cli credential add-nic-lockdown-ikm --password mypassword
 
 ")]
 pub(crate) struct Args {

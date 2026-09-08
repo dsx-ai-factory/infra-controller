@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 
 use ::rpc::forge as rpc;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use db::ObjectColumnFilter;
 use db::db_read::DbReader;
@@ -288,18 +289,18 @@ async fn resolve_dpu_nvconfig_profile(
     let Some(dpu_machine_id) = machine_interface.machine_id.as_ref() else {
         return Ok(None);
     };
-    if !dpu_machine_id.machine_type().is_dpu() {
+    let Ok(dpu_machine_id) = DpuMachineId::try_from(*dpu_machine_id) else {
         return Ok(None);
-    }
+    };
 
-    let Some(host) = db::machine::find_host_by_dpu_machine_id(&mut *conn, dpu_machine_id).await?
+    let Some(host) = db::machine::find_host_by_dpu_machine_id(&mut *conn, &dpu_machine_id).await?
     else {
         return Ok(None);
     };
     let product_family = resolve_host_product_family(api, conn, &host).await?;
 
     let Some(dpu) =
-        db::machine::find_one(&mut *conn, dpu_machine_id, MachineSearchConfig::default()).await?
+        db::machine::find_one(&mut *conn, &dpu_machine_id, MachineSearchConfig::default()).await?
     else {
         return Ok(None);
     };

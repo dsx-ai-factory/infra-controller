@@ -205,7 +205,7 @@ async fn rotate_power_shelf_bmc(
     match rotate_bmc(
         &services.db_pool,
         services.credential_manager.as_ref(),
-        services.redfish_client_pool.as_ref(),
+        services.bmc_credential_ops.as_ref(),
         &target,
         force,
     )

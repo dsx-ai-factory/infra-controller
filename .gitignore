@@ -73,3 +73,6 @@ devenv.local.yaml
 # agent tests point `[forge-system] root-ca` at dev/certs/forge_root.pem, so
 # running them publishes a copy beside it. Runtime artifact, never committed.
 dev/certs/pub/
+
+# DPU upgrade ISO/ZIP build output (build-dpu-upgrade-iso.sh default --output-dir)
+scripts/control-plane-dpu/upgrade/output/

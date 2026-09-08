@@ -138,6 +138,17 @@ pub async fn lenovo_gb300_bmc() -> TestBmcHandle {
     .await
 }
 
+pub async fn nvidia_dgx_h100_bmc() -> TestBmcHandle {
+    test_bmc(machine_router(
+        &host_info(HardwareType::NvidiaDgxH100),
+        Arc::new(NoopCallbacks),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
 pub async fn dgx_gb300_bmc() -> TestBmcHandle {
     test_bmc(machine_router(
         &host_info(HardwareType::NvidiaDgxGb300),

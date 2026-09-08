@@ -405,7 +405,7 @@ async fn failed_discovery_returns_discovery(pool: PgPool) {
             failed_at: chrono::Utc::now(),
             source: FailureSource::Scout,
         },
-        machine_id: mh.host.id,
+        machine_id: mh.host.id.into(),
         retry_count: 0,
     })
     .await;

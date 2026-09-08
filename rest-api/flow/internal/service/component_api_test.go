@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	inventorymanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/manager"
 	inventorystore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/store"
@@ -28,17 +30,19 @@ import (
 type mockManager struct {
 	inventorymanager.Manager // embed to satisfy the interface; unimplemented methods will panic
 
-	components  map[uuid.UUID]*component.Component
-	racks       map[uuid.UUID]*rack.Rack
-	domainRacks map[uuid.UUID][]*rack.Rack
-	drifts      []inventorystore.ComponentDrift
+	components      map[uuid.UUID]*component.Component
+	componentsByMAC map[string]*component.Component
+	racks           map[uuid.UUID]*rack.Rack
+	domainRacks     map[uuid.UUID][]*rack.Rack
+	drifts          []inventorystore.ComponentDrift
 }
 
 func newMockManager() *mockManager {
 	return &mockManager{
-		components:  make(map[uuid.UUID]*component.Component),
-		racks:       make(map[uuid.UUID]*rack.Rack),
-		domainRacks: make(map[uuid.UUID][]*rack.Rack),
+		components:      make(map[uuid.UUID]*component.Component),
+		componentsByMAC: make(map[string]*component.Component),
+		racks:           make(map[uuid.UUID]*rack.Rack),
+		domainRacks:     make(map[uuid.UUID][]*rack.Rack),
 	}
 }
 
@@ -47,6 +51,14 @@ func (m *mockManager) GetRackByIdentifier(
 	id identifier.Identifier,
 	_ bool,
 ) (*rack.Rack, error) {
+	if id.ExternalID != "" {
+		for _, r := range m.racks {
+			if r.ExternalID == id.ExternalID {
+				return r, nil
+			}
+		}
+		return nil, status.Error(codes.NotFound, "rack not found")
+	}
 	return m.GetRackByID(context.Background(), id.ID, true)
 }
 
@@ -82,6 +94,41 @@ func (m *mockManager) GetRackByID(_ context.Context, id uuid.UUID, _ bool) (*rac
 	return nil, assert.AnError
 }
 
+func (m *mockManager) GetRackByExternalID(
+	_ context.Context,
+	externalID string,
+	_ bool,
+) (*rack.Rack, error) {
+	for _, r := range m.racks {
+		if r.ExternalID == externalID {
+			return r, nil
+		}
+	}
+	return nil, status.Error(codes.NotFound, "rack not found")
+}
+
+func (m *mockManager) GetRacksByIDs(
+	_ context.Context,
+	ids []uuid.UUID,
+	_ bool,
+) ([]*rack.Rack, error) {
+	result := make([]*rack.Rack, 0, len(ids))
+	for _, id := range ids {
+		if r, ok := m.racks[id]; ok {
+			result = append(result, r)
+		}
+	}
+	return result, nil
+}
+
+func (m *mockManager) GetRacksByIDsIncludingDeleted(
+	ctx context.Context,
+	ids []uuid.UUID,
+	withComponents bool,
+) ([]*rack.Rack, error) {
+	return m.GetRacksByIDs(ctx, ids, withComponents)
+}
+
 func (m *mockManager) GetComponentByID(_ context.Context, id uuid.UUID) (*component.Component, error) {
 	if c, ok := m.components[id]; ok {
 		return c, nil
@@ -101,6 +148,13 @@ func (m *mockManager) GetComponentsByExternalIDs(_ context.Context, externalIDs 
 		}
 	}
 	return result, nil
+}
+
+func (m *mockManager) GetComponentByBMCMAC(_ context.Context, macAddress string) (*component.Component, error) {
+	if c, ok := m.componentsByMAC[macAddress]; ok {
+		return c, nil
+	}
+	return nil, status.Error(codes.NotFound, "component not found")
 }
 
 func (m *mockManager) AddComponent(_ context.Context, comp *component.Component) (uuid.UUID, error) {
@@ -143,6 +197,127 @@ func (m *mockManager) PurgeComponent(_ context.Context, id uuid.UUID) error {
 }
 
 // --- Tests ---
+
+func TestGetRackInfoByIDPrefersExternalID(t *testing.T) {
+	mgr := newMockManager()
+	internalID := uuid.New()
+	mgr.racks[internalID] = &rack.Rack{
+		Info:       deviceinfo.DeviceInfo{ID: internalID, Name: "rack-1"},
+		ExternalID: "core-rack-01",
+	}
+
+	response, err := (&FlowServerImpl{inventoryManager: mgr}).GetRackInfoByID(
+		context.Background(),
+		&pb.GetRackInfoByIDRequest{Id: &pb.UUID{Id: "core-rack-01"}},
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, response.GetRack())
+	assert.Equal(t, "core-rack-01", response.GetRack().GetExternalId())
+}
+
+func TestGetRackInfoByIDDoesNotResolveFlowUUID(t *testing.T) {
+	mgr := newMockManager()
+	internalID := uuid.New()
+	mgr.racks[internalID] = &rack.Rack{
+		Info:       deviceinfo.DeviceInfo{ID: internalID, Name: "rack-1"},
+		ExternalID: "core-rack-01",
+	}
+
+	response, err := (&FlowServerImpl{inventoryManager: mgr}).GetRackInfoByID(
+		context.Background(),
+		&pb.GetRackInfoByIDRequest{Id: &pb.UUID{Id: internalID.String()}},
+	)
+
+	require.Nil(t, response)
+	assert.Equal(t, codes.NotFound, status.Code(err))
+}
+
+func TestGetComponentInfoByIDResolvesExternalIdentifier(t *testing.T) {
+	coreID := "core-machine-01"
+	internalID := uuid.New()
+	resolved := &component.Component{
+		Info:        deviceinfo.DeviceInfo{ID: internalID},
+		Type:        devicetypes.ComponentTypeCompute,
+		ComponentID: coreID,
+	}
+
+	tests := []struct {
+		name       string
+		identifier string
+		setup      func(*mockManager)
+		wantCode   codes.Code
+	}{
+		{
+			name:       "external component ID resolves",
+			identifier: coreID,
+			setup: func(m *mockManager) {
+				m.components[internalID] = resolved
+			},
+		},
+		{
+			name:       "normalized BMC MAC resolves",
+			identifier: "AA-BB-CC-DD-EE-FF",
+			setup: func(m *mockManager) {
+				m.componentsByMAC["aa:bb:cc:dd:ee:ff"] = resolved
+			},
+		},
+		{
+			name:       "Flow UUID is not an external identifier",
+			identifier: internalID.String(),
+			setup: func(m *mockManager) {
+				m.components[internalID] = resolved
+			},
+			wantCode: codes.NotFound,
+		},
+		{
+			name:       "duplicate external ID across component types is rejected",
+			identifier: coreID,
+			setup: func(m *mockManager) {
+				m.components[internalID] = resolved
+				other := &component.Component{
+					Info:        deviceinfo.DeviceInfo{ID: uuid.New()},
+					Type:        devicetypes.ComponentTypeNVSwitch,
+					ComponentID: coreID,
+				}
+				m.components[other.Info.ID] = other
+			},
+			wantCode: codes.FailedPrecondition,
+		},
+		{
+			name:       "BMC MAC resolves despite duplicate external ID",
+			identifier: "AA-BB-CC-DD-EE-FF",
+			setup: func(m *mockManager) {
+				m.components[internalID] = resolved
+				other := &component.Component{
+					Info:        deviceinfo.DeviceInfo{ID: uuid.New()},
+					Type:        devicetypes.ComponentTypeNVSwitch,
+					ComponentID: coreID,
+				}
+				m.components[other.Info.ID] = other
+				m.componentsByMAC["aa:bb:cc:dd:ee:ff"] = resolved
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := newMockManager()
+			tt.setup(mgr)
+			response, err := (&FlowServerImpl{inventoryManager: mgr}).GetComponentInfoByID(
+				context.Background(),
+				&pb.GetComponentInfoByIDRequest{Id: &pb.UUID{Id: tt.identifier}},
+			)
+			if tt.wantCode != codes.OK {
+				require.Equal(t, tt.wantCode, status.Code(err))
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, response.GetComponent())
+			assert.Equal(t, coreID, response.GetComponent().GetComponentId())
+		})
+	}
+}
 
 func TestAddComponent_Success(t *testing.T) {
 	mgr := newMockManager()
@@ -568,6 +743,8 @@ func setupValidateTestData(mgr *mockManager) (uuid.UUID, []uuid.UUID) {
 	comp2ID := uuid.New()
 	comp3ID := uuid.New()
 
+	missingMAC, _ := net.ParseMAC("aa:bb:cc:dd:ee:02")
+
 	mgr.racks[rackID] = &rack.Rack{
 		Info: deviceinfo.DeviceInfo{ID: rackID, Name: "test-rack"},
 		Components: []component.Component{
@@ -582,6 +759,9 @@ func setupValidateTestData(mgr *mockManager) (uuid.UUID, []uuid.UUID) {
 				Info:            deviceinfo.DeviceInfo{ID: comp2ID, Name: "compute-02", Manufacturer: "NVIDIA"},
 				FirmwareVersion: "1.0.0",
 				RackID:          rackID,
+				BmcsByType: map[devicetypes.BMCType][]bmc.BMC{
+					devicetypes.BMCTypeHost: {{MAC: bmc.MACAddress{HardwareAddr: missingMAC}}},
+				},
 			},
 			{
 				Type:            devicetypes.ComponentTypeNVSwitch,
@@ -590,6 +770,10 @@ func setupValidateTestData(mgr *mockManager) (uuid.UUID, []uuid.UUID) {
 				RackID:          rackID,
 			},
 		},
+	}
+	for i := range mgr.racks[rackID].Components {
+		comp := &mgr.racks[rackID].Components[i]
+		mgr.components[comp.Info.ID] = comp
 	}
 
 	// Set up drifts for comp1 (mismatch) and comp2 (missing_in_actual)
@@ -644,6 +828,10 @@ func TestValidateComponents_NoFilters(t *testing.T) {
 	assert.Equal(t, 3, len(resp.Diffs))
 	assert.Equal(t, int32(2), resp.MismatchCount)
 	assert.Equal(t, int32(1), resp.MissingCount)
+	require.Equal(t, pb.DiffType_DIFF_TYPE_MISSING, resp.Diffs[1].GetType())
+	assert.Nil(t, resp.Diffs[1].GetId())
+	assert.Empty(t, resp.Diffs[1].GetComponentId())
+	assert.Equal(t, "aa:bb:cc:dd:ee:02", resp.Diffs[1].GetComponentMacAddress())
 }
 
 func TestValidateComponents_WithTypeFilter(t *testing.T) {

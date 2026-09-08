@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 
 use carbide_instrument::{DynamicLog, Event, LabelValue, LogAt};
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineInterfaceId};
 use mac_address::MacAddress;
 use model::hardware_info::HardwareInfo;
 use model::machine::Machine;
@@ -45,7 +45,7 @@ enum ScoutPciComparison {
 struct EligibleInterface {
     machine_interface_id: MachineInterfaceId,
     mac_address: MacAddress,
-    dpu_machine_id: MachineId,
+    dpu_machine_id: DpuMachineId,
 }
 
 /// One eligible interface paired with its parsed scout endpoint BDF.
@@ -279,8 +279,7 @@ fn eligible_interfaces(machine: &Machine) -> Vec<EligibleInterface> {
         .filter_map(|interface| {
             let dpu_machine_id = interface.attached_dpu_machine_id?;
             (interface.machine_id == Some(machine.id)
-                && interface.network_segment_type == Some(NetworkSegmentType::Admin)
-                && dpu_machine_id.machine_type().is_dpu())
+                && interface.network_segment_type == Some(NetworkSegmentType::Admin))
             .then_some(EligibleInterface {
                 machine_interface_id: interface.id,
                 mac_address: interface.mac_address,
@@ -465,7 +464,7 @@ mod tests {
     /// Builds one Admin interface owned by the fixture host and attached to a DPU.
     fn eligible_interface(
         mac_address: MacAddress,
-        dpu_machine_id: MachineId,
+        dpu_machine_id: DpuMachineId,
     ) -> MachineInterfaceSnapshot {
         let mut interface = MachineInterfaceSnapshot::mock_with_mac(mac_address);
         interface.id =

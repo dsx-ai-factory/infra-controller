@@ -177,6 +177,7 @@ impl NvidiaDgxH100<'_> {
                     id: system_id.into(),
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("DGXH100".into()),
+                    bios_version: None,
                     eth_interfaces,
                     serial_number: Some(self.dgx_system_serial_number.to_string().into()),
                     boot_order_mode: redfish::computer_system::BootOrderMode::ViaSettings,
@@ -197,6 +198,7 @@ impl NvidiaDgxH100<'_> {
                     id: "HGX_Baseboard_0".into(),
                     manufacturer: Some("NVIDIA".into()),
                     model: None,
+                    bios_version: None,
                     chassis: vec!["HGX_BMC_0".into()],
                     eth_interfaces: None,
                     callbacks: None,
@@ -208,13 +210,40 @@ impl NvidiaDgxH100<'_> {
                     base_bios: None,
                     log_services: None,
                     storage: None,
-                    processors: None,
+                    processors: Some(self.hgx_gpu_processors("HGX_Baseboard_0")),
                     memory: None,
                     serial_console: None,
                     secure_boot_available: false,
                 },
             ],
         }
+    }
+
+    /// The eight GPUs of the HGX baseboard, as Redfish `Processor` resources.
+    ///
+    /// Hardware exposes each GPU both here and as an `HGX_GPU_SXM_*` chassis.
+    /// The processor view is where GPU sensor readings are attributed, so a
+    /// fixture that omitted it could not exercise per-GPU sensor telemetry.
+    fn hgx_gpu_processors(&self, system_id: &str) -> Vec<redfish::processor::Processor> {
+        (1..=8)
+            .map(|index| {
+                let chassis_id = format!("HGX_GPU_SXM_{index}");
+                let voltage_sensor_id =
+                    redfish::sensor::sensor_id(redfish::sensor::SensorKind::Voltage, 1);
+                redfish::processor::gpu(
+                    system_id,
+                    &format!("GPU_SXM_{index}"),
+                    redfish::sensor::chassis_resource(&chassis_id, &voltage_sensor_id)
+                        .odata_id
+                        .as_ref(),
+                    &redfish::processor::GpuIdentity {
+                        uuid: &gpu_uuid(index),
+                        serial_number: &self.gpu_serial[index - 1],
+                        model: GPU_MODEL,
+                    },
+                )
+            })
+            .collect()
     }
 
     pub(crate) fn chassis_config(&self) -> redfish::chassis::ChassisConfig {
@@ -393,23 +422,36 @@ fn base_bios(system_id: &str) -> serde_json::Value {
         }))
 }
 
+const GPU_MODEL: &str = "H100 80GB HBM3";
+
+/// Stable per-slot GPU UUID, so a test can assert that a given slot reports a
+/// specific device identity.
+///
+/// Hardware reports one UUID per GPU on the GPU's `Processor`, its enclosing
+/// `Chassis` and its `PCIeDevice` alike, so every fixture for a slot uses this.
+fn gpu_uuid(index: usize) -> String {
+    format!("beea8cdf-7b7d-035c-ed07-360e311fcb{index:02x}")
+}
+
 fn hgx_gpu_sxm_chassis(index: usize, serial: &str) -> redfish::chassis::SingleChassisConfig {
     let id = format!("HGX_GPU_SXM_{index}");
     redfish::chassis::SingleChassisConfig {
         chassis_type: "Other".into(),
         manufacturer: Some("NVIDIA".into()),
         part_number: Some("2330-885-A1".into()),
-        model: Some("H100 80GB HBM3".into()),
+        model: Some(GPU_MODEL.into()),
         serial_number: Some(serial.to_string().into()),
+        uuid: Some(gpu_uuid(index).into()),
         pcie_devices: Some(vec![
             redfish::pcie_device::builder(&redfish::pcie_device::chassis_resource(
                 &id,
                 &format!("GPU_SXM_{index}"),
             ))
             .manufacturer("NVIDIA")
-            .model("H100 80GB HBM3")
+            .model(GPU_MODEL)
             .part_number("2330-885-A1")
             .serial_number(serial)
+            .uuid(&gpu_uuid(index))
             .build(),
         ]),
         sensors: Some(redfish::sensor::generate_chassis_sensors(

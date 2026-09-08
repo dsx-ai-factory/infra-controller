@@ -57,6 +57,7 @@ use model::vpc::{FabricInterfaceType, VpcVirtualizationTypeCapabilities};
 use serde_json::json;
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
+use tracing::Instrument;
 
 use crate::api::{Api, log_machine_id, log_request_data, log_tenant_organization_id};
 use crate::cfg::file::CarbideConfig;
@@ -292,7 +293,7 @@ pub(crate) async fn find_by_machine_id(
 ) -> Result<Response<rpc::InstanceList>, Status> {
     log_request_data(&request);
 
-    let machine_id = convert_and_log_machine_id(Some(&request.into_inner()))?;
+    let machine_id = convert_and_log_machine_id::<MachineId>(Some(&request.into_inner()))?;
 
     let mut txn = api.txn_begin().await?;
 
@@ -723,6 +724,108 @@ pub(crate) async fn release(
 ) -> Result<Response<rpc::InstanceReleaseResult>, Status> {
     log_request_data(&request);
     let delete_instance = request.into_inner();
+    release_one_instance(api, delete_instance).await?;
+    Ok(Response::new(rpc::InstanceReleaseResult {}))
+}
+
+/// Releases multiple instances in one call. Each instance is released in its
+/// own transaction via [`release_one_instance`] -- the exact same logic and
+/// failure modes as calling `ReleaseInstance` once per instance -- so the only
+/// thing this RPC saves versus a client-side loop is the client-server round
+/// trips, not any change in per-instance behavior or transaction semantics.
+///
+/// Deliberately best-effort, not all-or-nothing: one instance failing (already
+/// released, blocked by a health check, not found, etc.) does not roll back or
+/// block the rest of the batch. A live 4,500-instance scale test found that
+/// aborting an entire batch on the first per-instance failure stranded
+/// thousands of instances with no way to resume (see admin-cli's
+/// release_batch_with_retry, crates/admin-cli/src/instance/release/cmd.rs)
+/// -- an all-or-nothing RPC-level transaction would reintroduce that same
+/// failure mode one layer down, so each instance's outcome is independent and
+/// reported individually instead.
+pub(crate) async fn batch_release(
+    api: &Api,
+    request: Request<rpc::BatchInstanceReleaseRequest>,
+) -> Result<Response<rpc::BatchInstanceReleaseResponse>, Status> {
+    log_request_data(&request);
+    let batch = request.into_inner();
+
+    let mut results = Vec::with_capacity(batch.release_requests.len());
+
+    for release_request in batch.release_requests {
+        let Some(instance_id) = release_request.id else {
+            // No id means there is nothing to attempt and nothing to key a
+            // success on, but the caller still needs to see this entry
+            // accounted for -- report it as a failed result with no id
+            // rather than silently dropping it, so response counts always
+            // reconcile against the request count.
+            tracing::warn!("Batch release entry with no instance id reported as a failure");
+            results.push(rpc::InstanceReleaseOutcome {
+                id: None,
+                status: rpc::InstanceReleaseStatusCode::InvalidArgument as i32,
+                error: "release request is missing an instance id".to_string(),
+            });
+            continue;
+        };
+        // Per-instance span, not just a %instance_id log field: log_machine_id/
+        // log_tenant_organization_id record onto Span::current(), and without a
+        // dedicated span per iteration every call in this loop would record onto
+        // the same batch-wide ReleaseInstances span -- last-write-wins, so the
+        // completed span would only ever reflect the final instance's machine and
+        // tenant, losing per-instance audit attribution for a destructive
+        // fleet-scale operation. Field names must match what those helpers record.
+        let instance_span = tracing::info_span!(
+            "release_one_instance",
+            instance_id = %instance_id,
+            forge.machine_id = tracing::field::Empty,
+            tenant.organization_id = tracing::field::Empty,
+        );
+        let outcome = match release_one_instance(api, release_request)
+            .instrument(instance_span)
+            .await
+        {
+            Ok(()) => rpc::InstanceReleaseOutcome {
+                id: Some(instance_id),
+                status: rpc::InstanceReleaseStatusCode::Success as i32,
+                error: String::new(),
+            },
+            Err(status) => rpc::InstanceReleaseOutcome {
+                id: Some(instance_id),
+                status: instance_release_status_code_for(&status) as i32,
+                error: status.message().to_string(),
+            },
+        };
+        results.push(outcome);
+    }
+
+    Ok(Response::new(rpc::BatchInstanceReleaseResponse { results }))
+}
+
+/// Maps a per-instance release failure's gRPC status code onto the batch
+/// response's stable [`rpc::InstanceReleaseStatusCode`], so callers can
+/// distinguish retryable outcomes (e.g. `Unavailable`, `ResourceExhausted`)
+/// from terminal ones (e.g. `NotFound`) without string-matching `error`.
+fn instance_release_status_code_for(status: &Status) -> rpc::InstanceReleaseStatusCode {
+    use rpc::InstanceReleaseStatusCode as Code;
+    match status.code() {
+        tonic::Code::InvalidArgument => Code::InvalidArgument,
+        tonic::Code::NotFound => Code::NotFound,
+        tonic::Code::FailedPrecondition => Code::FailedPrecondition,
+        tonic::Code::ResourceExhausted => Code::ResourceExhausted,
+        tonic::Code::PermissionDenied => Code::PermissionDenied,
+        tonic::Code::Unavailable => Code::Unavailable,
+        _ => Code::InternalError,
+    }
+}
+
+/// Core single-instance release logic, shared by [`release`] and
+/// [`batch_release`]. Owns its own transaction (begin through commit) so each
+/// instance in a batch is fully independent -- a failure partway through one
+/// instance's release never poisons or rolls back another instance's work.
+async fn release_one_instance(
+    api: &Api,
+    delete_instance: rpc::InstanceReleaseRequest,
+) -> Result<(), Status> {
     let instance_id = delete_instance
         .id
         .ok_or(RpcDataConversionError::MissingArgument("id"))?;
@@ -816,7 +919,7 @@ pub(crate) async fn release(
             "Instance is already marked for deletion.",
         );
         txn.commit().await?;
-        return Ok(Response::new(rpc::InstanceReleaseResult {}));
+        return Ok(());
     }
 
     let pkeys = load_ib_partition_pkeys(txn.as_mut(), &[&instance.infiniband_config]).await?;
@@ -828,7 +931,7 @@ pub(crate) async fn release(
 
     txn.commit().await?;
 
-    Ok(Response::new(rpc::InstanceReleaseResult {}))
+    Ok(())
 }
 
 pub(crate) async fn update_phone_home_last_contact(
@@ -893,9 +996,13 @@ pub(crate) async fn update_phone_home_last_contact(
         let caller_is_attached_dpu = if caller_is_host {
             false
         } else {
-            db::machine::find_host_by_dpu_machine_id(&mut txn, caller_machine_id)
-                .await?
-                .is_some_and(|host| host.id == instance.machine_id)
+            db::machine::find_host_by_dpu_machine_id(
+                &mut txn,
+                &carbide_uuid::machine::DpuMachineId::try_from(*caller_machine_id)
+                    .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?,
+            )
+            .await?
+            .is_some_and(|host| host.id == instance.machine_id)
         };
 
         if !caller_is_host && !caller_is_attached_dpu {
@@ -2129,8 +2236,11 @@ async fn update_instance_spx_config(
         only_svpc: false,
         only_astra: false,
     };
+    let host_machine_id = carbide_uuid::machine::HostMachineId::try_from(mid)
+        .map_err(|error| CarbideError::internal(error.to_string()))?;
     let dpa_interfaces =
-        db::dpa_interface::find_by_machine_id(txn.as_mut(), mid, dpa_search_config).await?;
+        db::dpa_interface::find_by_machine_id(txn.as_mut(), host_machine_id, dpa_search_config)
+            .await?;
 
     mh_snapshot.dpa_interface_snapshots = dpa_interfaces;
 

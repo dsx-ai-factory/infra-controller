@@ -133,20 +133,21 @@ where
             }
         }
 
-        let detectors = if let Some(state) = &self.state {
-            self.fetch_leak_detectors(&state.detector_ids).await?
+        let (detectors, unreadable) = if let Some(state) = &self.state {
+            self.fetch_leak_detectors(&state.detector_ids).await
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let detector_count = detectors.len();
-        let report = build_health_report(detectors, &self.event_context);
+        let fetch_failures = unreadable.len();
+        let report = build_health_report(detectors, &unreadable, &self.event_context);
 
         self.emit_event(CollectorEvent::HealthReport(Arc::new(report)));
 
         Ok(IterationResult {
             refresh_triggered,
             entity_count: Some(detector_count),
-            fetch_failures: 0,
+            fetch_failures,
         })
     }
 
@@ -191,30 +192,51 @@ where
         Ok(detector_ids)
     }
 
+    /// Fetches every discovered detector, returning the ones that could be read
+    /// along with the ids of the ones that could not.
+    ///
+    /// A detector the BMC serves in a shape this client cannot decode costs its
+    /// own leak reporting instead of every other detector on the endpoint. It is
+    /// reported as unreadable rather than dropped: leak classification counts
+    /// alerts, so a silently shorter batch would read downstream as an all-clear
+    /// for a detector whose state is actually unknown. The count also reaches
+    /// the collector runtime as `fetch_failures`, which is the operator-visible
+    /// signal that this endpoint is reporting on fewer detectors than it
+    /// discovered.
     async fn fetch_leak_detectors(
         &self,
         detector_ids: &[ODataId],
-    ) -> Result<Vec<Arc<LeakDetector>>, HealthError> {
+    ) -> (Vec<Arc<LeakDetector>>, Vec<ODataId>) {
         let mut detectors = Vec::new();
+        let mut unreadable = Vec::new();
         for detector_id in detector_ids {
-            detectors.push(
-                self.bmc
-                    .get::<LeakDetector>(detector_id)
-                    .await
-                    .map_err(|error| HealthError::BmcError(Box::new(error)))?,
-            );
+            match self.bmc.get::<LeakDetector>(detector_id).await {
+                Ok(detector) => detectors.push(detector),
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        detector = %detector_id,
+                        "Failed to fetch leak detector; it is reported as unreadable"
+                    );
+                    unreadable.push(detector_id.clone());
+                }
+            }
         }
 
-        Ok(detectors)
+        (detectors, unreadable)
     }
 }
 
-fn build_health_report(detectors: Vec<Arc<LeakDetector>>, context: &EventContext) -> HealthReport {
+fn build_health_report(
+    detectors: Vec<Arc<LeakDetector>>,
+    unreadable: &[ODataId],
+    context: &EventContext,
+) -> HealthReport {
     let mut successes = Vec::new();
     let mut alerts = Vec::new();
 
     for detector in detectors {
-        let target = detector_target(detector.as_ref());
+        let target = detector_target(&detector);
         let resource_state = detector
             .status
             .as_ref()
@@ -236,7 +258,7 @@ fn build_health_report(detectors: Vec<Arc<LeakDetector>>, context: &EventContext
                 target: Some(target),
             }),
             Some(DetectorState::Warning) | Some(DetectorState::Critical) => {
-                alerts.push(leak_alert(detector.as_ref(), target));
+                alerts.push(leak_alert(&detector, target));
             }
             Some(DetectorState::Unavailable)
             | Some(DetectorState::Absent)
@@ -250,6 +272,18 @@ fn build_health_report(detectors: Vec<Arc<LeakDetector>>, context: &EventContext
                 );
             }
         }
+    }
+
+    // A detector this client could not read has unknown state, not healthy
+    // state. Reporting it as a sensor failure keeps that distinction visible to
+    // leak classification, which would otherwise see only a shorter batch.
+    for detector_id in unreadable {
+        alerts.push(HealthReportAlert {
+            probe_id: Probe::LeakDetection,
+            target: Some(detector_id.to_string()),
+            message: format!("Leak detector '{detector_id}' could not be read"),
+            classifications: vec![Classification::SensorFailure],
+        });
     }
 
     HealthReport {
@@ -287,15 +321,48 @@ fn leak_alert(detector: &LeakDetector, target: String) -> HealthReportAlert {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
 
+    use axum::Router;
+    use axum::extract::{OriginalUri, State};
+    use axum::http::{StatusCode, header};
+    use axum::response::{IntoResponse, Response};
+    use bmc_mock::test_support::TestBmc;
+    use bmc_mock::test_support::axum_http_client::AxumRouterHttpClient;
     use carbide_test_support::{Check, check_values};
     use mac_address::MacAddress;
+    use nv_redfish::bmc_http::{BmcCredentials, CacheSettings};
+    use url::Url;
 
     use super::*;
+    use crate::endpoint::test_support::{mac, test_endpoint};
     use crate::endpoint::{BmcAddr, EndpointMetadata, MachineData, SharedSystemUuid};
     use crate::sink::HealthReportTarget;
+
+    const DETECTORS_PATH: &str =
+        "/redfish/v1/Chassis/MGX_BMC_0/ThermalSubsystem/LeakDetection/LeakDetectors";
+
+    /// A detector body in the shape a real VR RTF switch BMC serves, with
+    /// `ReactionDelaySeconds` interpolated verbatim so a caller chooses the
+    /// JSON encoding the client has to parse.
+    fn switch_detector_body(id: &str, reaction_delay_seconds: &str) -> String {
+        format!(
+            r##"{{
+                "@odata.id": "{DETECTORS_PATH}/{id}",
+                "@odata.type": "#LeakDetector.v1_4_0.LeakDetector",
+                "CriticalReactionType": "None",
+                "DetectorState": "OK",
+                "Id": "{id}",
+                "LeakDetectorType": "Moisture",
+                "Name": "{id}",
+                "ReactionDelaySeconds": {reaction_delay_seconds},
+                "Status": {{ "State": "Enabled" }},
+                "WarningReactionType": "None"
+            }}"##
+        )
+    }
 
     #[derive(Debug, Eq, PartialEq)]
     struct SuccessSummary {
@@ -528,14 +595,121 @@ mod tests {
                     .into_iter()
                     .map(|json| {
                         Arc::new(
-                            serde_json::from_str::<LeakDetector>(json)
-                                .expect("valid leak detector"),
+                            serde_json::from_str::<LeakDetector>(json).expect("valid leak detector"),
                         )
                     })
                     .collect();
 
-                build_health_report(detectors, &context()).into()
+                build_health_report(detectors, &[], &context()).into()
             },
+        );
+    }
+
+    #[test]
+    fn unreadable_detectors_report_as_sensor_failures() {
+        let readable = r#"{
+            "@odata.id": "/redfish/v1/Chassis/System/LeakDetectors/OK",
+            "Id": "OK",
+            "Name": "Healthy leak detector",
+            "DetectorState": "OK",
+            "Status": { "Health": "OK", "State": "Enabled" }
+        }"#;
+        let detectors = vec![Arc::new(
+            serde_json::from_str::<LeakDetector>(readable).expect("valid leak detector"),
+        )];
+        let unreadable = [ODataId::from(format!("{DETECTORS_PATH}/leakage2"))];
+
+        let report: ReportSummary = build_health_report(detectors, &unreadable, &context()).into();
+
+        assert_eq!(
+            report,
+            expected_report(
+                vec![SuccessSummary {
+                    probe_id: Probe::LeakDetection,
+                    target: Some("/redfish/v1/Chassis/System/LeakDetectors/OK".to_string()),
+                }],
+                vec![AlertSummary {
+                    probe_id: Probe::LeakDetection,
+                    target: Some(format!("{DETECTORS_PATH}/leakage2")),
+                    message: format!("Leak detector '{DETECTORS_PATH}/leakage2' could not be read"),
+                    classifications: vec![Classification::SensorFailure],
+                }],
+            ),
+            "an unreadable detector must stay visible instead of silently shortening the batch"
+        );
+    }
+
+    async fn detector_response(
+        State(bodies): State<Arc<HashMap<String, String>>>,
+        OriginalUri(uri): OriginalUri,
+    ) -> Response {
+        match bodies.get(uri.path()) {
+            Some(body) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.clone(),
+            )
+                .into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+
+    /// `LeakDetector_v1.xml` declares `ReactionDelaySeconds` as `Edm.Int64`, so
+    /// the `0.0` that switch BMC firmware serves for it fails to decode. That is
+    /// how a single detector body becomes unreadable in the field, and this
+    /// collector never reads the property that sinks it.
+    #[tokio::test]
+    async fn undecodable_detector_is_named_without_losing_the_batch() {
+        let detectors = [("leakage1", "0"), ("leakage2", "0.0"), ("leakage3", "30")];
+        let bodies: HashMap<String, String> = detectors
+            .iter()
+            .map(|(id, delay)| {
+                (
+                    format!("{DETECTORS_PATH}/{id}"),
+                    switch_detector_body(id, delay),
+                )
+            })
+            .collect();
+        let router = Router::new()
+            .fallback(detector_response)
+            .with_state(Arc::new(bodies));
+        let bmc = Arc::new(TestBmc::new(
+            AxumRouterHttpClient::new(router),
+            Url::parse("https://leak-detector-test.local").expect("test URL should parse"),
+            BmcCredentials::new("root".to_string(), "password".to_string()),
+            CacheSettings::with_capacity(8),
+        ));
+        let collector = LeakDetectorCollector::new_runner(
+            bmc,
+            Arc::new(test_endpoint(mac("42:9e:b1:bd:9d:dd"))),
+            LeakDetectorCollectorConfig {
+                data_sink: None,
+                state_refresh_interval: Duration::from_secs(60),
+            },
+        )
+        .expect("leak detector collector should build");
+
+        let detector_ids: Vec<ODataId> = detectors
+            .iter()
+            .map(|(id, _)| ODataId::from(format!("{DETECTORS_PATH}/{id}")))
+            .collect();
+        let (fetched, unreadable) = collector.fetch_leak_detectors(&detector_ids).await;
+
+        let fetched_ids: Vec<String> = fetched
+            .iter()
+            .map(|detector| detector.odata_id().to_string())
+            .collect();
+        let unreadable_ids: Vec<String> = unreadable.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            (fetched_ids, unreadable_ids),
+            (
+                vec![
+                    format!("{DETECTORS_PATH}/leakage1"),
+                    format!("{DETECTORS_PATH}/leakage3"),
+                ],
+                vec![format!("{DETECTORS_PATH}/leakage2")],
+            ),
+            "a detector this client cannot decode should be named, not dropped from the batch"
         );
     }
 }

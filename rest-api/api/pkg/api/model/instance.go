@@ -55,6 +55,11 @@ func ValidatePowerProfile(ctx context.Context, dpsEnabled bool, provider dpsclie
 const (
 	// MaxInterfaceCount is the maximum number of Interfaces allowed per Instance
 	MaxInterfaceCount = 16
+	// MaxSpectrumXAttachmentCount is the maximum number of SpectrumX Attachments allowed per Instance.
+	// Core caps the usable count at the Machine's SpectrumX PFs, and multiplane splits each port into
+	// one PF per plane, so an 8-SuperNIC HGX node on the 4-plane Astra profile exposes 32. This only
+	// keeps an unbounded list from reaching the Site, so it sits above that rather than near it.
+	MaxSpectrumXAttachmentCount = 64
 	// MachineIssueCategoryHardware is the category for hardware issues
 	MachineIssueCategoryHardware = "Hardware"
 	// MachineIssueCategoryNetwork is the category for network issues
@@ -64,6 +69,10 @@ const (
 	// MachineIssueCategoryOther is the category for other issues
 	MachineIssueCategoryOther = "Other"
 )
+
+// validationErrorUserDataLength derives from util.MaxUserDataBytes so the
+// message and the enforced limit cannot drift apart.
+var validationErrorUserDataLength = fmt.Sprintf("`userData` must not exceed %d KiB", util.MaxUserDataBytes/1024)
 
 var (
 	// SitePhoneHomeCloudInit default cloudinit with phone home config
@@ -401,6 +410,41 @@ func ValidateDpuExtensionServiceDeployments(desdrs []APIDpuExtensionServiceDeplo
 	return nil
 }
 
+// ValidateSpectrumXAttachments validates the SpectrumX Attachments for the Instance create/update request.
+// Each attachment consumes one device instance in Core's allocate_spx_port_mac, which rejects a repeated
+// device and device instance pair irrespective of virtualFunctionId. Reject it here so the caller gets a
+// 400 instead of a Site failure. Core bounds the real count by the Machine's SpectrumX interfaces, so
+// MaxSpectrumXAttachmentCount only keeps an unbounded list from reaching it.
+func ValidateSpectrumXAttachments(sacs []APISpectrumXAttachmentCreateOrUpdateRequest) error {
+	if len(sacs) > MaxSpectrumXAttachmentCount {
+		return validation.Errors{
+			"spectrumXAttachments": fmt.Errorf("at most %v SpectrumX Attachments can be specified", MaxSpectrumXAttachmentCount),
+		}
+	}
+
+	deviceInstanceMap := map[string]bool{}
+
+	for _, sac := range sacs {
+		err := sac.Validate()
+		if err != nil {
+			return err
+		}
+
+		deviceInstanceID := fmt.Sprintf("%s-%d", sac.Device, *sac.DeviceInstance)
+
+		_, exists := deviceInstanceMap[deviceInstanceID]
+		if exists {
+			return validation.Errors{
+				"spectrumXAttachments": fmt.Errorf("duplicate SpectrumX Attachment specified for Device %v, Device Instance: %v", sac.Device, *sac.DeviceInstance),
+			}
+		}
+
+		deviceInstanceMap[deviceInstanceID] = true
+	}
+
+	return nil
+}
+
 // ValidateNVLinkInterfaces validates the NVLink interfaces for Instance create/update request.
 // A subset of GPUs may be specified; specifying more interfaces than GPUs is not allowed.
 // Each DeviceInstance (GPU index) must be unique and within the valid range for the machine.
@@ -475,6 +519,8 @@ type APIInstanceCreateRequest struct {
 	AutoNetwork bool `json:"autoNetwork"`
 	// InfiniBandInterfaces is the list of InfiniBandInterface to create for the Instance
 	InfiniBandInterfaces []APIInfiniBandInterfaceCreateOrUpdateRequest `json:"infinibandInterfaces"`
+	// SpectrumXAttachments is the list of SpectrumX Partition attachments to create for the Instance
+	SpectrumXAttachments []APISpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments"`
 	// DpuExtensionServiceDeployments is the list of DpuExtensionServiceDeployments to create for the Instance
 	DpuExtensionServiceDeployments []APIDpuExtensionServiceDeploymentRequest `json:"dpuExtensionServiceDeployments"`
 	// NVLinkInterfaces is the list of NVLinkInterface to create for the Instance
@@ -545,6 +591,8 @@ type APIBatchInstanceCreateRequest struct {
 	AutoNetwork bool `json:"autoNetwork"`
 	// InfiniBandInterfaces is the list of InfiniBandInterface to create for each instance (shared across all instances)
 	InfiniBandInterfaces []APIInfiniBandInterfaceCreateOrUpdateRequest `json:"infinibandInterfaces"`
+	// SpectrumXAttachments is the list of SpectrumX Partition attachments to create for each instance (shared across all instances)
+	SpectrumXAttachments []APISpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments"`
 	// NVLinkInterfaces is the list of NVLinkInterface to create for each instance (shared across all instances)
 	NVLinkInterfaces []APINVLinkInterfaceCreateOrUpdateRequest `json:"nvLinkInterfaces"`
 	// DpuExtensionServiceDeployments is the list of DpuExtensionServiceDeployments to create for each Instance (shared across all instances)
@@ -580,6 +628,10 @@ func (icr APIInstanceCreateRequest) Validate() error {
 			validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&icr.OperatingSystemID,
 			validationis.UUID.Error(validationErrorInvalidUUID)),
+		validation.Field(&icr.UserData,
+			validation.When(icr.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
+		),
 		validation.Field(&icr.PowerProfile,
 			validation.When(icr.PowerProfile != nil, validation.Required.Error("`powerProfile` must not be empty"))),
 		validation.Field(&icr.Interfaces,
@@ -645,6 +697,12 @@ func (icr APIInstanceCreateRequest) Validate() error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// Validate SpectrumX Attachments
+	err = ValidateSpectrumXAttachments(icr.SpectrumXAttachments)
+	if err != nil {
+		return err
 	}
 
 	// Validate DpuExtensionServiceDeployments
@@ -888,7 +946,7 @@ func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 			// If there's still user-data, marshal so that it can be stored in the DB later
 			if isUserDataValidYAML && len(documentRoot.Content) > 0 {
 
-				byteUserData, err := yaml.Marshal(userDataMap)
+				byteUserData, err := util.MarshalUserData(userDataMap)
 				if err != nil {
 					return validation.Errors{
 						"userData": errors.New("failed to re-construct userData after processing phone home config"),
@@ -914,7 +972,7 @@ func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 		}
 	}
 
-	return nil
+	return util.ValidateEffectiveUserData(icr.UserData)
 }
 
 // ValidateMultiEthernetDeviceInterfaces validates the Multi-Ethernet Device Interfaces for the Instance
@@ -958,6 +1016,10 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 			validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&bicr.OperatingSystemID,
 			validationis.UUID.Error(validationErrorInvalidUUID)),
+		validation.Field(&bicr.UserData,
+			validation.When(bicr.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
+		),
 		validation.Field(&bicr.PowerProfile,
 			validation.When(bicr.PowerProfile != nil, validation.Required.Error("`powerProfile` must not be empty"))),
 		validation.Field(&bicr.Interfaces,
@@ -1023,6 +1085,12 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// Validate SpectrumX Attachments
+	err = ValidateSpectrumXAttachments(bicr.SpectrumXAttachments)
+	if err != nil {
+		return err
 	}
 
 	// Validate DpuExtensionServiceDeployments
@@ -1256,7 +1324,7 @@ func (bicr *APIBatchInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg
 			// If there's still user-data, marshal so that it can be stored in the DB later
 			if isUserDataValidYAML && len(documentRoot.Content) > 0 {
 
-				byteUserData, err := yaml.Marshal(userDataMap)
+				byteUserData, err := util.MarshalUserData(userDataMap)
 				if err != nil {
 					return validation.Errors{
 						"userData": errors.New("failed to re-construct userData after processing phone home config"),
@@ -1275,7 +1343,7 @@ func (bicr *APIBatchInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg
 		}
 	}
 
-	return nil
+	return util.ValidateEffectiveUserData(bicr.UserData)
 }
 
 // ValidateNVLinkInterfaces validates the NVLink interfaces for the Instance
@@ -1323,6 +1391,9 @@ type APIInstanceUpdateRequest struct {
 	AutoNetwork *bool `json:"autoNetwork"`
 	// InfiniBandInterfaces is the list of InfiniBandInterface to update for the Instance
 	InfiniBandInterfaces []APIInfiniBandInterfaceCreateOrUpdateRequest `json:"infinibandInterfaces"`
+	// SpectrumXAttachments is the list of SpectrumX Partition attachments to update for the Instance. `nil` leaves
+	// the Instance's SpectrumX attachments unchanged; a non-nil (possibly empty) list replaces them entirely.
+	SpectrumXAttachments []APISpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments"`
 	// DpuExtensionServiceDeployments is the list of DpuExtensionServiceDeployments to update for the Instance
 	DpuExtensionServiceDeployments []APIDpuExtensionServiceDeploymentRequest `json:"dpuExtensionServiceDeployments"`
 	// NVLinkInterfaces is the list of NVLinkInterface to update for the Instance
@@ -1573,7 +1644,7 @@ func (iur *APIInstanceUpdateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 			// If there's still user-data, marshal so that it can be stored in the DB later
 			if isUserDataValidYAML && len(documentRoot.Content) > 0 {
 
-				byteUserData, err := yaml.Marshal(userDataMap)
+				byteUserData, err := util.MarshalUserData(userDataMap)
 				if err != nil {
 					return validation.Errors{
 						"userData": errors.New("failed to re-construct userData after processing phone home config"),
@@ -1599,7 +1670,17 @@ func (iur *APIInstanceUpdateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 		}
 	}
 
-	return nil
+	// An update that touches none of user-data, the base OS, or phone-home
+	// leaves iur.UserData nil, so the value heading to the Site is the stored
+	// blob that mergedUserData resolved to. Checking it here rather than
+	// assigning it back keeps the field absent from the update, so an
+	// unrelated update cannot rewrite a column the caller never named.
+	effectiveUserData := iur.UserData
+	if effectiveUserData == nil {
+		effectiveUserData = mergedUserData
+	}
+
+	return util.ValidateEffectiveUserData(effectiveUserData)
 }
 
 // ValidateMultiEthernetDeviceInterfaces validates the Multi-Ethernet Device Interfaces for the Instance
@@ -1636,6 +1717,7 @@ func (iur *APIInstanceUpdateRequest) IsUpdateRequest() bool {
 		iur.Interfaces != nil ||
 		iur.AutoNetwork != nil ||
 		iur.InfiniBandInterfaces != nil ||
+		iur.SpectrumXAttachments != nil ||
 		iur.NVLinkInterfaces != nil ||
 		iur.SSHKeyGroupIDs != nil ||
 		iur.NetworkSecurityGroupID != nil ||
@@ -1644,7 +1726,8 @@ func (iur *APIInstanceUpdateRequest) IsUpdateRequest() bool {
 
 // IsInterfaceUpdateRequest checks if the request is an instance interface update request
 func (iur *APIInstanceUpdateRequest) IsInterfaceUpdateRequest() bool {
-	return iur.Interfaces != nil || iur.AutoNetwork != nil || iur.InfiniBandInterfaces != nil || iur.NVLinkInterfaces != nil
+	return iur.Interfaces != nil || iur.AutoNetwork != nil || iur.InfiniBandInterfaces != nil || iur.NVLinkInterfaces != nil ||
+		iur.SpectrumXAttachments != nil
 }
 
 // IsRebootRequest checks if the request is an instance reboot request
@@ -1664,6 +1747,10 @@ func (iur APIInstanceUpdateRequest) Validate() error {
 		),
 		validation.Field(&iur.OperatingSystemID,
 			validationis.UUID.Error(validationErrorInvalidUUID),
+		),
+		validation.Field(&iur.UserData,
+			validation.When(iur.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
 		),
 		validation.Field(&iur.Interfaces,
 			validation.When(len(iur.Interfaces) > 0, validation.Length(1, MaxInterfaceCount).Error(fmt.Sprintf("at most %v Interfaces can be specified", MaxInterfaceCount))),
@@ -1738,6 +1825,12 @@ func (iur APIInstanceUpdateRequest) Validate() error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// Validate SpectrumX Attachments
+	err = ValidateSpectrumXAttachments(iur.SpectrumXAttachments)
+	if err != nil {
+		return err
 	}
 
 	// Validate DpuExtensionServiceDeployments

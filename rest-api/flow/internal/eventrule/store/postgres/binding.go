@@ -12,7 +12,6 @@ import (
 	converterdao "github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
 	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
-	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 )
 
@@ -65,7 +64,8 @@ func (s *Store) Bind(ctx context.Context, binding eventrule.Binding) error {
 		}
 		if exists {
 			return fmt.Errorf(
-				"event rule %s cannot mix site and rack bindings",
+				"%w: event rule %s cannot mix site and rack bindings",
+				eventrule.ErrBindingConflict,
 				binding.RuleID,
 			)
 		}
@@ -89,12 +89,30 @@ func (s *Store) Bind(ctx context.Context, binding eventrule.Binding) error {
 	})
 }
 
-// Unbind deletes one binding.
-func (s *Store) Unbind(ctx context.Context, id uuid.UUID) error {
-	result, err := s.pg.DB.NewDelete().
+// Unbind atomically deletes the binding for an event type and scope.
+func (s *Store) Unbind(
+	ctx context.Context,
+	eventType eventrule.Type,
+	scope eventrule.Scope,
+) error {
+	if err := eventType.Validate(); err != nil {
+		return err
+	}
+	if err := scope.Validate(); err != nil {
+		return err
+	}
+
+	query := s.pg.DB.NewDelete().
 		Model((*dbmodel.EventRuleBinding)(nil)).
-		Where("id = ?", id).
-		Exec(ctx)
+		Where("event_type = ?", string(eventType)).
+		Where("scope_type = ?", string(scope.Type))
+	if scope.Type == eventrule.ScopeTypeSite {
+		query = query.Where("scope_id IS NULL")
+	} else {
+		query = query.Where("scope_id = ?", scope.ID)
+	}
+
+	result, err := query.Exec(ctx)
 	if err != nil {
 		return err
 	}
@@ -103,8 +121,14 @@ func (s *Store) Unbind(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return err
 	}
+
 	if deleted == 0 {
-		return fmt.Errorf("%w: binding %s", eventrule.ErrRuleNotFound, id)
+		return fmt.Errorf(
+			"%w: binding for event type %q and scope %q",
+			eventrule.ErrBindingNotFound,
+			eventType,
+			scope.Type,
+		)
 	}
 
 	return nil
@@ -157,7 +181,8 @@ func bindingForScope(
 
 func bindingScopeConflict(binding eventrule.Binding) error {
 	return fmt.Errorf(
-		"event type %q already has a binding for scope %q",
+		"%w: event type %q already has a binding for scope %q",
+		eventrule.ErrBindingConflict,
 		binding.EventType,
 		binding.Scope.Type,
 	)

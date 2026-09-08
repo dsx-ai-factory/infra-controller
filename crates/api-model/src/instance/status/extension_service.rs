@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::extension_service::ExtensionServiceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
 use serde::{Deserialize, Serialize};
@@ -47,9 +47,9 @@ impl InstanceExtensionServicesStatus {
     /// observation remains unsynced/Unknown rather than being guessed to be a
     /// Kubernetes Pod service.
     pub fn from_config_and_type_observations(
-        dpu_ids: &[MachineId],
+        dpu_ids: &[DpuMachineId],
         config: Versioned<&InstanceExtensionServicesConfig>,
-        observations: &HashMap<MachineId, InstanceExtensionServiceStatusObservationByType>,
+        observations: &HashMap<DpuMachineId, InstanceExtensionServiceStatusObservationByType>,
         is_instance_deleted: bool,
     ) -> Self {
         let dpf_service_ids =
@@ -85,10 +85,10 @@ impl InstanceExtensionServicesStatus {
     pub fn from_config_and_service_type_observations(
         config: Versioned<&InstanceExtensionServicesConfig>,
         service_types: &HashMap<ExtensionServiceId, ExtensionServiceType>,
-        kubernetes_pod_required_dpus: &[MachineId],
-        dpf_helm_chart_required_dpus: &[MachineId],
+        kubernetes_pod_required_dpus: &[DpuMachineId],
+        dpf_helm_chart_required_dpus: &[DpuMachineId],
         instance_deleted_at: Option<&DateTime<Utc>>,
-        observations: &HashMap<MachineId, InstanceExtensionServiceStatusObservationByType>,
+        observations: &HashMap<DpuMachineId, InstanceExtensionServiceStatusObservationByType>,
     ) -> Self {
         // This means the instance has no extension services configured and all once terminating
         // services has been terminated from all DPUs and hence not present any more
@@ -308,7 +308,7 @@ impl InstanceExtensionServicesStatus {
 
 // Derive service id types from observations
 fn observed_service_ids(
-    observations: &HashMap<MachineId, InstanceExtensionServiceStatusObservationByType>,
+    observations: &HashMap<DpuMachineId, InstanceExtensionServiceStatusObservationByType>,
     service_type: ExtensionServiceType,
 ) -> HashSet<ExtensionServiceId> {
     observations
@@ -328,7 +328,7 @@ fn observed_service_ids(
 #[derive(Clone, Debug)]
 pub struct MachineExtensionServiceStatus {
     /// The ID of the DPU this status is from
-    pub machine_id: MachineId,
+    pub machine_id: DpuMachineId,
     /// The deployment status of the extension service on this specific DPU
     pub status: ExtensionServiceDeploymentStatus,
     /// Optional error message if the service encountered issues on this DPU
@@ -442,12 +442,15 @@ impl InstanceExtensionServiceStatusObservationByType {
     }
 
     /// Aggregates persisted type-partitioned observations.
-    pub fn aggregate_instance_observation(dpu_snapshots: &[Machine]) -> HashMap<MachineId, Self> {
+    pub fn aggregate_instance_observation(
+        dpu_snapshots: &[Machine],
+    ) -> HashMap<DpuMachineId, Self> {
         dpu_snapshots
             .iter()
             .filter_map(|dpu| {
+                let dpu_id = dpu.dpu_machine_id().ok()?;
                 let observations = dpu.status.extension_service_status_observations.clone();
-                (!observations.by_service_type.is_empty()).then_some((dpu.id, observations))
+                (!observations.by_service_type.is_empty()).then_some((dpu_id, observations))
             })
             .collect()
     }
@@ -560,6 +563,7 @@ mod tests {
     use std::str::FromStr;
 
     use carbide_test_support::value_scenarios;
+    use carbide_uuid::machine::DpuMachineId as MachineId;
     use chrono::{TimeZone, Utc};
 
     use super::*;
@@ -925,7 +929,7 @@ mod tests {
             InstanceExtensionServiceStatusObservationByType::aggregate_instance_observation(&[
                 dpu.clone()
             ]);
-        let aggregated = &aggregated[&dpu.id];
+        let aggregated = &aggregated[&dpu.dpu_machine_id().unwrap()];
         assert!(
             aggregated
                 .for_service_type(ExtensionServiceType::KubernetesPod)
@@ -1551,7 +1555,6 @@ mod tests {
         observation_with_dpf_status
             .extension_service_statuses
             .push(dpf_status);
-
         assert!(!observation.any_observed_version_changed(&observation_with_dpf_status));
     }
 

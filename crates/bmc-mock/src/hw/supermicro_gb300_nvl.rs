@@ -172,6 +172,7 @@ impl SupermicroGB300Nvl<'_> {
                     log_services: None,
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("GB300 1CPU:2GPU Board PC".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: None,
                     secure_boot_available: false,
@@ -193,6 +194,7 @@ impl SupermicroGB300Nvl<'_> {
                     // SMC GB300: Supermicro host system reporting product "GB NVL".
                     manufacturer: Some("Supermicro".into()),
                     model: Some("GB NVL".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: Some(callbacks),
                     // This firmware exposes the SecureBoot resource but omits

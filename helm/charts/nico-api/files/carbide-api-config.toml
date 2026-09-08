@@ -110,11 +110,12 @@ failure_retry_time = "90m"
 vpc_prefix_drain_time = "5m"
 
 [network_security_group]
-# Controls whether additional config to support
-# stateful/reflexive ACLs will be inserted into
-# the HBN config.
-# This is expected to remain off at least until
-# NICo v2025.12.19 is fully in production.
+# Controls whether NSGs may enable stateful egress and whether
+# stateful/reflexive ACL support is inserted into HBN configuration.
+# When false, Core rejects stateful NSG creation and updates from
+# stateless to stateful. Existing stateful NSGs remain editable but
+# are applied statelessly.
+# Leave disabled until every DPU in the site runs HBN 2.3 or later.
 stateful_acls_enabled = false
 
 # Maximum number of security groups rules

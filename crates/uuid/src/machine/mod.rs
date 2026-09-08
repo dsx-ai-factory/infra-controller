@@ -16,8 +16,10 @@
  */
 
 use std::cmp::Ordering;
+use std::convert::Infallible;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter, Write};
+use std::hash::Hash;
 use std::str::FromStr;
 
 use data_encoding::BASE32_DNSSEC;
@@ -25,13 +27,63 @@ use prost::DecodeError;
 use prost::bytes::{Buf, BufMut};
 use prost::encoding::{DecodeContext, WireType};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::DbPrimaryUuid;
 
 static MACHINE_ID_PREFIX: &str = "fm100";
 
 use crate::typed_uuids::{TypedUuid, UuidSubtype};
+
+macro_rules! impl_prost_message_for_machine_id {
+    ($newtype:ty, $default_type:expr) => {
+        impl prost::Message for $newtype {
+            fn encode_raw(&self, buf: &mut impl prost::bytes::BufMut)
+            where
+                Self: Sized,
+            {
+                super::encode_machine_id(self.as_machine_id(), buf);
+            }
+
+            fn merge_field(
+                &mut self,
+                tag: u32,
+                wire_type: prost::encoding::WireType,
+                buf: &mut impl prost::bytes::Buf,
+                ctx: prost::encoding::DecodeContext,
+            ) -> Result<(), prost::DecodeError>
+            where
+                Self: Sized,
+            {
+                let mut id = *self.as_machine_id();
+                super::merge_machine_id(&mut id, tag, wire_type, buf, ctx)?;
+                *self = Self::try_from(id).map_err(|error| {
+                    #[allow(deprecated)]
+                    prost::DecodeError::new(error.to_string())
+                })?;
+                Ok(())
+            }
+
+            fn encoded_len(&self) -> usize {
+                super::encoded_machine_id_len(self.as_machine_id())
+            }
+
+            #[allow(deprecated)]
+            fn clear(&mut self) {
+                *self = Self::default();
+            }
+        }
+
+        impl Default for $newtype {
+            /// Returns a synthetic value required for prost message decoding.
+            ///
+            /// This is an interoperability value, not an application machine ID.
+            fn default() -> Self {
+                Self::try_from(super::prost_default_machine_id($default_type))
+                    .expect("the prost default machine type matches the subtype")
+            }
+        }
+    };
+}
 
 // Macro used by below modules (`mod dpu;`, etc): needs to be declared before we declare them.
 #[cfg(feature = "sqlx")]
@@ -167,14 +219,13 @@ impl PartialOrd for MachineId {
 }
 
 // Implement [`prost::Message`] manually so that we can be wire-compatible with the
-// `.common.MachineId` protobuf message, which is what we actually serialize. Do this by
-// constructing a `legacy_rpc::MachineId` and delegate all  [`prost::Message`] methods to it.
+// `.common.MachineId` protobuf message, which is what we actually serialize.
 impl prost::Message for MachineId {
     fn encode_raw(&self, buf: &mut impl BufMut)
     where
         Self: Sized,
     {
-        legacy_rpc::MachineId::from(*self).encode_raw(buf);
+        encode_machine_id(self, buf);
     }
 
     fn merge_field(
@@ -187,25 +238,41 @@ impl prost::Message for MachineId {
     where
         Self: Sized,
     {
-        let mut legacy_message = legacy_rpc::MachineId::from(*self);
-        legacy_message.merge_field(tag, wire_type, buf, ctx)?;
-        *self = MachineId::from_str(&legacy_message.id).map_err(|_| {
-            // Deprecation: if they remove DecodeError::new, they hopefully will provide some other way
-            // to impl prost::Message.
-            #[allow(deprecated)]
-            DecodeError::new(format!("Invalid machine id: {}", legacy_message.id))
-        })?;
-        Ok(())
+        merge_machine_id(self, tag, wire_type, buf, ctx)
     }
 
     fn encoded_len(&self) -> usize {
-        legacy_rpc::MachineId::from(*self).encoded_len()
+        encoded_machine_id_len(self)
     }
 
     #[allow(deprecated)]
     fn clear(&mut self) {
         *self = MachineId::default();
     }
+}
+
+fn encode_machine_id(id: &MachineId, buf: &mut impl BufMut) {
+    prost::Message::encode_raw(&legacy_rpc::MachineId::from(*id), buf);
+}
+
+fn merge_machine_id(
+    id: &mut MachineId,
+    tag: u32,
+    wire_type: WireType,
+    buf: &mut impl Buf,
+    ctx: DecodeContext,
+) -> Result<(), DecodeError> {
+    let mut legacy_message = legacy_rpc::MachineId::from(*id);
+    prost::Message::merge_field(&mut legacy_message, tag, wire_type, buf, ctx)?;
+    *id = MachineId::from_str(&legacy_message.id).map_err(|_| {
+        #[allow(deprecated)]
+        DecodeError::new(format!("Invalid machine id: {}", legacy_message.id))
+    })?;
+    Ok(())
+}
+
+fn encoded_machine_id_len(id: &MachineId) -> usize {
+    prost::Message::encoded_len(&legacy_rpc::MachineId::from(*id))
 }
 
 mod legacy_rpc {
@@ -311,6 +378,65 @@ impl PgHasArrayType for MachineId {
     }
 }
 
+pub trait MachineIdSubtypeTrait:
+    Display
+    + Copy
+    + Clone
+    + Send
+    + Sync
+    + Eq
+    + PartialEq
+    + Hash
+    + Into<MachineId>
+    + TryFrom<MachineId, Error: Into<InvalidMachineType>>
+{
+    fn machine_type(&self) -> MachineType;
+    fn as_machine_id(&self) -> &MachineId;
+    fn machine_id_subtype(&self) -> MachineIdSubtype;
+
+    fn to_machine_id(&self) -> MachineId {
+        *Self::as_machine_id(self)
+    }
+
+    fn host_or_dpu_id(&self) -> HostOrDpuId {
+        HostOrDpuId::from(self.machine_id_subtype())
+    }
+
+    fn is_dpu(&self) -> bool {
+        matches!(self.machine_type(), MachineType::Dpu)
+    }
+}
+
+pub trait AsMachineId: Send + Sync {
+    fn as_machine_id(&self) -> &MachineId;
+}
+
+impl<T: MachineIdSubtypeTrait> AsMachineId for T {
+    fn as_machine_id(&self) -> &MachineId {
+        <Self as MachineIdSubtypeTrait>::as_machine_id(self)
+    }
+}
+
+impl MachineIdSubtypeTrait for MachineId {
+    fn machine_type(&self) -> MachineType {
+        Self::machine_type(self)
+    }
+
+    fn as_machine_id(&self) -> &MachineId {
+        self
+    }
+
+    fn machine_id_subtype(&self) -> MachineIdSubtype {
+        MachineId::machine_id_subtype(self)
+    }
+}
+
+impl From<&MachineId> for MachineId {
+    fn from(id: &MachineId) -> Self {
+        *id
+    }
+}
+
 /// Equivalent to [`MachineType`] but carries the strongly-typed subtype with each variant
 pub enum MachineIdSubtype {
     Dpu(DpuMachineId),
@@ -323,6 +449,16 @@ pub enum MachineIdSubtype {
 pub enum HostOrDpuId {
     Host(HostMachineId),
     Dpu(DpuMachineId),
+}
+
+impl From<MachineIdSubtype> for HostOrDpuId {
+    fn from(value: MachineIdSubtype) -> Self {
+        match value {
+            MachineIdSubtype::Dpu(id) => HostOrDpuId::Dpu(id),
+            MachineIdSubtype::StableHost(id) => HostOrDpuId::Host(id.into()),
+            MachineIdSubtype::PredictedHost(id) => HostOrDpuId::Host(id.into()),
+        }
+    }
 }
 
 impl MachineId {
@@ -349,16 +485,6 @@ impl MachineId {
         self.ty
     }
 
-    /// Generate Remote ID based on machineID.
-    /// Remote Id is inserted by dhcrelay on DPU in each DHCP request sent by host.
-    /// This field is used only for DPU.
-    pub fn remote_id(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(self.to_string().as_bytes());
-        let hash: [u8; 32] = hasher.finalize().into();
-        BASE32_DNSSEC.encode(&hash)
-    }
-
     /// Note: Never use this! Tonic's codegen requires all types to implement Default, but there is
     /// no logical reason to construct a "default" MachineId in real code, so we simply construct a
     /// bogus one here.
@@ -367,11 +493,7 @@ impl MachineId {
         note = "Do not use `MachineId::default()` directly; only implemented for prost interop"
     )]
     pub fn default() -> Self {
-        Self::new(
-            MachineIdSource::ProductBoardChassisSerial,
-            [0; 32],
-            MachineType::Host,
-        )
+        prost_default_machine_id(MachineType::Host)
     }
 
     pub(crate) fn is_matching_prefix(s: &str) -> bool {
@@ -381,14 +503,13 @@ impl MachineId {
     /// Equivalent to [`Self::machine_type`] but returns a [`MachineIdSubtype`], which carries the
     /// strongly-typed subtype with each variant
     pub fn machine_id_subtype(&self) -> MachineIdSubtype {
-        // SAFETY: subtypes must convert if the type matches
         match self.ty {
-            MachineType::Dpu => MachineIdSubtype::Dpu(DpuMachineId::try_from(*self).unwrap()),
+            MachineType::Dpu => MachineIdSubtype::Dpu(DpuMachineId(*self)),
             MachineType::Host => {
-                MachineIdSubtype::StableHost(StableHostMachineId::try_from(*self).unwrap())
+                MachineIdSubtype::StableHost(StableHostMachineId(HostMachineId(*self)))
             }
             MachineType::PredictedHost => {
-                MachineIdSubtype::PredictedHost(PredictedHostMachineId::try_from(*self).unwrap())
+                MachineIdSubtype::PredictedHost(PredictedHostMachineId(HostMachineId(*self)))
             }
         }
     }
@@ -396,14 +517,17 @@ impl MachineId {
     /// Similar to [`Self::machine_id_subtype`] but for cases where stable and predicted host ID's
     /// should be combined into a single [`HostMachineId`] variant.
     pub fn host_or_dpu_id(&self) -> HostOrDpuId {
-        // SAFETY: subtypes must convert if the type matches
         match self.ty {
-            MachineType::Dpu => HostOrDpuId::Dpu(DpuMachineId::try_from(*self).unwrap()),
+            MachineType::Dpu => HostOrDpuId::Dpu(DpuMachineId(*self)),
             MachineType::Host | MachineType::PredictedHost => {
-                HostOrDpuId::Host(HostMachineId::try_from(*self).unwrap())
+                HostOrDpuId::Host(HostMachineId(*self))
             }
         }
     }
+}
+
+fn prost_default_machine_id(ty: MachineType) -> MachineId {
+    MachineId::new(MachineIdSource::ProductBoardChassisSerial, [0; 32], ty)
 }
 
 impl DbPrimaryUuid for MachineId {
@@ -648,6 +772,12 @@ impl<'de> Deserialize<'de> for MachineId {
 pub struct InvalidMachineType {
     expected: &'static str,
     actual: MachineId,
+}
+
+impl From<Infallible> for InvalidMachineType {
+    fn from(_: Infallible) -> Self {
+        unreachable!()
+    }
 }
 
 #[cfg(test)]

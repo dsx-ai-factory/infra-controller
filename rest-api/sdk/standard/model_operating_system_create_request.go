@@ -47,15 +47,15 @@ type OperatingSystemCreateRequest struct {
 	ImageAuthType NullableString `json:"imageAuthType,omitempty"`
 	// Auth token to retrieve the image from image URL, required if imageAuthType is specified
 	ImageAuthToken NullableString `json:"imageAuthToken,omitempty"`
-	// Disk path where the image should be mounted, optional
-	ImageDisk NullableString `json:"imageDisk,omitempty"`
+	// Optional whole-disk target that will be overwritten with the image. Accepts `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest` selects the smallest enumerated whole disk, preferring one with an EFI partition to break a size tie. Partition aliases ending in `-part<digits>` are rejected. When omitted, null, or empty on creation, the Site prefers a disk with an EFI partition, then falls back to `/dev/nvme0n1` or `/dev/sda`.
+	ImageDisk NullableString `json:"imageDisk,omitempty" validate:"regexp=^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\\s]+))$"`
 	// Root filesystem UUID; this or `rootFsLabel` is required for image-based OS
 	RootFsId NullableString `json:"rootFsId,omitempty"`
 	// Root filesystem label; this or `rootFsId` is required for image-based OS
 	RootFsLabel NullableString `json:"rootFsLabel,omitempty"`
 	// Indicates whether the Phone Home service should be enabled or disabled for Operating System
 	PhoneHomeEnabled NullableBool `json:"phoneHomeEnabled,omitempty"`
-	// User data for the Operating System
+	// User data for the Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
 	UserData NullableString `json:"userData,omitempty"`
 	// Deprecated and ignored: whether the Operating System is cloud-init based. Value now derived from `userData`.
 	// Deprecated

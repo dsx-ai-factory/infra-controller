@@ -179,6 +179,11 @@ impl RedfishClientPool for RedfishClientPoolImpl {
     }
 }
 
+impl super::sealed::Sealed for RedfishClientPoolImpl {}
+
+#[async_trait]
+impl super::BmcCredentialOps for RedfishClientPoolImpl {}
+
 #[cfg(test)]
 mod tests {
     use carbide_test_support::value_scenarios;

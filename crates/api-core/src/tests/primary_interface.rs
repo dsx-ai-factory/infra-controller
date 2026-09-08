@@ -1066,7 +1066,7 @@ async fn test_set_primary_interface_rejects_deleted_instance_and_rolls_back_writ
     let mut deletion = env.pool.begin().await?;
     db::instance::mark_as_deleted(instance.id, deletion.as_mut()).await?;
     deletion.commit().await?;
-    let state_before = load_set_primary_persistence_state(&env.pool, host_id).await?;
+    let state_before = load_set_primary_persistence_state(&env.pool, host_id.into()).await?;
 
     struct Case {
         name: &'static str,
@@ -1090,7 +1090,7 @@ async fn test_set_primary_interface_rejects_deleted_instance_and_rolls_back_writ
         let error = env
             .api
             .set_primary_interface(tonic::Request::new(forge::SetPrimaryInterfaceRequest {
-                host_machine_id: Some(host_id),
+                host_machine_id: Some(host_id.into()),
                 interface_id: Some(case.interface_id),
                 force_reconcile: case.force_reconcile,
                 ..Default::default()
@@ -1103,7 +1103,7 @@ async fn test_set_primary_interface_rejects_deleted_instance_and_rolls_back_writ
             format!("instance {} is being deleted", instance.id),
         );
 
-        let state_after = load_set_primary_persistence_state(&env.pool, host_id).await?;
+        let state_after = load_set_primary_persistence_state(&env.pool, host_id.into()).await?;
         assert_eq!(state_after, state_before, "{} persisted state", case.name);
     }
 

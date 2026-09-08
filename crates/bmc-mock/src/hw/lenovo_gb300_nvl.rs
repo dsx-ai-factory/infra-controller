@@ -174,6 +174,7 @@ impl LenovoGB300Nvl<'_> {
                     log_services: None,
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("GB300 1CPU:2GPU Board PC".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: None,
                     serial_console: None,
@@ -195,7 +196,8 @@ impl LenovoGB300Nvl<'_> {
                     // simulate it so far.
                     log_services: None,
                     manufacturer: Some("Lenovo".into()),
-                    model: Some("HG634N_V2".into()),
+                    model: Some("HG635N_V2".into()),
+                    bios_version: Some("GBHC01A_01.05.0".into()),
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: Some(callbacks),
                     serial_console: None,
@@ -280,7 +282,7 @@ impl LenovoGB300Nvl<'_> {
 
     pub(crate) fn update_service_config(&self) -> redfish::update_service::UpdateServiceConfig {
         redfish::update_service::UpdateServiceConfig {
-            firmware_inventory: [("BMC-Primary", "1.0.0"), ("UEFI", "1.0.0")]
+            firmware_inventory: [("BMC", "1.0.0")]
                 .iter()
                 .map(|(id, version)| {
                     redfish::software_inventory::builder(
@@ -290,8 +292,8 @@ impl LenovoGB300Nvl<'_> {
                     .build()
                 })
                 .collect(),
-            host_bmc_inventory_id: Some("BMC-Primary".to_string()),
-            host_uefi_inventory_id: Some("UEFI".to_string()),
+            host_bmc_inventory_id: Some("BMC".to_string()),
+            host_uefi_inventory_id: None,
             ..Default::default()
         }
     }

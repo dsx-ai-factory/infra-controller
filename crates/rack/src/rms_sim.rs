@@ -23,8 +23,6 @@ use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use librms::{RackManagerError, RmsApi};
 use tokio::sync::Mutex;
 
-use crate::rms_client::SwitchSystemImageRmsClient;
-
 /// RMS simulation for testing, similar to RedfishSim
 pub struct RmsSim {
     fail_create_nodes: Arc<AtomicBool>,
@@ -155,10 +153,6 @@ impl Default for RmsSim {
 impl RmsSim {
     /// Convert RmsSim to the type expected by Api and StateHandlerServices
     pub fn as_rms_client(&self) -> Option<Arc<dyn RmsApi>> {
-        Some(Arc::new(self.build_mock_client()))
-    }
-
-    pub fn as_switch_system_image_rms_client(&self) -> Option<Arc<dyn SwitchSystemImageRmsClient>> {
         Some(Arc::new(self.build_mock_client()))
     }
 
@@ -1321,33 +1315,6 @@ impl RmsApi for MockRmsClient {
                 error_message: "mock firmware job not found".to_string(),
                 ..Default::default()
             }))
-    }
-}
-
-#[async_trait::async_trait]
-impl SwitchSystemImageRmsClient for MockRmsClient {
-    async fn apply_switch_system_image(
-        &self,
-        cmd: rms::ApplySwitchSystemImageRequest,
-    ) -> Result<rms::ApplySwitchSystemImageResponse, tonic::Status> {
-        self.submitted_apply_switch_system_image_requests
-            .lock()
-            .await
-            .push(cmd);
-
-        Ok(self
-            .queued_apply_switch_system_image_responses
-            .lock()
-            .await
-            .pop_front()
-            .unwrap_or_default())
-    }
-
-    async fn get_switch_system_image_job_status(
-        &self,
-        cmd: rms::GetSwitchSystemImageJobStatusRequest,
-    ) -> Result<rms::GetSwitchSystemImageJobStatusResponse, tonic::Status> {
-        self.switch_system_image_job_status(cmd).await
     }
 }
 

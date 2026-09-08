@@ -29,6 +29,7 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
     DpuConfigExt as _, FixtureDefault as _, ManagedHostConfigExt as _,
 };
+use carbide_uuid::machine::MachineId;
 use db::ObjectFilter;
 use db::sku::CURRENT_SKU_VERSION;
 use itertools::Itertools;
@@ -2662,9 +2663,13 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
     assert_eq!(explored_endpoints.len(), 2);
 
     let mut explored_managed_hosts = db::explored_managed_host::find_all(&pool).await?;
-    let mut machines = db::machine::find(&pool, ObjectFilter::All, MachineSearchConfig::default())
-        .await
-        .unwrap();
+    let mut machines = db::machine::find(
+        &pool,
+        ObjectFilter::<MachineId>::All,
+        MachineSearchConfig::default(),
+    )
+    .await
+    .unwrap();
 
     // There should be no managed host
     assert_eq!(explored_managed_hosts.len(), 0);
@@ -2698,9 +2703,13 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
 
     explorer.run_single_iteration().await.unwrap();
     explored_managed_hosts = db::explored_managed_host::find_all(&pool).await?;
-    machines = db::machine::find(&pool, ObjectFilter::All, MachineSearchConfig::default())
-        .await
-        .unwrap();
+    machines = db::machine::find(
+        &pool,
+        ObjectFilter::<MachineId>::All,
+        MachineSearchConfig::default(),
+    )
+    .await
+    .unwrap();
 
     // We should see one explored_managed host && 2 machines
     assert_eq!(

@@ -41,6 +41,7 @@ import (
 	authn "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authentication"
 	otprop "go.opentelemetry.io/contrib/propagators/ot"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/interceptor"
 	"golang.org/x/time/rate"
@@ -191,7 +192,15 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	if cfg.GetTracingEnabled() {
 		svcName := cfg.GetTracingServiceName()
 		if svcName != "" {
-			e.Use(otelecho.Middleware(svcName, otelecho.WithSkipper(skipTracingRoutes), otelecho.WithPropagators(otprop.OT{})))
+			// Composite: WithPropagators replaces, so OT alone dropped W3C.
+			e.Use(otelecho.Middleware(svcName,
+				otelecho.WithSkipper(skipTracingRoutes),
+				otelecho.WithPropagators(propagation.NewCompositeTextMapPropagator(
+					propagation.TraceContext{},
+					propagation.Baggage{},
+					otprop.OT{},
+				)),
+			))
 		} else {
 			log.Warn().Msg("failed to get Tracing Service Name, skipping OTel middleware")
 		}

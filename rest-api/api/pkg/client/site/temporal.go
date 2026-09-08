@@ -16,8 +16,11 @@ import (
 	zlogadapter "logur.dev/adapter/zerolog"
 	"logur.dev/logur"
 
+	"go.opentelemetry.io/otel"
 	tsdkClient "go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/contrib/opentelemetry"
 	tsdkConverter "go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/interceptor"
 
 	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
 )
@@ -56,6 +59,15 @@ func (cp *ClientPool) GetClientByID(siteID uuid.UUID) (tsdkClient.Client, error)
 
 	tLogger := logur.LoggerToKV(zlogadapter.New(zerolog.New(os.Stderr)))
 
+	// Every SiteTaskQueue workflow leaves through this client.
+	var tInterceptors []interceptor.ClientInterceptor
+	otelInterceptor, oerr := opentelemetry.NewTracingInterceptor(
+		opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
+	if oerr != nil {
+		return nil, fmt.Errorf("creating Temporal tracing interceptor: %w", oerr)
+	}
+	tInterceptors = append(tInterceptors, otelInterceptor)
+
 	tc, err := tsdkClient.NewLazyClient(tsdkClient.Options{
 		HostPort:  fmt.Sprintf("%v:%v", cp.tcfg.Host, cp.tcfg.Port),
 		Namespace: siteID.String(),
@@ -71,7 +83,8 @@ func (cp *ClientPool) GetClientByID(siteID uuid.UUID) (tsdkClient.Client, error)
 			tsdkConverter.NewProtoPayloadConverter(),
 			tsdkConverter.NewJSONPayloadConverter(),
 		),
-		Logger: tLogger,
+		Logger:       tLogger,
+		Interceptors: tInterceptors,
 	})
 
 	if err != nil {

@@ -3,8 +3,10 @@
 This toolchain provisions a BlueField DPU from scratch on a site controller host.
 It is designed to be run **manually** by an operator from the host's BMC remote console.
 
-> **Note:** This is for *initial DPU install* only — not for firmware upgrades on
-> already-running deployments. The host has no network at this stage; networking
+> **Note:** This is for *initial DPU install* only. For firmware upgrades on
+> already-running deployments, use the upgrade toolchain in
+> [`upgrade/README.md`](upgrade/README.md), which preserves the DPU's existing
+> configuration. The host has no network at this stage; networking
 > is established as part of the provisioning process.
 
 ---

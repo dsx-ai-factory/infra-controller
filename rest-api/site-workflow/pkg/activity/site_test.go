@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	tClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -32,16 +33,17 @@ func TestManageSiteConfigInventory_DiscoverSiteConfigInventory(t *testing.T) {
 		wantErr            error
 	}{
 		{
-			name: "publishes Core build info alongside the Site Agent build info",
+			name: "publishes Site Agent build info",
 			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{
 				Version:           "2.0.0",
 				InventoryInterval: durationpb.New(3 * time.Minute),
+				FlowEnabled:       proto.Bool(true),
 			},
 		},
 		{
 			// The Site Agent leaves the interval unset when it cannot derive one, so Cloud can
 			// tell that apart from a real value and stay on its own default.
-			name:               "omits the interval when the Site Agent could not derive one",
+			name:               "publishes an absent inventory interval",
 			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: "2.0.0"},
 		},
 		{
@@ -114,8 +116,7 @@ func TestManageSiteConfigInventory_DiscoverSiteConfigInventory(t *testing.T) {
 				"Version request must set DisplayConfig, Core omits the runtime config without it")
 			assert.Equal(t, siteFabricPrefixes, buildInfo.GetRuntimeConfig().GetSiteFabricPrefixes())
 
-			// The Site Agent build info is fixed at startup, so it is published as handed over.
-			assert.Equal(t, tt.siteAgentBuildInfo, inventory.GetSiteAgentBuildInfo())
+			assert.True(t, proto.Equal(tt.siteAgentBuildInfo, inventory.GetSiteAgentBuildInfo()))
 		})
 	}
 }

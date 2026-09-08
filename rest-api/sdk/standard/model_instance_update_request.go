@@ -42,7 +42,7 @@ type InstanceUpdateRequest struct {
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
 	// Power profile to apply to the Instance. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`. Omission or `null` preserves the current profile; an empty string clears it when DPS power management is disabled.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
-	// Any user-data to be sent to the booting OS.  For example, cloud-init data.
+	// Any user-data to be sent to the booting OS.  For example, cloud-init data. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
 	UserData NullableString `json:"userData,omitempty"`
 	// Whether the custom iPXE data should be used for every boot.
 	AlwaysBootWithCustomIpxe NullableBool `json:"alwaysBootWithCustomIpxe,omitempty"`
@@ -58,6 +58,8 @@ type InstanceUpdateRequest struct {
 	AutoNetwork NullableBool `json:"autoNetwork,omitempty"`
 	// Update InfiniBand Interfaces of the Instance
 	InfinibandInterfaces []InfiniBandInterfaceCreateRequest `json:"infinibandInterfaces,omitempty"`
+	// Update SpectrumX Partition attachments of the Instance. Omitting this field leaves the Instance's SpectrumX attachments unchanged; an explicit (possibly empty) list replaces them entirely. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.
+	SpectrumXAttachments []InstanceSpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments,omitempty"`
 	// Update NVLink Interfaces of the Instance. A subset of GPUs may be specified. Each item references a GPU index (`deviceInstance`) and an NVLink Logical Partition. Different interfaces may reference different NVLink Logical Partitions. Partial updates are not allowed; specified interfaces will delete or replace existing Interfaces. Updating is not allowed if the Instance's VPC has the `nvLinkLogicalPartitionId` attribute set.
 	NvLinkInterfaces []NVLinkInterfaceCreateOrUpdateRequest `json:"nvLinkInterfaces,omitempty"`
 	// Updated set of DPU Extension Services to deploy to the DPUs of this Instance
@@ -800,6 +802,38 @@ func (o *InstanceUpdateRequest) SetInfinibandInterfaces(v []InfiniBandInterfaceC
 	o.InfinibandInterfaces = v
 }
 
+// GetSpectrumXAttachments returns the SpectrumXAttachments field value if set, zero value otherwise.
+func (o *InstanceUpdateRequest) GetSpectrumXAttachments() []InstanceSpectrumXAttachmentCreateOrUpdateRequest {
+	if o == nil || IsNil(o.SpectrumXAttachments) {
+		var ret []InstanceSpectrumXAttachmentCreateOrUpdateRequest
+		return ret
+	}
+	return o.SpectrumXAttachments
+}
+
+// GetSpectrumXAttachmentsOk returns a tuple with the SpectrumXAttachments field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *InstanceUpdateRequest) GetSpectrumXAttachmentsOk() ([]InstanceSpectrumXAttachmentCreateOrUpdateRequest, bool) {
+	if o == nil || IsNil(o.SpectrumXAttachments) {
+		return nil, false
+	}
+	return o.SpectrumXAttachments, true
+}
+
+// HasSpectrumXAttachments returns a boolean if a field has been set.
+func (o *InstanceUpdateRequest) HasSpectrumXAttachments() bool {
+	if o != nil && !IsNil(o.SpectrumXAttachments) {
+		return true
+	}
+
+	return false
+}
+
+// SetSpectrumXAttachments gets a reference to the given []InstanceSpectrumXAttachmentCreateOrUpdateRequest and assigns it to the SpectrumXAttachments field.
+func (o *InstanceUpdateRequest) SetSpectrumXAttachments(v []InstanceSpectrumXAttachmentCreateOrUpdateRequest) {
+	o.SpectrumXAttachments = v
+}
+
 // GetNvLinkInterfaces returns the NvLinkInterfaces field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetNvLinkInterfaces() []NVLinkInterfaceCreateOrUpdateRequest {
 	if o == nil || IsNil(o.NvLinkInterfaces) {
@@ -927,6 +961,9 @@ func (o InstanceUpdateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.InfinibandInterfaces) {
 		toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
+	}
+	if !IsNil(o.SpectrumXAttachments) {
+		toSerialize["spectrumXAttachments"] = o.SpectrumXAttachments
 	}
 	if !IsNil(o.NvLinkInterfaces) {
 		toSerialize["nvLinkInterfaces"] = o.NvLinkInterfaces

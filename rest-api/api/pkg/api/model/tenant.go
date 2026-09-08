@@ -8,6 +8,7 @@ import (
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 var (
@@ -48,6 +49,38 @@ type APITenant struct {
 	Capabilities *APITenantCapabilities `json:"capabilities"`
 	// Deprecations is the list of deprecations for the Tenant
 	Deprecations []APIDeprecation `json:"deprecations"`
+}
+
+// APITenantRoutingProfile describes the routing profiles a Tenant may select
+// for VPC creation at one Site.
+type APITenantRoutingProfile struct {
+	// DefaultRoutingProfile is the profile Core applies when a VPC omits routingProfile.
+	DefaultRoutingProfile string `json:"defaultRoutingProfile"`
+	// PermittedRoutingProfiles contains the profiles this Tenant may choose during VPC creation.
+	// Choosing DefaultRoutingProfile inherits it without sending an explicit override.
+	PermittedRoutingProfiles []string `json:"permittedRoutingProfiles"`
+}
+
+// FromProto populates the REST response from Core's Tenant lookup. When the
+// Tenant lacks the site-scoped write privilege, only its inheritable default is
+// exposed as selectable.
+func (atrp *APITenantRoutingProfile) FromProto(response *corev1.FindTenantResponse, allowAlternatives bool) {
+	*atrp = APITenantRoutingProfile{PermittedRoutingProfiles: []string{}}
+	if response == nil || response.GetTenant() == nil {
+		return
+	}
+
+	atrp.DefaultRoutingProfile = NormalizeAPIVpcRoutingProfileFromSite(response.GetTenant().GetRoutingProfileType())
+	if !allowAlternatives {
+		if atrp.DefaultRoutingProfile != "" {
+			atrp.PermittedRoutingProfiles = append(atrp.PermittedRoutingProfiles, atrp.DefaultRoutingProfile)
+		}
+		return
+	}
+
+	for _, profile := range response.GetPermittedRoutingProfileTypes() {
+		atrp.PermittedRoutingProfiles = append(atrp.PermittedRoutingProfiles, NormalizeAPIVpcRoutingProfileFromSite(profile))
+	}
 }
 
 // NewAPITenant accepts a DB layer Tenant object and the deprecated tenant-wide

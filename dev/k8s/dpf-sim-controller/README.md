@@ -4,7 +4,7 @@ A **development-only** simulator for the DOCA Platform Framework (DPF) operator,
 built to let machine-a-tron simulated fleets progress past the `dpuinit`
 machine state without real BlueField hardware or a real DPF install.
 
-Tracking issue: [NVIDIA/infra-controller#3323](https://github.com/NVIDIA/infra-controller/issues/3323).
+Tracking issue: [dsx-ai-factory/infra-controller#3323](https://github.com/dsx-ai-factory/infra-controller/issues/3323).
 
 ## What it does
 

@@ -1871,12 +1871,24 @@ pub(crate) async fn batch_allocate_instances(
     // deduplicated set; each map key is visited exactly once, so `remove` is
     // safe here.
     let dpa_search_config = DpaSearchConfig::default();
-    let snapshot_ids: Vec<MachineId> = snapshot_map.keys().copied().collect();
+    let snapshot_ids: Vec<carbide_uuid::machine::HostMachineId> = snapshot_map
+        .values()
+        .map(|snapshot| {
+            snapshot
+                .host_snapshot
+                .host_machine_id()
+                .map_err(|error| CarbideError::internal(error.to_string()))
+        })
+        .collect::<Result<_, _>>()?;
     let mut dpa_interfaces_by_machine =
         db::dpa_interface::find_by_machine_ids(&mut txn, &snapshot_ids, dpa_search_config).await?;
-    for (machine_id, snapshot) in snapshot_map.iter_mut() {
+    for snapshot in snapshot_map.values_mut() {
+        let host_machine_id = snapshot
+            .host_snapshot
+            .host_machine_id()
+            .map_err(|error| CarbideError::internal(error.to_string()))?;
         snapshot.dpa_interface_snapshots = dpa_interfaces_by_machine
-            .remove(machine_id)
+            .remove(&host_machine_id)
             .unwrap_or_default();
     }
 

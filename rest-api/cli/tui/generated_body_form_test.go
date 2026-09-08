@@ -315,7 +315,11 @@ func TestGeneratedTUICommandGuidedBodyResolvesNamesToIDs(t *testing.T) {
 		"",
 	)
 	_, err := withStdin(t, "\ny\n", func() (string, error) {
-		return "", requireTUICommand(t, "vpc-peering create").Run(session, nil)
+		return "", runGeneratedTUICommand(
+			session,
+			generatedCommandInfoByName(t, "vpc-peering create"),
+			nil,
+		)
 	})
 	require.NoError(t, err)
 

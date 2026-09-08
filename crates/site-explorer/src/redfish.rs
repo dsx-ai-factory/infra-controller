@@ -25,7 +25,7 @@ use carbide_network::deserialize_input_mac_to_address;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::conv::{IntoModel, bmc_vendor};
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
-use carbide_redfish::libredfish::{RedfishAuth, RedfishClientCreationError, RedfishClientPool};
+use carbide_redfish::libredfish::{BmcCredentialOps, RedfishAuth, RedfishClientCreationError};
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::Credentials;
 use libredfish::model::ODataId;
@@ -49,14 +49,15 @@ const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
 // RedfishClient is a wrapper around a redfish client pool and implements redfish utility functions that the site explorer utilizes.
 // TODO: In the future, we should refactor a lot of this client's work to api/src/redfish.rs because other components in carbide can utilize this functionality.
 // Eventually, this file should only have code related to generating the site exploration report.
+#[derive(Clone)]
 pub(super) struct RedfishClient {
-    redfish_client_pool: Arc<dyn RedfishClientPool>,
+    redfish_client_pool: Arc<dyn BmcCredentialOps>,
     nv_redfish_client_pool: Arc<NvRedfishClientPool>,
 }
 
 impl RedfishClient {
     pub(super) fn new(
-        redfish_client_pool: Arc<dyn RedfishClientPool>,
+        redfish_client_pool: Arc<dyn BmcCredentialOps>,
         nv_redfish_client_pool: Arc<NvRedfishClientPool>,
     ) -> Self {
         Self {
@@ -484,6 +485,25 @@ impl RedfishClient {
             .map_err(map_redfish_client_creation_error)?;
 
         client.power(action).await.map_err(map_redfish_error)?;
+        Ok(())
+    }
+
+    pub(super) async fn chassis_reset(
+        &self,
+        bmc_ip_address: SocketAddr,
+        credentials: Credentials,
+        chassis_id: &str,
+        action: libredfish::SystemPowerControl,
+    ) -> Result<(), EndpointExplorationError> {
+        let client = self
+            .create_authenticated_redfish_client(bmc_ip_address, credentials)
+            .await
+            .map_err(map_redfish_client_creation_error)?;
+
+        client
+            .chassis_reset(chassis_id, action)
+            .await
+            .map_err(map_redfish_error)?;
         Ok(())
     }
 
@@ -934,6 +954,13 @@ async fn fetch_system(client: &dyn Redfish) -> Result<FetchedSystem, EndpointExp
             .ok(),
     };
 
+    let bios_version = system
+        .bios_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        .map(str::to_string);
+
     Ok(FetchedSystem {
         system: ComputerSystem {
             ethernet_interfaces,
@@ -950,6 +977,7 @@ async fn fetch_system(client: &dyn Redfish) -> Result<FetchedSystem, EndpointExp
             power_state: system.power_state.into_model(),
             sku: system.sku,
             boot_order,
+            bios_version,
             serial_console_ssh_port: None,
         },
         is_dpu,

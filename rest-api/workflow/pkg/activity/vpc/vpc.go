@@ -505,6 +505,14 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 				logger.Warn().Msg(fmt.Sprintf("unable to create VPC found on Site: tenant organization differs in REST cache and Site record %s", reportedVpc.Org))
 				return nil, nil
 			}
+			// Deleted records when the delete happened, so a delete newer than the interval can
+			// postdate this inventory. Undeleting then would revive a VPC the snapshot never saw
+			// removed. A later inventory undeletes it if the Site still reports it.
+			if site.IsTimeWithinStaleInventoryThreshold(*existingVpc.Deleted) {
+				logger.Info().Msgf("not undeleting VPC %s yet because it was deleted more recently than the inventory interval", vpcID)
+				return nil, nil
+			}
+
 			// Undelete only; UpdateVpcsInDB applies Site-reported field updates.
 			restored, clearErr := vpcDAO.Clear(ctx, tx, cdbm.VpcClearInput{VpcID: existingVpc.ID, Deleted: true})
 			if clearErr != nil {

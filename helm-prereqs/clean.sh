@@ -46,6 +46,12 @@ echo "=== [0/8] Uninstalling NICo REST stack ==="
 # from both nico-prereqs (DB creds, vault tokens) and the REST stack.
 helm uninstall flow                 -n flow                            2>/dev/null || true
 kubectl delete ns flow --wait=false --ignore-not-found                 2>/dev/null || true
+# --no-hooks: the rack-manager chart ships a pre-delete drop-database hook
+# (disabled in values/rms.yaml, but a hand-installed release may have it on)
+# that pulls postgres:15-alpine from Docker Hub — a mirror-only site would
+# hang here, and clean.sh drops the whole postgres namespace anyway.
+helm uninstall rack --no-hooks      -n rack-manager                    2>/dev/null || true
+kubectl delete ns rack-manager --wait=false --ignore-not-found         2>/dev/null || true
 helm uninstall nico-rest-site-agent -n nico-rest                       2>/dev/null || true
 helm uninstall nico-rest            -n nico-rest                       2>/dev/null || true
 helm uninstall temporal                -n temporal     2>/dev/null || true
@@ -287,7 +293,7 @@ kubectl delete clustersecretstore \
 # not strand their cluster-scoped resources.
 kubectl delete clusterexternalsecret \
     nico-roots-eso nico-db-eso \
-    flow-db-eso psm-db-eso nsm-db-eso \
+    flow-db-eso psm-db-eso nsm-db-eso rms-db-eso \
     --ignore-not-found 2>/dev/null || true
 kubectl delete clusterrole \
     vault-pki-config-reader eso-postgres-ns-role flow-vault-tokens-writer \

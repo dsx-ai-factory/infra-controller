@@ -25,7 +25,6 @@ use dashmap::DashMap;
 use http::Response;
 use http::header::CONTENT_TYPE;
 use hyper::Request;
-use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -628,8 +627,8 @@ pub async fn run_metrics_server(
     }
 }
 
-fn serve_request(
-    req: Request<Incoming>,
+fn serve_request<B>(
+    req: Request<B>,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<Response<String>, hyper::Error> {
     match req.uri().path() {
@@ -641,7 +640,7 @@ fn serve_request(
         "/metrics" => serve_prometheus(metrics_manager.export_metrics(), "service metrics"),
         "/telemetry" => serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics"),
         _ => Ok(Response::builder()
-            .status(http::StatusCode::OK)
+            .status(http::StatusCode::NOT_FOUND)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
             .body("not found; use /metrics, /telemetry, or /livez".to_string())
             .expect("BUG: Response::builder error")),
@@ -698,6 +697,33 @@ mod tests {
     use carbide_test_support::{Check, check_values};
 
     use super::*;
+
+    #[test]
+    fn unknown_metrics_route_returns_not_found() {
+        let request = Request::builder()
+            .uri("/definitely-not-a-route")
+            .body(())
+            .expect("test request should be valid");
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test").expect("metrics manager should initialize for test"),
+        );
+
+        let response =
+            serve_request(request, metrics_manager).expect("request should produce a response");
+
+        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+        );
+        assert_eq!(
+            response.body(),
+            "not found; use /metrics, /telemetry, or /livez",
+        );
+    }
 
     #[test]
     fn collector_registry_sanitizes_descriptor_fq_name() {

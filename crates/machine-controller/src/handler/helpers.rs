@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId as MachineId;
 use model::machine::{
     DpfState, DpuDiscoveringState, DpuDiscoveringStates, DpuInitNextStateResolver, DpuInitState,
     DpuInitStates, DpuReprovisionStates, HostReprovisionState, InstallDpuOsState,
@@ -46,18 +46,18 @@ pub(super) trait NextState {
         state: &ManagedHostStateSnapshot,
         current_reprovision_state: &ReprovisionState,
     ) -> Result<ManagedHostState, StateHandlerError> {
-        let dpu_ids_for_reprov =
-            // EnumIter conflicts with Itertool, don't know why?
-            itertools::Itertools::collect_vec(state.dpu_snapshots.iter().filter_map(|x| {
-                if x.reprovision_requested.is_some() {
-                    Some(&x.id)
-                } else {
-                    None
-                }
-            }));
+        let dpu_ids_for_reprov = state
+            .dpu_snapshots
+            .iter()
+            .filter(|machine| machine.reprovision_requested.is_some())
+            .map(Machine::dpu_machine_id)
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let all_machine_ids =
-            itertools::Itertools::collect_vec(state.dpu_snapshots.iter().map(|x| &x.id));
+        let all_machine_ids = state
+            .dpu_snapshots
+            .iter()
+            .map(Machine::dpu_machine_id)
+            .collect::<Result<Vec<_>, _>>()?;
 
         match current_reprovision_state {
             ReprovisionState::BmcFirmwareUpgrade { .. } => ReprovisionState::FirmwareUpgrade
@@ -216,12 +216,6 @@ impl DpuInitStateHelper for DpuInitState {
         current_state: &ManagedHostState,
         dpu_id: &MachineId,
     ) -> Result<ManagedHostState, StateHandlerError> {
-        if !dpu_id.machine_type().is_dpu() {
-            return Err(StateHandlerError::InvalidState(format!(
-                "Invalid DPU ID passed to DpuInitState::next_state. DPU ID: {dpu_id}."
-            )));
-        }
-
         match current_state {
             ManagedHostState::DPUInit { dpu_states } => {
                 let mut states = dpu_states.states.clone();
@@ -492,7 +486,7 @@ pub(super) trait ReprovisionStateHelper {
         self,
         current_state: &ManagedHostState,
         dpu_snapshots: &[Machine],
-        dpu_ids_to_process: Vec<&MachineId>,
+        dpu_ids_to_process: Vec<MachineId>,
     ) -> Result<ManagedHostState, StateHandlerError>;
 }
 
@@ -504,23 +498,24 @@ impl ReprovisionStateHelper for ReprovisionState {
         self,
         current_state: &ManagedHostState,
         dpu_snapshots: &[Machine],
-        dpu_ids_to_process: Vec<&MachineId>,
+        dpu_ids_to_process: Vec<MachineId>,
     ) -> Result<ManagedHostState, StateHandlerError> {
         match current_state {
             ManagedHostState::Ready => {
                 let states = dpu_snapshots
                     .iter()
                     .map(|x| {
-                        (
-                            x.id,
-                            if dpu_ids_to_process.contains(&&x.id) {
+                        let dpu_id = x.dpu_machine_id()?;
+                        Ok::<_, StateHandlerError>((
+                            dpu_id,
+                            if dpu_ids_to_process.contains(&dpu_id) {
                                 self.clone()
                             } else {
                                 ReprovisionState::NotUnderReprovision
                             },
-                        )
+                        ))
                     })
-                    .collect::<HashMap<MachineId, ReprovisionState>>();
+                    .collect::<Result<HashMap<MachineId, ReprovisionState>, _>>()?;
 
                 Ok(ManagedHostState::DPUReprovision {
                     dpu_states: DpuReprovisionStates { states },
@@ -530,16 +525,17 @@ impl ReprovisionStateHelper for ReprovisionState {
                 let states = dpu_snapshots
                     .iter()
                     .map(|x| {
-                        (
-                            x.id,
-                            if dpu_ids_to_process.contains(&&x.id) {
+                        let dpu_id = x.dpu_machine_id()?;
+                        Ok::<_, StateHandlerError>((
+                            dpu_id,
+                            if dpu_ids_to_process.contains(&dpu_id) {
                                 self.clone()
                             } else {
                                 ReprovisionState::NotUnderReprovision
                             },
-                        )
+                        ))
                     })
-                    .collect::<HashMap<MachineId, ReprovisionState>>();
+                    .collect::<Result<HashMap<MachineId, ReprovisionState>, _>>()?;
                 Ok(ManagedHostState::DPUReprovision {
                     dpu_states: DpuReprovisionStates { states },
                 })
@@ -551,16 +547,17 @@ impl ReprovisionStateHelper for ReprovisionState {
                     let states = dpu_snapshots
                         .iter()
                         .map(|x| {
-                            (
-                                x.id,
-                                if dpu_ids_to_process.contains(&&x.id) {
+                            let dpu_id = x.dpu_machine_id()?;
+                            Ok::<_, StateHandlerError>((
+                                dpu_id,
+                                if dpu_ids_to_process.contains(&dpu_id) {
                                     self.clone()
                                 } else {
                                     ReprovisionState::NotUnderReprovision
                                 },
-                            )
+                            ))
                         })
-                        .collect::<HashMap<MachineId, ReprovisionState>>();
+                        .collect::<Result<HashMap<MachineId, ReprovisionState>, _>>()?;
 
                     Ok(ManagedHostState::Assigned {
                         instance_state: InstanceState::DPUReprovision {

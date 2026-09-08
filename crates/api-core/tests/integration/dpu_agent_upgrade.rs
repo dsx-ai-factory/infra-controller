@@ -23,7 +23,7 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
     FixtureDefault as _, ManagedHostConfigExt as _,
 };
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use chrono::{Duration, Utc};
 use health_report::{HealthAlertClassification, HealthProbeAlert, HealthProbeId};
 use model::test_support::ManagedHostConfig;
@@ -55,10 +55,10 @@ async fn init(pool: PgPool) -> (TestHarness, TestManagedHost) {
 }
 
 /// Helper: call record_dpu_network_status with an old agent version.
-async fn report_old_agent_version(env: &TestHarness, dpu_machine_id: MachineId) {
+async fn report_old_agent_version(env: &TestHarness, dpu_machine_id: DpuMachineId) {
     env.api()
         .record_dpu_network_status(tonic::Request::new(rpc::DpuNetworkStatus {
-            dpu_machine_id: dpu_machine_id.into(),
+            dpu_machine_id: Some(dpu_machine_id.into()),
             dpu_agent_version: Some("v2023.06-rc2-1-gc5c05de3".to_string()),
             observed_at: None,
             dpu_health: Some(::rpc::health::HealthReport {
@@ -85,7 +85,7 @@ async fn report_old_agent_version(env: &TestHarness, dpu_machine_id: MachineId) 
         .unwrap();
 }
 
-async fn upgrade_needed(env: &TestHarness, dpu_machine_id: MachineId) -> bool {
+async fn upgrade_needed(env: &TestHarness, dpu_machine_id: DpuMachineId) -> bool {
     env.api()
         .dpu_agent_upgrade_check(tonic::Request::new(rpc::DpuAgentUpgradeCheckRequest {
             machine_id: dpu_machine_id.to_string(),
@@ -193,7 +193,7 @@ async fn test_upgrade_check(db_pool: PgPool) -> Result<(), eyre::Report> {
         .api()
         .get_managed_host_network_config(tonic::Request::new(
             rpc::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: dpu_machine_id.into(),
+                dpu_machine_id: Some(dpu_machine_id.into()),
             },
         ))
         .await?
@@ -204,7 +204,7 @@ async fn test_upgrade_check(db_pool: PgPool) -> Result<(), eyre::Report> {
     let network_config_version = response.managed_host_config_version.clone();
     env.api()
         .record_dpu_network_status(tonic::Request::new(rpc::DpuNetworkStatus {
-            dpu_machine_id: dpu_machine_id.into(),
+            dpu_machine_id: Some(dpu_machine_id.into()),
             // BEGIN This is the important line for this test
             dpu_agent_version: Some("v2023.06-rc2-1-gc5c05de3".to_string()),
             // END
@@ -310,7 +310,7 @@ async fn test_dpu_agent_version_staleness(db_pool: PgPool) -> Result<(), eyre::R
         .api()
         .get_managed_host_network_config(tonic::Request::new(
             rpc::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: mh.first_dpu().id.into(),
+                dpu_machine_id: Some(mh.first_dpu().id.into()),
             },
         ))
         .await?
@@ -400,7 +400,7 @@ impl TestManagedHostDpuAgentExt for TestManagedHost {
         test_env
             .api()
             .record_dpu_network_status(tonic::Request::new(rpc::DpuNetworkStatus {
-                dpu_machine_id: self.first_dpu().id.into(),
+                dpu_machine_id: Some(self.first_dpu().id.into()),
                 dpu_agent_version: agent_version.map(Into::into),
                 observed_at: None,
                 dpu_health: Some(::rpc::health::HealthReport {
@@ -438,7 +438,7 @@ impl TestManagedHostDpuAgentExt for TestManagedHost {
         let alerts = test_env
             .api()
             .find_machines_by_ids(tonic::Request::new(rpc::MachinesByIdsRequest {
-                machine_ids: vec![self.host.id],
+                machine_ids: vec![self.host.id.into()],
                 include_history: false,
             }))
             .await

@@ -106,7 +106,7 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 		if vpcPrefix == nil {
 			// Inventory pushes are unordered Temporal workflows. A stale snapshot can still list a
 			// just-deleted prefix as TERMINATING/TERMINATED (or even READY). Never create/undelete
-			// from a terminal Site status — that re-claims IPAM and resurrects a user delete.
+			// from a terminal Site status, since that re-claims IPAM and resurrects a user delete.
 			reportedStatus, _ := getControllerVpcPrefixStatus(controllerVpcPrefix.GetStatus())
 			if reportedStatus == cdbm.VpcPrefixStatusDeleting || reportedStatus == cdbm.VpcPrefixStatusDeleted {
 				slogger.Info().Msgf("skipping create or undelete of VPC Prefix from Site inventory: Site reports status %s", reportedStatus)
@@ -301,7 +301,7 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 		}
 		if len(vpcMatches) == 0 {
 			// Even if this happens, the VPC will be created based on the createOrUpdateVpcFromSite function in the vpc activity
-			// hence we are just returning nil and next inventory iteration VPC will be created in the vpc activity
+			// so we are just returning nil and next inventory iteration VPC will be created in the vpc activity
 			logger.Warn().Msgf("unable to create VPC Prefix found on Site: no VPC was found for ID: %s", parentVpcID)
 			return nil, nil
 		}
@@ -346,6 +346,14 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 			existingPrefix, parseErr := netip.ParsePrefix(existingVpcPrefix.Prefix)
 			if parseErr != nil || existingPrefix.Masked().String() != reportedVpcPrefix.Prefix {
 				logger.Warn().Msgf("unable to create VPC Prefix found on Site: prefix differs in REST cache and Site record for VPC Prefix %s", controllerVpcPrefixID)
+				return nil, nil
+			}
+			// Deleted records when the delete happened, so a delete newer than the interval can
+			// postdate this inventory. Undeleting then would revive a VPC Prefix the snapshot
+			// never saw removed. Skip before the IPAM work below rather than after, so there is
+			// no allocation to unwind. A later inventory undeletes it if the Site still reports it.
+			if site.IsTimeWithinStaleInventoryThreshold(*existingVpcPrefix.Deleted) {
+				logger.Info().Msgf("not undeleting VPC Prefix %s yet because it was deleted more recently than the inventory interval", controllerVpcPrefixID)
 				return nil, nil
 			}
 		}
@@ -512,7 +520,7 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 			Prefix:       reportedVpcPrefix.Prefix,
 			PrefixLength: reportedPrefixLength,
 			Status:       cdbm.VpcPrefixStatusReady,
-			CreatedBy:    site.CreatedBy,
+			CreatedBy:    vpc.CreatedBy,
 		})
 		if createErr != nil {
 			return nil, fmt.Errorf("unable to create VPC Prefix found on Site: failed to create VPC Prefix, DB error: %w", createErr)

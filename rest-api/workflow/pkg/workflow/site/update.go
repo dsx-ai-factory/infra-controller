@@ -100,7 +100,8 @@ func UpdateSiteConfigInventoryV2(ctx workflow.Context, siteIDStr string, invento
 
 	var manageSite siteActivity.ManageSite
 
-	siteUpdateErr := workflow.ExecuteActivity(ctx, manageSite.UpdateSiteInDB, siteID, coreBuildInfo, inventory.GetSiteAgentBuildInfo()).Get(ctx, nil)
+	siteUpdateErr := workflow.ExecuteActivity(ctx, manageSite.UpdateSiteInDB, siteID, coreBuildInfo,
+		inventory.GetSiteAgentBuildInfo()).Get(ctx, nil)
 	if siteUpdateErr != nil {
 		logger.Warn().Err(siteUpdateErr).Msg("failed to execute UpdateSiteInDB activity")
 	}

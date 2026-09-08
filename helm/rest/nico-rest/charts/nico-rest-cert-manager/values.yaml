@@ -4,6 +4,8 @@
 nameOverride: ""
 namespaceOverride: ""
 
+podAnnotations: {}
+
 image:
   name: nico-rest-cert-manager
 

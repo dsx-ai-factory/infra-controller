@@ -1763,6 +1763,7 @@ type Component struct {
 	LeakStatus      LeakStatus                `protobuf:"varint,10,opt,name=leak_status,json=leakStatus,proto3,enum=v1.LeakStatus" json:"leak_status,omitempty"` // Coolant leak detection status (set by the leak-detection loop)
 	NvlDomainId     *UUID                     `protobuf:"bytes,11,opt,name=nvl_domain_id,json=nvlDomainId,proto3" json:"nvl_domain_id,omitempty"`                // NVLink Domain containing this component's rack; omitted when unassigned
 	TaskStats       *TaskStats                `protobuf:"bytes,12,opt,name=task_stats,json=taskStats,proto3" json:"task_stats,omitempty"`                        // Active Tasks that explicitly target this component.
+	RackExternalId  string                    `protobuf:"bytes,13,opt,name=rack_external_id,json=rackExternalId,proto3" json:"rack_external_id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1881,6 +1882,13 @@ func (x *Component) GetTaskStats() *TaskStats {
 	return nil
 }
 
+func (x *Component) GetRackExternalId() string {
+	if x != nil {
+		return x.RackExternalId
+	}
+	return ""
+}
+
 type Rack struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Info          *DeviceInfo            `protobuf:"bytes,1,opt,name=info,proto3" json:"info,omitempty"`
@@ -1888,6 +1896,7 @@ type Rack struct {
 	Components    []*Component           `protobuf:"bytes,3,rep,name=components,proto3" json:"components,omitempty"`
 	NvlDomainIds  []*UUID                `protobuf:"bytes,4,rep,name=nvl_domain_ids,json=nvlDomainIds,proto3" json:"nvl_domain_ids,omitempty"` // NVLink Domains containing this rack; empty when unassigned
 	TaskStats     *TaskStats             `protobuf:"bytes,5,opt,name=task_stats,json=taskStats,proto3" json:"task_stats,omitempty"`            // All active Tasks on this rack, including component-scoped Tasks.
+	ExternalId    string                 `protobuf:"bytes,6,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1955,6 +1964,13 @@ func (x *Rack) GetTaskStats() *TaskStats {
 		return x.TaskStats
 	}
 	return nil
+}
+
+func (x *Rack) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
 }
 
 type Identifier struct {
@@ -2436,6 +2452,7 @@ type RackTarget struct {
 	//
 	//	*RackTarget_Id
 	//	*RackTarget_Name
+	//	*RackTarget_ExternalId
 	Identifier isRackTarget_Identifier `protobuf_oneof:"identifier"`
 	// Optional: filter by component type. Omit (or send empty list) to include all components in the rack.
 	ComponentTypes []ComponentType `protobuf:"varint,3,rep,packed,name=component_types,json=componentTypes,proto3,enum=v1.ComponentType" json:"component_types,omitempty"`
@@ -2498,6 +2515,15 @@ func (x *RackTarget) GetName() string {
 	return ""
 }
 
+func (x *RackTarget) GetExternalId() string {
+	if x != nil {
+		if x, ok := x.Identifier.(*RackTarget_ExternalId); ok {
+			return x.ExternalId
+		}
+	}
+	return ""
+}
+
 func (x *RackTarget) GetComponentTypes() []ComponentType {
 	if x != nil {
 		return x.ComponentTypes
@@ -2510,16 +2536,22 @@ type isRackTarget_Identifier interface {
 }
 
 type RackTarget_Id struct {
-	Id *UUID `protobuf:"bytes,1,opt,name=id,proto3,oneof"` // Rack UUID
+	Id *UUID `protobuf:"bytes,1,opt,name=id,proto3,oneof"` // Flow rack UUID
 }
 
 type RackTarget_Name struct {
 	Name string `protobuf:"bytes,2,opt,name=name,proto3,oneof"` // Rack name
 }
 
+type RackTarget_ExternalId struct {
+	ExternalId string `protobuf:"bytes,4,opt,name=external_id,json=externalId,proto3,oneof"`
+}
+
 func (*RackTarget_Id) isRackTarget_Identifier() {}
 
 func (*RackTarget_Name) isRackTarget_Identifier() {}
+
+func (*RackTarget_ExternalId) isRackTarget_Identifier() {}
 
 // ComponentTarget identifies a specific component
 type ComponentTarget struct {
@@ -2597,21 +2629,18 @@ type ComponentTarget_Id struct {
 }
 
 type ComponentTarget_External struct {
-	External *ExternalRef `protobuf:"bytes,2,opt,name=external,proto3,oneof"` // External system reference
+	External *ExternalRef `protobuf:"bytes,2,opt,name=external,proto3,oneof"`
 }
 
 func (*ComponentTarget_Id) isComponentTarget_Identifier() {}
 
 func (*ComponentTarget_External) isComponentTarget_Identifier() {}
 
-// ExternalRef identifies a component by its external system ID.
-// All component types are routed through Core (NICo); the ID is the
-// identifier expected by NICo for that component type (e.g. machine_id
-// for compute, PMC MAC for power shelf).
+// ExternalRef identifies a component by its external identifier and optional type.
 type ExternalRef struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Type          ComponentType          `protobuf:"varint,1,opt,name=type,proto3,enum=v1.ComponentType" json:"type,omitempty"` // Component type determines the source system
-	Id            string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`                            // ID expected by NICo for this component type
+	Type          ComponentType          `protobuf:"varint,1,opt,name=type,proto3,enum=v1.ComponentType" json:"type,omitempty"` // UNKNOWN requires an unambiguous ID.
+	Id            string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4699,15 +4728,16 @@ func (x *ValidateComponentsResponse) GetMatchCount() int32 {
 }
 
 type ComponentDiff struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Type          DiffType               `protobuf:"varint,1,opt,name=type,proto3,enum=v1.DiffType" json:"type,omitempty"`
-	ComponentId   string                 `protobuf:"bytes,2,opt,name=component_id,json=componentId,proto3" json:"component_id,omitempty"` // Component ID assigned by the component manager service
-	Expected      *Component             `protobuf:"bytes,3,opt,name=expected,proto3" json:"expected,omitempty"`                          // Populated when type is MISSING
-	Actual        *Component             `protobuf:"bytes,4,opt,name=actual,proto3" json:"actual,omitempty"`
-	FieldDiffs    []*FieldDiff           `protobuf:"bytes,5,rep,name=field_diffs,json=fieldDiffs,proto3" json:"field_diffs,omitempty"` // Populated when type is MISMATCH
-	Id            *UUID                  `protobuf:"bytes,6,opt,name=id,proto3" json:"id,omitempty"`                                   // Flow internal component UUID
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Type                DiffType               `protobuf:"varint,1,opt,name=type,proto3,enum=v1.DiffType" json:"type,omitempty"`
+	ComponentId         string                 `protobuf:"bytes,2,opt,name=component_id,json=componentId,proto3" json:"component_id,omitempty"` // Component ID assigned by the component manager service
+	Expected            *Component             `protobuf:"bytes,3,opt,name=expected,proto3" json:"expected,omitempty"`                          // Populated when type is MISSING
+	Actual              *Component             `protobuf:"bytes,4,opt,name=actual,proto3" json:"actual,omitempty"`
+	FieldDiffs          []*FieldDiff           `protobuf:"bytes,5,rep,name=field_diffs,json=fieldDiffs,proto3" json:"field_diffs,omitempty"`                              // Populated when type is MISMATCH
+	Id                  *UUID                  `protobuf:"bytes,6,opt,name=id,proto3" json:"id,omitempty"`                                                                // Flow internal component UUID
+	ComponentMacAddress string                 `protobuf:"bytes,7,opt,name=component_mac_address,json=componentMacAddress,proto3" json:"component_mac_address,omitempty"` // BMC MAC address identifying a missing expected component
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *ComponentDiff) Reset() {
@@ -4780,6 +4810,13 @@ func (x *ComponentDiff) GetId() *UUID {
 		return x.Id
 	}
 	return nil
+}
+
+func (x *ComponentDiff) GetComponentMacAddress() string {
+	if x != nil {
+		return x.ComponentMacAddress
+	}
+	return ""
 }
 
 type FieldDiff struct {
@@ -5968,13 +6005,13 @@ func (x *DecommissionRackRequest) GetRuleId() *UUID {
 // every Task is returned subject to pagination.
 type ListTasksRequest struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
-	RackId     *UUID                  `protobuf:"bytes,1,opt,name=rack_id,json=rackId,proto3,oneof" json:"rack_id,omitempty"`        // Restrict to Tasks created against this rack.
+	RackId     *UUID                  `protobuf:"bytes,1,opt,name=rack_id,json=rackId,proto3,oneof" json:"rack_id,omitempty"`        // Restrict by rack identifier.
 	ActiveOnly bool                   `protobuf:"varint,2,opt,name=active_only,json=activeOnly,proto3" json:"active_only,omitempty"` // Restrict to non-terminal Tasks (Waiting, Pending, Running).
 	Pagination *Pagination            `protobuf:"bytes,3,opt,name=pagination,proto3,oneof" json:"pagination,omitempty"`
-	// Restrict to Tasks that target this component UUID, regardless of
-	// component type. A rack_id + component_id combination that references
-	// a component not on the given rack is not an error; it yields an
-	// empty result.
+	// Restrict to Tasks that target this component identifier, regardless of
+	// component type. A rack_id plus
+	// component_id combination that references a component not on the given
+	// rack is not an error; it yields an empty result.
 	ComponentId *UUID `protobuf:"bytes,4,opt,name=component_id,json=componentId,proto3,oneof" json:"component_id,omitempty"`
 	// When true, populate Task.report on each returned task. Defaults to
 	// false because report bodies can be several KB and would otherwise
@@ -11377,6 +11414,7 @@ type OperationRunTarget struct {
 	ComponentsByType *ComponentsByType        `protobuf:"bytes,9,opt,name=components_by_type,json=componentsByType,proto3" json:"components_by_type,omitempty"`
 	CreatedAt        *timestamppb.Timestamp   `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	UpdatedAt        *timestamppb.Timestamp   `protobuf:"bytes,11,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	RackExternalId   string                   `protobuf:"bytes,12,opt,name=rack_external_id,json=rackExternalId,proto3" json:"rack_external_id,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -11486,6 +11524,13 @@ func (x *OperationRunTarget) GetUpdatedAt() *timestamppb.Timestamp {
 		return x.UpdatedAt
 	}
 	return nil
+}
+
+func (x *OperationRunTarget) GetRackExternalId() string {
+	if x != nil {
+		return x.RackExternalId
+	}
+	return ""
 }
 
 // NVLDomainTargets contains one or more NVLink domain targets.
@@ -11672,7 +11717,7 @@ const file_flow_proto_rawDesc = "" +
 	"\tTaskStats\x12,\n" +
 	"\x12waiting_task_count\x18\x01 \x01(\rR\x10waitingTaskCount\x12,\n" +
 	"\x12pending_task_count\x18\x02 \x01(\rR\x10pendingTaskCount\x12,\n" +
-	"\x12running_task_count\x18\x03 \x01(\rR\x10runningTaskCount\"\xfa\x03\n" +
+	"\x12running_task_count\x18\x03 \x01(\rR\x10runningTaskCount\"\xa4\x04\n" +
 	"\tComponent\x12%\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x11.v1.ComponentTypeR\x04type\x12\"\n" +
 	"\x04info\x18\x02 \x01(\v2\x0e.v1.DeviceInfoR\x04info\x12)\n" +
@@ -11689,7 +11734,8 @@ const file_flow_proto_rawDesc = "" +
 	"leakStatus\x12,\n" +
 	"\rnvl_domain_id\x18\v \x01(\v2\b.v1.UUIDR\vnvlDomainId\x12,\n" +
 	"\n" +
-	"task_stats\x18\f \x01(\v2\r.v1.TaskStatsR\ttaskStats\"\xe1\x01\n" +
+	"task_stats\x18\f \x01(\v2\r.v1.TaskStatsR\ttaskStats\x12(\n" +
+	"\x10rack_external_id\x18\r \x01(\tR\x0erackExternalId\"\x82\x02\n" +
 	"\x04Rack\x12\"\n" +
 	"\x04info\x18\x01 \x01(\v2\x0e.v1.DeviceInfoR\x04info\x12(\n" +
 	"\blocation\x18\x02 \x01(\v2\f.v1.LocationR\blocation\x12-\n" +
@@ -11698,7 +11744,9 @@ const file_flow_proto_rawDesc = "" +
 	"components\x12.\n" +
 	"\x0envl_domain_ids\x18\x04 \x03(\v2\b.v1.UUIDR\fnvlDomainIds\x12,\n" +
 	"\n" +
-	"task_stats\x18\x05 \x01(\v2\r.v1.TaskStatsR\ttaskStats\":\n" +
+	"task_stats\x18\x05 \x01(\v2\r.v1.TaskStatsR\ttaskStats\x12\x1f\n" +
+	"\vexternal_id\x18\x06 \x01(\tR\n" +
+	"externalId\":\n" +
 	"\n" +
 	"Identifier\x12\x18\n" +
 	"\x02id\x18\x01 \x01(\v2\b.v1.UUIDR\x02id\x12\x12\n" +
@@ -11727,11 +11775,13 @@ const file_flow_proto_rawDesc = "" +
 	"\x06groups\x18\x01 \x03(\v2\x15.v1.ComponentsForTypeR\x06groups\"i\n" +
 	"\x11ComponentsForType\x12%\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x11.v1.ComponentTypeR\x04type\x12-\n" +
-	"\rcomponent_ids\x18\x02 \x03(\v2\b.v1.UUIDR\fcomponentIds\"\x88\x01\n" +
+	"\rcomponent_ids\x18\x02 \x03(\v2\b.v1.UUIDR\fcomponentIds\"\xab\x01\n" +
 	"\n" +
 	"RackTarget\x12\x1a\n" +
 	"\x02id\x18\x01 \x01(\v2\b.v1.UUIDH\x00R\x02id\x12\x14\n" +
-	"\x04name\x18\x02 \x01(\tH\x00R\x04name\x12:\n" +
+	"\x04name\x18\x02 \x01(\tH\x00R\x04name\x12!\n" +
+	"\vexternal_id\x18\x04 \x01(\tH\x00R\n" +
+	"externalId\x12:\n" +
 	"\x0fcomponent_types\x18\x03 \x03(\x0e2\x11.v1.ComponentTypeR\x0ecomponentTypesB\f\n" +
 	"\n" +
 	"identifier\"j\n" +
@@ -11931,7 +11981,7 @@ const file_flow_proto_rawDesc = "" +
 	"\x10unexpected_count\x18\x04 \x01(\x05R\x0funexpectedCount\x12%\n" +
 	"\x0emismatch_count\x18\x05 \x01(\x05R\rmismatchCount\x12\x1f\n" +
 	"\vmatch_count\x18\x06 \x01(\x05R\n" +
-	"matchCount\"\xf0\x01\n" +
+	"matchCount\"\xa4\x02\n" +
 	"\rComponentDiff\x12 \n" +
 	"\x04type\x18\x01 \x01(\x0e2\f.v1.DiffTypeR\x04type\x12!\n" +
 	"\fcomponent_id\x18\x02 \x01(\tR\vcomponentId\x12)\n" +
@@ -11939,7 +11989,8 @@ const file_flow_proto_rawDesc = "" +
 	"\x06actual\x18\x04 \x01(\v2\r.v1.ComponentR\x06actual\x12.\n" +
 	"\vfield_diffs\x18\x05 \x03(\v2\r.v1.FieldDiffR\n" +
 	"fieldDiffs\x12\x18\n" +
-	"\x02id\x18\x06 \x01(\v2\b.v1.UUIDR\x02id\"t\n" +
+	"\x02id\x18\x06 \x01(\v2\b.v1.UUIDR\x02id\x122\n" +
+	"\x15component_mac_address\x18\a \x01(\tR\x13componentMacAddress\"t\n" +
 	"\tFieldDiff\x12\x1d\n" +
 	"\n" +
 	"field_name\x18\x01 \x01(\tR\tfieldName\x12%\n" +
@@ -12435,7 +12486,7 @@ const file_flow_proto_rawDesc = "" +
 	"\n" +
 	"terminated\x18\x03 \x01(\x05R\n" +
 	"terminated\x12\x18\n" +
-	"\askipped\x18\x04 \x01(\x05R\askipped\"\xfa\x03\n" +
+	"\askipped\x18\x04 \x01(\x05R\askipped\"\xa4\x04\n" +
 	"\x12OperationRunTarget\x12\x18\n" +
 	"\x02id\x18\x01 \x01(\v2\b.v1.UUIDR\x02id\x122\n" +
 	"\x10operation_run_id\x18\x02 \x01(\v2\b.v1.UUIDR\x0eoperationRunId\x12!\n" +
@@ -12451,7 +12502,8 @@ const file_flow_proto_rawDesc = "" +
 	"created_at\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"A\n" +
+	"updated_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12(\n" +
+	"\x10rack_external_id\x18\f \x01(\tR\x0erackExternalId\"A\n" +
 	"\x10NVLDomainTargets\x12-\n" +
 	"\atargets\x18\x01 \x03(\v2\x13.v1.NVLDomainTargetR\atargets\"\x8d\x01\n" +
 	"\x0fNVLDomainTarget\x12\x1a\n" +
@@ -13302,6 +13354,7 @@ func file_flow_proto_init() {
 	file_flow_proto_msgTypes[18].OneofWrappers = []any{
 		(*RackTarget_Id)(nil),
 		(*RackTarget_Name)(nil),
+		(*RackTarget_ExternalId)(nil),
 	}
 	file_flow_proto_msgTypes[19].OneofWrappers = []any{
 		(*ComponentTarget_Id)(nil),

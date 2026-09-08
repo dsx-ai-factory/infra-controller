@@ -196,13 +196,6 @@ impl EventContext {
         }
     }
 
-    pub fn power_shelf_serial(&self) -> Option<&str> {
-        match &self.metadata {
-            Some(EndpointMetadata::PowerShelf(power_shelf)) => Some(power_shelf.serial.as_str()),
-            _ => None,
-        }
-    }
-
     pub fn health_report_target(&self) -> Option<HealthReportTarget> {
         match self.metadata {
             Some(EndpointMetadata::Machine(_)) => Some(HealthReportTarget::Machine),
@@ -767,7 +760,7 @@ mod tests {
             })),
             ContextKind::PowerShelf => Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: Some(power_shelf_id()),
-                serial: "PS-001".to_string(),
+                serial: Some("PS-001".to_string()),
             })),
         };
 

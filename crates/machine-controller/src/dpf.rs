@@ -30,7 +30,7 @@ use carbide_dpf::{
     DpuDeviceInfo, DpuNodeInfo, DpuPhase, DpuWatcher, KubeRepository, ResourceLabeler,
     node_id_from_dpu_node_cr_name,
 };
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use model::dpa_interface::DpaInterface;
 use model::dpu_machine_update::OutdatedDpfDpu;
 use model::machine::{Machine, ManagedHostStateSnapshot};
@@ -528,7 +528,7 @@ impl DpfSdkOps {
 /// Records that a host owes `kind`, returning the stored action.
 async fn record_pending_action(
     db_pool: &PgPool,
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     kind: MachinePendingActionKind,
 ) -> Result<MachinePendingAction, DpfError> {
     let mut conn = db_pool.acquire().await.map_err(|e| {
@@ -578,6 +578,9 @@ async fn enqueue_host(
         tracing::warn!(node = %node_name, bmc_mac_address = %bmc_mac, reason, "Could not find host for DPF node");
         return Ok(());
     };
+    let host_machine_id = HostMachineId::try_from(host_machine_id).map_err(|error| {
+        DpfError::InvalidState(format!("BMC MAC resolved to a non-host machine: {error}"))
+    })?;
 
     // Written before the enqueue so a processor cannot reach the host's handler
     // while the marker is still missing.
@@ -816,7 +819,7 @@ impl DpfOperations for DpfSdkOps {
                 );
                 continue;
             };
-            let dpu_machine_id: MachineId = match machine_id_str.parse() {
+            let dpu_machine_id: DpuMachineId = match machine_id_str.parse() {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::warn!(

@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 use model::dpu_machine_update::DpuMachineUpdate;
-use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{HostHealthConfig, LoadSnapshotOptions, ManagedHostState, ReprovisionRequest};
 use model::machine_update_module::{
     AutomaticFirmwareUpdateReference, DPU_FIRMWARE_UPDATE_TARGET, DpuReprovisionInitiator,
@@ -104,14 +103,7 @@ pub async fn get_updated_machines(
     txn: &mut PgConnection,
     host_health_config: HostHealthConfig,
 ) -> Result<Vec<DpuMachineUpdate>, DatabaseError> {
-    let machine_ids = crate::machine::find_machine_ids(
-        &mut *txn,
-        MachineSearchConfig {
-            include_predicted_host: true,
-            ..Default::default()
-        },
-    )
-    .await?;
+    let machine_ids = crate::managed_host::load_host_ids(&mut *txn).await?;
     let snapshots = crate::managed_host::load_by_machine_ids(
         txn,
         &machine_ids,
@@ -159,25 +151,29 @@ pub async fn get_updated_machines(
             // We only signal an update as complete once ALL DPUs are done
             // That prevents removing the updating flags from the Host
             // if just one DPU completes the update
-            let completed_updates: Vec<DpuMachineUpdate> = managed_host
+            let completed_updates: Result<Vec<DpuMachineUpdate>, DatabaseError> = managed_host
                 .dpu_snapshots
                 .iter()
-                .map(|dpu| DpuMachineUpdate {
-                    host_machine_id: machine_id,
-                    dpu_machine_id: dpu.id,
-                    firmware_version: dpu
-                        .status
-                        .hardware_info
-                        .as_ref()
-                        .and_then(|info| info.dpu_info.as_ref())
-                        .map(|dpu_info| dpu_info.firmware_version.clone())
-                        .unwrap_or_default(),
-                    dpf_managed,
+                .map(|dpu| {
+                    Ok(DpuMachineUpdate {
+                        host_machine_id: machine_id,
+                        dpu_machine_id: dpu.dpu_machine_id()?,
+                        firmware_version: dpu
+                            .status
+                            .hardware_info
+                            .as_ref()
+                            .and_then(|info| info.dpu_info.as_ref())
+                            .map(|dpu_info| dpu_info.firmware_version.clone())
+                            .unwrap_or_default(),
+                        dpf_managed,
+                    })
                 })
                 .collect();
 
             Some(completed_updates)
         })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .flatten()
         .collect();
 

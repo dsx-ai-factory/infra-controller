@@ -12,6 +12,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -1267,6 +1268,35 @@ func TestMachineSQLDAO_GetAll(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("includes soft-deleted Machines when requested", func(t *testing.T) {
+		machineID := ms1[0].ID
+		err := msd.Delete(ctx, nil, machineID, false)
+		require.NoError(t, err)
+
+		active, activeTotal, err := msd.GetAll(
+			ctx,
+			nil,
+			MachineFilterInput{MachineIDs: []string{machineID}},
+			paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, active)
+		assert.Zero(t, activeTotal)
+
+		withDeleted, totalWithDeleted, err := msd.GetAll(
+			ctx,
+			nil,
+			MachineFilterInput{MachineIDs: []string{machineID}, IncludeDeleted: true},
+			paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, withDeleted, 1)
+		assert.Equal(t, 1, totalWithDeleted)
+		assert.NotNil(t, withDeleted[0].Deleted)
+	})
 }
 
 func TestMachineSQLDAO_Update(t *testing.T) {
@@ -1633,6 +1663,33 @@ func TestMachineSQLDAO_Clear(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("can clear soft-delete timestamp", func(t *testing.T) {
+		machineID := mcsExp[3].ID
+		err := msd.Delete(ctx, nil, machineID, false)
+		require.NoError(t, err)
+
+		var deleted Machine
+		err = dbSession.DB.NewSelect().
+			Model(&deleted).
+			Where("m.id = ?", machineID).
+			WhereAllWithDeleted().
+			Scan(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, deleted.Deleted)
+
+		restored, err := msd.Clear(ctx, nil, MachineClearInput{
+			MachineID: machineID,
+			Deleted:   true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, restored)
+		assert.Nil(t, restored.Deleted)
+
+		active, err := msd.GetByID(ctx, nil, machineID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, machineID, active.ID)
+	})
 }
 
 func TestMachineSQLDAO_Delete(t *testing.T) {

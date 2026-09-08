@@ -29,7 +29,7 @@ The chart is designed for production environments where NICo manages the full li
 - **Kubernetes** 1.27+
 - **Helm** 3.12+
 - **cert-manager** with a `ClusterIssuer` configured (default issuer name: `vault-nico-issuer`)
-- **HashiCorp Vault** for PKI certificate issuance and secret storage
+- **HashiCorp Vault** for PKI certificate issuance and, by default, secret storage. NICo can keep its managed credentials in Postgres instead; see [Secrets Storage](../docs/configuration/secrets-storage.md).
 - **PostgreSQL** (SSL-enabled) for the `nico-api` database backend
 - **Prometheus Operator CRDs** if you enable `ServiceMonitor` resources
 - **Required Kubernetes Secrets and ConfigMaps** (Vault tokens, database credentials, SSO secrets, etc.)

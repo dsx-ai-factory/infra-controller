@@ -1190,22 +1190,22 @@ func TestResolveComponentTarget_ExternalID(t *testing.T) {
 			ct: operation.ComponentTarget{
 				External: &operation.ExternalRef{ID: "ext-1", Type: devicetypes.ComponentTypeCompute},
 			},
-			wantErr: "no component found with external id ext-1 and type",
+			wantErr: "component identifier \"ext-1\" not found",
 		},
 		{
-			name: "ambiguous — two components share same external id and type",
+			name: "ambiguous — two component types share the external id",
 			setup: func(m *mockManager) {
 				c1 := makeComp(compID, devicetypes.ComponentTypeCompute)
 				c1.ComponentID = "ext-2"
 				m.components[compID] = c1
-				c2 := makeComp(comp2ID, devicetypes.ComponentTypeCompute)
+				c2 := makeComp(comp2ID, devicetypes.ComponentTypeNVSwitch)
 				c2.ComponentID = "ext-2"
 				m.components[comp2ID] = c2
 			},
 			ct: operation.ComponentTarget{
-				External: &operation.ExternalRef{ID: "ext-2", Type: devicetypes.ComponentTypeCompute},
+				External: &operation.ExternalRef{ID: "ext-2", Type: devicetypes.ComponentTypeUnknown},
 			},
-			wantErr: "ambiguous external component: 2 components share external id ext-2",
+			wantErr: "component identifier \"ext-2\" is ambiguous",
 		},
 		{
 			name: "exactly one match — success",

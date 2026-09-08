@@ -626,7 +626,7 @@ impl TestBehavior {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn from_parameters_if_testing(parameters: &mut String) -> Option<TestBehavior> {
         let mut param_obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(parameters).expect("invalid parameters");
@@ -641,13 +641,13 @@ impl TestBehavior {
         }
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     fn from_parameters_if_testing(_parameters: &mut String) -> Option<TestBehavior> {
         None
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_behavior {
     use super::TestBehavior;
 

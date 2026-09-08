@@ -32,6 +32,9 @@ RUN go mod download
 # Copy source files
 COPY site-manager/ ./site-manager/
 COPY cert-manager/ ./cert-manager/
+# common/pkg/tracing installs the global propagator; every other rest-api
+# image already copies common/ for it.
+COPY common/ ./common/
 
 # Build the site manager
 WORKDIR /workspace/site-manager

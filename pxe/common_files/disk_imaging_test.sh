@@ -151,4 +151,68 @@ fi
 assert_log_contains \
 	"blkid failed while looking up UUID=root with status 4: stdout=<empty>; stderr=command failed"
 
+assert_parsed_argument() {
+	local argument=$1
+	local variable_name=$2
+	local expected=$3
+
+	printf -v "$variable_name" '%s' "unparsed"
+	parse_kernel_cmdline_argument "$argument" ||
+		fail "argument was not recognized: $argument"
+	assert_eq "$argument" "$expected" "${!variable_name}"
+}
+
+echo "kernel command-line arguments"
+image_disk=unchanged-disk
+assert_parsed_argument \
+	'image_url=https://images.example/image.qcow2?token=a=b-image_disk' \
+	image_url \
+	'https://images.example/image.qcow2?token=a=b-image_disk'
+assert_eq "image_url does not alter image_disk" "unchanged-disk" "$image_disk"
+
+image_url=unchanged-url
+assert_parsed_argument \
+	'image_disk=/dev/disk/by-id/foo=bar-image_url' \
+	image_disk \
+	'/dev/disk/by-id/foo=bar-image_url'
+assert_eq "image_disk does not alter image_url" "unchanged-url" "$image_url"
+
+assert_parsed_argument 'image_sha=sha=value' image_sha 'sha=value'
+assert_parsed_argument 'image_auth_type=Bearer' image_auth_type 'Bearer'
+assert_parsed_argument 'image_auth_token=token=value' image_auth_token 'token=value'
+assert_parsed_argument 'image_distro_name=UbUnTu' distro_name 'ubuntu'
+assert_parsed_argument 'image_distro_version=24.04' distro_version '24.04'
+assert_parsed_argument 'image_distro_release=server' distro_release 'server'
+assert_parsed_argument 'rootfs_uuid=root=value' rootfs_uuid 'root=value'
+assert_parsed_argument 'rootfs_label=root-label' rootfs_label 'root-label'
+assert_parsed_argument 'bootfs_uuid=boot=value' bootfs_uuid 'boot=value'
+assert_parsed_argument 'efifs_uuid=efi=value' efifs_uuid 'efi=value'
+assert_parsed_argument 'update_grub_template=yes' update_grub_template 'yes'
+assert_parsed_argument 'update_grub_cfg=yes' update_grub_cfg 'yes'
+assert_parsed_argument \
+	'ds=nocloud;s=https://cloud.example/data?token=a=b' \
+	cloud_init_url \
+	'https://cloud.example/data?token=a=b'
+assert_parsed_argument \
+	'ds=nocloud-net;s=https://cloud.example/data?token=c=d' \
+	cloud_init_url \
+	'https://cloud.example/data?token=c=d'
+
+forge_test_user=
+forge_test_pass=
+parse_kernel_cmdline_argument \
+	'create_forge_test_user=tester:pass:word=value' ||
+	fail "test-user argument was not recognized"
+assert_eq "test-user name" "tester" "$forge_test_user"
+assert_eq "test-user password preserves delimiters" "pass:word=value" "$forge_test_pass"
+
+image_url=unchanged-url
+image_disk=unchanged-disk
+if parse_kernel_cmdline_argument \
+	'other=image_disk=/dev/disk/by-id/foo-image_url'; then
+	fail "unknown argument was accepted"
+fi
+assert_eq "unknown argument leaves image_url unchanged" "unchanged-url" "$image_url"
+assert_eq "unknown argument leaves image_disk unchanged" "unchanged-disk" "$image_disk"
+
 echo "disk imaging identifier tests passed"

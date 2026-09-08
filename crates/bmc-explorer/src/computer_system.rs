@@ -296,6 +296,15 @@ impl<B: Bmc> ExploredComputerSystem<B> {
                     .unwrap_or_default()
             });
 
+        let bios_version = self
+            .system
+            .raw()
+            .bios_version
+            .clone()
+            .flatten()
+            .map(|version| version.trim().to_string())
+            .filter(|version| !version.is_empty());
+
         let serial_console_ssh_port = self
             .system
             .raw()
@@ -329,6 +338,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             power_state,
             sku: self.system.sku().map(|v| v.to_string()),
             boot_order,
+            bios_version,
             serial_console_ssh_port,
         })
     }

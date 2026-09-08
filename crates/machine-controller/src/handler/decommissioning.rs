@@ -181,10 +181,7 @@ pub(super) async fn handle_deconfiguring_host(
                 ));
             }
 
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
+            let bmc_access_info = ctx.services.bmc_access_info_for_machine(machine).await?;
 
             let bmc_mac =
                 machine
@@ -222,7 +219,7 @@ pub(super) async fn handle_deconfiguring_host(
             let key = CredentialKey::host_uefi_site_default(version);
             let credentials = ctx
                 .services
-                .redfish_client_pool
+                .bmc_credential_ops
                 .credential_reader()
                 .get_credentials(&key)
                 .await
@@ -239,13 +236,17 @@ pub(super) async fn handle_deconfiguring_host(
 
             let job_id = ctx
                 .services
-                .redfish_client_pool
-                .clear_host_uefi_password(redfish_client.as_ref(), credentials)
+                .bmc_credential_ops
+                .clear_host_uefi_password(&bmc_access_info, credentials)
                 .await
-                .map_err(|error| {
-                    StateHandlerError::GenericError(eyre::eyre!(
+                .map_err(|error| match error {
+                    // Client creation failed (credential store, TCP, or the
+                    // vendor probe): propagate as-is so the framework
+                    // retries normally.
+                    carbide_redfish::libredfish::CredentialOpError::ClientCreation(e) => e.into(),
+                    error => StateHandlerError::GenericError(eyre::eyre!(
                         "failed to clear host UEFI password: {error}"
-                    ))
+                    )),
                 })?;
 
             let next = match job_id {

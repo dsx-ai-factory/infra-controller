@@ -65,9 +65,16 @@ pub(super) async fn get_astra_config(
 
     let mut txn = api.txn_begin().await?;
 
-    let dpa_interfaces =
-        db::dpa_interface::find_by_machine_id(&mut txn, snapshot.host_snapshot.id, search_config)
-            .await?;
+    let dpa_interfaces = db::dpa_interface::find_by_machine_id(
+        &mut txn,
+        snapshot
+            .host_snapshot
+            .id
+            .try_into()
+            .map_err(CarbideError::from)?,
+        search_config,
+    )
+    .await?;
 
     txn.commit().await?;
 
@@ -223,9 +230,16 @@ pub(super) async fn process_astra_config_status(
         only_astra: true,
     };
 
-    let dpa_interfaces =
-        db::dpa_interface::find_by_machine_id(&mut txn, snapshot.host_snapshot.id, search_config)
-            .await?;
+    let dpa_interfaces = db::dpa_interface::find_by_machine_id(
+        &mut txn,
+        snapshot
+            .host_snapshot
+            .id
+            .try_into()
+            .map_err(CarbideError::from)?,
+        search_config,
+    )
+    .await?;
 
     if dpa_interfaces.is_empty() {
         // This should not happen. How is the DPU reporting the Astra config status if there are no Astra NICs?

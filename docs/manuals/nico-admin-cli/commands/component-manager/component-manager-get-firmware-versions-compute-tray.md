@@ -10,8 +10,8 @@ Target compute trays
 ## SYNOPSIS
 
 **nico-admin-cli component-manager get-firmware-versions compute-tray**
-\<**--machine-id**\> \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+\<**--machine-id**\|**--mac-address**\> \[**--extended**\]
+\[**--sort-by**\] \[**-h**\|**--help**\]
 
 ## DESCRIPTION
 
@@ -21,6 +21,10 @@ Target compute trays
 
 **--machine-id** *\<MACHINE_IDS\>...*  
 Machine IDs to target
+
+**--mac-address** *\<MAC_ADDRESSES\>...*  
+Device MAC addresses to target (BMC MAC for compute/switch, PMC MAC for
+power shelf)
 
 **--extended**  
 Extended result output.

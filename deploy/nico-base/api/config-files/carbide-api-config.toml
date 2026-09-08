@@ -91,14 +91,14 @@ failure_retry_time = "90m"
 vpc_prefix_drain_time = "5m"
 
 [network_security_group]
-# Controls whether additional config to support
-# stateful/reflexive ACLs will be inserted into
-# the HBN config.
-# This is expected to remain off at least until all sites
-# are running HBN 2.3 or higher.  The reflexive-acl
-# implementation in earlier versions exposes a way for
-# users to accidentally permit-all in both directions
-# with a single rule in one direction.
+# Controls whether NSGs may enable stateful egress and whether
+# stateful/reflexive ACL support is inserted into HBN configuration.
+# When false, Core rejects stateful NSG creation and updates from
+# stateless to stateful. Existing stateful NSGs remain editable but
+# are applied statelessly.
+# Leave disabled until every DPU in the site runs HBN 2.3 or later.
+# Earlier reflexive-ACL implementations allow one directional rule
+# to unintentionally permit traffic in both directions.
 stateful_acls_enabled = false
 
 # Maximum number of security groups rules

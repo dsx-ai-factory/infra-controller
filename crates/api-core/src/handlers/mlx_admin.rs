@@ -1304,8 +1304,10 @@ async fn get_device_lockdown_key(
     // refer to as the "pci_name".
     //
     // In other words, device_id == pci_name.
+    let host_machine_id = carbide_uuid::machine::HostMachineId::try_from(machine_id)
+        .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
     let dpa_interface =
-        db::dpa_interface::get_for_pci_name(&api.database_connection, &machine_id, device_id)
+        db::dpa_interface::get_for_pci_name(&api.database_connection, &host_machine_id, device_id)
             .await
             .map_err(|e| {
                 CarbideError::NotFoundError {

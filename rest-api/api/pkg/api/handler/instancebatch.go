@@ -1784,6 +1784,12 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			InstanceRequests: make([]*corev1.InstanceAllocationRequest, 0, len(createdInstancesData)),
 		}
 
+		// The request carries one set of SpectrumX attachments for every Instance in the batch.
+		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(apiRequest.SpectrumXAttachments))
+		for _, sac := range apiRequest.SpectrumXAttachments {
+			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, sac.ToProto())
+		}
+
 		for _, data := range createdInstancesData {
 			instance := data.instance
 
@@ -1821,6 +1827,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 					Nvlink: &corev1.InstanceNVLinkConfig{
 						GpuConfigs: data.nvlInterfaceConfigs,
 					},
+					Spxconfig: &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs},
 				},
 				AllowUnhealthyMachine: false,
 			}

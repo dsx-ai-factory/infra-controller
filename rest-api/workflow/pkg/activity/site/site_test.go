@@ -45,6 +45,7 @@ import (
 	tosv1mock "go.temporal.io/api/operatorservicemock/v1"
 	twsv1mock "go.temporal.io/api/workflowservicemock/v1"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -1259,6 +1260,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 		siteAgentBuildInfo    *corev1.SiteAgentBuildInfo
 		wantVersion           *string
 		wantVpcSlaac          bool
+		wantFlow              bool
 		wantAgentVersion      *string
 		wantInterval          *int
 		wantDBUpdate          bool
@@ -1296,10 +1298,11 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			// An older Site Agent reports nothing about itself, which must not erase what an
 			// earlier report established.
 			name:             "leaves Site Agent values alone when nothing is reported",
-			existingConfig:   &cdbm.SiteConfig{},
+			existingConfig:   &cdbm.SiteConfig{Flow: true},
 			existingInterval: cutil.GetPtr(180),
 			buildInfo:        &corev1.BuildInfo{},
 			wantInterval:     cutil.GetPtr(180),
+			wantFlow:         true,
 		},
 		{
 			name:               "keeps the stored interval when the report omits it",
@@ -1420,6 +1423,43 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			wantDBUpdate:    true,
 		},
 		{
+			name:               "enables Flow when Site Agent reports it enabled",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion, FlowEnabled: proto.Bool(true)},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantFlow:           true,
+			wantDBUpdate:       true,
+		},
+		{
+			name:               "disables Flow when Site Agent reports it disabled",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{Flow: true},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion, FlowEnabled: proto.Bool(false)},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantDBUpdate:       true,
+		},
+		{
+			name:               "preserves Flow when queued Site inventory omits configuration",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{Flow: true},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantFlow:           true,
+		},
+		{
+			name:               "skips update when reported Flow configuration matches",
+			existingVersion:    cutil.GetPtr("1.0.0"),
+			existingConfig:     &cdbm.SiteConfig{Flow: true},
+			buildInfo:          &corev1.BuildInfo{BuildVersion: "1.0.0"},
+			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: existingAgentVersion, FlowEnabled: proto.Bool(true)},
+			wantVersion:        cutil.GetPtr("1.0.0"),
+			wantFlow:           true,
+		},
+		{
 			name:            "initializes nil config with advertised VPC SLAAC",
 			existingVersion: cutil.GetPtr("1.0.0"),
 			existingConfig:  nil,
@@ -1502,6 +1542,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			}
 			require.NotNil(t, got.Config)
 			assert.Equal(t, tt.wantVpcSlaac, got.Config.VpcSlaac)
+			assert.Equal(t, tt.wantFlow, got.Config.Flow)
 
 			// A nil expectation means the report left the stored value as createSite wrote it.
 			wantAgentVersion := existingAgentVersion

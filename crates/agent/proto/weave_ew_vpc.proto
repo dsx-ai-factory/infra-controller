@@ -21,9 +21,6 @@ package nvidia.weave.controller.v1;
 import "buf/validate/validate.proto";
 import "google/protobuf/timestamp.proto";
 
-// TODO(Ashok): Replace this with the canonical public Go import path.
-option go_package = "gitlab-master.nvidia.com/doca-platform-foundation/dpf-vpc/api/grpc/nvidia/weave/controller/v1;controllerv1";
-
 // The NetworkIsolationService service provides APIs to manage virtual networks.
 service NetworkIsolationService {
   // CreateVirtualNetwork creates a new virtual network.

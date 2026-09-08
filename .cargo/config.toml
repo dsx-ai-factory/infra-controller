@@ -37,6 +37,13 @@ rustflags = [
 #[target.x86_64-unknown-linux-gnu]
 #rustflags = ["-C", "linker=clang", "-C", "link-arg=-fuse-ld=lld"]
 
+# mold is selected by the build environment rather than from here, through
+# CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER pointing at a driver that
+# already passes -fuse-ld=mold. Setting the flag here as well reached every
+# aarch64 build, including ones whose image predates the mold install, and cc
+# rejects a linker it does not have: "unrecognized command-line option
+# '-fuse-ld=mold'". Keep linker selection with the toolchain that provides it.
+
 [env]
 RUST_TEST_THREADS = "40"
 

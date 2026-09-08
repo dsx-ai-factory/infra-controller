@@ -71,6 +71,58 @@ func TestBuiltInRegistryGetByEventTypeDetectsInconsistentState(t *testing.T) {
 	require.False(t, errors.Is(err, eventrule.ErrRuleNotFound))
 }
 
+func TestBuiltInRegistry_supportsEventType(t *testing.T) {
+	rule := testRule(uuid.New(), "test.event")
+	registry, err := testBuiltInRegistry(rule)
+	require.NoError(t, err)
+
+	tests := map[string]struct {
+		eventType eventrule.Type
+		want      bool
+	}{
+		"registered": {
+			eventType: rule.EventType,
+			want:      true,
+		},
+		"unregistered": {
+			eventType: "other.event",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, test.want, registry.supportsEventType(test.eventType))
+		})
+	}
+}
+
+func TestBuiltInRegistry_List(t *testing.T) {
+	first := testRule(
+		uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		"first.event",
+	)
+	second := testRule(
+		uuid.MustParse("00000000-0000-0000-0000-000000000002"),
+		"second.event",
+	)
+	third := testRule(
+		uuid.MustParse("00000000-0000-0000-0000-000000000003"),
+		"third.event",
+	)
+	registry, err := testBuiltInRegistry(third, first, second)
+	require.NoError(t, err)
+
+	page, err := registry.List(context.Background(), eventrule.RuleListRequest{
+		Offset: 1,
+		Limit:  1,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 3, page.Total)
+	require.Len(t, page.Rules, 1)
+	require.Equal(t, second.ID, page.Rules[0].ID)
+}
+
 func testBuiltInRegistry(rules ...*eventrule.Rule) (*builtInRegistry, error) {
 	registry := &builtInRegistry{
 		byID:        make(map[uuid.UUID]eventrule.Rule, len(rules)),

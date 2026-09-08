@@ -264,6 +264,7 @@ jobs:
           - nvswitch-manager
           - powershelf-manager
           - proto
+          - sdk-simple
           - site-agent
           - site-manager
           - site-workflow

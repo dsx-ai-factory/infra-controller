@@ -167,7 +167,10 @@ async fn test_dns(pool: PgPool) {
 
     // And now check to make sure the DNS records exist and,
     // of course, that they are correct.
-    let machine_ids: [MachineId; 2] = [managed_host.host.id, managed_host.first_dpu().id];
+    let machine_ids: [MachineId; 2] = [
+        managed_host.host.id.into(),
+        managed_host.first_dpu().id.into(),
+    ];
     for machine_id in &machine_ids {
         let mut txn = env.db_txn().await;
 

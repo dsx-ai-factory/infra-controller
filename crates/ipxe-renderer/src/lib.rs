@@ -1253,6 +1253,29 @@ mod tests {
     }
 
     #[test]
+    fn static_ipxe_menu_retries_only_marked_boot_scripts() {
+        assert!(STATIC_IPXE_MENU_TEMPLATE.contains(
+            "imgfree nico-boot ||\n\
+             set nico-retry-provisioning 0\n\
+             time chain --name nico-boot http://${next-server}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto retry_nico_boot"
+        ));
+        assert!(STATIC_IPXE_MENU_TEMPLATE.contains(
+            ":retry_nico_boot\n\
+             iseq ${nico-retry-provisioning} 1 || goto error_handler\n\
+             imgstat nico-boot || goto error_handler\n\
+             prompt --key p --timeout 30000 Hit the ${bold}p${boldoff} key to open NICo menu; retrying in 30 seconds... && goto nico_menu ||\n\
+             time imgexec nico-boot && exit 1 || goto retry_nico_boot"
+        ));
+        assert_eq!(
+            STATIC_IPXE_MENU_TEMPLATE
+                .matches("/api/v0/pxe/boot?")
+                .count(),
+            1,
+            "retrying should reuse the served script instead of requesting it again"
+        );
+    }
+
+    #[test]
     fn test_get_template_by_name() {
         let renderer = DefaultIpxeScriptRenderer::new();
 

@@ -12,7 +12,7 @@ submodules, Docker with cross-architecture emulation, and the cargo build toolin
 in one idempotent step:
 
 ```sh
-git clone git@github.com:NVIDIA/infra-controller.git
+git clone git@github.com:dsx-ai-factory/infra-controller.git
 cd infra-controller
 make bootstrap          # or: ./scripts/setup-build-host.sh
 ```
@@ -29,7 +29,7 @@ steps on an `apt`-based distribution such as Ubuntu 24.04:
 2. [Add the correct hook for your shell](https://direnv.net/docs/hook.html)
 3. Install rustup: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` (select Option 1)
 4. Start a new shell to pick up changes made from direnv and rustup.
-5. Clone NICo - `git clone git@github.com:NVIDIA/infra-controller.git infra-controller`
+5. Clone NICo - `git clone git@github.com:dsx-ai-factory/infra-controller.git infra-controller`
 6. `cd infra-controller`
 7. `direnv allow`
 8. `git submodule update --init --recursive`
@@ -40,7 +40,6 @@ steps on an `apt`-based distribution such as Ubuntu 24.04:
 11. `echo "kernel.apparmor_restrict_unprivileged_userns=0" | sudo tee /etc/sysctl.d/99-userns.conf`
 12. `sudo usermod -aG docker $(id -un)`
 13. `reboot`
-
 
 ## Build all images with one command
 
@@ -218,11 +217,12 @@ docker build --file dev/docker/Dockerfile.build-artifacts-container-cross-aarch6
 ```
 
 ## Building the admin-cli
+
 The `admin-cli` build does not produce a container. It produces a binary:
 
 `$REPO_ROOT/target/release/nico-admin-cli`
 
-```
+```text
 BUILD_CONTAINER_X86_URL="nico-buildcontainer-x86_64" cargo make build-cli
 ```
 

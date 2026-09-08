@@ -17,7 +17,7 @@
 use std::ops::DerefMut;
 
 use carbide_uuid::dpu_remediations::RemediationId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use model::dpu_remediation::{
     AppliedRemediation, ApproveRemediation, DisableRemediation, EnableRemediation,
     NewAppliedRemediation, NewRemediation, Remediation, RemediationApplicationStatus,
@@ -206,14 +206,14 @@ impl ColumnInfo<'_> for AppliedRemediationDpuMachineIdColumn {
 }
 
 pub enum AppliedRemediationIdQueryType {
-    Machine(MachineId),
+    Machine(DpuMachineId),
     RemediationId(RemediationId),
 }
 
 pub async fn find_applied_remediation_ids(
     txn: &mut sqlx::Transaction<'_, Postgres>,
     id_query_args: AppliedRemediationIdQueryType,
-) -> Result<(Vec<RemediationId>, Vec<MachineId>), DatabaseError> {
+) -> Result<(Vec<RemediationId>, Vec<DpuMachineId>), DatabaseError> {
     let ids = match id_query_args {
         AppliedRemediationIdQueryType::Machine(machine_id) => {
             let remediation_ids = find_applied_remediations_by(

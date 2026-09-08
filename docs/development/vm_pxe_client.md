@@ -8,7 +8,8 @@ w/o graphics support. If the OS is graphical (e.g. ubuntu livecd) remove
 
 To allow the QEMU VM to join the bridge network that is used
 for development, create or edit the file '/etc/qemu/bridge.conf' such that its contents are:
-```
+
+```text
 $ cat /etc/qemu/bridge.conf
 allow nico0
 ```
@@ -20,13 +21,14 @@ A TPM (Trusted Platform Module) is a chip that can securely store artifacts used
 ### Install Software TPM emulator
 
 - On Debian/Ubuntu:
-  ```
+
+  ```text
   sudo apt-get install -y swtpm swtpm-tools
   ```
 
 ### Create a directory for emulated TPM state
 
-```
+```text
 mkdir /tmp/emulated_tpm
 ```
 
@@ -34,11 +36,12 @@ mkdir /tmp/emulated_tpm
 
 This step makes sure the emulated TPM has certificates.
 
-```
+```text
 swtpm_setup --tpmstate /tmp/emulated_tpm --tpm2 --create-ek-cert --create-platform-cert
 ```
 
 If you get an error in this step, try the following steps:
+
 - Run `/usr/share/swtpm/swtpm-create-user-config-files`. Potentially with `--overwrite`.
   This writes the following files:
   - `~/.config/swtpm_setup.conf`
@@ -50,16 +53,18 @@ If you get an error in this step, try the following steps:
   To fix the bug, edit `/usr/share/swtpm/swtpm-create-user-config-files`, search for
   the place where `create_certs_tool` is written, and replace it with the correct path
   to the tool. E.g.
-  ```
+
+  ```text
   create_certs_tool = /usr/lib/x86_64-linux-gnu/swtpm/swtpm-localca
   ```
+
   Then run `/usr/share/swtpm/swtpm-create-user-config-files` again.
 
 ### Start the TPM emulator
 
 Run the following command in separate terminal to start a software TPM emulation
 
-```
+```text
 swtpm socket --tpmstate dir=/tmp/emulated_tpm --ctrl type=unixio,path=/tmp/emulated_tpm/swtpm-sock --log level=20 --tpm2
 ```
 
@@ -87,7 +92,7 @@ You can also use graphical interface `virt-manager`.
 The virtual machine should fail to PXE boot from IPv4 (but gets an IP address) and IPv6, and then succeed from "HTTP boot IPv4", getting both an IP address and a boot image.
 
 This should boot you into the pre-exec image. The user is `root` and password
-is specified in the [mkosi.default](https://github.com/NVIDIA/infra-controller/tree/main/pxe) file.
+is specified in the [mkosi.default](https://github.com/dsx-ai-factory/infra-controller/tree/main/pxe) file.
 
 In order to exit out of console use `ctrl-a x`
 
@@ -99,7 +104,7 @@ Do **not** do this step in `tmux` or `screen`. The QEMU escape sequence is Ctrl-
 
 With TPM:
 
-```
+```text
 sudo qemu-system-x86_64 -boot n -nographic -display none \
   -serial mon:stdio -cpu host \
   -accel kvm -device virtio-serial-pci \
@@ -112,7 +117,7 @@ sudo qemu-system-x86_64 -boot n -nographic -display none \
 
 Without TPM:
 
-```
+```text
 sudo qemu-system-x86_64 -boot n -nographic -display none \
   -serial mon:stdio -cpu host \
   -accel kvm -device virtio-serial-pci \
@@ -128,4 +133,3 @@ On Fedora change the `-bios` line to `-bios /usr/share/OVMF/OVMF_CODE.fd`.
 **Note:** Verify the OVMF path for your system — depending on how the `ovmf` package was installed, the file may be under a subdirectory called `x64`.
 
 **Note:** Known older issue on first boot that you'll land on a UEFI shell, have to `exit` back into the BIOS and select "Continue" in order to proceed into normal login.
-

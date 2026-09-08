@@ -110,7 +110,7 @@ pub(crate) async fn assign_to_machine(
     let mut txn = api.txn_begin().await?;
 
     let sku_machine_pair = request.into_inner();
-    let machine_id = convert_and_log_machine_id(sku_machine_pair.machine_id.as_ref())?;
+    let machine_id = convert_and_log_machine_id::<MachineId>(sku_machine_pair.machine_id.as_ref())?;
 
     let machine =
         db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default()).await?;
@@ -177,7 +177,7 @@ pub(crate) async fn verify_for_machine(
     request: Request<MachineId>,
 ) -> Result<Response<()>, Status> {
     log_request_data(&request);
-    let machine_id = convert_and_log_machine_id(Some(&request.into_inner()))?;
+    let machine_id = convert_and_log_machine_id::<MachineId>(Some(&request.into_inner()))?;
 
     let mut txn = api.txn_begin().await?;
 
@@ -216,7 +216,7 @@ pub(crate) async fn remove_sku_association(
 ) -> Result<Response<()>, Status> {
     log_request_data(&request);
     let request = request.into_inner();
-    let machine_id = convert_and_log_machine_id(request.machine_id.as_ref())?;
+    let machine_id = convert_and_log_machine_id::<MachineId>(request.machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
 

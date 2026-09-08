@@ -102,6 +102,13 @@ func (m *mockTargetFetcher) GetComponentByID(
 	return nil, errors.New("component not found")
 }
 
+func (m *mockTargetFetcher) GetComponentByBMCMAC(
+	_ context.Context,
+	_ string,
+) (*component.Component, error) {
+	return nil, status.Error(codes.NotFound, "component not found")
+}
+
 func (m *mockTargetFetcher) GetComponentsByExternalIDs(
 	ctx context.Context,
 	externalIDs []string,
@@ -512,7 +519,7 @@ func TestResolveTargetSpecToRacks_ComponentTargetByExternalRef(t *testing.T) {
 		Components: []operation.ComponentTarget{
 			{
 				External: &operation.ExternalRef{
-					Type: devicetypes.ComponentTypeCompute,
+					Type: devicetypes.ComponentTypeUnknown,
 					ID:   externalID,
 				},
 			},

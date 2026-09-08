@@ -46,7 +46,7 @@ pub(in crate::tests) const TEST_DOCA_TELEMETRY_VERSION: &str = "1.14.2-doca2.2.0
 pub(in crate::tests) async fn create_dpu_machine(
     env: &TestEnv,
     host_config: &ManagedHostConfig,
-) -> carbide_uuid::machine::MachineId {
+) -> carbide_uuid::machine::DpuMachineId {
     site_explorer::new_dpu(env, host_config.clone())
         .await
         .unwrap()

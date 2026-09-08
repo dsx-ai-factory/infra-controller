@@ -159,7 +159,7 @@ func TestExecuteGRPCProxyClassifiesLostResults(t *testing.T) {
 				cancel()
 			}
 
-			err := ExecuteFlowGRPC(ctx, temporalClient, "/v1.Flow/CreateOperationRun", &emptypb.Empty{}, nil, "flow-grpc-create-1", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, "")
+			err := ExecuteFlowGRPC(ctx, temporalClient, "/v1.Flow/CreateOperationRun", &emptypb.Empty{}, nil, "create-1", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, "")
 
 			require.NotNil(t, err)
 			assert.Equal(t, tc.expectedCode, err.Code)
@@ -213,7 +213,7 @@ func TestProxyFlowGRPCSeparatesDiagnosisFromResponseData(t *testing.T) {
 				context.Background(), echoCtx, zerolog.New(&logs), temporalClient,
 				"/v1.Flow/GetRackInfoByID",
 				&emptypb.Empty{}, nil,
-				"flow-grpc-rack-get-1", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+				"rack-get-1", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 			)
 
 			require.NoError(t, err)
@@ -280,7 +280,7 @@ func TestExecuteGRPCProxyRejectsSecretFieldsWithoutKey(t *testing.T) {
 		{
 			name: "flow",
 			execute: func(stc tclient.Client) *cutil.APIError {
-				return ExecuteFlowGRPC(context.Background(), stc, "/v1.Flow/CreateOperationRun", &emptypb.Empty{}, nil, "flow-grpc-create-1", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, "", "password")
+				return ExecuteFlowGRPC(context.Background(), stc, "/v1.Flow/CreateOperationRun", &emptypb.Empty{}, nil, "create-1", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, "", "password")
 			},
 			message: "Failed to encode Flow proxy request",
 		},
@@ -303,7 +303,7 @@ func TestExecuteGRPCProxyRejectsSecretFieldsWithoutKey(t *testing.T) {
 func TestExecuteFlowGRPC(t *testing.T) {
 	temporalClient, started := newTimingOutProxyClient()
 
-	const workflowID = "flow-grpc-get-operation-run-run-1-true"
+	const workflowID = "get-operation-run-run-1-true"
 	err := ExecuteFlowGRPC(
 		context.Background(),
 		temporalClient,

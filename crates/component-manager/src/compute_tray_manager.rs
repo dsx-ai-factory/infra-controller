@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::net::IpAddr;
 
 use carbide_secrets::credentials::Credentials;
+use mac_address::MacAddress;
 use model::component_manager::{ComputeTrayComponent, FirmwareState, PowerAction};
 
 use crate::error::ComponentManagerError;
@@ -16,6 +17,7 @@ use crate::types::FirmwareUpdateOptions;
 pub struct ComputeTrayEndpoint {
     pub vendor: ComputeTrayVendor,
     pub bmc_ip: IpAddr,
+    pub bmc_mac: MacAddress,
     pub bmc_credentials: Credentials,
 }
 
@@ -56,6 +58,7 @@ pub enum ComputeTrayModel {
 #[derive(Debug, Clone)]
 pub struct ComputeTrayResult {
     pub bmc_ip: IpAddr,
+    pub bmc_mac: MacAddress,
     pub success: bool,
     pub error: Option<String>,
 }
@@ -63,6 +66,7 @@ pub struct ComputeTrayResult {
 #[derive(Debug, Clone)]
 pub struct ComputeTrayFirmwareUpdateStatus {
     pub bmc_ip: IpAddr,
+    pub bmc_mac: MacAddress,
     pub state: FirmwareState,
     pub target_version: String,
     pub error: Option<String>,
@@ -90,8 +94,10 @@ impl std::fmt::Display for Backend {
 /// Backend trait for compute tray management operations.
 ///
 /// Implementations receive physical endpoint information (BMC IP/MAC + vendor)
-/// and handle registration with the backend service internally. Results are
-/// keyed by `bmc_ip`.
+/// and handle registration with the backend service internally. Each result
+/// echoes the endpoint's `bmc_ip` and `bmc_mac` so callers can correlate an
+/// outcome back to the target they supplied without a side lookup (the BMC IP
+/// is not a stable correlation key before ingestion, where leases churn).
 #[async_trait::async_trait]
 pub trait ComputeTrayManager: Send + Sync + Debug + 'static {
     fn name(&self) -> &str;
@@ -104,6 +110,11 @@ pub trait ComputeTrayManager: Send + Sync + Debug + 'static {
         action: PowerAction,
     ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError>;
 
+    /// Update firmware on compute trays.
+    ///
+    /// Endpoints that resolve to an ingested machine row are handled through
+    /// that row; rack-scale trays with no row yet (pre-ingestion) are resolved
+    /// from the expected inventory by BMC MAC where the backend supports it.
     async fn update_firmware(
         &self,
         endpoints: &[ComputeTrayEndpoint],

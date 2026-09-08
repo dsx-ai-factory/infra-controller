@@ -283,7 +283,7 @@ async fn test_allocate_instance_rejects_interface_anycast_prefix_outside_vpc_pro
     let err = env
         .api
         .allocate_instance(tonic::Request::new(forge::InstanceAllocationRequest {
-            machine_id: Some(mh.host().id),
+            machine_id: Some(mh.host().id.into()),
             instance_type_id: None,
             config: Some(forge::InstanceConfig {
                 tenant: Some(forge::TenantConfig {
@@ -496,7 +496,7 @@ async fn test_zero_dpu_instance_allocation_auto(
     // not strictly testing instance allocation, it's very related, because cloud-api will be using
     // the static_vpc_id field to determine where allocation should happen.
     let rpc_machine: forge::Machine = env
-        .find_machine(zero_dpu_host.host_snapshot.id)
+        .find_machine(&zero_dpu_host.host_snapshot.id)
         .await
         .remove(0);
 
@@ -1281,7 +1281,7 @@ async fn test_zero_dpu_host_verifies_boot_order_during_platform_configuration(
     // (including SetBootOrder to CheckBootOrder, where `is_boot_order_setup`
     // is called).
     env.run_machine_state_controller_iteration_until_state_matches(
-        &zero_dpu_host.host_snapshot.id,
+        &zero_dpu_host.host_snapshot.id.try_into().unwrap(),
         10,
         ManagedHostState::Ready,
     )

@@ -26,7 +26,14 @@ use sqlx::PgConnection;
 
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter};
 use crate::db_read::DbReader;
+use crate::machine::MachineRowLockItem;
 use crate::{DatabaseError, DatabaseResult};
+
+impl MachineRowLockItem for MachineValidation {
+    fn machine_id(&self) -> MachineId {
+        self.machine_id
+    }
+}
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;

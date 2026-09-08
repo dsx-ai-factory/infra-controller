@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 use carbide_uuid::machine::MachineId;
-use carbide_uuid::rack::RackId;
+use carbide_uuid::rack::{RackId, RackProfileId};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::expected_machine::{
@@ -86,6 +86,47 @@ pub async fn find_many_by_bmc_mac_address(
             }
         })
         .collect()
+}
+
+/// RMS rack identity for a compute tray that does not yet have a machine row,
+/// resolved from the expected inventory. Used for pre-ingestion firmware
+/// updates against rack-scale (RMS-managed) compute trays.
+#[derive(Debug, sqlx::FromRow)]
+pub struct PreIngestionComputeRmsIdentity {
+    pub bmc_mac_address: MacAddress,
+    pub rack_id: RackId,
+    pub rack_profile_id: Option<RackProfileId>,
+}
+
+/// Resolve RMS rack identities for pre-ingestion compute trays by BMC MAC.
+///
+/// A compute tray is rack-scale (RMS-managed) exactly when its expected record
+/// declares a `rack_id`; this mirrors the signal site-explorer uses to build an
+/// RMS node identity at machine creation. The rack profile is taken from the
+/// live `racks` row when it exists and otherwise from the `expected_racks`
+/// declaration, so the descriptor resolves before the rack row is created.
+/// Rows without a `rack_id` are omitted (standalone servers are not RMS-managed).
+pub async fn find_rms_identities_by_bmc_macs(
+    db: impl DbReader<'_>,
+    bmc_mac_addresses: &[MacAddress],
+) -> DatabaseResult<Vec<PreIngestionComputeRmsIdentity>> {
+    let sql = r#"
+        SELECT
+            em.bmc_mac_address AS bmc_mac_address,
+            em.rack_id AS rack_id,
+            COALESCE(r.rack_profile_id, er.rack_profile_id) AS rack_profile_id
+        FROM expected_machines em
+        LEFT JOIN racks r ON r.id = em.rack_id
+        LEFT JOIN expected_racks er ON er.rack_id = em.rack_id
+        WHERE em.bmc_mac_address = ANY($1)
+          AND em.rack_id IS NOT NULL
+    "#;
+
+    sqlx::query_as(sql)
+        .bind(bmc_mac_addresses)
+        .fetch_all(db)
+        .await
+        .map_err(|err| DatabaseError::query(sql, err))
 }
 
 /// Find the ExpectedMachine that declares an interface MAC.

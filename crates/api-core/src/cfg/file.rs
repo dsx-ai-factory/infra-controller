@@ -231,11 +231,11 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub site_fabric_prefixes: Vec<IpNetwork>,
 
-    /// Opts this site into tenant prefix overlap admission.
+    /// Opts this site into exact tenant VpcPrefix reuse checks.
     ///
-    /// Defaults to `false`. Participating FNN base profiles must separately
-    /// set `tenant_prefix_overlap_eligible`, and configuration alone does not permit
-    /// duplicate prefix persistence while database exclusions remain active.
+    /// Defaults to `false`. The complete eligibility, rejection, and database
+    /// fallback contract is documented under "Tenant prefix overlap checks"
+    /// in `crates/api-core/src/cfg/README.md`.
     #[serde(default)]
     pub tenant_prefix_overlap_enabled: bool,
 
@@ -1472,7 +1472,7 @@ pub struct SecretsConfig {
     /// them, longest prefix winning. A "/" catch-all entry is required.
     /// Reads never consult routing -- every stored row records the KEK
     /// that wrapped it -- so rotating a key means changing it here and
-    /// running `carbide-admin-cli secrets re-wrap`.
+    /// running `nico-admin-cli secrets re-wrap`.
     ///
     /// Example:
     /// ```toml
@@ -1780,6 +1780,23 @@ pub struct DpfConfig {
     /// configured to route outbound HTTPS traffic through the specified proxy.
     #[serde(default)]
     pub proxy: Option<DpfProxyDetails>,
+    /// `bf.cfg` lines appended to every deployment's DPUFlavor `bfcfgParameters`.
+    ///
+    /// Each entry is passed through verbatim; NICo applies no quoting or interpretation. The
+    /// BFB installer sources `bf.cfg` as shell, so values needing quotes must carry their own:
+    /// `extra_bfcfg_parameters = ["ubuntu_PASSWORD='$6$...'"]`.
+    ///
+    /// Entries containing the Go template delimiter `{{` are rejected at startup, since BF4
+    /// Astra renders its DPUFlavorTemplate body and could not pass them through.
+    ///
+    /// [`DpfDeploymentConfig::extra_bfcfg_parameters`] appends to this list for a single
+    /// deployment.
+    ///
+    /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning every DPU at the
+    /// site. `bf.cfg` is applied at install, so that reprovision is also what delivers a
+    /// changed value to DPUs that are already installed.
+    #[serde(default)]
+    pub extra_bfcfg_parameters: Vec<String>,
     /// Per-generation DPUDeployment configurations. BF3 is always present with sensible
     /// defaults; BF4 variants are opt-in.
     #[serde(default)]
@@ -1798,6 +1815,7 @@ impl Default for DpfConfig {
             services: Box::default(),
             extra_services: Box::default(),
             proxy: None,
+            extra_bfcfg_parameters: Vec::new(),
             deployments: DpfDeploymentsConfig::default(),
         }
     }
@@ -1861,6 +1879,16 @@ impl DpfConfig {
         self.apply_extra_pull_secret_override(&mut extra);
 
         DpfResolvedMandatoryServicesConfig { base, extra }
+    }
+
+    /// Returns the site-wide `bf.cfg` parameters followed by `deployment`'s own.
+    ///
+    /// Appends rather than overrides, unlike [`Self::resolved_services_for`], so a deployment
+    /// setting one parameter of its own does not have to restate the site-wide list.
+    pub fn resolved_bfcfg_parameters_for(&self, deployment: &DpfDeploymentConfig) -> Vec<String> {
+        let mut parameters = self.extra_bfcfg_parameters.clone();
+        parameters.extend_from_slice(&deployment.extra_bfcfg_parameters);
+        parameters
     }
 
     /// Applies the optional [`Self::docker_image_pull_secret`] override to every
@@ -2240,6 +2268,17 @@ pub struct DpfDeploymentConfig {
     /// entries overlay the corresponding site-wide extra-service definition.
     #[serde(default)]
     pub extra_services: BTreeMap<DpfExtraService, DpfServiceConfigOverride>,
+
+    /// `bf.cfg` lines for this deployment's DPUFlavor only, for parameters that apply to one
+    /// DPU generation but not the others.
+    ///
+    /// Appends to the site-wide [`DpfConfig::extra_bfcfg_parameters`]; it does not replace it,
+    /// unlike `services`. See [`DpfConfig::resolved_bfcfg_parameters_for`].
+    ///
+    /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning this deployment's
+    /// DPUs.
+    #[serde(default)]
+    pub extra_bfcfg_parameters: Vec<String>,
 }
 
 impl Default for DpfDeploymentConfig {
@@ -2252,6 +2291,7 @@ impl Default for DpfDeploymentConfig {
             node_label_key: default_dpf_node_label_key(),
             services: None,
             extra_services: BTreeMap::new(),
+            extra_bfcfg_parameters: Vec::new(),
         }
     }
 }
@@ -2815,12 +2855,12 @@ pub struct FnnRoutingProfileConfig {
     #[serde(default)]
     pub internal: Option<bool>,
 
-    /// Opts VPCs based on this profile into future tenant prefix overlap admission.
+    /// Opts VPCs based on this profile into exact tenant VpcPrefix reuse checks.
     ///
     /// This base-profile setting defaults to `false` and cannot be overridden
-    /// by a VPC. Admission support is tracked by
-    /// <https://github.com/NVIDIA/infra-controller/issues/3890>; this value
-    /// alone changes neither routing nor prefix persistence.
+    /// by a VPC. The complete eligibility, rejection, and database fallback
+    /// contract is documented under "Tenant prefix overlap checks" in
+    /// `crates/api-core/src/cfg/README.md`.
     #[serde(default)]
     pub tenant_prefix_overlap_eligible: bool,
 
@@ -2867,22 +2907,27 @@ pub struct FnnRoutingProfileConfig {
 }
 
 impl FnnRoutingProfileConfig {
-    /// Returns whether this resolved profile satisfies the profile-local overlap policy.
+    /// `is_eligible_for_tenant_prefix_overlap` returns whether the resolved
+    /// profile meets every profile condition for exact prefix reuse.
     ///
     /// Evaluate the profile returned by [`FnnConfig::resolve_vpc_routing_profile`],
     /// not the raw base profile, so VPC overrides participate in the decision.
-    /// This check cannot see site-wide route targets, additional FNN imports,
-    /// VPC peering, or retained routing state. Callers must reject those paths
-    /// between overlapping VPCs and separately require the site gate and
-    /// site-wide `vpc_isolation_behavior = "mutual_isolation"`.
-    #[allow(dead_code)] // Staged for https://github.com/NVIDIA/infra-controller/issues/3890.
+    /// The caller adds the site-wide conditions for these prefix writers.
+    /// Peering and VPC policy changes are tracked in
+    /// <https://github.com/NVIDIA/infra-controller/issues/5114>, and retained
+    /// Instance paths are tracked in
+    /// <https://github.com/NVIDIA/infra-controller/issues/5115>. Startup and
+    /// complete writer coverage are tracked in
+    /// <https://github.com/NVIDIA/infra-controller/issues/5116>. All three must
+    /// land before the database cutover in
+    /// <https://github.com/NVIDIA/infra-controller/issues/3892>.
     pub(crate) fn is_eligible_for_tenant_prefix_overlap(&self) -> bool {
         // Keep this exhaustive so new profile fields require an explicit eligibility decision.
         let Self {
             tenant_prefix_overlap_eligible,
             route_target_imports,
             route_targets_on_exports,
-            // External profiles are outside the initial overlap-admission scope.
+            // External profiles cannot participate in exact prefix reuse.
             internal,
             leak_default_route_from_underlay,
             leak_tenant_host_routes_to_underlay,
@@ -3672,6 +3717,14 @@ pub struct DpuConfig {
     #[serde(default)]
     pub num_of_vfs: u32,
 
+    /// Number of deterministic HBN interfaces reserved for service-VPC attachments.
+    #[serde(default)]
+    pub service_vpc_slot_count: u32,
+
+    /// Additional SF capacity that is not assigned to an HBN interface.
+    #[serde(default)]
+    pub additional_managed_sf: u32,
+
     /// Restart OVS on DPU agents whenever the host switches between
     /// admin and tenant networking. Required in some environments to
     /// ensure OVS picks up the changed network configuration.
@@ -3720,6 +3773,10 @@ impl<'de> Deserialize<'de> for DpuConfig {
             #[serde(default)]
             num_of_vfs: Option<u32>,
             #[serde(default)]
+            service_vpc_slot_count: Option<u32>,
+            #[serde(default)]
+            additional_managed_sf: Option<u32>,
+            #[serde(default)]
             restart_ovs_on_use_admin_network_change: Option<bool>,
         }
 
@@ -3750,6 +3807,12 @@ impl<'de> Deserialize<'de> for DpuConfig {
                 .dpu_enable_secure_boot
                 .unwrap_or(default.dpu_enable_secure_boot),
             num_of_vfs,
+            service_vpc_slot_count: partial
+                .service_vpc_slot_count
+                .unwrap_or(default.service_vpc_slot_count),
+            additional_managed_sf: partial
+                .additional_managed_sf
+                .unwrap_or(default.additional_managed_sf),
             restart_ovs_on_use_admin_network_change: partial
                 .restart_ovs_on_use_admin_network_change
                 .unwrap_or(default.restart_ovs_on_use_admin_network_change),
@@ -3880,6 +3943,8 @@ impl Default for DpuConfig {
             ],
             dpu_enable_secure_boot: false,
             num_of_vfs: DEFAULT_DPU_NUM_OF_VFS,
+            service_vpc_slot_count: 0,
+            additional_managed_sf: 0,
             restart_ovs_on_use_admin_network_change: false,
         }
     }
@@ -3939,10 +4004,10 @@ pub struct NetworkSecurityGroupConfig {
     /// (src port range * dst port range * src prefix list * dst prefix list)
     #[serde(default = "default_max_network_security_group_size")]
     pub max_network_security_group_size: u32,
-    /// Whether to allow stateful security groups.
-    /// This will initially only be passed through to the
-    /// DPU as a way to toggle default stateful options
-    /// in nvue config.
+    /// Whether NSGs may enable stateful egress and the DPU enables its supporting NVUE options.
+    ///
+    /// When disabled, stateful NSG creation and updates from stateless to stateful are rejected.
+    /// Existing stateful NSGs remain editable, but the DPU applies their rules statelessly.
     #[serde(default = "default_to_true")]
     pub stateful_acls_enabled: bool,
 
@@ -6501,6 +6566,8 @@ mqtt_endpoint = "mqtt.forge"
 bootstrap_ca_source = "embedded"
 dpu_enable_secure_boot = true
 num_of_vfs = 64
+service_vpc_slot_count = 5
+additional_managed_sf = 2
 "#;
 
         let config: CarbideConfig = Figment::new()
@@ -6515,6 +6582,8 @@ num_of_vfs = 64
         );
         assert!(config.dpu_config.dpu_enable_secure_boot);
         assert_eq!(config.dpu_config.num_of_vfs, 64);
+        assert_eq!(config.dpu_config.service_vpc_slot_count, 5);
+        assert_eq!(config.dpu_config.additional_managed_sf, 2);
         assert!(!config.dpu_config.dpu_models.is_empty());
     }
 
@@ -6868,6 +6937,87 @@ sign_proxy_url = "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080"
         assert_eq!(
             config.services.dpu_agent.extra_helm_values.unwrap()["fmds"]["sign_proxy_url"],
             "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080"
+        );
+    }
+
+    #[test]
+    fn dpf_extra_bfcfg_parameters_reach_the_config_verbatim() {
+        // The strings reach bf.cfg unquoted and uninterpreted, so parsing must not alter them.
+        let parse = |body: &str| {
+            toml::from_str::<DpfConfig>(body)
+                .expect("dpf config must parse")
+                .extra_bfcfg_parameters
+        };
+
+        value_scenarios!(
+            run = |body: &str| parse(body);
+
+            "absent key defaults to no extra parameters" {
+                "enabled = true\n" => Vec::<String>::new(),
+            }
+
+            "explicit empty list is accepted" {
+                "extra_bfcfg_parameters = []\n" => Vec::<String>::new(),
+            }
+
+            "a quoted password hash survives parsing unchanged" {
+                // Single-quoted in bf.cfg so the hash's `$` sections are not shell-expanded.
+                "extra_bfcfg_parameters = [\"ubuntu_PASSWORD='$6$sa.lt$h/a.sh'\"]\n"
+                    => vec!["ubuntu_PASSWORD='$6$sa.lt$h/a.sh'".to_string()],
+            }
+
+            "configured order is preserved" {
+                "extra_bfcfg_parameters = [\"FIRST=1\", \"SECOND=2\"]\n"
+                    => vec!["FIRST=1".to_string(), "SECOND=2".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn deployment_bfcfg_parameters_append_to_the_site_wide_list() {
+        // Append, not override, so a deployment setting its own parameter keeps the site-wide
+        // list rather than replacing it.
+        let resolved = |body: &str| {
+            let config = toml::from_str::<DpfConfig>(body).expect("dpf config must parse");
+            config.resolved_bfcfg_parameters_for(&config.deployments.bf3)
+        };
+        let deployment_keys = "\nflavor_name = \"f\"\ndeployment_name = \"d\"\n\
+                               node_label_key = \"k\"\n";
+
+        value_scenarios!(
+            run = |body: &str| resolved(body);
+
+            "neither level configured yields nothing" {
+                "enabled = true\n" => Vec::<String>::new(),
+            }
+
+            "site-wide only applies to the deployment" {
+                "extra_bfcfg_parameters = [\"SITE=1\"]\n" => vec!["SITE=1".to_string()],
+            }
+
+            "deployment-only applies without a site-wide list" {
+                &format!("[deployments.bf3]{deployment_keys}\
+                          extra_bfcfg_parameters = [\"OWN=1\"]\n")
+                    => vec!["OWN=1".to_string()],
+            }
+
+            "site-wide comes first, then the deployment's own" {
+                &format!("extra_bfcfg_parameters = [\"SITE=1\", \"SITE=2\"]\n\
+                          [deployments.bf3]{deployment_keys}\
+                          extra_bfcfg_parameters = [\"OWN=1\"]\n")
+                    => vec!["SITE=1".to_string(), "SITE=2".to_string(), "OWN=1".to_string()],
+            }
+
+            "a deployment list does not replace the site-wide one" {
+                // A site-wide password survives a deployment adding a parameter of its own.
+                &format!("extra_bfcfg_parameters = [\"ubuntu_PASSWORD='$6$sa.lt$h/a.sh'\"]\n\
+                          [deployments.bf3]{deployment_keys}\
+                          extra_bfcfg_parameters = [\"OWN=1\"]\n")
+                    => vec![
+                        "ubuntu_PASSWORD='$6$sa.lt$h/a.sh'".to_string(),
+                        "OWN=1".to_string(),
+                    ],
+            }
         );
     }
 
@@ -7578,6 +7728,7 @@ helm_repo_url = "oci://registry.example.test/doca"
             node_label_key: "carbide.nvidia.com/bf4".to_string(),
             services: None,
             extra_services: BTreeMap::new(),
+            extra_bfcfg_parameters: Vec::new(),
         }
     }
 

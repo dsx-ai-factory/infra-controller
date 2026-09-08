@@ -31,6 +31,7 @@ use uuid::Uuid;
 
 use crate::CarbideError;
 use crate::test_support::fixture_config::FixtureDefault as _;
+use crate::test_support::metadata;
 use crate::tests::common;
 
 async fn create_fixture_expected_machines(pool: &sqlx::PgPool) {
@@ -676,7 +677,7 @@ async fn test_get_linked_expected_machines_completed(pool: sqlx::PgPool) {
         common::api_fixtures::create_managed_host_with_config(&env, host_config)
             .await
             .into();
-    let host_machine = env.find_machine(host_machine_id).await.remove(0);
+    let host_machine = env.find_machine(&host_machine_id).await.remove(0);
     let bmc_ip = host_machine.bmc_info.as_ref().unwrap().ip();
 
     // The test
@@ -766,7 +767,7 @@ async fn test_add_and_update_expected_machine_with_invalid_metadata(pool: sqlx::
     let env = create_test_env(pool).await;
     let bmc_mac_address: MacAddress = "3A:3B:3C:3D:3E:3F".parse().unwrap();
     // Start adding an expected-machine with invalid metadata
-    for (invalid_metadata, expected_err) in common::metadata::invalid_metadata_testcases(false) {
+    for (invalid_metadata, expected_err) in metadata::invalid_metadata_testcases(false) {
         let expected_machine = rpc::forge::ExpectedMachine {
             bmc_mac_address: bmc_mac_address.to_string(),
             bmc_username: "ADMIN".into(),
@@ -822,7 +823,7 @@ async fn test_add_and_update_expected_machine_with_invalid_metadata(pool: sqlx::
         .await
         .expect("Expected addition to succeed");
 
-    for (invalid_metadata, expected_err) in common::metadata::invalid_metadata_testcases(false) {
+    for (invalid_metadata, expected_err) in metadata::invalid_metadata_testcases(false) {
         let expected_machine = rpc::forge::ExpectedMachine {
             bmc_mac_address: bmc_mac_address.to_string(),
             bmc_username: "ADMIN".into(),

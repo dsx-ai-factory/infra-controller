@@ -38,7 +38,7 @@ pub(crate) use common::{MachineQuery, NetworkConfigQuery};
 pub(crate) use health_report::args::HealthReportTemplates;
 pub(crate) use health_report::cmd::{get_empty_template, get_health_report};
 pub(crate) use show::args::Args as ShowMachine;
-pub(crate) use show::cmd::{get_next_free_machine, handle_show};
+pub(crate) use show::cmd::{get_next_free_machine, get_next_free_machine_prefetched, handle_show};
 
 use crate::cfg::dispatch::Dispatch;
 

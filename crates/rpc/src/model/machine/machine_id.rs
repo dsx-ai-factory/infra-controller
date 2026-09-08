@@ -29,13 +29,17 @@ pub fn try_parse_machine_id(id: &str) -> Result<MachineId, RpcDataConversionErro
 
 #[cfg(test)]
 mod tests {
+    use carbide_uuid::machine::DpuMachineId;
+
     use super::*;
 
     #[test]
     fn validate_remote_id() {
-        let dpu_id =
+        let dpu_id = DpuMachineId::try_from(
             try_parse_machine_id("fm100dsg4ekcb4sdi6hkqn0iojhj18okrr8vct64luh8957lfe8e69vme20")
-                .unwrap();
+                .unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(
             "d33nk2ne8p59qr988hssbc84gb2b0s34vcq5j7pm5jnrbnhc6880",

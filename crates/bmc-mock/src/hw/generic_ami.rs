@@ -87,6 +87,7 @@ impl GenericAmi<'_> {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
+                bios_version: None,
                 eth_interfaces: Some(vec![]),
                 serial_number: Some(self.product_serial_number.to_string().into()),
                 boot_order_mode: redfish::computer_system::BootOrderMode::Generic,

@@ -31,11 +31,14 @@ spec:
             - name: KC_DB
               value: "postgres"
             - name: KC_DB_URL
-              value: "jdbc:postgresql://postgres.postgres:5432/keycloak"
+              value: "jdbc:postgresql://${KEYCLOAK_DB_HOST}:5432/${KEYCLOAK_DB_NAME}?sslmode=${KEYCLOAK_DB_SSLMODE}"
             - name: KC_DB_USERNAME
-              value: "keycloak"
+              value: "${KEYCLOAK_DB_USER}"
             - name: KC_DB_PASSWORD
-              value: "keycloak"
+              valueFrom:
+                secretKeyRef:
+                  name: "${KEYCLOAK_DB_PASSWORD_SECRET_NAME}"
+                  key: "${KEYCLOAK_DB_PASSWORD_SECRET_KEY}"
             - name: KC_HEALTH_ENABLED
               value: "true"
             - name: KC_METRICS_ENABLED

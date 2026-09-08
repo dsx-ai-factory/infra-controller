@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use ::rpc::forge::{MachineHardwareInfoUpdateType, UpdateMachineHardwareInfoRequest};
+use carbide_uuid::machine::MachineId;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -28,7 +29,8 @@ pub(crate) async fn handle_machine_hardware_info_update(
     log_request_data(&request);
     let update_hardware_info_request = request.into_inner();
 
-    let machine_id = convert_and_log_machine_id(update_hardware_info_request.machine_id.as_ref())?;
+    let machine_id =
+        convert_and_log_machine_id::<MachineId>(update_hardware_info_request.machine_id.as_ref())?;
 
     let request_hardware_info =
         update_hardware_info_request

@@ -125,13 +125,17 @@ nico-api's:
 
 nico-bmc-proxy traces each proxied Redfish request through the BMC credential proxy
 (`crates/bmc-proxy/src/bmc_proxy.rs`). It follows the same W3C propagation model as nico-api
-(issue [#2438](https://github.com/NVIDIA/infra-controller/issues/2438)) so a call from nico-api or
+(issue [#2438](https://github.com/dsx-ai-factory/infra-controller/issues/2438)) so a call from nico-api or
 DPS stays one trace across the proxy hop (issue
-[#2355](https://github.com/NVIDIA/infra-controller/issues/2355)).
+[#2355](https://github.com/dsx-ai-factory/infra-controller/issues/2355)).
 
 - **Off by default.** Spans are exported only when an OTLP endpoint is configured **and**
   `[tracing] enabled = true` (or the process is started with `--debug`). There is no runtime
   toggle on this binary.
+- **Environment variable override.** Tracing can be enabled via environment variable using the
+  `NICO_BMC_PROXY__TRACING__ENABLED=true`. The double underscore (`__`) maps to nested TOML sections,
+  so `NICO_BMC_PROXY__TRACING__ENABLED` overrides `[tracing] enabled`. This prefix takes precedence
+  over TOML configuration.
 - **Endpoint.** Set the standard `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or
   `OTEL_EXPORTER_OTLP_ENDPOINT` to cover every signal at once; the trace-specific variable wins when
   both are set. `[tracing] otlp_endpoint` in the proxy TOML is the fallback for when neither variable

@@ -21,7 +21,9 @@ use std::sync::atomic::Ordering;
 
 use ::rpc::forge as rpc;
 use carbide_utils::none_if_empty::NoneIfEmpty;
-use carbide_uuid::machine::{MachineIdSource, StableHostMachineId};
+use carbide_uuid::machine::{
+    HostMachineId, MachineId, MachineIdSource, MachineIdSubtype, StableHostMachineId,
+};
 use carbide_uuid::nvlink::NvLinkDomainId;
 use db::WithTransaction;
 use futures_util::FutureExt;
@@ -404,12 +406,20 @@ pub(crate) async fn discover_machine(
         db_machine.id
     } else {
         // Now we know stable machine id for host. Let's update it in db.
+        let stable_host_machine_id = StableHostMachineId::try_from(stable_machine_id)
+            .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
+        let current_host_machine_id = caller_interface
+            .machine_id
+            .map(HostMachineId::try_from)
+            .transpose()
+            .map_err(|error| CarbideError::internal(error.to_string()))?;
         db::machine::try_sync_stable_id_with_current_machine_id_for_host(
             &mut txn,
-            &caller_interface.machine_id,
-            &stable_machine_id,
+            current_host_machine_id,
+            &stable_host_machine_id,
         )
         .await?
+        .into()
     };
 
     db::machine_topology::create_or_update_with_bom_validation(
@@ -420,7 +430,7 @@ pub(crate) async fn discover_machine(
     )
     .await?;
 
-    if hardware_info.is_dpu() {
+    if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id.machine_id_subtype() {
         // Create Host proactively.
         // In case host interface is created, this method will return existing one, instead
         // creating new everytime.
@@ -472,12 +482,15 @@ pub(crate) async fn discover_machine(
             .await?;
 
             // Update host and DPUs state correctly.
+            let host_machine_id = proactive_machine
+                .host_machine_id()
+                .map_err(|error| CarbideError::internal(error.to_string()))?;
             db::machine::update_state(
                 &mut txn,
-                &proactive_machine.id,
+                &host_machine_id,
                 &ManagedHostState::DPUInit {
                     dpu_states: DpuInitStates {
-                        states: HashMap::from([(machine_id, DpuInitState::Init)]),
+                        states: HashMap::from([(dpu_machine_id, DpuInitState::Init)]),
                     },
                 },
             )
@@ -666,7 +679,7 @@ pub(crate) async fn discovery_completed(
     log_request_data(&request);
 
     let req = request.into_inner();
-    let machine_id = convert_and_log_machine_id(req.machine_id.as_ref())?;
+    let machine_id = convert_and_log_machine_id::<MachineId>(req.machine_id.as_ref())?;
 
     let (machine, mut txn) = api
         .load_machine(&machine_id, MachineSearchConfig::default())

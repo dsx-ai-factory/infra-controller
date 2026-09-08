@@ -117,7 +117,7 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     // Setup
     let env = create_test_env(db_pool.clone()).await;
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
-    let host_machine = env.find_machine(host_machine_id).await.remove(0);
+    let host_machine = env.find_machine(&host_machine_id).await.remove(0);
 
     let bmc_ip = host_machine.bmc_info.as_ref().unwrap().ip();
 

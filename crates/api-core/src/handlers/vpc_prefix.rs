@@ -15,29 +15,27 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
+
 use ::db::{ObjectColumnFilter, vpc_prefix as db};
 use ::rpc::forge as rpc;
 use ::rpc::forge::PrefixMatchType;
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_uuid::vpc::VpcId;
 use ipnetwork::IpNetwork;
 use model::network_prefix::NetworkPrefix;
+use model::network_segment::NetworkSegmentType;
 use model::site_prefix::{
     SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState, SitePrefixRoutingScope,
 };
 use model::vpc::{Vpc, VpcVirtualizationTypeCapabilities};
 use model::vpc_prefix;
+use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
-use crate::CarbideError;
 use crate::api::{Api, log_request_data};
-
-fn contains_prefix(parent: IpNetwork, child: IpNetwork) -> bool {
-    match (parent, child) {
-        (IpNetwork::V4(parent), IpNetwork::V4(child)) => child.is_subnet_of(parent),
-        (IpNetwork::V6(parent), IpNetwork::V6(child)) => child.is_subnet_of(parent),
-        _ => false,
-    }
-}
+use crate::cfg::file::CarbideConfig;
+use crate::{CarbideError, CarbideResult};
 
 fn validate_site_prefix_attachment(
     site_prefix: &SitePrefix,
@@ -72,7 +70,7 @@ fn validate_site_prefix_attachment(
         )));
     }
 
-    if !contains_prefix(site_prefix.config.prefix, vpc_prefix) {
+    if !super::tenant_prefix_overlap::contains_prefix(site_prefix.config.prefix, vpc_prefix) {
         return Err(CarbideError::InvalidArgument(format!(
             "the VPC prefix {vpc_prefix} is not contained within SitePrefix {} ({})",
             site_prefix.id, site_prefix.config.prefix
@@ -88,6 +86,104 @@ fn validate_site_prefix_attachment(
     }
 
     Ok(())
+}
+
+/// `validate_vpc_prefix_overlaps` rejects `candidate` unless every existing
+/// overlap passes `pair_is_eligible`.
+///
+/// The caller acquires the overlap lock before reading the candidate `Vpc` and
+/// any selected `SitePrefix`, so a waiting create sees every competing prefix
+/// that committed first.
+async fn validate_vpc_prefix_overlaps(
+    runtime_config: &CarbideConfig,
+    txn: &mut PgConnection,
+    candidate: &vpc_prefix::NewVpcPrefix,
+    candidate_vpc: &Vpc,
+    candidate_site_prefix: Option<&SitePrefix>,
+    overlaps: &[vpc_prefix::VpcPrefix],
+) -> CarbideResult<()> {
+    if overlaps.is_empty() {
+        return Ok(());
+    }
+
+    let Some(candidate_site_prefix) = candidate_site_prefix else {
+        return Err(super::tenant_prefix_overlap::overlap_error());
+    };
+    let vpc_ids = overlaps
+        .iter()
+        .map(|prefix| prefix.vpc_id)
+        .collect::<Vec<_>>();
+    let vpcs = ::db::vpc::find_by(
+        &mut *txn,
+        ObjectColumnFilter::List(::db::vpc::IdColumn, &vpc_ids),
+    )
+    .await?
+    .into_iter()
+    .map(|vpc| (vpc.id, vpc))
+    .collect::<HashMap<_, _>>();
+    let Some(site_prefix_ids) = overlaps
+        .iter()
+        .map(|prefix| prefix.site_prefix_id)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Err(super::tenant_prefix_overlap::overlap_error());
+    };
+    let site_prefixes = ::db::site_prefix::find_by_ids(&mut *txn, &site_prefix_ids)
+        .await?
+        .into_iter()
+        .map(|site_prefix| (site_prefix.id, site_prefix))
+        .collect::<HashMap<_, _>>();
+
+    for existing in overlaps {
+        let Some(existing_vpc) = vpcs.get(&existing.vpc_id) else {
+            return Err(super::tenant_prefix_overlap::overlap_error());
+        };
+        let Some(existing_site_prefix) = existing
+            .site_prefix_id
+            .and_then(|id| site_prefixes.get(&id))
+        else {
+            return Err(super::tenant_prefix_overlap::overlap_error());
+        };
+        if !super::tenant_prefix_overlap::pair_is_eligible(
+            runtime_config,
+            super::tenant_prefix_overlap::VpcPrefixParticipant {
+                prefix: candidate.config.prefix,
+                is_deleted: false,
+                vpc: candidate_vpc,
+                site_prefix: candidate_site_prefix,
+            },
+            super::tenant_prefix_overlap::VpcPrefixParticipant {
+                prefix: existing.config.prefix,
+                is_deleted: existing.deleted.is_some(),
+                vpc: existing_vpc,
+                site_prefix: existing_site_prefix,
+            },
+        ) {
+            return Err(super::tenant_prefix_overlap::overlap_error());
+        }
+    }
+
+    Ok(())
+}
+
+/// `adoptable_segment_prefixes` returns direct Tenant prefixes the `VpcPrefix`
+/// may adopt.
+///
+/// A direct prefix on another VPC or a non-Tenant segment cannot be linked to
+/// this `VpcPrefix`, so the request is rejected without identifying its owner.
+fn adoptable_segment_prefixes(
+    overlaps: Vec<db::AttachedSegmentPrefix>,
+    candidate_vpc_id: VpcId,
+) -> CarbideResult<Vec<NetworkPrefix>> {
+    let mut adoptable = Vec::with_capacity(overlaps.len());
+    for overlap in overlaps {
+        if overlap.vpc_id != candidate_vpc_id || overlap.segment_type != NetworkSegmentType::Tenant
+        {
+            return Err(super::tenant_prefix_overlap::overlap_error());
+        }
+        adoptable.push(overlap.prefix);
+    }
+    Ok(adoptable)
 }
 
 pub(crate) async fn create(
@@ -113,6 +209,7 @@ pub(crate) async fn create(
     }
 
     let mut txn = api.txn_begin().await?;
+    ::db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
 
     // Resolve and lock the exact SitePrefix before locking the VPC. The shared
     // row lock permits concurrent child creation but conflicts with retirement
@@ -195,8 +292,8 @@ pub(crate) async fn create(
         id: new_prefix.vpc_id.to_string(),
     })?;
 
-    if let Some(site_prefix) = selected_site_prefix {
-        validate_site_prefix_attachment(&site_prefix, vpc, new_prefix.config.prefix)?;
+    if let Some(ref site_prefix) = selected_site_prefix {
+        validate_site_prefix_attachment(site_prefix, vpc, new_prefix.config.prefix)?;
         new_prefix.site_prefix_id = Some(site_prefix.id);
     } else if let Some(ref site_prefixes) = api.eth_data.site_fabric_prefixes {
         // Preserve the mixed-version configured-root path. Production startup
@@ -221,47 +318,18 @@ pub(crate) async fn create(
     let expected_vpc_version = vpc.version;
 
     let conflicting_vpc_prefixes = db::probe(new_prefix.config.prefix, &mut txn).await?;
-    if !conflicting_vpc_prefixes.is_empty() {
-        let conflicting_vpc_prefixes = conflicting_vpc_prefixes
-            .into_iter()
-            .map(|p| p.config.prefix);
-        let conflicting_vpc_prefixes = itertools::join(conflicting_vpc_prefixes, ", ");
-        let msg = format!(
-            "The requested VPC prefix ({vpc_prefix}) overlaps at least one \
-            existing VPC prefix ({conflicting_vpc_prefixes})",
-            vpc_prefix = new_prefix.config.prefix,
-        );
-        return Err(CarbideError::InvalidArgument(msg).into());
-    }
+    validate_vpc_prefix_overlaps(
+        &api.runtime_config,
+        &mut txn,
+        &new_prefix,
+        vpc,
+        selected_site_prefix.as_ref(),
+        &conflicting_vpc_prefixes,
+    )
+    .await?;
 
     let segment_prefixes = db::probe_segment_prefixes(new_prefix.config.prefix, &mut txn).await?;
-
-    // Check that all the prefixes we found are on segments that belong to our
-    // own VPC.
-    let segment_prefixes: Vec<NetworkPrefix> = {
-        let (own_segment_prefixes, foreign_segment_prefixes) = segment_prefixes
-            .into_iter()
-            .partition::<Vec<_>, _>(|(segment_vpc_id, _)| segment_vpc_id == &new_prefix.vpc_id);
-
-        if !foreign_segment_prefixes.is_empty() {
-            let foreign_segment_prefixes = foreign_segment_prefixes
-                .into_iter()
-                .map(|(_, np)| np.prefix);
-            let foreign_segment_prefixes = itertools::join(foreign_segment_prefixes, ", ");
-            let msg = format!(
-                "The requested VPC prefix of {vpc_prefix} conflicts with at \
-                least one network segment prefix ({foreign_segment_prefixes}) \
-                owned by another VPC",
-                vpc_prefix = new_prefix.config.prefix,
-            );
-            return Err(CarbideError::InvalidArgument(msg).into());
-        }
-        // We don't need the associated VpcIds anymore, get rid of them.
-        own_segment_prefixes
-            .into_iter()
-            .map(|(_, segment_prefix)| segment_prefix)
-            .collect()
-    };
+    let segment_prefixes = adoptable_segment_prefixes(segment_prefixes, new_prefix.vpc_id)?;
 
     // Check that the network segment prefixes we found can actually fit into
     // this new VPC prefix container.
@@ -275,25 +343,6 @@ pub(crate) async fn create(
             an existing network segment prefix ({larger_segment_prefix})",
             vpc_prefix = new_prefix.config.prefix,
             larger_segment_prefix = larger_segment_prefix.prefix,
-        );
-        return Err(CarbideError::InvalidArgument(msg).into());
-    }
-
-    // Check that the network segment prefixes aren't already tied to a VPC
-    // prefix. This is probably impossible at this point if the DB constraints
-    // and transactional isolation are working as intended, but better safe
-    // than sorry.
-    if let Some((associated_vpc_prefix, segment_prefix)) = segment_prefixes
-        .iter()
-        .find_map(|segment_prefix| segment_prefix.vpc_prefix.map(|p| (p, segment_prefix)))
-    {
-        let msg = format!(
-            "The requested VPC prefix ({vpc_prefix}) contains a network \
-            segment prefix ({segment_prefix}) which is already associated with \
-            another VPC prefix ({associated_vpc_prefix}). If you see this \
-            error message, please file a bug!",
-            vpc_prefix = new_prefix.config.prefix,
-            segment_prefix = segment_prefix.prefix,
         );
         return Err(CarbideError::InvalidArgument(msg).into());
     }

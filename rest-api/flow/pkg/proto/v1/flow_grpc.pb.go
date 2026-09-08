@@ -73,6 +73,17 @@ const (
 	Flow_GetOperationRule_FullMethodName         = "/v1.Flow/GetOperationRule"
 	Flow_ListOperationRules_FullMethodName       = "/v1.Flow/ListOperationRules"
 	Flow_SetRuleAsDefault_FullMethodName         = "/v1.Flow/SetRuleAsDefault"
+	Flow_CreateEventRule_FullMethodName          = "/v1.Flow/CreateEventRule"
+	Flow_GetEventRule_FullMethodName             = "/v1.Flow/GetEventRule"
+	Flow_GetEffectiveEventRule_FullMethodName    = "/v1.Flow/GetEffectiveEventRule"
+	Flow_ListEventRules_FullMethodName           = "/v1.Flow/ListEventRules"
+	Flow_UpdateEventRule_FullMethodName          = "/v1.Flow/UpdateEventRule"
+	Flow_EnableEventRule_FullMethodName          = "/v1.Flow/EnableEventRule"
+	Flow_DisableEventRule_FullMethodName         = "/v1.Flow/DisableEventRule"
+	Flow_DeleteEventRule_FullMethodName          = "/v1.Flow/DeleteEventRule"
+	Flow_CreateEventRuleBinding_FullMethodName   = "/v1.Flow/CreateEventRuleBinding"
+	Flow_GetEventRuleBinding_FullMethodName      = "/v1.Flow/GetEventRuleBinding"
+	Flow_DeleteEventRuleBinding_FullMethodName   = "/v1.Flow/DeleteEventRuleBinding"
 	Flow_AssociateRuleWithRack_FullMethodName    = "/v1.Flow/AssociateRuleWithRack"
 	Flow_DisassociateRuleFromRack_FullMethodName = "/v1.Flow/DisassociateRuleFromRack"
 	Flow_GetRackRuleAssociation_FullMethodName   = "/v1.Flow/GetRackRuleAssociation"
@@ -149,6 +160,25 @@ type FlowClient interface {
 	GetOperationRule(ctx context.Context, in *GetOperationRuleRequest, opts ...grpc.CallOption) (*OperationRule, error)
 	ListOperationRules(ctx context.Context, in *ListOperationRulesRequest, opts ...grpc.CallOption) (*ListOperationRulesResponse, error)
 	SetRuleAsDefault(ctx context.Context, in *SetRuleAsDefaultRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Creates a persisted event rule in the disabled state. The returned rule
+	// always has enabled set to false and does not participate in effective-rule
+	// selection. Callers may create its bindings while it is disabled, but must
+	// call EnableEventRule before it can override a site or built-in rule.
+	CreateEventRule(ctx context.Context, in *CreateEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error)
+	GetEventRule(ctx context.Context, in *GetEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error)
+	GetEffectiveEventRule(ctx context.Context, in *GetEffectiveEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error)
+	// Returns matching persisted rules followed by built-in rules, with each
+	// group ordered by ascending rule ID. Filters are applied before pagination.
+	// When pagination is omitted, offset defaults to 0 and limit defaults to 100.
+	ListEventRules(ctx context.Context, in *ListEventRulesRequest, opts ...grpc.CallOption) (*ListEventRulesResponse, error)
+	UpdateEventRule(ctx context.Context, in *UpdateEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error)
+	EnableEventRule(ctx context.Context, in *EnableEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error)
+	DisableEventRule(ctx context.Context, in *DisableEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error)
+	DeleteEventRule(ctx context.Context, in *DeleteEventRuleRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Event-rule bindings
+	CreateEventRuleBinding(ctx context.Context, in *CreateEventRuleBindingRequest, opts ...grpc.CallOption) (*EventRuleBinding, error)
+	GetEventRuleBinding(ctx context.Context, in *GetEventRuleBindingRequest, opts ...grpc.CallOption) (*EventRuleBinding, error)
+	DeleteEventRuleBinding(ctx context.Context, in *DeleteEventRuleBindingRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Rack-rule associations
 	AssociateRuleWithRack(ctx context.Context, in *AssociateRuleWithRackRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	DisassociateRuleFromRack(ctx context.Context, in *DisassociateRuleFromRackRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -673,6 +703,116 @@ func (c *flowClient) SetRuleAsDefault(ctx context.Context, in *SetRuleAsDefaultR
 	return out, nil
 }
 
+func (c *flowClient) CreateEventRule(ctx context.Context, in *CreateEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventRule)
+	err := c.cc.Invoke(ctx, Flow_CreateEventRule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) GetEventRule(ctx context.Context, in *GetEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventRule)
+	err := c.cc.Invoke(ctx, Flow_GetEventRule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) GetEffectiveEventRule(ctx context.Context, in *GetEffectiveEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventRule)
+	err := c.cc.Invoke(ctx, Flow_GetEffectiveEventRule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) ListEventRules(ctx context.Context, in *ListEventRulesRequest, opts ...grpc.CallOption) (*ListEventRulesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListEventRulesResponse)
+	err := c.cc.Invoke(ctx, Flow_ListEventRules_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) UpdateEventRule(ctx context.Context, in *UpdateEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventRule)
+	err := c.cc.Invoke(ctx, Flow_UpdateEventRule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) EnableEventRule(ctx context.Context, in *EnableEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventRule)
+	err := c.cc.Invoke(ctx, Flow_EnableEventRule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) DisableEventRule(ctx context.Context, in *DisableEventRuleRequest, opts ...grpc.CallOption) (*EventRule, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventRule)
+	err := c.cc.Invoke(ctx, Flow_DisableEventRule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) DeleteEventRule(ctx context.Context, in *DeleteEventRuleRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Flow_DeleteEventRule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) CreateEventRuleBinding(ctx context.Context, in *CreateEventRuleBindingRequest, opts ...grpc.CallOption) (*EventRuleBinding, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventRuleBinding)
+	err := c.cc.Invoke(ctx, Flow_CreateEventRuleBinding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) GetEventRuleBinding(ctx context.Context, in *GetEventRuleBindingRequest, opts ...grpc.CallOption) (*EventRuleBinding, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EventRuleBinding)
+	err := c.cc.Invoke(ctx, Flow_GetEventRuleBinding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *flowClient) DeleteEventRuleBinding(ctx context.Context, in *DeleteEventRuleBindingRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Flow_DeleteEventRuleBinding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *flowClient) AssociateRuleWithRack(ctx context.Context, in *AssociateRuleWithRackRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
@@ -855,6 +995,25 @@ type FlowServer interface {
 	GetOperationRule(context.Context, *GetOperationRuleRequest) (*OperationRule, error)
 	ListOperationRules(context.Context, *ListOperationRulesRequest) (*ListOperationRulesResponse, error)
 	SetRuleAsDefault(context.Context, *SetRuleAsDefaultRequest) (*emptypb.Empty, error)
+	// Creates a persisted event rule in the disabled state. The returned rule
+	// always has enabled set to false and does not participate in effective-rule
+	// selection. Callers may create its bindings while it is disabled, but must
+	// call EnableEventRule before it can override a site or built-in rule.
+	CreateEventRule(context.Context, *CreateEventRuleRequest) (*EventRule, error)
+	GetEventRule(context.Context, *GetEventRuleRequest) (*EventRule, error)
+	GetEffectiveEventRule(context.Context, *GetEffectiveEventRuleRequest) (*EventRule, error)
+	// Returns matching persisted rules followed by built-in rules, with each
+	// group ordered by ascending rule ID. Filters are applied before pagination.
+	// When pagination is omitted, offset defaults to 0 and limit defaults to 100.
+	ListEventRules(context.Context, *ListEventRulesRequest) (*ListEventRulesResponse, error)
+	UpdateEventRule(context.Context, *UpdateEventRuleRequest) (*EventRule, error)
+	EnableEventRule(context.Context, *EnableEventRuleRequest) (*EventRule, error)
+	DisableEventRule(context.Context, *DisableEventRuleRequest) (*EventRule, error)
+	DeleteEventRule(context.Context, *DeleteEventRuleRequest) (*emptypb.Empty, error)
+	// Event-rule bindings
+	CreateEventRuleBinding(context.Context, *CreateEventRuleBindingRequest) (*EventRuleBinding, error)
+	GetEventRuleBinding(context.Context, *GetEventRuleBindingRequest) (*EventRuleBinding, error)
+	DeleteEventRuleBinding(context.Context, *DeleteEventRuleBindingRequest) (*emptypb.Empty, error)
 	// Rack-rule associations
 	AssociateRuleWithRack(context.Context, *AssociateRuleWithRackRequest) (*emptypb.Empty, error)
 	DisassociateRuleFromRack(context.Context, *DisassociateRuleFromRackRequest) (*emptypb.Empty, error)
@@ -1028,6 +1187,39 @@ func (UnimplementedFlowServer) ListOperationRules(context.Context, *ListOperatio
 }
 func (UnimplementedFlowServer) SetRuleAsDefault(context.Context, *SetRuleAsDefaultRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetRuleAsDefault not implemented")
+}
+func (UnimplementedFlowServer) CreateEventRule(context.Context, *CreateEventRuleRequest) (*EventRule, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateEventRule not implemented")
+}
+func (UnimplementedFlowServer) GetEventRule(context.Context, *GetEventRuleRequest) (*EventRule, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetEventRule not implemented")
+}
+func (UnimplementedFlowServer) GetEffectiveEventRule(context.Context, *GetEffectiveEventRuleRequest) (*EventRule, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetEffectiveEventRule not implemented")
+}
+func (UnimplementedFlowServer) ListEventRules(context.Context, *ListEventRulesRequest) (*ListEventRulesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListEventRules not implemented")
+}
+func (UnimplementedFlowServer) UpdateEventRule(context.Context, *UpdateEventRuleRequest) (*EventRule, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateEventRule not implemented")
+}
+func (UnimplementedFlowServer) EnableEventRule(context.Context, *EnableEventRuleRequest) (*EventRule, error) {
+	return nil, status.Error(codes.Unimplemented, "method EnableEventRule not implemented")
+}
+func (UnimplementedFlowServer) DisableEventRule(context.Context, *DisableEventRuleRequest) (*EventRule, error) {
+	return nil, status.Error(codes.Unimplemented, "method DisableEventRule not implemented")
+}
+func (UnimplementedFlowServer) DeleteEventRule(context.Context, *DeleteEventRuleRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteEventRule not implemented")
+}
+func (UnimplementedFlowServer) CreateEventRuleBinding(context.Context, *CreateEventRuleBindingRequest) (*EventRuleBinding, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateEventRuleBinding not implemented")
+}
+func (UnimplementedFlowServer) GetEventRuleBinding(context.Context, *GetEventRuleBindingRequest) (*EventRuleBinding, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetEventRuleBinding not implemented")
+}
+func (UnimplementedFlowServer) DeleteEventRuleBinding(context.Context, *DeleteEventRuleBindingRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteEventRuleBinding not implemented")
 }
 func (UnimplementedFlowServer) AssociateRuleWithRack(context.Context, *AssociateRuleWithRackRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method AssociateRuleWithRack not implemented")
@@ -1986,6 +2178,204 @@ func _Flow_SetRuleAsDefault_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Flow_CreateEventRule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateEventRuleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).CreateEventRule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_CreateEventRule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).CreateEventRule(ctx, req.(*CreateEventRuleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_GetEventRule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetEventRuleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetEventRule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetEventRule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetEventRule(ctx, req.(*GetEventRuleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_GetEffectiveEventRule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetEffectiveEventRuleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetEffectiveEventRule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetEffectiveEventRule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetEffectiveEventRule(ctx, req.(*GetEffectiveEventRuleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_ListEventRules_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListEventRulesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).ListEventRules(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_ListEventRules_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).ListEventRules(ctx, req.(*ListEventRulesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_UpdateEventRule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateEventRuleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).UpdateEventRule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_UpdateEventRule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).UpdateEventRule(ctx, req.(*UpdateEventRuleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_EnableEventRule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EnableEventRuleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).EnableEventRule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_EnableEventRule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).EnableEventRule(ctx, req.(*EnableEventRuleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_DisableEventRule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DisableEventRuleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).DisableEventRule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_DisableEventRule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).DisableEventRule(ctx, req.(*DisableEventRuleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_DeleteEventRule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteEventRuleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).DeleteEventRule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_DeleteEventRule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).DeleteEventRule(ctx, req.(*DeleteEventRuleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_CreateEventRuleBinding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateEventRuleBindingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).CreateEventRuleBinding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_CreateEventRuleBinding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).CreateEventRuleBinding(ctx, req.(*CreateEventRuleBindingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_GetEventRuleBinding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetEventRuleBindingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetEventRuleBinding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetEventRuleBinding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetEventRuleBinding(ctx, req.(*GetEventRuleBindingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Flow_DeleteEventRuleBinding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteEventRuleBindingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).DeleteEventRuleBinding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_DeleteEventRuleBinding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).DeleteEventRuleBinding(ctx, req.(*DeleteEventRuleBindingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Flow_AssociateRuleWithRack_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AssociateRuleWithRackRequest)
 	if err := dec(in); err != nil {
@@ -2408,6 +2798,50 @@ var Flow_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetRuleAsDefault",
 			Handler:    _Flow_SetRuleAsDefault_Handler,
+		},
+		{
+			MethodName: "CreateEventRule",
+			Handler:    _Flow_CreateEventRule_Handler,
+		},
+		{
+			MethodName: "GetEventRule",
+			Handler:    _Flow_GetEventRule_Handler,
+		},
+		{
+			MethodName: "GetEffectiveEventRule",
+			Handler:    _Flow_GetEffectiveEventRule_Handler,
+		},
+		{
+			MethodName: "ListEventRules",
+			Handler:    _Flow_ListEventRules_Handler,
+		},
+		{
+			MethodName: "UpdateEventRule",
+			Handler:    _Flow_UpdateEventRule_Handler,
+		},
+		{
+			MethodName: "EnableEventRule",
+			Handler:    _Flow_EnableEventRule_Handler,
+		},
+		{
+			MethodName: "DisableEventRule",
+			Handler:    _Flow_DisableEventRule_Handler,
+		},
+		{
+			MethodName: "DeleteEventRule",
+			Handler:    _Flow_DeleteEventRule_Handler,
+		},
+		{
+			MethodName: "CreateEventRuleBinding",
+			Handler:    _Flow_CreateEventRuleBinding_Handler,
+		},
+		{
+			MethodName: "GetEventRuleBinding",
+			Handler:    _Flow_GetEventRuleBinding_Handler,
+		},
+		{
+			MethodName: "DeleteEventRuleBinding",
+			Handler:    _Flow_DeleteEventRuleBinding_Handler,
 		},
 		{
 			MethodName: "AssociateRuleWithRack",

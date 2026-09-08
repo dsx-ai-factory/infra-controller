@@ -96,6 +96,22 @@ impl ProcessorBuilder {
         self.add_str_field("ProcessorType", value)
     }
 
+    /// Device identity that survives a socket swap.
+    ///
+    /// On an NVIDIA GPU this matches the NVML GPU UUID without its `GPU-`
+    /// prefix, and the UUID the enclosing GPU chassis reports.
+    fn uuid(self, value: &str) -> Self {
+        self.add_str_field("UUID", value)
+    }
+
+    fn serial_number(self, value: &str) -> Self {
+        self.add_str_field("SerialNumber", value)
+    }
+
+    fn model(self, value: &str) -> Self {
+        self.add_str_field("Model", value)
+    }
+
     fn metrics(self, metrics: &redfish::Resource<'_>) -> Self {
         self.apply_patch(metrics.nav_property("Metrics"))
     }
@@ -113,11 +129,29 @@ impl ProcessorBuilder {
     }
 }
 
-pub(crate) fn gpu(system_id: &str, processor_id: &str, core_voltage_sensor_uri: &str) -> Processor {
+/// Identity fields an NVIDIA GPU reports on its `Processor` resource.
+///
+/// Real hardware reports the same values on the enclosing GPU chassis, so a
+/// fixture should keep the two in agreement.
+pub(crate) struct GpuIdentity<'a> {
+    pub(crate) uuid: &'a str,
+    pub(crate) serial_number: &'a str,
+    pub(crate) model: &'a str,
+}
+
+pub(crate) fn gpu(
+    system_id: &str,
+    processor_id: &str,
+    core_voltage_sensor_uri: &str,
+    identity: &GpuIdentity<'_>,
+) -> Processor {
     let metrics = metrics_resource(system_id, processor_id);
     let metrics_json = nvidia_gpu_metrics(&metrics, processor_id, core_voltage_sensor_uri);
     builder(&system_resource(system_id, processor_id))
         .processor_type("GPU")
+        .uuid(identity.uuid)
+        .serial_number(identity.serial_number)
+        .model(identity.model)
         .status(redfish::resource::Status::Ok)
         .metrics(&metrics)
         .build(metrics_json)
@@ -223,7 +257,15 @@ fn nvidia_gpu_oem() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::gpu;
+    use super::{GpuIdentity, gpu};
+
+    fn test_identity() -> GpuIdentity<'static> {
+        GpuIdentity {
+            uuid: "beea8cdf-7b7d-035c-ed07-360e311fcbe1",
+            serial_number: "1655023015625",
+            model: "H100 80GB HBM3",
+        }
+    }
 
     #[test]
     fn gpu_processor_links_to_metrics_and_chassis_sensor() {
@@ -231,11 +273,17 @@ mod tests {
             "HGX_Baseboard_0",
             "GPU_0",
             "/redfish/v1/Chassis/HGX_GPU_0/Sensors/Voltage_1",
+            &test_identity(),
         );
 
         let resource = processor.to_json();
         assert_eq!(resource["Id"], "GPU_0");
         assert_eq!(resource["ProcessorType"], "GPU");
+        // Identity of the GPU in the socket, which hardware reports here and a
+        // consumer needs to distinguish one physical GPU from another.
+        assert_eq!(resource["UUID"], "beea8cdf-7b7d-035c-ed07-360e311fcbe1");
+        assert_eq!(resource["SerialNumber"], "1655023015625");
+        assert_eq!(resource["Model"], "H100 80GB HBM3");
         assert_eq!(
             resource["Metrics"]["@odata.id"],
             "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_0/ProcessorMetrics"
@@ -264,6 +312,7 @@ mod tests {
             "HGX_Baseboard_0",
             "GPU_0",
             "/redfish/v1/Chassis/HGX_GPU_0/Sensors/Voltage_1",
+            &test_identity(),
         );
         let metrics = processor.metrics_json();
         let oem = &metrics["Oem"]["Nvidia"];

@@ -39,7 +39,7 @@ Tenant privileges are described in terms of Capabilities. The capabilities of a 
 
 In service account mode, the `targetedInstanceCreation` capability is granted to Service Account Tenant when [`GET /v2/org/{org}/nico/service-account/current` REST API endpoint](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/service-account/get-current-service-account) is called.
 
-At present turning this capability on for regular Tenants (who are not part of a Service Account org) is not supported via the REST API. However the feature is in active development, relevant issue can be tracked [here](https://github.com/NVIDIA/infra-controller/issues/2104).
+At present turning this capability on for regular Tenants (who are not part of a Service Account org) is not supported via the REST API. However the feature is in active development and can be tracked in [issue #2104](https://github.com/dsx-ai-factory/infra-controller/issues/2104).
 
 NOTE: Privileged Tenants still need Network Allocations from Provider in order to create Instances.
 

@@ -1004,7 +1004,9 @@ mod tests {
     /// details kept as native structured values.
     #[test]
     fn dns_request_completed_pairs_its_histogram_and_log() {
-        use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
+        use carbide_instrument::testing::{
+            ApproxHistogramSum, CapturedFieldKind, MetricsCapture, capture_logs,
+        };
         use carbide_test_support::{Check, check_values};
 
         struct RequestCompletedCase {
@@ -1035,7 +1037,7 @@ mod tests {
             record_count_kind: Option<CapturedFieldKind>,
             duration_milliseconds_kind: Option<CapturedFieldKind>,
             histogram_count: u64,
-            histogram_sum: f64,
+            histogram_sum: ApproxHistogramSum,
         }
 
         check_values(
@@ -1068,7 +1070,7 @@ mod tests {
                         record_count_kind: Some(CapturedFieldKind::I64),
                         duration_milliseconds_kind: Some(CapturedFieldKind::F64),
                         histogram_count: 1,
-                        histogram_sum: 250.0,
+                        histogram_sum: ApproxHistogramSum(250.0),
                     },
                 },
                 Check {
@@ -1099,7 +1101,7 @@ mod tests {
                         record_count_kind: Some(CapturedFieldKind::I64),
                         duration_milliseconds_kind: Some(CapturedFieldKind::F64),
                         histogram_count: 1,
-                        histogram_sum: 1_500.0,
+                        histogram_sum: ApproxHistogramSum(1_500.0),
                     },
                 },
             ],

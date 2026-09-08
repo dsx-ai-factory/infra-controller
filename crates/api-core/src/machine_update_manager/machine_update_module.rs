@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use async_trait::async_trait;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use model::machine::ManagedHostStateSnapshot;
 use sqlx::PgConnection;
 
@@ -43,7 +43,7 @@ pub(crate) trait MachineUpdateModule: Send + Sync + fmt::Display {
         pool: &sqlx::Pool<sqlx::Postgres>,
         available_updates: i32,
         updating_host_machines: &HashSet<MachineId>,
-        snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+        snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<HashSet<MachineId>>;
 
     async fn clear_completed_updates(&self, txn: &mut PgConnection) -> CarbideResult<()>;
@@ -51,6 +51,6 @@ pub(crate) trait MachineUpdateModule: Send + Sync + fmt::Display {
     async fn update_metrics(
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
-        snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+        snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<()>;
 }

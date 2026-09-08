@@ -270,7 +270,8 @@ async fn force_request_converges_quarantined_dpu_uefi_when_disabled(
             Utc::now() + Duration::seconds(3600),
         )
         .await?;
-        db::machine::set_uefi_credential_rotation_requested(&mut conn, dpu_machine_id).await?;
+        db::machine::set_uefi_credential_rotation_requested(&mut conn, dpu_machine_id.into())
+            .await?;
     }
 
     // Iteration 1: the force request drives entry into RotatingDpuUefi for the
@@ -374,6 +375,79 @@ async fn dpu_uefi_change_failure_quarantines_and_returns_to_ready(
             !recorded.contains("dpu-uefi-v1"),
             "the recorded rotation error must be password-redacted, got {recorded:?}"
         );
+    }
+
+    Ok(())
+}
+
+/// A client-creation failure during the DPU UEFI change (credential store,
+/// TCP, or the vendor probe) is transient: the state must hold in place with
+/// no quarantine or counted attempt, and a later tick must complete the
+/// rotation once creation succeeds again.
+#[sqlx_test]
+async fn dpu_uefi_client_creation_failure_retries_without_quarantine(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cm = Arc::new(TestCredentialManager::default());
+    let mut env = Env::builder(pool.clone())
+        .with_credential_manager(cm.clone())
+        .configure_runtime(|c| c.uefi_rotation_enabled = true)
+        .build()
+        .await;
+
+    let (mh, dpu_mac) = ready_host_with_dpu(&env).await;
+    stage_lagging_dpu_uefi(&env, &pool, dpu_mac).await?;
+
+    // Iteration 1: Ready observes the lag and enters RotatingDpuUefi.
+    env.run_single_iteration().await;
+    assert!(
+        matches!(
+            mh.host.machine().await.state.value,
+            ManagedHostState::RotatingDpuUefi { .. }
+        ),
+        "expected RotatingDpuUefi after the entry guard fires, got {:?}",
+        mh.host.machine().await.state.value,
+    );
+
+    // A tick with client creation failing must hold in place: same state, no
+    // quarantine, no counted attempt.
+    env.redfish_sim
+        .set_create_client_error("dpu bmc unreachable");
+    env.run_single_iteration().await;
+    assert!(
+        matches!(
+            mh.host.machine().await.state.value,
+            ManagedHostState::RotatingDpuUefi { .. }
+        ),
+        "a transient creation failure must not advance or abort the rotation, got {:?}",
+        mh.host.machine().await.state.value,
+    );
+    {
+        let mut conn = pool.acquire().await?;
+        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+            .await?
+            .expect("device rotation row should exist");
+        assert!(
+            !status.quarantined,
+            "a transient creation failure must not quarantine the DPU"
+        );
+        assert_eq!(
+            status.rotate_attempts, 0,
+            "a transient creation failure must not count a rotation attempt"
+        );
+    }
+
+    // Once creation succeeds again, a later iteration retries and the
+    // rotation converges normally.
+    env.redfish_sim.clear_create_client_error();
+    run_until_ready(&mut env, &mh).await;
+    {
+        let mut conn = pool.acquire().await?;
+        let status = device_rotation_status(&mut conn, DPU_UEFI, dpu_mac)
+            .await?
+            .expect("device rotation row should exist");
+        assert!(status.converged, "the retried rotation should converge");
+        assert_eq!(status.current_version, Some(1));
     }
 
     Ok(())

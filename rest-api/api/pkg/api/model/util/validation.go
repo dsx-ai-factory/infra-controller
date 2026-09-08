@@ -19,13 +19,28 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 )
 
+const (
+	// MaxUserDataBytes caps `userData` on Instance and Operating System
+	// create/update requests. A Site publishes Instance inventory in pages of
+	// InventoryCloudPageSize (25), each budgeted at maxPublishPayloadBytes
+	// (1945 KiB) to stay under the 2 MiB blob Temporal rejects. 32 KiB holds a
+	// full page's user data to 800 KiB, leaving the rest for the other Instance
+	// fields, and keeps one record far enough under the budget that the publish
+	// ladder never has to floor at a single item to fit it. It also sits
+	// mid-range for infra providers: AWS 16 KB, Hetzner/Alibaba 32 KiB,
+	// Azure/OpenStack ~48 KiB, DO/IBM 64 KiB.
+	MaxUserDataBytes = 32 * 1024
+)
+
 var (
 	LeadingWhitespaceRegexp  = regexp.MustCompile("^\\s+.*")
 	TrailingWhitespaceRegexp = regexp.MustCompile(".*\\s+$")
 	NotAllWhitespaceRegexp   = regexp.MustCompile("[^\\s]+")
 	ShaHashRegex             = regexp.MustCompile("^[A-Fa-f0-9]+$")
 	Sha256LowercaseHexRegex  = regexp.MustCompile("^[a-f0-9]{64}$")
-	DiskImagePathRegex       = regexp.MustCompile("^/dev/(:?nvme\\d+n\\d+|sd*)")
+	DiskImagePathRegex       = regexp.MustCompile(`^(smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/[:space:]]+))$`)
+	diskImagePartitionRegex  = regexp.MustCompile(`^/dev/disk/by-id/.*-part[0-9]+$`)
+	errInvalidDiskImagePath  = errors.New("not a valid disk path")
 
 	ValidationErrorNameHasLeadingWhitespace  = errors.New("name field has leading whitespace")
 	ValidationErrorNameHasTrailingWhitespace = errors.New("name field has trailing whitespace")
@@ -42,7 +57,42 @@ var (
 	ErrValidationLabelKeyLength   = fmt.Errorf("label key must contain at least 1 character and a maximum of %v characters", LabelKeyMaxLength)
 	ErrValidationLabelValueLength = fmt.Errorf("label value cannot exceed a maximum of %v characters", LabelValueMaxLength)
 	ErrValidationLabelCount       = fmt.Errorf("up to %v key/value pairs can be specified in labels", LabelCountMax)
+
+	// ErrValidationEffectiveUserDataLength reports the merged user data
+	// breaching MaxUserDataBytes after Operating System defaults are
+	// inherited and the phone-home block is inserted.
+	ErrValidationEffectiveUserDataLength = fmt.Errorf("effective `userData` exceeds %d KiB after applying Operating System defaults and phone-home configuration", MaxUserDataBytes/1024)
 )
+
+// ValidateDiskImagePath validates whole-disk targets accepted by the image
+// provisioning flow. Partition aliases in /dev/disk/by-id use a trailing
+// -part<number> suffix and must not be accepted as whole disks.
+func ValidateDiskImagePath(value interface{}) error {
+	value, isNil := validation.Indirect(value)
+	if isNil {
+		return nil
+	}
+
+	path, ok := value.(string)
+	if !ok || !DiskImagePathRegex.MatchString(path) || diskImagePartitionRegex.MatchString(path) {
+		return errInvalidDiskImagePath
+	}
+
+	return nil
+}
+
+// ValidateEffectiveUserData checks the byte length of the user data a request
+// sends to the Site. Request-field validation runs before Operating System
+// defaults are inherited and before phone-home insertion enlarges the YAML,
+// so every path that finalizes user data has to re-check the result.
+func ValidateEffectiveUserData(userData *string) error {
+	if userData == nil || len(*userData) <= MaxUserDataBytes {
+		return nil
+	}
+	return validation.Errors{
+		"userData": ErrValidationEffectiveUserDataLength,
+	}
+}
 
 // ValidateLabels validates optional API label maps (count, keys, values).
 // Signature matches ozzo's `validation.RuleFunc` so it can be used

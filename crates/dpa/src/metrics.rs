@@ -75,7 +75,9 @@ pub(crate) struct DpaCommandSendFailed {
 #[cfg(test)]
 mod tests {
     use carbide_instrument::emit;
-    use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{
+        ApproxHistogramSum, CapturedFieldKind, MetricsCapture, capture_logs,
+    };
     use carbide_test_support::value_scenarios;
 
     use super::*;
@@ -111,7 +113,7 @@ mod tests {
         log_count: usize,
         log: Option<LogObservation>,
         histogram_count_delta: u64,
-        histogram_sum_delta: f64,
+        histogram_sum_delta: ApproxHistogramSum,
     }
 
     #[test]
@@ -178,7 +180,7 @@ mod tests {
                         topic_kind: None,
                     }),
                     histogram_count_delta: 1,
-                    histogram_sum_delta: 12.5,
+                    histogram_sum_delta: ApproxHistogramSum(12.5),
                 },
             }
             "MQTT queue rejected the command" {
@@ -202,7 +204,7 @@ mod tests {
                         topic_kind: Some(CapturedFieldKind::Debug),
                     }),
                     histogram_count_delta: 1,
-                    histogram_sum_delta: 375.0,
+                    histogram_sum_delta: ApproxHistogramSum(375.0),
                 },
             }
         );

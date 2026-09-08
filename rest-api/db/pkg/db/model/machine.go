@@ -270,6 +270,8 @@ type MachineClearInput struct {
 	NetworkHealthMessage  bool
 	DefaultMacAddress     bool
 	Hostname              bool
+	// Deleted clears the soft-delete timestamp (undelete).
+	Deleted bool
 }
 
 // MachineFilterInput filtering options for GetAll method
@@ -290,6 +292,8 @@ type MachineFilterInput struct {
 	Labels                    map[string]string
 	IsMissingOnSite           *bool
 	ExcludeMetadata           bool // When true, excludes the metadata JSONB column from SELECT to improve performance on bulk queries
+	// IncludeDeleted returns soft-deleted rows in addition to active ones.
+	IncludeDeleted bool
 }
 
 type MachineHealth struct {
@@ -741,6 +745,9 @@ func (msd MachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineFi
 	}
 
 	query := db.GetIDB(tx, msd.dbSession).NewSelect().Model(&machines)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 
 	query, err := msd.setQueryWithFilter(filter, query, machineDAOSpan)
 	if err != nil {
@@ -850,11 +857,20 @@ func (msd MachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineClea
 		m.Hostname = nil
 		updatedFields = append(updatedFields, "hostname")
 	}
+	if input.Deleted {
+		m.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, msd.dbSession).NewUpdate().Model(m).Column(updatedFields...).Where("id = ?", input.MachineID).Exec(ctx)
+		query := db.GetIDB(tx, msd.dbSession).NewUpdate().Model(m).Column(updatedFields...).Where("id = ?", input.MachineID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}

@@ -24,7 +24,7 @@ use std::time::Duration;
 use bmc_explorer::Product;
 use carbide_ipmi::IPMITool;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
-use carbide_redfish::libredfish::RedfishClientPool;
+use carbide_redfish::libredfish::BmcCredentialOps;
 use carbide_redfish::libredfish::conv::IntoLibredfish;
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::{CredentialManager, Credentials};
@@ -38,11 +38,11 @@ use model::site_explorer::{
 };
 use sqlx::PgPool;
 
-use super::EndpointExplorer;
 use super::config::SiteExplorerExploreMode;
 use super::credentials::{CredentialClient, get_bmc_root_credential_key};
 use super::metrics::SiteExplorationMetrics;
 use super::redfish::RedfishClient;
+use super::{AuthenticatedBmc, EndpointExplorer};
 
 const BMC_AUTH_RETRY_DURATION: Duration = Duration::from_secs(3);
 
@@ -76,11 +76,36 @@ struct BmcPasswordRotationFinished {
     error: String,
 }
 
-/// An `EndpointExplorer` which uses redfish APIs to query the endpoint
-pub struct BmcEndpointExplorer {
+/// Credential resolution plus authenticated Redfish/IPMI access. Owns the
+/// [`AuthenticatedBmc`] implementation, so BMC admin ops live here rather than
+/// on the explorer.
+#[derive(Clone)]
+pub struct AuthenticatedBmcClient {
     redfish_client: RedfishClient,
     ipmi_tool: Arc<dyn IPMITool>,
     credential_client: CredentialClient,
+}
+
+impl AuthenticatedBmcClient {
+    /// Build the shared authenticated BMC client used by endpoint exploration
+    /// and by callers performing BMC administration.
+    pub fn new(
+        redfish_client_pool: Arc<dyn BmcCredentialOps>,
+        nv_redfish_client_pool: Arc<NvRedfishClientPool>,
+        ipmi_tool: Arc<dyn IPMITool>,
+        credential_manager: Arc<dyn CredentialManager>,
+    ) -> Self {
+        Self {
+            redfish_client: RedfishClient::new(redfish_client_pool, nv_redfish_client_pool),
+            ipmi_tool,
+            credential_client: CredentialClient::new(credential_manager),
+        }
+    }
+}
+
+/// An `EndpointExplorer` which uses redfish APIs to query the endpoint
+pub struct BmcEndpointExplorer {
+    bmc_client: Arc<AuthenticatedBmcClient>,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
     mode: SiteExplorerExploreMode,
     /// Used to record per-device BMC rotation convergence at the moment the
@@ -92,19 +117,15 @@ pub struct BmcEndpointExplorer {
 }
 
 impl BmcEndpointExplorer {
+    /// Build an explorer over the shared authenticated BMC client.
     pub fn new(
-        redfish_client_pool: Arc<dyn RedfishClientPool>,
-        nv_redfish_client_pool: Arc<NvRedfishClientPool>,
-        ipmi_tool: Arc<dyn IPMITool>,
-        credential_manager: Arc<dyn CredentialManager>,
+        bmc_client: Arc<AuthenticatedBmcClient>,
         rotate_switch_nvos_credentials: Arc<AtomicBool>,
         mode: SiteExplorerExploreMode,
         database_connection: Option<PgPool>,
     ) -> Self {
         Self {
-            redfish_client: RedfishClient::new(redfish_client_pool, nv_redfish_client_pool),
-            ipmi_tool,
-            credential_client: CredentialClient::new(credential_manager),
+            bmc_client,
             rotate_switch_nvos_credentials,
             mode,
             database_connection,
@@ -114,6 +135,7 @@ impl BmcEndpointExplorer {
     pub async fn get_sitewide_bmc_password(&self) -> Result<String, EndpointExplorationError> {
         let version = self.current_sitewide_bmc_version().await?;
         let credentials = self
+            .bmc_client
             .credential_client
             .get_sitewide_bmc_root_credentials(version)
             .await?;
@@ -130,7 +152,8 @@ impl BmcEndpointExplorer {
         create_if_missing: bool,
     ) -> Result<String, EndpointExplorationError> {
         let version = self.current_sitewide_dpu_bmc_service_version().await?;
-        self.credential_client
+        self.bmc_client
+            .credential_client
             .get_sitewide_dpu_bmc_service_password(version, create_if_missing)
             .await
     }
@@ -230,18 +253,14 @@ impl BmcEndpointExplorer {
     }
 
     async fn get_dpu_factory_default_credentials(&self, bmc_ip_address: SocketAddr) -> Credentials {
-        let model = self.redfish_client.get_dpu_model_hint(bmc_ip_address).await;
-        self.credential_client
+        let model = self
+            .bmc_client
+            .redfish_client
+            .get_dpu_model_hint(bmc_ip_address)
+            .await;
+        self.bmc_client
+            .credential_client
             .get_dpu_factory_default_credentials(model)
-            .await
-    }
-
-    pub async fn get_bmc_root_credentials(
-        &self,
-        bmc_mac_address: MacAddress,
-    ) -> Result<Credentials, EndpointExplorationError> {
-        self.credential_client
-            .get_bmc_root_credentials(bmc_mac_address)
             .await
     }
 
@@ -249,7 +268,8 @@ impl BmcEndpointExplorer {
         &self,
         bmc_mac_address: MacAddress,
     ) -> Result<Credentials, EndpointExplorationError> {
-        self.credential_client
+        self.bmc_client
+            .credential_client
             .get_switch_nvos_admin_credentials(bmc_mac_address)
             .await
     }
@@ -259,7 +279,8 @@ impl BmcEndpointExplorer {
         bmc_mac_address: MacAddress,
         credentials: &Credentials,
     ) -> Result<(), EndpointExplorationError> {
-        self.credential_client
+        self.bmc_client
+            .credential_client
             .set_bmc_root_credentials(bmc_mac_address, credentials)
             .await?;
 
@@ -291,32 +312,6 @@ impl BmcEndpointExplorer {
         Ok(())
     }
 
-    pub async fn set_bmc_root_password(
-        &self,
-        bmc_ip_address: SocketAddr,
-        vendor: RedfishVendor,
-        current_bmc_credentials: Credentials,
-        new_password: String,
-    ) -> Result<Credentials, EndpointExplorationError> {
-        self.redfish_client
-            .set_bmc_root_password(
-                bmc_ip_address,
-                vendor,
-                current_bmc_credentials.clone(),
-                new_password.clone(),
-            )
-            .await?;
-
-        let (user, _) = match current_bmc_credentials {
-            Credentials::UsernamePassword { username, password } => (username, password),
-        };
-
-        Ok(Credentials::UsernamePassword {
-            username: user,
-            password: new_password,
-        })
-    }
-
     async fn rotate_dpu_service_password_from_factory_defaults(
         &self,
         bmc_ip_address: SocketAddr,
@@ -324,7 +319,8 @@ impl BmcEndpointExplorer {
         root_credentials: &Credentials,
     ) -> Result<(), EndpointExplorationError> {
         let new_password = self.get_sitewide_dpu_bmc_service_password(true).await?;
-        self.redfish_client
+        self.bmc_client
+            .redfish_client
             .set_bf4_dpu_service_password(bmc_ip_address, root_credentials.clone(), new_password)
             .await?;
 
@@ -366,7 +362,8 @@ impl BmcEndpointExplorer {
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
         match self.mode {
             SiteExplorerExploreMode::LibRedfish => {
-                self.redfish_client
+                self.bmc_client
+                    .redfish_client
                     .generate_exploration_report(
                         bmc_ip_address,
                         credentials.clone(),
@@ -376,12 +373,14 @@ impl BmcEndpointExplorer {
                     .await
             }
             SiteExplorerExploreMode::NvRedfish => {
-                self.redfish_client
+                self.bmc_client
+                    .redfish_client
                     .nv_generate_exploration_report(bmc_ip_address, credentials, boot_interface)
                     .await
             }
             SiteExplorerExploreMode::CompareResult => {
                 let libredfish = self
+                    .bmc_client
                     .redfish_client
                     .generate_exploration_report(
                         bmc_ip_address,
@@ -391,6 +390,7 @@ impl BmcEndpointExplorer {
                     )
                     .await;
                 let nvredfish = self
+                    .bmc_client
                     .redfish_client
                     .nv_generate_exploration_report(bmc_ip_address, credentials, boot_interface)
                     .await;
@@ -457,6 +457,7 @@ impl BmcEndpointExplorer {
             // return an error if we cannot log into the machine's BMC using current credentials
             let sitewide_bmc_password = self.get_sitewide_bmc_password().await?;
             let rotation = self
+                .bmc_client
                 .set_bmc_root_password(
                     bmc_ip_address,
                     vendor,
@@ -501,6 +502,7 @@ impl BmcEndpointExplorer {
 
         let version = self.current_sitewide_bmc_version().await?;
         let sitewide_credentials = self
+            .bmc_client
             .credential_client
             .get_sitewide_bmc_root_credentials(version)
             .await?;
@@ -515,7 +517,8 @@ impl BmcEndpointExplorer {
         // before validating with the sitewide credentials.
         tokio::time::sleep(BMC_AUTH_RETRY_DURATION).await;
 
-        self.redfish_client
+        self.bmc_client
+            .redfish_client
             .validate_bmc_credentials(bmc_ip_address, credentials.clone())
             .await?;
 
@@ -545,7 +548,8 @@ impl BmcEndpointExplorer {
                 %bmc_mac_address,
                 "Storing NVOS admin credentials in vault"
             );
-            self.credential_client
+            self.bmc_client
+                .credential_client
                 .set_bmc_nvos_admin_credentials(
                     bmc_mac_address,
                     &Credentials::UsernamePassword {
@@ -557,161 +561,42 @@ impl BmcEndpointExplorer {
         }
         Ok(())
     }
+}
 
-    pub async fn redfish_reset_bmc(
+impl AuthenticatedBmcClient {
+    async fn get_bmc_root_credentials(
         &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-        reset_type: Option<libredfish::ManagerResetType>,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client
-            .reset_bmc(bmc_ip_address, credentials, reset_type)
+        bmc_mac_address: MacAddress,
+    ) -> Result<Credentials, EndpointExplorationError> {
+        self.credential_client
+            .get_bmc_root_credentials(bmc_mac_address)
             .await
     }
 
-    pub async fn redfish_power_control(
+    async fn set_bmc_root_password(
         &self,
         bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-        action: libredfish::SystemPowerControl,
-    ) -> Result<(), EndpointExplorationError> {
+        vendor: RedfishVendor,
+        current_bmc_credentials: Credentials,
+        new_password: String,
+    ) -> Result<Credentials, EndpointExplorationError> {
         self.redfish_client
-            .power(bmc_ip_address, credentials, action)
-            .await
-    }
-
-    pub async fn machine_setup(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-        boot_interface: Option<&BootInterfaceTarget>,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client
-            .machine_setup(bmc_ip_address, credentials, boot_interface)
-            .await
-    }
-
-    pub async fn set_boot_order_dpu_first(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-        boot_interface: &BootInterfaceTarget,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client
-            .set_boot_order_dpu_first(bmc_ip_address, credentials, boot_interface)
-            .await
-    }
-
-    pub async fn set_nic_mode(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-        mode: BlueFieldOperatingMode,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client
-            .set_nic_mode(bmc_ip_address, credentials, mode.into_libredfish())
-            .await
-    }
-
-    async fn is_viking(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-    ) -> Result<bool, EndpointExplorationError> {
-        self.redfish_client
-            .is_viking(bmc_ip_address, credentials)
-            .await
-    }
-
-    pub async fn clear_nvram(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client
-            .clear_nvram(bmc_ip_address, credentials)
-            .await
-    }
-
-    pub async fn disable_secure_boot(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client
-            .disable_secure_boot(bmc_ip_address, credentials)
-            .await
-    }
-
-    pub async fn lockdown(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-        action: libredfish::EnabledDisabled,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client
-            .lockdown(bmc_ip_address, credentials, action)
-            .await
-    }
-
-    pub async fn lockdown_status(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-    ) -> Result<LockdownStatus, EndpointExplorationError> {
-        self.redfish_client
-            .lockdown_status(bmc_ip_address, credentials)
-            .await
-    }
-
-    pub async fn enable_infinite_boot(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client
-            .enable_infinite_boot(bmc_ip_address, credentials)
-            .await
-    }
-
-    pub async fn is_infinite_boot_enabled(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-    ) -> Result<Option<bool>, EndpointExplorationError> {
-        self.redfish_client
-            .is_infinite_boot_enabled(bmc_ip_address, credentials)
-            .await
-    }
-
-    async fn create_bmc_user(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-        new_username: &str,
-        new_password: &str,
-        role_id: libredfish::RoleId,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client
-            .create_bmc_user(
+            .set_bmc_root_password(
                 bmc_ip_address,
-                credentials,
-                new_username,
-                new_password,
-                role_id,
+                vendor,
+                current_bmc_credentials.clone(),
+                new_password.clone(),
             )
-            .await
-    }
+            .await?;
 
-    async fn delete_bmc_user(
-        &self,
-        bmc_ip_address: SocketAddr,
-        credentials: Credentials,
-        delete_username: &str,
-    ) -> Result<(), EndpointExplorationError> {
-        self.redfish_client
-            .delete_bmc_user(bmc_ip_address, credentials, delete_username)
-            .await
+        let (user, _) = match current_bmc_credentials {
+            Credentials::UsernamePassword { username, password } => (username, password),
+        };
+
+        Ok(Credentials::UsernamePassword {
+            username: user,
+            password: new_password,
+        })
     }
 }
 
@@ -721,13 +606,10 @@ impl EndpointExplorer for BmcEndpointExplorer {
         &self,
         metrics: &mut SiteExplorationMetrics,
     ) -> Result<(), EndpointExplorationError> {
-        self.credential_client.check_preconditions(metrics).await
-    }
-
-    async fn have_credentials(&self, interface: &MachineInterfaceSnapshot) -> bool {
-        self.get_bmc_root_credentials(interface.mac_address)
+        self.bmc_client
+            .credential_client
+            .check_preconditions(metrics)
             .await
-            .is_ok()
     }
 
     // 1) Authenticate and set the BMC root account credentials
@@ -749,7 +631,12 @@ impl EndpointExplorer for BmcEndpointExplorer {
         }
 
         let bmc_mac_address = interface.mac_address;
-        let vendor = match self.redfish_client.get_redfish_vendor(bmc_ip_address).await {
+        let vendor = match self
+            .bmc_client
+            .redfish_client
+            .get_redfish_vendor(bmc_ip_address)
+            .await
+        {
             Ok(vendor) => vendor,
             Err(e) => {
                 tracing::error!(
@@ -769,18 +656,22 @@ impl EndpointExplorer for BmcEndpointExplorer {
                     return Err(e);
                 };
 
-                let (username, password) =
-                    match self.get_bmc_root_credentials(bmc_mac_address).await {
-                        Ok(Credentials::UsernamePassword { username, password }) => {
-                            (username, password)
-                        }
-                        Err(_) => (eps.bmc_username.clone(), eps.bmc_password.clone()),
-                    };
+                let (username, password) = match self
+                    .bmc_client
+                    .get_bmc_root_credentials(bmc_mac_address)
+                    .await
+                {
+                    Ok(Credentials::UsernamePassword { username, password }) => {
+                        (username, password)
+                    }
+                    Err(_) => (eps.bmc_username.clone(), eps.bmc_password.clone()),
+                };
 
                 // Lite-On and Delta power shelf BMCs don't expose vendor
                 // details in the service root, so we fall back to checking the
                 // Manufacturer field across all Chassis entries.
                 let vendor = match self
+                    .bmc_client
                     .redfish_client
                     .probe_vendor_name_from_chassis(bmc_ip_address, username, password)
                     .await
@@ -818,7 +709,11 @@ impl EndpointExplorer for BmcEndpointExplorer {
         // Case 1: Vault contains a path at "bmc/{bmc_mac_address}/root"
         // This machine has its BMC set to the carbide sitewide BMC root password.
         // Create the redfish client and generate the report.
-        let report = match self.get_bmc_root_credentials(bmc_mac_address).await {
+        let report = match self
+            .bmc_client
+            .get_bmc_root_credentials(bmc_mac_address)
+            .await
+        {
             Ok(credentials) => {
                 match self
                     .generate_exploration_report(
@@ -922,6 +817,7 @@ impl EndpointExplorer for BmcEndpointExplorer {
                 };
 
                 let product = self
+                    .bmc_client
                     .redfish_client
                     .get_redfish_product(bmc_ip_address)
                     .await?;
@@ -1047,6 +943,15 @@ impl EndpointExplorer for BmcEndpointExplorer {
 
         Ok(report)
     }
+}
+
+#[async_trait::async_trait]
+impl AuthenticatedBmc for AuthenticatedBmcClient {
+    async fn have_credentials(&self, interface: &MachineInterfaceSnapshot) -> bool {
+        self.get_bmc_root_credentials(interface.mac_address)
+            .await
+            .is_ok()
+    }
 
     async fn redfish_reset_bmc(
         &self,
@@ -1058,7 +963,8 @@ impl EndpointExplorer for BmcEndpointExplorer {
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
             Ok(credentials) => {
-                self.redfish_reset_bmc(bmc_ip_address, credentials, reset_type)
+                self.redfish_client
+                    .reset_bmc(bmc_ip_address, credentials, reset_type)
                     .await
             }
             Err(e) => {
@@ -1126,7 +1032,8 @@ impl EndpointExplorer for BmcEndpointExplorer {
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
             Ok(credentials) => {
-                self.redfish_power_control(bmc_ip_address, credentials, action)
+                self.redfish_client
+                    .power(bmc_ip_address, credentials, action)
                     .await
             }
             Err(e) => {
@@ -1141,6 +1048,19 @@ impl EndpointExplorer for BmcEndpointExplorer {
         }
     }
 
+    async fn redfish_chassis_reset(
+        &self,
+        bmc_ip_address: SocketAddr,
+        interface: &MachineInterfaceSnapshot,
+        chassis_id: &str,
+        action: libredfish::SystemPowerControl,
+    ) -> Result<(), EndpointExplorationError> {
+        let credentials = self.get_bmc_root_credentials(interface.mac_address).await?;
+        self.redfish_client
+            .chassis_reset(bmc_ip_address, credentials, chassis_id, action)
+            .await
+    }
+
     async fn disable_secure_boot(
         &self,
         bmc_ip_address: SocketAddr,
@@ -1149,7 +1069,11 @@ impl EndpointExplorer for BmcEndpointExplorer {
         let bmc_mac_address = interface.mac_address;
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
-            Ok(credentials) => self.disable_secure_boot(bmc_ip_address, credentials).await,
+            Ok(credentials) => {
+                self.redfish_client
+                    .disable_secure_boot(bmc_ip_address, credentials)
+                    .await
+            }
             Err(e) => {
                 tracing::info!(
                     %bmc_ip_address,
@@ -1171,7 +1095,11 @@ impl EndpointExplorer for BmcEndpointExplorer {
         let bmc_mac_address = interface.mac_address;
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
-            Ok(credentials) => self.lockdown(bmc_ip_address, credentials, action).await,
+            Ok(credentials) => {
+                self.redfish_client
+                    .lockdown(bmc_ip_address, credentials, action)
+                    .await
+            }
             Err(e) => {
                 tracing::info!(
                     %bmc_ip_address,
@@ -1192,7 +1120,11 @@ impl EndpointExplorer for BmcEndpointExplorer {
         let bmc_mac_address = interface.mac_address;
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
-            Ok(credentials) => self.lockdown_status(bmc_ip_address, credentials).await,
+            Ok(credentials) => {
+                self.redfish_client
+                    .lockdown_status(bmc_ip_address, credentials)
+                    .await
+            }
             Err(e) => {
                 tracing::info!(
                     %bmc_ip_address,
@@ -1213,7 +1145,11 @@ impl EndpointExplorer for BmcEndpointExplorer {
         let bmc_mac_address = interface.mac_address;
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
-            Ok(credentials) => self.enable_infinite_boot(bmc_ip_address, credentials).await,
+            Ok(credentials) => {
+                self.redfish_client
+                    .enable_infinite_boot(bmc_ip_address, credentials)
+                    .await
+            }
             Err(e) => {
                 tracing::info!(
                     %bmc_ip_address,
@@ -1235,7 +1171,8 @@ impl EndpointExplorer for BmcEndpointExplorer {
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
             Ok(credentials) => {
-                self.is_infinite_boot_enabled(bmc_ip_address, credentials)
+                self.redfish_client
+                    .is_infinite_boot_enabled(bmc_ip_address, credentials)
                     .await
             }
             Err(e) => {
@@ -1260,7 +1197,8 @@ impl EndpointExplorer for BmcEndpointExplorer {
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
             Ok(credentials) => {
-                self.machine_setup(bmc_ip_address, credentials, boot_interface)
+                self.redfish_client
+                    .machine_setup(bmc_ip_address, credentials, boot_interface)
                     .await
             }
             Err(e) => {
@@ -1285,7 +1223,8 @@ impl EndpointExplorer for BmcEndpointExplorer {
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
             Ok(credentials) => {
-                self.set_boot_order_dpu_first(bmc_ip_address, credentials, boot_interface)
+                self.redfish_client
+                    .set_boot_order_dpu_first(bmc_ip_address, credentials, boot_interface)
                     .await
             }
             Err(e) => {
@@ -1309,7 +1248,11 @@ impl EndpointExplorer for BmcEndpointExplorer {
         let bmc_mac_address = interface.mac_address;
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
-            Ok(credentials) => self.set_nic_mode(bmc_ip_address, credentials, mode).await,
+            Ok(credentials) => {
+                self.redfish_client
+                    .set_nic_mode(bmc_ip_address, credentials, mode.into_libredfish())
+                    .await
+            }
             Err(e) => {
                 tracing::info!(
                     %bmc_ip_address,
@@ -1330,7 +1273,11 @@ impl EndpointExplorer for BmcEndpointExplorer {
         let bmc_mac_address = interface.mac_address;
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
-            Ok(credentials) => self.is_viking(bmc_ip_address, credentials).await,
+            Ok(credentials) => {
+                self.redfish_client
+                    .is_viking(bmc_ip_address, credentials)
+                    .await
+            }
             Err(e) => {
                 tracing::info!(
                     %bmc_ip_address,
@@ -1351,7 +1298,11 @@ impl EndpointExplorer for BmcEndpointExplorer {
         let bmc_mac_address = interface.mac_address;
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
-            Ok(credentials) => self.clear_nvram(bmc_ip_address, credentials).await,
+            Ok(credentials) => {
+                self.redfish_client
+                    .clear_nvram(bmc_ip_address, credentials)
+                    .await
+            }
             Err(e) => {
                 tracing::info!(
                     %bmc_ip_address,
@@ -1376,7 +1327,8 @@ impl EndpointExplorer for BmcEndpointExplorer {
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
             Ok(credentials) => {
-                self.create_bmc_user(bmc_ip_address, credentials, username, password, role_id)
+                self.redfish_client
+                    .create_bmc_user(bmc_ip_address, credentials, username, password, role_id)
                     .await
             }
             Err(e) => {
@@ -1401,7 +1353,8 @@ impl EndpointExplorer for BmcEndpointExplorer {
 
         match self.get_bmc_root_credentials(bmc_mac_address).await {
             Ok(credentials) => {
-                self.delete_bmc_user(bmc_ip_address, credentials, username)
+                self.redfish_client
+                    .delete_bmc_user(bmc_ip_address, credentials, username)
                     .await
             }
             Err(e) => {
@@ -1892,15 +1845,14 @@ mod tests {
         let mode = crate::config::SiteExplorerConfig::default_explore_mode();
         assert_eq!(mode, SiteExplorerExploreMode::NvRedfish);
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
-        let explorer = BmcEndpointExplorer::new(
+        let bmc_client = Arc::new(AuthenticatedBmcClient::new(
             Arc::new(RedfishSim::default()),
             Arc::new(NvRedfishClientPool::new(proxy_address)),
             carbide_ipmi::test_support(),
             Arc::new(TestCredentialManager::default()),
-            Arc::new(AtomicBool::new(false)),
-            mode,
-            None,
-        );
+        ));
+        let explorer =
+            BmcEndpointExplorer::new(bmc_client, Arc::new(AtomicBool::new(false)), mode, None);
 
         explorer
             .generate_exploration_report(
@@ -2026,11 +1978,14 @@ mod tests {
     ) -> Result<Vec<Option<RedfishSimBootInterfaceRef>>, String> {
         let sim = Arc::new(RedfishSim::default());
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
-        let explorer = BmcEndpointExplorer::new(
+        let bmc_client = Arc::new(AuthenticatedBmcClient::new(
             sim.clone(),
             Arc::new(NvRedfishClientPool::new(proxy_address)),
             carbide_ipmi::test_support(),
             Arc::new(TestCredentialManager::default()),
+        ));
+        let explorer = BmcEndpointExplorer::new(
+            bmc_client,
             Arc::new(AtomicBool::new(false)),
             SiteExplorerExploreMode::LibRedfish,
             None,
@@ -2145,11 +2100,14 @@ mod tests {
             .expect("seed site-wide BMC credentials");
 
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
-        let explorer = BmcEndpointExplorer::new(
+        let bmc_client = Arc::new(AuthenticatedBmcClient::new(
             sim.clone(),
             Arc::new(NvRedfishClientPool::new(proxy_address)),
             carbide_ipmi::test_support(),
             credential_manager.clone(),
+        ));
+        let explorer = BmcEndpointExplorer::new(
+            bmc_client,
             Arc::new(AtomicBool::new(false)),
             SiteExplorerExploreMode::LibRedfish,
             None,

@@ -949,7 +949,7 @@ async fn test_machine_dhcp_with_api_for_instance_physical_virtual(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(mh.dpu().id),
+            dpu_machine_id: Some(mh.dpu().id.into()),
         }))
         .await
         .unwrap()
@@ -1073,7 +1073,7 @@ async fn test_dpu_machine_dhcp_for_existing_dpu(
     let host_config = env.managed_host_config();
     let dpu_machine_id = dpu::create_dpu_machine(&env, &host_config).await;
 
-    let machine = env.find_machine(dpu_machine_id).await.remove(0);
+    let machine = env.find_machine(&dpu_machine_id).await.remove(0);
     let mac = machine.status.as_ref().unwrap().interfaces[0]
         .mac_address
         .clone();
@@ -2110,7 +2110,7 @@ async fn test_dhcp_v6_find_existing_machine_uses_link_address(
     .await?;
     let mut txn = pool.begin().await?;
     let machine_id = db::machine::find_existing_machine(&mut txn, host_mac, link_address).await?;
-    assert_eq!(machine_id, Some(host.host().id));
+    assert_eq!(machine_id, Some(host.host().id.into()));
     txn.rollback().await?;
 
     Ok(())
@@ -3406,7 +3406,7 @@ async fn test_discover_dhcp_dangling_address_is_not_found(
 /// see in production.
 async fn host_interface_and_gateway(
     env: &TestEnv,
-    host_machine_id: carbide_uuid::machine::MachineId,
+    host_machine_id: carbide_uuid::machine::HostMachineId,
 ) -> Result<(MacAddress, IpAddr), Box<dyn std::error::Error>> {
     let mut txn = env.pool.begin().await?;
     let interfaces_by_machine =
@@ -3434,7 +3434,7 @@ async fn host_interface_and_gateway(
 /// `instances.machine_id`, so a minimal INSERT is enough.
 async fn attach_bare_instance(
     env: &TestEnv,
-    machine_id: carbide_uuid::machine::MachineId,
+    machine_id: carbide_uuid::machine::HostMachineId,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = env.pool.begin().await?;
     sqlx::query("INSERT INTO instances (machine_id) VALUES ($1)")
@@ -3495,7 +3495,7 @@ async fn test_dhcp_allows_host_bmc_with_instance_on_dpu_host(
     let bmc_interface = interfaces
         .iter()
         .find(|interface| {
-            interface.machine_id == Some(mh.host().id)
+            interface.machine_id == Some(mh.host().id.into())
                 && interface.interface_type == InterfaceType::Bmc
         })
         .ok_or("host has no BMC machine_interface")?;

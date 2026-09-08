@@ -19,6 +19,8 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/proto"
@@ -180,6 +182,7 @@ func coreGRPCDialOptions(transportCredentials credentials.TransportCredentials) 
 	return []grpc.DialOption{
 		grpc.WithTransportCredentials(transportCredentials),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(coreGRPCMaxRecvMsgSize)),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))),
 		grpc.WithChainUnaryInterceptor(grpclog.UnaryClientInterceptor("nico-core-api")),
 	}
 }

@@ -391,6 +391,34 @@ fn get_bf4_astra_ovs_defaults() -> String {
     .to_string()
 }
 
+/// Rejects bf.cfg parameters carrying the Go template opening delimiter.
+///
+/// Astra serializes its flavor spec into a `DPUFlavorTemplate` whose body DPF renders as a Go
+/// template before creating each DPU's flavor, so a `{{` there is an action rather than literal
+/// text: it interpolates device values, or fails the render when it names a key the device does
+/// not have. Escaping is not reliably expressible, because the Go escape `{{ "{{" }}` carries
+/// quotes that YAML serialization escapes in turn.
+///
+/// BF3 and generic BF4 write a DPUFlavor directly and would pass `{{` through untouched, but they
+/// are held to the same restriction so the configuration contract does not vary by deployment
+/// type. A parameter that works on one deployment and silently breaks on another is a worse trap
+/// than a rule that applies everywhere.
+fn reject_template_delimiters(parameters: &[String]) -> Result<(), crate::error::DpfError> {
+    // Report the position, never the value: a parameter may carry a password hash.
+    if let Some((index, _)) = parameters
+        .iter()
+        .enumerate()
+        .find(|(_, parameter)| parameter.contains("{{"))
+    {
+        return Err(crate::error::DpfError::ConfigError(format!(
+            "resolved bf.cfg parameter {index} contains the Go template delimiter `{{{{`, which \
+             cannot reach bf.cfg verbatim: BF4 Astra renders its DPUFlavorTemplate body as a Go \
+             template, so the value would be interpreted instead"
+        )));
+    }
+    Ok(())
+}
+
 /// Rejects proxy strings containing characters that would break a systemd `Environment="..."` line:
 /// double-quotes (break the quoting), newlines / carriage returns (break the unit-file line), and
 /// any other ASCII control character (< 0x20 or DEL 0x7f).
@@ -441,10 +469,19 @@ pub fn default_flavor_for(
         pf_total_sf,
         None,
         None,
+        &[],
     )
 }
 
 /// Builds a platform flavor from validated VF, SF, topology, and effective-inventory inputs.
+///
+/// `extra_bfcfg_parameters` are operator-supplied bf.cfg lines appended verbatim to the built-in
+/// `bfcfgParameters` of every deployment type.
+///
+/// WARNING: Every argument here feeds the flavor hash. Changing one will generate a new
+/// DPUFlavor, reprovisioning the deployment's DPUs.
+// Each argument is an independent site input; a struct would move the same list one level out.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn default_flavor_for_with_topology(
     namespace: &str,
     proxy: &Option<DpfProxyDetails>,
@@ -453,6 +490,7 @@ pub(crate) fn default_flavor_for_with_topology(
     pf_total_sf: u32,
     intercept_bridging: Option<&DpfInterceptBridging>,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
+    extra_bfcfg_parameters: &[String],
 ) -> Result<DPUFlavor, crate::error::DpfError> {
     match deployment_type {
         DpuDeploymentType::Bf4Generic => flavor_bf4_with_topology(
@@ -462,6 +500,7 @@ pub(crate) fn default_flavor_for_with_topology(
             pf_total_sf,
             intercept_bridging,
             dhcp_acl_interfaces,
+            extra_bfcfg_parameters,
         ),
         DpuDeploymentType::Bf4Astra => Err(crate::error::DpfError::ConfigError(
             "BF4 Astra uses DPUFlavorTemplate; call flavor_bf4_astra() instead".to_string(),
@@ -474,6 +513,7 @@ pub(crate) fn default_flavor_for_with_topology(
             pf_total_sf,
             intercept_bridging,
             dhcp_acl_interfaces,
+            extra_bfcfg_parameters,
         ),
     }
 }
@@ -498,6 +538,7 @@ pub fn flavor_bf4(
         DEFAULT_PF_TOTAL_SF_RESERVED,
         None,
         None,
+        &[],
     )
 }
 
@@ -509,12 +550,15 @@ fn flavor_bf4_with_topology(
     pf_total_sf: u32,
     intercept_bridging: Option<&DpfInterceptBridging>,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
+    extra_bfcfg_parameters: &[String],
 ) -> Result<DPUFlavor, crate::error::DpfError> {
-    let bfcfg_parameters = vec![
+    reject_template_delimiters(extra_bfcfg_parameters)?;
+    let mut bfcfg_parameters = vec![
         "UPDATE_ATF_UEFI=yes".to_string(),
         "UPDATE_DPU_OS=yes".to_string(),
         "WITH_NIC_FW_UPDATE=yes".to_string(),
     ];
+    bfcfg_parameters.extend_from_slice(extra_bfcfg_parameters);
     Ok(DPUFlavor {
         metadata: ObjectMeta {
             name: None,
@@ -553,13 +597,20 @@ fn flavor_bf4_with_topology(
 /// Builds the BF4 Astra DPUFlavorTemplate.
 ///
 /// The DPF operator renders this template for each DPU and creates the resulting DPUFlavor.
+///
+/// Astra declares no built-in `bfcfgParameters`, so the field stays absent unless the operator
+/// configures some. Keeping it absent holds the template hash of existing Astra sites unchanged,
+/// which is what stops an upgrade from reprovisioning Astra DPUs on its own.
 pub fn flavor_bf4_astra(
     namespace: &str,
     proxy: &Option<DpfProxyDetails>,
     pf_total_sf: u32,
+    extra_bfcfg_parameters: &[String],
 ) -> Result<DPUFlavorTemplate, crate::error::DpfError> {
+    reject_template_delimiters(extra_bfcfg_parameters)?;
     let flavor_spec = DpuFlavorSpec {
-        bfcfg_parameters: None,
+        bfcfg_parameters: (!extra_bfcfg_parameters.is_empty())
+            .then(|| extra_bfcfg_parameters.to_vec()),
         config_files: Some(get_bf4_astra_config_files(proxy)?),
         containerd_config: Some(DpuFlavorContainerdConfig {
             registry_endpoint: None,
@@ -718,10 +769,6 @@ fn bf4_astra_ew_nic_configurations() -> Vec<DpuFlavorEwNicConfigurations> {
                 name: "LINK_TYPE_P1".to_string(),
                 value: "2".to_string(),
             },
-            DpuFlavorEwNicConfigurationsRawNvConfig {
-                name: "HIDE_PORT2_PF".to_string(),
-                value: "1".to_string(),
-            },
         ]),
         spectrum_x_optimized: Some(DpuFlavorEwNicConfigurationsSpectrumXOptimized {
             enabled: true,
@@ -755,10 +802,13 @@ pub fn default_flavor(
         DEFAULT_PF_TOTAL_SF_RESERVED,
         None,
         None,
+        &[],
     )
 }
 
 /// Builds BF3 flavor state from the validated site VF count and intercept-bridging topology.
+// Each argument is an independent site input; a struct would move the same list one level out.
+#[allow(clippy::too_many_arguments)]
 fn default_flavor_with_topology(
     namespace: &str,
     proxy: &Option<DpfProxyDetails>,
@@ -767,12 +817,15 @@ fn default_flavor_with_topology(
     pf_total_sf: u32,
     intercept_bridging: Option<&DpfInterceptBridging>,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
+    extra_bfcfg_parameters: &[String],
 ) -> Result<DPUFlavor, crate::error::DpfError> {
-    let bfcfg_parameters = vec![
+    reject_template_delimiters(extra_bfcfg_parameters)?;
+    let mut bfcfg_parameters = vec![
         "UPDATE_ATF_UEFI=yes".to_string(),
         "UPDATE_DPU_OS=yes".to_string(),
         "WITH_NIC_FW_UPDATE=yes".to_string(),
     ];
+    bfcfg_parameters.extend_from_slice(extra_bfcfg_parameters);
     Ok(DPUFlavor {
         metadata: ObjectMeta {
             name: None,
@@ -828,6 +881,41 @@ fn get_default_grub() -> DpuFlavorGrub {
             .collect(),
         ),
     }
+}
+
+/// Returns HBN's DPF reference AppArmor extensions.
+///
+/// The rsyslog policy permits the complete rotation chain, while the tcpdump policy accepts
+/// signals from `runc`. Cloud-init writes both before DPF's provisioning reboot loads the profiles.
+/// Since these files are part of the flavor hash, changing them reprovisions every DPF DPU.
+fn hbn_apparmor_config_files() -> [DpuFlavorConfigFiles; 2] {
+    [
+        DpuFlavorConfigFiles {
+            path: "/etc/apparmor.d/local/usr.sbin.rsyslogd".to_string(),
+            operation: Some(DpuFlavorConfigFilesOperation::Override),
+            permissions: Some("0644".to_string()),
+            raw: Some(
+                concat!(
+                    "signal (receive) peer=runc,\n",
+                    "capability chown,\n",
+                    "/usr/{bin,sbin}/* ixr,\n",
+                    "/etc/logrotate.d/* rk,\n",
+                    "/var/lib/logrotate/{,**} rwk,\n",
+                )
+                .to_string(),
+            ),
+            content_from: None,
+            r#type: None,
+        },
+        DpuFlavorConfigFiles {
+            path: "/etc/apparmor.d/local/usr.bin.tcpdump".to_string(),
+            operation: Some(DpuFlavorConfigFilesOperation::Override),
+            permissions: Some("0644".to_string()),
+            raw: Some("signal (receive) peer=runc,\n".to_string()),
+            content_from: None,
+            r#type: None,
+        },
+    ]
 }
 
 /// Returns the base set of config files, plus an optional containerd proxy drop-in if `proxy` is set.
@@ -918,6 +1006,8 @@ fn get_config_files(
             r#type: None,
         },
     ];
+
+    config_files.extend(hbn_apparmor_config_files());
     config_files.extend(ovn_encap_config_files());
 
     if let Some(proxy) = proxy {
@@ -1237,67 +1327,40 @@ fn get_bf4_astra_config_files(
                     "_ovs-vsctl set Interface p1 mtu_request=9216\n",
                     "_ovs-vsctl set Port p1 external_ids:dpf-type=physical\n",
                     "\n",
-                    "# Configure ovs bridges for xplane:\n",
-                    "RAILS=(0 1 2 3)\n",
-                    "SW_PLANES=(0 1)\n",
+                    "# Configure OVS bridges and xplane ports. Each row is:\n",
+                    "# interface prefix | PCI address | bridge | xplane group ID\n",
                     "HW_PLANES=(0 1 2 3)\n",
                     "\n",
-                    "for rail in \"${RAILS[@]}\"; do\n",
-                    "    for sw_plane in \"${SW_PLANES[@]}\"; do\n",
-                    "        bridge=\"brcx-r${rail}swpln${sw_plane}\"\n",
-                    "        _ovs-vsctl --may-exist add-br \"$bridge\"\n",
-                    "        _ovs-vsctl set bridge \"$bridge\" datapath_type=netdev\n",
-                    "        _ovs-vsctl set bridge \"$bridge\" fail_mode=standalone\n",
-                    "    done\n",
-                    "done\n",
+                    "XPLANE_ROWS=(\n",
+                    "    \"A53|0005:03:00.0|brcx-r1swpln0|r1swpln0\"\n",
+                    "    \"A56|0005:06:00.0|brcx-r0swpln0|r0swpln0\"\n",
+                    "    \"A43|0004:03:00.0|brcx-r0swpln1|r0swpln1\"\n",
+                    "    \"A46|0004:06:00.0|brcx-r1swpln1|r1swpln1\"\n",
+                    "    \"A3|0000:03:00.0|brcx-r3swpln0|r3swpln0\"\n",
+                    "    \"A6|0000:06:00.0|brcx-r2swpln0|r2swpln0\"\n",
+                    "    \"A13|0001:03:00.0|brcx-r2swpln1|r2swpln1\"\n",
+                    "    \"A16|0001:06:00.0|brcx-r3swpln1|r3swpln1\"\n",
+                    ")\n",
                     "\n",
                     "_ovs-vsctl --may-exist add-br br-xplane\n",
                     "_ovs-vsctl set bridge br-xplane datapath_type=netdev\n",
                     "_ovs-vsctl set bridge br-xplane fail_mode=secure\n",
                     "\n",
-                    "# Map (rail, sw_plane) -> CX9 ID\n",
-                    "# Rail 0: SW 0 -> CX1, SW 1 -> CX2\n",
-                    "# Rail 1: SW 0 -> CX0, SW 1 -> CX3\n",
-                    "# Rail 2: SW 0 -> CX5, SW 1 -> CX6\n",
-                    "# Rail 3: SW 0 -> CX4, SW 1 -> CX7\n",
-                    "declare -A CX9_MAP\n",
-                    "CX9_MAP[\"0,0\"]=1\n",
-                    "CX9_MAP[\"0,1\"]=2\n",
-                    "CX9_MAP[\"1,0\"]=0\n",
-                    "CX9_MAP[\"1,1\"]=3\n",
-                    "CX9_MAP[\"2,0\"]=5\n",
-                    "CX9_MAP[\"2,1\"]=6\n",
-                    "CX9_MAP[\"3,0\"]=4\n",
-                    "CX9_MAP[\"3,1\"]=7\n",
+                    "for row in \"${XPLANE_ROWS[@]}\"; do\n",
+                    "    IFS='|' read -r iface_prefix pci_address bridge group_id <<< \"$row\"\n",
+                    "    _ovs-vsctl --may-exist add-br \"$bridge\"\n",
+                    "    _ovs-vsctl set bridge \"$bridge\" datapath_type=netdev\n",
+                    "    _ovs-vsctl set bridge \"$bridge\" fail_mode=standalone\n",
+                    "    for hw_plane in \"${HW_PLANES[@]}\"; do\n",
+                    "        interface_val=\"${iface_prefix}p${hw_plane}\"\n",
                     "\n",
-                    "# Map CX9 ID -> interface name (Ax)\n",
-                    "declare -A IFACE_MAP\n",
-                    "IFACE_MAP[0]=\"A53\"\n",
-                    "IFACE_MAP[1]=\"A56\"\n",
-                    "IFACE_MAP[2]=\"A43\"\n",
-                    "IFACE_MAP[3]=\"A46\"\n",
-                    "IFACE_MAP[4]=\"A3\"\n",
-                    "IFACE_MAP[5]=\"A6\"\n",
-                    "IFACE_MAP[6]=\"A13\"\n",
-                    "IFACE_MAP[7]=\"A16\"\n",
-                    "\n",
-                    "for rail in \"${RAILS[@]}\"; do\n",
-                    "    for sw_plane in \"${SW_PLANES[@]}\"; do\n",
-                    "        group_id=\"r${rail}swpln${sw_plane}\"\n",
-                    "        cx9_id=\"${CX9_MAP[\"${rail},${sw_plane}\"]}\"\n",
-                    "        iface_prefix=\"${IFACE_MAP[$cx9_id]}\"\n",
-                    "\n",
-                    "        for hw_plane in \"${HW_PLANES[@]}\"; do\n",
-                    "            interface_val=\"${iface_prefix}p${hw_plane}\"\n",
-                    "\n",
-                    "            _ovs-vsctl --may-exist add-port br-xplane \"$interface_val\"\n",
-                    "            _ovs-vsctl set Interface \"$interface_val\" type=dpdk\n",
-                    "            _ovs-vsctl set Interface \"$interface_val\" mtu_request=9216\n",
-                    "            _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane=true\n",
-                    "            _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane-group-id=\"$group_id\"\n",
-                    "            _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane-uplink=true\n",
-                    "            _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane-plane-id=\"$hw_plane\"\n",
-                    "        done\n",
+                    "        _ovs-vsctl --may-exist add-port br-xplane \"$interface_val\"\n",
+                    "        _ovs-vsctl set Interface \"$interface_val\" type=dpdk\n",
+                    "        _ovs-vsctl set Interface \"$interface_val\" mtu_request=9216\n",
+                    "        _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane=true\n",
+                    "        _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane-group-id=\"$group_id\"\n",
+                    "        _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane-uplink=true\n",
+                    "        _ovs-vsctl set Interface \"$interface_val\" external_ids:xplane-plane-id=\"$hw_plane\"\n",
                     "    done\n",
                     "done\n",
                     "mst start\n",
@@ -1316,75 +1379,65 @@ fn get_bf4_astra_config_files(
                     "#!/bin/bash\n",
                     "NETPLAN_FILE=\"/etc/netplan/99-cx9-rails.yaml\"\n",
                     "\n",
+                    "# interface prefix | PCI address | bridge. The MAC-to-PCI association is read\n",
+                    "# from the SmartNIC PF config for each interface prefix's p0 port.\n",
+                    "PCI_BRIDGE_ROWS=(\n",
+                    "    \"A53|0005:03:00.0|brcx-r1swpln0\"\n",
+                    "    \"A56|0005:06:00.0|brcx-r0swpln0\"\n",
+                    "    \"A43|0004:03:00.0|brcx-r0swpln1\"\n",
+                    "    \"A46|0004:06:00.0|brcx-r1swpln1\"\n",
+                    "    \"A3|0000:03:00.0|brcx-r3swpln0\"\n",
+                    "    \"A6|0000:06:00.0|brcx-r2swpln0\"\n",
+                    "    \"A13|0001:03:00.0|brcx-r2swpln1\"\n",
+                    "    \"A16|0001:06:00.0|brcx-r3swpln1\"\n",
+                    ")\n",
+                    "\n",
+                    "# MAC address | address | gateway | /16 route | /13 route\n",
+                    "UNDERLAY_ROWS=(\n",
+                    "    \"{{ .mac_0_val }}|{{ .ip_0_val }}|{{ .gw_0_val }}|{{ .route1_0_val }}|{{ .route2_0_val }}\"\n",
+                    "    \"{{ .mac_1_val }}|{{ .ip_1_val }}|{{ .gw_1_val }}|{{ .route1_1_val }}|{{ .route2_1_val }}\"\n",
+                    "    \"{{ .mac_2_val }}|{{ .ip_2_val }}|{{ .gw_2_val }}|{{ .route1_2_val }}|{{ .route2_2_val }}\"\n",
+                    "    \"{{ .mac_3_val }}|{{ .ip_3_val }}|{{ .gw_3_val }}|{{ .route1_3_val }}|{{ .route2_3_val }}\"\n",
+                    "    \"{{ .mac_4_val }}|{{ .ip_4_val }}|{{ .gw_4_val }}|{{ .route1_4_val }}|{{ .route2_4_val }}\"\n",
+                    "    \"{{ .mac_5_val }}|{{ .ip_5_val }}|{{ .gw_5_val }}|{{ .route1_5_val }}|{{ .route2_5_val }}\"\n",
+                    "    \"{{ .mac_6_val }}|{{ .ip_6_val }}|{{ .gw_6_val }}|{{ .route1_6_val }}|{{ .route2_6_val }}\"\n",
+                    "    \"{{ .mac_7_val }}|{{ .ip_7_val }}|{{ .gw_7_val }}|{{ .route1_7_val }}|{{ .route2_7_val }}\"\n",
+                    ")\n",
+                    "\n",
+                    "bridge_for_mac() {\n",
+                    "    local target_mac=\"$1\" row iface_prefix pci bridge iface_val config_path\n",
+                    "    for row in \"${PCI_BRIDGE_ROWS[@]}\"; do\n",
+                    "        IFS='|' read -r iface_prefix pci bridge <<< \"$row\"\n",
+                    "        iface_val=\"${iface_prefix}p0\"\n",
+                    "        config_path=\"/sys/bus/pci/devices/${pci}/net/${iface_val}/smart_nic/pf/config\"\n",
+                    "        if [ -r \"$config_path\" ] && grep -qiF \"$target_mac\" \"$config_path\"; then\n",
+                    "            printf '%s\\n' \"$bridge\"\n",
+                    "            return 0\n",
+                    "        fi\n",
+                    "    done\n",
+                    "    return 1\n",
+                    "}\n",
+                    "\n",
                     "{\n",
                     "    echo \"network:\"\n",
                     "    echo \"  version: 2\"\n",
                     "    echo \"  ethernets:\"\n",
                     "\n",
-                    "    echo \"    brcx-r0swpln0:\"\n",
-                    "    echo \"      addresses:\"\n",
-                    "    echo \"        - {{ .rail0_swp0_ip }}\"\n",
-                    "    echo \"      routes:\"\n",
-                    "    echo \"        - to: {{ .rail0_swp0_route1 }}\"\n",
-                    "    echo \"          via: {{ .rail0_swp0_gw }}\"\n",
-                    "    echo \"        - to: {{ .rail0_swp0_route2 }}\"\n",
-                    "    echo \"          via: {{ .rail0_swp0_gw }}\"\n",
-                    "    echo \"    brcx-r1swpln0:\"\n",
-                    "    echo \"      addresses:\"\n",
-                    "    echo \"        - {{ .rail1_swp0_ip }}\"\n",
-                    "    echo \"      routes:\"\n",
-                    "    echo \"        - to: {{ .rail1_swp0_route1 }}\"\n",
-                    "    echo \"          via: {{ .rail1_swp0_gw }}\"\n",
-                    "    echo \"        - to: {{ .rail1_swp0_route2 }}\"\n",
-                    "    echo \"          via: {{ .rail1_swp0_gw }}\"\n",
-                    "    echo \"    brcx-r2swpln0:\"\n",
-                    "    echo \"      addresses:\"\n",
-                    "    echo \"        - {{ .rail2_swp0_ip }}\"\n",
-                    "    echo \"      routes:\"\n",
-                    "    echo \"        - to: {{ .rail2_swp0_route1 }}\"\n",
-                    "    echo \"          via: {{ .rail2_swp0_gw }}\"\n",
-                    "    echo \"        - to: {{ .rail2_swp0_route2 }}\"\n",
-                    "    echo \"          via: {{ .rail2_swp0_gw }}\"\n",
-                    "    echo \"    brcx-r3swpln0:\"\n",
-                    "    echo \"      addresses:\"\n",
-                    "    echo \"        - {{ .rail3_swp0_ip }}\"\n",
-                    "    echo \"      routes:\"\n",
-                    "    echo \"        - to: {{ .rail3_swp0_route1 }}\"\n",
-                    "    echo \"          via: {{ .rail3_swp0_gw }}\"\n",
-                    "    echo \"        - to: {{ .rail3_swp0_route2 }}\"\n",
-                    "    echo \"          via: {{ .rail3_swp0_gw }}\"\n",
-                    "    echo \"    brcx-r0swpln1:\"\n",
-                    "    echo \"      addresses:\"\n",
-                    "    echo \"        - {{ .rail0_swp1_ip }}\"\n",
-                    "    echo \"      routes:\"\n",
-                    "    echo \"        - to: {{ .rail0_swp1_route1 }}\"\n",
-                    "    echo \"          via: {{ .rail0_swp1_gw }}\"\n",
-                    "    echo \"        - to: {{ .rail0_swp1_route2 }}\"\n",
-                    "    echo \"          via: {{ .rail0_swp1_gw }}\"\n",
-                    "    echo \"    brcx-r1swpln1:\"\n",
-                    "    echo \"      addresses:\"\n",
-                    "    echo \"        - {{ .rail1_swp1_ip }}\"\n",
-                    "    echo \"      routes:\"\n",
-                    "    echo \"        - to: {{ .rail1_swp1_route1 }}\"\n",
-                    "    echo \"          via: {{ .rail1_swp1_gw }}\"\n",
-                    "    echo \"        - to: {{ .rail1_swp1_route2 }}\"\n",
-                    "    echo \"          via: {{ .rail1_swp1_gw }}\"\n",
-                    "    echo \"    brcx-r2swpln1:\"\n",
-                    "    echo \"      addresses:\"\n",
-                    "    echo \"        - {{ .rail2_swp1_ip }}\"\n",
-                    "    echo \"      routes:\"\n",
-                    "    echo \"        - to: {{ .rail2_swp1_route1 }}\"\n",
-                    "    echo \"          via: {{ .rail2_swp1_gw }}\"\n",
-                    "    echo \"        - to: {{ .rail2_swp1_route2 }}\"\n",
-                    "    echo \"          via: {{ .rail2_swp1_gw }}\"\n",
-                    "    echo \"    brcx-r3swpln1:\"\n",
-                    "    echo \"      addresses:\"\n",
-                    "    echo \"        - {{ .rail3_swp1_ip }}\"\n",
-                    "    echo \"      routes:\"\n",
-                    "    echo \"        - to: {{ .rail3_swp1_route1 }}\"\n",
-                    "    echo \"          via: {{ .rail3_swp1_gw }}\"\n",
-                    "    echo \"        - to: {{ .rail3_swp1_route2 }}\"\n",
-                    "    echo \"          via: {{ .rail3_swp1_gw }}\"\n",
+                    "    for row in \"${UNDERLAY_ROWS[@]}\"; do\n",
+                    "        IFS='|' read -r mac address gateway route1 route2 <<< \"$row\"\n",
+                    "        bridge=\"$(bridge_for_mac \"$mac\")\" || {\n",
+                    "            echo \"xplane-bridge.sh: no bridge found for underlay MAC ${mac}\" >&2\n",
+                    "            exit 1\n",
+                    "        }\n",
+                    "        echo \"    ${bridge}:\"\n",
+                    "        echo \"      addresses:\"\n",
+                    "        echo \"        - ${address}\"\n",
+                    "        echo \"      routes:\"\n",
+                    "        echo \"        - to: ${route1}\"\n",
+                    "        echo \"          via: ${gateway}\"\n",
+                    "        echo \"        - to: ${route2}\"\n",
+                    "        echo \"          via: ${gateway}\"\n",
+                    "    done\n",
                     "} > \"$NETPLAN_FILE\"\n",
                     "\n",
                     "netplan apply\n",
@@ -1446,6 +1499,9 @@ fn get_bf4_astra_config_files(
             r#type: Some(DpuFlavorConfigFilesType::AgentApplied),
         },
     ];
+
+    config_files.extend(hbn_apparmor_config_files());
+
     if let Some(proxy) = proxy {
         validate_proxy_string(&proxy.https_proxy, "https_proxy")?;
 
@@ -1651,7 +1707,7 @@ mod tests {
     fn astra_flavor_spec(proxy: &Option<DpfProxyDetails>) -> DpuFlavorSpec {
         let interfaces = crate::sdk::build_astra_dpu_interfaces_vec();
         let pf_total_sf = crate::sdk::calculate_astra_pf_total_sf(interfaces.as_slice()).unwrap();
-        let template = flavor_bf4_astra("astra-ns", proxy, pf_total_sf).unwrap();
+        let template = flavor_bf4_astra("astra-ns", proxy, pf_total_sf, &[]).unwrap();
         flavor_spec_from_template(&template)
     }
 
@@ -1884,13 +1940,22 @@ mod tests {
 
         // BF3 and generic BF4 consume the validated site value.
         let bf3 = parameters(
-            default_flavor_with_topology("ns", &None, DpuDeploymentType::Bf3, 3, 61, None, None)
-                .unwrap(),
+            default_flavor_with_topology(
+                "ns",
+                &None,
+                DpuDeploymentType::Bf3,
+                3,
+                61,
+                None,
+                None,
+                &[],
+            )
+            .unwrap(),
         );
         assert!(bf3.contains(&"NUM_OF_VFS=3".to_string()));
         assert!(bf3.contains(&"PF_TOTAL_SF=61".to_string()));
         let generic_bf4 =
-            parameters(flavor_bf4_with_topology("ns", &None, 5, 63, None, None).unwrap());
+            parameters(flavor_bf4_with_topology("ns", &None, 5, 63, None, None, &[]).unwrap());
         assert!(generic_bf4.contains(&"NUM_OF_VFS=5".to_string()));
         assert!(generic_bf4.contains(&"PF_TOTAL_SF=63".to_string()));
 
@@ -1949,6 +2014,204 @@ mod tests {
         assert!(!gb200.contains(&"PCI_SWITCH0_UPSTREAM_PORT_PEX=0".to_string()));
     }
 
+    /// Builds a flavor from operator-supplied bf.cfg parameters and returns the field they land in.
+    fn bfcfg_parameters(deployment_type: DpuDeploymentType, extra: &[&str]) -> Option<Vec<String>> {
+        let extra: Vec<String> = extra.iter().map(|p| (*p).to_string()).collect();
+        // Astra is a DPUFlavorTemplate, so its spec comes back through the rendered body.
+        if matches!(deployment_type, DpuDeploymentType::Bf4Astra) {
+            let interfaces = crate::sdk::build_astra_dpu_interfaces_vec();
+            let pf_total_sf =
+                crate::sdk::calculate_astra_pf_total_sf(interfaces.as_slice()).unwrap();
+            let template = flavor_bf4_astra("ns", &None, pf_total_sf, &extra).unwrap();
+            return flavor_spec_from_template(&template).bfcfg_parameters;
+        }
+        default_flavor_for_with_topology(
+            "ns",
+            &None,
+            deployment_type,
+            DEFAULT_DPU_NUM_OF_VFS,
+            DEFAULT_PF_TOTAL_SF_RESERVED,
+            None,
+            None,
+            &extra,
+        )
+        .unwrap()
+        .spec
+        .bfcfg_parameters
+    }
+
+    /// A password line: a crypt(3) hash with `$` sections and operator-supplied shell quoting,
+    /// both of which must survive unchanged.
+    const PASSWORD_PARAMETER: &str = "ubuntu_PASSWORD='$6$rounds=5000$sa.lt$h/a.sh'";
+
+    #[test]
+    fn extra_bfcfg_parameters_are_appended_verbatim() {
+        // BF3 and generic BF4 append operator input after their built-ins. Astra has no built-ins
+        // and carries the operator's entries alone, leaving the field absent when there are none.
+        // Spelled out rather than read back from the builders, so a changed built-in fails here.
+        let built_ins = || {
+            vec![
+                "UPDATE_ATF_UEFI=yes".to_string(),
+                "UPDATE_DPU_OS=yes".to_string(),
+                "WITH_NIC_FW_UPDATE=yes".to_string(),
+            ]
+        };
+        let with_extras = |extras: &[&str]| {
+            let mut parameters = built_ins();
+            parameters.extend(extras.iter().map(|p| (*p).to_string()));
+            Some(parameters)
+        };
+
+        value_scenarios!(
+            run = |(deployment_type, extra): (DpuDeploymentType, &[&str])| {
+                bfcfg_parameters(deployment_type, extra)
+            };
+
+            "BF3 without extras keeps only its built-ins" {
+                (DpuDeploymentType::Bf3, &[][..]) => Some(built_ins()),
+            }
+
+            "BF3 appends the password after its built-ins" {
+                (DpuDeploymentType::Bf3, &[PASSWORD_PARAMETER][..])
+                    => with_extras(&[PASSWORD_PARAMETER]),
+            }
+
+            "generic BF4 appends the password after its built-ins" {
+                (DpuDeploymentType::Bf4Generic, &[PASSWORD_PARAMETER][..])
+                    => with_extras(&[PASSWORD_PARAMETER]),
+            }
+
+            "multiple parameters retain configured order" {
+                (DpuDeploymentType::Bf3, &["FIRST=1", "SECOND=2"][..])
+                    => with_extras(&["FIRST=1", "SECOND=2"]),
+            }
+
+            "Astra without extras leaves bfcfgParameters absent" {
+                // Absent, not empty: Astra has no built-ins, and emitting a list would change its
+                // template hash and reprovision every Astra DPU with no operator change.
+                (DpuDeploymentType::Bf4Astra, &[][..]) => None,
+            }
+
+            "Astra carries the operator's parameters alone" {
+                (DpuDeploymentType::Bf4Astra, &[PASSWORD_PARAMETER][..])
+                    => Some(vec![PASSWORD_PARAMETER.to_string()]),
+            }
+
+            "a value NICo would have to quote is passed through byte for byte" {
+                (DpuDeploymentType::Bf3, &["RAW=\"$un touched'\\\""][..])
+                    => with_extras(&["RAW=\"$un touched'\\\""]),
+            }
+        );
+    }
+
+    /// Builds a flavor for `deployment_type`, discarding the value, so error cases can be checked
+    /// uniformly across the DPUFlavor and DPUFlavorTemplate variants.
+    fn build_flavor(deployment_type: DpuDeploymentType, extra: &[&str]) -> Result<(), ()> {
+        let extra: Vec<String> = extra.iter().map(|p| (*p).to_string()).collect();
+        if matches!(deployment_type, DpuDeploymentType::Bf4Astra) {
+            let interfaces = crate::sdk::build_astra_dpu_interfaces_vec();
+            let pf_total_sf =
+                crate::sdk::calculate_astra_pf_total_sf(interfaces.as_slice()).unwrap();
+            return flavor_bf4_astra("ns", &None, pf_total_sf, &extra)
+                .map(drop)
+                .map_err(drop);
+        }
+        default_flavor_for_with_topology(
+            "ns",
+            &None,
+            deployment_type,
+            DEFAULT_DPU_NUM_OF_VFS,
+            DEFAULT_PF_TOTAL_SF_RESERVED,
+            None,
+            None,
+            &extra,
+        )
+        .map(drop)
+        .map_err(drop)
+    }
+
+    #[test]
+    fn go_template_delimiters_are_rejected_for_every_deployment_type() {
+        // Astra's spec becomes a Go-rendered DPUFlavorTemplate body, so `{{` cannot survive there
+        // as literal text. BF3 and generic BF4 would pass it through, but are held to the same
+        // rule so the configuration contract does not vary by deployment type.
+        scenarios!(
+            run = |(deployment_type, parameter): (DpuDeploymentType, &str)| {
+                build_flavor(deployment_type, &[parameter])
+            };
+
+            "BF3 rejects a Go action" {
+                (DpuDeploymentType::Bf3, "SOME_KEY={{ .underlayIp }}") => Fails,
+            }
+
+            "generic BF4 rejects a Go action" {
+                (DpuDeploymentType::Bf4Generic, "SOME_KEY={{ .underlayIp }}") => Fails,
+            }
+
+            "Astra rejects a Go action" {
+                (DpuDeploymentType::Bf4Astra, "SOME_KEY={{ .underlayIp }}") => Fails,
+            }
+
+            "an unspaced Go action is rejected too" {
+                (DpuDeploymentType::Bf4Astra, "SOME_KEY={{.underlayIp}}") => Fails,
+            }
+
+            "a password hash is accepted" {
+                (DpuDeploymentType::Bf4Astra, PASSWORD_PARAMETER) => Yields(()),
+            }
+
+            "a lone closing delimiter is literal to the renderer and stays allowed" {
+                (DpuDeploymentType::Bf4Astra, "SOME_KEY=a}}b") => Yields(()),
+            }
+
+            "a single brace is not a delimiter" {
+                (DpuDeploymentType::Bf3, "SOME_KEY={value}") => Yields(()),
+            }
+        );
+    }
+
+    #[test]
+    fn extra_bfcfg_parameters_change_the_flavor_name() {
+        // The parameters are part of the hashed spec. A rename is what makes MachineUpdateManager
+        // reprovision, which is the only path by which a changed value reaches an installed DPU.
+        let name = |extra: &[&str]| {
+            let extra: Vec<String> = extra.iter().map(|p| (*p).to_string()).collect();
+            default_flavor_for_with_topology(
+                "ns",
+                &None,
+                DpuDeploymentType::Bf3,
+                DEFAULT_DPU_NUM_OF_VFS,
+                DEFAULT_PF_TOTAL_SF_RESERVED,
+                None,
+                None,
+                &extra,
+            )
+            .unwrap()
+            .unique_name(DEFAULT_FLAVOR_NAME)
+            .unwrap()
+        };
+
+        value_scenarios!(
+            run = |(left, right): (&[&str], &[&str])| name(left) == name(right);
+
+            "identical parameters keep the name stable" {
+                (&[PASSWORD_PARAMETER][..], &[PASSWORD_PARAMETER][..]) => true,
+            }
+
+            "setting a parameter renames the flavor" {
+                (&[][..], &[PASSWORD_PARAMETER][..]) => false,
+            }
+
+            "rotating the password renames the flavor" {
+                (&[PASSWORD_PARAMETER][..], &["ubuntu_PASSWORD='$6$other'"][..]) => false,
+            }
+
+            "reordering renames the flavor, since order is preserved not normalized" {
+                (&["FIRST=1", "SECOND=2"][..], &["SECOND=2", "FIRST=1"][..]) => false,
+            }
+        );
+    }
+
     /// Verifies normalized input order cannot change rendered flavor identity.
     #[test]
     fn intercept_bridging_input_order_does_not_change_flavor_hash() {
@@ -1969,6 +2232,7 @@ mod tests {
                 DEFAULT_PF_TOTAL_SF_RESERVED + 7,
                 Some(topology),
                 Some(&interfaces),
+                &[],
             )
             .unwrap()
             .unique_name(DEFAULT_FLAVOR_NAME)
@@ -2356,6 +2620,7 @@ mod tests {
                 crate::sdk::build_astra_dpu_interfaces_vec().as_slice(),
             )
             .unwrap(),
+            &[],
         )
         .unwrap();
         let template_body: serde_yaml::Value =
@@ -2507,12 +2772,45 @@ mod tests {
                         .find(|file| file.path == "/etc/mellanox/xplane-bridge.sh")
                         .and_then(|file| file.raw.as_ref())
                         .unwrap();
-                    xplane_script.contains("{{ .rail0_swp0_ip }}")
-                        && xplane_script.contains("{{ .rail0_swp0_gw }}")
-                        && xplane_script.contains("{{ .rail0_swp0_route1 }}")
-                        && xplane_script.contains("{{ .rail3_swp1_ip }}")
-                        && xplane_script.contains("{{ .rail3_swp1_gw }}")
-                        && xplane_script.contains("{{ .rail3_swp1_route2 }}")
+                    xplane_script.contains("{{ .mac_0_val }}")
+                        && xplane_script.contains("{{ .ip_0_val }}")
+                        && xplane_script.contains("{{ .gw_0_val }}")
+                        && xplane_script.contains("{{ .route1_0_val }}")
+                        && xplane_script.contains("{{ .mac_7_val }}")
+                        && xplane_script.contains("{{ .ip_7_val }}")
+                        && xplane_script.contains("{{ .gw_7_val }}")
+                        && xplane_script.contains("{{ .route2_7_val }}")
+                        && xplane_script.contains(
+                            "/sys/bus/pci/devices/${pci}/net/${iface_val}/smart_nic/pf/config",
+                        )
+                        && xplane_script.contains("iface_val=\"${iface_prefix}p0\"")
+                } => true,
+            }
+
+            "xplane port mapping uses the Astra interface, PCI, bridge, and group rows" {
+                {
+                    let ovs_setup_script = flavor
+                        .spec
+                        .config_files
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .find(|file| file.path == "/etc/mellanox/ovs-script.sh")
+                        .and_then(|file| file.raw.as_ref())
+                        .unwrap();
+                    ovs_setup_script.contains("IFS='|' read -r iface_prefix pci_address bridge group_id")
+                        && [
+                            "A53|0005:03:00.0|brcx-r1swpln0|r1swpln0",
+                            "A56|0005:06:00.0|brcx-r0swpln0|r0swpln0",
+                            "A43|0004:03:00.0|brcx-r0swpln1|r0swpln1",
+                            "A46|0004:06:00.0|brcx-r1swpln1|r1swpln1",
+                            "A3|0000:03:00.0|brcx-r3swpln0|r3swpln0",
+                            "A6|0000:06:00.0|brcx-r2swpln0|r2swpln0",
+                            "A13|0001:03:00.0|brcx-r2swpln1|r2swpln1",
+                            "A16|0001:06:00.0|brcx-r3swpln1|r3swpln1",
+                        ]
+                        .into_iter()
+                        .all(|row| ovs_setup_script.contains(row))
                 } => true,
             }
 
@@ -2617,12 +2915,12 @@ mod tests {
                     .count();
                 (files.len(), proxy_file_count)
             };
-            "no proxy keeps the twelve Astra base files" {
-                None => (12, 0),
+            "no proxy keeps the fourteen Astra base files" {
+                None => (14, 0),
             }
 
             "configured proxy appends exactly one proxy file" {
-                proxy("http://proxy:3128", &["10.0.0.0/8", "localhost"]) => (13, 1),
+                proxy("http://proxy:3128", &["10.0.0.0/8", "localhost"]) => (15, 1),
             }
         );
     }
@@ -2640,16 +2938,74 @@ mod tests {
                     .unwrap()
                     .len()
             };
-            "no proxy yields nine base files" {
-                None => 9,
+            "no proxy yields eleven base files" {
+                None => 11,
             }
 
-            "proxy with empty no_proxy appends a tenth" {
-                proxy("http://proxy:3128", &[]) => 10,
+            "proxy with empty no_proxy appends a twelfth" {
+                proxy("http://proxy:3128", &[]) => 12,
             }
 
             "proxy with no_proxy list still appends exactly one" {
-                proxy("http://proxy:3128", &["10.0.0.0/8", "localhost"]) => 10,
+                proxy("http://proxy:3128", &["10.0.0.0/8", "localhost"]) => 12,
+            }
+        );
+    }
+
+    #[test]
+    fn every_deployment_type_includes_hbn_apparmor_extensions() {
+        value_scenarios!(
+            run = |deployment_type| {
+                let files = match deployment_type {
+                    DpuDeploymentType::Bf4Astra => {
+                        astra_flavor_spec(&None).config_files.unwrap()
+                    }
+                    deployment_type => default_flavor_for("ns", &None, deployment_type)
+                        .unwrap()
+                        .spec
+                        .config_files
+                        .unwrap(),
+                };
+                let has_file = |path: &str, raw: &str| {
+                    files.iter().find(|file| file.path == path).is_some_and(|file| {
+                        matches!(
+                            file.operation,
+                            Some(DpuFlavorConfigFilesOperation::Override)
+                        ) && file.permissions.as_deref() == Some("0644")
+                            && file.raw.as_deref() == Some(raw)
+                            && file.content_from.is_none()
+                            && file.r#type.is_none()
+                    })
+                };
+
+                has_file(
+                    "/etc/apparmor.d/local/usr.sbin.rsyslogd",
+                    concat!(
+                        "signal (receive) peer=runc,\n",
+                        "capability chown,\n",
+                        "/usr/{bin,sbin}/* ixr,\n",
+                        "/etc/logrotate.d/* rk,\n",
+                        "/var/lib/logrotate/{,**} rwk,\n",
+                    ),
+                ) && has_file(
+                    "/etc/apparmor.d/local/usr.bin.tcpdump",
+                    "signal (receive) peer=runc,\n",
+                )
+            };
+            "BF3" {
+                DpuDeploymentType::Bf3 => true,
+            }
+
+            "GB200 BF3" {
+                DpuDeploymentType::Bf3Gb200 => true,
+            }
+
+            "generic BF4" {
+                DpuDeploymentType::Bf4Generic => true,
+            }
+
+            "Astra BF4" {
+                DpuDeploymentType::Bf4Astra => true,
             }
         );
     }

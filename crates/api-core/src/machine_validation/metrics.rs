@@ -193,6 +193,8 @@ mod tests {
             components: vec![],
             last_modified_at: Utc::now(),
             is_enabled: true,
+            plugin: None,
+            full_host_approved: false,
         }];
         let test_meter = TestMeter::default();
 

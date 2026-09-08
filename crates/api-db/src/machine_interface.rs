@@ -21,7 +21,7 @@ use std::net::IpAddr;
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::domain::DomainId;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait, MachineInterfaceId};
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::switch::SwitchId;
@@ -468,20 +468,38 @@ pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<MachineInter
     find_by(txn, ObjectColumnFilter::All::<IdColumn>).await
 }
 
-pub async fn find_by_machine_ids(
+pub async fn find_by_machine_ids<ID>(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
-) -> Result<std::collections::HashMap<MachineId, Vec<MachineInterfaceSnapshot>>, DatabaseError> {
+    machine_ids: &[ID],
+) -> Result<std::collections::HashMap<ID, Vec<MachineInterfaceSnapshot>>, DatabaseError>
+where
+    ID: MachineIdSubtypeTrait,
+{
     use itertools::Itertools;
-    // The .unwrap() in the `group_map_by` call is ok - because we are only
-    // searching for Machines which have associated MachineIds
-    Ok(
-        find_by(txn, ObjectColumnFilter::List(MachineIdColumn, machine_ids))
-            .await?
-            .into_iter()
-            .filter(|interface| interface.interface_type != InterfaceType::Bmc)
-            .into_group_map_by(|interface| interface.machine_id.unwrap()),
+    Ok(find_by(
+        txn,
+        ObjectColumnFilter::List(
+            MachineIdColumn,
+            machine_ids
+                .iter()
+                .map(MachineIdSubtypeTrait::to_machine_id)
+                .collect::<Vec<_>>()
+                .as_slice(),
+        ),
     )
+    .await?
+    .into_iter()
+    .filter_map(|interface| {
+        let Some(Ok(interface_id)) = interface.machine_id.map(ID::try_from) else {
+            return None;
+        };
+        if interface.interface_type != InterfaceType::Bmc {
+            Some((interface_id, interface))
+        } else {
+            None
+        }
+    })
+    .into_group_map())
 }
 
 /// `find_by_machine_id_for_update` locks one host's non-BMC interface rows in

@@ -42,6 +42,7 @@ pub(super) mod expected_switch;
 pub(super) mod extension_service;
 pub(super) mod finder;
 pub(super) mod firmware;
+pub(super) mod gpu_reset;
 pub(super) mod health;
 pub(super) mod host_reprovisioning;
 pub(super) mod ib_fabric;
@@ -91,6 +92,7 @@ pub(super) mod switch;
 pub(super) mod tenant;
 pub(super) mod tenant_identity_config;
 pub(super) mod tenant_keyset;
+mod tenant_prefix_overlap;
 pub(super) mod tpm_ca;
 pub(super) mod uefi;
 pub(super) mod uefi_credential_rotation;
@@ -110,7 +112,7 @@ pub(crate) async fn resolve_machine_interface_for_test(
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn process_scout_req_for_test(
     api: &crate::Api,
-    machine_id: carbide_uuid::machine::MachineId,
+    machine_id: carbide_uuid::machine::HostMachineId,
 ) -> crate::CarbideResult<rpc::forge_agent_control_response::Action> {
     svpc::process_scout_req(api, machine_id).await
 }

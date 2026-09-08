@@ -1,6 +1,9 @@
+{/* <!-- rumdl-disable MD041 --> */}
+
 This guide explains how to configure authentication and authorization for the NICo REST API.
 
 ### Overview
+
 NICo REST API uses JWT bearer tokens for authentication. For every API request, the service validates the token signature and issuer, then uses configured claim mappings to determine the caller's organization and roles.
 
 Authorization is role based. NICo supports two roles:
@@ -33,9 +36,10 @@ sequenceDiagram
   end
 ```
 
-Additional auth configuration details are documented in [`rest-api/auth/README.md`](https://github.com/NVIDIA/infra-controller/blob/main/rest-api/auth/README.md).
+Additional auth configuration details are documented in [`rest-api/auth/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/auth/README.md).
 
 ### Choose an Authentication Mode
+
 NICo REST API supports two authentication configuration modes:
 
 - Configure one or more external JWT issuers under `issuers`.
@@ -44,9 +48,10 @@ NICo REST API supports two authentication configuration modes:
 Use only one mode for a deployment. Helm values document `issuers` and `keycloak` as mutually exclusive. When Keycloak is disabled, at least one issuer should be configured.
 
 ### Where to Configure Authentication
+
 Authentication is part of the REST API configuration.
 
-For local or direct REST API configuration, update `issuers` or `keycloak` in [`rest-api/api/config.yaml`](https://github.com/NVIDIA/infra-controller/blob/main/rest-api/api/config.yaml):
+For local or direct REST API configuration, update `issuers` or `keycloak` in [`rest-api/api/config.yaml`](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/api/config.yaml):
 
 ```yaml
 issuers:
@@ -63,7 +68,7 @@ issuers:
         roles: ["TENANT_ADMIN"]
 ```
 
-For Helm deployments, set the same values under `config` in [`helm/rest/nico-rest/charts/nico-rest-api/values.yaml`](https://github.com/NVIDIA/infra-controller/blob/main/helm/rest/nico-rest/charts/nico-rest-api/values.yaml):
+For Helm deployments, set the same values under `config` in [`helm/rest/nico-rest/charts/nico-rest-api/values.yaml`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/rest/nico-rest/charts/nico-rest-api/values.yaml):
 
 ```yaml
 config:
@@ -81,7 +86,7 @@ config:
           roles: ["TENANT_ADMIN"]
 ```
 
-For Kustomize deployments, set the same values in the REST API ConfigMap at [`rest-api/deploy/kustomize/base/api/configmap.yaml`](https://github.com/NVIDIA/infra-controller/blob/main/rest-api/deploy/kustomize/base/api/configmap.yaml) under `data.config.yaml`:
+For Kustomize deployments, set the same values in the REST API ConfigMap at [`rest-api/deploy/kustomize/base/api/configmap.yaml`](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/deploy/kustomize/base/api/configmap.yaml) under `data.config.yaml`:
 
 ```yaml
 apiVersion: v1
@@ -107,6 +112,7 @@ data:
 After changing a Kubernetes ConfigMap or Helm value, restart or roll out the REST API pods so the service loads the updated configuration.
 
 ### Configure an External JWT Issuer
+
 Use `issuers` when tokens are issued by an external identity provider. Each issuer entry tells NICo where to get signing keys, which issuer claim to trust, and how to map token claims to NICo organizations and roles.
 
 ```yaml
@@ -231,9 +237,11 @@ For example, `aud: ["api-audience", "tenant-client-a"]` authorizes `tenant-org` 
 NICo supports `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, `ES256`, `ES384`, `ES512`, and `EdDSA` signed tokens.
 
 ### Claim Mapping Recipes
+
 Claim mappings are the bridge between identity-provider claims and NICo authorization. Choose the mapping style that matches how your IdP represents users, organizations, and roles.
 
 #### Service Account
+
 Use this for machine-to-machine automation. A service account gets both provider and tenant admin roles for the configured organization, which is useful when building a SaaS on top of NICo with its own tenancy layer.
 
 ```yaml
@@ -246,6 +254,7 @@ claimMappings:
 When the REST API is configured in service account mode, API users should first call the [Retrieve Service Account endpoint](/infra-controller/rest-api-reference/api-reference/service-account/get-current-service-account). The service account organization can act as both provider and tenant for common bootstrap and automation workflows.
 
 #### Static Organization and Static Roles
+
 Use this for the simplest onboarding path: every token from the issuer maps to the same NICo organization and fixed roles.
 
 ```yaml
@@ -256,6 +265,7 @@ claimMappings:
 ```
 
 #### Static Organization and Dynamic Roles
+
 Use this when every token belongs to the same organization, but the IdP controls each user's roles.
 
 ```yaml
@@ -268,6 +278,7 @@ claimMappings:
 The `rolesAttribute` value can use dot notation for nested claims. Roles may be provided as an array, such as `["TENANT_ADMIN"]`, or as a space-separated string, such as `"TENANT_ADMIN PROVIDER_ADMIN"`.
 
 #### Dynamic Organization and Dynamic Roles
+
 Use this for multi-tenant identity providers where organization and role information comes from token claims.
 
 ```yaml
@@ -310,7 +321,9 @@ All three attributes support dot notation for nested claims. For example, if `or
 Dynamic organizations cannot use an organization name already reserved by a static `orgName` mapping. A dynamic mapping may set `audiences`, but the same flat audience set gates every organization it resolves; audience values are not bound to resolved organization names.
 
 ### Common Configuration Examples
+
 #### SaaS Service Account
+
 Use this when building a SaaS on top of NICo with its own tenancy layer. NICo sees the SaaS backend as one automation identity with both provider and tenant privileges, while the SaaS application manages end-user tenants separately.
 
 ```yaml
@@ -326,6 +339,7 @@ issuers:
 ```
 
 #### One Business with Provider and Tenant Teams
+
 Use this when one team or group manages infrastructure and another team or group consumes it within the same business. Both teams authenticate through the same issuer, but NICo maps them to separate organizations and roles.
 
 ```yaml
@@ -344,6 +358,7 @@ issuers:
 ```
 
 #### Provider with Multiple Tenant IdPs
+
 Use this when NICo has one provider organization and multiple tenant organizations that authenticate through different identity providers. The provider issuer maps only to `PROVIDER_ADMIN`; each tenant issuer maps only to its own `TENANT_ADMIN` organization.
 
 ```yaml
@@ -375,6 +390,7 @@ issuers:
 ```
 
 ### Configure Keycloak
+
 Use the `keycloak` section when deploying NICo with the built-in Keycloak integration.
 
 ```yaml
@@ -418,6 +434,7 @@ If Keycloak is exposed through an ingress, only expose the public endpoints requ
 Block administrative and token-exchange paths, including `/admin/*` and `/realms/{realm}/protocol/openid-connect/token`, from external access unless your deployment explicitly requires them.
 
 ### Validation Rules
+
 Use these rules when reviewing a configuration before rollout:
 
 - Issuer names must be unique.
@@ -430,6 +447,7 @@ Use these rules when reviewing a configuration before rollout:
 - Roles must be `TENANT_ADMIN`, `PROVIDER_ADMIN`, or both.
 
 ### Troubleshooting
+
 If requests fail after authentication is enabled, check the token and REST API configuration together.
 
 - `401 Unauthorized` with an audience error usually means the token `aud` claim does not match any configured `audiences`. Update the IdP client audience, update NICo `audiences`, or omit `audiences` if audience enforcement is not needed.

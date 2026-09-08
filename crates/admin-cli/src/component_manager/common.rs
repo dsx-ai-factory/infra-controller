@@ -20,6 +20,7 @@ use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
+use mac_address::MacAddress;
 
 const MAX_FAILURE_DETAILS: usize = 10;
 
@@ -115,22 +116,43 @@ impl From<PowerShelfTargetArgs> for rpc::forge::PowerShelfIdList {
     }
 }
 
+/// Compute-tray target: either machine ids or BMC MAC addresses, exactly one of
+/// which must be supplied. MACs let operators target compute trays before
+/// ingestion has assigned a machine id.
 #[derive(ClapArgs, Debug)]
-pub(super) struct MachineTargetArgs {
+#[clap(group(
+    clap::ArgGroup::new("compute_tray_target")
+        .required(true)
+        .args(["machine_ids", "mac_addresses"])
+))]
+pub(super) struct ComputeTrayTargetArgs {
     #[clap(
         long = "machine-id",
-        required = true,
         num_args = 1..,
         value_delimiter = ',',
         help = "Machine IDs to target"
     )]
     machine_ids: Vec<MachineId>,
+
+    #[clap(flatten)]
+    macs: MacTargetArgs,
 }
 
-impl From<MachineTargetArgs> for rpc::common::MachineIdList {
-    fn from(args: MachineTargetArgs) -> Self {
-        Self {
-            machine_ids: args.machine_ids,
+/// The resolved compute-tray selection, mapped by each command into the proto
+/// oneof variant for its request type.
+pub(super) enum ComputeTraySelection {
+    MachineIds(rpc::common::MachineIdList),
+    Macs(rpc::forge::MacAddressList),
+}
+
+impl ComputeTrayTargetArgs {
+    pub(super) fn into_selection(self) -> ComputeTraySelection {
+        if !self.macs.is_present() {
+            ComputeTraySelection::MachineIds(rpc::common::MachineIdList {
+                machine_ids: self.machine_ids,
+            })
+        } else {
+            ComputeTraySelection::Macs(self.macs.into())
         }
     }
 }
@@ -155,6 +177,39 @@ impl From<RackTargetArgs> for rpc::forge::RackIdList {
     }
 }
 
+/// Shared `--mac-address` target option for component-manager commands.
+/// Operators must specify either the mac address or the device ID but not both.
+#[derive(ClapArgs, Debug)]
+pub(super) struct MacTargetArgs {
+    #[clap(
+        long = "mac-address",
+        num_args = 1..,
+        value_delimiter = ',',
+        help = "Device MAC addresses to target (BMC MAC for compute/switch, PMC MAC for power shelf)"
+    )]
+    mac_addresses: Vec<MacAddress>,
+}
+
+impl MacTargetArgs {
+    /// Whether the caller supplied any MAC addresses (used by per-type tracks
+    /// to pick the MAC branch of the id/MAC `ArgGroup`).
+    pub(super) fn is_present(&self) -> bool {
+        !self.mac_addresses.is_empty()
+    }
+}
+
+impl From<MacTargetArgs> for rpc::forge::MacAddressList {
+    fn from(args: MacTargetArgs) -> Self {
+        Self {
+            mac_addresses: args
+                .mac_addresses
+                .iter()
+                .map(MacAddress::to_string)
+                .collect(),
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub(super) enum DeviceTargetArgs {
     #[clap(about = "Target NVLink switches")]
@@ -164,7 +219,7 @@ pub(super) enum DeviceTargetArgs {
     PowerShelf(PowerShelfTargetArgs),
 
     #[clap(about = "Target compute trays")]
-    ComputeTray(MachineTargetArgs),
+    ComputeTray(ComputeTrayTargetArgs),
 
     #[clap(about = "Target racks")]
     Rack(RackTargetArgs),
@@ -182,7 +237,7 @@ pub(super) enum PowerControlTargetArgs {
     PowerShelf(PowerShelfTargetArgs),
 
     #[clap(about = "Target compute trays")]
-    ComputeTray(MachineTargetArgs),
+    ComputeTray(ComputeTrayTargetArgs),
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -275,7 +330,7 @@ fn component_failure_detail(result: Option<&rpc::forge::ComponentResult>) -> Str
         return "unknown=missing-result".to_string();
     };
 
-    let component_id = display_or_dash(&result.component_id);
+    let component_id = display_or_dash(component_result_identifier(result));
     let status = component_result_status_name(result.status);
     if result.error.is_empty() {
         format!("{component_id}={status}({})", result.status)
@@ -292,7 +347,7 @@ pub(super) fn component_result_fields(
 ) -> (String, String, String) {
     match result {
         Some(result) => (
-            display_or_dash(&result.component_id),
+            display_or_dash(component_result_identifier(result)),
             component_result_status_name(result.status).to_string(),
             display_or_dash(&result.error),
         ),
@@ -310,6 +365,7 @@ pub(super) fn component_result_json(
     match result {
         Some(result) => serde_json::json!({
             "component_id": result.component_id,
+            "mac_address": result.mac_address,
             "status": component_result_status_name(result.status),
             "status_code": result.status,
             "error": result.error,
@@ -348,6 +404,19 @@ pub(super) fn display_or_dash(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+/// The identifier to display for a component result: the component ID for an
+/// ingested component, or the echoed BMC/PMC MAC address for a MAC-targeted
+/// (possibly pre-ingestion) request, which carries no component ID. Empty when
+/// neither is known, so callers still render a dash.
+fn component_result_identifier(result: &rpc::forge::ComponentResult) -> &str {
+    result
+        .component_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .or(result.mac_address.as_deref())
+        .unwrap_or_default()
 }
 
 pub(super) fn join_or_dash(values: &[String]) -> String {

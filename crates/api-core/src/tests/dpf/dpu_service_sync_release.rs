@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ::rpc::forge as rpc;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
 use rpc::DpuServiceSyncReleaseStatus as ReleaseStatus;
 use rpc::forge_server::Forge;
 use tonic::Request;
@@ -37,12 +37,12 @@ use super::dpu_service_sync::{
     reset_host_to_waiting_for_ready,
 };
 
-fn by_machine_ids(ids: &[MachineId]) -> rpc::ReleaseDpuServiceSyncHoldRequest {
+fn by_machine_ids(ids: &[impl MachineIdSubtypeTrait]) -> rpc::ReleaseDpuServiceSyncHoldRequest {
     rpc::ReleaseDpuServiceSyncHoldRequest {
         target: Some(
             rpc::release_dpu_service_sync_hold_request::Target::MachineIds(
                 ::rpc::common::MachineIdList {
-                    machine_ids: ids.to_vec(),
+                    machine_ids: ids.iter().copied().map(Into::into).collect::<Vec<_>>(),
                 },
             ),
         ),
@@ -219,7 +219,7 @@ async fn a_mixed_batch_reports_one_result_per_machine_in_request_order(pool: sql
     let results = release(&fixture, by_machine_ids(&[fixture.mh.id, fixture.mh.id])).await;
 
     assert_eq!(results.len(), 2, "one result per named machine");
-    assert_eq!(results[0].0, fixture.mh.id);
+    assert_eq!(results[0].0, fixture.mh.id.into());
     assert_eq!(results[0].1, ReleaseStatus::Released);
     assert_eq!(results[1].1, ReleaseStatus::NotPending);
 }
@@ -272,7 +272,7 @@ async fn an_assigned_host_named_by_instance_id_is_released(pool: sqlx::PgPool) {
     .await;
 
     assert_eq!(results.len(), 1, "the instance resolves to its one host");
-    assert_eq!(results[0].0, fixture.mh.id);
+    assert_eq!(results[0].0, fixture.mh.id.into());
     assert_eq!(results[0].1, ReleaseStatus::Released);
     assert!(!is_outstanding(&fixture.pool, &fixture.mh.id).await);
 }
@@ -293,7 +293,10 @@ async fn an_unknown_machine_rejects_the_whole_call_before_releasing(pool: sqlx::
     let status = fixture
         .env
         .api
-        .release_dpu_service_sync_hold(Request::new(by_machine_ids(&[fixture.mh.id, unknown])))
+        .release_dpu_service_sync_hold(Request::new(by_machine_ids(&[
+            fixture.mh.id.into(),
+            unknown,
+        ])))
         .await
         .expect_err("unknown machine should be rejected");
 
@@ -334,7 +337,7 @@ async fn the_worklist_empties_on_release_and_the_history_records_the_operator(po
     request_sync(&fixture.pool, &fixture.mh.id).await;
 
     let worklist = worklist_ids(&fixture).await;
-    assert_eq!(worklist, vec![fixture.mh.id]);
+    assert_eq!(worklist, vec![fixture.mh.id.into()]);
 
     let detail = fixture
         .env
@@ -367,7 +370,7 @@ async fn the_worklist_empties_on_release_and_the_history_records_the_operator(po
         .env
         .api
         .list_dpu_service_sync_history(Request::new(rpc::ListDpuServiceSyncHistoryRequest {
-            machine_id: Some(fixture.mh.id),
+            machine_id: Some(fixture.mh.id.into()),
         }))
         .await
         .expect("history")

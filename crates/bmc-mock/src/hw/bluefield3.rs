@@ -157,6 +157,7 @@ impl Bluefield3<'_> {
                 id: Cow::Borrowed("Bluefield"),
                 manufacturer: Some(Cow::Borrowed("Nvidia")),
                 model: Some(Cow::Borrowed("BlueField-3 DPU")),
+                bios_version: None,
                 eth_interfaces: Some(eth_interfaces),
                 chassis: vec!["Bluefield_BMC".into()],
                 serial_number: Some(self.product_serial_number.to_string().into()),

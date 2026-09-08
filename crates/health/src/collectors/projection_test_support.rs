@@ -821,27 +821,32 @@ impl ProjectionFixture {
                     entity,
                     system: self.system.clone(),
                     sensors,
+                    gpu: None,
                 }
             }
             TestEntity::NvidiaGpuProcessor => DiscoveredEntity::Processor {
                 entity: self.processor("GPU0"),
                 system: self.system.clone(),
                 sensors: Vec::new(),
+                gpu: None,
             },
             TestEntity::SparseProcessor => DiscoveredEntity::Processor {
                 entity: self.processor("CPU-sparse"),
                 system: self.system.clone(),
                 sensors: Vec::new(),
+                gpu: None,
             },
             TestEntity::ProcessorWithEmptyMetrics => DiscoveredEntity::Processor {
                 entity: self.processor("CPU-empty"),
                 system: self.system.clone(),
                 sensors: Vec::new(),
+                gpu: None,
             },
             TestEntity::ProcessorWithMalformedMetrics => DiscoveredEntity::Processor {
                 entity: self.processor("CPU-malformed"),
                 system: self.system.clone(),
                 sensors: Vec::new(),
+                gpu: None,
             },
             TestEntity::Memory => DiscoveredEntity::Memory {
                 entity: self.memory("DIMM0"),
@@ -884,6 +889,7 @@ impl ProjectionFixture {
                 entity: self.chassis("CH0"),
                 sensors: Vec::new(),
                 shelf_power: None,
+                gpu: None,
             },
             TestEntity::ShelfChassis => {
                 let entity = self.chassis("CH0");
@@ -901,12 +907,14 @@ impl ProjectionFixture {
                     shelf_power: Some(ShelfPower {
                         subsystem: Some(subsystem),
                     }),
+                    gpu: None,
                 }
             }
             TestEntity::SparseChassis => DiscoveredEntity::Chassis {
                 entity: self.chassis("CH-sparse"),
                 sensors: Vec::new(),
                 shelf_power: None,
+                gpu: None,
             },
         }
     }

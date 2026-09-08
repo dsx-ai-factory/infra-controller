@@ -208,8 +208,8 @@ async fn test_dpf_inventory_uses_host_context_and_preserves_last_good_value(pool
 
     // Read both records through the public API and derive the expected CR name
     // independently from their reported BMC MAC addresses.
-    let host = env.find_machine(managed_host.id).await.remove(0);
-    let dpu = env.find_machine(managed_host.dpu_ids[0]).await.remove(0);
+    let host = env.find_machine(&managed_host.id).await.remove(0);
+    let dpu = env.find_machine(&managed_host.dpu_ids[0]).await.remove(0);
     assert!(
         host.config
             .as_ref()
@@ -245,7 +245,7 @@ async fn test_dpf_inventory_uses_host_context_and_preserves_last_good_value(pool
     // Report an incomplete agent inventory and confirm the operator value wins.
     let report = || {
         Request::new(rpc::DpuAgentInventoryReport {
-            machine_id: Some(managed_host.dpu_ids[0]),
+            machine_id: Some(managed_host.dpu_ids[0].into()),
             inventory: Some(rpc::MachineInventory {
                 components: vec![rpc::MachineInventorySoftwareComponent {
                     name: "agent-only".to_string(),
@@ -266,7 +266,7 @@ async fn test_dpf_inventory_uses_host_context_and_preserves_last_good_value(pool
         vec![expected_dpu_name]
     );
     let stored_inventory = env
-        .find_machine(managed_host.dpu_ids[0])
+        .find_machine(&managed_host.dpu_ids[0])
         .await
         .remove(0)
         .inventory
@@ -287,7 +287,7 @@ async fn test_dpf_inventory_uses_host_context_and_preserves_last_good_value(pool
         .await
         .expect_err("incomplete DPF inventory must be rejected");
     let inventory_after_error = env
-        .find_machine(managed_host.dpu_ids[0])
+        .find_machine(&managed_host.dpu_ids[0])
         .await
         .remove(0)
         .inventory

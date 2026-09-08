@@ -25,8 +25,8 @@ use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::Credentials;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
-use carbide_site_explorer::BmcEndpointExplorer;
 use carbide_site_explorer::config::SiteExplorerExploreMode;
+use carbide_site_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 use clap::Parser;
 use mac_address::MacAddress;
 use tracing_subscriber::fmt;
@@ -87,7 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proxy_address = Arc::new(ArcSwap::new(None.into()));
     let credential_provider = Arc::new(TestCredentialManager::new(fallback_credentials.clone()));
 
-    let redfish_client_pool = carbide_redfish::libredfish::new_pool(
+    // The explorer performs credential-lifecycle work, so it takes the
+    // credential-operations handle of the direct pool.
+    let (_, redfish_client_pool) = carbide_redfish::libredfish::new_pool_with_credential_ops(
         credential_provider.clone(),
         rf_pool,
         proxy_address.clone(),
@@ -105,11 +107,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let rotate_switch_nvos_credentials = Default::default();
 
-    let explorer = BmcEndpointExplorer::new(
+    let bmc_client = Arc::new(AuthenticatedBmcClient::new(
         redfish_client_pool,
         Arc::new(NvRedfishClientPool::new(proxy_address)),
         carbide_ipmi::test_support(),
         credential_provider.clone(),
+    ));
+    let explorer = BmcEndpointExplorer::new(
+        bmc_client,
         rotate_switch_nvos_credentials,
         mode,
         // Standalone debug tool: no database, so rotation bookkeeping is skipped.

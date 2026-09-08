@@ -128,6 +128,9 @@ fn convert_tests_to_nice_format(
             Ok(msg) => msg,
             Err(_) => "[]".to_string(),
         };
+        let plugin = test.plugin.unwrap_or_default();
+        let plugin_entrypoint =
+            serde_json::to_string(&plugin.entrypoint).unwrap_or_else(|_| "[]".to_string());
 
         let details = vec![
             ("TestId", test.test_id),
@@ -165,6 +168,12 @@ fn convert_tests_to_nice_format(
             ("IsVerified", test.verified.to_string()),
             ("IsReadOnly", test.read_only.to_string()),
             ("IsEnabled", test.is_enabled.to_string()),
+            ("FullHostApproved", test.full_host_approved.to_string()),
+            ("PluginImage", plugin.image),
+            ("PluginEntrypoint", plugin_entrypoint),
+            ("PluginParameters", plugin.parameters_json),
+            ("PluginPrivileged", plugin.privileged.to_string()),
+            ("PluginHostAccessFull", plugin.host_access_full.to_string()),
         ];
 
         for (key, value) in details {
@@ -246,6 +255,7 @@ pub(super) async fn machine_validation_test_update(
         custom_tags: options.custom_tags,
         components: options.components,
         is_enabled: options.is_enabled,
+        plugin: None,
         description: options.description,
         verified: None,
         name: None,
@@ -297,7 +307,36 @@ pub(super) async fn machine_validation_test_add(
         custom_tags: options.custom_tags,
         components: options.components,
         is_enabled: options.is_enabled,
+        plugin: None,
     };
     api_client.0.add_machine_validation_test(request).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ::rpc::forge::{MachineValidationPlugin, MachineValidationTest};
+
+    use super::convert_tests_to_nice_format;
+
+    #[test]
+    fn detailed_test_output_includes_plugin_definition() {
+        let output = convert_tests_to_nice_format(vec![MachineValidationTest {
+            plugin: Some(MachineValidationPlugin {
+                image: "registry.example.com/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                entrypoint: vec!["/plugin/entrypoint".to_string(), "--check-gpus".to_string()],
+                parameters_json: r#"{"expectedGpuCount":8}"#.to_string(),
+                privileged: true,
+                host_access_full: true,
+            }),
+            ..Default::default()
+        }])
+        .expect("plugin details render");
+
+        assert!(output.contains("PluginImage"));
+        assert!(output.contains("/plugin/entrypoint"));
+        assert!(output.contains("PluginParameters"));
+        assert!(output.contains("PluginPrivileged: true"));
+        assert!(output.contains("PluginHostAccessFull: true"));
+    }
 }

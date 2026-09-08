@@ -33,6 +33,7 @@ A reference installation and configuration of all these components is described 
 ESO syncs secrets from Vault into Kubernetes Secret objects.
 
 **Configuration required:**
+
 - A SecretStore or ClusterSecretStore pointing to Vault.
 - ExternalSecret objects for each NICo namespace:
   - `nico-roots-eso`: target secret `nico-roots` with keys `site-root`, `nico-root`
@@ -51,11 +52,13 @@ ESO syncs secrets from Vault into Kubernetes Secret objects.
 **ClusterIssuers required**: `self-issuer`, `site-issuer`, `vault-issuer`, `vault-nico-issuer`
 
 **If you already have cert-manager:**
+
 - Ensure cert-manager is version v1.11.1 or later.
 - Your ClusterIssuer objects must be able to issue cluster-internal certs (service DNS SANs) and any externally-facing FQDNs.
 - Approver flows must allow Certificate resources for NICo namespaces.
 
 **If deploying the reference version:**
+
 - Install cert-manager version v1.11.1 and approver-policy version v0.6.3.
 - Create ClusterIssuers matching your PKI.
 - Typical SANs include internal service names (e.g. `nico-api.<ns>.svc.cluster.local`, `nico-api.nico`) and optional external FQDNs
@@ -72,12 +75,14 @@ ESO syncs secrets from Vault into Kubernetes Secret objects.
 PostgreSQL stores all NICo system state in the `nico_system_nico` database. Only the API Service reads from and writes to it.
 
 **Configuration required:**
+
 - Database and role with password
 - TLS enabled (recommended) or secure network policy between DB and NICo namespaces
 - Extensions: `btree_gin` and `pg_trgm`
 - DSN available to workloads via ESO (per-namespace credentials)
 
 **If you already have PostgreSQL:**
+
 - Provide a database, role, and password
 - Create the required extensions:
 
@@ -93,6 +98,7 @@ psql "postgres://<POSTGRES_USER>:<POSTGRES_PASSWORD>@<POSTGRES_HOST>:<POSTGRES_P
   - `elektra-site-agent.elektra.nico-pg-cluster.credentials`
 
 **If deploying the reference version:**
+
 - Deploy the Zalando operator and a Spilo-15 cluster sized for your SLOs
 - Expose a ClusterIP service on port `5432`
 - Surface credentials through ExternalSecrets to each namespace
@@ -104,15 +110,17 @@ psql "postgres://<POSTGRES_USER>:<POSTGRES_PASSWORD>@<POSTGRES_HOST>:<POSTGRES_P
 | Vault server | v1.14.0 (HA Raft) |
 | Vault injector (vault-k8s) | v1.2.1 |
 
-Vault provides a PKI engine for certificate issuance and a KV secrets engine for credential storage.
+Vault provides a PKI engine for certificate issuance and a KV secrets engine for credential storage. NICo can keep the credentials it manages in Postgres instead; refer to [Day 0 Credential Store](../installation-options/day0-credential-store.md). Certificate issuance stays in Vault.
 
 **Configuration required:**
+
 - PKI engine(s) for the root/intermediate CA chain (where your `nico-roots`/`site-root` are derived)
 - Kubernetes auth at path `auth/kubernetes` with roles mapping service accounts in: `nico-system`, `cert-manager`, `cloud-api`, `cloud-workflow`, `elektra-site-agent`
 - KV v2 for application material: `<VAULT_PATH_PREFIX>/kv/*`
 - PKI for issuance: `<VAULT_PATH_PREFIX>/pki/*`
 
 **If deploying the reference version:**
+
 - Stand up Vault 1.14.0 with TLS (server cert for `vault.vault.svc`)
 - Configure the following environment variables:
   - `VAULT_ADDR` (cluster-internal URL, e.g. `https://vault.vault.svc:8200` or `http://vault.vault.svc:8200` if testing)
@@ -141,6 +149,7 @@ Temporal is the workflow orchestration engine used by NICo REST for multi-step o
 **Namespaces required:** `cloud`, `site`, and the per-site UUID (registered after site creation)
 
 **If you already have Temporal:**
+
 - Ensure the frontend gRPC endpoint is reachable from NICo workloads
 - Present proper mTLS/CA if TLS is required
 - Register the following namespaces:
@@ -152,6 +161,7 @@ tctl --ns <SITE_UUID> namespace register   # once you know the site UUID
 ```
 
 **If deploying the reference version:**
+
 - Deploy Temporal and expose port `:7233`.
 - Register the same namespaces as above.
 

@@ -37,6 +37,7 @@ use tonic::Request;
 
 use crate::cfg::file::{FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry};
 use crate::test_support::fixture_config::ManagedHostConfigExt as _;
+use crate::test_support::metadata;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common::api_fixtures::instance::advance_created_instance_into_ready_state;
 use crate::tests::common::api_fixtures::{create_managed_host_multi_dpu, get_vpc_fixture_id};
@@ -853,7 +854,7 @@ async fn test_reject_invalid_instance_config_updates(_: PgPoolOptions, options: 
     );
 
     // Try to update to invalid metadata
-    for (invalid_metadata, expected_err) in common::metadata::invalid_metadata_testcases(true) {
+    for (invalid_metadata, expected_err) in metadata::invalid_metadata_testcases(true) {
         let err = env
             .api
             .update_instance_config(tonic::Request::new(

@@ -674,7 +674,7 @@ separation and authenticates the envelope version and key ID. It does not bind
 an entire envelope to a particular database row or Temporal execution; database
 authorization and integrity controls must prevent replay or relocation of a
 complete envelope. The scope of
-[issue #4392](https://github.com/NVIDIA/infra-controller/issues/4392) uses one
+[issue #4392](https://github.com/dsx-ai-factory/infra-controller/issues/4392) uses one
 preserved key and does not provide a key-rotation operation.
 
 When `FLOW_DATA_ENCRYPTION_KEY_PATH` is unset, Flow starts with a warning and

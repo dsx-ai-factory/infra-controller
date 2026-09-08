@@ -474,12 +474,60 @@ pub(crate) async fn get_next_free_machine(
     min_interface_count: usize,
     flat_vpc_id: Option<VpcId>,
 ) -> Option<Machine> {
+    get_next_free_machine_inner(
+        api_client,
+        machine_ids,
+        min_interface_count,
+        flat_vpc_id,
+        None,
+    )
+    .await
+}
+
+/// Same selection logic as [`get_next_free_machine`], but reads from a
+/// caller-provided `prefetched` lookup instead of issuing a single-machine
+/// `get_machine` RPC per candidate. Callers that already know the full
+/// candidate set (e.g. an explicit `--machine-id` list) should batch-resolve
+/// it once via a chunked `find_machines_by_ids` call and pass the result
+/// here, rather than looping this once per machine -- a few thousand
+/// individual lookups is exactly the pattern that trips per-client admission
+/// control at fleet scale.
+#[allow(deprecated)]
+pub(crate) async fn get_next_free_machine_prefetched(
+    api_client: &ApiClient,
+    machine_ids: &mut VecDeque<MachineId>,
+    min_interface_count: usize,
+    flat_vpc_id: Option<VpcId>,
+    prefetched: &std::collections::HashMap<MachineId, Machine>,
+) -> Option<Machine> {
+    get_next_free_machine_inner(
+        api_client,
+        machine_ids,
+        min_interface_count,
+        flat_vpc_id,
+        Some(prefetched),
+    )
+    .await
+}
+
+#[allow(deprecated)]
+async fn get_next_free_machine_inner(
+    api_client: &ApiClient,
+    machine_ids: &mut VecDeque<MachineId>,
+    min_interface_count: usize,
+    flat_vpc_id: Option<VpcId>,
+    prefetched: Option<&std::collections::HashMap<MachineId, Machine>>,
+) -> Option<Machine> {
     while let Some(id) = machine_ids.pop_front() {
         tracing::debug!(
             machine_id = %id,
             "Checking machine",
         );
-        if let Ok(machine) = api_client.get_machine(id).await {
+        let looked_up = match prefetched {
+            Some(cache) => cache.get(&id).cloned().ok_or(()),
+            None => api_client.get_machine(id).await.map_err(|_| ()),
+        };
+        if let Ok(machine) = looked_up {
             if machine.state != "Ready" {
                 tracing::debug!("Machine is not ready");
                 continue;

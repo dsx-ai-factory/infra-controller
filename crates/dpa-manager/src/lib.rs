@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use carbide_dpa::DpaInfo;
 use carbide_utils::periodic_timer::PeriodicTimer;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use chrono::TimeDelta;
 use db::db_read::PgPoolReader;
 use db::work_lock_manager::WorkLockManagerHandle;
@@ -367,7 +367,16 @@ impl DpaMonitor {
         // in the slice are harmless for `= ANY($1)`, and the non-consuming
         // `get` keeps the assignment correct even when two entries resolve to
         // the same host snapshot.
-        let machine_ids: Vec<MachineId> = res.values().map(|mh| mh.host_snapshot.id).collect();
+        let machine_ids: Vec<HostMachineId> = res
+            .values()
+            .map(|mh| {
+                mh.host_snapshot
+                    .host_machine_id()
+                    .map_err(|error| DpaManagerError::Internal {
+                        message: error.to_string(),
+                    })
+            })
+            .collect::<Result<_, _>>()?;
         let dpa_search_config = DpaSearchConfig {
             only_svpc: false,
             only_astra: false,
@@ -379,7 +388,11 @@ impl DpaMonitor {
 
         for mh in res.values_mut() {
             mh.dpa_interface_snapshots = dpa_snapshots_by_machine
-                .get(&mh.host_snapshot.id)
+                .get(&mh.host_snapshot.host_machine_id().map_err(|error| {
+                    DpaManagerError::Internal {
+                        message: error.to_string(),
+                    }
+                })?)
                 .cloned()
                 .unwrap_or_default();
         }

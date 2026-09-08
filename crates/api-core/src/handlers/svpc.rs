@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use ::rpc::protos::mlx_device as mlx_device_pb;
 use carbide_host_support::dpa_cmds::{DpaCommand, DpaDeviceCommand, OpCode};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use db::dpa_interface;
 use eyre::eyre;
 use libmlx::device::report::MlxDeviceReport;
@@ -48,7 +48,7 @@ use crate::{CarbideError, CarbideResult};
 /// If there is work to be done, return an MLX action with per-device commands.
 pub(super) async fn process_scout_req(
     api: &Api,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
 ) -> CarbideResult<fac::Action> {
     if !api.runtime_config.is_ewethers_enabled() || !api.runtime_config.is_svpc_enabled() {
         tracing::info!(
@@ -168,7 +168,7 @@ pub(super) async fn process_scout_req(
 /// The gate is checked first so the host-scoped DB read is skipped whenever the
 /// gate is on (the answer is already `true`); the force flag is only consulted
 /// when the gate is off.
-async fn resolve_rotate_lockdown_key(api: &Api, machine_id: MachineId) -> CarbideResult<bool> {
+async fn resolve_rotate_lockdown_key(api: &Api, machine_id: HostMachineId) -> CarbideResult<bool> {
     if api.runtime_config.nic_lockdown_ikm_rotation_enabled {
         return Ok(true);
     }
@@ -294,7 +294,7 @@ async fn resolve_unlock_ikm_version(api: &Api, mac: MacAddress) -> CarbideResult
 async fn build_unlock_command(
     api: &Api,
     sn: &DpaInterface,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
 ) -> CarbideResult<DpaCommand<'static>> {
     // DB-native `i32`; converted to the `u32` the derivation layer uses. The
@@ -333,7 +333,7 @@ async fn build_unlock_command(
 fn build_apply_firmware_command<'a>(
     api: &'a Api,
     sn: &DpaInterface,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
 ) -> DpaCommand<'a> {
     // Look up a FirmwareFlasherProfile for the device's PN:PSID
@@ -383,7 +383,7 @@ fn build_apply_firmware_command<'a>(
         carbide_instrument::emit(FirmwareUpdateProgress {
             target: FirmwareUpdateTarget::SuperNic,
             phase: FirmwareUpdatePhase::Started,
-            machine_id,
+            machine_id: machine_id.into(),
             detail: format!(
                 "pci_name={pci_name} part_number={part_number} psid={psid} \
                  observed_fw_version={:?} expected_fw_version={}",
@@ -418,7 +418,7 @@ fn build_apply_firmware_command<'a>(
 fn build_apply_profile_command(
     api: &Api,
     interface: &DpaInterface,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
 ) -> CarbideResult<DpaCommand<'static>> {
     let Some(profile_name) = &interface.mlxconfig_profile else {
@@ -477,7 +477,7 @@ fn build_apply_profile_command(
 async fn build_lock_command(
     api: &Api,
     sn: &DpaInterface,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
     migrate_to_target: bool,
 ) -> CarbideResult<DpaCommand<'static>> {
@@ -490,7 +490,7 @@ async fn build_lock_command(
 async fn lock_command_for_target(
     api: &Api,
     sn: &DpaInterface,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
     target_version: i32,
 ) -> CarbideResult<DpaCommand<'static>> {
@@ -578,8 +578,14 @@ async fn process_mlx_observation(
         only_astra: false,
     };
 
-    let dpa_snapshots =
-        db::dpa_interface::find_by_machine_id(&mut txn, machine_id, dpa_search_config).await?;
+    let dpa_snapshots = db::dpa_interface::find_by_machine_id(
+        &mut txn,
+        machine_id.try_into().map_err(|error| {
+            CarbideError::InvalidArgument(format!("invalid host machine ID: {error}"))
+        })?,
+        dpa_search_config,
+    )
+    .await?;
 
     if dpa_snapshots.is_empty() {
         tracing::error!(
@@ -750,7 +756,9 @@ pub(crate) async fn publish_mlx_device_report(
                 let device_description = device_info.device_description.clone();
 
                 let Some(new_interface) = NewDpaInterface::from_device_info(
-                    machine_id,
+                    machine_id.try_into().map_err(|error| {
+                        CarbideError::InvalidArgument(format!("invalid host machine ID: {error}"))
+                    })?,
                     device_info.base_mac,
                     device_type,
                     pci_name.clone(),

@@ -24,6 +24,7 @@ use ipnetwork::IpNetwork;
 use model::DeletedFilter;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::network_prefix::NetworkPrefix;
+use model::network_segment::NetworkSegmentType;
 use model::site_prefix::SitePrefixAuthority;
 use model::vpc_prefix::{
     DeleteVpcPrefix, NewVpcPrefix, UpdateVpcPrefix, VpcPrefix, VpcPrefixControllerState,
@@ -462,25 +463,45 @@ pub async fn probe(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-// Given a new VPC prefix which has been not been persisted yet, find the
-// network segment prefixes that overlap with it, along with the VPC ID each
-// one is associated with. The caller should use this information to reject
-// any problematic VPC prefixes, and to update any matching segment prefixes
-// which should be adopted by the new VPC prefix.
+/// `AttachedSegmentPrefix` identifies a `NetworkPrefix` linked directly to a
+/// `NetworkSegment` that has a VPC.
+#[derive(Debug)]
+pub struct AttachedSegmentPrefix {
+    /// The `NetworkSegment` belongs to this VPC.
+    pub vpc_id: VpcId,
+    /// `VpcPrefix` creation uses this `NetworkSegment` type to decide whether
+    /// it may adopt the prefix.
+    pub segment_type: NetworkSegmentType,
+    /// This is the `NetworkPrefix` stored directly on the `NetworkSegment`.
+    pub prefix: NetworkPrefix,
+}
+
+/// `probe_segment_prefixes` finds direct `NetworkPrefix` records on attached
+/// `NetworkSegment` records that overlap `network`.
+///
+/// Soft-deleted segments remain visible because their `NetworkPrefix` rows stay
+/// in the database until final deletion. A `NetworkPrefix` linked to a
+/// `VpcPrefix` is checked through that `VpcPrefix` instead, so this query does
+/// not return it.
 pub async fn probe_segment_prefixes(
     network: IpNetwork,
     txn: &mut PgConnection,
-) -> Result<Vec<(VpcId, NetworkPrefix)>, DatabaseError> {
-    let query = "SELECT ns.vpc_id AS vpc_id, np.* FROM network_prefixes np \
+) -> Result<Vec<AttachedSegmentPrefix>, DatabaseError> {
+    let query = "SELECT ns.vpc_id AS vpc_id, ns.network_segment_type, np.* \
+            FROM network_prefixes np \
             INNER JOIN network_segments ns ON np.segment_id = ns.id \
-            WHERE np.prefix && $1 AND ns.network_segment_type='tenant'";
+            WHERE np.prefix && $1 \
+              AND ns.vpc_id IS NOT NULL \
+              AND np.vpc_prefix_id IS NULL";
 
     sqlx::query(query)
         .bind(network)
         .try_map(|row| {
-            let vpc_id: VpcId = row.try_get("vpc_id")?;
-            let network_prefix = NetworkPrefix::from_row(&row)?;
-            Ok((vpc_id, network_prefix))
+            Ok(AttachedSegmentPrefix {
+                vpc_id: row.try_get("vpc_id")?,
+                segment_type: row.try_get("network_segment_type")?,
+                prefix: NetworkPrefix::from_row(&row)?,
+            })
         })
         .fetch_all(txn)
         .await

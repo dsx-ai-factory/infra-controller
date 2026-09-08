@@ -29,9 +29,9 @@ use std::time::Duration;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_utils::managed_loop::{self, LoopManager};
 use carbide_utils::periodic_timer::PeriodicTimer;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
+use db::Transaction;
 use db::work_lock_manager::{AcquireLockError, WorkLockManagerHandle};
-use db::{DatabaseError, ObjectFilter, Transaction};
 use host_firmware::HostFirmwareUpdate;
 use machine_update_module::MachineUpdateModule;
 use model::dpu_machine_update::DpuMachineUpdate;
@@ -162,7 +162,7 @@ impl MachineUpdateManager {
     async fn get_all_snapshots(
         &self,
         txn: &mut PgConnection,
-    ) -> CarbideResult<HashMap<MachineId, ManagedHostStateSnapshot>> {
+    ) -> CarbideResult<HashMap<HostMachineId, ManagedHostStateSnapshot>> {
         let machine_ids = db::machine::find_machine_ids(
             &mut *txn,
             MachineSearchConfig {
@@ -170,7 +170,11 @@ impl MachineUpdateManager {
                 ..Default::default()
             },
         )
-        .await?;
+        .await?
+        .into_iter()
+        .filter_map(|id| HostMachineId::try_from(id).ok())
+        .collect::<Vec<_>>();
+
         db::managed_host::load_by_machine_ids(
             txn,
             &machine_ids,
@@ -219,16 +223,11 @@ impl MachineUpdateManager {
         }
 
         // current host machines in maintenance
-        let mut current_updating_machines: HashSet<MachineId> =
-            MachineUpdateManager::get_updating_machines(&mut txn).await?;
+        let mut current_updating_machines = HashSet::<MachineId>::new();
 
         for update_module in self.update_modules.iter() {
-            current_updating_machines = update_module
-                .get_updates_in_progress(&mut txn)
-                .await?
-                .union(&current_updating_machines)
-                .copied()
-                .collect();
+            current_updating_machines
+                .extend(update_module.get_updates_in_progress(&mut txn).await?);
         }
 
         let snapshots = self.get_all_snapshots(&mut txn).await?;
@@ -315,31 +314,5 @@ impl MachineUpdateManager {
         .await?;
 
         Ok(())
-    }
-
-    /// get host machines that are applying updates
-    pub(crate) async fn get_updating_machines(
-        txn: &mut PgConnection,
-    ) -> Result<HashSet<MachineId>, DatabaseError> {
-        let machines = db::machine::find(
-            txn,
-            ObjectFilter::All,
-            MachineSearchConfig {
-                include_predicted_host: true,
-                ..Default::default()
-            },
-        )
-        .await?;
-
-        Ok(machines
-            .into_iter()
-            .filter_map(|m| {
-                if !m.is_dpu() && m.machine_updates_in_progress() {
-                    Some(m.id)
-                } else {
-                    None
-                }
-            })
-            .collect())
     }
 }

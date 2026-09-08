@@ -4,19 +4,24 @@
 package subnet
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
@@ -208,7 +213,7 @@ func testSubnetBuildVPC(t *testing.T, dbSession *cdb.Session, name string, ip *c
 	input := cdbm.VpcCreateInput{
 		Name:                      name,
 		Description:               cutil.GetPtr("Test VPC"),
-		Org:                       st.Org,
+		Org:                       tn.Org,
 		InfrastructureProviderID:  ip.ID,
 		TenantID:                  tn.ID,
 		SiteID:                    st.ID,
@@ -387,6 +392,9 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 	// Subnet 5 is reported as Ready in Controller inventory but is being deleted, so does not get updated
 	subnet5 := testSubnetBuildSubnet(t, dbSession, "test-subnet-5", tn, vpc, nil, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusDeleting, tnu)
 
+	// Subnet 10 is reported as Terminated in Controller inventory but remains Deleting until it disappears from inventory
+	subnet10 := testSubnetBuildSubnet(t, dbSession, "test-subnet-10", tn, vpc, nil, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusDeleting, tnu)
+
 	// Subnet 6 was previously missing but is reported as Ready in Controller inventory
 	subnet6 := testSubnetBuildSubnet(t, dbSession, "test-subnet-6", tn, vpc, nil, cutil.GetPtr(uuid.New()), &ipb.RoutingType, &ipv4Prefix, &ipv4Gateway, &ipb.ID, 26, cdbm.SubnetStatusError, tnu)
 
@@ -461,7 +469,7 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 		args            args
 		updatedSubnet   *cdbm.Subnet
 		deletedSubnets  []*cdbm.Subnet
-		deletingSubnet  *cdbm.Subnet
+		deletingSubnets []*cdbm.Subnet
 		missingSubnets  []*cdbm.Subnet
 		restoredSubnet  *cdbm.Subnet
 		unpairedSubnets []*cdbm.Subnet
@@ -501,6 +509,7 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 					Segments: []*corev1.NetworkSegment{
 						testBuildNetworkSegment(subnet1.ControllerNetworkSegmentID.String(), subnet1.Name, &mtu, corev1.TenantState_READY, corev1.NetworkSegmentType_TENANT),
 						testBuildNetworkSegment(subnet5.ControllerNetworkSegmentID.String(), subnet5.Name, nil, corev1.TenantState_READY, corev1.NetworkSegmentType_TENANT),
+						testBuildNetworkSegment(subnet10.ControllerNetworkSegmentID.String(), subnet10.Name, nil, corev1.TenantState_TERMINATED, corev1.NetworkSegmentType_TENANT),
 						testBuildNetworkSegment(subnet6.ControllerNetworkSegmentID.String(), subnet6.Name, nil, corev1.TenantState_READY, corev1.NetworkSegmentType_TENANT),
 						testBuildNetworkSegment(uuid.NewString(), subnet8.ID.String(), nil, corev1.TenantState_READY, corev1.NetworkSegmentType_TENANT),
 						testBuildNetworkSegment(uuid.NewString(), subnet9.ID.String(), nil, corev1.TenantState_READY, corev1.NetworkSegmentType_TENANT),
@@ -509,7 +518,7 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 			},
 			updatedSubnet:   subnet1,
 			deletedSubnets:  []*cdbm.Subnet{subnet2, subnetFG, subnet7},
-			deletingSubnet:  subnet5,
+			deletingSubnets: []*cdbm.Subnet{subnet5, subnet10},
 			missingSubnets:  []*cdbm.Subnet{subnet3, subnet4},
 			restoredSubnet:  subnet6,
 			unpairedSubnets: []*cdbm.Subnet{subnet8, subnet9},
@@ -647,9 +656,9 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 				assert.Equal(t, cdbm.SubnetStatusReady, us.Status)
 			}
 
-			// Check that Subnet 5, which was in Deleting state, did not get its state changed to Ready if Site inventory reports it as Ready
-			if tt.deletingSubnet != nil {
-				us, err := subnetDAO.GetByID(ctx, nil, tt.deletingSubnet.ID, nil)
+			// Check that Subnets in Deleting state remain Deleting while they are still present in Site inventory
+			for _, subnet := range tt.deletingSubnets {
+				us, err := subnetDAO.GetByID(ctx, nil, subnet.ID, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, cdbm.SubnetStatusDeleting, us.Status)
 			}
@@ -662,6 +671,479 @@ func TestManageSubnet_UpdateSubnetsInDB(t *testing.T) {
 			}
 		})
 	}
+
+	regressionTests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "auto creates, replays, and restores Subnets",
+			run:  testManageSubnetUpdateSubnetsInDBAutoCreatesAndRestores,
+		},
+	}
+	for _, test := range regressionTests {
+		t.Run(test.name, test.run)
+	}
+}
+
+func testManageSubnetUpdateSubnetsInDBAutoCreatesAndRestores(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSubnetInitDB(t)
+	defer dbSession.Close()
+	testSubnetSetupSchema(t, dbSession)
+
+	providerOrg := "test-provider-org"
+	providerUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), providerOrg, []string{"FORGE_PROVIDER_ADMIN"})
+	provider := testSubnetSiteBuildInfrastructureProvider(t, dbSession, "test-provider", providerOrg, providerUser)
+	tenantOrg := "test-tenant-org"
+	tenantUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), tenantOrg, []string{"FORGE_TENANT_ADMIN"})
+	tenant := testSubnetBuildTenant(t, dbSession, "test-tenant", tenantOrg, tenantUser)
+	site := testSubnetBuildSite(t, dbSession, provider, "test-site", providerUser)
+
+	parentVpc := testSubnetBuildVPC(t, dbSession, "parent-vpc", provider, tenant, site, nil, nil, tenantUser)
+	controllerVpcID := parentVpc.ID
+	ipBlock := testSubnetBuildIPBlock(
+		t, dbSession, "test-subnet-ip-block", site, provider, &tenant.ID,
+		cdbm.IPBlockRoutingTypeDatacenterOnly, "10.20.0.0", 16,
+		cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tenantUser,
+	)
+	ipamStorage := ipam.NewIpamStorage(dbSession.DB, nil)
+	_, err := ipam.CreateIpamEntryForIPBlock(
+		ctx, ipamStorage, ipBlock.Prefix, ipBlock.PrefixLength, ipBlock.RoutingType,
+		ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+	)
+	require.NoError(t, err)
+
+	manager := ManageSubnet{dbSession: dbSession}
+	subnetDAO := cdbm.NewSubnetDAO(dbSession)
+	statusDetailDAO := cdbm.NewStatusDetailDAO(dbSession)
+
+	controllerSegmentID := uuid.MustParse("abcdef01-2345-4678-9abc-def012345678")
+	gateway := "10.20.30.1"
+	controllerSegment := &corev1.NetworkSegment{
+		Id: &corev1.NetworkSegmentId{Value: controllerSegmentID.String()},
+		Config: &corev1.NetworkSegmentConfig{
+			VpcId:       &corev1.VpcId{Value: controllerVpcID.String()},
+			SegmentType: corev1.NetworkSegmentType_TENANT,
+			Prefixes: []*corev1.NetworkPrefix{
+				{Prefix: "10.20.30.0/24", Gateway: &gateway},
+			},
+		},
+		Metadata: &corev1.Metadata{
+			Name: "site-created-subnet",
+		},
+		Status: &corev1.NetworkSegmentStatus{
+			TenantState: corev1.TenantState_READY,
+		},
+	}
+	inventory := &corev1.SubnetInventory{
+		Segments: []*corev1.NetworkSegment{controllerSegment},
+	}
+
+	if !t.Run("auto creates Subnet from inventory", func(t *testing.T) {
+		var logOutput bytes.Buffer
+		originalLogger := log.Logger
+		log.Logger = zerolog.New(&logOutput)
+		defer func() {
+			log.Logger = originalLogger
+		}()
+
+		_, err := manager.UpdateSubnetsInDB(ctx, site.ID, inventory)
+		require.NoError(t, err)
+		assert.Contains(t, logOutput.String(), "created or undeleted Subnet from Site inventory")
+
+		created, err := subnetDAO.GetByID(ctx, nil, controllerSegmentID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, controllerSegmentID, created.ID)
+		assert.Equal(t, parentVpc.ID, created.VpcID)
+		assert.Equal(t, tenant.ID, created.TenantID)
+		assert.Equal(t, tenantOrg, created.Org)
+		assert.Equal(t, site.ID, created.SiteID)
+		assert.Equal(t, parentVpc.CreatedBy, created.CreatedBy)
+		assert.Equal(t, cdbm.SubnetStatusReady, created.Status)
+		assert.Equal(t, "site-created-subnet", created.Name)
+		require.NotNil(t, created.IPv4Prefix)
+		assert.Equal(t, "10.20.30.0", *created.IPv4Prefix)
+		require.NotNil(t, created.IPv4Gateway)
+		assert.Equal(t, gateway, *created.IPv4Gateway)
+		assert.Equal(t, 24, created.PrefixLength)
+		require.NotNil(t, created.IPv4BlockID)
+		assert.Equal(t, ipBlock.ID, *created.IPv4BlockID)
+		require.NotNil(t, created.ControllerNetworkSegmentID)
+		assert.Equal(t, controllerSegmentID, *created.ControllerNetworkSegmentID)
+
+		ipamer := cipam.NewWithStorage(ipamStorage)
+		ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+			ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+		))
+		assert.NotNil(t, ipamer.PrefixFrom(ctx, controllerSegment.Config.Prefixes[0].Prefix))
+
+		statusDetails, _, statusErr := statusDetailDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.StatusDetailFilterInput{EntityIDs: []string{created.ID.String()}},
+			cdbp.PageInput{},
+		)
+		require.NoError(t, statusErr)
+		require.NotEmpty(t, statusDetails)
+		foundCreateMessage := false
+		for i := range statusDetails {
+			if statusDetails[i].Message != nil &&
+				*statusDetails[i].Message == "Subnet was found on Site, Ready for use" {
+				foundCreateMessage = true
+				break
+			}
+		}
+		assert.True(t, foundCreateMessage)
+	}) {
+		t.FailNow()
+	}
+
+	if !t.Run("inventory replay is idempotent", func(t *testing.T) {
+		_, err := manager.UpdateSubnetsInDB(ctx, site.ID, inventory)
+		require.NoError(t, err)
+		subnets, count, err := subnetDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{controllerSegmentID}},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, subnets, 1)
+		assert.Equal(t, 1, count)
+	}) {
+		t.FailNow()
+	}
+
+	t.Run("uppercase inventory ID follows the recovery path", func(t *testing.T) {
+		canonicalID := controllerSegment.Id.Value
+		controllerSegment.Id.Value = strings.ToUpper(canonicalID)
+		require.NotEqual(t, canonicalID, controllerSegment.Id.Value)
+		defer func() {
+			controllerSegment.Id.Value = canonicalID
+		}()
+
+		var logOutput bytes.Buffer
+		originalLogger := log.Logger
+		log.Logger = zerolog.New(&logOutput)
+		defer func() {
+			log.Logger = originalLogger
+		}()
+
+		_, err := manager.UpdateSubnetsInDB(ctx, site.ID, inventory)
+		require.NoError(t, err)
+
+		subnets, count, err := subnetDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{controllerSegmentID}},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, subnets, 1)
+		assert.Equal(t, 1, count)
+		assert.Contains(t, logOutput.String(), "created or undeleted Subnet from Site inventory")
+	})
+
+	t.Run("inventory skips restore when Site reports TERMINATING", func(t *testing.T) {
+		_, err := subnetDAO.Update(ctx, nil, cdbm.SubnetUpdateInput{
+			SubnetId:        controllerSegmentID,
+			Status:          cutil.GetPtr(cdbm.SubnetStatusDeleting),
+			IsMissingOnSite: cutil.GetPtr(true),
+		})
+		require.NoError(t, err)
+		require.NoError(t, ipam.DeleteChildIpamEntryFromCidr(
+			ctx, nil, dbSession, ipamStorage, ipBlock, controllerSegment.Config.Prefixes[0].Prefix,
+		))
+		require.NoError(t, subnetDAO.Delete(ctx, nil, controllerSegmentID))
+
+		deleted, _, err := subnetDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{controllerSegmentID}, IncludeDeleted: true},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, deleted, 1)
+		require.NotNil(t, deleted[0].Deleted)
+		assert.Equal(t, cdbm.SubnetStatusDeleting, deleted[0].Status)
+		deletedAt := *deleted[0].Deleted
+
+		terminatingInventory := &corev1.SubnetInventory{
+			Segments: []*corev1.NetworkSegment{
+				{
+					Id: &corev1.NetworkSegmentId{Value: controllerSegmentID.String()},
+					Config: &corev1.NetworkSegmentConfig{
+						VpcId:       &corev1.VpcId{Value: controllerVpcID.String()},
+						SegmentType: corev1.NetworkSegmentType_TENANT,
+						Prefixes: []*corev1.NetworkPrefix{
+							{Prefix: controllerSegment.Config.Prefixes[0].Prefix, Gateway: &gateway},
+						},
+					},
+					Metadata: &corev1.Metadata{Name: "site-created-subnet"},
+					Status: &corev1.NetworkSegmentStatus{
+						TenantState: corev1.TenantState_TERMINATING,
+					},
+				},
+			},
+		}
+		_, err = manager.UpdateSubnetsInDB(ctx, site.ID, terminatingInventory)
+		require.NoError(t, err)
+
+		stillDeleted, _, err := subnetDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{controllerSegmentID}, IncludeDeleted: true},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, stillDeleted, 1)
+		require.NotNil(t, stillDeleted[0].Deleted)
+		assert.Equal(t, deletedAt, *stillDeleted[0].Deleted)
+		assert.Equal(t, cdbm.SubnetStatusDeleting, stillDeleted[0].Status)
+
+		_, err = subnetDAO.GetByID(ctx, nil, controllerSegmentID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+
+		ipamer := cipam.NewWithStorage(ipamStorage)
+		ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+			ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+		))
+		assert.Nil(t, ipamer.PrefixFrom(ctx, controllerSegment.Config.Prefixes[0].Prefix))
+	})
+
+	t.Run("inventory defers restore when delete is newer than the inventory interval", func(t *testing.T) {
+		recentlyDeletedSubnetID := uuid.New()
+		recentlyDeletedPrefix := "10.20.31.0"
+		recentlyDeletedCIDR := "10.20.31.0/24"
+		recentlyDeletedGateway := "10.20.31.1"
+		_, err := subnetDAO.Create(ctx, nil, cdbm.SubnetCreateInput{
+			SubnetID:                   &recentlyDeletedSubnetID,
+			Name:                       "recently-deleted-subnet",
+			Org:                        tenant.Org,
+			SiteID:                     site.ID,
+			VpcID:                      parentVpc.ID,
+			TenantID:                   tenant.ID,
+			ControllerNetworkSegmentID: &recentlyDeletedSubnetID,
+			RoutingType:                &ipBlock.RoutingType,
+			IPv4Prefix:                 &recentlyDeletedPrefix,
+			IPv4Gateway:                &recentlyDeletedGateway,
+			IPv4BlockID:                &ipBlock.ID,
+			PrefixLength:               24,
+			Status:                     cdbm.SubnetStatusDeleting,
+			CreatedBy:                  tenantUser.ID,
+		})
+		require.NoError(t, err)
+		require.NoError(t, subnetDAO.Delete(ctx, nil, recentlyDeletedSubnetID))
+
+		deleted, _, err := subnetDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{recentlyDeletedSubnetID}, IncludeDeleted: true},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, deleted, 1)
+		require.NotNil(t, deleted[0].Deleted)
+		deletedAt := *deleted[0].Deleted
+
+		recentInventory := &corev1.SubnetInventory{
+			Segments: []*corev1.NetworkSegment{
+				{
+					Id: &corev1.NetworkSegmentId{Value: recentlyDeletedSubnetID.String()},
+					Config: &corev1.NetworkSegmentConfig{
+						VpcId:       &corev1.VpcId{Value: controllerVpcID.String()},
+						SegmentType: corev1.NetworkSegmentType_TENANT,
+						Prefixes: []*corev1.NetworkPrefix{
+							{Prefix: recentlyDeletedCIDR, Gateway: &recentlyDeletedGateway},
+						},
+					},
+					Metadata: &corev1.Metadata{Name: "recently-deleted-subnet"},
+					Status:   &corev1.NetworkSegmentStatus{TenantState: corev1.TenantState_READY},
+				},
+			},
+		}
+		_, err = manager.UpdateSubnetsInDB(ctx, site.ID, recentInventory)
+		require.NoError(t, err)
+
+		stillDeleted, _, err := subnetDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{recentlyDeletedSubnetID}, IncludeDeleted: true},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, stillDeleted, 1)
+		require.NotNil(t, stillDeleted[0].Deleted)
+		assert.Equal(t, deletedAt, *stillDeleted[0].Deleted)
+
+		_, err = subnetDAO.GetByID(ctx, nil, recentlyDeletedSubnetID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+
+		ipamer := cipam.NewWithStorage(ipamStorage)
+		ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+			ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+		))
+		assert.Nil(t, ipamer.PrefixFrom(ctx, recentlyDeletedCIDR))
+	})
+
+	t.Run("inventory restores soft-deleted Subnet", func(t *testing.T) {
+		var logOutput bytes.Buffer
+		originalLogger := log.Logger
+		log.Logger = zerolog.New(&logOutput)
+		defer func() {
+			log.Logger = originalLogger
+		}()
+
+		// Establish the soft-delete precondition here so this subtest can be
+		// selected with -run without executing the preceding lifecycle subtests.
+		existing, _, err := subnetDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{controllerSegmentID}, IncludeDeleted: true},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		if len(existing) == 0 {
+			created, createErr := subnetDAO.Create(ctx, nil, cdbm.SubnetCreateInput{
+				SubnetID:                   &controllerSegmentID,
+				Name:                       controllerSegment.GetMetadata().GetName(),
+				Org:                        tenant.Org,
+				SiteID:                     site.ID,
+				VpcID:                      parentVpc.ID,
+				TenantID:                   tenant.ID,
+				ControllerNetworkSegmentID: &controllerSegmentID,
+				RoutingType:                &ipBlock.RoutingType,
+				IPv4Prefix:                 cutil.GetPtr("10.20.30.0"),
+				IPv4Gateway:                &gateway,
+				IPv4BlockID:                &ipBlock.ID,
+				PrefixLength:               24,
+				Status:                     cdbm.SubnetStatusDeleting,
+				CreatedBy:                  tenantUser.ID,
+			})
+			require.NoError(t, createErr)
+			existing = []cdbm.Subnet{*created}
+		}
+		require.Len(t, existing, 1)
+
+		if existing[0].Deleted == nil {
+			_, err = subnetDAO.Update(ctx, nil, cdbm.SubnetUpdateInput{
+				SubnetId:        controllerSegmentID,
+				Status:          cutil.GetPtr(cdbm.SubnetStatusDeleting),
+				IsMissingOnSite: cutil.GetPtr(true),
+			})
+			require.NoError(t, err)
+
+			setupIPAMer := cipam.NewWithStorage(ipamStorage)
+			setupIPAMer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+				ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+			))
+			if setupIPAMer.PrefixFrom(ctx, controllerSegment.Config.Prefixes[0].Prefix) != nil {
+				require.NoError(t, ipam.DeleteChildIpamEntryFromCidr(
+					ctx, nil, dbSession, ipamStorage, ipBlock, controllerSegment.Config.Prefixes[0].Prefix,
+				))
+			}
+			require.NoError(t, subnetDAO.Delete(ctx, nil, controllerSegmentID))
+		}
+
+		deleted, _, err := subnetDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{controllerSegmentID}, IncludeDeleted: true},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, deleted, 1)
+		require.NotNil(t, deleted[0].Deleted)
+		require.Equal(t, cdbm.SubnetStatusDeleting, deleted[0].Status)
+		// The undelete is deferred while the delete is newer than the staleness threshold, so
+		// backdate it past that.
+		util.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.Subnet)(nil), controllerSegmentID)
+
+		_, err = manager.UpdateSubnetsInDB(ctx, site.ID, inventory)
+		require.NoError(t, err)
+		assert.Contains(t, logOutput.String(), "created or undeleted Subnet from Site inventory")
+
+		restored, err := subnetDAO.GetByID(ctx, nil, controllerSegmentID, nil)
+		require.NoError(t, err)
+		assert.Nil(t, restored.Deleted)
+		assert.False(t, restored.IsMissingOnSite)
+		assert.Equal(t, cdbm.SubnetStatusReady, restored.Status)
+		ipamer := cipam.NewWithStorage(ipamStorage)
+		ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+			ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+		))
+		assert.NotNil(t, ipamer.PrefixFrom(ctx, controllerSegment.Config.Prefixes[0].Prefix))
+
+		statusDetails, _, statusErr := statusDetailDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.StatusDetailFilterInput{EntityIDs: []string{restored.ID.String()}},
+			cdbp.PageInput{},
+		)
+		require.NoError(t, statusErr)
+		foundReadyMessage := false
+		for i := range statusDetails {
+			if statusDetails[i].Message != nil &&
+				*statusDetails[i].Message == "Subnet is ready for use" {
+				foundReadyMessage = true
+				break
+			}
+		}
+		assert.True(t, foundReadyMessage)
+	})
+
+	t.Run("inventory skips restore when tenant organization differs", func(t *testing.T) {
+		require.NoError(t, ipam.DeleteChildIpamEntryFromCidr(
+			ctx, nil, dbSession, ipamStorage, ipBlock, controllerSegment.Config.Prefixes[0].Prefix,
+		))
+		require.NoError(t, subnetDAO.Delete(ctx, nil, controllerSegmentID))
+		deleted, _, err := subnetDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{controllerSegmentID}, IncludeDeleted: true},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, deleted, 1)
+		require.NotNil(t, deleted[0].Deleted)
+		deletedAt := *deleted[0].Deleted
+
+		_, err = dbSession.DB.NewUpdate().
+			Model((*cdbm.Subnet)(nil)).
+			Set("org = ?", "other-tenant-org").
+			Where("id = ?", controllerSegmentID).
+			WhereAllWithDeleted().
+			Exec(ctx)
+		require.NoError(t, err)
+
+		_, err = manager.UpdateSubnetsInDB(ctx, site.ID, inventory)
+		require.NoError(t, err)
+
+		stillDeleted, _, err := subnetDAO.GetAll(
+			ctx,
+			nil,
+			cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{controllerSegmentID}, IncludeDeleted: true},
+			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, stillDeleted, 1)
+		require.NotNil(t, stillDeleted[0].Deleted)
+		assert.Equal(t, deletedAt, *stillDeleted[0].Deleted)
+
+		_, err = subnetDAO.GetByID(ctx, nil, controllerSegmentID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	})
 }
 
 func TestNewManageSubnet(t *testing.T) {
@@ -715,6 +1197,693 @@ func TestNewManageSubnet(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManageSubnet_CreateOrUpdateSubnetFromSite(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSubnetInitDB(t)
+	defer dbSession.Close()
+	testSubnetSetupSchema(t, dbSession)
+
+	providerOrg := "test-provider-org"
+	providerUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), providerOrg, []string{"FORGE_PROVIDER_ADMIN"})
+	provider := testSubnetSiteBuildInfrastructureProvider(t, dbSession, "test-provider", providerOrg, providerUser)
+	site := testSubnetBuildSite(t, dbSession, provider, "test-site", providerUser)
+
+	authorizedTenantOrg := "test-authorized-tenant"
+	authorizedTenantUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), authorizedTenantOrg, []string{"FORGE_TENANT_ADMIN"})
+	authorizedTenant := testSubnetBuildTenant(t, dbSession, "test-authorized-tenant", authorizedTenantOrg, authorizedTenantUser)
+
+	parentVpc := testSubnetBuildVPC(t, dbSession, "parent-vpc", provider, authorizedTenant, site, nil, nil, authorizedTenantUser)
+	controllerVpcID := parentVpc.ID
+	ipBlock := testSubnetBuildIPBlock(
+		t, dbSession, "test-subnet-ip-block", site, provider, &authorizedTenant.ID,
+		cdbm.IPBlockRoutingTypeDatacenterOnly, "10.0.0.0", 8,
+		cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, authorizedTenantUser,
+	)
+	ipamStorage := ipam.NewIpamStorage(dbSession.DB, nil)
+	_, err := ipam.CreateIpamEntryForIPBlock(
+		ctx, ipamStorage, ipBlock.Prefix, ipBlock.PrefixLength, ipBlock.RoutingType,
+		ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+	)
+	require.NoError(t, err)
+	ipamer := cipam.NewWithStorage(ipamStorage)
+	ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+		ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+	))
+	_, err = ipamer.AcquireSpecificChildPrefix(ctx, "10.0.0.0/8", "10.5.0.0/24")
+	require.NoError(t, err)
+	existingSubnet := testSubnetBuildSubnet(
+		t, dbSession, "existing-name", authorizedTenant, parentVpc, nil, nil,
+		&ipBlock.RoutingType, cutil.GetPtr("10.0.0.0"), cutil.GetPtr("10.0.0.1"),
+		&ipBlock.ID, 24, cdbm.SubnetStatusReady, authorizedTenantUser,
+	)
+
+	manager := ManageSubnet{dbSession: dbSession}
+
+	tests := []struct {
+		name              string
+		controllerSegment *corev1.NetworkSegment
+		wantSubnet        bool
+		wantName          string
+		wantNamePref      string
+	}{
+		{
+			name: "unknown parent VPC is rejected",
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config: &corev1.NetworkSegmentConfig{
+					VpcId: &corev1.VpcId{Value: uuid.NewString()},
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "10.1.0.0/24", Gateway: cutil.GetPtr("10.1.0.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: "unknown-vpc-subnet"},
+			},
+		},
+		{
+			name: "invalid Controller Segment ID",
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: "not-a-uuid"},
+				Config: &corev1.NetworkSegmentConfig{
+					VpcId: &corev1.VpcId{Value: controllerVpcID.String()},
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "10.1.0.0/24", Gateway: cutil.GetPtr("10.1.0.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: "invalid-id-subnet"},
+			},
+		},
+		{
+			name: "empty Prefix is rejected",
+			controllerSegment: &corev1.NetworkSegment{
+				Id:       &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config:   &corev1.NetworkSegmentConfig{VpcId: &corev1.VpcId{Value: controllerVpcID.String()}},
+				Metadata: &corev1.Metadata{Name: "missing-prefix"},
+			},
+		},
+		{
+			name: "invalid Prefix CIDR is rejected",
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config: &corev1.NetworkSegmentConfig{
+					VpcId: &corev1.VpcId{Value: controllerVpcID.String()},
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "not-an-ip/24", Gateway: cutil.GetPtr("10.1.0.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: "bad-cidr-subnet"},
+			},
+		},
+		{
+			name: "empty VPC ID is rejected",
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config: &corev1.NetworkSegmentConfig{
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "10.1.0.0/24", Gateway: cutil.GetPtr("10.1.0.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: "missing-vpc-id"},
+			},
+		},
+		{
+			name: "no containing IP Block is rejected",
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config: &corev1.NetworkSegmentConfig{
+					VpcId: &corev1.VpcId{Value: controllerVpcID.String()},
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "192.168.1.0/24", Gateway: cutil.GetPtr("192.168.1.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: "no-ip-block-subnet"},
+			},
+		},
+		{
+			name: "already allocated Site CIDR is rejected",
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config: &corev1.NetworkSegmentConfig{
+					VpcId: &corev1.VpcId{Value: controllerVpcID.String()},
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "10.5.0.0/24", Gateway: cutil.GetPtr("10.5.0.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: "allocated-subnet"},
+			},
+		},
+		{
+			name: "renames Subnet when active name already exists",
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config: &corev1.NetworkSegmentConfig{
+					VpcId: &corev1.VpcId{Value: controllerVpcID.String()},
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "10.2.0.0/24", Gateway: cutil.GetPtr("10.2.0.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: existingSubnet.Name},
+			},
+			wantSubnet:   true,
+			wantNamePref: existingSubnet.Name + "-recovered-",
+		},
+		{
+			name: "assigns recovered name when metadata name is empty",
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config: &corev1.NetworkSegmentConfig{
+					VpcId: &corev1.VpcId{Value: controllerVpcID.String()},
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "10.3.0.0/24", Gateway: cutil.GetPtr("10.3.0.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: ""},
+			},
+			wantSubnet:   true,
+			wantNamePref: "recovered-",
+		},
+		{
+			name: "creates Subnet using parent VPC REST ID as Site VPC ID",
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config: &corev1.NetworkSegmentConfig{
+					VpcId: &corev1.VpcId{Value: parentVpc.ID.String()},
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "10.4.0.0/24", Gateway: cutil.GetPtr("10.4.0.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: "rest-id-parent-vpc-subnet"},
+			},
+			wantSubnet: true,
+			wantName:   "rest-id-parent-vpc-subnet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			subnet := manager.createOrUpdateSubnetFromSite(ctx, site, tt.controllerSegment)
+			if tt.wantSubnet {
+				require.NotNil(t, subnet)
+				assert.Equal(t, cdbm.SubnetStatusReady, subnet.Status)
+				assert.Equal(t, authorizedTenant.ID, subnet.TenantID)
+				assert.Equal(t, parentVpc.ID, subnet.VpcID)
+				require.NotNil(t, subnet.IPv4BlockID)
+				assert.Equal(t, ipBlock.ID, *subnet.IPv4BlockID)
+				assert.NotNil(t, ipamer.PrefixFrom(ctx, tt.controllerSegment.Config.Prefixes[0].Prefix))
+				if tt.wantName != "" {
+					assert.Equal(t, tt.wantName, subnet.Name)
+				}
+				if tt.wantNamePref != "" {
+					assert.True(t, len(subnet.Name) > len(tt.wantNamePref))
+					assert.Equal(t, tt.wantNamePref, subnet.Name[:len(tt.wantNamePref)])
+				}
+			} else {
+				assert.Nil(t, subnet)
+			}
+		})
+	}
+
+	storedIPBlockTests := []struct {
+		name                    string
+		storedIPBlockStatus     string
+		createMoreSpecificBlock bool
+		expectedRestore         bool
+	}{
+		{
+			name:                    "undelete ignores a newer more-specific IP Block",
+			storedIPBlockStatus:     cdbm.IPBlockStatusReady,
+			createMoreSpecificBlock: true,
+			expectedRestore:         true,
+		},
+		{
+			name:                "undelete skips a stored IP Block that is not Ready",
+			storedIPBlockStatus: cdbm.IPBlockStatusError,
+		},
+	}
+
+	for _, test := range storedIPBlockTests {
+		t.Run(test.name, func(t *testing.T) {
+			testCtx := context.Background()
+			testDBSession := testSubnetInitDB(t)
+			defer testDBSession.Close()
+			testSubnetSetupSchema(t, testDBSession)
+
+			testProviderOrg := "test-provider-org"
+			testProviderUser := testSubnetBuildUser(t, testDBSession, uuid.NewString(), testProviderOrg, []string{"FORGE_PROVIDER_ADMIN"})
+			testProvider := testSubnetSiteBuildInfrastructureProvider(t, testDBSession, "test-provider", testProviderOrg, testProviderUser)
+			testTenantOrg := "test-tenant-org"
+			testTenantUser := testSubnetBuildUser(t, testDBSession, uuid.NewString(), testTenantOrg, []string{"FORGE_TENANT_ADMIN"})
+			testTenant := testSubnetBuildTenant(t, testDBSession, "test-tenant", testTenantOrg, testTenantUser)
+			testSite := testSubnetBuildSite(t, testDBSession, testProvider, "test-site", testProviderUser)
+			testParentVpc := testSubnetBuildVPC(t, testDBSession, "parent-vpc", testProvider, testTenant, testSite, nil, nil, testTenantUser)
+			storedIPBlock := testSubnetBuildIPBlock(
+				t, testDBSession, "stored-ip-block", testSite, testProvider, &testTenant.ID,
+				cdbm.IPBlockRoutingTypeDatacenterOnly, "10.20.0.0", 16,
+				cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, testTenantUser,
+			)
+
+			testIPAMStorage := ipam.NewIpamStorage(testDBSession.DB, nil)
+			_, err := ipam.CreateIpamEntryForIPBlock(
+				testCtx, testIPAMStorage, storedIPBlock.Prefix, storedIPBlock.PrefixLength,
+				storedIPBlock.RoutingType, storedIPBlock.InfrastructureProviderID.String(),
+				storedIPBlock.SiteID.String(),
+			)
+			require.NoError(t, err)
+
+			controllerSegmentID := uuid.New()
+			testSubnetDAO := cdbm.NewSubnetDAO(testDBSession)
+			_, err = testSubnetDAO.Create(testCtx, nil, cdbm.SubnetCreateInput{
+				SubnetID:                   &controllerSegmentID,
+				Name:                       "stored-ip-block-subnet",
+				Org:                        testTenant.Org,
+				SiteID:                     testSite.ID,
+				VpcID:                      testParentVpc.ID,
+				TenantID:                   testTenant.ID,
+				ControllerNetworkSegmentID: &controllerSegmentID,
+				RoutingType:                &storedIPBlock.RoutingType,
+				IPv4Prefix:                 cutil.GetPtr("10.20.30.0"),
+				IPv4Gateway:                cutil.GetPtr("10.20.30.1"),
+				IPv4BlockID:                &storedIPBlock.ID,
+				PrefixLength:               24,
+				Status:                     cdbm.SubnetStatusDeleting,
+				CreatedBy:                  testTenantUser.ID,
+			})
+			require.NoError(t, err)
+			err = testSubnetDAO.Delete(testCtx, nil, controllerSegmentID)
+			require.NoError(t, err)
+			// The undelete is deferred while the delete is newer than the staleness threshold,
+			// so backdate it past that.
+			util.TestInventoryAgeDeletedTimestamp(testCtx, t, testDBSession, (*cdbm.Subnet)(nil), controllerSegmentID)
+
+			if test.storedIPBlockStatus != cdbm.IPBlockStatusReady {
+				_, err = cdbm.NewIPBlockDAO(testDBSession).Update(testCtx, nil, cdbm.IPBlockUpdateInput{
+					IPBlockID: storedIPBlock.ID,
+					Status:    &test.storedIPBlockStatus,
+				})
+				require.NoError(t, err)
+			}
+			if test.createMoreSpecificBlock {
+				testSubnetBuildIPBlock(
+					t, testDBSession, "more-specific-ip-block", testSite, testProvider, &testTenant.ID,
+					cdbm.IPBlockRoutingTypeDatacenterOnly, "10.20.16.0", 20,
+					cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, testTenantUser,
+				)
+			}
+
+			controllerSegment := &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: controllerSegmentID.String()},
+				Config: &corev1.NetworkSegmentConfig{
+					VpcId: &corev1.VpcId{Value: testParentVpc.ID.String()},
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "10.20.30.0/24", Gateway: cutil.GetPtr("10.20.30.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: "stored-ip-block-subnet"},
+				Status: &corev1.NetworkSegmentStatus{
+					TenantState: corev1.TenantState_READY,
+				},
+			}
+
+			testManager := ManageSubnet{dbSession: testDBSession}
+			restored := testManager.createOrUpdateSubnetFromSite(testCtx, testSite, controllerSegment)
+			if !test.expectedRestore {
+				assert.Nil(t, restored)
+				deleted, _, getErr := testSubnetDAO.GetAll(
+					testCtx,
+					nil,
+					cdbm.SubnetFilterInput{
+						SubnetIDs:      []uuid.UUID{controllerSegmentID},
+						IncludeDeleted: true,
+					},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+					nil,
+				)
+				require.NoError(t, getErr)
+				require.Len(t, deleted, 1)
+				assert.NotNil(t, deleted[0].Deleted)
+				return
+			}
+			require.NotNil(t, restored)
+			require.NotNil(t, restored.IPv4BlockID)
+			assert.Equal(t, storedIPBlock.ID, *restored.IPv4BlockID)
+
+			testIPAMer := cipam.NewWithStorage(testIPAMStorage)
+			testIPAMer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+				testCtx, storedIPBlock.RoutingType, storedIPBlock.InfrastructureProviderID.String(),
+				storedIPBlock.SiteID.String(),
+			))
+			assert.NotNil(t, testIPAMer.PrefixFrom(testCtx, controllerSegment.Config.Prefixes[0].Prefix))
+		})
+	}
+
+	regressionTests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "rejects host bits in an equal-length CIDR",
+			run:  testCreateOrUpdateSubnetRejectsHostBitsEqualLengthCIDR,
+		},
+		{
+			name: "skips a fully granted IP Block",
+			run:  testCreateOrUpdateSubnetSkipsFullGrantIPBlock,
+		},
+		{
+			name: "skips undelete when the stored Prefix differs",
+			run:  testCreateOrUpdateSubnetSkipsRestoreWhenPrefixDiffers,
+		},
+		{
+			name: "skips a Controller Segment ID owned by another Site",
+			run:  testCreateOrUpdateSubnetSkipsIDOwnedByDifferentSite,
+		},
+	}
+
+	for _, test := range regressionTests {
+		t.Run(test.name, test.run)
+	}
+}
+
+func testCreateOrUpdateSubnetRejectsHostBitsEqualLengthCIDR(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSubnetInitDB(t)
+	defer dbSession.Close()
+	testSubnetSetupSchema(t, dbSession)
+
+	providerOrg := "test-provider-org"
+	providerUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), providerOrg, []string{"FORGE_PROVIDER_ADMIN"})
+	provider := testSubnetSiteBuildInfrastructureProvider(t, dbSession, "test-provider", providerOrg, providerUser)
+	tenantOrg := "test-tenant-org"
+	tenantUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), tenantOrg, []string{"FORGE_TENANT_ADMIN"})
+	tenant := testSubnetBuildTenant(t, dbSession, "test-tenant", tenantOrg, tenantUser)
+	site := testSubnetBuildSite(t, dbSession, provider, "test-site", providerUser)
+
+	parentVpc := testSubnetBuildVPC(t, dbSession, "parent-vpc", provider, tenant, site, nil, nil, tenantUser)
+	ipBlock := testSubnetBuildIPBlock(
+		t, dbSession, "test-full-grant-ip-block", site, provider, &tenant.ID,
+		cdbm.IPBlockRoutingTypeDatacenterOnly, "10.20.0.0", 16,
+		cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tenantUser,
+	)
+	ipamStorage := ipam.NewIpamStorage(dbSession.DB, nil)
+	_, err := ipam.CreateIpamEntryForIPBlock(
+		ctx, ipamStorage, ipBlock.Prefix, ipBlock.PrefixLength, ipBlock.RoutingType,
+		ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+	)
+	require.NoError(t, err)
+
+	hostBitsSubnetID := uuid.New()
+	manager := ManageSubnet{dbSession: dbSession}
+	created := manager.createOrUpdateSubnetFromSite(ctx, site, &corev1.NetworkSegment{
+		Id: &corev1.NetworkSegmentId{Value: hostBitsSubnetID.String()},
+		Config: &corev1.NetworkSegmentConfig{
+			VpcId: &corev1.VpcId{Value: parentVpc.ID.String()},
+			Prefixes: []*corev1.NetworkPrefix{
+				{Prefix: "10.20.0.1/16", Gateway: cutil.GetPtr("10.20.0.2")},
+			},
+		},
+		Metadata: &corev1.Metadata{Name: "host-bits-subnet"},
+		Status:   &corev1.NetworkSegmentStatus{TenantState: corev1.TenantState_READY},
+	})
+	assert.Nil(t, created)
+
+	subnetDAO := cdbm.NewSubnetDAO(dbSession)
+	_, err = subnetDAO.GetByID(ctx, nil, hostBitsSubnetID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+
+	ipBlockDAO := cdbm.NewIPBlockDAO(dbSession)
+	reloadedIPBlock, err := ipBlockDAO.GetByID(ctx, nil, ipBlock.ID, nil)
+	require.NoError(t, err)
+	assert.False(t, reloadedIPBlock.FullGrant)
+
+	childPrefix, err := ipam.CreateChildIpamEntryForIPBlock(
+		ctx, nil, dbSession, ipamStorage, reloadedIPBlock, reloadedIPBlock.PrefixLength,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "10.20.0.0/16", childPrefix.Cidr)
+	reloadedIPBlock, err = ipBlockDAO.GetByID(ctx, nil, ipBlock.ID, nil)
+	require.NoError(t, err)
+	assert.True(t, reloadedIPBlock.FullGrant)
+}
+
+func testCreateOrUpdateSubnetSkipsFullGrantIPBlock(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSubnetInitDB(t)
+	defer dbSession.Close()
+	testSubnetSetupSchema(t, dbSession)
+
+	providerOrg := "test-provider-org"
+	providerUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), providerOrg, []string{"FORGE_PROVIDER_ADMIN"})
+	provider := testSubnetSiteBuildInfrastructureProvider(t, dbSession, "test-provider", providerOrg, providerUser)
+	tenantOrg := "test-tenant-org"
+	tenantUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), tenantOrg, []string{"FORGE_TENANT_ADMIN"})
+	tenant := testSubnetBuildTenant(t, dbSession, "test-tenant", tenantOrg, tenantUser)
+	site := testSubnetBuildSite(t, dbSession, provider, "test-site", providerUser)
+
+	parentVpc := testSubnetBuildVPC(t, dbSession, "parent-vpc", provider, tenant, site, nil, nil, tenantUser)
+	ipBlock := testSubnetBuildIPBlock(
+		t, dbSession, "test-full-grant-ip-block", site, provider, &tenant.ID,
+		cdbm.IPBlockRoutingTypeDatacenterOnly, "10.20.0.0", 16,
+		cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tenantUser,
+	)
+	ipamStorage := ipam.NewIpamStorage(dbSession.DB, nil)
+	_, err := ipam.CreateIpamEntryForIPBlock(
+		ctx, ipamStorage, ipBlock.Prefix, ipBlock.PrefixLength, ipBlock.RoutingType,
+		ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+	)
+	require.NoError(t, err)
+
+	_, err = ipam.CreateChildIpamEntryForIPBlock(
+		ctx, nil, dbSession, ipamStorage, ipBlock, ipBlock.PrefixLength,
+	)
+	require.NoError(t, err)
+	ipBlockDAO := cdbm.NewIPBlockDAO(dbSession)
+	fullGrantedIPBlock, err := ipBlockDAO.GetByID(ctx, nil, ipBlock.ID, nil)
+	require.NoError(t, err)
+	require.True(t, fullGrantedIPBlock.FullGrant)
+
+	childSubnetID := uuid.New()
+	manager := ManageSubnet{dbSession: dbSession}
+	created := manager.createOrUpdateSubnetFromSite(ctx, site, &corev1.NetworkSegment{
+		Id: &corev1.NetworkSegmentId{Value: childSubnetID.String()},
+		Config: &corev1.NetworkSegmentConfig{
+			VpcId: &corev1.VpcId{Value: parentVpc.ID.String()},
+			Prefixes: []*corev1.NetworkPrefix{
+				{Prefix: "10.20.30.0/24", Gateway: cutil.GetPtr("10.20.30.1")},
+			},
+		},
+		Metadata: &corev1.Metadata{Name: "full-grant-child-subnet"},
+		Status:   &corev1.NetworkSegmentStatus{TenantState: corev1.TenantState_READY},
+	})
+	assert.Nil(t, created)
+
+	subnetDAO := cdbm.NewSubnetDAO(dbSession)
+	_, err = subnetDAO.GetByID(ctx, nil, childSubnetID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+
+	ipamer := cipam.NewWithStorage(ipamStorage)
+	ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+		ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+	))
+	assert.Nil(t, ipamer.PrefixFrom(ctx, "10.20.30.0/24"))
+
+	reloadedIPBlock, err := ipBlockDAO.GetByID(ctx, nil, ipBlock.ID, nil)
+	require.NoError(t, err)
+	assert.True(t, reloadedIPBlock.FullGrant)
+}
+
+func testCreateOrUpdateSubnetSkipsRestoreWhenPrefixDiffers(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSubnetInitDB(t)
+	defer dbSession.Close()
+	testSubnetSetupSchema(t, dbSession)
+
+	providerOrg := "test-provider-org"
+	providerUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), providerOrg, []string{"FORGE_PROVIDER_ADMIN"})
+	provider := testSubnetSiteBuildInfrastructureProvider(t, dbSession, "test-provider", providerOrg, providerUser)
+	tenantOrg := "test-tenant-org"
+	tenantUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), tenantOrg, []string{"FORGE_TENANT_ADMIN"})
+	tenant := testSubnetBuildTenant(t, dbSession, "test-tenant", tenantOrg, tenantUser)
+	site := testSubnetBuildSite(t, dbSession, provider, "test-site", providerUser)
+
+	parentVpc := testSubnetBuildVPC(t, dbSession, "parent-vpc", provider, tenant, site, nil, nil, tenantUser)
+	ipBlock := testSubnetBuildIPBlock(
+		t, dbSession, "test-prefix-mismatch-ip-block", site, provider, &tenant.ID,
+		cdbm.IPBlockRoutingTypeDatacenterOnly, "10.20.0.0", 16,
+		cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tenantUser,
+	)
+	ipamStorage := ipam.NewIpamStorage(dbSession.DB, nil)
+	_, err := ipam.CreateIpamEntryForIPBlock(
+		ctx, ipamStorage, ipBlock.Prefix, ipBlock.PrefixLength, ipBlock.RoutingType,
+		ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+	)
+	require.NoError(t, err)
+
+	storedCIDR := "10.20.30.0/24"
+	reportedCIDR := "10.20.31.0/24"
+	subnetID := uuid.New()
+	subnetDAO := cdbm.NewSubnetDAO(dbSession)
+	_, err = subnetDAO.Create(ctx, nil, cdbm.SubnetCreateInput{
+		SubnetID:                   &subnetID,
+		Name:                       "stored-subnet",
+		Org:                        tenant.Org,
+		SiteID:                     site.ID,
+		VpcID:                      parentVpc.ID,
+		TenantID:                   tenant.ID,
+		ControllerNetworkSegmentID: &subnetID,
+		RoutingType:                &ipBlock.RoutingType,
+		IPv4Prefix:                 cutil.GetPtr("10.20.30.0"),
+		IPv4Gateway:                cutil.GetPtr("10.20.30.1"),
+		IPv4BlockID:                &ipBlock.ID,
+		PrefixLength:               24,
+		Status:                     cdbm.SubnetStatusDeleting,
+		CreatedBy:                  tenantUser.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, subnetDAO.Delete(ctx, nil, subnetID))
+
+	deleted, _, err := subnetDAO.GetAll(
+		ctx,
+		nil,
+		cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{subnetID}, IncludeDeleted: true},
+		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, deleted, 1)
+	require.NotNil(t, deleted[0].Deleted)
+	deletedAt := *deleted[0].Deleted
+
+	manager := ManageSubnet{dbSession: dbSession}
+	created := manager.createOrUpdateSubnetFromSite(ctx, site, &corev1.NetworkSegment{
+		Id: &corev1.NetworkSegmentId{Value: subnetID.String()},
+		Config: &corev1.NetworkSegmentConfig{
+			VpcId: &corev1.VpcId{Value: parentVpc.ID.String()},
+			Prefixes: []*corev1.NetworkPrefix{
+				{Prefix: reportedCIDR, Gateway: cutil.GetPtr("10.20.31.1")},
+			},
+		},
+		Metadata: &corev1.Metadata{Name: "drifted-subnet"},
+		Status:   &corev1.NetworkSegmentStatus{TenantState: corev1.TenantState_READY},
+	})
+	assert.Nil(t, created)
+
+	stillDeleted, _, err := subnetDAO.GetAll(
+		ctx,
+		nil,
+		cdbm.SubnetFilterInput{SubnetIDs: []uuid.UUID{subnetID}, IncludeDeleted: true},
+		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, stillDeleted, 1)
+	require.NotNil(t, stillDeleted[0].Deleted)
+	assert.Equal(t, deletedAt, *stillDeleted[0].Deleted)
+	require.NotNil(t, stillDeleted[0].IPv4Prefix)
+	assert.Equal(t, "10.20.30.0", *stillDeleted[0].IPv4Prefix)
+
+	_, err = subnetDAO.GetByID(ctx, nil, subnetID, nil)
+	assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+
+	ipamer := cipam.NewWithStorage(ipamStorage)
+	ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+		ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
+	))
+	assert.Nil(t, ipamer.PrefixFrom(ctx, reportedCIDR))
+	assert.Nil(t, ipamer.PrefixFrom(ctx, storedCIDR))
+}
+
+func testCreateOrUpdateSubnetSkipsIDOwnedByDifferentSite(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSubnetInitDB(t)
+	defer dbSession.Close()
+	testSubnetSetupSchema(t, dbSession)
+
+	providerOrg := "test-provider-org"
+	providerUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), providerOrg, []string{"FORGE_PROVIDER_ADMIN"})
+	provider := testSubnetSiteBuildInfrastructureProvider(t, dbSession, "test-provider", providerOrg, providerUser)
+	tenantOrg := "test-tenant-org"
+	tenantUser := testSubnetBuildUser(t, dbSession, uuid.NewString(), tenantOrg, []string{"FORGE_TENANT_ADMIN"})
+	tenant := testSubnetBuildTenant(t, dbSession, "test-tenant", tenantOrg, tenantUser)
+	siteA := testSubnetBuildSite(t, dbSession, provider, "test-site-a", providerUser)
+	siteB := testSubnetBuildSite(t, dbSession, provider, "test-site-b", providerUser)
+
+	vpcA := testSubnetBuildVPC(t, dbSession, "vpc-a", provider, tenant, siteA, nil, nil, tenantUser)
+	vpcB := testSubnetBuildVPC(t, dbSession, "vpc-b", provider, tenant, siteB, nil, nil, tenantUser)
+
+	ipBlockA := testSubnetBuildIPBlock(
+		t, dbSession, "ip-block-a", siteA, provider, &tenant.ID,
+		cdbm.IPBlockRoutingTypeDatacenterOnly, "10.10.0.0", 16,
+		cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tenantUser,
+	)
+	ipBlockB := testSubnetBuildIPBlock(
+		t, dbSession, "ip-block-b", siteB, provider, &tenant.ID,
+		cdbm.IPBlockRoutingTypeDatacenterOnly, "10.20.0.0", 16,
+		cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tenantUser,
+	)
+	ipamStorage := ipam.NewIpamStorage(dbSession.DB, nil)
+	_, err := ipam.CreateIpamEntryForIPBlock(
+		ctx, ipamStorage, ipBlockB.Prefix, ipBlockB.PrefixLength, ipBlockB.RoutingType,
+		ipBlockB.InfrastructureProviderID.String(), ipBlockB.SiteID.String(),
+	)
+	require.NoError(t, err)
+
+	sharedSubnetID := uuid.New()
+	prefixA := "10.10.1.0"
+	prefixLengthA := 24
+	existing, err := cdbm.NewSubnetDAO(dbSession).Create(ctx, nil, cdbm.SubnetCreateInput{
+		SubnetID:                   &sharedSubnetID,
+		Name:                       "site-a-subnet",
+		Org:                        tenant.Org,
+		SiteID:                     siteA.ID,
+		VpcID:                      vpcA.ID,
+		TenantID:                   tenant.ID,
+		ControllerNetworkSegmentID: &sharedSubnetID,
+		RoutingType:                &ipBlockA.RoutingType,
+		IPv4Prefix:                 &prefixA,
+		IPv4Gateway:                cutil.GetPtr("10.10.1.1"),
+		IPv4BlockID:                &ipBlockA.ID,
+		PrefixLength:               prefixLengthA,
+		Status:                     cdbm.SubnetStatusReady,
+		CreatedBy:                  tenantUser.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, sharedSubnetID, existing.ID)
+	require.Equal(t, siteA.ID, existing.SiteID)
+
+	manager := ManageSubnet{dbSession: dbSession}
+	created := manager.createOrUpdateSubnetFromSite(ctx, siteB, &corev1.NetworkSegment{
+		Id: &corev1.NetworkSegmentId{Value: sharedSubnetID.String()},
+		Config: &corev1.NetworkSegmentConfig{
+			VpcId: &corev1.VpcId{Value: vpcB.ID.String()},
+			Prefixes: []*corev1.NetworkPrefix{
+				{Prefix: "10.20.1.0/24", Gateway: cutil.GetPtr("10.20.1.1")},
+			},
+		},
+		Metadata: &corev1.Metadata{Name: "site-b-collision-subnet"},
+		Status:   &corev1.NetworkSegmentStatus{TenantState: corev1.TenantState_READY},
+	})
+	assert.Nil(t, created)
+
+	subnetDAO := cdbm.NewSubnetDAO(dbSession)
+	stillOriginal, err := subnetDAO.GetByID(ctx, nil, sharedSubnetID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, siteA.ID, stillOriginal.SiteID)
+	require.NotNil(t, stillOriginal.IPv4Prefix)
+	assert.Equal(t, prefixA, *stillOriginal.IPv4Prefix)
+	assert.Equal(t, "site-a-subnet", stillOriginal.Name)
+	assert.Nil(t, stillOriginal.Deleted)
+
+	siteBSubnets, _, err := subnetDAO.GetAll(ctx, nil, cdbm.SubnetFilterInput{
+		SiteIDs: []uuid.UUID{siteB.ID},
+	}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, siteBSubnets)
+
+	ipamer := cipam.NewWithStorage(ipamStorage)
+	ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
+		ctx, ipBlockB.RoutingType, ipBlockB.InfrastructureProviderID.String(), ipBlockB.SiteID.String(),
+	))
+	assert.Nil(t, ipamer.PrefixFrom(ctx, "10.20.1.0/24"))
 }
 
 // Test Subnet Metrics - CREATE operations

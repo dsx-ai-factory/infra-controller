@@ -270,6 +270,7 @@ message Component {
     LeakStatus leak_status = 10;  // Coolant leak detection status (set by the leak-detection loop)
     UUID nvl_domain_id = 11;  // NVLink Domain containing this component's rack; omitted when unassigned
     TaskStats task_stats = 12;  // Active Tasks that explicitly target this component.
+    string rack_external_id = 13;
 }
 
 message Rack {
@@ -278,6 +279,7 @@ message Rack {
     repeated Component components = 3;
     repeated UUID nvl_domain_ids = 4;  // NVLink Domains containing this rack; empty when unassigned
     TaskStats task_stats = 5;  // All active Tasks on this rack, including component-scoped Tasks.
+    string external_id = 6;
 }
 
 message Identifier {
@@ -336,8 +338,9 @@ message ComponentsForType {
 // To target specific components, use the component-level APIs instead.
 message RackTarget {
     oneof identifier {
-        UUID id = 1;        // Rack UUID
+        UUID id = 1;        // Flow rack UUID
         string name = 2;    // Rack name
+        string external_id = 4;
     }
     // Optional: filter by component type. Omit (or send empty list) to include all components in the rack.
     repeated ComponentType component_types = 3;
@@ -347,17 +350,14 @@ message RackTarget {
 message ComponentTarget {
     oneof identifier {
         UUID id = 1;           // Component UUID
-        ExternalRef external = 2;  // External system reference
+        ExternalRef external = 2;
     }
 }
 
-// ExternalRef identifies a component by its external system ID.
-// All component types are routed through Core (NICo); the ID is the
-// identifier expected by NICo for that component type (e.g. machine_id
-// for compute, PMC MAC for power shelf).
+// ExternalRef identifies a component by its external identifier and optional type.
 message ExternalRef {
-    ComponentType type = 1;  // Component type determines the source system
-    string id = 2;           // ID expected by NICo for this component type
+    ComponentType type = 1;  // UNKNOWN requires an unambiguous ID.
+    string id = 2;
 }
 
 message NVLDomain {
@@ -603,6 +603,7 @@ message ComponentDiff {
     Component actual = 4;
     repeated FieldDiff field_diffs = 5; // Populated when type is MISMATCH
     UUID id = 6;                // Flow internal component UUID
+    string component_mac_address = 7; // BMC MAC address identifying a missing expected component
 }
 
 message FieldDiff {
@@ -769,13 +770,13 @@ message DecommissionRackRequest {
 // set filter. Unset optional fields are not applied; with no filter set
 // every Task is returned subject to pagination.
 message ListTasksRequest {
-    optional UUID rack_id = 1;                  // Restrict to Tasks created against this rack.
+    optional UUID rack_id = 1;                  // Restrict by rack identifier.
     bool active_only = 2;                       // Restrict to non-terminal Tasks (Waiting, Pending, Running).
     optional Pagination pagination = 3;
-    // Restrict to Tasks that target this component UUID, regardless of
-    // component type. A rack_id + component_id combination that references
-    // a component not on the given rack is not an error; it yields an
-    // empty result.
+    // Restrict to Tasks that target this component identifier, regardless of
+    // component type. A rack_id plus
+    // component_id combination that references a component not on the given
+    // rack is not an error; it yields an empty result.
     optional UUID component_id = 4;
     // When true, populate Task.report on each returned task. Defaults to
     // false because report bodies can be several KB and would otherwise
@@ -1557,6 +1558,7 @@ message OperationRunTarget {
     ComponentsByType components_by_type = 9;
     google.protobuf.Timestamp created_at = 10;
     google.protobuf.Timestamp updated_at = 11;
+    string rack_external_id = 12;
 }
 
 // NVLDomainTargets contains one or more NVLink domain targets.

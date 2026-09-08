@@ -205,6 +205,7 @@ pub(crate) struct SingleSystemConfig {
     pub(crate) serial_number: Option<Cow<'static, str>>,
     pub(crate) manufacturer: Option<Cow<'static, str>>,
     pub(crate) model: Option<Cow<'static, str>>,
+    pub(crate) bios_version: Option<Cow<'static, str>>,
     pub(crate) boot_order_mode: BootOrderMode,
     pub(crate) callbacks: Option<Arc<dyn Callbacks>>,
     pub(crate) chassis: Vec<Cow<'static, str>>,
@@ -701,6 +702,7 @@ async fn get_system(State(state): State<BmcState>, Path(system_id): Path<String>
     b.maybe_with(SystemBuilder::serial_number, &config.serial_number)
         .maybe_with(SystemBuilder::manufacturer, &config.manufacturer)
         .maybe_with(SystemBuilder::model, &config.model)
+        .maybe_with(SystemBuilder::bios_version, &config.bios_version)
         .maybe_with(SystemBuilder::bios, &bios)
         .maybe_with(SystemBuilder::boot_options, &boot_options)
         .maybe_with(SystemBuilder::ethernet_interfaces, &ethernet_interfaces)
@@ -1289,6 +1291,10 @@ impl SystemBuilder {
 
     fn model(self, v: &str) -> Self {
         self.add_str_field("Model", v)
+    }
+
+    fn bios_version(self, version: &str) -> Self {
+        self.add_str_field("BiosVersion", version)
     }
 
     fn ethernet_interfaces(self, v: &redfish::Collection<'_>) -> Self {

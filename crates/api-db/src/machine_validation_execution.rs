@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::machine::MachineId;
 use carbide_uuid::machine_validation::{
     MachineValidationAttemptId, MachineValidationId, MachineValidationRunItemId,
 };
@@ -36,6 +37,7 @@ const SUMMARY_LIMIT: usize = 4096;
 
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct StaleMachineValidationAttempt {
+    pub machine_id: MachineId,
     pub validation_id: MachineValidationId,
     pub run_item_id: MachineValidationRunItemId,
     pub attempt_id: MachineValidationAttemptId,
@@ -44,6 +46,12 @@ pub struct StaleMachineValidationAttempt {
     pub timeout_seconds: i64,
     pub started_at: Option<DateTime<Utc>>,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
+}
+
+impl crate::machine::MachineRowLockItem for StaleMachineValidationAttempt {
+    fn machine_id(&self) -> MachineId {
+        self.machine_id
+    }
 }
 
 pub async fn materialize_run_plan(
@@ -264,6 +272,7 @@ pub async fn find_stale_active_attempts(
     const QUERY: &str = "
         WITH active_attempts AS (
             SELECT
+                validation.machine_id,
                 run_item.run_id AS validation_id,
                 run_item.id AS run_item_id,
                 attempt.id AS attempt_id,
@@ -288,6 +297,7 @@ pub async fn find_stale_active_attempts(
                 AND attempt.state='Running'
         )
         SELECT
+            machine_id,
             validation_id,
             run_item_id,
             attempt_id,

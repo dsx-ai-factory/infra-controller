@@ -54,6 +54,7 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		libssl-dev \
 		libtss2-dev \
 		libudev-dev \
+		mold \
 		pandoc \
 		pkg-config \
 		tpm2-tools \
@@ -66,8 +67,12 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		git \
 	&& rm -rf /var/lib/apt/lists/*
 
-# make LLVM's linker lld the default, because ld crashes using too much memory
-RUN update-alternatives --install /usr/bin/ld ld /usr/bin/lld 50
+# Keep the system linker for non-Rust builds such as iPXE, whose linker script
+# is not accepted by mold. Cargo uses this wrapper even outside the repository.
+RUN printf '#!/bin/sh\nexec clang -fuse-ld=mold "$@"\n' \
+		>/usr/local/bin/clang-mold && \
+	chmod 0755 /usr/local/bin/clang-mold
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold
 
 RUN rustup component add rustfmt
 RUN cargo install cargo-cache cargo-make sccache --locked && \

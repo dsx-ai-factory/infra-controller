@@ -10,7 +10,7 @@ and Golang that provides site-local, zero-trust, bare-metal lifecycle
 management with DPU-enforced isolation. It automates the complexity of the
 bare-metal lifecycle to fast-track building next-generation AI Cloud offerings.
 
-> **Status:** Experimental/Preview. APIs, configurations, and features may
+> **Status:** Active development. APIs, configurations, and features may
 > change without notice between releases.
 
 ### Key Responsibilities
@@ -355,6 +355,8 @@ check before requesting review.
     - global versus subcommand position and required order
     - omission or fallback behavior
     - observable output, side effects, errors, and unsupported paths
+    - for repeated or list fields, membership, ordering, and whether omitted and
+      empty values have the same meaning
   - Exercise each changed CLI example at the PR revision on an authorized local
     or test target and compare it with real `--help` output. Verify changed API,
     configuration, environment-variable, and state contracts through schemas,

@@ -21,6 +21,9 @@ nico-rest-api:
   config:
     keycloak:
       enabled: true
+      # Hostname must match helm-prereqs/values.yaml::keycloak.namespace
+      # (default "nico-rest") — that value is not propagated here
+      # automatically, so update both together if you change it.
       baseURL: "http://keycloak.nico-rest:8082"
       externalBaseURL: "http://keycloak.nico-rest:8082"
       realm: "nico"

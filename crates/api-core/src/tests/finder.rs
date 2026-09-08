@@ -348,7 +348,7 @@ async fn test_identify_mac(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let res = env
         .api
         .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
-            machine_ids: vec![host_machine_id],
+            machine_ids: vec![host_machine_id.into()],
             ..Default::default()
         }))
         .await

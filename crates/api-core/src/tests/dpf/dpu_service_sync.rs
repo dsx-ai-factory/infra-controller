@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use model::machine::{DpfState, DpuInitState, DpuInitStates, ManagedHostState};
 use model::machine_pending_action::MachinePendingActionKind::DpuServiceSync;
 use tokio::time::timeout;
@@ -139,14 +139,14 @@ pub(super) async fn provisioned_with_sync(
     }
 }
 
-pub(super) async fn request_sync(pool: &sqlx::PgPool, host_id: &MachineId) {
+pub(super) async fn request_sync(pool: &sqlx::PgPool, host_id: &HostMachineId) {
     let mut conn = pool.acquire().await.unwrap();
     db::machine_pending_action::request(&mut conn, host_id, DpuServiceSync)
         .await
         .expect("recorded pending action");
 }
 
-pub(super) async fn is_outstanding(pool: &sqlx::PgPool, host_id: &MachineId) -> bool {
+pub(super) async fn is_outstanding(pool: &sqlx::PgPool, host_id: &HostMachineId) -> bool {
     db::machine_pending_action::is_outstanding(pool, host_id, DpuServiceSync)
         .await
         .expect("read pending action")
@@ -156,8 +156,8 @@ pub(super) async fn is_outstanding(pool: &sqlx::PgPool, host_id: &MachineId) -> 
 /// handler runs again without replaying the whole operator workflow.
 pub(super) async fn reset_host_to_waiting_for_ready(
     pool: &sqlx::PgPool,
-    host_id: &MachineId,
-    dpu_id: &MachineId,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
 ) {
     let state = ManagedHostState::DPUInit {
         dpu_states: DpuInitStates {

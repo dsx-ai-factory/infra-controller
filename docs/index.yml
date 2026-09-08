@@ -62,6 +62,8 @@ navigation:
               slug: dpf-setup
             - page: Day 0 Machine Identity
               path: getting-started/installation-options/day0-machine-identity.md
+            - page: Day 0 Credential Store
+              path: getting-started/installation-options/day0-credential-store.md
           slug: installation-options
 
     - section: Architecture
@@ -142,12 +144,16 @@ navigation:
               path: manuals/networking/infiniband_partitioning.md
         - page: Tenant Management
           path: configuration/tenant_management.md
+        - page: Image-Based Operating Systems
+          path: configuration/image-based-operating-systems.md
         - page: Organization & Permissions
           path: configuration/org-permissions.md
         - page: Machine Identity
           path: configuration/machine_identity.md
         - page: Secrets Storage
           path: configuration/secrets-storage.md
+        - page: Credential Sources
+          path: configuration/credential-sources.md
         - page: Host Naming
           path: configuration/host-naming.md
         - page: DNS

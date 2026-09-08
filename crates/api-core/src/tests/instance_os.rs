@@ -334,7 +334,7 @@ async fn test_allocate_instance_rejects_inactive_os(_: PgPoolOptions, options: P
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id.into()),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(rpc::forge::InstanceOperatingSystemConfig {
@@ -422,7 +422,7 @@ async fn test_allocate_instance_rejects_not_ready_os(_: PgPoolOptions, options: 
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.id.into(),
+            machine_id: Some(mh.id.into()),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(rpc::forge::InstanceOperatingSystemConfig {

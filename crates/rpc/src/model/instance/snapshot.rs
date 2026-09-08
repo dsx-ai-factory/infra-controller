@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use config_version::Versioned;
 use model::health::HealthReportSources;
 use model::instance::snapshot::InstanceSnapshot;
@@ -35,8 +35,8 @@ use crate::model::instance::status::instance_status_from_config_and_observation;
 #[allow(clippy::too_many_arguments)]
 pub fn instance_snapshot_derive_status(
     snapshot: &InstanceSnapshot,
-    dpu_id_to_device_map: HashMap<String, Vec<MachineId>>,
-    primary_dpu_machine_id: Option<MachineId>,
+    dpu_id_to_device_map: HashMap<String, Vec<DpuMachineId>>,
+    primary_dpu_machine_id: Option<DpuMachineId>,
     managed_host_state: ManagedHostState,
     reprovision_request: Option<ReprovisionRequest>,
     ib_status: Option<&MachineInfinibandStatusObservation>,

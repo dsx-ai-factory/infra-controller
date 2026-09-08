@@ -409,6 +409,7 @@ func (os *OperatingSystem) ToImageAttributesProto(tenantOrg string) *corev1.OsIm
 		AuthToken:            os.ImageAuthToken,
 		RootfsId:             os.RootFsID,
 		RootfsLabel:          os.RootFsLabel,
+		BootDisk:             os.ImageDisk,
 	}
 }
 

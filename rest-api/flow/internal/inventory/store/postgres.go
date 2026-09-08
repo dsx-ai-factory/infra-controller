@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
@@ -163,6 +165,51 @@ func (s *PostgresStore) GetRacksByIDs(
 	return results, nil
 }
 
+// GetRacksByIDsIncludingDeleted retrieves multiple racks by UUID, including
+// soft-deleted rows.
+func (s *PostgresStore) GetRacksByIDsIncludingDeleted(
+	ctx context.Context,
+	ids []uuid.UUID,
+	withComponents bool,
+) ([]*rack.Rack, error) {
+	if len(ids) == 0 {
+		return []*rack.Rack{}, nil
+	}
+
+	rackDaos, err := model.GetRacksByIDsIncludingDeleted(ctx, s.pg.DB, ids, withComponents)
+	if err != nil {
+		return nil, s.checkDBGetError(err, "")
+	}
+
+	results := make([]*rack.Rack, 0, len(rackDaos))
+	for i := range rackDaos {
+		results = append(results, dao.RackFrom(&rackDaos[i]))
+	}
+	return results, nil
+}
+
+// GetRackByExternalID retrieves a rack by its external ID.
+func (s *PostgresStore) GetRackByExternalID(
+	ctx context.Context,
+	externalID string,
+	withComponents bool,
+) (*rack.Rack, error) {
+	if externalID == "" {
+		return nil, errors.GRPCErrorInvalidArgument("rack external id is not specified")
+	}
+
+	var rackDAO model.Rack
+	query := s.pg.DB.NewSelect().Model(&rackDAO).Where("r.external_id = ?", externalID)
+	if withComponents {
+		query = query.Relation("Components").Relation("Components.BMCs")
+	}
+	if err := query.Scan(ctx); err != nil {
+		return nil, s.checkDBGetError(err, fmt.Sprintf("rack with external id %s", externalID))
+	}
+
+	return dao.RackFrom(&rackDAO), nil
+}
+
 // GetRackBySerial retrieves a rack by its serial number and manufacturer.
 func (s *PostgresStore) GetRackBySerial(
 	ctx context.Context,
@@ -196,6 +243,15 @@ func (s *PostgresStore) GetRackByIdentifier(
 		)
 	}
 
+	if identifier.ExternalID != "" {
+		r, err := s.GetRackByExternalID(ctx, identifier.ExternalID, withComponents)
+		if err == nil {
+			return r, nil
+		}
+		if status.Code(err) != codes.NotFound || (identifier.ID == uuid.Nil && identifier.Name == "") {
+			return nil, err
+		}
+	}
 	if identifier.ID != uuid.Nil {
 		deviceInfo := deviceinfo.DeviceInfo{
 			ID: identifier.ID,
@@ -410,6 +466,7 @@ func (s *PostgresStore) GetComponentsByExternalIDs(
 	err := s.pg.DB.NewSelect().
 		Model(&componentModels).
 		Where("c.external_id IN (?)", bun.In(externalIDs)).
+		Relation("BMCs").
 		Relation("Rack").
 		Scan(ctx)
 	if err != nil {

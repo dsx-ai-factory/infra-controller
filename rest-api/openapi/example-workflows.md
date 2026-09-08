@@ -23,7 +23,6 @@ This section provides example REST API workflows for common NICo tasks. All exam
   </Accordion>
 </AccordionGroup>
 
-
 ## Managing Virtual Private Clouds
 
 <Note>
@@ -92,6 +91,7 @@ Before assigning Instance Types, you should have the ID of the Instance Type. Yo
 ## Managing Operating Systems
 
 Before adding an operating system image, ensure you have:
+
 - An iPXE script as a one-line string.
 - **Optional**: A cloud-init script as a one-line string.
 - For the iPXE string and cloud-init string, replace newline characters with `\n` and escape quotation marks with `\"`.
@@ -101,6 +101,11 @@ Before adding an operating system image, ensure you have:
   <Accordion title="Add an Operating System Image">
     <Code src="snippets/input/add_operating_system.sh" title="Example Call" />
     <Code src="snippets/output/add_operating_system.json" title="Example Response" />
+  </Accordion>
+  <Accordion title="Add an Image-Based Operating System">
+    The `imageDisk` value identifies the whole disk that NICo overwrites. A `/dev/disk/by-id/` selector is stable across enumeration changes but must exist on every eligible machine. Use `smallest` only when the intended boot disk is consistently the smallest whole disk. See [Image-Based Operating Systems](../../docs/configuration/image-based-operating-systems.md) for selection, update, and filesystem-identity behavior.
+    <Code src="snippets/input/add_image_operating_system.sh" title="Example Call" />
+    <Code src="snippets/output/add_image_operating_system.json" title="Example Response" />
   </Accordion>
 </AccordionGroup>
 

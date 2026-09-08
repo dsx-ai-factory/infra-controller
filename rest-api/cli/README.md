@@ -44,7 +44,7 @@ If you use a coding agent that has shell access, point it at [`cli/INSTALL.md`](
 
 ```text
 Install nicocli following the instructions at
-https://github.com/NVIDIA/infra-controller/rest-api/blob/main/cli/INSTALL.md
+https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/cli/INSTALL.md
 ```
 
 ### Inside the nico-rest-api container
@@ -307,7 +307,7 @@ Commands follow `nicocli <resource> [sub-resource] <action> [args] [flags]`.
 
 Nested API paths appear as sub-resource groups:
 
-```
+```text
 nicocli allocation list
 nicocli allocation constraint list
 nicocli allocation constraint create <allocationId>
@@ -330,7 +330,7 @@ nicocli completion fish > ~/.config/fish/completions/nicocli.fish
 
 Each environment (local dev, staging, prod) gets its own config file in `~/.nico/`:
 
-```
+```text
 ~/.nico/config.yaml           # default (local dev)
 ~/.nico/config.staging.yaml   # staging
 ~/.nico/config.prod.yaml      # production

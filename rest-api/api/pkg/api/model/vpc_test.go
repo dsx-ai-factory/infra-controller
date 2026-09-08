@@ -186,14 +186,14 @@ func TestAPIVpcCreateRequest_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "test invalid VPC create request - routing profile is unsupported",
+			name: "test valid VPC create request - site-configured routing profile",
 			fields: fields{
 				Name:                      "test-name",
 				SiteID:                    uuid.NewString(),
 				NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcFNN),
 				RoutingProfile:            cutil.GetPtr("tenant-edge"),
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "test invalid VPC create request - invalid VNI",

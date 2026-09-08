@@ -20,7 +20,7 @@ use std::net::IpAddr;
 
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use carbide_uuid::dpa_interface::{DpaInterfaceId, NULL_DPA_INTERFACE_ID};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use config_version::ConfigVersion;
 use mac_address::MacAddress;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -196,7 +196,7 @@ pub async fn find_by_ip(
 // are found, because multiple would not make sense.
 pub async fn get_for_pci_name(
     txn: impl DbReader<'_>,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     pci_name: &str,
 ) -> Result<DpaInterface, DatabaseError> {
     let query = "SELECT row_to_json(m.*) from (select * from dpa_interfaces WHERE deleted is NULL AND machine_id = $1 AND pci_name = $2) m";
@@ -248,7 +248,7 @@ pub async fn find_by_mac_addr(
 /// is always available.
 pub async fn update_device_info(
     txn: &mut PgConnection,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     pci_name: &str,
     device_info: &MlxDeviceInfo,
 ) -> Result<(), DatabaseError> {
@@ -291,7 +291,7 @@ fn validate_search_config(search_config: &DpaSearchConfig) -> Result<(), Databas
 // Used by the machine statemachine controller to find all DPAs associated with a given machine
 pub async fn find_by_machine_id(
     txn: impl DbReader<'_>,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     search_config: DpaSearchConfig,
 ) -> Result<Vec<DpaInterface>, DatabaseError> {
     validate_search_config(&search_config)?;
@@ -331,9 +331,9 @@ pub async fn find_by_machine_id(
 /// (callers default such machines to an empty list).
 pub async fn find_by_machine_ids(
     txn: impl DbReader<'_>,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
     search_config: DpaSearchConfig,
-) -> Result<std::collections::HashMap<MachineId, Vec<DpaInterface>>, DatabaseError> {
+) -> Result<std::collections::HashMap<HostMachineId, Vec<DpaInterface>>, DatabaseError> {
     validate_search_config(&search_config)?;
 
     // No machines means no interfaces; skip the round trip entirely.
@@ -364,7 +364,7 @@ pub async fn find_by_machine_ids(
         .map_err(|e| DatabaseError::query(builder.sql(), e))?;
 
     Ok(interfaces.into_iter().fold(
-        std::collections::HashMap::<MachineId, Vec<DpaInterface>>::new(),
+        std::collections::HashMap::<HostMachineId, Vec<DpaInterface>>::new(),
         |mut by_machine, interface| {
             by_machine
                 .entry(interface.machine_id)
@@ -500,7 +500,7 @@ pub async fn delete(value: DpaInterface, txn: &mut PgConnection) -> Result<(), D
 
 pub async fn is_machine_dpa_capable(
     txn: &mut PgConnection,
-    machine_id: MachineId,
+    machine_id: HostMachineId,
 ) -> Result<bool, DatabaseError> {
     let result = batch_is_machine_dpa_capable(txn, &[machine_id]).await?;
     Ok(result.contains(&machine_id))
@@ -510,8 +510,8 @@ pub async fn is_machine_dpa_capable(
 /// Returns a HashSet of machine IDs that have DPA interfaces.
 pub async fn batch_is_machine_dpa_capable(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
-) -> Result<HashSet<MachineId>, DatabaseError> {
+    machine_ids: &[HostMachineId],
+) -> Result<HashSet<HostMachineId>, DatabaseError> {
     if machine_ids.is_empty() {
         return Ok(HashSet::new());
     }
@@ -519,20 +519,12 @@ pub async fn batch_is_machine_dpa_capable(
     let query = "SELECT DISTINCT machine_id FROM dpa_interfaces
                  WHERE deleted IS NULL AND machine_id = ANY($1)";
 
-    let rows: Vec<(String,)> = sqlx::query_as(query)
-        .bind(
-            machine_ids
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>(),
-        )
+    Ok(sqlx::query_scalar(query)
+        .bind(machine_ids)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-
-    Ok(rows
+        .map_err(|e| DatabaseError::query(query, e))?
         .into_iter()
-        .filter_map(|(id,)| id.parse::<MachineId>().ok())
         .collect())
 }
 
@@ -569,7 +561,9 @@ mod test {
 
     use carbide_libmlx_model::device::info::MlxDeviceInfo;
     use carbide_test_support::query_counter::count_queries;
-    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+    use carbide_uuid::machine::{
+        HostMachineId as MachineId, MachineId as GenericMachineId, MachineIdSource, MachineType,
+    };
     use mac_address::MacAddress;
     use model::dpa_interface::{
         DpaInterfaceControllerState, DpaInterfaceType, DpaSearchConfig, NewDpaInterface,
@@ -605,11 +599,13 @@ mod test {
             for i in offset..(offset + n) {
                 let mut hash = [0u8; 32];
                 hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
-                let id = MachineId::new(
+                let id: MachineId = GenericMachineId::new(
                     MachineIdSource::ProductBoardChassisSerial,
                     hash,
                     MachineType::Host,
-                );
+                )
+                .try_into()
+                .unwrap();
                 machine::create(&mut txn, None, &id, ManagedHostState::Ready, None, 2).await?;
                 crate::dpa_interface::persist(
                     NewDpaInterface {

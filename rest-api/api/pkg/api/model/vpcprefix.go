@@ -5,26 +5,21 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/vpcprefix"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	ipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
-	// VpcPrefixBlockSizeMin is the minimum value of the VpcPrefixSize field
-	VpcPrefixBlockSizeMin = 8
-	// VpcPrefixBlockSizeMax is the maximum value of the VpcPrefixSize field
-	VpcPrefixBlockSizeMax = 31
-
-	validationErrorIPBlockIDRequired     = "IPBlockID is required in request"
-	validationErrorVpcPrefixBlockSizeMin = "prefixLength must be at least 8"
-	validationErrorVpcPrefixBlockSizeMax = "prefixLength must be at most 31"
+	validationErrorIPBlockIDRequired = "IPBlockID is required in request"
 )
 
 // APIVpcPrefixCreateRequest is the data structure to capture user request to create a new VpcPrefix
@@ -37,6 +32,19 @@ type APIVpcPrefixCreateRequest struct {
 	IPBlockID *string `json:"ipBlockId"`
 	// PrefixLength is the length of the prefix
 	PrefixLength int `json:"prefixLength"`
+}
+
+// ValidatePrefixLength checks PrefixLength against the maximum resolved from
+// the IP Block family and VPC address mode. Callers run Validate first because
+// those values are not part of the request body.
+func (vpcr *APIVpcPrefixCreateRequest) ValidatePrefixLength(maxPrefixLength int) error {
+	if vpcr.PrefixLength > maxPrefixLength {
+		return validation.Errors{
+			"prefixLength": fmt.Errorf("prefixLength must be at most %d for this IP Block and VPC", maxPrefixLength),
+		}
+	}
+
+	return nil
 }
 
 // Validate ensure the values passed in request are acceptable
@@ -53,8 +61,8 @@ func (vpcr *APIVpcPrefixCreateRequest) Validate() error {
 			validation.When(vpcr.IPBlockID != nil, validationis.UUID.Error(validationErrorInvalidUUID))),
 		validation.Field(&vpcr.PrefixLength,
 			validation.Required.Error(validationErrorValueRequired),
-			validation.Min(VpcPrefixBlockSizeMin).Error(validationErrorVpcPrefixBlockSizeMin),
-			validation.Max(VpcPrefixBlockSizeMax).Error(validationErrorVpcPrefixBlockSizeMax)),
+			validation.Min(vpcprefix.PrefixLengthMinimum).Error(fmt.Sprintf("prefixLength must be at least %d", vpcprefix.PrefixLengthMinimum)),
+			validation.Max(vpcprefix.PrefixLengthMaximum).Error(fmt.Sprintf("prefixLength must be at most %d", vpcprefix.PrefixLengthMaximum))),
 	)
 
 	if err != nil {
@@ -70,9 +78,9 @@ func (vpcr *APIVpcPrefixCreateRequest) Validate() error {
 // (Id, VpcId, Config.Prefix, Metadata.Name). The parent `vpc` is needed
 // to translate to the Site-facing VPC ID (`Vpc.GetSiteID`).
 //
-// The method trusts that the request has already been Validated. There
-// are no cross-context checks for this entity beyond what Validate
-// covers.
+// The method trusts that the request has already passed `Validate` and
+// `ValidatePrefixLength`; the handler supplies the resolved IP Block family
+// and VPC SLAAC setting before reaching this conversion.
 //
 // Precondition: `vpc` must be non-nil; a nil `vpc` produces a
 // `VpcPrefixCreationRequest` with an unset `VpcId`, which the Site

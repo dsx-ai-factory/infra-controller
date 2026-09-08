@@ -168,7 +168,7 @@ func TestAggregateNICoStatuses(t *testing.T) {
 	mkStatus := func(compID string, state corev1.FirmwareUpdateState, errMsg string) *corev1.FirmwareUpdateStatus {
 		return &corev1.FirmwareUpdateStatus{
 			Result: &corev1.ComponentResult{
-				ComponentId: compID,
+				ComponentId: &compID,
 				Error:       errMsg,
 			},
 			State: state,

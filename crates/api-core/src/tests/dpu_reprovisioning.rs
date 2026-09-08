@@ -19,6 +19,7 @@ use std::collections::HashMap;
 
 use carbide_machine_controller::handler::MachineStateHandlerBuilder;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
+use carbide_uuid::machine::{DpuMachineId, MachineIdSubtypeTrait};
 use chrono::Utc;
 use common::api_fixtures::{
     create_managed_host_multi_dpu, create_managed_host_with_hardware_info_template,
@@ -131,7 +132,7 @@ fn has_dpu_reprovision_state(
 
 async fn assert_dpu_reprovision_host_boot_repair(
     env: &TestEnv,
-    machine: &TestMachine,
+    machine: &TestMachine<impl MachineIdSubtypeTrait>,
     expected_states: Vec<ManagedHostState>,
 ) -> Machine {
     env.redfish_sim.set_lockdown(EnabledDisabled::Enabled);
@@ -263,7 +264,7 @@ async fn assert_dpu_reprovision_host_boot_repair(
 async fn prepare_dpu_reprovision_host_boot_check(
     env: &TestEnv,
     mh: &TestManagedHost,
-) -> TestMachine {
+) -> TestMachine<DpuMachineId> {
     let dpu_machine = mh.dpu();
     let mut txn = env.pool.begin().await.unwrap();
     db::machine::update_state(
@@ -588,7 +589,7 @@ async fn test_dpu_for_reprovisioning_fail_if_maintenance_not_set(pool: sqlx::PgP
             .trigger_dpu_reprovisioning(tonic::Request::new(
                 ::rpc::forge::DpuReprovisioningRequest {
                     dpu_id: None,
-                    machine_id: mh.dpu().id.into(),
+                    machine_id: Some(mh.dpu().id.into()),
                     mode: rpc::forge::dpu_reprovisioning_request::Mode::Set as i32,
                     initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                     update_firmware: true
@@ -609,7 +610,7 @@ async fn test_dpu_for_reprovisioning_fail_if_state_is_not_ready(pool: sqlx::PgPo
             .trigger_dpu_reprovisioning(tonic::Request::new(
                 ::rpc::forge::DpuReprovisioningRequest {
                     dpu_id: None,
-                    machine_id: dpu_machine_id.into(),
+                    machine_id: Some(dpu_machine_id.into()),
                     mode: rpc::forge::dpu_reprovisioning_request::Mode::Set as i32,
                     initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                     update_firmware: true
@@ -1141,7 +1142,7 @@ async fn test_dpu_for_set_but_clear_failed(pool: sqlx::PgPool) {
         .into_inner();
 
     assert_eq!(res.dpus.len(), 1);
-    assert_eq!(res.dpus[0].id, mh.dpu().id.into());
+    assert_eq!(res.dpus[0].id, Some(mh.dpu().id.into()));
 
     db::machine::update_dpu_reprovision_start_time(&mh.dpu().id, &mut txn)
         .await
@@ -1152,7 +1153,7 @@ async fn test_dpu_for_set_but_clear_failed(pool: sqlx::PgPool) {
             .trigger_dpu_reprovisioning(tonic::Request::new(
                 ::rpc::forge::DpuReprovisioningRequest {
                     dpu_id: None,
-                    machine_id: mh.dpu().id.into(),
+                    machine_id: Some(mh.dpu().id.into()),
                     mode: rpc::forge::dpu_reprovisioning_request::Mode::Clear as i32,
                     initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                     update_firmware: true
@@ -1433,7 +1434,7 @@ async fn test_clear_maintenance_when_reprov_is_set(pool: sqlx::PgPool) {
     assert!(
         env.api
             .set_maintenance(tonic::Request::new(::rpc::forge::MaintenanceRequest {
-                host_id: mh.id.into(),
+                host_id: Some(mh.id.into()),
                 operation: 1,
                 reference: Some("no reference".to_string()),
             }))
@@ -1464,7 +1465,7 @@ async fn test_dpu_reset(pool: sqlx::PgPool) {
         4,
         ManagedHostState::DPUInit {
             dpu_states: model::machine::DpuInitStates {
-                states: HashMap::from([(mh.dpu().id, DpuInitState::WaitingForNetworkConfig)]),
+                states: HashMap::from([(mh.dpu_ids[0], DpuInitState::WaitingForNetworkConfig)]),
             },
         },
     )
@@ -1488,7 +1489,7 @@ async fn test_restart_dpu_reprov(pool: sqlx::PgPool) {
             .trigger_dpu_reprovisioning(tonic::Request::new(
                 ::rpc::forge::DpuReprovisioningRequest {
                     dpu_id: None,
-                    machine_id: mh.id.into(),
+                    machine_id: Some(mh.id.into()),
                     mode: Mode::Restart as i32,
                     initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                     update_firmware: false,
@@ -1580,7 +1581,7 @@ async fn test_restart_dpu_reprov_unassigned_host_boot_failure(pool: sqlx::PgPool
         &mut txn,
         &mh.id,
         &ManagedHostState::Failed {
-            machine_id: mh.id,
+            machine_id: mh.id.into(),
             retry_count: 0,
             details: FailureDetails {
                 cause: FailureCause::BiosSetupFailed {
@@ -2106,7 +2107,7 @@ async fn test_instance_reprov_restart_failed_impl(pool: sqlx::PgPool) {
             .trigger_dpu_reprovisioning(tonic::Request::new(
                 ::rpc::forge::DpuReprovisioningRequest {
                     dpu_id: None,
-                    machine_id: mh.id.into(),
+                    machine_id: Some(mh.id.into()),
                     mode: Mode::Restart as i32,
                     initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                     update_firmware: false,
@@ -2222,7 +2223,7 @@ async fn test_dpu_for_reprovisioning_cannot_restart_if_not_started(pool: sqlx::P
         .trigger_dpu_reprovisioning(tonic::Request::new(
             ::rpc::forge::DpuReprovisioningRequest {
                 dpu_id: None,
-                machine_id: mh.id.into(),
+                machine_id: Some(mh.id.into()),
                 mode: rpc::forge::dpu_reprovisioning_request::Mode::Restart as i32,
                 initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                 update_firmware: true,
@@ -2242,7 +2243,7 @@ impl TestManagedHost {
         self.api
             .insert_machine_health_report(tonic::Request::new(
                 rpc::forge::InsertMachineHealthReportRequest {
-                    machine_id: self.id.into(),
+                    machine_id: Some(self.id.into()),
                     health_report_entry: Some(rpc::forge::HealthReportEntry {
                         report: Some(
                             health_report::HealthReport {

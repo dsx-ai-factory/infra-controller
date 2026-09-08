@@ -18,7 +18,7 @@
 //! Tenant identity config for SPIFFE JWT-SVID machine identity.
 //! Stores per-org identity config and signing keys in `tenant_identity_config` table.
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostOrDpuId, MachineId};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use model::tenant::identity_config::SigningKeyPublicV1;
 use model::tenant::{
@@ -318,10 +318,11 @@ async fn instance_machine_id_for_identity_lookup(
     txn: &mut PgConnection,
     machine_id: &MachineId,
 ) -> DatabaseResult<MachineId> {
-    if !machine_id.machine_type().is_dpu() {
+    let HostOrDpuId::Dpu(dpu_machine_id) = machine_id.host_or_dpu_id() else {
         return Ok(*machine_id);
-    }
-    let Some(host) = crate::machine::find_host_by_dpu_machine_id(txn, machine_id).await? else {
+    };
+    let Some(host) = crate::machine::find_host_by_dpu_machine_id(txn, &dpu_machine_id).await?
+    else {
         return Ok(*machine_id);
     };
     Ok(host.id)

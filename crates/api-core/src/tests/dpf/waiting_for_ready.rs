@@ -26,7 +26,7 @@ use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use db::TransactionVending;
 use libredfish::SystemPowerControl;
 use model::machine::{DpfState, DpuInitState, ManagedHostState, PerformPowerOperation};
@@ -67,8 +67,8 @@ fn expect_provisioning(mock: &mut MockDpfOperations) {
 /// transition without replaying the preceding operator workflow.
 async fn reset_host_to_dpf_state(
     pool: &sqlx::PgPool,
-    host_id: &MachineId,
-    dpu_id: &MachineId,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
     dpf_state: DpfState,
 ) {
     let state = ManagedHostState::DPUInit {
@@ -101,8 +101,8 @@ async fn reset_host_to_dpf_state(
 /// decisions after their initial DPF ingestion has completed.
 async fn reset_host_to_waiting_for_ready(
     pool: &sqlx::PgPool,
-    host_id: &MachineId,
-    dpu_id: &MachineId,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
 ) {
     reset_host_to_dpf_state(
         pool,
@@ -183,7 +183,7 @@ async fn test_waiting_for_ready_reboot_flow(pool: sqlx::PgPool) {
         actions
     );
 
-    reboot_completed(&env, mh.id).await;
+    reboot_completed(&env, mh.id.into()).await;
 
     // Complete On, observe DPU readiness, then cross the DeviceReady barrier.
     timeout(TEST_TIMEOUT, async {
@@ -691,7 +691,7 @@ async fn test_waiting_for_ready_host_already_off(pool: sqlx::PgPool) {
         actions
     );
 
-    reboot_completed(&env, mh.id).await;
+    reboot_completed(&env, mh.id.into()).await;
 
     // Complete On, observe DPU readiness, then cross the DeviceReady barrier.
     timeout(TEST_TIMEOUT, async {
@@ -714,8 +714,8 @@ async fn test_waiting_for_ready_host_already_off(pool: sqlx::PgPool) {
 /// a stale/invalid state stored by a previous implementation.
 async fn write_unknown_dpf_init_state(
     pool: &sqlx::PgPool,
-    host_id: &MachineId,
-    dpu_id: &MachineId,
+    host_id: &HostMachineId,
+    dpu_id: &DpuMachineId,
 ) {
     let state_json: serde_json::Value = serde_json::json!({
         "state": "dpuinit",

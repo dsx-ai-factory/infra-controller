@@ -44,39 +44,48 @@ type Operation interface {
 }
 
 func New(typ taskcommon.TaskType, info json.RawMessage) (Operation, error) {
+	operation, err := newEmpty(typ)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(info, operation); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal %s task info: %w", operationTypeName(typ), err)
+	}
+
+	return operation, nil
+}
+
+func newEmpty(typ taskcommon.TaskType) (Operation, error) {
 	switch typ {
 	case taskcommon.TaskTypePowerControl:
-		var taskInfo PowerControlTaskInfo
-		if err := json.Unmarshal(info, &taskInfo); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal power control task info: %w", err) //nolint
-		}
-		return &taskInfo, nil
+		return &PowerControlTaskInfo{}, nil
 	case taskcommon.TaskTypeFirmwareControl:
-		var taskInfo FirmwareControlTaskInfo
-		if err := json.Unmarshal(info, &taskInfo); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal firmware control task info: %w", err) //nolint
-		}
-		return &taskInfo, nil
+		return &FirmwareControlTaskInfo{}, nil
 	case taskcommon.TaskTypeInjectExpectation:
-		var taskInfo InjectExpectationTaskInfo
-		if err := json.Unmarshal(info, &taskInfo); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal inject expectation task info: %w", err) //nolint
-		}
-		return &taskInfo, nil
+		return &InjectExpectationTaskInfo{}, nil
 	case taskcommon.TaskTypeBringUp:
-		var taskInfo BringUpTaskInfo
-		if err := json.Unmarshal(info, &taskInfo); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal bring-up task info: %w", err) //nolint
-		}
-		return &taskInfo, nil
+		return &BringUpTaskInfo{}, nil
 	case taskcommon.TaskTypeDecommission:
-		var taskInfo DecommissionTaskInfo
-		if err := json.Unmarshal(info, &taskInfo); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal decommission task info: %w", err) //nolint
-		}
-		return &taskInfo, nil
+		return &DecommissionTaskInfo{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported task type: %s", typ)
+	}
+}
+
+func operationTypeName(typ taskcommon.TaskType) string {
+	switch typ {
+	case taskcommon.TaskTypePowerControl:
+		return "power control"
+	case taskcommon.TaskTypeFirmwareControl:
+		return "firmware control"
+	case taskcommon.TaskTypeInjectExpectation:
+		return "inject expectation"
+	case taskcommon.TaskTypeBringUp:
+		return "bring-up"
+	case taskcommon.TaskTypeDecommission:
+		return "decommission"
+	default:
+		return string(typ)
 	}
 }
 

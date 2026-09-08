@@ -15,11 +15,13 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use opentelemetry::metrics::MeterProvider;
 use prometheus::{Encoder, TextEncoder};
 
+use crate::fmds_client::register_external_connection_metric;
 use crate::instrumentation::NetworkMonitorMetricsState;
 use crate::network_monitor::NetworkMonitorError;
 
@@ -38,6 +40,8 @@ fn test_metrics() {
     let meter = meter_provider.meter("agent");
 
     let metrics = crate::instrumentation::create_metrics(meter.clone());
+    let fmds_connection_status = register_external_connection_metric(&meter);
+    fmds_connection_status.store(true, Ordering::Relaxed);
     metrics.record_machine_boot_time(1740171762);
     metrics.record_agent_start_time(1740171801);
     metrics.record_client_cert_expiry_time(|| Some(1742763762));

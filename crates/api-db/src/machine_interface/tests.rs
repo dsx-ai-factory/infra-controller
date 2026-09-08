@@ -428,7 +428,7 @@ async fn test_expected_declaration_does_not_reclassify_attached_dpu_interface(
     .await?;
     txn.commit().await?;
 
-    assert_eq!(reconciled.attached_dpu_machine_id, Some(dpu_id));
+    assert_eq!(reconciled.attached_dpu_machine_id, Some(dpu_id.try_into()?));
     assert_eq!(reconciled.interface_type, InterfaceType::Data);
     assert!(reconciled.primary_interface);
 
@@ -502,7 +502,10 @@ async fn test_expected_interface_settings_do_not_overwrite_concurrent_dpu_associ
         Some(false),
     )
     .await?;
-    assert_eq!(stale_interface.attached_dpu_machine_id, Some(dpu_id));
+    assert_eq!(
+        stale_interface.attached_dpu_machine_id,
+        Some(dpu_id.try_into()?)
+    );
     assert_eq!(stale_interface.interface_type, InterfaceType::Data);
     assert!(stale_interface.primary_interface);
     expected_txn.commit().await?;
@@ -511,7 +514,7 @@ async fn test_expected_interface_settings_do_not_overwrite_concurrent_dpu_associ
     let reconciled = find_one(verify_txn.as_pgconn(), interface.id).await?;
     verify_txn.commit().await?;
 
-    assert_eq!(reconciled.attached_dpu_machine_id, Some(dpu_id));
+    assert_eq!(reconciled.attached_dpu_machine_id, Some(dpu_id.try_into()?));
     assert_eq!(reconciled.interface_type, InterfaceType::Data);
     assert!(reconciled.primary_interface);
 

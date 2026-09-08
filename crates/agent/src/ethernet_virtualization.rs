@@ -231,9 +231,9 @@ impl NvueClientContext {
     }
 
     // Wrap the inner nvue_client's `push_config()` and try to avoid re-applying
-    // a configuration we're already using. Returns Ok(Some(revision_id)) on
-    // a change, Ok(None) if the config was unchanged, and otherwise passes
-    // through errors from the inner client.
+    // a configuration we're already using. Returns Ok(Some(revision_id)) when
+    // a revision was applied, Ok(None) if the config was unchanged, and
+    // otherwise passes through errors from the inner client.
     async fn update_config(
         &mut self,
         config: &NvueConfig,
@@ -245,13 +245,9 @@ impl NvueClientContext {
         {
             Ok(None)
         } else {
-            self.nvue_client
-                .push_config(config)
-                .await
-                .map(|revision_id| {
-                    self.last_applied_hash.replace(new_hash);
-                    Some(revision_id)
-                })
+            let revision_id = self.nvue_client.push_config(config).await?;
+            self.last_applied_hash.replace(new_hash);
+            Ok(revision_id)
         }
     }
 }

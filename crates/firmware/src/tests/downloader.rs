@@ -18,7 +18,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use carbide_instrument::testing::{CapturedLog, MetricsCapture, capture_logs};
+use carbide_instrument::testing::{ApproxHistogramSum, CapturedLog, MetricsCapture, capture_logs};
 use carbide_instrument::{LabelValue, emit};
 use carbide_test_support::{Check, check_values};
 use sha2::Digest;
@@ -512,9 +512,10 @@ fn download_finished_records_duration_and_owns_the_completion_line() {
             "one observation under outcome={outcome}",
         );
         let sum = metrics.histogram_sum_delta(DOWNLOAD_DURATION_METRIC, &[("outcome", outcome)]);
-        assert!(
-            (sum - seconds).abs() < 1e-9,
-            "outcome={outcome} records {seconds}s, got {sum}"
+        assert_eq!(
+            sum,
+            ApproxHistogramSum(seconds),
+            "outcome={outcome} records {seconds}s"
         );
     }
 }

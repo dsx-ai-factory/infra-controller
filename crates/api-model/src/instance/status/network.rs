@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::convert::Into;
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::vpc::VpcId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
@@ -91,9 +91,9 @@ impl InstanceNetworkStatus {
     /// because the observation might have been related to a different config,
     /// and the interfaces therefore won't match.
     pub fn from_config_and_observations(
-        dpu_id_to_device_map: HashMap<String, Vec<MachineId>>,
+        dpu_id_to_device_map: HashMap<String, Vec<DpuMachineId>>,
         config: Versioned<&InstanceNetworkConfig>,
-        observations: &HashMap<MachineId, InstanceNetworkStatusObservation>,
+        observations: &HashMap<DpuMachineId, InstanceNetworkStatusObservation>,
         is_network_config_request_pending: bool,
     ) -> Self {
         if is_network_config_request_pending {
@@ -108,7 +108,7 @@ impl InstanceNetworkStatus {
         }
 
         // Observations without interfaces are from unused DPUs.  filter them out
-        let observations: HashMap<&MachineId, &InstanceNetworkStatusObservation> = observations
+        let observations: HashMap<&DpuMachineId, &InstanceNetworkStatusObservation> = observations
             .iter()
             .filter(|obs| !obs.1.interfaces.is_empty())
             .collect();
@@ -481,10 +481,13 @@ impl InstanceNetworkStatusObservation {
 
     pub fn aggregate_instance_observation(
         dpu_snapshots: &[Machine],
-    ) -> HashMap<MachineId, InstanceNetworkStatusObservation> {
+    ) -> HashMap<DpuMachineId, InstanceNetworkStatusObservation> {
         let mut observation_map = HashMap::default();
 
         for dpu_snapshot in dpu_snapshots {
+            let Ok(dpu_machine_id) = dpu_snapshot.dpu_machine_id() else {
+                continue;
+            };
             if let Some(obs) = dpu_snapshot
                 .network_status_observation
                 .as_ref()
@@ -496,7 +499,7 @@ impl InstanceNetworkStatusObservation {
                     observed_at: m.observed_at,
                 })
             {
-                observation_map.insert(dpu_snapshot.id, obs);
+                observation_map.insert(dpu_machine_id, obs);
             }
         }
 
@@ -554,6 +557,7 @@ mod tests {
     use std::fmt::Write;
     use std::str::FromStr;
 
+    use carbide_uuid::machine::DpuMachineId as MachineId;
     use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
     use carbide_uuid::vpc::VpcPrefixId;
 

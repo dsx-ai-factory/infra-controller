@@ -42,7 +42,8 @@ impl DbMachineExt for Machine {
     }
 
     async fn update_state<'txn>(&self, txn: &mut PgTransaction<'txn>, state: ManagedHostState) {
-        db::machine::update_state(txn.as_mut(), &self.id, &state)
+        let host_machine_id = self.id.try_into().expect("machine should be a host");
+        db::machine::update_state(txn.as_mut(), &host_machine_id, &state)
             .await
             .expect("machine state should be updated");
     }

@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
+use carbide_redfish::libredfish::CredentialOpError;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use db::WithTransaction;
 use futures_util::FutureExt;
@@ -283,27 +284,11 @@ pub(crate) async fn clear_host_uefi_password(
     // held across it, then read the actual secret.
     txn.commit().await?;
     let clear_credentials =
-        read_uefi_credentials(api.redfish_pool.credential_reader(), &clear_key).await?;
-
-    let redfish_client = api
-        .redfish_pool
-        .client_by_info(&bmc_access_info)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                "unable to create redfish client",
-            );
-            CarbideError::Internal {
-                message: format!(
-                    "Could not create connection to Redfish API to {machine_id}, check logs"
-                ),
-            }
-        })?;
+        read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &clear_key).await?;
 
     let job_id: Option<String> = api
-        .redfish_pool
-        .clear_host_uefi_password(redfish_client.as_ref(), clear_credentials)
+        .bmc_credential_ops
+        .clear_host_uefi_password(&bmc_access_info, clear_credentials)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to run clear_host_uefi_password call");
@@ -398,30 +383,23 @@ pub(crate) async fn set_host_uefi_password(
     // connection is not held across them, then read the actual secret.
     txn.commit().await?;
     let host_uefi_credentials =
-        read_uefi_credentials(api.redfish_pool.credential_reader(), &host_uefi_key).await?;
-
-    let redfish_client = api
-        .redfish_pool
-        .client_by_info(&bmc_access_info)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                "unable to create redfish client",
-            );
-            CarbideError::RedfishClientCreation {
-                inner: e.into(),
-                machine_id,
-            }
-        })?;
+        read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &host_uefi_key).await?;
 
     let job_id = api
-        .redfish_pool
-        .uefi_setup(redfish_client.as_ref(), false, host_uefi_credentials)
+        .bmc_credential_ops
+        .uefi_setup(&bmc_access_info, false, host_uefi_credentials)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to run uefi_setup call");
-            CarbideError::internal(format!("failed redfish uefi_setup subtask: {e}"))
+            match e {
+                // Keep the Redfish-classified error code (and its operator
+                // mitigation text) for client-creation failures.
+                CredentialOpError::ClientCreation(inner) => CarbideError::RedfishClientCreation {
+                    inner: inner.into(),
+                    machine_id,
+                },
+                e => CarbideError::internal(format!("failed redfish uefi_setup subtask: {e}")),
+            }
         })?;
     // uefi_setup returns a BMC job_id; the password change completes
     // asynchronously on the device and we do not poll it here. We optimistically
@@ -554,28 +532,24 @@ pub(crate) async fn set_dpu_uefi_password(
     // connection is not held across them, then read the actual secret.
     txn.commit().await?;
     let dpu_uefi_credentials =
-        read_uefi_credentials(api.redfish_pool.credential_reader(), &dpu_uefi_key).await?;
-
-    let redfish_client = api
-        .redfish_pool
-        .client_by_info(&bmc_access_info)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "unable to create redfish client");
-            CarbideError::RedfishClientCreation {
-                inner: e.into(),
-                machine_id,
-            }
-        })?;
+        read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &dpu_uefi_key).await?;
 
     // A DPU stages the UEFI change through Redfish BIOS settings and schedules no
     // job (it commits on the next DPU restart), so there is no job id to return.
-    api.redfish_pool
-        .uefi_setup(redfish_client.as_ref(), true, dpu_uefi_credentials)
+    api.bmc_credential_ops
+        .uefi_setup(&bmc_access_info, true, dpu_uefi_credentials)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to run uefi_setup call for DPU");
-            CarbideError::internal(format!("failed redfish uefi_setup subtask: {e}"))
+            match e {
+                // Keep the Redfish-classified error code (and its operator
+                // mitigation text) for client-creation failures.
+                CredentialOpError::ClientCreation(inner) => CarbideError::RedfishClientCreation {
+                    inner: inner.into(),
+                    machine_id,
+                },
+                e => CarbideError::internal(format!("failed redfish uefi_setup subtask: {e}")),
+            }
         })?;
 
     // Mirror the host path's optimistic convergence record: the change is staged

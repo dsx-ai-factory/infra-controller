@@ -3,7 +3,7 @@
 
 .PHONY: test postgres-up postgres-down ensure-postgres postgres-wait clean check-source-headers fix-source-headers check-command-bundle
 .PHONY: build docker-build docker-build-local
-.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-site-workflow test-flow test-powershelf-manager test-nvswitch-manager test-proto migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
+.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-site-workflow test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
 .PHONY: validate-openapi preview-openapi generate-client
 .PHONY: core-proto core-proto-clean core-proto-fetch core-proto-fmt core-protogen flow-proto flow-protogen tools-build tools-clean
 .PHONY: pre-commit-install pre-commit-run pre-commit-update
@@ -260,7 +260,10 @@ test-nvswitch-manager:
 		DB_NAME=$(POSTGRES_DB) \
 		go test -p 1 ./... -count=1
 
-test: test-ipam test-db test-api test-auth test-common test-cert-manager test-site-workflow test-site-manager test-workflow test-site-agent test-flow test-powershelf-manager test-nvswitch-manager test-proto
+test-sdk-simple:
+	go test ./sdk/simple -count=1
+
+test: test-ipam test-db test-api test-auth test-common test-cert-manager test-site-workflow test-site-manager test-workflow test-site-agent test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple
 
 build:
 	mkdir -p $(BUILD_DIR)

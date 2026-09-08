@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use carbide_utils::redfish::BmcAccessInfo;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::MachineIdSubtypeTrait;
 use model::machine::{Machine, ManagedHostState};
 use rpc::forge::forge_server::Forge;
 use tonic::Request;
@@ -30,22 +30,22 @@ pub(in crate::tests) mod interface;
 
 pub(in crate::tests) type TestMachineInterface = interface::TestMachineInterface;
 
-pub(in crate::tests) struct TestMachine {
-    pub(in crate::tests) id: MachineId,
+pub(in crate::tests) struct TestMachine<ID: MachineIdSubtypeTrait> {
+    pub(in crate::tests) id: ID,
     api: Arc<Api>,
 }
 
 type Txn<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 
-impl TestMachine {
-    pub(in crate::tests) fn new(id: MachineId, api: Arc<Api>) -> Self {
+impl<ID: MachineIdSubtypeTrait> TestMachine<ID> {
+    pub(in crate::tests) fn new(id: ID, api: Arc<Api>) -> Self {
         Self { id, api }
     }
 
     pub(in crate::tests) async fn rpc_machine(&self) -> rpc::Machine {
         self.api
             .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
-                machine_ids: vec![self.id],
+                machine_ids: vec![self.id.into()],
                 include_history: true,
             }))
             .await
@@ -98,7 +98,7 @@ impl TestMachine {
         let response = self
             .api
             .reboot_completed(Request::new(rpc::forge::MachineRebootCompletedRequest {
-                machine_id: self.id.into(),
+                machine_id: Some(self.id.into()),
             }))
             .await
             .unwrap()
@@ -116,7 +116,7 @@ impl TestMachine {
         self.reboot_completed().await;
         self.api
             .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
-                machine_id: self.id.into(),
+                machine_id: Some(self.id.into()),
             }))
             .await
             .unwrap()
@@ -126,7 +126,7 @@ impl TestMachine {
     pub(in crate::tests) async fn discovery_completed(&self) {
         self.api
             .discovery_completed(Request::new(rpc::forge::MachineDiscoveryCompletedRequest {
-                machine_id: self.id.into(),
+                machine_id: Some(self.id.into()),
             }))
             .await
             .unwrap()
@@ -142,7 +142,7 @@ impl TestMachine {
             .trigger_dpu_reprovisioning(tonic::Request::new(
                 ::rpc::forge::DpuReprovisioningRequest {
                     dpu_id: None,
-                    machine_id: self.id.into(),
+                    machine_id: Some(self.id.into()),
                     mode: mode as i32,
                     initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
                     update_firmware,

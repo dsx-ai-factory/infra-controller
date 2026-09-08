@@ -99,11 +99,11 @@ jobs:
             exit 1
           fi
           # canonical endpoints are constants: variables must not redirect them
-          if [ "${GITHUB_REPOSITORY}" = "NVIDIA/infra-controller" ]; then
+          if [ "${GITHUB_REPOSITORY}" = "dsx-ai-factory/infra-controller" ]; then
             target_registry="nvcr.io/0837451325059433/carbide-dev"
           else
             if [ -z "${REGISTRY_OVERRIDE}" ]; then
-              echo "::error::NICO_TARGET_IMAGE_REGISTRY repository variable is required outside NVIDIA/infra-controller"
+              echo "::error::NICO_TARGET_IMAGE_REGISTRY repository variable is required outside dsx-ai-factory/infra-controller"
               exit 1
             fi
             _norm="${REGISTRY_OVERRIDE%/}"
@@ -166,7 +166,7 @@ jobs:
             HELM_VERSION="${HELM_VERSION%-*}.${HELM_VERSION##*-}"
           fi
 
-          if [ "${GITHUB_REPOSITORY}" != "NVIDIA/infra-controller" ]; then
+          if [ "${GITHUB_REPOSITORY}" != "dsx-ai-factory/infra-controller" ]; then
             case "${NGC_PATH_OVERRIDE%/}" in
               "0837451325059433/carbide-dev"|"0837451325059433/carbide")
                 echo "::error::this repository must not publish helm/resources to the canonical NGC path"
@@ -181,7 +181,7 @@ jobs:
             echo "binary_version=${BINARY_VERSION}"
             echo "build_timestamp=${BUILD_TIMESTAMP}"
             echo "target_registry=${target_registry}"
-            if [ "${GITHUB_REPOSITORY}" = "NVIDIA/infra-controller" ]; then
+            if [ "${GITHUB_REPOSITORY}" = "dsx-ai-factory/infra-controller" ]; then
               echo "target_ngc_path=${target_registry#*/}"
             else
               echo "target_ngc_path=${NGC_PATH_OVERRIDE:-}"

@@ -17,6 +17,7 @@
 use ::rpc::forge::ForgeAgentControlResponse;
 use ::rpc::model::machine::get_action_for_dpu_state;
 use ::rpc::{forge as rpc, forge_agent_control_response as fac, scout_firmware_upgrade as sfu};
+use carbide_uuid::machine::{HostOrDpuId, MachineId, MachineIdSubtype};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     BomValidating, CleanupContext, CleanupState, DecommissioningState, DeconfiguringHostState,
@@ -42,7 +43,7 @@ pub(crate) async fn cleanup_machine_completed(
     let cleanup_info = request.into_inner();
     tracing::info!(?cleanup_info, "cleanup_machine_completed");
 
-    let machine_id = convert_and_log_machine_id(cleanup_info.machine_id.as_ref())?;
+    let machine_id = convert_and_log_machine_id::<MachineId>(cleanup_info.machine_id.as_ref())?;
 
     // Load machine from DB
     let (machine, mut txn) = api
@@ -119,10 +120,10 @@ pub(crate) async fn cleanup_machine_completed(
 
     // State handler should mark Machine as Adopted and reboot host for bios/bmc lockdown.
     // Wake it up
-    if machine_id.machine_type().is_host()
+    if let MachineIdSubtype::StableHost(host_machine_id) = machine_id.machine_id_subtype()
         && let Err(err) = api
             .machine_state_handler_enqueuer
-            .enqueue_object(&machine_id)
+            .enqueue_object(&host_machine_id.into())
             .await
     {
         carbide_instrument::emit(StateHandlerWakeupFailed {
@@ -169,34 +170,32 @@ pub(crate) async fn forge_agent_control(
 
     use rpc::forge_agent_control_response::Action;
 
-    let machine_id = convert_and_log_machine_id(request.into_inner().machine_id.as_ref())?;
+    let machine_id =
+        convert_and_log_machine_id::<MachineId>(request.into_inner().machine_id.as_ref())?;
 
     let (machine, mut txn) = api
         .load_machine(&machine_id, MachineSearchConfig::default())
         .await?;
 
-    let is_dpu = machine.is_dpu();
-    let host_machine = if !is_dpu {
-        machine.clone()
-    } else {
-        db::machine::find_host_by_dpu_machine_id(&mut txn, &machine_id)
+    let dpu_machine_id = machine.dpu_machine_id();
+    let host_machine = if let Ok(dpu_machine_id) = &dpu_machine_id {
+        db::machine::find_host_by_dpu_machine_id(&mut txn, dpu_machine_id)
             .await?
             .ok_or(CarbideError::NotFoundError {
                 kind: "machine",
                 id: machine_id.to_string(),
             })?
-    };
-
-    if !is_dpu {
+    } else {
         db::machine::update_scout_contact_time(&machine_id, &mut txn).await?;
-    }
+        machine.clone()
+    };
 
     // Respond based on machine current state
     let state = host_machine.current_state();
 
-    let (action, maybe_pending_txn) = if is_dpu {
+    let (action, maybe_pending_txn) = if let Ok(dpu_machine_id) = &dpu_machine_id {
         (
-            get_action_for_dpu_state(state, &machine_id).map_err(CarbideError::from)?,
+            get_action_for_dpu_state(state, dpu_machine_id).map_err(CarbideError::from)?,
             Some(txn),
         )
     } else {
@@ -331,7 +330,12 @@ pub(crate) async fn forge_agent_control(
             } => {
                 // Commit the transaction now, to avoid holding across an unrelated await point
                 txn.commit().await?;
-                match crate::handlers::svpc::process_scout_req(api, machine_id).await {
+                match crate::handlers::svpc::process_scout_req(
+                    api,
+                    machine_id.try_into().map_err(CarbideError::from)?,
+                )
+                .await
+                {
                     Ok(action) => (action, None),
                     Err(e) => {
                         tracing::error!(
@@ -349,7 +353,12 @@ pub(crate) async fn forge_agent_control(
             // RotateKeyUnlocking -> RotateKeyLocking cycle for each card.
             ManagedHostState::RotatingNicLockdown => {
                 txn.commit().await?;
-                match crate::handlers::svpc::process_scout_req(api, machine_id).await {
+                match crate::handlers::svpc::process_scout_req(
+                    api,
+                    machine_id.try_into().map_err(CarbideError::from)?,
+                )
+                .await
+                {
                     Ok(action) => (action, None),
                     Err(error) => {
                         tracing::error!(
@@ -369,7 +378,12 @@ pub(crate) async fn forge_agent_control(
                     },
             } => {
                 txn.commit().await?;
-                match crate::handlers::svpc::process_scout_req(api, machine_id).await {
+                match crate::handlers::svpc::process_scout_req(
+                    api,
+                    machine_id.try_into().map_err(CarbideError::from)?,
+                )
+                .await
+                {
                     Ok(action) => (action, None),
                     Err(error) => {
                         tracing::error!(
@@ -505,7 +519,7 @@ pub(crate) async fn reboot_completed(
     log_request_data(&request);
 
     let req = request.into_inner();
-    let machine_id = convert_and_log_machine_id(req.machine_id.as_ref())?;
+    let machine_id = convert_and_log_machine_id::<MachineId>(req.machine_id.as_ref())?;
 
     let (machine, mut txn) = api
         .load_machine(&machine_id, MachineSearchConfig::default())
@@ -519,10 +533,10 @@ pub(crate) async fn reboot_completed(
 
     // Wake up the state handler for the machine
     // Don't do it for DPUs - state handlers only run on hosts
-    if (machine_id.machine_type().is_host() || machine_id.machine_type().is_predicted_host())
+    if let HostOrDpuId::Host(host_machine_id) = machine_id.host_or_dpu_id()
         && let Err(err) = api
             .machine_state_handler_enqueuer
-            .enqueue_object(&machine_id)
+            .enqueue_object(&host_machine_id)
             .await
     {
         carbide_instrument::emit(StateHandlerWakeupFailed {

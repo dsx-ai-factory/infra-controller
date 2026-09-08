@@ -109,6 +109,7 @@ impl HpeProliantDl380aGen11<'_> {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("HPE".into()),
                 model: Some(MODEL.into()),
+                bios_version: None,
                 eth_interfaces: Some(eth_interfaces),
                 serial_number: Some(self.product_serial_number.to_string().into()),
                 boot_order_mode: redfish::computer_system::BootOrderMode::Generic,

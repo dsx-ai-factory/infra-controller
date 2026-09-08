@@ -16,9 +16,13 @@
  */
 
 use std::fmt::{Display, Formatter};
+use std::ops::Deref;
 use std::str::FromStr;
 
-use super::{HostMachineId, InvalidMachineType, MachineId, MachineType};
+use super::{
+    HostMachineId, InvalidMachineType, MachineId, MachineIdSubtype, MachineIdSubtypeTrait,
+    MachineType,
+};
 
 /// A stable machine ID that identifies an ingested host (not a predicted host).
 #[repr(transparent)]
@@ -26,10 +30,26 @@ use super::{HostMachineId, InvalidMachineType, MachineId, MachineType};
 #[serde(transparent)]
 pub struct StableHostMachineId(pub(super) HostMachineId);
 
+impl_prost_message_for_machine_id!(StableHostMachineId, MachineType::Host);
+
+impl MachineIdSubtypeTrait for StableHostMachineId {
+    fn machine_type(&self) -> MachineType {
+        MachineType::Host
+    }
+
+    fn as_machine_id(&self) -> &MachineId {
+        StableHostMachineId::as_machine_id(self)
+    }
+
+    fn machine_id_subtype(&self) -> MachineIdSubtype {
+        MachineIdSubtype::StableHost(*self)
+    }
+}
+
 impl StableHostMachineId {
     /// Returns the underlying machine ID.
     pub fn as_machine_id(&self) -> &MachineId {
-        self.0.as_machine_id()
+        &self.0.0
     }
 
     /// Returns the underlying HostMachineId (which is allowed to be either a predicted or stable
@@ -39,14 +59,9 @@ impl StableHostMachineId {
     }
 }
 
-impl AsRef<MachineId> for StableHostMachineId {
-    fn as_ref(&self) -> &MachineId {
-        self.0.as_machine_id()
-    }
-}
-
-impl AsRef<HostMachineId> for StableHostMachineId {
-    fn as_ref(&self) -> &HostMachineId {
+impl Deref for StableHostMachineId {
+    type Target = HostMachineId;
+    fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
@@ -79,12 +94,40 @@ impl TryFrom<HostMachineId> for StableHostMachineId {
     }
 }
 
+impl TryFrom<&MachineId> for StableHostMachineId {
+    type Error = InvalidMachineType;
+
+    fn try_from(id: &MachineId) -> Result<Self, Self::Error> {
+        Self::try_from(*id)
+    }
+}
+
+impl TryFrom<&HostMachineId> for StableHostMachineId {
+    type Error = InvalidMachineType;
+
+    fn try_from(id: &HostMachineId) -> Result<Self, Self::Error> {
+        Self::try_from(*id)
+    }
+}
+
 impl FromStr for StableHostMachineId {
     type Err = crate::machine::MachineIdSubtypeParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let id = MachineId::from_str(value)?;
         Ok(Self::try_from(id)?)
+    }
+}
+
+impl From<&StableHostMachineId> for HostMachineId {
+    fn from(id: &StableHostMachineId) -> Self {
+        id.0
+    }
+}
+
+impl From<&StableHostMachineId> for MachineId {
+    fn from(id: &StableHostMachineId) -> Self {
+        id.0.into()
     }
 }
 

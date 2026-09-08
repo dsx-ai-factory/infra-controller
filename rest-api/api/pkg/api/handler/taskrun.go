@@ -159,7 +159,7 @@ func (h CreateTaskRunHandler) Handle(c echo.Context) error {
 	flowRequest := apiRequest.ToProto()
 
 	// Dedicated workflow ID per request so Create is never deduped.
-	workflowID := common.FlowWorkflowID(fmt.Sprintf("task-run-create-%s", uuid.NewString()))
+	workflowID := fmt.Sprintf("task-run-create-%s", uuid.NewString())
 
 	var flowResponse flowv1.CreateOperationRunResponse
 	proxyErr := common.ProxyFlowGRPC(
@@ -259,7 +259,7 @@ func (h GetTaskRunHandler) Handle(c echo.Context) error {
 	// IncludeStats is part of the workflow ID because the conflict policy
 	// attaches to an in-flight execution with the same ID, which would
 	// otherwise return a response whose stats presence contradicts the query.
-	workflowID := common.FlowWorkflowID(fmt.Sprintf("task-run-get-%s-%t", runID, apiRequest.IncludeStats))
+	workflowID := fmt.Sprintf("task-run-get-%s-%t", runID, apiRequest.IncludeStats)
 
 	var flowResponse flowv1.GetOperationRunResponse
 	proxyErr := common.ProxyFlowGRPC(
@@ -357,7 +357,7 @@ func (h GetAllTaskRunHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, ferr.Error(), nil)
 	}
 
-	workflowID := common.FlowWorkflowID(fmt.Sprintf("task-run-get-all-%s", common.QueryParamHash(apiRequest.QueryValues(pageRequest))))
+	workflowID := fmt.Sprintf("task-run-get-all-%s", common.QueryParamHash(apiRequest.QueryValues(pageRequest)))
 
 	var flowResponse flowv1.ListOperationRunsResponse
 	proxyErr := common.ProxyFlowGRPC(
@@ -468,7 +468,7 @@ func (h GetAllTaskRunTargetHandler) Handle(c echo.Context) error {
 	}
 
 	flowRequest := apiRequest.ToProto(runID, pageRequest)
-	workflowID := common.FlowWorkflowID(fmt.Sprintf("task-run-target-get-all-%s-%s", runID, common.QueryParamHash(apiRequest.QueryValues(pageRequest))))
+	workflowID := fmt.Sprintf("task-run-target-get-all-%s-%s", runID, common.QueryParamHash(apiRequest.QueryValues(pageRequest)))
 
 	var flowResponse flowv1.ListOperationRunTargetsResponse
 	proxyErr := common.ProxyFlowGRPC(
@@ -521,7 +521,7 @@ func executeRunLifecycleAction(
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
-	workflowID := common.FlowWorkflowID(fmt.Sprintf("task-run-%s-%s", action, runID))
+	workflowID := fmt.Sprintf("task-run-%s-%s", action, runID)
 
 	var flowResponse flowv1.OperationRun
 	proxyErr := common.ProxyFlowGRPC(

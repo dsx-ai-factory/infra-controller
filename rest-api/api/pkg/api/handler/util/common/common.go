@@ -2162,7 +2162,7 @@ func ExecutePowerControlWorkflow(
 		ctx, c, logger, stc,
 		fullMethod,
 		flowRequest, &flowResponse,
-		FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
 		return nil, proxyErr
@@ -2200,7 +2200,7 @@ func ExecuteBringUpRackWorkflow(
 		ctx, c, logger, stc,
 		flowv1.Flow_BringUpRack_FullMethodName,
 		flowRequest, &flowResponse,
-		FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
 		return nil, proxyErr
@@ -2261,7 +2261,7 @@ func ExecuteFirmwareUpdateWorkflow(
 		ctx, c, logger, stc,
 		flowv1.Flow_UpgradeFirmware_FullMethodName,
 		flowRequest, &flowResponse,
-		FlowWorkflowID(workflowID), conflictPolicy,
+		workflowID, conflictPolicy,
 		siteID, "authenticationData",
 	)
 	if proxyErr != nil {

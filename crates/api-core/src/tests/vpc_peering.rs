@@ -16,7 +16,7 @@
  */
 use std::collections::HashMap;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use carbide_uuid::vpc::VpcId;
 use carbide_uuid::vpc_peering::VpcPeeringId;
 use futures_util::{FutureExt, TryFutureExt};
@@ -46,7 +46,7 @@ async fn create_test_vpcs(
     env: &TestEnv,
     count: i32,
     vtype: Option<VpcVirtualizationType>,
-) -> Result<MachineId, Box<dyn std::error::Error>> {
+) -> Result<DpuMachineId, Box<dyn std::error::Error>> {
     let default_tenant = default_tenant_config();
     let tenant_organization_id =
         if matches!(vtype, Some(VpcVirtualizationType::Fnn)) && env.config.fnn.is_some() {
@@ -430,7 +430,7 @@ async fn create_vpc_peering(
     env: &TestEnv,
     vtype1: VpcVirtualizationType,
     vtype2: VpcVirtualizationType,
-) -> Result<(VpcId, VpcId, u32, u32, MachineId), Box<dyn std::error::Error>> {
+) -> Result<(VpcId, VpcId, u32, u32, DpuMachineId), Box<dyn std::error::Error>> {
     let default_tenant = default_tenant_config();
     let peer_tenant_organization_id = "Tenant2";
     let use_fixture_tenants = env.config.fnn.is_some()
@@ -508,7 +508,7 @@ async fn test_vpc_peering_network_config(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -555,7 +555,7 @@ async fn test_vpc_peering_network_config_exclusive_etv(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -588,7 +588,7 @@ async fn test_vpc_peering_deletion_upon_vpc_deletion(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -613,7 +613,7 @@ async fn test_vpc_peering_deletion_upon_vpc_deletion(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -685,7 +685,7 @@ async fn test_vpc_peering_network_config_ordered_peerings(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await?
         .into_inner();

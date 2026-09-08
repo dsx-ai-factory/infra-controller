@@ -32,7 +32,7 @@
 //! # BMC flow (single synchronous step + crash marker)
 //!
 //! The BMC password primitive
-//! ([`carbide_redfish::libredfish::RedfishClientPool::set_bmc_root_password`])
+//! ([`carbide_redfish::libredfish::BmcCredentialOps::set_bmc_root_password`])
 //! is synchronous (no BIOS job to poll), so BMC rotation is one step guarded by
 //! the `rotating_to_version` crash marker:
 //!
@@ -42,7 +42,7 @@
 //! 3. Change the password with **change-then-verify recovery**: authenticate
 //!    with the current per-device secret and change to the rotate-TO value. On
 //!    failure, ask the BMC whether the rotate-TO value *already* authenticates
-//!    ([`RedfishClientPool::bmc_credentials_valid`]) -- if so, a prior attempt
+//!    ([`BmcCredentialOps::bmc_credentials_valid`]) -- if so, a prior attempt
 //!    changed the hardware before crashing and the device is already at target.
 //!    This never re-issues a same-value (`new -> new`) change, which some BMCs
 //!    reject under a password-reuse policy, and costs at most one extra failed
@@ -62,7 +62,7 @@
 //! every tick.
 //!
 //! The recovery path intentionally does not re-apply the vendor password policy
-//! ([`carbide_redfish::libredfish::RedfishClientPool::set_bmc_root_password`]
+//! ([`carbide_redfish::libredfish::BmcCredentialOps::set_bmc_root_password`]
 //! applies it on every change). That policy is a *static* per-vendor setting,
 //! and every password the device has ever carried -- including its initial
 //! provisioning value -- was set through `set_bmc_root_password`, so a device
@@ -84,7 +84,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
-use carbide_redfish::libredfish::RedfishClientPool;
+use carbide_redfish::libredfish::BmcCredentialOps;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
@@ -364,7 +364,7 @@ pub enum DispatchVendor {
     /// it -- `Fixed` only means "resolved by the caller, not the engine".
     Fixed(RedfishVendor),
     /// Resolve the vendor at rotation time by probing the BMC's Chassis
-    /// manufacturer ([`RedfishClientPool::probe_bmc_vendor`]) -- power-shelf
+    /// manufacturer ([`BmcCredentialOps::probe_bmc_vendor`]) -- power-shelf
     /// PMCs (Lite-On/Delta), which do *not* expose a recognized vendor in their
     /// Redfish service root. The probe runs *inside* the engine's
     /// quarantine-on-failure envelope and reuses the same credential candidates
@@ -936,10 +936,14 @@ async fn enter_device_rotation(
 /// (no rotation row) or [`RotateOutcome::Converged`] (already at target) -- there
 /// is nothing to force in those cases -- and a forced attempt that fails
 /// re-quarantines through the normal backoff bookkeeping.
+///
+/// `redfish_pool` is the direct pool's credential-operations handle
+/// ([`BmcCredentialOps`]): rotation authenticates to the BMC itself to
+/// change and verify passwords.
 pub async fn rotate_bmc(
     db_pool: &PgPool,
     credential_manager: &dyn CredentialManager,
-    redfish_pool: &dyn RedfishClientPool,
+    redfish_pool: &dyn BmcCredentialOps,
     bmc: &BmcRotationTarget,
     force: bool,
 ) -> Result<RotateOutcome, RotationEngineError> {
@@ -1013,10 +1017,14 @@ pub async fn rotate_bmc(
 
 /// Converge one BF4 DPU BMC's `service` account password to the staged
 /// site-wide target.
+///
+/// `redfish_pool` is the direct pool's credential-operations handle
+/// ([`BmcCredentialOps`]): rotation authenticates to the BMC itself to
+/// change and verify passwords.
 pub async fn rotate_dpu_bmc_service(
     db_pool: &PgPool,
     credential_manager: &dyn CredentialManager,
-    redfish_pool: &dyn RedfishClientPool,
+    redfish_pool: &dyn BmcCredentialOps,
     endpoint: &BmcEndpoint,
     force: bool,
 ) -> Result<RotateOutcome, RotationEngineError> {
@@ -1085,7 +1093,7 @@ pub async fn rotate_dpu_bmc_service(
 /// secret is written: the site-wide versioned secret is the only copy.
 async fn converge_dpu_bmc_service_password(
     credential_manager: &dyn CredentialManager,
-    redfish_pool: &dyn RedfishClientPool,
+    redfish_pool: &dyn BmcCredentialOps,
     endpoint: &BmcEndpoint,
     rotate_to_version: u32,
 ) -> Result<CredentialConvergence, String> {
@@ -1214,7 +1222,7 @@ impl CredentialConvergence {
 /// returns a secret-bearing string.
 async fn converge_bmc_password(
     credential_manager: &dyn CredentialManager,
-    redfish_pool: &dyn RedfishClientPool,
+    redfish_pool: &dyn BmcCredentialOps,
     bmc: &BmcRotationTarget,
     rotate_to_version: u32,
 ) -> Result<CredentialConvergence, ConvergeError> {
@@ -1300,7 +1308,7 @@ async fn converge_bmc_password(
 /// The normal path authenticates with `rotate_from` (the current per-device
 /// secret) and changes the password to `rotate_to`. When that fails, the
 /// hardware may already be at `rotate_to` because a prior attempt changed it and
-/// crashed before recording success; [`RedfishClientPool::bmc_credentials_valid`]
+/// crashed before recording success; [`BmcCredentialOps::bmc_credentials_valid`]
 /// confirms that without re-issuing a same-value (`new -> new`) change some BMCs
 /// reject. Only when the rotate-TO value does *not* already authenticate is the
 /// change treated as a genuine failure.
@@ -1309,7 +1317,7 @@ async fn converge_bmc_password(
 /// on a genuine device-level failure. Bounded to at most one failed login on the
 /// recovery path, so it cannot trip BMC lockout.
 async fn change_or_recover(
-    redfish_pool: &dyn RedfishClientPool,
+    redfish_pool: &dyn BmcCredentialOps,
     bmc: &BmcRotationTarget,
     vendor: RedfishVendor,
     rotate_from: Credentials,
@@ -1364,7 +1372,7 @@ async fn change_or_recover(
 /// quarantine with backoff. Returns an already-`to_string`-ed error (still to be
 /// redacted by the caller); never returns a secret-bearing string itself.
 async fn resolve_dispatch_vendor(
-    redfish_pool: &dyn RedfishClientPool,
+    redfish_pool: &dyn BmcCredentialOps,
     bmc: &BmcRotationTarget,
     rotate_from: &Credentials,
     rotate_to: &Credentials,
@@ -1409,7 +1417,7 @@ mod tests {
 
     use carbide_instrument::emit;
     use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
-    use carbide_redfish::libredfish::RedfishClientPool;
+    use carbide_redfish::libredfish::BmcCredentialOps;
     use carbide_redfish::libredfish::test_support::RedfishSim;
     use carbide_secrets::credentials::{
         BmcCredentialType, CredentialKey, CredentialReader, CredentialWriter, Credentials,

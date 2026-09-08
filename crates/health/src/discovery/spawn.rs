@@ -205,8 +205,11 @@ fn spawn_generic_redfish_collectors(
     // Chassis power evidence and Manager (PMC) status are collected for
     // power-shelf endpoints only.
     let power_shelf = matches!(endpoint.metadata, Some(EndpointMetadata::PowerShelf(_)));
+    // GPU identity attributes on log records are resolved against the shared
+    // entity inventory, so discovery must also run for a logs-only deployment.
+    let gpu_identity_enabled = ctx.attributes.gpu_identity;
 
-    if (sensors_enabled || metrics_enabled || gpu_inventory_enabled)
+    if (sensors_enabled || metrics_enabled || gpu_inventory_enabled || gpu_identity_enabled)
         && !ctx.collectors.contains(CollectorKind::Discovery, &key)
     {
         let shared = ctx.collectors.inventory_for(&key);
@@ -221,6 +224,7 @@ fn spawn_generic_redfish_collectors(
                 shared,
                 request_concurrency: ctx.bmc_request_concurrency,
                 collect_shelf_power: power_shelf,
+                gpu_identity: gpu_identity_enabled,
             },
             CollectorStartContext {
                 limiter: ctx.limiter.clone(),
@@ -388,6 +392,14 @@ fn spawn_generic_redfish_collectors(
                 .create_collector_registry(format!("log_collector_{key}"), metrics_prefix)?,
         );
 
+        // Resolved once here because both SSE spawn paths below share the
+        // endpoint's inventory handle.
+        let sse_gpu_inventory = if ctx.attributes.gpu_identity {
+            Some(ctx.collectors.inventory_for(&key))
+        } else {
+            None
+        };
+
         let sse_cfg = logs_cfg.sse_or_default();
         let sse_backoff_config = || BackoffConfig {
             initial: sse_cfg.initial_backoff,
@@ -429,6 +441,7 @@ fn spawn_generic_redfish_collectors(
                         SseLogCollectorConfig {
                             include_diagnostics: ctx.logs_include_diagnostics,
                             request_concurrency: ctx.bmc_request_concurrency,
+                            gpu_inventory: sse_gpu_inventory,
                         },
                         data_sink,
                         StreamingCollectorStartContext {
@@ -472,6 +485,7 @@ fn spawn_generic_redfish_collectors(
                         SseLogCollectorConfig {
                             include_diagnostics: ctx.logs_include_diagnostics,
                             request_concurrency: ctx.bmc_request_concurrency,
+                            gpu_inventory: sse_gpu_inventory,
                         },
                         data_sink,
                         StreamingCollectorStartContext {
@@ -1189,7 +1203,7 @@ mod tests {
             Some(EndpointMetadata::PowerShelf(
                 crate::endpoint::PowerShelfData {
                     id: None,
-                    serial: "614MP1RXX03X6510035".to_string(),
+                    serial: Some("614MP1RXX03X6510035".to_string()),
                 },
             )),
         );

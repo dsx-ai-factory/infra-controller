@@ -53,7 +53,7 @@ use crate::duppet::{SummaryFormat, SyncOptions};
 use crate::ethernet_virtualization::{
     InterfaceTranslationMode, NvueClientContext, NvueUpdateFlavor, ServiceAddresses,
 };
-use crate::fmds_client::FmdsUpdater;
+use crate::fmds_client::{FmdsUpdater, register_external_connection_metric};
 use crate::health::HealthCheckParams;
 use crate::host_machine_id::get_host_machine_id_retry;
 use crate::instrumentation::{
@@ -174,10 +174,12 @@ pub(super) async fn setup_and_run(
             fmds_address = fmds_addr,
             "Using FmdsUpdater::External FMDS service"
         );
+        let last_connect_succeeded = register_external_connection_metric(&get_dpu_agent_meter());
         FmdsUpdater::External {
             address: fmds_addr.clone(),
             machine_identity: agent_config.machine_identity.clone(),
             connect_timeout: Duration::from_secs(options.fmds_connect_timeout_secs),
+            last_connect_succeeded,
         }
     } else {
         if options.enable_metadata_service {

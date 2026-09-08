@@ -40,7 +40,7 @@ type InstanceCreateRequest struct {
 	VpcId string `json:"vpcId"`
 	// IDs of additional VPCs the Instance should attach to through non-primary interfaces. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, must be valid UUIDs, and must not include the primary `vpcId`.
 	SecondaryVpcIds []string `json:"secondaryVpcIds,omitempty"`
-	// Can only be specified if allowOverride is set to true in Operating System
+	// Can only be specified if allowOverride is set to true in Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
 	UserData NullableString `json:"userData,omitempty"`
 	// Must be specified if iPXE Script field is empty
 	OperatingSystemId NullableString `json:"operatingSystemId,omitempty"`
@@ -62,6 +62,8 @@ type InstanceCreateRequest struct {
 	AutoNetwork *bool `json:"autoNetwork,omitempty"`
 	// Associate one or more Partitions with this Instance
 	InfinibandInterfaces []InfiniBandInterfaceCreateRequest `json:"infinibandInterfaces,omitempty"`
+	// Associate one or more SpectrumX Partitions with this Instance. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.
+	SpectrumXAttachments []InstanceSpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments,omitempty"`
 	// DPU Extension Services to deploy to the DPUs of this Instance
 	DpuExtensionServiceDeployments []DpuExtensionServiceDeploymentRequest `json:"dpuExtensionServiceDeployments,omitempty"`
 	// Define Interfaces to associate Instance GPUs with NVLink Logical Partitions. A subset of GPUs may be specified (it is not required to include all GPUs). Each item references one GPU index (`deviceInstance`) and one NVLink Logical Partition. Different interfaces may reference different NVLink Logical Partitions.
@@ -766,6 +768,38 @@ func (o *InstanceCreateRequest) SetInfinibandInterfaces(v []InfiniBandInterfaceC
 	o.InfinibandInterfaces = v
 }
 
+// GetSpectrumXAttachments returns the SpectrumXAttachments field value if set, zero value otherwise.
+func (o *InstanceCreateRequest) GetSpectrumXAttachments() []InstanceSpectrumXAttachmentCreateOrUpdateRequest {
+	if o == nil || IsNil(o.SpectrumXAttachments) {
+		var ret []InstanceSpectrumXAttachmentCreateOrUpdateRequest
+		return ret
+	}
+	return o.SpectrumXAttachments
+}
+
+// GetSpectrumXAttachmentsOk returns a tuple with the SpectrumXAttachments field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *InstanceCreateRequest) GetSpectrumXAttachmentsOk() ([]InstanceSpectrumXAttachmentCreateOrUpdateRequest, bool) {
+	if o == nil || IsNil(o.SpectrumXAttachments) {
+		return nil, false
+	}
+	return o.SpectrumXAttachments, true
+}
+
+// HasSpectrumXAttachments returns a boolean if a field has been set.
+func (o *InstanceCreateRequest) HasSpectrumXAttachments() bool {
+	if o != nil && !IsNil(o.SpectrumXAttachments) {
+		return true
+	}
+
+	return false
+}
+
+// SetSpectrumXAttachments gets a reference to the given []InstanceSpectrumXAttachmentCreateOrUpdateRequest and assigns it to the SpectrumXAttachments field.
+func (o *InstanceCreateRequest) SetSpectrumXAttachments(v []InstanceSpectrumXAttachmentCreateOrUpdateRequest) {
+	o.SpectrumXAttachments = v
+}
+
 // GetDpuExtensionServiceDeployments returns the DpuExtensionServiceDeployments field value if set, zero value otherwise.
 func (o *InstanceCreateRequest) GetDpuExtensionServiceDeployments() []DpuExtensionServiceDeploymentRequest {
 	if o == nil || IsNil(o.DpuExtensionServiceDeployments) {
@@ -954,6 +988,9 @@ func (o InstanceCreateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.InfinibandInterfaces) {
 		toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
+	}
+	if !IsNil(o.SpectrumXAttachments) {
+		toSerialize["spectrumXAttachments"] = o.SpectrumXAttachments
 	}
 	if !IsNil(o.DpuExtensionServiceDeployments) {
 		toSerialize["dpuExtensionServiceDeployments"] = o.DpuExtensionServiceDeployments

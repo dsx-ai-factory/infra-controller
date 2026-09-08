@@ -5,3 +5,6 @@
 	path = pxe/ipxe/upstream
 	url = https://github.com/ipxe/ipxe.git
 	ignore = dirty
+[submodule "helm-prereqs/nv-rms"]
+	path = helm-prereqs/nv-rms
+	url = https://github.com/dsx-ai-factory/nv-rms.git

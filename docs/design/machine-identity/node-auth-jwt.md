@@ -1,8 +1,8 @@
 # Node-Auth: Self-Signed Bearer JWTs for Scout and DPU-Agent
 
-Design for [#355](https://github.com/NVIDIA/infra-controller/issues/355)
+Design for [#355](https://github.com/dsx-ai-factory/infra-controller/issues/355)
 (sub-issue of the Vault-elimination epic
-[#195](https://github.com/NVIDIA/infra-controller/issues/195)): Scout and the
+[#195](https://github.com/dsx-ai-factory/infra-controller/issues/195)): Scout and the
 DPU-agent authenticate to the API with short-lived bearer JWTs alongside —
 and eventually instead of — mTLS client certificates.
 

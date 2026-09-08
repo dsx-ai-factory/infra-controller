@@ -25,7 +25,7 @@ use carbide_test_harness::dns::TestDomain;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use carbide_uuid::instance_type::InstanceTypeId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use model::instance_type::InstanceTypeMachineCapabilityFilter;
 use model::machine::capabilities::MachineCapabilityType;
@@ -79,7 +79,7 @@ impl TestEnvOverrides {
 }
 
 struct TestManagedHost {
-    id: MachineId,
+    id: HostMachineId,
 }
 
 async fn create_test_env(pool: PgPool) -> TestEnv {
@@ -256,7 +256,7 @@ async fn allocate_instance(
     env.api
         .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: Some(host.id),
+            machine_id: Some(host.id.into()),
             instance_type_id: instance_type_id.map(str::to_string),
             config: Some(rpc::forge::InstanceConfig {
                 tenant: Some(rpc::forge::TenantConfig {
@@ -1506,7 +1506,7 @@ async fn test_remove_machine_association(
     let bound_instance_type = env
         .api
         .find_machines_by_ids(Request::new(rpc::forge::MachinesByIdsRequest {
-            machine_ids: vec![host_to_remove.id],
+            machine_ids: vec![host_to_remove.id.into()],
             ..Default::default()
         }))
         .await

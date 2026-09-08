@@ -24,7 +24,8 @@ use carbide_machine_controller::config::machine_validation::{
 use carbide_machine_controller::handler::MachineStateHandlerBuilder;
 use carbide_uuid::machine_validation::{MachineValidationId, MachineValidationRunItemId};
 use common::api_fixtures::{
-    create_host_with_machine_validation, create_test_env, get_machine_validation_results,
+    TestEnvOverrides, create_host_with_machine_validation, create_test_env,
+    create_test_env_with_overrides, get_config, get_machine_validation_results,
     get_machine_validation_runs, on_demand_machine_validation,
 };
 use config_version::ConfigVersion;
@@ -34,7 +35,10 @@ use model::machine::{
 };
 use rpc::Timestamp;
 use rpc::forge::forge_server::Forge;
-use rpc::forge::{MachineValidationTestNextVersionRequest, MachineValidationTestVerfiedRequest};
+use rpc::forge::{
+    MachineValidationTestFullHostApprovalRequest, MachineValidationTestNextVersionRequest,
+    MachineValidationTestVerfiedRequest,
+};
 
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::tests::common;
@@ -200,7 +204,7 @@ async fn test_machine_validation_with_error(
     env.api
         .machine_validation_completed(tonic::Request::new(
             rpc::forge::MachineValidationCompletedRequest {
-                machine_id: Some(mh.host().id),
+                machine_id: Some(mh.host().id.into()),
                 machine_validation_error: None,
                 validation_id: Some(validation_id),
             },
@@ -832,6 +836,7 @@ async fn test_machine_validation_add_new_test_case(
         custom_tags: vec!["dgxcloud".to_string()],
         components: vec!["GPU".to_string()],
         is_enabled: Some(true),
+        plugin: None,
     };
     let add_update_response = env
         .api
@@ -1016,6 +1021,142 @@ async fn test_machine_validation_mark_test_as_verfied(
         .tests;
     assert!(tests[0].verified);
     assert_eq!(return_message, "Success");
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn plugin_full_host_approval_and_enablement_are_server_managed(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config.machine_validation_config.approved_plugin_registries =
+        vec!["registry.example.com".to_owned()];
+    config.machine_validation_config.allow_privileged_plugins = true;
+    config.machine_validation_config.allow_full_host_plugins = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let plugin = rpc::forge::MachineValidationPlugin {
+        image: "registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        entrypoint: vec!["/plugin/entrypoint".to_owned()],
+        parameters_json: "{}".to_owned(),
+        privileged: true,
+        host_access_full: true,
+    };
+    let created = env
+        .api
+        .add_machine_validation_test(tonic::Request::new(
+            rpc::forge::MachineValidationTestAddRequest {
+                name: "gpu-health".to_owned(),
+                contexts: vec!["Discovery".to_owned()],
+                command: String::new(),
+                args: String::new(),
+                timeout: Some(60),
+                plugin: Some(plugin),
+                ..Default::default()
+            },
+        ))
+        .await?
+        .into_inner();
+
+    let enable_before_verification = env
+        .api
+        .machine_validation_test_enable_disable_test(tonic::Request::new(
+            rpc::forge::MachineValidationTestEnableDisableTestRequest {
+                test_id: created.test_id.clone(),
+                version: created.version.clone(),
+                is_enabled: true,
+            },
+        ))
+        .await;
+    assert_eq!(
+        enable_before_verification.unwrap_err().code(),
+        tonic::Code::InvalidArgument
+    );
+
+    env.api
+        .machine_validation_test_verfied(tonic::Request::new(MachineValidationTestVerfiedRequest {
+            test_id: created.test_id.clone(),
+            version: created.version.clone(),
+        }))
+        .await?;
+
+    // Legacy test-selection policy must not bypass plugin approval state.
+    apply_config_on_startup(
+        &env.api,
+        &MachineValidationConfig {
+            test_selection_mode: MachineValidationTestSelectionMode::EnableAll,
+            approved_plugin_registries: vec!["registry.example.com".to_owned()],
+            allow_privileged_plugins: true,
+            allow_full_host_plugins: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let after_startup_policy = env
+        .api
+        .get_machine_validation_tests(tonic::Request::new(
+            rpc::forge::MachineValidationTestsGetRequest {
+                test_id: Some(created.test_id.clone()),
+                version: Some(created.version.clone()),
+                ..Default::default()
+            },
+        ))
+        .await?
+        .into_inner()
+        .tests
+        .pop()
+        .expect("created plugin revision must be returned");
+    assert!(!after_startup_policy.is_enabled);
+
+    let enable_before_approval = env
+        .api
+        .machine_validation_test_enable_disable_test(tonic::Request::new(
+            rpc::forge::MachineValidationTestEnableDisableTestRequest {
+                test_id: created.test_id.clone(),
+                version: created.version.clone(),
+                is_enabled: true,
+            },
+        ))
+        .await;
+    assert_eq!(
+        enable_before_approval.unwrap_err().code(),
+        tonic::Code::InvalidArgument
+    );
+
+    env.api
+        .machine_validation_test_approve_full_host(tonic::Request::new(
+            MachineValidationTestFullHostApprovalRequest {
+                test_id: created.test_id.clone(),
+                version: created.version.clone(),
+            },
+        ))
+        .await?;
+    env.api
+        .machine_validation_test_enable_disable_test(tonic::Request::new(
+            rpc::forge::MachineValidationTestEnableDisableTestRequest {
+                test_id: created.test_id.clone(),
+                version: created.version.clone(),
+                is_enabled: true,
+            },
+        ))
+        .await?;
+
+    let test = env
+        .api
+        .get_machine_validation_tests(tonic::Request::new(
+            rpc::forge::MachineValidationTestsGetRequest {
+                test_id: Some(created.test_id),
+                version: Some(created.version),
+                ..Default::default()
+            },
+        ))
+        .await?
+        .into_inner()
+        .tests
+        .pop()
+        .expect("created plugin revision must be returned");
+    assert!(test.verified);
+    assert!(test.full_host_approved);
+    assert!(test.is_enabled);
     Ok(())
 }
 
@@ -1277,6 +1418,7 @@ async fn test_machine_validation_get_unverified_tests(
         custom_tags: vec!["dgxcloud".to_string()],
         components: vec!["GPU".to_string()],
         is_enabled: Some(true),
+        plugin: None,
     };
     let add_update_response = env
         .api
@@ -2019,7 +2161,7 @@ async fn test_machine_validation_manager_reconciles_stale_run(
     env.api
         .machine_validation_completed(tonic::Request::new(
             rpc::forge::MachineValidationCompletedRequest {
-                machine_id: Some(mh.host().id),
+                machine_id: Some(mh.host().id.into()),
                 machine_validation_error: None,
                 validation_id: Some(validation_id),
             },
@@ -2114,6 +2256,9 @@ async fn test_machine_validation_tests_on_startup_default_mode(
                 enable: true,
             },
         ],
+        approved_plugin_registries: vec![],
+        allow_privileged_plugins: false,
+        allow_full_host_plugins: false,
     };
 
     // Apply config
@@ -2190,6 +2335,9 @@ async fn test_machine_validation_tests_enable_all_mode(
             id: initial_tests[0].test_id.clone(),
             enable: false, // Override first test to be disabled
         }],
+        approved_plugin_registries: vec![],
+        allow_privileged_plugins: false,
+        allow_full_host_plugins: false,
     };
 
     // Apply config
@@ -2252,6 +2400,9 @@ async fn test_machine_validation_tests_on_startup_disable_all_mode(
             id: initial_tests[0].test_id.clone(),
             enable: true, // Override first test to be enabled
         }],
+        approved_plugin_registries: vec![],
+        allow_privileged_plugins: false,
+        allow_full_host_plugins: false,
     };
 
     // Apply config
@@ -2367,6 +2518,9 @@ async fn test_machine_validation_tests_on_startup_missing_tests_config(
         run_interval: std::time::Duration::from_secs(60),
         stale_run_timeout: std::time::Duration::from_secs(24 * 60 * 60),
         tests: vec![], // Empty test configuration
+        approved_plugin_registries: vec![],
+        allow_privileged_plugins: false,
+        allow_full_host_plugins: false,
     };
 
     // Apply config
@@ -2398,6 +2552,9 @@ async fn test_machine_validation_tests_on_startup_missing_tests_config(
         run_interval: std::time::Duration::from_secs(60),
         stale_run_timeout: std::time::Duration::from_secs(24 * 60 * 60),
         tests: vec![], // Empty test configuration
+        approved_plugin_registries: vec![],
+        allow_privileged_plugins: false,
+        allow_full_host_plugins: false,
     };
 
     // Apply config

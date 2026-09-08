@@ -2718,6 +2718,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "state-controller",
+ "tokio",
  "tokio-util",
  "tonic",
  "tracing",
@@ -2885,7 +2886,6 @@ dependencies = [
  "sqlx",
  "state-controller",
  "tokio",
- "tonic",
  "tracing",
 ]
 
@@ -3317,20 +3317,30 @@ dependencies = [
  "carbide-health-metrics",
  "carbide-health-report",
  "carbide-instrument",
+ "carbide-rack",
  "carbide-redfish",
+ "carbide-rpc",
  "carbide-secrets",
+ "carbide-test-harness",
  "carbide-test-support",
  "carbide-utils",
  "carbide-uuid",
+ "chrono",
  "component-manager",
  "config-version",
  "eyre",
  "libredfish",
+ "librms",
  "mac_address",
  "opentelemetry 0.32.0",
+ "serde_json",
  "sqlx",
  "state-controller",
+ "tokio",
+ "tokio-util",
+ "tonic",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -6741,7 +6751,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.3#8f0eb0ed25955d9ba486b8c495f0adf9a85a8e7a"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.4#5b3bfb1cfe06c4a36fc93d0cf1b4c0ab9288c633"
 dependencies = [
  "chrono",
  "clap",

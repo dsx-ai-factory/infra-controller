@@ -144,6 +144,13 @@ service Forge {
   rpc AllocateInstances(BatchInstanceAllocationRequest) returns (BatchInstanceAllocationResponse);
   // Releases an instance that has been allocated by a tenant
   rpc ReleaseInstance(InstanceReleaseRequest) returns (InstanceReleaseResult);
+  // Releases multiple instances in a single call. Best-effort per instance --
+  // one instance failing to release (e.g. already released, or blocked by a
+  // health check) does not roll back or block the release of the rest of the
+  // batch. Compare AllocateInstances, which is all-or-nothing: that semantic
+  // does not fit release, where callers need partial progress rather than a
+  // single bad ID aborting an entire large batch.
+  rpc ReleaseInstances(BatchInstanceReleaseRequest) returns (BatchInstanceReleaseResponse);
   // Updates the network interface configuration for an instance
   // The update will take effect asynchronously. Users should monitor `Instance.status.network_status.synced`
   // to determine whether all updates have been applied.
@@ -707,15 +714,24 @@ service Forge {
   // Machine-Validation test list
   rpc GetMachineValidationTests(MachineValidationTestsGetRequest) returns (MachineValidationTestsGetResponse);
 
+  // A request without plugin creates a legacy test. A plugin creates an immutable
+  // revision that starts unverified and disabled; it must be verified before enablement.
   rpc AddMachineValidationTest(MachineValidationTestAddRequest) returns (MachineValidationTestAddUpdateResponse);
 
   rpc UpdateMachineValidationTest(MachineValidationTestUpdateRequest) returns (MachineValidationTestAddUpdateResponse);
 
+  // Verifies one immutable plugin revision. Verification is required before enablement.
   rpc MachineValidationTestVerfied(MachineValidationTestVerfiedRequest) returns (MachineValidationTestVerfiedResponse);
 
   rpc MachineValidationTestNextVersion(MachineValidationTestNextVersionRequest) returns (MachineValidationTestNextVersionResponse);
 
+  // Enables or disables a revision. Plugin enablement requires verification and,
+  // for host_access_full, separate approval of the exact revision.
   rpc MachineValidationTestEnableDisableTest(MachineValidationTestEnableDisableTestRequest) returns (MachineValidationTestEnableDisableTestResponse);
+
+  // Approves the writable host-root mount for one verified plugin revision.
+  // The request fails unless that exact immutable revision requests host_access_full.
+  rpc MachineValidationTestApproveFullHost(MachineValidationTestFullHostApprovalRequest) returns (MachineValidationTestFullHostApprovalResponse);
 
   rpc UpdateMachineValidationRun(MachineValidationRunRequest) returns (MachineValidationRunResponse);
 
@@ -724,6 +740,8 @@ service Forge {
   rpc AdminBmcReset(AdminBmcResetRequest) returns (AdminBmcResetResponse);
   // Admin Power Control
   rpc AdminPowerControl(AdminPowerControlRequest) returns (AdminPowerControlResponse);
+  // Reset a GPU baseboard (e.g. HGX) via Redfish Chassis.Reset, resetting all GPUs on it; v1 accepts only ForceRestart and rejects all other actions.
+  rpc AdminGpuReset(AdminGpuResetRequest) returns (AdminGpuResetResponse);
   // Disable Secure Boot
   rpc DisableSecureBoot(BmcEndpointRequest) returns (DisableSecureBootResponse);
   // Set Lockdown (Enable or Disable)
@@ -3895,6 +3913,71 @@ message InstanceReleaseRequest {
 message InstanceReleaseResult {
 }
 
+// Batch instance release request
+message BatchInstanceReleaseRequest {
+  // List of instance release requests. Processed best-effort: a failure on
+  // one does not prevent the rest from being attempted. An empty list is not
+  // an error -- the response comes back with an empty `results`. An entry
+  // with no `id` set is reported as a failed result with `id` unset, rather
+  // than silently skipped.
+  repeated InstanceReleaseRequest release_requests = 1;
+}
+
+// Machine-readable outcome of one instance's release attempt within a batch.
+// Mirrors `ComponentManagerStatusCode`'s pattern of a stable status enum
+// instead of string-matching an error message, so callers can distinguish
+// retryable outcomes (e.g. INSTANCE_RELEASE_STATUS_CODE_UNAVAILABLE,
+// INSTANCE_RELEASE_STATUS_CODE_RESOURCE_EXHAUSTED) from terminal ones (e.g.
+// INSTANCE_RELEASE_STATUS_CODE_NOT_FOUND) without parsing free text.
+//
+// SUCCESS is deliberately NOT the zero value: proto3 sends no wire bytes for
+// a field equal to its default, so an omitted or accidentally-uninitialized
+// `status` is indistinguishable on the wire from one explicitly set to the
+// zero value. If SUCCESS were 0, that ambiguity would silently read as
+// success for a destructive, fleet-scale operation. UNSPECIFIED occupying 0
+// makes a missing status an obviously-wrong value instead.
+enum InstanceReleaseStatusCode {
+  INSTANCE_RELEASE_STATUS_CODE_UNSPECIFIED = 0;
+  INSTANCE_RELEASE_STATUS_CODE_SUCCESS = 1;
+  INSTANCE_RELEASE_STATUS_CODE_INVALID_ARGUMENT = 2;
+  INSTANCE_RELEASE_STATUS_CODE_NOT_FOUND = 3;
+  INSTANCE_RELEASE_STATUS_CODE_FAILED_PRECONDITION = 4;
+  INSTANCE_RELEASE_STATUS_CODE_RESOURCE_EXHAUSTED = 5;
+  INSTANCE_RELEASE_STATUS_CODE_PERMISSION_DENIED = 6;
+  INSTANCE_RELEASE_STATUS_CODE_UNAVAILABLE = 7;
+  INSTANCE_RELEASE_STATUS_CODE_INTERNAL_ERROR = 8;
+}
+
+// One ordered result per requested release, in the same order as
+// `BatchInstanceReleaseRequest.release_requests`. Mirrors
+// `ExpectedMachineOperationResult`'s one-result-per-operation shape so
+// callers get explicit request/result correlation instead of having to
+// search two separate lists by ID.
+//
+// Retry lifecycle: release only soft-deletes an instance (marks it deleted;
+// the row and its history persist while an async reconciler completes
+// secure-erase). Retrying the same id while that row still exists returns
+// SUCCESS again -- release is idempotent, safe to retry with the exact same
+// batch request after any failure, including a partial one. Only once the
+// row is eventually purged does the same id start returning NOT_FOUND
+// instead. There is no bound on how long that takes in practice, but callers
+// should not assume SUCCESS is available forever for an id already released.
+message InstanceReleaseOutcome {
+  // Echoes the request's id. Unset only when the corresponding request
+  // itself had no id set (see `status` in that case:
+  // INSTANCE_RELEASE_STATUS_CODE_INVALID_ARGUMENT).
+  common.InstanceId id = 1;
+  InstanceReleaseStatusCode status = 2;
+  // Human-readable detail. Empty on success.
+  string error = 3;
+}
+
+// Batch instance release response
+message BatchInstanceReleaseResponse {
+  // One result per requested release, in request order.
+  repeated InstanceReleaseOutcome results = 1;
+}
+
 message MachinesByIdsRequest {
   repeated common.MachineId machine_ids = 1;
   bool include_history = 2;
@@ -6065,6 +6148,12 @@ message FindTenantRequest {
 }
 message FindTenantResponse {
   Tenant tenant = 1;
+  // Named VPC routing profiles whose access tier is permitted for this Tenant.
+  // Omitted and empty are equivalent. The list is empty when the Tenant, FNN,
+  // or the Tenant's configured routing profile is unavailable. Otherwise it
+  // includes that profile and every profile with an equal or higher access
+  // tier, sorted by profile name.
+  repeated string permitted_routing_profile_types = 2;
 }
 
 message TenantKeysetIdentifier {
@@ -7199,6 +7288,18 @@ message AdminPowerControlResponse {
   optional string msg = 1;
 }
 
+message AdminGpuResetRequest {
+  // Machine whose GPU baseboard BMC is targeted. Required.
+  common.MachineId machine_id = 1;
+  // Redfish Chassis id to reset, e.g. "HGX_Chassis_0". Required.
+  string chassis_id = 2;
+  // Reset type. v1 accepts only ForceRestart and rejects all other actions.
+  AdminPowerControlRequest.SystemPowerControl action = 3;
+}
+
+message AdminGpuResetResponse {
+}
+
 message GetRedfishJobStateRequest {
   common.MachineId machine_id = 1;
   string job_id = 2;
@@ -7342,6 +7443,9 @@ message MachineValidationTestUpdateRequest {
     repeated string custom_tags = 16;
     repeated string components = 17;
     optional bool is_enabled = 19;
+    // Plugin revisions are immutable. This field is accepted only when creating
+    // a new revision and cannot modify an existing plugin revision.
+    optional MachineValidationPlugin plugin = 20;
   }
   string test_id = 1;
   string version = 2;
@@ -7369,6 +7473,7 @@ message MachineValidationTestAddRequest {
   repeated string custom_tags = 16;
   repeated string components = 17;
   optional bool is_enabled = 18;
+  optional MachineValidationPlugin plugin = 19;
 }
 message MachineValidationTestAddUpdateResponse {
   string test_id = 1;
@@ -7412,6 +7517,32 @@ message MachineValidationTest {
   repeated string components = 21;
   string last_modified_at = 22;
   bool is_enabled = 23;
+  // OCI plugin configuration for this immutable revision, if plugin-backed.
+  optional MachineValidationPlugin plugin = 24;
+  // Server-managed approval required for plugin.host_access_full.
+  bool full_host_approved = 25;
+}
+
+// A generic OCI plugin. The image is an immutable digest-pinned reference and
+// entrypoint arguments are passed directly to the container runtime.
+message MachineValidationPlugin {
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  string image = 1;
+  repeated string entrypoint = 2;
+  // JSON object of non-secret site-defined values included in input.json.
+  string parameters_json = 3;
+  bool privileged = 4;
+  bool host_access_full = 5;
+}
+
+message MachineValidationTestFullHostApprovalRequest {
+  string test_id = 1;
+  string version = 2;
+}
+
+message MachineValidationTestFullHostApprovalResponse {
+  string message = 1;
 }
 message MachineValidationTestNextVersionResponse {
   string test_id = 1;
@@ -9760,9 +9891,13 @@ enum ComponentManagerStatusCode {
 }
 
 message ComponentResult {
-  string component_id = 1;
+  // Absent when the target was a MAC with no ingested component row yet.
+  optional string component_id = 1;
   ComponentManagerStatusCode status = 2;
   string error = 3;
+  // Echoed for MAC-targeted requests so callers can correlate results when
+  // component_id is absent. Populated for ID targets too when known.
+  optional string mac_address = 4;
 }
 
 message SwitchIdList {
@@ -9773,6 +9908,11 @@ message PowerShelfIdList {
   repeated common.PowerShelfId ids = 1;
 }
 
+// A list of device MAC addresses used to target component operations (BMC MAC for compute/switch, PMC MAC for power shelf).
+message MacAddressList {
+  repeated string mac_addresses = 1;
+}
+
 // --- Component inventory ---
 
 message GetComponentInventoryRequest {
@@ -9780,6 +9920,7 @@ message GetComponentInventoryRequest {
     common.MachineIdList machine_ids = 1;
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
+    MacAddressList compute_bmc_macs = 4;
   }
 }
 
@@ -9799,6 +9940,7 @@ message ComponentPowerControlRequest {
     common.MachineIdList machine_ids = 1;
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
+    MacAddressList compute_bmc_macs = 6;
   }
   common.SystemPowerControl action = 4;
   // When true, bypass the state controller and dispatch directly to the
@@ -9871,8 +10013,13 @@ enum ComputeTrayComponent {
 }
 
 message UpdateComputeTrayFirmwareTarget {
+  // Exactly one of machine_ids or bmc_macs must be set (the server rejects
+  // neither/both). machine_ids targets ingested trays; bmc_macs targets by BMC
+  // MAC, including pre-ingestion. These are plain fields rather than a oneof so
+  // field 1 stays wire-compatible with earlier releases that predate bmc_macs.
   common.MachineIdList machine_ids = 1;
   repeated ComputeTrayComponent components = 2;
+  MacAddressList bmc_macs = 3;
 }
 
 message UpdateSwitchFirmwareTarget {
@@ -9924,6 +10071,7 @@ message GetComponentFirmwareStatusRequest {
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     RackIdList rack_ids = 4;
+    MacAddressList compute_bmc_macs = 5;
   }
 }
 
@@ -9937,6 +10085,7 @@ message ListComponentFirmwareVersionsRequest {
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     RackIdList rack_ids = 4;
+    MacAddressList compute_bmc_macs = 5;
   }
 }
 

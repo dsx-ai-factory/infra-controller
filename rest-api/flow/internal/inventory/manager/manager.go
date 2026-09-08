@@ -35,7 +35,9 @@ type Manager interface {
 	// Rack operations
 	CreateExpectedRack(ctx context.Context, rack *rack.Rack) (uuid.UUID, error)
 	GetRackByID(ctx context.Context, id uuid.UUID, withComponents bool) (*rack.Rack, error)
+	GetRackByExternalID(ctx context.Context, externalID string, withComponents bool) (*rack.Rack, error)
 	GetRacksByIDs(ctx context.Context, ids []uuid.UUID, withComponents bool) ([]*rack.Rack, error)
+	GetRacksByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID, withComponents bool) ([]*rack.Rack, error)
 	GetRackBySerial(ctx context.Context, manufacturer string, serial string, withComponents bool) (*rack.Rack, error)
 	GetRackByIdentifier(ctx context.Context, identifier identifier.Identifier, withComponents bool) (*rack.Rack, error)
 	PatchRack(ctx context.Context, rack *rack.Rack) (string, error)
@@ -111,9 +113,20 @@ func (m *ManagerImpl) GetRackByID(ctx context.Context, id uuid.UUID, withCompone
 	return m.store.GetRackByID(ctx, id, withComponents)
 }
 
+// GetRackByExternalID retrieves a rack by its external ID.
+func (m *ManagerImpl) GetRackByExternalID(ctx context.Context, externalID string, withComponents bool) (*rack.Rack, error) {
+	return m.store.GetRackByExternalID(ctx, externalID, withComponents)
+}
+
 // GetRacksByIDs retrieves multiple racks by their UUIDs.
 func (m *ManagerImpl) GetRacksByIDs(ctx context.Context, ids []uuid.UUID, withComponents bool) ([]*rack.Rack, error) {
 	return m.store.GetRacksByIDs(ctx, ids, withComponents)
+}
+
+// GetRacksByIDsIncludingDeleted retrieves multiple racks by UUID, including
+// soft-deleted rows.
+func (m *ManagerImpl) GetRacksByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID, withComponents bool) ([]*rack.Rack, error) {
+	return m.store.GetRacksByIDsIncludingDeleted(ctx, ids, withComponents)
 }
 
 // GetRackBySerial retrieves a rack by its serial number and manufacturer.

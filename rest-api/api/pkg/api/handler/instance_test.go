@@ -4923,6 +4923,36 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			verifyChildSpanner:          true,
 		},
 		{
+			name: "test Instance update marks the Instance configuring for a SpectrumX-only update",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					// The iPXE-based Operating System rejects an unset ipxeScript, so carry it
+					// through to keep this case independent of the surrounding table order.
+					IpxeScript: os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{
+						{
+							SpectrumXPartitionID: uuid.NewString(),
+							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+							DeviceInstance:       cutil.GetPtr(0),
+							AttachmentType:       model.SpectrumXAttachmentTypePhysical,
+						},
+					},
+				},
+				reqInstance:           inst1.ID.String(),
+				cleanInstanceToStatus: inst1.Status,
+				reqOrg:                tnOrg1,
+				reqUser:               tnu1,
+				respCode:              http.StatusOK,
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
 			name: "test Instance update rejects power profile when DPS power management is disabled",
 			fields: fields{
 				dbSession: dbSession,
@@ -7813,6 +7843,18 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						}
 					}
 
+					// Verify the SpectrumX Attachments are in the Site Controller request
+					if len(tt.args.reqData.SpectrumXAttachments) > 0 {
+						require.NotNil(t, siteReq.Config.Spxconfig)
+						assert.Equal(t, len(tt.args.reqData.SpectrumXAttachments), len(siteReq.Config.Spxconfig.SpxAttachments))
+
+						// Make sure order to should be same as the request received
+						for i := range siteReq.Config.Spxconfig.SpxAttachments {
+							assert.Equal(t, siteReq.Config.Spxconfig.SpxAttachments[i].SpxPartitionId.Value, tt.args.reqData.SpectrumXAttachments[i].SpectrumXPartitionID)
+							assert.Equal(t, siteReq.Config.Spxconfig.SpxAttachments[i].Device, tt.args.reqData.SpectrumXAttachments[i].Device)
+						}
+					}
+
 					// Verify the DPU Extension Service Deployments are in the Site Controller request
 					if len(tt.args.reqData.DpuExtensionServiceDeployments) > 0 {
 						assert.Equal(t, len(tt.args.reqData.DpuExtensionServiceDeployments), len(siteReq.Config.DpuExtensionServices.ServiceConfigs), siteReq.Config.DpuExtensionServices.ServiceConfigs)
@@ -7847,7 +7889,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			assert.NotEqual(t, rst.Updated.String(), inst1.Updated.String())
 
 			// Verify Instance status is configuring if any of the interfaces are being updated
-			if tt.args.reqData.NVLinkInterfaces != nil || tt.args.reqData.Interfaces != nil || tt.args.reqData.InfiniBandInterfaces != nil {
+			if tt.args.reqData.NVLinkInterfaces != nil || tt.args.reqData.Interfaces != nil || tt.args.reqData.InfiniBandInterfaces != nil ||
+				tt.args.reqData.SpectrumXAttachments != nil {
 				assert.Equal(t, rst.Status, cdbm.InstanceStatusConfiguring)
 			}
 

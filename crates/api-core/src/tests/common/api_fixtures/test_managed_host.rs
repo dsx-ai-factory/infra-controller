@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 // `PgPoolReader` and `LoadSnapshotOptions` are only used by the `#[cfg(test)]`
 // `TestManagedHostSnapshots` trait below, so gate them out of test-support-only builds.
 #[cfg(test)]
@@ -38,12 +38,12 @@ use crate::tests::common::api_fixtures::instance::TestInstanceBuilder;
 use crate::tests::common::api_fixtures::{Api, TestEnv, TestMachine};
 
 pub(in crate::tests) struct TestManagedHost {
-    pub(in crate::tests) id: MachineId,
-    pub(in crate::tests) dpu_ids: Vec<MachineId>,
+    pub(in crate::tests) id: HostMachineId,
+    pub(in crate::tests) dpu_ids: Vec<DpuMachineId>,
     pub(in crate::tests) api: Arc<Api>,
 }
 
-impl From<TestManagedHost> for (MachineId, MachineId) {
+impl From<TestManagedHost> for (HostMachineId, DpuMachineId) {
     fn from(mut v: TestManagedHost) -> Self {
         (v.id, v.dpu_ids.remove(0))
     }
@@ -58,7 +58,11 @@ impl TestManagedHost {
     #[allow(deprecated)]
     pub(in crate::tests) fn from_rpc_machine(m: &rpc::Machine, api: Arc<Api>) -> Self {
         TestManagedHost {
-            id: m.id.unwrap(),
+            id: m
+                .id
+                .unwrap()
+                .try_into()
+                .expect("MachineId should be a HostMachineId"),
             dpu_ids: m
                 .status
                 .as_ref()
@@ -74,21 +78,25 @@ impl TestManagedHost {
                         .iter()
                         .filter_map(|i| i.attached_dpu_machine_id)
                         .collect()
-                }),
+                })
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<DpuMachineId>, _>>()
+                .expect("attachec_dpu_machine_id should be a valid DpuMachineId"),
             api,
         }
     }
 
-    pub(in crate::tests) fn dpu(&self) -> TestMachine {
+    pub(in crate::tests) fn dpu(&self) -> TestMachine<DpuMachineId> {
         TestMachine::new(self.dpu_ids[0], self.api.clone())
     }
 
-    pub(in crate::tests) fn dpu_n(&self, n: usize) -> TestMachine {
+    pub(in crate::tests) fn dpu_n(&self, n: usize) -> TestMachine<DpuMachineId> {
         assert!(n < self.dpu_ids.len());
         TestMachine::new(self.dpu_ids[n], self.api.clone())
     }
 
-    pub(in crate::tests) fn host(&self) -> TestMachine {
+    pub(in crate::tests) fn host(&self) -> TestMachine<HostMachineId> {
         TestMachine::new(self.id, self.api.clone())
     }
 
@@ -111,7 +119,7 @@ impl TestManagedHost {
     ) -> ManagedHostState {
         ManagedHostState::DPUReprovision {
             dpu_states: model::machine::DpuReprovisionStates {
-                states: HashMap::from([(self.dpu().id, state)]),
+                states: HashMap::from([(self.dpu_ids[0], state)]),
             },
         }
     }
@@ -140,7 +148,7 @@ impl TestManagedHost {
         ManagedHostState::Assigned {
             instance_state: InstanceState::DPUReprovision {
                 dpu_states: model::machine::DpuReprovisionStates {
-                    states: HashMap::from([(self.dpu().id, state)]),
+                    states: HashMap::from([(self.dpu_ids[0], state)]),
                 },
             },
         }
@@ -165,7 +173,7 @@ impl TestManagedHost {
         self.api
             .machine_validation_completed(Request::new(
                 rpc::forge::MachineValidationCompletedRequest {
-                    machine_id: self.id.into(),
+                    machine_id: Some(self.id.into()),
                     machine_validation_error: None,
                     validation_id: Some(validation_id),
                 },
@@ -195,7 +203,7 @@ pub(in crate::tests) trait TestManagedHostSnapshots {
         &self,
         txn: &mut PgPoolReader,
         load_options: LoadSnapshotOptions,
-    ) -> HashMap<MachineId, ManagedHostStateSnapshot>;
+    ) -> HashMap<HostMachineId, ManagedHostStateSnapshot>;
 }
 
 #[cfg(test)]
@@ -204,13 +212,10 @@ impl TestManagedHostSnapshots for Vec<TestManagedHost> {
         &self,
         txn: &mut PgPoolReader,
         load_options: LoadSnapshotOptions,
-    ) -> HashMap<MachineId, ManagedHostStateSnapshot> {
-        db::managed_host::load_by_machine_ids(
-            txn,
-            &self.iter().map(|m| m.id).collect::<Vec<_>>(),
-            load_options,
-        )
-        .await
-        .unwrap()
+    ) -> HashMap<HostMachineId, ManagedHostStateSnapshot> {
+        let machine_ids = self.iter().map(|machine| machine.id).collect::<Vec<_>>();
+        db::managed_host::load_by_machine_ids(txn, &machine_ids, load_options)
+            .await
+            .unwrap()
     }
 }

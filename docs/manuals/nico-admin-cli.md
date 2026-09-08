@@ -137,4 +137,4 @@ roles, see [NICo mTLS and authorization](./nico-api-auth.md).
 
 ---
 
-For the full command reference, see the [CLI manual index](https://github.com/NVIDIA/infra-controller/tree/main/docs/manuals/nico-admin-cli/index.md)
+For the full command reference, see the [CLI manual index](https://github.com/dsx-ai-factory/infra-controller/tree/main/docs/manuals/nico-admin-cli/index.md)

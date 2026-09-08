@@ -1068,7 +1068,9 @@ mod http_request_tests {
     use axum::http::{Request as HttpRequest, StatusCode};
     use axum::routing::get;
     use carbide_instrument::emit;
-    use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{
+        ApproxHistogramSum, CapturedFieldKind, MetricsCapture, capture_logs,
+    };
     use carbide_test_support::{Check, check_values};
     use tower::ServiceExt;
 
@@ -1086,7 +1088,7 @@ mod http_request_tests {
     struct EventObservation {
         request_delta: f64,
         latency_count_delta: u64,
-        latency_sum_delta: f64,
+        latency_sum_delta: ApproxHistogramSum,
         logs: Vec<LogObservation>,
     }
 
@@ -1142,7 +1144,7 @@ mod http_request_tests {
                     expect: EventObservation {
                         request_delta: 1.0,
                         latency_count_delta: 0,
-                        latency_sum_delta: 0.0,
+                        latency_sum_delta: ApproxHistogramSum(0.0),
                         logs: vec![LogObservation {
                             metadata_name: "dpu_agent_http_request_started".to_string(),
                             level: tracing::Level::INFO,
@@ -1168,7 +1170,7 @@ mod http_request_tests {
                     expect: EventObservation {
                         request_delta: 0.0,
                         latency_count_delta: 1,
-                        latency_sum_delta: 12.5,
+                        latency_sum_delta: ApproxHistogramSum(12.5),
                         logs: vec![LogObservation {
                             metadata_name: "dpu_agent_http_response_generated".to_string(),
                             level: tracing::Level::INFO,

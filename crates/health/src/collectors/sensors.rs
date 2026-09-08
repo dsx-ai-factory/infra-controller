@@ -1188,6 +1188,7 @@ mod tests {
                         entity: chassis,
                         sensors: vec![sensor],
                         shelf_power: None,
+                        gpu: None,
                     }],
                 );
             }

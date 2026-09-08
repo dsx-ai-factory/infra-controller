@@ -353,9 +353,7 @@ func (atrt *APITaskRunTarget) FromProto(p *flowv1.OperationRunTarget) {
 	if p.GetOperationRunId() != nil {
 		atrt.RunID = p.GetOperationRunId().GetId()
 	}
-	if p.GetRackId() != nil {
-		atrt.RackID = p.GetRackId().GetId()
-	}
+	atrt.RackID = p.GetRackExternalId()
 	atrt.SequenceIndex = p.GetSequenceIndex()
 	atrt.PhaseIndex = p.GetPhaseIndex()
 	if id := p.GetTaskId(); id != nil && id.GetId() != "" {

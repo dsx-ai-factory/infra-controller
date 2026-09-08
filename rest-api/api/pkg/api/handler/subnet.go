@@ -44,7 +44,8 @@ const DefaultReservedIPCount = 2
 
 // ~~~~~ Create Handler ~~~~~ //
 
-// CreateSubnetHandler is the API Handler for creating new Subnet
+// CreateSubnetHandler creates IPv4 Subnets for Ethernet virtualizer VPCs.
+// FNN VPCs use the separate VPC Prefix resource.
 type CreateSubnetHandler struct {
 	dbSession  *cdb.Session
 	tc         temporalClient.Client
@@ -65,8 +66,8 @@ func NewCreateSubnetHandler(dbSession *cdb.Session, tc temporalClient.Client, sc
 }
 
 // Handle godoc
-// @Summary Create a Subnet
-// @Description Create a Subnet
+// @Summary Create Subnet
+// @Description Creates an IPv4 Subnet in an Ethernet virtualizer VPC. FNN VPCs use VPC Prefixes.
 // @Tags Subnet
 // @Accept json
 // @Produce json
@@ -134,9 +135,9 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant for VPC in request does not match tenant in org", nil)
 	}
 
-	// Verify if vpc is ethernet virtualized
+	// A nil `NetworkVirtualizationType` represents legacy Ethernet virtualizer VPCs.
 	if vpc.NetworkVirtualizationType != nil && *vpc.NetworkVirtualizationType != cdbm.VpcEthernetVirtualizer {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in request must have Ethernet network virtualization type in order to create Subnets", vpc.ID), nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC: %v must be an Ethernet virtualizer VPC for REST Subnet creation", vpc.ID), nil)
 	}
 
 	// Verify if vpc is ready
@@ -161,21 +162,25 @@ func (csh CreateSubnetHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where the Subnet is being created must be in Registered state in order to proceed", nil)
 	}
 
-	// Validate IPBlocks in request
-	// NOTE: model validation ensures non-nil IPv4BlockID
+	// Validate the Ready, tenant-allocated IPv4 IP block for this Subnet.
+	// Model validation ensures IPv4BlockID is non-nil.
 	ipBlockFilter := cdbm.IPBlockFilterInput{}
 	ipBlockFilter.TenantAllocated(tenant.ID)
+	ipBlockFilter.Statuses = []string{cdbm.IPBlockStatusReady}
 	ipv4Block, err := common.GetIPBlockFromIDString(ctx, nil, *apiRequest.IPv4BlockID, ipBlockFilter, csh.dbSession)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error getting IPv4 IPBlock in request")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error retrieving ipv4 IPBlock from request", nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find a Ready, tenant-allocated IPv4 IP block specified by ipv4BlockId", nil)
+	}
+	if ipv4Block.ProtocolVersion != cdbm.IPBlockProtocolVersionV4 {
+		logger.Warn().Msg("ipv4BlockId must reference an IPv4 IP block for Subnet creation")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "ipv4BlockId must reference an IPv4 IP block for Subnet creation", nil)
 	}
 	if vpc.SiteID != ipv4Block.SiteID {
 		logger.Warn().Msg("IPv4 Block specified in request and VPC do not belong to the same Site")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "IPv4 Block specified in request and VPC do not belong to the same Site", nil)
 	}
-	// NOTE: validation ensures that IPv6BlockID will be nil, ie, it is not supported yet
-	// when IPv6 is supported, further validations must ensure that the RoutingType of v4 and v6 must match
+	// A REST Subnet uses one IPv4 block, so its routing type comes from that block.
 	routingType := ipv4Block.RoutingType
 
 	// Check for name uniqueness for the tenant, ie, Tenant cannot have another Subnet with same name at the Site

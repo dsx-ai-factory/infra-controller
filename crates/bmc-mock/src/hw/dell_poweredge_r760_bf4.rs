@@ -111,6 +111,7 @@ impl DellPowerEdgeR760Bf4<'_> {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("Dell Inc.".into()),
                 model: Some("PowerEdge R760".into()),
+                bios_version: None,
                 eth_interfaces: Some(eth_interfaces),
                 serial_number,
                 boot_order_mode: redfish::computer_system::BootOrderMode::OrderedCollection,

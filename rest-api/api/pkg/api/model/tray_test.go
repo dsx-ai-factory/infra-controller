@@ -90,6 +90,7 @@ func TestNewAPITray(t *testing.T) {
 				},
 				FirmwareVersion: "2.1.0",
 				ComponentId:     "nico-machine-456",
+				RackExternalId:  "core-rack-789",
 				Position: &flowv1.RackPosition{
 					SlotId:  1,
 					TrayIdx: 0,
@@ -102,12 +103,11 @@ func TestNewAPITray(t *testing.T) {
 						IpAddress:  cutil.GetPtr("192.168.1.100"),
 					},
 				},
-				RackId:      &flowv1.UUID{Id: "rack-id-789"},
+				RackId:      &flowv1.UUID{Id: "flow-rack-uuid"},
 				NvlDomainId: &flowv1.UUID{Id: domainID},
 			},
 			want: &APITray{
-				ID:              "tray-id-123",
-				ComponentID:     "nico-machine-456",
+				ID:              "nico-machine-456",
 				Type:            "Compute",
 				Name:            "compute-tray-1",
 				Manufacturer:    "NVIDIA",
@@ -127,14 +127,15 @@ func TestNewAPITray(t *testing.T) {
 						IPAddress:  "192.168.1.100",
 					},
 				},
-				RackID:         "rack-id-789",
+				RackID:         "core-rack-789",
 				NVLinkDomainID: cutil.GetPtr(domainID),
 			},
 		},
 		{
 			name: "switch tray without optional fields",
 			comp: &flowv1.Component{
-				Type: flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+				Type:        flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+				ComponentId: "core-switch-1",
 				Info: &flowv1.DeviceInfo{
 					Id:           &flowv1.UUID{Id: "switch-tray-id"},
 					Name:         "switch-tray-1",
@@ -148,7 +149,7 @@ func TestNewAPITray(t *testing.T) {
 				},
 			},
 			want: &APITray{
-				ID:              "switch-tray-id",
+				ID:              "core-switch-1",
 				Type:            "NVSwitch",
 				Name:            "switch-tray-1",
 				Manufacturer:    "NVIDIA",
@@ -164,7 +165,9 @@ func TestNewAPITray(t *testing.T) {
 		{
 			name: "powershelf tray",
 			comp: &flowv1.Component{
-				Type: flowv1.ComponentType_COMPONENT_TYPE_POWERSHELF,
+				Type:           flowv1.ComponentType_COMPONENT_TYPE_POWERSHELF,
+				ComponentId:    "core-powershelf-1",
+				RackExternalId: "core-rack-abc",
 				Info: &flowv1.DeviceInfo{
 					Id:           &flowv1.UUID{Id: "power-tray-id"},
 					Name:         "powershelf-1",
@@ -174,10 +177,10 @@ func TestNewAPITray(t *testing.T) {
 				Position: &flowv1.RackPosition{
 					SlotId: 48,
 				},
-				RackId: &flowv1.UUID{Id: "rack-abc"},
+				RackId: &flowv1.UUID{Id: "flow-rack-uuid"},
 			},
 			want: &APITray{
-				ID:           "power-tray-id",
+				ID:           "core-powershelf-1",
 				Type:         "PowerShelf",
 				Name:         "powershelf-1",
 				Manufacturer: "NVIDIA",
@@ -187,31 +190,33 @@ func TestNewAPITray(t *testing.T) {
 					TrayIdx: 0,
 					HostID:  0,
 				},
-				RackID: "rack-abc",
+				RackID: "core-rack-abc",
 			},
 		},
 		{
 			name: "tray with minimal info and explicit type",
 			comp: &flowv1.Component{
-				Type: flowv1.ComponentType_COMPONENT_TYPE_COMPUTE,
+				Type:        flowv1.ComponentType_COMPONENT_TYPE_COMPUTE,
+				ComponentId: "core-machine-minimal",
 				Info: &flowv1.DeviceInfo{
 					Id: &flowv1.UUID{Id: "minimal-tray"},
 				},
 			},
 			want: &APITray{
-				ID:   "minimal-tray",
+				ID:   "core-machine-minimal",
 				Type: "Compute",
 			},
 		},
 		{
 			name: "tray with unspecified type falls back to unknown",
 			comp: &flowv1.Component{
+				ComponentId: "core-component-untyped",
 				Info: &flowv1.DeviceInfo{
 					Id: &flowv1.UUID{Id: "untyped-tray"},
 				},
 			},
 			want: &APITray{
-				ID:   "untyped-tray",
+				ID:   "core-component-untyped",
 				Type: "Unknown",
 			},
 		},
@@ -222,21 +227,22 @@ func TestNewAPITray(t *testing.T) {
 				ComponentId: "compute-component-123",
 			},
 			want: &APITray{
-				Type:        "Compute",
-				ComponentID: "compute-component-123",
+				ID:   "compute-component-123",
+				Type: "Compute",
 			},
 		},
 		{
 			name: "tray without position",
 			comp: &flowv1.Component{
-				Type: flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+				Type:        flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+				ComponentId: "core-switch-no-position",
 				Info: &flowv1.DeviceInfo{
 					Id:   &flowv1.UUID{Id: "switch-tray-id"},
 					Name: "switch-1",
 				},
 			},
 			want: &APITray{
-				ID:       "switch-tray-id",
+				ID:       "core-switch-no-position",
 				Type:     "NVSwitch",
 				Name:     "switch-1",
 				Position: nil,
@@ -255,7 +261,6 @@ func TestNewAPITray(t *testing.T) {
 
 			assert.NotNil(t, got)
 			assert.Equal(t, tt.want.ID, got.ID)
-			assert.Equal(t, tt.want.ComponentID, got.ComponentID)
 			assert.Equal(t, tt.want.Type, got.Type)
 			assert.Equal(t, tt.want.Name, got.Name)
 			assert.Equal(t, tt.want.Manufacturer, got.Manufacturer)
@@ -312,18 +317,18 @@ func TestAPITray_FromProto(t *testing.T) {
 			Id:   &flowv1.UUID{Id: "tray-uuid"},
 			Name: "My Tray",
 		},
-		Position:   &flowv1.RackPosition{SlotId: 3, TrayIdx: 0, HostId: 1},
-		RackId:     &flowv1.UUID{Id: "rack-uuid"},
-		Status:     &flowv1.ComponentOperationStatus{Phase: flowv1.Phase_PHASE_IN_USE},
-		LeakStatus: flowv1.LeakStatus_LEAK_STATUS_DETECTED,
+		Position:       &flowv1.RackPosition{SlotId: 3, TrayIdx: 0, HostId: 1},
+		RackId:         &flowv1.UUID{Id: "rack-uuid"},
+		RackExternalId: "core-rack-1",
+		Status:         &flowv1.ComponentOperationStatus{Phase: flowv1.Phase_PHASE_IN_USE},
+		LeakStatus:     flowv1.LeakStatus_LEAK_STATUS_DETECTED,
 	}
 	at := &APITray{}
 	at.FromProto(comp)
 	assert.Equal(t, "Compute", at.Type)
-	assert.Equal(t, "comp-1", at.ComponentID)
-	assert.Equal(t, "tray-uuid", at.ID)
+	assert.Equal(t, "comp-1", at.ID)
 	assert.Equal(t, "My Tray", at.Name)
-	assert.Equal(t, "rack-uuid", at.RackID)
+	assert.Equal(t, "core-rack-1", at.RackID)
 	assert.Equal(t, "InUse", at.OperationStatus)
 	assert.Equal(t, "Leaking", at.LeakStatus)
 	assert.NotNil(t, at.Position)
@@ -332,7 +337,7 @@ func TestAPITray_FromProto(t *testing.T) {
 	assert.Equal(t, int32(1), at.Position.HostID)
 
 	at.FromProto(nil) // no-op, fields unchanged
-	assert.Equal(t, "tray-uuid", at.ID)
+	assert.Equal(t, "comp-1", at.ID)
 
 	// A component with no computed operation status and no leak status
 	// resolves both fields to "Unknown".
@@ -370,9 +375,9 @@ func TestAPITrayGetAllRequest_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "invalid rackId - not a UUID",
-			req:     APITrayGetAllRequest{RackID: strPtr("not-a-uuid")},
-			wantErr: true,
+			name:    "non-UUID external rack ID is valid",
+			req:     APITrayGetAllRequest{RackID: strPtr("core-rack-01")},
+			wantErr: false,
 		},
 		{
 			name:    "rackId and rackName mutually exclusive",
@@ -420,38 +425,18 @@ func TestAPITrayGetAllRequest_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "invalid UUID in IDs",
-			req:     APITrayGetAllRequest{IDs: []string{"not-a-uuid"}},
-			wantErr: true,
-		},
-		{
-			name:    "componentIDs with type is valid",
-			req:     APITrayGetAllRequest{ComponentIDs: []string{"comp-1", "comp-2"}, Type: strPtr("Compute")},
+			name:    "non-UUID component ID is valid",
+			req:     APITrayGetAllRequest{IDs: []string{"core-machine-1"}},
 			wantErr: false,
 		},
 		{
-			name:    "componentIDs without type is invalid",
-			req:     APITrayGetAllRequest{ComponentIDs: []string{"comp-1"}},
-			wantErr: true,
-		},
-		{
-			name:    "IDs and componentIDs can coexist (both component-level)",
-			req:     APITrayGetAllRequest{IDs: []string{validUUID}, ComponentIDs: []string{"comp-1"}, Type: strPtr("Compute")},
+			name:    "IDs with type are valid",
+			req:     APITrayGetAllRequest{IDs: []string{"comp-1", "comp-2"}, Type: strPtr("Compute")},
 			wantErr: false,
 		},
 		{
 			name:    "rackId conflicts with IDs",
 			req:     APITrayGetAllRequest{RackID: strPtr(validUUID), IDs: []string{validUUID2}},
-			wantErr: true,
-		},
-		{
-			name:    "rackName conflicts with componentIDs",
-			req:     APITrayGetAllRequest{RackName: strPtr("Rack-001"), ComponentIDs: []string{"comp-1"}, Type: strPtr("Compute")},
-			wantErr: true,
-		},
-		{
-			name:    "rackId conflicts with componentIDs",
-			req:     APITrayGetAllRequest{RackID: strPtr(validUUID), ComponentIDs: []string{"comp-1"}, Type: strPtr("Compute")},
 			wantErr: true,
 		},
 		{
@@ -485,11 +470,6 @@ func TestAPITrayGetAllRequest_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "slotId with componentIds without rack invalid",
-			req:     APITrayGetAllRequest{SlotID: int32Ptr(3), ComponentIDs: []string{"comp-1"}, Type: strPtr("Compute")},
-			wantErr: true,
-		},
-		{
 			name:    "negative slotId invalid",
 			req:     APITrayGetAllRequest{RackName: strPtr("Rack-001"), SlotID: int32Ptr(-1)},
 			wantErr: true,
@@ -512,11 +492,11 @@ func TestAPITrayGetAllRequest_Validate(t *testing.T) {
 }
 
 func TestAPITrayGetAllRequest_ToProto(t *testing.T) {
-	rackID := uuid.New().String()
+	rackID := "core-rack-01"
 	rackName := "Rack-001"
 	trayType := "Compute"
-	id1 := uuid.New().String()
-	id2 := uuid.New().String()
+	id1 := "core-machine-01"
+	id2 := "core-machine-02"
 
 	tests := []struct {
 		name     string
@@ -541,7 +521,7 @@ func TestAPITrayGetAllRequest_ToProto(t *testing.T) {
 				rackTargets := req.TargetSpec.GetRacks()
 				require.NotNil(t, rackTargets)
 				require.Len(t, rackTargets.Targets, 1)
-				assert.Equal(t, rackID, rackTargets.Targets[0].GetId().GetId())
+				assert.Equal(t, rackID, rackTargets.Targets[0].GetExternalId())
 				assert.ElementsMatch(t, ValidProtoComponentTypes, rackTargets.Targets[0].ComponentTypes)
 			},
 		},
@@ -582,7 +562,7 @@ func TestAPITrayGetAllRequest_ToProto(t *testing.T) {
 				rackTargets := req.TargetSpec.GetRacks()
 				require.NotNil(t, rackTargets)
 				require.Len(t, rackTargets.Targets, 1)
-				assert.Equal(t, rackID, rackTargets.Targets[0].GetId().GetId())
+				assert.Equal(t, rackID, rackTargets.Targets[0].GetExternalId())
 				assert.Contains(t, rackTargets.Targets[0].ComponentTypes, flowv1.ComponentType_COMPONENT_TYPE_COMPUTE)
 			},
 		},
@@ -596,15 +576,16 @@ func TestAPITrayGetAllRequest_ToProto(t *testing.T) {
 				compTargets := req.TargetSpec.GetComponents()
 				require.NotNil(t, compTargets)
 				assert.Len(t, compTargets.Targets, 2)
-				assert.Equal(t, id1, compTargets.Targets[0].GetId().GetId())
-				assert.Equal(t, id2, compTargets.Targets[1].GetId().GetId())
+				assert.Equal(t, id1, compTargets.Targets[0].GetExternal().GetId())
+				assert.Equal(t, id2, compTargets.Targets[1].GetExternal().GetId())
+				assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_UNKNOWN, compTargets.Targets[0].GetExternal().GetType())
 			},
 		},
 		{
-			name: "componentIDs with type - component-level targeting via ExternalRef",
+			name: "IDs with type - typed component-level targeting",
 			request: &APITrayGetAllRequest{
-				ComponentIDs: []string{"comp-1", "comp-2"},
-				Type:         &trayType,
+				IDs:  []string{"comp-1", "comp-2"},
+				Type: &trayType,
 			},
 			validate: func(t *testing.T, req *flowv1.GetComponentsRequest) {
 				require.NotNil(t, req.TargetSpec)
@@ -618,22 +599,6 @@ func TestAPITrayGetAllRequest_ToProto(t *testing.T) {
 				}
 			},
 		},
-		{
-			name: "IDs and componentIDs with type - mixed component-level targeting",
-			request: &APITrayGetAllRequest{
-				IDs:          []string{id1},
-				ComponentIDs: []string{"comp-1"},
-				Type:         &trayType,
-			},
-			validate: func(t *testing.T, req *flowv1.GetComponentsRequest) {
-				require.NotNil(t, req.TargetSpec)
-				compTargets := req.TargetSpec.GetComponents()
-				require.NotNil(t, compTargets)
-				assert.Len(t, compTargets.Targets, 2)
-				assert.Equal(t, id1, compTargets.Targets[0].GetId().GetId())
-				assert.NotNil(t, compTargets.Targets[1].GetExternal())
-			},
-		},
 	}
 
 	for _, tt := range tests {
@@ -645,6 +610,28 @@ func TestAPITrayGetAllRequest_ToProto(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTrayFilter_ToTargetSpec(t *testing.T) {
+	t.Run("component ID and type", func(t *testing.T) {
+		trayType := "Compute"
+		filter := &TrayFilter{IDs: []string{"machine-1"}, Type: &trayType}
+
+		targets := filter.ToTargetSpec().GetComponents().GetTargets()
+		require.Len(t, targets, 1)
+		assert.Equal(t, "machine-1", targets[0].GetExternal().GetId())
+		assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, targets[0].GetExternal().GetType())
+	})
+
+	t.Run("rack ID", func(t *testing.T) {
+		rackID := "rack-1"
+		filter := &TrayFilter{RackID: &rackID}
+
+		targets := filter.ToTargetSpec().GetRacks().GetTargets()
+		require.Len(t, targets, 1)
+		assert.Equal(t, rackID, targets[0].GetExternalId())
+		assert.Nil(t, targets[0].GetId())
+	})
 }
 
 func TestTrayFilter_SlotFilter(t *testing.T) {
@@ -787,6 +774,27 @@ func TestAPITrayValidateAllRequest_Validate_SlotConstraints(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+func TestAPITrayValidateAllRequest_ToTargetSpec(t *testing.T) {
+	t.Run("component ID", func(t *testing.T) {
+		request := &APITrayValidateAllRequest{IDs: []string{"switch-1"}}
+
+		targets := request.ToTargetSpec().GetComponents().GetTargets()
+		require.Len(t, targets, 1)
+		assert.Equal(t, "switch-1", targets[0].GetExternal().GetId())
+		assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_UNKNOWN, targets[0].GetExternal().GetType())
+	})
+
+	t.Run("rack ID", func(t *testing.T) {
+		rackID := "rack-1"
+		request := &APITrayValidateAllRequest{RackID: &rackID}
+
+		targets := request.ToTargetSpec().GetRacks().GetTargets()
+		require.Len(t, targets, 1)
+		assert.Equal(t, rackID, targets[0].GetExternalId())
+		assert.Nil(t, targets[0].GetId())
+	})
 }
 
 func TestAPITrayValidateAllRequest_SlotFilter(t *testing.T) {

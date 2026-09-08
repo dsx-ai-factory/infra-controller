@@ -6,9 +6,12 @@ package planner
 import (
 	"context"
 	"fmt"
+	"net"
 	"slices"
 
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	inventoryresolver "github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
@@ -28,6 +31,7 @@ type InventoryTargetSource interface {
 	GetRacksForNVLDomain(ctx context.Context, domainIdentifier identifier.Identifier) ([]*rack.Rack, error)
 	GetListOfRacks(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy, withComponents bool) ([]*rack.Rack, int32, error)
 	GetComponentByID(ctx context.Context, id uuid.UUID) (*inventorycomponent.Component, error)
+	GetComponentByBMCMAC(ctx context.Context, macAddress string) (*inventorycomponent.Component, error)
 	GetComponentsByExternalIDs(ctx context.Context, externalIDs []string) ([]*inventorycomponent.Component, error)
 }
 
@@ -323,17 +327,41 @@ func (l *InventoryTargetLookup) componentFromTarget(
 	if target.External == nil {
 		return nil, fmt.Errorf("component target is required")
 	}
+	if _, err := net.ParseMAC(target.External.ID); err == nil {
+		return inventoryresolver.ResolveComponentIdentifier(
+			ctx,
+			l.inventory,
+			target.External.ID,
+			target.External.Type,
+		)
+	}
 
+	var matched *inventorycomponent.Component
 	for _, comp := range externalComponents {
 		if comp == nil || comp.ComponentID != target.External.ID {
 			continue
 		}
-		if comp.Type == target.External.Type {
-			return comp, nil
+		if target.External.Type != devicetypes.ComponentTypeUnknown && comp.Type != target.External.Type {
+			continue
 		}
+		if matched != nil {
+			return nil, status.Errorf(
+				codes.FailedPrecondition,
+				"component %s is ambiguous",
+				target.TargetIdentifier(),
+			)
+		}
+		matched = comp
+	}
+	if matched != nil {
+		return matched, nil
 	}
 
-	return nil, fmt.Errorf("component %s not found", target.TargetIdentifier())
+	return nil, status.Errorf(
+		codes.NotFound,
+		"component %s not found",
+		target.TargetIdentifier(),
+	)
 }
 
 func executionTargetFromRack(

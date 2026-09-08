@@ -380,7 +380,7 @@ fn build_test_instance_allocation_request(
     segment_id: NetworkSegmentId,
 ) -> rpc::forge::InstanceAllocationRequest {
     rpc::forge::InstanceAllocationRequest {
-        machine_id: Some(mh.host().id),
+        machine_id: Some(mh.host().id.into()),
         config: Some(rpc::forge::InstanceConfig {
             tenant: Some(default_tenant_config()),
             os: Some(default_os_config()),

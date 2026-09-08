@@ -27,12 +27,22 @@ EXAMPLES:
 
 Create an OS image entry in a tenant's catalog:
     $ nico-admin-cli os-image create --id 12345678-1234-5678-90ab-cdef01234567 \
-    --url https://images.example.com/ubuntu.qcow2 --digest sha256:abcd… --tenant-org-id fds34511233a
+    --url https://images.example.com/ubuntu.qcow2 --digest sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae --tenant-org-id fds34511233a
 
 Create one with a name/description and a Bearer auth token for the image URL:
     $ nico-admin-cli os-image create --id 12345678-1234-5678-90ab-cdef01234567 \
-    --url https://images.example.com/ubuntu.qcow2 --digest sha256:abcd… --tenant-org-id fds34511233a \
-    --name ubuntu-22.04 --description \"Ubuntu 22.04 base\" --auth-type Bearer --auth-token <token>
+    --url https://images.example.com/ubuntu.qcow2 --digest sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae --tenant-org-id fds34511233a \
+    --name ubuntu-22.04 --description \"Ubuntu 22.04 base\" --auth-type Bearer --auth-token ZXhhbXBsZS1pbWFnZS10b2tlbg==
+
+Overwrite the smallest whole disk, preferring an EFI disk to break a size tie:
+    $ nico-admin-cli os-image create --id 12345678-1234-5678-90ab-cdef01234567 \
+    --url https://images.example.com/ubuntu.qcow2 --digest sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae --tenant-org-id fds34511233a \
+    --boot-disk smallest
+
+Overwrite a disk selected by its stable Linux identifier:
+    $ nico-admin-cli os-image create --id 12345678-1234-5678-90ab-cdef01234567 \
+    --url https://images.example.com/ubuntu.qcow2 --digest sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae --tenant-org-id fds34511233a \
+    --boot-disk /dev/disk/by-id/nvme-Dell_BOSS-N1_VNOWW56VFCV0055601UT
 
 ")]
 pub(crate) struct Args {
@@ -84,7 +94,11 @@ pub(crate) struct Args {
         help = "Label of the root filesystem of the OS image."
     )]
     rootfs_label: Option<String>,
-    #[clap(short = 'b', long, help = "Boot device path if using local disk.")]
+    #[clap(
+        short = 'b',
+        long,
+        help = "Whole-disk target that the image overwrites. Accepts 'smallest', /dev/nvme<controller>n<namespace>, /dev/sd<letters>, or /dev/disk/by-id/<identifier>. If omitted or empty, selection prefers a disk with an EFI partition, then /dev/nvme0n1 or /dev/sda."
+    )]
     boot_disk: Option<String>,
     #[clap(long, help = "UUID of the image boot filesystem (/boot)")]
     bootfs_id: Option<String>,

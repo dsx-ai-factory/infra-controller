@@ -19,6 +19,11 @@
 
 use crate::power_shelf::PowerShelfConfig;
 
+/// Returns a default power shelf config with a unique name.
+pub fn default_config() -> PowerShelfConfig {
+    power_shelf_config(&format!("Test Power Shelf {}", uuid::Uuid::new_v4()))
+}
+
 /// Returns a power shelf config with capacity 100 and voltage 240.
 pub fn power_shelf_config(name: &str) -> PowerShelfConfig {
     PowerShelfConfig {

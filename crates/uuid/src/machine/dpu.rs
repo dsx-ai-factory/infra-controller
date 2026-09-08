@@ -16,9 +16,13 @@
  */
 
 use std::fmt::{Display, Formatter};
+use std::ops::Deref;
 use std::str::FromStr;
 
-use super::{InvalidMachineType, MachineId, MachineType};
+use data_encoding::BASE32_DNSSEC;
+use sha2::{Digest, Sha256};
+
+use super::{InvalidMachineType, MachineId, MachineIdSubtype, MachineIdSubtypeTrait, MachineType};
 
 /// A machine ID that identifies a DPU.
 #[repr(transparent)]
@@ -26,15 +30,41 @@ use super::{InvalidMachineType, MachineId, MachineType};
 #[serde(transparent)]
 pub struct DpuMachineId(pub(super) MachineId);
 
+impl_prost_message_for_machine_id!(DpuMachineId, MachineType::Dpu);
+
+impl MachineIdSubtypeTrait for DpuMachineId {
+    fn machine_type(&self) -> MachineType {
+        MachineType::Dpu
+    }
+
+    fn as_machine_id(&self) -> &MachineId {
+        DpuMachineId::as_machine_id(self)
+    }
+
+    fn machine_id_subtype(&self) -> MachineIdSubtype {
+        MachineIdSubtype::Dpu(*self)
+    }
+}
+
 impl DpuMachineId {
     /// Returns the underlying machine ID.
     pub fn as_machine_id(&self) -> &MachineId {
         &self.0
     }
+
+    /// Generate Remote ID based on machineID.
+    /// Remote Id is inserted by dhcrelay on DPU in each DHCP request sent by host.
+    pub fn remote_id(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.to_string().as_bytes());
+        let hash: [u8; 32] = hasher.finalize().into();
+        BASE32_DNSSEC.encode(&hash)
+    }
 }
 
-impl AsRef<MachineId> for DpuMachineId {
-    fn as_ref(&self) -> &MachineId {
+impl Deref for DpuMachineId {
+    type Target = MachineId;
+    fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
@@ -53,6 +83,14 @@ impl TryFrom<MachineId> for DpuMachineId {
     }
 }
 
+impl TryFrom<&MachineId> for DpuMachineId {
+    type Error = InvalidMachineType;
+
+    fn try_from(id: &MachineId) -> Result<Self, Self::Error> {
+        Self::try_from(*id)
+    }
+}
+
 impl FromStr for DpuMachineId {
     type Err = crate::machine::MachineIdSubtypeParseError;
 
@@ -64,6 +102,12 @@ impl FromStr for DpuMachineId {
 
 impl From<DpuMachineId> for MachineId {
     fn from(id: DpuMachineId) -> Self {
+        id.0
+    }
+}
+
+impl From<&DpuMachineId> for MachineId {
+    fn from(id: &DpuMachineId) -> Self {
         id.0
     }
 }

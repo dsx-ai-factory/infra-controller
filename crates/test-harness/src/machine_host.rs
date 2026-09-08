@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use carbide_api_core::test_support::Api;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use mac_address::MacAddress;
 use model::hardware_info::HardwareInfo;
 use model::machine::machine_id::from_hardware_info;
@@ -34,7 +34,7 @@ use crate::rpc::forge::{
 
 #[derive(Clone)]
 pub struct TestHostMachine {
-    pub id: MachineId,
+    pub id: HostMachineId,
     pub bmc_mac: MacAddress,
     pub api: Arc<Api>,
     hardware_info: HardwareInfo,
@@ -42,7 +42,7 @@ pub struct TestHostMachine {
 }
 
 impl TestHostMachine {
-    pub(crate) fn new(id: MachineId, api: Arc<Api>, config: &ManagedHostConfig) -> Self {
+    pub(crate) fn new(id: HostMachineId, api: Arc<Api>, config: &ManagedHostConfig) -> Self {
         Self {
             id,
             bmc_mac: config.bmc_mac_address,
@@ -98,13 +98,15 @@ impl TestHostMachine {
             discovered_id, expected_id,
             "host discovery should resolve to the stable test machine"
         );
-        self.id = discovered_id;
+        self.id = discovered_id
+            .try_into()
+            .expect("host discovery should yield a valid HostMachineId");
     }
 
     pub async fn reboot_completed(&self) {
         self.api
             .reboot_completed(tonic::Request::new(MachineRebootCompletedRequest {
-                machine_id: Some(self.id),
+                machine_id: Some(self.id.into()),
             }))
             .await
             .unwrap();
@@ -113,7 +115,7 @@ impl TestHostMachine {
     pub async fn forge_agent_control(&self) -> ForgeAgentControlResponse {
         self.api
             .forge_agent_control(tonic::Request::new(ForgeAgentControlRequest {
-                machine_id: Some(self.id),
+                machine_id: Some(self.id.into()),
             }))
             .await
             .unwrap()
@@ -123,7 +125,7 @@ impl TestHostMachine {
 
 impl TestMachine for TestHostMachine {
     fn id(&self) -> MachineId {
-        self.id
+        self.id.into()
     }
 
     fn api(&self) -> &Api {

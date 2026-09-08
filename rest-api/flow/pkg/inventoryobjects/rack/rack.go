@@ -29,6 +29,7 @@ import (
 // Always verify the context in which a Rack object is used.
 type Rack struct {
 	Info        deviceinfo.DeviceInfo `json:"info"`
+	ExternalID  string                `json:"external_id,omitempty"`
 	Loc         location.Location     `json:"loc"`
 	Components  []component.Component `json:"components"`
 	NVLDomainID uuid.UUID             `json:"nvl_domain_id"`

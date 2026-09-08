@@ -18,6 +18,7 @@
 use std::convert::TryFrom;
 use std::str::FromStr;
 
+use carbide_uuid::machine::HostMachineId;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::dpa_interface::{DpaInterface, DpaInterfaceType, NewDpaInterface};
@@ -54,7 +55,9 @@ impl TryFrom<rpc::forge::DpaInterfaceCreationRequest> for NewDpaInterface {
         let mac_address = MacAddress::from_str(&value.mac_addr)
             .map_err(|_| RpcDataConversionError::InvalidMacAddress(value.mac_addr.to_string()))?;
         Ok(NewDpaInterface {
-            machine_id,
+            machine_id: HostMachineId::try_from(machine_id).map_err(|error| {
+                RpcDataConversionError::InvalidValue(machine_id.to_string(), error.to_string())
+            })?,
             mac_address,
             device_type: value.device_type,
             pci_name: value.pci_name,
@@ -112,7 +115,7 @@ impl From<DpaInterface> for rpc::forge::DpaInterface {
             deleted: src.deleted.map(|t| t.into()),
             last_hb_time: Some(src.last_hb_time.into()),
             mac_addr: src.mac_address.to_string(),
-            machine_id: Some(src.machine_id),
+            machine_id: Some(src.machine_id.into()),
             controller_state: controller_state.to_string(),
             controller_state_version: controller_state_version.to_string(),
             network_config: network_config.to_string(),

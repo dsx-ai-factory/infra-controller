@@ -24,9 +24,9 @@ State controllers manage lifecycles for resources such as:
 
 Two generic interfaces define the processor contract:
 
-- **[`StateHandler`](https://github.com/NVIDIA/infra-controller/blob/main/crates/state-controller/src/state_handler.rs):**
+- **[`StateHandler`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/state-controller/src/state_handler.rs):**
   Selects the handling outcome for the resource.
-- **[`StateControllerIO`](https://github.com/NVIDIA/infra-controller/blob/main/crates/state-controller/src/io.rs):** Loads
+- **[`StateControllerIO`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/state-controller/src/io.rs):** Loads
   resources and versioned controller state. It also persists controller state, history, and applicable outcomes and
   supplies metrics, service-level agreement (SLA), and manual-intervention reason tokens.
 
@@ -48,11 +48,11 @@ Do not add a second lifecycle writer implicitly.
 ### Model Every State
 
 For machines and managed hosts, an exhaustive `match` over
-[`ManagedHostState`](https://github.com/NVIDIA/infra-controller/blob/main/crates/api-model/src/machine/mod.rs) makes
+[`ManagedHostState`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-model/src/machine/mod.rs) makes
 unhandled states visible to the compiler.
 
 The primary transition logic lives in the
-[machine-controller handler](https://github.com/NVIDIA/infra-controller/blob/main/crates/machine-controller/src/handler.rs).
+[machine-controller handler](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/machine-controller/src/handler.rs).
 The [managed-host state diagrams](state_machines/managedhost.md) show the rendered flows.
 
 ### Measure Progress
@@ -68,15 +68,15 @@ whether a resource has exceeded it. Deployments can use those measurements for a
 ### Enqueue Work
 
 Each controller owns a
-[`StateControllerConfig`](https://github.com/NVIDIA/infra-controller/blob/main/crates/state-controller-common/src/config.rs)
+[`StateControllerConfig`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/state-controller-common/src/config.rs)
 instance. The
-[`StateControllerConfig` reference](https://github.com/NVIDIA/infra-controller/blob/main/crates/api-core/src/cfg/README.md#statecontrollerconfig)
+[`StateControllerConfig` reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#statecontrollerconfig)
 lists all scheduling settings and defaults. Controllers receive work through three paths:
 
 - **Periodic enqueue:** Each controller periodically enqueues its resources according to `iteration_time`.
 - **Transition enqueue:** After a committed transition, finalization schedules an immediate requeue.
 - **Explicit enqueue:** Other control-plane components can request an earlier run through the
-  [`Enqueuer`](https://github.com/NVIDIA/infra-controller/blob/main/crates/state-controller/src/controller/enqueuer.rs).
+  [`Enqueuer`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/state-controller/src/controller/enqueuer.rs).
 
 Explicit enqueue is idempotent and does not interrupt active handling. When the resource is already queued or claimed,
 the request does not create a second queue entry. If active handling does not schedule another run, finalization can
@@ -263,7 +263,7 @@ atomic. Use these transaction boundaries:
 A `WorkLock` and a queued-object claim are separate coordination mechanisms. Neither provides exactly-once execution.
 
 When NICo coordinates long-running work through the
-[work-lock manager](https://github.com/NVIDIA/infra-controller/blob/main/crates/api-db/src/work_lock_manager.rs), a
+[work-lock manager](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-db/src/work_lock_manager.rs), a
 `WorkLock` is an expiring lease. Its keepalive loop can lose the lease while the caller continues running. Keeping the
 Rust value in scope is not proof of current ownership.
 

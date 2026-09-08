@@ -158,7 +158,7 @@ issuers:
         audiences: ["clientB"]
 ```
 
-A token with `aud: ["nico-api", "clientA"]` can access only `orgA`; a token with `aud: ["nico-api", "clientB"]` can access only `orgB`. 
+A token with `aud: ["nico-api", "clientA"]` can access only `orgA`; a token with `aud: ["nico-api", "clientB"]` can access only `orgB`.
 
 ---
 
@@ -244,7 +244,7 @@ Edit the `nico-rest-api-config` ConfigMap in `nico-rest` namespace:
 kubectl edit configmap nico-rest-api-config -n nico-rest
 ```
 
-If you applied the [kustomize manifests](https://github.com/NVIDIA/infra-controller/rest-api/blob/main/deploy/kustomize/base/api/configmap.yaml), there should already be a section for Keycloak auth.
+If you applied the [kustomize manifests](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/deploy/kustomize/base/api/configmap.yaml), there should already be a section for Keycloak auth.
 
 Edit the Keycloak configuration (or add if not present) section to match the following:
 
@@ -271,7 +271,7 @@ keycloak:
 
 Ensure the NICo REST API Deployment mounts the Keycloak client secret.
 
-If you applied the [kustomize manifests](https://github.com/NVIDIA/infra-controller/rest-api/blob/main/deploy/kustomize/base/api/deployment.yaml) without any changes, this step should not be needed. Verify and edit as needed.
+If you applied the [kustomize manifests](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/deploy/kustomize/base/api/deployment.yaml) without any changes, this step should not be needed. Verify and edit as needed.
 
 ```yaml
 spec:
@@ -304,7 +304,7 @@ kubectl logs -n nico-rest -l app.kubernetes.io/name=nico-rest-api --tail=50 | gr
 
 Expected log messages:
 
-```
+```text
 Creating new Keycloak configuration
 Keycloak configuration created successfully
 ```

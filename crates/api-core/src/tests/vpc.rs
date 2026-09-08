@@ -32,6 +32,7 @@ use model::vpc::{
 };
 use rpc::forge::forge_server::Forge;
 
+use crate::test_support::metadata;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
@@ -372,7 +373,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
     assert_eq!(status.code(), tonic::Code::NotFound);
 
     // Try to update to invalid metadata
-    for (invalid_metadata, expected_err) in common::metadata::invalid_metadata_testcases(true) {
+    for (invalid_metadata, expected_err) in metadata::invalid_metadata_testcases(true) {
         let invalid_updated_vpc = env
             .api
             .update_vpc(tonic::Request::new(rpc::forge::VpcUpdateRequest {
@@ -1554,7 +1555,7 @@ async fn create_vpc_with_invalid_metadata(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
 
-    for (invalid_metadata, expected_err) in common::metadata::invalid_metadata_testcases(true) {
+    for (invalid_metadata, expected_err) in metadata::invalid_metadata_testcases(true) {
         let result = env
             .api
             .create_vpc(

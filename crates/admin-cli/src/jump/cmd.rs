@@ -250,6 +250,7 @@ pub(super) async fn jump(args: Cmd, ctx: &mut RuntimeContext) -> color_eyre::Res
                             label_value: None,
                         },
                         ctx.config.format,
+                        &mut ctx.output_file,
                         &ctx.api_client,
                         1,
                     )

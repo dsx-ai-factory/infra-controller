@@ -33,7 +33,7 @@ pub(crate) async fn list_machine_health_reports(
 ) -> Result<Response<rpc::ListHealthReportResponse>, Status> {
     let mut txn = api.txn_begin().await?;
 
-    let machine_id = convert_and_log_machine_id(Some(&machine_id.into_inner()))?;
+    let machine_id = convert_and_log_machine_id::<MachineId>(Some(&machine_id.into_inner()))?;
 
     let machine = db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default())
         .await?
@@ -112,7 +112,7 @@ pub(crate) async fn insert_machine_health_report(
     else {
         return Err(CarbideError::MissingArgument("health_report_entry").into());
     };
-    let machine_id = convert_and_log_machine_id(machine_id.as_ref())?;
+    let machine_id = convert_and_log_machine_id::<MachineId>(machine_id.as_ref())?;
     let Some(report) = report else {
         return Err(CarbideError::MissingArgument("report").into());
     };

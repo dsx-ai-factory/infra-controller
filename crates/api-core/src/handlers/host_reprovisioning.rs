@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use itertools::Itertools;
 use model::machine::{
     HostReprovisionState, InstanceState, LoadSnapshotOptions, ManagedHostState, ScoutUpgradeResult,
@@ -50,7 +50,7 @@ pub(crate) async fn trigger_host_reprovisioning(
 
     log_request_data(&request);
     let req = request.into_inner();
-    let machine_id = convert_and_log_machine_id(req.machine_id.as_ref())?;
+    let machine_id = convert_and_log_machine_id::<MachineId>(req.machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
 
@@ -169,7 +169,7 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
     log_request_data(&request);
 
     let req = request.into_inner();
-    let machine_id = convert_and_log_machine_id(req.machine_id.as_ref())?;
+    let machine_id = convert_and_log_machine_id::<HostMachineId>(req.machine_id.as_ref())?;
 
     let (machine, mut txn) = api.load_machine(&machine_id, Default::default()).await?;
 
@@ -268,7 +268,7 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
     {
         carbide_instrument::emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::ScoutFirmwareUpgradeStatus,
-            machine_id,
+            machine_id: machine_id.into(),
             err: err.to_string(),
         });
     }

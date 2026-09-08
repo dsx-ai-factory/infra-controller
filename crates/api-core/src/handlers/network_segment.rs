@@ -17,6 +17,7 @@
 use ::rpc::forge as rpc;
 use db::resource_pool::ResourcePoolDatabaseError;
 use db::{AnnotatedSqlxError, DatabaseError, ObjectColumnFilter, network_segment};
+use ipnetwork::IpNetwork;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig, NetworkSegmentType,
     NewNetworkSegment,
@@ -25,8 +26,8 @@ use model::vpc::VpcVirtualizationTypeCapabilities;
 use sqlx::{PgConnection, PgTransaction};
 use tonic::{Request, Response, Status};
 
-use crate::CarbideError;
 use crate::api::{Api, log_request_data};
+use crate::{CarbideError, CarbideResult};
 
 pub(crate) async fn find_ids(
     api: &Api,
@@ -87,6 +88,24 @@ pub(crate) async fn find_by_ids(
     }))
 }
 
+/// `reject_vpc_prefix_overlaps` rejects direct `NetworkPrefix` records that
+/// overlap a `VpcPrefix`.
+///
+/// The caller holds the overlap transaction lock from this probe through the
+/// `NetworkSegment` write, so another participating `VpcPrefix` request cannot
+/// commit between them.
+async fn reject_vpc_prefix_overlaps(
+    txn: &mut PgConnection,
+    prefixes: &[IpNetwork],
+) -> CarbideResult<()> {
+    for prefix in prefixes {
+        if !db::vpc_prefix::probe(*prefix, &mut *txn).await?.is_empty() {
+            return Err(super::tenant_prefix_overlap::overlap_error());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn create(
     api: &Api,
     request: Request<rpc::NetworkSegmentCreationRequest>,
@@ -131,6 +150,9 @@ pub(crate) async fn create(
     }
 
     let mut txn = api.txn_begin().await?;
+    if new_network_segment.vpc_id.is_some() {
+        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    }
 
     let allocate_svi_ip = if let Some(vpc_id) = new_network_segment.vpc_id {
         let vpcs = db::vpc::find_by(
@@ -155,6 +177,15 @@ pub(crate) async fn create(
     } else {
         false
     };
+
+    if new_network_segment.vpc_id.is_some() {
+        let prefixes = new_network_segment
+            .prefixes
+            .iter()
+            .map(|prefix| prefix.prefix)
+            .collect::<Vec<_>>();
+        reject_vpc_prefix_overlaps(&mut txn, &prefixes).await?;
+    }
 
     let network_segment = save(api, &mut txn, new_network_segment, false, allocate_svi_ip).await?;
 
@@ -181,6 +212,7 @@ pub(crate) async fn attach_to_vpc(
     let vpc_id = vpc_id.ok_or(CarbideError::MissingArgument("vpc_id"))?;
 
     let mut txn = api.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
 
     let vpcs = db::vpc::find_by_with_lock(
         txn.as_mut(),
@@ -228,7 +260,16 @@ pub(crate) async fn attach_to_vpc(
             ))
             .into());
         }
-        _ => db::network_segment::attach_to_vpc(&segment, txn.as_mut(), vpc_id).await?,
+        _ => {
+            let prefixes = segment
+                .prefixes
+                .iter()
+                .filter(|prefix| prefix.vpc_prefix_id.is_none())
+                .map(|prefix| prefix.prefix)
+                .collect::<Vec<_>>();
+            reject_vpc_prefix_overlaps(&mut txn, &prefixes).await?;
+            db::network_segment::attach_to_vpc(&segment, txn.as_mut(), vpc_id).await?
+        }
     };
 
     txn.commit().await?;

@@ -10,10 +10,10 @@ firmware on compute trays
 ## SYNOPSIS
 
 **nico-admin-cli component-manager update-firmware compute-tray**
-\<**--machine-id**\> \[**--target-version**\] \[**--sot-json-file**\]
-\[**--access-token**\] \[**--force-update**\] \[**--component**\]
-\[**--bypass-state-controller**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+\<**--machine-id**\|**--mac-address**\> \[**--target-version**\]
+\[**--sot-json-file**\] \[**--access-token**\] \[**--force-update**\]
+\[**--component**\] \[**--bypass-state-controller**\] \[**--extended**\]
+\[**--sort-by**\] \[**-h**\|**--help**\]
 
 ## DESCRIPTION
 
@@ -23,6 +23,10 @@ Queue firmware on compute trays
 
 **--machine-id** *\<MACHINE_IDS\>...*  
 Machine IDs to target
+
+**--mac-address** *\<MAC_ADDRESSES\>...*  
+Device MAC addresses to target (BMC MAC for compute/switch, PMC MAC for
+power shelf)
 
 **--target-version** *\<TARGET_VERSION\>*  
 Firmware target version for legacy direct-update paths

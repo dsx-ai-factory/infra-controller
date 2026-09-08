@@ -368,6 +368,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 	var vpc *cdbm.Vpc
 	var ssd *cdbm.StatusDetail
 	controllerVpc := &corev1.Vpc{}
+	controllerVpcModel := &cdbm.Vpc{}
 
 	// timeoutResp lets the closure signal a post-rollback handler — the
 	// TerminateWorkflow call has to run after the closure returns so that
@@ -477,6 +478,19 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIError(code, fmt.Sprintf("Failed to execute sync workflow to create VPC on Site: %s", unwrapped), nil)
 		}
 
+		controllerVpcModel.FromProto(controllerVpc)
+		if controllerVpcModel.RoutingProfile != nil {
+			updatedVpc, derr := vpcDAO.Update(ctx, tx, cdbm.VpcUpdateInput{
+				VpcID:          vpc.ID,
+				RoutingProfile: controllerVpcModel.RoutingProfile,
+			})
+			if derr != nil {
+				logger.Error().Err(derr).Msg("error persisting Core-resolved VPC routing profile")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to persist Core-resolved VPC routing profile", nil)
+			}
+			vpc = updatedVpc
+		}
+
 		logger.Info().Str("Workflow ID", wid).Msg("completed synchronous create VPC workflow")
 		return nil
 	})
@@ -509,10 +523,8 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 
 	statusDetails := []cdbm.StatusDetail{*ssd}
 
-	// Make a best-effort attempt to cache the controller-reported VNI and
-	// effective routing profile for the response.
-	controllerVpcModel := &cdbm.Vpc{}
-	controllerVpcModel.FromProto(controllerVpc)
+	// Make a best-effort attempt to cache the remaining controller-reported
+	// state for the response. The resolved routing profile was committed above.
 	activeVni := controllerVpcModel.ActiveVni
 	effectiveRoutingProfile := controllerVpcModel.EffectiveRoutingProfile
 	if activeVni != nil || effectiveRoutingProfile != nil {
@@ -526,7 +538,7 @@ func (cvh CreateVPCHandler) Handle(c echo.Context) error {
 		}
 		updatedVpc, err := vpcDAO.Update(ctx, nil, uvpcInput)
 		if err != nil {
-			logger.Error().Err(err).Msg("error while updating VPC DB entry for VNI")
+			logger.Error().Err(err).Msg("error while caching controller-reported VPC VNI and effective routing profile")
 		} else {
 			// Update the vpc being returned if all went well.
 			vpc = updatedVpc

@@ -10,8 +10,9 @@ import (
 )
 
 type Identifier struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
+	ID         uuid.UUID `json:"id"`
+	Name       string    `json:"name"`
+	ExternalID string    `json:"external_id"`
 }
 
 func New(id uuid.UUID, name string) *Identifier {
@@ -38,5 +39,5 @@ func (id *Identifier) Validate() error {
 }
 
 func (id *Identifier) ValidateAtLeastOne() bool {
-	return id != nil && (id.ID != uuid.Nil || id.Name != "")
+	return id != nil && (id.ID != uuid.Nil || id.Name != "" || id.ExternalID != "")
 }

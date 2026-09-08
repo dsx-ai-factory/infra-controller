@@ -137,6 +137,9 @@ pub(crate) fn add_routes(r: Router<BmcState>) -> Router<BmcState> {
 pub(crate) struct SingleChassisConfig {
     pub(crate) id: Cow<'static, str>,
     pub(crate) serial_number: Option<Cow<'static, str>>,
+    /// Identity of the device the chassis holds, which for a GPU module is the
+    /// GPU's own UUID.
+    pub(crate) uuid: Option<Cow<'static, str>>,
     pub(crate) manufacturer: Option<Cow<'static, str>>,
     pub(crate) model: Option<Cow<'static, str>>,
     pub(crate) part_number: Option<Cow<'static, str>>,
@@ -159,6 +162,7 @@ impl SingleChassisConfig {
             id: "".into(),
             chassis_type: "".into(),
             serial_number: None,
+            uuid: None,
             manufacturer: None,
             model: None,
             part_number: None,
@@ -317,6 +321,7 @@ async fn get_chassis(State(state): State<BmcState>, Path(chassis_id): Path<Strin
         .maybe_with(ChassisBuilder::network_adapters, &network_adapters)
         .maybe_with(ChassisBuilder::sensors, &sensors)
         .maybe_with(ChassisBuilder::serial_number, &config.serial_number)
+        .maybe_with(ChassisBuilder::uuid, &config.uuid)
         .maybe_with(ChassisBuilder::manufacturer, &config.manufacturer)
         .maybe_with(ChassisBuilder::part_number, &config.part_number)
         .maybe_with(ChassisBuilder::sku, &config.sku)
@@ -631,6 +636,14 @@ impl Builder for ChassisBuilder {
 impl ChassisBuilder {
     fn serial_number(self, v: &str) -> Self {
         self.add_str_field("SerialNumber", v)
+    }
+
+    /// Device identity that survives a chassis-slot swap.
+    ///
+    /// On an NVIDIA GPU module this matches the NVML GPU UUID without its
+    /// `GPU-` prefix, and the UUID the GPU's `Processor` reports.
+    fn uuid(self, v: &str) -> Self {
+        self.add_str_field("UUID", v)
     }
 
     fn chassis_type(self, v: &str) -> Self {

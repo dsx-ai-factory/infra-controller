@@ -562,6 +562,8 @@ nicocli tui
 5. **VPC prefix** -- network prefix for each interface (loops, can add more)
 6. **SSH key groups** -- optional, attaches SSH keys for serial-console access
 
+For an image-based operating system, review [Image-Based Operating Systems](image-based-operating-systems.md) before making the definition available to tenants. Its disk selector applies to every eligible target and the selected whole disk is overwritten during installation.
+
 ### Verifying an Instance Is Running
 
 After creation, the instance goes through these states:

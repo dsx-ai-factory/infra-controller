@@ -190,34 +190,41 @@ impl MachineValidationManager {
     /// Returns true if we stopped early due to a timeout.
     pub(crate) async fn run_single_iteration(&self) -> CarbideResult<()> {
         let mut metrics = MachineValidationMetrics::new();
-        // Completion events for the runs this iteration transitions, emitted
-        // only after the transaction commits: an iteration that fails and
-        // rolls back leaves the runs active, so an early emit would count
-        // them again when the next iteration re-flips the gate.
-        let mut completions: Vec<MachineValidationCompleted> = Vec::new();
-
-        let mut txn = db::Transaction::begin(&self.database_connection).await?;
         let now = chrono::Utc::now();
         let heartbeat_stale_timeout = heartbeat_stale_timeout(self.config.stale_run_timeout);
 
-        for validation in db::machine_validation::find_active(&mut txn).await? {
+        // Each reconciliation phase gets its own transaction. PostgreSQL
+        // keeps row locks until commit, so sharing a transaction would let a
+        // later phase restart from a lower MachineId while higher-ID locks
+        // from an earlier phase were still held, recreating SQLSTATE 40P01
+        // (`deadlock_detected`) with another ordered multi-machine writer.
+        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut completions = Vec::new();
+        for validation in db::machine::MachineRowLockOrderIter::new(
+            db::machine_validation::find_active(&mut txn).await?,
+        ) {
             if let Some(completion) =
                 reconcile_terminal_run_items(txn.as_pgconn(), validation).await?
             {
                 completions.push(completion);
             }
         }
+        txn.commit().await?;
+        // Emit only after this phase is durable. Otherwise a rollback would
+        // leave the validation active and a later retry would count it again.
+        completions.into_iter().for_each(carbide_instrument::emit);
 
-        let stale_attempts = db::machine_validation_execution::find_stale_active_attempts(
-            &mut txn,
-            heartbeat_stale_timeout,
-            now,
+        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut completions = Vec::new();
+        for stale_attempt in db::machine::MachineRowLockOrderIter::new(
+            db::machine_validation_execution::find_stale_active_attempts(
+                &mut txn,
+                heartbeat_stale_timeout,
+                now,
+            )
+            .await?,
         )
-        .await?;
-
-        for stale_attempt in stale_attempts
-            .into_iter()
-            .filter(|attempt| attempt.last_heartbeat_at.is_some())
+        .filter(|attempt| attempt.last_heartbeat_at.is_some())
         {
             if let Some(completion) =
                 reconcile_stale_attempt(txn.as_pgconn(), stale_attempt, now).await?
@@ -226,15 +233,17 @@ impl MachineValidationManager {
                 completions.push(completion);
             }
         }
+        txn.commit().await?;
+        completions.into_iter().for_each(carbide_instrument::emit);
 
-        let stale_validations = stale_validations(
+        let mut txn = db::Transaction::begin(&self.database_connection).await?;
+        let mut completions = Vec::new();
+        for validation in db::machine::MachineRowLockOrderIter::new(stale_validations(
             db::machine_validation::find_active(&mut txn).await?,
             self.config.stale_run_timeout,
             heartbeat_stale_timeout,
             now,
-        );
-
-        for validation in stale_validations {
+        )) {
             if let Some(completion) = reconcile_stale_validation(
                 txn.as_pgconn(),
                 validation,
@@ -290,12 +299,7 @@ impl MachineValidationManager {
         self.metric_holder.update_metrics(metrics);
 
         txn.commit().await?;
-
-        // The transitions are durable now, so count (and log) each completion
-        // exactly once.
-        for completion in completions {
-            carbide_instrument::emit(completion);
-        }
+        completions.into_iter().for_each(carbide_instrument::emit);
 
         Ok(())
     }

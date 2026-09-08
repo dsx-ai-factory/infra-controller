@@ -85,10 +85,7 @@ fn scout_may_replace_current_primary(interfaces: &[MachineInterfaceSnapshot]) ->
         return true;
     };
 
-    primary
-        .attached_dpu_machine_id
-        .is_some_and(|machine_id| machine_id.machine_type().is_dpu())
-        && primaries.next().is_none()
+    primary.attached_dpu_machine_id.is_some() && primaries.next().is_none()
 }
 
 /// Builds a desired boot target from a MAC address and optional Redfish interface ID.
@@ -141,34 +138,26 @@ pub(super) async fn update_primary_interface(
     // Site Explorer takes these locks before it changes interface ownership.
     // Matching that order keeps an operator or scout write from deadlocking discovery.
     db::machine_interface::lock_all_admin_segments(&mut txn).await?;
-    let interface_snapshots = db::machine_interface::find_by_machine_id_for_update(
-        &mut txn,
-        host_machine_id.as_machine_id(),
-    )
-    .await?;
+    let interface_snapshots =
+        db::machine_interface::find_by_machine_id_for_update(&mut txn, &host_machine_id).await?;
     // This locks the Machine row with `FOR UPDATE`; the snapshot below is read after that wait.
     db::machine_desired_boot_interface::lock(txn.as_pgconn(), host_machine_id.as_host_machine_id())
         .await?;
-    let machine = db::machine::find_one(
-        &mut txn,
-        host_machine_id.as_machine_id(),
-        MachineSearchConfig::default(),
-    )
-    .await?
-    .ok_or_else(|| CarbideError::Internal {
-        message: format!(
-            "machine {host_machine_id} disappeared while its database record was locked"
-        ),
-    })?;
+    let machine = db::machine::find_one(&mut txn, &host_machine_id, MachineSearchConfig::default())
+        .await?
+        .ok_or_else(|| CarbideError::Internal {
+            message: format!(
+                "machine {host_machine_id} disappeared while its database record was locked"
+            ),
+        })?;
 
     let new_primary_interface_id = match selector {
         PrimaryInterfaceSelector::Interface(interface_id) => interface_id,
         PrimaryInterfaceSelector::Dpu(dpu_machine_id) => {
-            if !interface_snapshots.iter().any(|interface| {
-                interface
-                    .attached_dpu_machine_id
-                    .is_some_and(|machine_id| machine_id.machine_type().is_dpu())
-            }) {
+            if !interface_snapshots
+                .iter()
+                .any(|interface| interface.attached_dpu_machine_id.is_some())
+            {
                 return Err(CarbideError::FailedPrecondition(format!(
                     "host {host_machine_id} has no DPUs; set-primary-dpu does not apply to zero-DPU hosts"
                 )));
@@ -177,8 +166,7 @@ pub(super) async fn update_primary_interface(
             interface_snapshots
                 .iter()
                 .find(|interface| {
-                    interface.attached_dpu_machine_id.as_ref()
-                        == Some(dpu_machine_id.as_machine_id())
+                    interface.attached_dpu_machine_id.as_ref() == Some(&dpu_machine_id)
                 })
                 .map(|interface| interface.id)
                 .ok_or_else(|| {
@@ -220,9 +208,7 @@ pub(super) async fn update_primary_interface(
     }
 
     let host_has_dpu_backed_admin_interface = interface_snapshots.iter().any(|interface| {
-        interface
-            .attached_dpu_machine_id
-            .is_some_and(|machine_id| machine_id.machine_type().is_dpu())
+        interface.attached_dpu_machine_id.is_some()
             && interface.network_segment_type == Some(NetworkSegmentType::Admin)
     });
     if host_has_dpu_backed_admin_interface
@@ -235,8 +221,7 @@ pub(super) async fn update_primary_interface(
     }
 
     let instance =
-        db::instance::find_live_by_machine_id_for_update(&mut txn, host_machine_id.as_machine_id())
-            .await?;
+        db::instance::find_live_by_machine_id_for_update(&mut txn, &host_machine_id).await?;
     let reconciliation_is_pending = machine.pending_boot_interface_config_version().is_some();
     let reconciliation_is_eligible =
         matches!(machine.current_state(), ManagedHostState::Ready) && instance.is_none();
@@ -284,7 +269,7 @@ pub(super) async fn update_primary_interface_from_scout(
     // First, load the machine and compare its stored boot interface with this scout report.
     let machine = db::machine::find_one(
         api.pg_pool(),
-        host_machine_id.as_machine_id(),
+        &host_machine_id,
         MachineSearchConfig::default(),
     )
     .await?
@@ -298,7 +283,7 @@ pub(super) async fn update_primary_interface_from_scout(
         });
     };
     let candidate_interface_id = comparison.candidate_interface_id();
-    comparison.emit(host_machine_id.as_machine_id());
+    comparison.emit(&host_machine_id);
 
     // Then, stop before taking update locks unless this report can drive enabled reconciliation.
     let source_is_replaceable = machine
@@ -321,25 +306,18 @@ pub(super) async fn update_primary_interface_from_scout(
     let _admin_admission = db::machine_interface::admin_lock_admission().await;
     let mut txn = api.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(&mut txn).await?;
-    let interface_snapshots = db::machine_interface::find_by_machine_id_for_update(
-        &mut txn,
-        host_machine_id.as_machine_id(),
-    )
-    .await?;
+    let interface_snapshots =
+        db::machine_interface::find_by_machine_id_for_update(&mut txn, &host_machine_id).await?;
     // This locks the Machine row with `FOR UPDATE`; the snapshot below is read after that wait.
     db::machine_desired_boot_interface::lock(txn.as_pgconn(), host_machine_id.as_host_machine_id())
         .await?;
-    let machine = db::machine::find_one(
-        &mut txn,
-        host_machine_id.as_machine_id(),
-        MachineSearchConfig::default(),
-    )
-    .await?
-    .ok_or_else(|| CarbideError::Internal {
-        message: format!(
-            "machine {host_machine_id} disappeared while its database record was locked"
-        ),
-    })?;
+    let machine = db::machine::find_one(&mut txn, &host_machine_id, MachineSearchConfig::default())
+        .await?
+        .ok_or_else(|| CarbideError::Internal {
+            message: format!(
+                "machine {host_machine_id} disappeared while its database record was locked"
+            ),
+        })?;
     let Some((new_primary_interface, boot_target)) = select_primary_interface_from_scout(
         txn.as_pgconn(),
         host_machine_id,
@@ -425,7 +403,7 @@ async fn select_primary_interface_from_scout<'a>(
     // Finally, do not compete with a primary interface that Site Explorer has already planned. Its
     // writers take the same global Admin locks as this caller.
     let has_primary_prediction =
-        db::predicted_machine_interface::find_by_machine_id(txn, host_machine_id.as_machine_id())
+        db::predicted_machine_interface::find_by_machine_id(txn, &host_machine_id)
             .await?
             .iter()
             .any(|prediction| prediction.primary_interface);
@@ -435,7 +413,7 @@ async fn select_primary_interface_from_scout<'a>(
 
     // Allocation also locks the Machine row, so it cannot commit concurrently. Read the Instance
     // ID without locking it to avoid reversing the lock order used by release.
-    if db::instance::find_id_by_machine_id(txn, host_machine_id.as_machine_id())
+    if db::instance::find_id_by_machine_id(txn, &host_machine_id)
         .await?
         .is_some()
     {
@@ -482,11 +460,8 @@ async fn apply_primary_interface_update(
         // admin primary skips this pass; reconciliation assigns the address after the primary
         // flag changes.
         if current_primary_is_admin {
-            db::machine_interface::reconcile_admin_addresses_for_host(
-                txn,
-                host_machine_id.as_machine_id(),
-            )
-            .await?;
+            db::machine_interface::reconcile_admin_addresses_for_host(txn, &host_machine_id)
+                .await?;
         }
 
         if let Some(current_primary_interface_id) = current_primary_interface_id {
@@ -494,21 +469,17 @@ async fn apply_primary_interface_update(
                 .await?;
         }
         db::machine_interface::set_primary_interface(&new_primary_interface_id, true, txn).await?;
-        db::machine_interface::reconcile_admin_addresses_for_host(
-            txn,
-            host_machine_id.as_machine_id(),
-        )
-        .await?;
+        db::machine_interface::reconcile_admin_addresses_for_host(txn, &host_machine_id).await?;
 
         let (network_config, network_config_version) =
-            db::machine::get_network_config(txn.as_pgconn(), host_machine_id.as_machine_id())
+            db::machine::get_network_config(txn.as_pgconn(), &host_machine_id)
                 .await?
                 .take();
         // The Machine row was locked before this version was read, so another transaction cannot
         // change the version before this update. The update must therefore match one row.
         if !db::machine::try_update_network_config(
             txn,
-            host_machine_id.as_machine_id(),
+            &host_machine_id,
             network_config_version,
             &network_config,
         )

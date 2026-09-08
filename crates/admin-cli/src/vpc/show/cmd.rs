@@ -25,51 +25,60 @@ use prettytable::{Table, row};
 use super::args::Args;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
+use crate::{async_write, async_writeln};
+
+pub(crate) trait VpcShowClient {
+    async fn list_vpcs(&self, args: Args, page_size: usize) -> CarbideCliResult<forgerpc::VpcList>;
+
+    async fn find_vpcs_by_ids(&self, vpc_ids: Vec<VpcId>) -> CarbideCliResult<forgerpc::VpcList>;
+}
+
+impl VpcShowClient for ApiClient {
+    async fn list_vpcs(&self, args: Args, page_size: usize) -> CarbideCliResult<forgerpc::VpcList> {
+        ApiClient::get_all_vpcs(
+            self,
+            args.tenant_org_id,
+            args.name,
+            page_size,
+            args.label_key,
+            args.label_value,
+        )
+        .await
+    }
+
+    async fn find_vpcs_by_ids(&self, vpc_ids: Vec<VpcId>) -> CarbideCliResult<forgerpc::VpcList> {
+        Ok(self.0.find_vpcs_by_ids(vpc_ids).await?)
+    }
+}
 
 pub(crate) async fn show(
     args: Args,
     output_format: OutputFormat,
-    api_client: &ApiClient,
+    output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
+    api_client: &impl VpcShowClient,
     page_size: usize,
 ) -> CarbideCliResult<()> {
     let is_json = output_format == OutputFormat::Json;
     if let Some(id) = args.id {
-        show_vpc_details(id, is_json, api_client).await?;
+        show_vpc_details(id, is_json, output_file, api_client).await?;
     } else {
-        show_vpcs(
-            is_json,
-            api_client,
-            page_size,
-            args.tenant_org_id,
-            args.name,
-            args.label_key,
-            args.label_value,
-        )
-        .await?;
+        show_vpcs(is_json, output_file, api_client, page_size, args).await?;
     }
     Ok(())
 }
 
 async fn show_vpcs(
     json: bool,
-    api_client: &ApiClient,
+    output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
+    api_client: &impl VpcShowClient,
     page_size: usize,
-    tenant_org_id: Option<String>,
-    name: Option<String>,
-    label_key: Option<String>,
-    label_value: Option<String>,
+    args: Args,
 ) -> CarbideCliResult<()> {
-    let all_vpcs = match api_client
-        .get_all_vpcs(tenant_org_id, name, page_size, label_key, label_value)
-        .await
-    {
-        Ok(all_vpcs) => all_vpcs,
-        Err(e) => return Err(e),
-    };
+    let all_vpcs = api_client.list_vpcs(args, page_size).await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&all_vpcs)?);
+        async_writeln!(output_file, "{}", serde_json::to_string_pretty(&all_vpcs)?)?;
     } else {
-        convert_vpcs_to_nice_table(all_vpcs).printstd();
+        async_write!(output_file, "{}", convert_vpcs_to_nice_table(all_vpcs))?;
     }
     Ok(())
 }
@@ -77,9 +86,10 @@ async fn show_vpcs(
 async fn show_vpc_details(
     vpc_id: VpcId,
     json: bool,
-    api_client: &ApiClient,
+    output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
+    api_client: &impl VpcShowClient,
 ) -> CarbideCliResult<()> {
-    let vpcs = api_client.0.find_vpcs_by_ids(vec![vpc_id]).await?;
+    let vpcs = api_client.find_vpcs_by_ids(vec![vpc_id]).await?;
 
     if vpcs.vpcs.len() != 1 {
         return Err(CarbideCliError::GenericError("Unknown VPC ID".to_string()));
@@ -88,12 +98,13 @@ async fn show_vpc_details(
     let vpcs = &vpcs.vpcs[0];
 
     if json {
-        println!("{}", serde_json::to_string_pretty(vpcs)?);
+        async_writeln!(output_file, "{}", serde_json::to_string_pretty(vpcs)?)?;
     } else {
-        println!(
+        async_writeln!(
+            output_file,
             "{}",
             convert_vpc_to_nice_format(vpcs).unwrap_or_else(|x| x.to_string())
-        );
+        )?;
     }
     Ok(())
 }
@@ -109,6 +120,7 @@ fn convert_vpcs_to_nice_table(vpcs: forgerpc::VpcList) -> Box<Table> {
         "Version",
         "Created",
         "Virt Type",
+        "SLAAC Enabled",
         "Labels",
     ]);
     let default_metadata = Default::default();
@@ -131,6 +143,7 @@ fn convert_vpcs_to_nice_table(vpcs: forgerpc::VpcList) -> Box<Table> {
             vpc.version,
             vpc.created.unwrap_or_default(),
             virt_type,
+            format_slaac_enabled(config.slaac_enabled),
             metadata
                 .labels
                 .iter()
@@ -223,6 +236,10 @@ pub(in crate::vpc) fn convert_vpc_to_nice_format(vpc: &forgerpc::Vpc) -> Carbide
                 .into(),
         ),
         (
+            "SLAAC ENABLED",
+            format_slaac_enabled(config.slaac_enabled).into(),
+        ),
+        (
             "ROUTING PROFILE TYPE",
             config
                 .routing_profile_type
@@ -247,15 +264,49 @@ pub(in crate::vpc) fn convert_vpc_to_nice_format(vpc: &forgerpc::Vpc) -> Carbide
     Ok(lines)
 }
 
+fn format_slaac_enabled(slaac_enabled: Option<bool>) -> &'static str {
+    match slaac_enabled {
+        Some(true) => "true",
+        Some(false) => "false",
+        // `None` means Core predates the response field.
+        None => "Unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::async_write::CapturedOutput;
+
+    struct FakeVpcShowClient {
+        vpcs: forgerpc::VpcList,
+    }
+
+    impl VpcShowClient for FakeVpcShowClient {
+        async fn list_vpcs(
+            &self,
+            _args: Args,
+            _page_size: usize,
+        ) -> CarbideCliResult<forgerpc::VpcList> {
+            Ok(self.vpcs.clone())
+        }
+
+        async fn find_vpcs_by_ids(
+            &self,
+            _vpc_ids: Vec<VpcId>,
+        ) -> CarbideCliResult<forgerpc::VpcList> {
+            Err(CarbideCliError::GenericError(
+                "unexpected VPC detail request".to_string(),
+            ))
+        }
+    }
 
     #[test]
-    fn vpc_details_include_routing_profiles() {
+    fn vpc_details_include_slaac_and_routing_profiles() {
         let vpc = forgerpc::Vpc {
             config: Some(forgerpc::VpcConfig {
                 tenant_organization_id: "tenant".to_string(),
+                slaac_enabled: Some(true),
                 routing_profile_type: Some("INTERNAL".to_string()),
                 routing_profile_overrides: Some(forgerpc::VpcRoutingProfileOverrides {
                     leak_default_route_from_underlay: Some(false),
@@ -275,6 +326,7 @@ mod tests {
         };
 
         let display = convert_vpc_to_nice_format(&vpc).expect("VPC display");
+        assert!(display.contains("SLAAC ENABLED            : true"));
         assert!(display.contains("ROUTING PROFILE TYPE"));
         assert!(display.contains("INTERNAL"));
         let (_, routing_profiles) = display
@@ -288,5 +340,68 @@ mod tests {
         assert!(!overrides.contains("\"access_tier\""));
         assert!(effective.contains("\"internal\": true"));
         assert!(effective.contains("\"access_tier\": 2"));
+    }
+
+    #[tokio::test]
+    async fn vpc_list_command_includes_slaac_presence_and_empty_cells() {
+        let client = FakeVpcShowClient {
+            vpcs: forgerpc::VpcList {
+                vpcs: [
+                    ("enabled", Some(true)),
+                    ("disabled", Some(false)),
+                    ("older-core", None),
+                ]
+                .into_iter()
+                .map(|(name, slaac_enabled)| forgerpc::Vpc {
+                    metadata: Some(forgerpc::Metadata {
+                        name: name.to_string(),
+                        ..Default::default()
+                    }),
+                    config: Some(forgerpc::VpcConfig {
+                        slaac_enabled,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
+            },
+        };
+
+        let mut captured = CapturedOutput::new();
+        show(
+            Args {
+                id: None,
+                tenant_org_id: None,
+                name: None,
+                label_key: None,
+                label_value: None,
+            },
+            OutputFormat::AsciiTable,
+            captured.writer(),
+            &client,
+            100,
+        )
+        .await
+        .expect("VPC list should render");
+
+        let display = String::from_utf8(captured.into_bytes().await).expect("UTF-8 output");
+        let cells_for = |name| {
+            display
+                .lines()
+                .find(|line| line.contains(name))
+                .unwrap_or_else(|| panic!("missing row for {name}"))
+                .trim_matches('|')
+                .split('|')
+                .map(str::trim)
+                .collect::<Vec<_>>()
+        };
+
+        let header = cells_for("SLAAC Enabled");
+        assert_eq!(header[7], "SLAAC Enabled");
+        assert_eq!(cells_for("enabled")[7], "true");
+        assert_eq!(cells_for("disabled")[7], "false");
+        let older_core = cells_for("older-core");
+        assert_eq!(older_core[7], "Unknown");
+        assert_eq!(older_core[8], "");
     }
 }

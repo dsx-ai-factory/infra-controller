@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use carbide_uuid::network::NetworkSegmentId;
+use model::network_prefix::NetworkPrefix;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentDeletionState, NetworkSegmentType,
 };
@@ -47,6 +48,16 @@ fn available_ip_metric_value(count: Option<u128>) -> usize {
         .unwrap_or_default()
 }
 
+fn compatibility_metric_prefix(prefixes: &[NetworkPrefix]) -> Option<&NetworkPrefix> {
+    // These metrics expose one compatibility series per segment and historically
+    // describe IPv4. Prefer it explicitly so dual-stack DB row order cannot
+    // change the reported prefix or counts.
+    prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv4())
+        .or_else(|| prefixes.first())
+}
+
 impl NetworkSegmentStateHandler {
     pub fn new(
         drain_period: chrono::Duration,
@@ -71,18 +82,17 @@ impl NetworkSegmentStateHandler {
             return;
         }
 
-        // `NetworkSegmentMetrics` still exposes one prefix per segment, so preserve
-        // the legacy `prefixes[0]` selection. Dual-stack values therefore depend on
-        // prefix order until the metric schema can emit one series per address family.
-        ctx.metrics.available_ips = available_ip_metric_value(state.prefixes[0].num_free_ips);
-        ctx.metrics.reserved_ips = state.prefixes[0].num_reserved as usize;
+        let metric_prefix = compatibility_metric_prefix(&state.prefixes)
+            .expect("non-empty prefix list was checked above");
+        ctx.metrics.available_ips = available_ip_metric_value(metric_prefix.num_free_ips);
+        ctx.metrics.reserved_ips = metric_prefix.num_reserved as usize;
         ctx.metrics.seg_name = state.config.name.clone();
 
         ctx.metrics.seg_type = state.config.segment_type.to_string();
         ctx.metrics.seg_id = state.id.to_string();
-        ctx.metrics.prefix = state.prefixes[0].prefix.to_string();
+        ctx.metrics.prefix = metric_prefix.prefix.to_string();
 
-        let total = state.prefixes[0].prefix.size();
+        let total = metric_prefix.prefix.size();
 
         let total_cnt: u32 = match total {
             ipnetwork::NetworkSize::V4(nf) => nf,
@@ -194,8 +204,25 @@ impl StateHandler for NetworkSegmentStateHandler {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::value_scenarios;
+    use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
+    use model::network_prefix::NetworkPrefix;
 
-    use super::available_ip_metric_value;
+    use super::{available_ip_metric_value, compatibility_metric_prefix};
+
+    fn network_prefix(prefix: &str) -> NetworkPrefix {
+        NetworkPrefix {
+            id: NetworkPrefixId::new(),
+            segment_id: NetworkSegmentId::new(),
+            prefix: prefix.parse().unwrap(),
+            gateway: None,
+            dhcpv6_link_address: None,
+            num_reserved: 0,
+            vpc_prefix_id: None,
+            vpc_prefix: None,
+            svi_ip: None,
+            num_free_ips: None,
+        }
+    }
 
     #[test]
     fn available_ip_metric_preserves_or_saturates_counts() {
@@ -210,6 +237,25 @@ mod tests {
 
             "overflowing count" {
                 Some(u128::MAX) => usize::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn compatibility_metric_prefix_prefers_ipv4() {
+        value_scenarios!(run = |prefixes: Vec<NetworkPrefix>| {
+            compatibility_metric_prefix(&prefixes).map(|prefix| prefix.prefix)
+        };
+            "dual-stack prefix order" {
+                vec![network_prefix("192.0.2.0/24"), network_prefix("2001:db8::/64")]
+                    => Some("192.0.2.0/24".parse().unwrap()),
+                vec![network_prefix("2001:db8::/64"), network_prefix("192.0.2.0/24")]
+                    => Some("192.0.2.0/24".parse().unwrap()),
+            }
+
+            "IPv6-only segment" {
+                vec![network_prefix("2001:db8::/64")]
+                    => Some("2001:db8::/64".parse().unwrap()),
             }
         );
     }

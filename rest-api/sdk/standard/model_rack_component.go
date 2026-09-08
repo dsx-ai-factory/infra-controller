@@ -22,11 +22,9 @@ var _ MappedNullable = &RackComponent{}
 
 // RackComponent A component within a Rack (e.g. compute node, switch, PDU)
 type RackComponent struct {
-	// Unique identifier of the component
+	// Component ID
 	Id *string `json:"id,omitempty"`
-	// ID of the component
-	ComponentId *string `json:"componentId,omitempty"`
-	// ID of the rack this component belongs to
+	// ID of the Rack this component belongs to
 	RackId *string `json:"rackId,omitempty"`
 	// Type of the component (e.g. Compute, NVSwitch, PowerShelf)
 	Type *string `json:"type,omitempty"`
@@ -105,38 +103,6 @@ func (o *RackComponent) HasId() bool {
 // SetId gets a reference to the given string and assigns it to the Id field.
 func (o *RackComponent) SetId(v string) {
 	o.Id = &v
-}
-
-// GetComponentId returns the ComponentId field value if set, zero value otherwise.
-func (o *RackComponent) GetComponentId() string {
-	if o == nil || IsNil(o.ComponentId) {
-		var ret string
-		return ret
-	}
-	return *o.ComponentId
-}
-
-// GetComponentIdOk returns a tuple with the ComponentId field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-func (o *RackComponent) GetComponentIdOk() (*string, bool) {
-	if o == nil || IsNil(o.ComponentId) {
-		return nil, false
-	}
-	return o.ComponentId, true
-}
-
-// HasComponentId returns a boolean if a field has been set.
-func (o *RackComponent) HasComponentId() bool {
-	if o != nil && !IsNil(o.ComponentId) {
-		return true
-	}
-
-	return false
-}
-
-// SetComponentId gets a reference to the given string and assigns it to the ComponentId field.
-func (o *RackComponent) SetComponentId(v string) {
-	o.ComponentId = &v
 }
 
 // GetRackId returns the RackId field value if set, zero value otherwise.
@@ -631,9 +597,6 @@ func (o RackComponent) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	if !IsNil(o.Id) {
 		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.ComponentId) {
-		toSerialize["componentId"] = o.ComponentId
 	}
 	if !IsNil(o.RackId) {
 		toSerialize["rackId"] = o.RackId

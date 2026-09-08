@@ -10,10 +10,7 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/google/uuid"
-
 	validation "github.com/go-ozzo/ozzo-validation/v4"
-	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
@@ -160,12 +157,11 @@ func validateSlotConstraints(slotID *int32, rackID, rackName *string) error {
 // TrayFilter specifies which trays to target in a batch operation.
 // If nil or empty, the operation targets all trays in the site.
 type TrayFilter struct {
-	RackID       *string  `json:"rackId,omitempty"`
-	RackName     *string  `json:"rackName,omitempty"`
-	Type         *string  `json:"type,omitempty"`
-	ComponentIDs []string `json:"componentIds,omitempty"`
-	IDs          []string `json:"ids,omitempty"`
-	SlotID       *int32   `json:"slotId,omitempty"` // Restrict to trays at this rack slot; requires rackId or rackName.
+	RackID   *string  `json:"rackId,omitempty"`
+	RackName *string  `json:"rackName,omitempty"`
+	Type     *string  `json:"type,omitempty"`
+	IDs      []string `json:"ids,omitempty"`
+	SlotID   *int32   `json:"slotId,omitempty"` // Restrict to trays at this rack slot; requires rackId or rackName.
 }
 
 // Validate checks the tray filter fields.
@@ -175,8 +171,8 @@ func (f *TrayFilter) Validate() error {
 	}
 
 	err := validation.ValidateStruct(f,
-		validation.Field(&f.RackID,
-			validation.When(f.RackID != nil, validationis.UUID.Error(validationErrorInvalidUUID))),
+		validation.Field(&f.RackID, validation.When(f.RackID != nil, validation.Required)),
+		validation.Field(&f.IDs, validation.Each(validation.Required)),
 		validation.Field(&f.Type,
 			validation.When(f.Type != nil, validation.In(validTrayTypesAny...).Error(
 				fmt.Sprintf("must be one of %v", slices.Collect(maps.Keys(APIToProtoComponentTypeName)))))),
@@ -185,24 +181,14 @@ func (f *TrayFilter) Validate() error {
 		return err
 	}
 
-	for _, id := range f.IDs {
-		if _, parseErr := uuid.Parse(id); parseErr != nil {
-			return validation.Errors{"ids": fmt.Errorf("%s: %s", validationErrorInvalidUUID, id)}
-		}
-	}
-
 	if f.RackID != nil && f.RackName != nil {
 		return validation.Errors{"rackId": fmt.Errorf("rackId and rackName are mutually exclusive")}
 	}
 
 	hasRackParams := f.RackID != nil || f.RackName != nil
-	hasComponentParams := len(f.IDs) > 0 || len(f.ComponentIDs) > 0
+	hasComponentParams := len(f.IDs) > 0
 	if hasRackParams && hasComponentParams {
-		return validation.Errors{"rackId": fmt.Errorf("rackId/rackName cannot be combined with ids/componentIds")}
-	}
-
-	if len(f.ComponentIDs) > 0 && f.Type == nil {
-		return validation.Errors{"componentIds": fmt.Errorf("type is required when componentIds is provided")}
+		return validation.Errors{"rackId": fmt.Errorf("rackId/rackName cannot be combined with ids")}
 	}
 
 	if err := validateSlotConstraints(f.SlotID, f.RackID, f.RackName); err != nil {
@@ -214,7 +200,7 @@ func (f *TrayFilter) Validate() error {
 
 // HasSlotFilter reports whether the filter constrains rack slot.
 // When true, callers cannot use ToTargetSpec directly: Flow has no
-// by-slot component target shape, so slotId is resolved to component UUIDs
+// by-slot component target shape, so slotId is resolved to component IDs
 // via lookup first. ToTargetSpec ignores SlotID.
 func (f *TrayFilter) HasSlotFilter() bool {
 	return f != nil && f.SlotID != nil
@@ -227,6 +213,24 @@ func (f *TrayFilter) MatchesSlot(comp *flowv1.Component) bool {
 		return true
 	}
 	return RackComponentSlotMatcher{SlotID: f.SlotID}.Matches(comp)
+}
+
+func componentTargetsFromIDs(ids []string, componentType *string) []*flowv1.ComponentTarget {
+	protoType := flowv1.ComponentType_COMPONENT_TYPE_UNKNOWN
+	if componentType != nil {
+		protoName := APIToProtoComponentTypeName[*componentType]
+		protoType = flowv1.ComponentType(flowv1.ComponentType_value[protoName])
+	}
+
+	targets := make([]*flowv1.ComponentTarget, 0, len(ids))
+	for _, id := range ids {
+		targets = append(targets, &flowv1.ComponentTarget{
+			Identifier: &flowv1.ComponentTarget_External{
+				External: &flowv1.ExternalRef{Type: protoType, Id: id},
+			},
+		})
+	}
+	return targets
 }
 
 // ToTargetSpec converts the filter to an Flow OperationTargetSpec.
@@ -244,40 +248,11 @@ func (f *TrayFilter) ToTargetSpec() *flowv1.OperationTargetSpec {
 		}
 	}
 
-	hasIDs := len(f.IDs) > 0
-	hasComponentIDsWithType := len(f.ComponentIDs) > 0 && f.Type != nil
-
-	if hasIDs || hasComponentIDsWithType {
-		componentTargets := make([]*flowv1.ComponentTarget, 0, len(f.IDs)+len(f.ComponentIDs))
-
-		for _, id := range f.IDs {
-			componentTargets = append(componentTargets, &flowv1.ComponentTarget{
-				Identifier: &flowv1.ComponentTarget_Id{
-					Id: &flowv1.UUID{Id: id},
-				},
-			})
-		}
-
-		if hasComponentIDsWithType {
-			if protoName, ok := APIToProtoComponentTypeName[*f.Type]; ok {
-				protoType := flowv1.ComponentType(flowv1.ComponentType_value[protoName])
-				for _, cid := range f.ComponentIDs {
-					componentTargets = append(componentTargets, &flowv1.ComponentTarget{
-						Identifier: &flowv1.ComponentTarget_External{
-							External: &flowv1.ExternalRef{
-								Type: protoType,
-								Id:   cid,
-							},
-						},
-					})
-				}
-			}
-		}
-
+	if len(f.IDs) > 0 {
 		return &flowv1.OperationTargetSpec{
 			Targets: &flowv1.OperationTargetSpec_Components{
 				Components: &flowv1.ComponentTargets{
-					Targets: componentTargets,
+					Targets: componentTargetsFromIDs(f.IDs, f.Type),
 				},
 			},
 		}
@@ -286,9 +261,7 @@ func (f *TrayFilter) ToTargetSpec() *flowv1.OperationTargetSpec {
 	rackTarget := &flowv1.RackTarget{}
 
 	if f.RackID != nil {
-		rackTarget.Identifier = &flowv1.RackTarget_Id{
-			Id: &flowv1.UUID{Id: *f.RackID},
-		}
+		rackTarget.Identifier = &flowv1.RackTarget_ExternalId{ExternalId: *f.RackID}
 	} else if f.RackName != nil {
 		rackTarget.Identifier = &flowv1.RackTarget_Name{
 			Name: *f.RackName,
@@ -316,27 +289,23 @@ func (f *TrayFilter) ToTargetSpec() *flowv1.OperationTargetSpec {
 
 // APITrayGetAllRequest captures query parameters for listing trays from Flow.
 type APITrayGetAllRequest struct {
-	SiteID       string   `query:"siteId"`
-	RackID       *string  `query:"rackId"`
-	RackName     *string  `query:"rackName"`
-	Type         *string  `query:"type"`
-	ComponentIDs []string `query:"componentId"`
-	IDs          []string `query:"id"`
-	SlotID       *int32   `query:"slotId"` // Restrict to trays at this rack slot; requires rackId or rackName.
+	SiteID   string   `query:"siteId"`
+	RackID   *string  `query:"rackId"`
+	RackName *string  `query:"rackName"`
+	Type     *string  `query:"type"`
+	IDs      []string `query:"id"`
+	SlotID   *int32   `query:"slotId"` // Restrict to trays at this rack slot; requires rackId or rackName.
 }
 
 // Validate checks field formats and enforces the Flow protobuf oneof constraints:
-//   - rackId must be a valid UUID
 //   - rackId and rackName are mutually exclusive (RackTarget.oneof identifier)
-//   - rackId/rackName cannot be combined with id/componentId (OperationTargetSpec.oneof targets)
-//   - componentId requires type (ExternalRef needs type)
+//   - rackId/rackName cannot be combined with id (OperationTargetSpec.oneof targets)
 //   - type must be one of the supported tray types
-//   - each entry in IDs must be a valid UUID
 //   - slotId requires rackId or rackName and must be >= 0
 func (r *APITrayGetAllRequest) Validate() error {
 	err := validation.ValidateStruct(r,
-		validation.Field(&r.RackID,
-			validation.When(r.RackID != nil, validationis.UUID.Error(validationErrorInvalidUUID))),
+		validation.Field(&r.RackID, validation.When(r.RackID != nil, validation.Required)),
+		validation.Field(&r.IDs, validation.Each(validation.Required)),
 		validation.Field(&r.Type,
 			validation.When(r.Type != nil, validation.In(validTrayTypesAny...).Error(
 				fmt.Sprintf("must be one of %v", slices.Collect(maps.Keys(APIToProtoComponentTypeName)))))),
@@ -345,24 +314,14 @@ func (r *APITrayGetAllRequest) Validate() error {
 		return err
 	}
 
-	for _, id := range r.IDs {
-		if _, parseErr := uuid.Parse(id); parseErr != nil {
-			return validation.Errors{"id": fmt.Errorf("%s: %s", validationErrorInvalidUUID, id)}
-		}
-	}
-
 	if r.RackID != nil && r.RackName != nil {
 		return validation.Errors{"rackId": fmt.Errorf("rackId and rackName are mutually exclusive")}
 	}
 
 	hasRackParams := r.RackID != nil || r.RackName != nil
-	hasComponentParams := len(r.IDs) > 0 || len(r.ComponentIDs) > 0
+	hasComponentParams := len(r.IDs) > 0
 	if hasRackParams && hasComponentParams {
-		return validation.Errors{"rackId": fmt.Errorf("rackId/rackName cannot be combined with id/componentId")}
-	}
-
-	if len(r.ComponentIDs) > 0 && r.Type == nil {
-		return validation.Errors{"componentId": fmt.Errorf("type is required when componentId is provided")}
+		return validation.Errors{"rackId": fmt.Errorf("rackId/rackName cannot be combined with id")}
 	}
 
 	if err := validateSlotConstraints(r.SlotID, r.RackID, r.RackName); err != nil {
@@ -389,40 +348,11 @@ func (r *APITrayGetAllRequest) MatchesSlot(comp *flowv1.Component) bool {
 func (r *APITrayGetAllRequest) ToProto() *flowv1.GetComponentsRequest {
 	flowRequest := &flowv1.GetComponentsRequest{}
 
-	hasIDs := len(r.IDs) > 0
-	hasComponentIDsWithType := len(r.ComponentIDs) > 0 && r.Type != nil
-
-	if hasIDs || hasComponentIDsWithType {
-		componentTargets := make([]*flowv1.ComponentTarget, 0, len(r.IDs)+len(r.ComponentIDs))
-
-		for _, id := range r.IDs {
-			componentTargets = append(componentTargets, &flowv1.ComponentTarget{
-				Identifier: &flowv1.ComponentTarget_Id{
-					Id: &flowv1.UUID{Id: id},
-				},
-			})
-		}
-
-		if hasComponentIDsWithType {
-			if protoName, ok := APIToProtoComponentTypeName[*r.Type]; ok {
-				protoType := flowv1.ComponentType(flowv1.ComponentType_value[protoName])
-				for _, cid := range r.ComponentIDs {
-					componentTargets = append(componentTargets, &flowv1.ComponentTarget{
-						Identifier: &flowv1.ComponentTarget_External{
-							External: &flowv1.ExternalRef{
-								Type: protoType,
-								Id:   cid,
-							},
-						},
-					})
-				}
-			}
-		}
-
+	if len(r.IDs) > 0 {
 		flowRequest.TargetSpec = &flowv1.OperationTargetSpec{
 			Targets: &flowv1.OperationTargetSpec_Components{
 				Components: &flowv1.ComponentTargets{
-					Targets: componentTargets,
+					Targets: componentTargetsFromIDs(r.IDs, r.Type),
 				},
 			},
 		}
@@ -435,9 +365,7 @@ func (r *APITrayGetAllRequest) ToProto() *flowv1.GetComponentsRequest {
 	if r.RackID != nil || r.RackName != nil {
 		rackTarget := &flowv1.RackTarget{}
 		if r.RackID != nil {
-			rackTarget.Identifier = &flowv1.RackTarget_Id{
-				Id: &flowv1.UUID{Id: *r.RackID},
-			}
+			rackTarget.Identifier = &flowv1.RackTarget_ExternalId{ExternalId: *r.RackID}
 		} else {
 			rackTarget.Identifier = &flowv1.RackTarget_Name{
 				Name: *r.RackName,
@@ -488,9 +416,6 @@ func (r *APITrayGetAllRequest) QueryValues() url.Values {
 	if r.Type != nil {
 		v.Set("type", *r.Type)
 	}
-	for _, cid := range r.ComponentIDs {
-		v.Add("componentId", cid)
-	}
 	for _, id := range r.IDs {
 		v.Add("id", id)
 	}
@@ -508,7 +433,7 @@ type APITrayValidateAllRequest struct {
 	Name         []string `query:"name"`
 	Manufacturer []string `query:"manufacturer"`
 	Type         *string  `query:"type"`
-	ComponentIDs []string `query:"componentId"`
+	IDs          []string `query:"id"`
 	SlotID       *int32   `query:"slotId"` // Restrict to trays at this rack slot; requires rackId or rackName.
 }
 
@@ -518,8 +443,8 @@ func (r *APITrayValidateAllRequest) Validate() error {
 		return fmt.Errorf("siteId query parameter is required")
 	}
 	if err := validation.ValidateStruct(r,
-		validation.Field(&r.RackID,
-			validation.When(r.RackID != nil, validationis.UUID.Error(validationErrorInvalidUUID))),
+		validation.Field(&r.RackID, validation.When(r.RackID != nil, validation.Required)),
+		validation.Field(&r.IDs, validation.Each(validation.Required)),
 		validation.Field(&r.Type,
 			validation.When(r.Type != nil, validation.In(validTrayTypesAny...).Error(
 				fmt.Sprintf("must be one of %v", slices.Collect(maps.Keys(APIToProtoComponentTypeName)))))),
@@ -530,11 +455,8 @@ func (r *APITrayValidateAllRequest) Validate() error {
 		return validation.Errors{"rackId": fmt.Errorf("rackId and rackName are mutually exclusive")}
 	}
 	hasRackScope := r.RackID != nil || r.RackName != nil
-	if hasRackScope && len(r.ComponentIDs) > 0 {
-		return validation.Errors{"rackId": fmt.Errorf("rackId/rackName and componentId are mutually exclusive")}
-	}
-	if len(r.ComponentIDs) > 0 && r.Type == nil {
-		return validation.Errors{"componentId": fmt.Errorf("type is required when componentId is provided")}
+	if hasRackScope && len(r.IDs) > 0 {
+		return validation.Errors{"rackId": fmt.Errorf("rackId/rackName and id are mutually exclusive")}
 	}
 	if err := validateSlotConstraints(r.SlotID, r.RackID, r.RackName); err != nil {
 		return err
@@ -562,7 +484,7 @@ func (r *APITrayValidateAllRequest) ToTargetSpec() *flowv1.OperationTargetSpec {
 			Targets: &flowv1.OperationTargetSpec_Racks{
 				Racks: &flowv1.RackTargets{
 					Targets: []*flowv1.RackTarget{
-						{Identifier: &flowv1.RackTarget_Id{Id: &flowv1.UUID{Id: *r.RackID}}},
+						{Identifier: &flowv1.RackTarget_ExternalId{ExternalId: *r.RackID}},
 					},
 				},
 			},
@@ -579,27 +501,11 @@ func (r *APITrayValidateAllRequest) ToTargetSpec() *flowv1.OperationTargetSpec {
 			},
 		}
 	}
-	if len(r.ComponentIDs) > 0 && r.Type != nil {
-		protoName, ok := APIToProtoComponentTypeName[*r.Type]
-		if !ok {
-			return nil
-		}
-		protoType := flowv1.ComponentType(flowv1.ComponentType_value[protoName])
-		targets := make([]*flowv1.ComponentTarget, 0, len(r.ComponentIDs))
-		for _, cid := range r.ComponentIDs {
-			targets = append(targets, &flowv1.ComponentTarget{
-				Identifier: &flowv1.ComponentTarget_External{
-					External: &flowv1.ExternalRef{
-						Type: protoType,
-						Id:   cid,
-					},
-				},
-			})
-		}
+	if len(r.IDs) > 0 {
 		return &flowv1.OperationTargetSpec{
 			Targets: &flowv1.OperationTargetSpec_Components{
 				Components: &flowv1.ComponentTargets{
-					Targets: targets,
+					Targets: componentTargetsFromIDs(r.IDs, r.Type),
 				},
 			},
 		}
@@ -643,8 +549,8 @@ func (r *APITrayValidateAllRequest) QueryValues() url.Values {
 	if r.Type != nil {
 		v.Set("type", *r.Type)
 	}
-	for _, cid := range r.ComponentIDs {
-		v.Add("componentId", cid)
+	for _, id := range r.IDs {
+		v.Add("id", id)
 	}
 	if r.SlotID != nil {
 		v.Set("slotId", strconv.FormatInt(int64(*r.SlotID), 10))
@@ -672,7 +578,6 @@ func (atp *APITrayPosition) FromProto(protoPosition *flowv1.RackPosition) {
 // APITray is the API representation of a Tray (Component) from Flow
 type APITray struct {
 	ID              string           `json:"id"`
-	ComponentID     string           `json:"componentId"`
 	Type            string           `json:"type"`
 	Name            string           `json:"name"`
 	Manufacturer    string           `json:"manufacturer"`
@@ -701,15 +606,12 @@ func (at *APITray) FromProto(comp *flowv1.Component) {
 	at.PowerState = comp.GetPowerState()
 	at.OperationStatus = enumOr(ProtoToAPIPhaseName, comp.GetStatus().GetPhase(), "Unknown")
 	at.LeakStatus = enumOr(ProtoToAPILeakStatusName, comp.GetLeakStatus(), "Unknown")
-	at.ComponentID = comp.GetComponentId()
+	at.ID = comp.GetComponentId()
 	at.TaskStats.FromProto(comp.GetTaskStats())
 
 	// Get info from DeviceInfo
 	if comp.GetInfo() != nil {
 		info := comp.GetInfo()
-		if info.GetId() != nil {
-			at.ID = info.GetId().GetId()
-		}
 		at.Name = info.GetName()
 		at.Manufacturer = info.GetManufacturer()
 		if info.Model != nil {
@@ -738,9 +640,7 @@ func (at *APITray) FromProto(comp *flowv1.Component) {
 	}
 
 	// Get rack ID
-	if comp.GetRackId() != nil {
-		at.RackID = comp.GetRackId().GetId()
-	}
+	at.RackID = comp.GetRackExternalId()
 
 	if comp.GetNvlDomainId() != nil {
 		domainID := comp.GetNvlDomainId().GetId()

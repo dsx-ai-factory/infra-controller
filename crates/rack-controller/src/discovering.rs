@@ -23,6 +23,7 @@
 //! rack transitions to Maintenance.
 
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
+use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use db::{ObjectFilter, machine as db_machine, power_shelf as db_power_shelf, switch as db_switch};
 use model::machine::ManagedHostState;
@@ -54,7 +55,7 @@ pub async fn handle_discovering(
 
     let available_compute = db_machine::find(
         txn.as_mut(),
-        ObjectFilter::All,
+        ObjectFilter::<MachineId>::All,
         MachineSearchConfig {
             rack_id: Some(id.clone()),
             ..Default::default()

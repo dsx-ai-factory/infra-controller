@@ -512,6 +512,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				require.NotNil(t, rst.Capabilities)
 				assert.True(t, rst.Capabilities.NativeNetworking)
 				assert.True(t, rst.Capabilities.NetworkSecurityGroup)
+				assert.True(t, rst.Capabilities.Flow)
 				assert.False(t, rst.Capabilities.VpcSlaac)
 				assert.False(t, rst.Capabilities.DPSPowerManagement)
 
@@ -524,6 +525,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				require.NotNil(t, createdSite.Config)
 				assert.True(t, createdSite.Config.NativeNetworking)
 				assert.True(t, createdSite.Config.NetworkSecurityGroup)
+				assert.True(t, createdSite.Config.Flow)
 				assert.False(t, createdSite.Config.VpcSlaac)
 
 				if !tt.siteMgrDisabled {
@@ -588,7 +590,7 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 	st2 := testSiteBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusError, ipu, nil, nil, nil)
 	st3 := testSiteBuildSite(t, dbSession, ip, "test-site-3", cdbm.SiteStatusRegistered, ipu, nil, nil, nil)
 	st4 := testSiteBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, ipu, nil, nil, nil)
-	st5 := testSiteBuildSite(t, dbSession, ip, "test-site-5", cdbm.SiteStatusRegistered, ipu, nil, nil, &cdbm.SiteConfig{NativeNetworking: true, NetworkSecurityGroup: true, VpcSlaac: true})
+	st5 := testSiteBuildSite(t, dbSession, ip, "test-site-5", cdbm.SiteStatusRegistered, ipu, nil, nil, &cdbm.SiteConfig{NativeNetworking: true, NetworkSecurityGroup: true, Flow: true, VpcSlaac: true})
 	st6 := testSiteBuildSite(t, dbSession, ip, "test-site-6", cdbm.SiteStatusRegistered, ipu, nil, nil, &cdbm.SiteConfig{NativeNetworking: true, NetworkSecurityGroup: true})
 	stPower := testSiteBuildSite(t, dbSession, ip, "test-site-power", cdbm.SiteStatusRegistered, ipu, nil, nil, &cdbm.SiteConfig{})
 
@@ -628,6 +630,7 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 		csmEnabled         bool
 		verifyTenantUpdate bool
 		verifyChildSpanner bool
+		verifyFlow         bool
 		verifyVpcSlaac     bool
 	}{
 		{
@@ -654,6 +657,26 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 			csmEnabled:         true,
 			wantErr:            false,
 			verifyChildSpanner: true,
+		},
+		{
+			name: "test Site update API endpoint rejects Provider modification of inventory-managed Flow",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        &tmocks.Client{},
+				cfg:       cfg,
+			},
+			args: args{
+				site: st5,
+				org:  ipOrg,
+				user: ipu,
+				reqData: &model.APISiteUpdateRequest{
+					Capabilities: &model.APISiteCapabilitiesUpdateRequest{Flow: cutil.GetPtr(false)},
+				},
+			},
+			csmEnabled:  true,
+			wantErr:     true,
+			respMessage: model.ErrMsgNotConfigurableByProvider,
+			verifyFlow:  true,
 		},
 		{
 			name: "test Site update API endpoint rejects Provider modification of inventory capability",
@@ -1019,6 +1042,12 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 				require.NoError(t, getErr)
 				require.NotNil(t, storedSite.Config)
 				assert.True(t, storedSite.Config.VpcSlaac)
+			}
+			if tt.verifyFlow {
+				storedSite, getErr := cdbm.NewSiteDAO(tt.fields.dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false)
+				require.NoError(t, getErr)
+				require.NotNil(t, storedSite.Config)
+				assert.True(t, storedSite.Config.Flow)
 			}
 
 			rst := &model.APISite{}

@@ -719,7 +719,7 @@ fn truncate_error_for_metric_label(mut error: String) -> String {
 #[cfg(test)]
 mod tests {
     use carbide_instrument::emit;
-    use carbide_instrument::testing::{MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
 
     use super::*;
@@ -877,7 +877,7 @@ mod tests {
             log_count: usize,
             log: Option<LogObservation>,
             histogram_count_delta: u64,
-            histogram_sum_delta: f64,
+            histogram_sum_delta: ApproxHistogramSum,
         }
 
         check_values(
@@ -892,7 +892,7 @@ mod tests {
                         log_count: 0,
                         log: None,
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 125.0,
+                        histogram_sum_delta: ApproxHistogramSum(125.0),
                     },
                 },
                 Check {
@@ -915,7 +915,7 @@ mod tests {
                             error: Some("database unavailable".to_string()),
                         }),
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 375.0,
+                        histogram_sum_delta: ApproxHistogramSum(375.0),
                     },
                 },
             ],
@@ -987,7 +987,7 @@ mod tests {
         struct OperationObservation {
             log: Option<OperationLog>,
             histogram_count_delta: u64,
-            histogram_sum_delta: f64,
+            histogram_sum_delta: ApproxHistogramSum,
         }
 
         fn expected_log(case: &OperationCase) -> Option<OperationLog> {
@@ -1116,7 +1116,7 @@ mod tests {
             let expect = OperationObservation {
                 log: expected_log(&case),
                 histogram_count_delta: 1,
-                histogram_sum_delta: 1.25,
+                histogram_sum_delta: ApproxHistogramSum(1.25),
             };
             Check {
                 scenario: case.scenario,

@@ -25,7 +25,7 @@ use ::rpc::forge::{
 };
 use carbide_instrument::testing::MetricsCapture;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use common::api_fixtures::network_segment::{
     FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, create_tenant_network_segment,
 };
@@ -44,7 +44,7 @@ use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 async fn set_use_admin_network_changed(
     env: &api_fixtures::TestEnv,
-    dpu_machine_id: MachineId,
+    dpu_machine_id: DpuMachineId,
     value: bool,
 ) {
     let mut txn = env.db_txn().await;
@@ -56,7 +56,7 @@ async fn set_use_admin_network_changed(
 
 async fn use_admin_network_changed(
     env: &api_fixtures::TestEnv,
-    dpu_machine_id: MachineId,
+    dpu_machine_id: DpuMachineId,
 ) -> Option<bool> {
     let mut txn = env.db_txn().await;
     let dpu = db::machine::find_one(txn.deref_mut(), &dpu_machine_id, Default::default())
@@ -67,7 +67,10 @@ async fn use_admin_network_changed(
     dpu.network_config.value.use_admin_network_changed
 }
 
-async fn bump_dpu_network_config_version(env: &api_fixtures::TestEnv, dpu_machine_id: MachineId) {
+async fn bump_dpu_network_config_version(
+    env: &api_fixtures::TestEnv,
+    dpu_machine_id: DpuMachineId,
+) {
     let mut txn = env.db_txn().await;
     let dpu = db::machine::find_one(txn.deref_mut(), &dpu_machine_id, Default::default())
         .await
@@ -83,12 +86,12 @@ async fn bump_dpu_network_config_version(env: &api_fixtures::TestEnv, dpu_machin
 
 async fn record_dpu_network_status(
     env: &api_fixtures::TestEnv,
-    dpu_machine_id: MachineId,
+    dpu_machine_id: DpuMachineId,
     network_config_version: Option<String>,
 ) {
     env.api
         .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
             dpu_agent_version: Some(dpu::TEST_DPU_AGENT_VERSION.to_string()),
             observed_at: Some(SystemTime::now().into()),
             dpu_health: Some(rpc::health::HealthReport {
@@ -164,7 +167,7 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -208,7 +211,7 @@ async fn test_managed_host_network_config_does_not_clear_use_admin_network_chang
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -233,7 +236,7 @@ async fn test_record_dpu_network_status_clears_use_admin_network_changed_for_mat
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -334,7 +337,7 @@ async fn test_managed_host_network_config_with_sitewide_bgp_password(pool: sqlx:
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -449,7 +452,7 @@ async fn test_managed_host_network_config_narrows_interface_anycast_prefixes(poo
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(mh.dpu().id),
+            dpu_machine_id: Some(mh.dpu().id.into()),
         }))
         .await
         .unwrap()
@@ -626,7 +629,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(mh.dpu().id),
+            dpu_machine_id: Some(mh.dpu().id.into()),
         }))
         .await
         .unwrap()
@@ -719,7 +722,7 @@ async fn test_managed_host_network_config_omits_fnn_vrf_loopback_by_default(pool
 
     // Allocate a managed host on the FNN segment.
     let mh = create_managed_host(&env).await;
-    let dpu_machine_id = mh.dpu().id;
+    let dpu_machine_id = mh.dpu_ids[0];
     mh.instance_builer(&env)
         .tenant_org(tenant.organization_id)
         .single_interface_network_config(segment_id)
@@ -730,7 +733,7 @@ async fn test_managed_host_network_config_omits_fnn_vrf_loopback_by_default(pool
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -798,7 +801,7 @@ async fn test_managed_host_network_config_includes_fnn_vrf_loopback_when_enabled
 
     // Allocate a managed host on the FNN segment.
     let mh = create_managed_host(&env).await;
-    let dpu_machine_id = mh.dpu().id;
+    let dpu_machine_id = mh.dpu_ids[0];
     mh.instance_builer(&env)
         .tenant_org(tenant.organization_id)
         .single_interface_network_config(segment_id)
@@ -809,7 +812,7 @@ async fn test_managed_host_network_config_includes_fnn_vrf_loopback_when_enabled
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -873,13 +876,13 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
 
     // Create a managed host that stays on the admin network.
     let mh = create_managed_host(&env).await;
-    let dpu_machine_id = mh.dpu().id;
+    let dpu_machine_id = mh.dpu_ids[0];
 
     // Fetch the DPU config and verify the FNN admin interface has no loopback.
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -963,7 +966,7 @@ async fn test_managed_host_network_config_errors_when_sitewide_bgp_password_miss
     let err = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .expect_err("missing site-wide BGP password should fail");
@@ -1103,13 +1106,13 @@ async fn test_managed_host_network_status(pool: sqlx::PgPool) {
         ],
         alerts: vec![],
     };
-    network_configured_with_health(&env, &mh.dpu().id, Some(dpu_health.clone())).await;
+    network_configured_with_health(&env, &mh.dpu_ids[0], Some(dpu_health.clone())).await;
 
     // Query the aggregate health.
     let reported_health = env
         .api
         .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
-            machine_ids: vec![mh.dpu().id],
+            machine_ids: vec![mh.dpu().id.into()],
             include_history: false,
         }))
         .await
@@ -1129,7 +1132,7 @@ async fn test_managed_host_network_status(pool: sqlx::PgPool) {
     // Now fetch the instance and check that knows its configs have synced
     let response = env
         .api
-        .find_instance_by_machine_id(tonic::Request::new(mh.id))
+        .find_instance_by_machine_id(tonic::Request::new(mh.id.into()))
         .await
         .unwrap()
         .into_inner();
@@ -1264,7 +1267,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_1_id),
+            dpu_machine_id: Some(dpu_1_id.into()),
         }))
         .await
         .unwrap()
@@ -1318,7 +1321,7 @@ async fn test_dpu_health_is_required(pool: sqlx::PgPool) {
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
         }))
         .await
         .unwrap()
@@ -1330,7 +1333,7 @@ async fn test_dpu_health_is_required(pool: sqlx::PgPool) {
     let err = env
         .api
         .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
-            dpu_machine_id: Some(dpu_machine_id),
+            dpu_machine_id: Some(dpu_machine_id.into()),
             dpu_agent_version: Some(dpu::TEST_DPU_AGENT_VERSION.to_string()),
             observed_at: Some(SystemTime::now().into()),
             dpu_health: None,
@@ -1396,7 +1399,7 @@ async fn test_retain_in_alert_since(pool: sqlx::PgPool) {
     let reported_health = env
         .api
         .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
-            machine_ids: vec![dpu_machine_id],
+            machine_ids: vec![dpu_machine_id.into()],
             include_history: false,
         }))
         .await
@@ -1425,7 +1428,7 @@ async fn test_retain_in_alert_since(pool: sqlx::PgPool) {
     let reported_health = env
         .api
         .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
-            machine_ids: vec![dpu_machine_id],
+            machine_ids: vec![dpu_machine_id.into()],
             include_history: false,
         }))
         .await
@@ -1462,7 +1465,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
             .api
             .get_managed_host_quarantine_state(tonic::Request::new(
                 rpc::forge::GetManagedHostQuarantineStateRequest {
-                    machine_id: Some(host_machine_id),
+                    machine_id: Some(host_machine_id.into()),
                 },
             ))
             .await?
@@ -1498,7 +1501,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
             .api
             .set_managed_host_quarantine_state(tonic::Request::new(
                 rpc::forge::SetManagedHostQuarantineStateRequest {
-                    machine_id: Some(host_machine_id),
+                    machine_id: Some(host_machine_id.into()),
                     quarantine_state: Some(rpc::forge::ManagedHostQuarantineState {
                         mode: rpc::forge::ManagedHostQuarantineMode::BlockAllTraffic as i32,
                         reason: Some("test reason 1".to_string()),
@@ -1527,7 +1530,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
             .machine_ids;
         assert_eq!(
             ids,
-            vec![host_machine_id],
+            vec![host_machine_id.into()],
             "Finding machine ID's with only_quarantine should have returned the quarantined host"
         );
     }
@@ -1555,7 +1558,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
             .api
             .get_managed_host_quarantine_state(tonic::Request::new(
                 rpc::forge::GetManagedHostQuarantineStateRequest {
-                    machine_id: Some(host_machine_id),
+                    machine_id: Some(host_machine_id.into()),
                 },
             ))
             .await?
@@ -1579,7 +1582,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
             .api
             .set_managed_host_quarantine_state(tonic::Request::new(
                 rpc::forge::SetManagedHostQuarantineStateRequest {
-                    machine_id: Some(host_machine_id),
+                    machine_id: Some(host_machine_id.into()),
                     quarantine_state: Some(rpc::forge::ManagedHostQuarantineState {
                         mode: rpc::forge::ManagedHostQuarantineMode::BlockAllTraffic as i32,
                         reason: Some("test reason 2".to_string()),
@@ -1622,7 +1625,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
             .api
             .get_managed_host_quarantine_state(tonic::Request::new(
                 rpc::forge::GetManagedHostQuarantineStateRequest {
-                    machine_id: Some(host_machine_id),
+                    machine_id: Some(host_machine_id.into()),
                 },
             ))
             .await?
@@ -1646,7 +1649,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
             .api
             .clear_managed_host_quarantine_state(tonic::Request::new(
                 rpc::forge::ClearManagedHostQuarantineStateRequest {
-                    machine_id: Some(host_machine_id),
+                    machine_id: Some(host_machine_id.into()),
                 },
             ))
             .await?

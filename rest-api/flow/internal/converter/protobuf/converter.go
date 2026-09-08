@@ -232,6 +232,7 @@ func ComponentFrom(c *pb.Component) *component.Component {
 		BmcsByType:      bmcsByType,
 		NVLDomainID:     UUIDFrom(c.GetNvlDomainId()),
 		PowerState:      c.GetPowerState(),
+		RackExternalID:  c.GetRackExternalId(),
 	}
 }
 
@@ -263,6 +264,7 @@ func RackFrom(r *pb.Rack) *rack.Rack {
 	}
 	result := &rack.Rack{
 		Info:       DeviceInfoFrom(r.GetInfo()),
+		ExternalID: r.GetExternalId(),
 		Loc:        LocationFrom(r.GetLocation()),
 		Components: components,
 	}
@@ -642,6 +644,7 @@ func ComponentTo(c *component.Component) *pb.Component {
 		PowerState:      c.PowerState,
 		Status:          ComponentOperationStatusTo(c.Status),
 		LeakStatus:      LeakStatusTo(c.LeakStatus),
+		RackExternalId:  c.RackExternalID,
 	}
 }
 
@@ -727,6 +730,7 @@ func RackTo(r *rack.Rack) *pb.Rack {
 
 	result := &pb.Rack{
 		Info:       DeviceInfoTo(&r.Info),
+		ExternalId: r.ExternalID,
 		Location:   LocationTo(&r.Loc),
 		Components: components,
 	}
@@ -1121,7 +1125,11 @@ func TargetSpecTo(ts operation.TargetSpec) (*pb.OperationTargetSpec, error) {
 		racks := make([]*pb.RackTarget, 0, len(ts.Racks))
 		for _, r := range ts.Racks {
 			rt := &pb.RackTarget{}
-			if r.Identifier.ID != uuid.Nil {
+			if r.Identifier.ExternalID != "" {
+				rt.Identifier = &pb.RackTarget_ExternalId{
+					ExternalId: r.Identifier.ExternalID,
+				}
+			} else if r.Identifier.ID != uuid.Nil {
 				rt.Identifier = &pb.RackTarget_Id{
 					Id: UUIDTo(r.Identifier.ID),
 				}
@@ -1130,7 +1138,7 @@ func TargetSpecTo(ts operation.TargetSpec) (*pb.OperationTargetSpec, error) {
 					Name: r.Identifier.Name,
 				}
 			} else {
-				return nil, fmt.Errorf("invalid rack target: neither id nor name is set")
+				return nil, fmt.Errorf("invalid rack target: neither id, external_id, nor name is set")
 			}
 
 			for _, ct := range r.ComponentTypes {
@@ -1277,18 +1285,27 @@ func RackTargetFrom(rt *pb.RackTarget) (operation.RackTarget, error) {
 
 	switch id := rt.GetIdentifier().(type) {
 	case *pb.RackTarget_Id:
-		parsed, err := uuid.Parse(id.Id.GetId())
+		rawID := id.Id.GetId()
+		if rawID == "" {
+			return operation.RackTarget{}, fmt.Errorf("rack target id must not be empty")
+		}
+		parsed, err := uuid.Parse(rawID)
 		if err != nil {
-			return operation.RackTarget{}, fmt.Errorf("invalid rack id %q: %w", id.Id.GetId(), err)
+			return operation.RackTarget{}, fmt.Errorf("invalid rack uuid %q: %w", rawID, err)
 		}
 		target.Identifier.ID = parsed
+	case *pb.RackTarget_ExternalId:
+		if id.ExternalId == "" {
+			return operation.RackTarget{}, fmt.Errorf("rack target external_id must not be empty")
+		}
+		target.Identifier.ExternalID = id.ExternalId
 	case *pb.RackTarget_Name:
 		if id.Name == "" {
 			return operation.RackTarget{}, fmt.Errorf("rack target name must not be empty")
 		}
 		target.Identifier.Name = id.Name
 	default:
-		return operation.RackTarget{}, fmt.Errorf("rack target must have either id or name set")
+		return operation.RackTarget{}, fmt.Errorf("rack target must have either id, external_id, or name set")
 	}
 
 	for _, pbType := range rt.GetComponentTypes() {
@@ -1321,9 +1338,6 @@ func ComponentTargetFrom(ct *pb.ComponentTarget) (operation.ComponentTarget, err
 		target.UUID = parsed
 	case *pb.ComponentTarget_External:
 		extType := ComponentTypeFrom(id.External.GetType())
-		if extType == devicetypes.ComponentTypeUnknown {
-			return operation.ComponentTarget{}, fmt.Errorf("external component type must not be unknown")
-		}
 		if id.External.GetId() == "" {
 			return operation.ComponentTarget{}, fmt.Errorf("external component id must not be empty")
 		}

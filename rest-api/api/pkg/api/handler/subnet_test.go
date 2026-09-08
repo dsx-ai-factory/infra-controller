@@ -139,6 +139,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 	vpc6 := testSubnetBuildVpc(t, dbSession, ip, tenant2, site, tnOrg1, "testVPC", cutil.GetPtr(cdbm.VpcEthernetVirtualizer), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 	vpc7 := testSubnetBuildVpc(t, dbSession, ip, tenant2, site4, tnOrg2, "testVPC", cutil.GetPtr(cdbm.VpcEthernetVirtualizer), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 	vpc8 := testSubnetBuildVpc(t, dbSession, ip, tenant1, site, tnOrg1, "testVPC", cutil.GetPtr(cdbm.VpcFNN), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
+	vpcLegacy := testSubnetBuildVpc(t, dbSession, ip, tenant1, site, tnOrg1, "legacyVPC", nil, cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -186,6 +187,14 @@ func TestSubnetHandler_Create(t *testing.T) {
 	parentPref1, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipb1.Prefix, ipb1.PrefixLength, ipb1.RoutingType, ipb1.InfrastructureProviderID.String(), ipb1.SiteID.String())
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPref1)
+	ipbV6 := testIPBlockBuildIPBlock(t, dbSession, "testipbv6", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8::", 64, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, ipu)
+	// Do not create an IPAM parent for this Pending block. Its test must fail
+	// during source-block validation.
+	ipbPending := testIPBlockBuildIPBlock(t, dbSession, "testipbpending", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.172.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusPending, ipu)
+	ipbLegacy := testIPBlockBuildIPBlock(t, dbSession, "testipblegacy", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.173.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
+	parentPrefLegacy, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbLegacy.Prefix, ipbLegacy.PrefixLength, ipbLegacy.RoutingType, ipbLegacy.InfrastructureProviderID.String(), ipbLegacy.SiteID.String())
+	assert.Nil(t, err)
+	assert.NotNil(t, parentPrefLegacy)
 
 	ipb2 := testIPBlockBuildIPBlock(t, dbSession, "testipb", site2, ip2, &tenant2.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	parentPref2, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipb2.Prefix, ipb2.PrefixLength, ipb2.RoutingType, ipb2.InfrastructureProviderID.String(), ipb2.SiteID.String())
@@ -215,15 +224,19 @@ func TestSubnetHandler_Create(t *testing.T) {
 	prefixLen := 24
 	okBody, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
+	okBodyLegacyVpc, err := json.Marshal(model.APISubnetCreateRequest{Name: "legacy-vpc", Description: cutil.GetPtr(""), VpcID: vpcLegacy.ID.String(), IPv4BlockID: cutil.GetPtr(ipbLegacy.ID.String()), PrefixLength: prefixLen})
+	assert.Nil(t, err)
+	errBodyPendingIPv4Block, err := json.Marshal(model.APISubnetCreateRequest{Name: "pending-ip-block", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipbPending.ID.String()), PrefixLength: prefixLen})
+	assert.Nil(t, err)
 
 	prefixLen = 16
 	okBodyFG, err := json.Marshal(model.APISubnetCreateRequest{Name: "okFG", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipbFG.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 	prefixLen = 30
-	okBodySlash30, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok31", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
+	okBodySlash30, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok30", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 	prefixLen = 31
-	errBodySlash31, err := json.Marshal(model.APISubnetCreateRequest{Name: "err32", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
+	errBodySlash31, err := json.Marshal(model.APISubnetCreateRequest{Name: "err31", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 	prefixLen = 24
 	okBodyNameClash, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), VpcID: vpc2.ID.String(), IPv4BlockID: cutil.GetPtr(ipb3.ID.String()), PrefixLength: prefixLen})
@@ -241,11 +254,13 @@ func TestSubnetHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 	errBodyBadIPv4BlockID, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
+	errBodyIPv6AsIPv4Block, err := json.Marshal(model.APISubnetCreateRequest{Name: "ipv6-as-ipv4", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipbV6.ID.String()), PrefixLength: prefixLen})
+	assert.Nil(t, err)
 	errBodyTenantSitePrefixID, err := json.Marshal(model.APISubnetCreateRequest{Name: "private-prefix", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(tenantSitePrefix.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 	errBodyNoIPv4, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), PrefixLength: prefixLen})
 	assert.Nil(t, err)
-	errBodyBadIPv6BlockID, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv6BlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefixLen})
+	errBodyBadIPv6BlockID, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), IPv6BlockID: cutil.GetPtr(uuid.New().String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 
 	errBodyBadIPv4BlockIDTenantMismatch, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb2.ID.String()), PrefixLength: prefixLen})
@@ -344,7 +359,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
-			name:           "error when vpc in request is not ethernet virtualization",
+			name:           "REST Subnet creation rejects an FNN VPC",
 			reqOrgName:     tnOrg1,
 			reqBody:        string(errBodyBadVpctype),
 			user:           tnu,
@@ -352,7 +367,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
-			name:           "error when ipv6block is present in request",
+			name:           "REST Subnet creation rejects ipv6BlockId",
 			reqOrgName:     tnOrg1,
 			reqBody:        string(errBodyBadIPv6BlockID),
 			user:           tnu,
@@ -360,7 +375,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
-			name:           "error when ipv4block is not present in request",
+			name:           "REST Subnet creation requires ipv4BlockId",
 			reqOrgName:     tnOrg1,
 			reqBody:        string(errBodyNoIPv4),
 			user:           tnu,
@@ -376,13 +391,31 @@ func TestSubnetHandler_Create(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
+			name:           "Pending tenant IPv4 block is rejected before IPAM allocation",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyPendingIPv4Block),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "Could not find a Ready, tenant-allocated IPv4 IP block specified by ipv4BlockId",
+		},
+		{
+			name:           "ipv4BlockId rejects an IPv6 IP block",
+			reqOrgName:     tnOrg1,
+			reqBody:        string(errBodyIPv6AsIPv4Block),
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+			expectedErrMsg: "ipv4BlockId must reference an IPv4 IP block for Subnet creation",
+		},
+		{
 			name:           "Tenant SitePrefix cannot be the source IP Block for a Subnet",
 			reqOrgName:     tnOrg1,
 			reqBody:        string(errBodyTenantSitePrefixID),
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
-			expectedErrMsg: "Error retrieving ipv4 IPBlock from request",
+			expectedErrMsg: "Could not find a Ready, tenant-allocated IPv4 IP block specified by ipv4BlockId",
 		},
 		{
 			name:           "error when ipv4 block in request is not derived for tenant",
@@ -420,6 +453,16 @@ func TestSubnetHandler_Create(t *testing.T) {
 			expectedPrefix:  "192.168.0.0",
 		},
 		{
+			name:            "Ready legacy VPC without networkVirtualizationType remains compatible",
+			reqOrgName:      tnOrg1,
+			reqBody:         string(okBodyLegacyVpc),
+			user:            tnu,
+			expectedErr:     false,
+			expectedStatus:  http.StatusCreated,
+			expectedGateway: "192.173.0.1",
+			expectedPrefix:  "192.173.0.0",
+		},
+		{
 			name:               "success case with Full Grant",
 			reqOrgName:         tnOrg1,
 			reqBody:            string(okBodyFG),
@@ -431,7 +474,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
-			name:            "success case with /31",
+			name:            "success case with /30",
 			reqOrgName:      tnOrg1,
 			reqBody:         string(okBodySlash30),
 			user:            tnu,
@@ -441,7 +484,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 			expectedPrefix:  "192.168.1.0",
 		},
 		{
-			name:           "error case with /32",
+			name:           "error case with /31",
 			reqOrgName:     tnOrg1,
 			reqBody:        string(errBodySlash31),
 			user:           tnu,
@@ -555,7 +598,11 @@ func TestSubnetHandler_Create(t *testing.T) {
 				}
 			} else {
 				if tc.expectedErrMsg != "" {
-					assert.Contains(t, rec.Body.String(), tc.expectedErrMsg)
+					var apiErr struct {
+						Message string `json:"message"`
+					}
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
+					assert.Equal(t, tc.expectedErrMsg, apiErr.Message)
 				}
 			}
 

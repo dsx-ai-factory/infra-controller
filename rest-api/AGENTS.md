@@ -10,7 +10,7 @@ the management backend for NVIDIA Infrastructure Controller (NICo), exposed as a
 provides multi-tenant, API-driven bare-metal lifecycle management, working in
 concert with Core services for on-site hardware operations.
 
-> **Status:** Experimental/Preview. APIs, configurations, and features may
+> **Status:** Active development. APIs, configurations, and features may
 > change without notice between releases.
 
 ### Key Responsibilities
@@ -202,6 +202,11 @@ verification expectations.
   send its ID in the list request, and require each returned row to match that
   exact tenant ID. Test a dual-role caller whose response also contains
   provider-owned and other-tenant resources.
+- When a site-wide TUI resource picker must ignore a narrower active scope,
+  clear that scope and invalidate filtered caches before fetching, then restore
+  the scope and invalidate filtered caches again on every return path so
+  site-wide entries cannot be reused under the restored scope. Test the scoped
+  case.
 - Tests that need a database use a PostgreSQL container (testcontainers-go
   or the Makefile-managed container).
 - Organize tests by the production function or method under test, not by individual
@@ -249,6 +254,10 @@ verification expectations.
   passwords and other credentials. Keep OpenAPI
   descriptions focused on the REST contract rather than internal gRPC
   implementation details.
+- When an authoritative external create returns a contract-critical value,
+  persist it in the request transaction before returning 2xx and independently
+  assert the response and database state. Do not rely on a best-effort cache or
+  later reconciliation for read-after-create behavior.
 - API-layer enum-like request constants exposed through JSON use CapitalCase
   values, for example `SiteWideRoot` and `BMCRoot`.
 - When prose names exact API enum values, format the literals as code, for
@@ -278,7 +287,9 @@ verification expectations.
   backslashes, control characters, non-ASCII text, and shell metacharacters.
 - When a mutation success message reads fields from a response object, reject
   malformed JSON, `null`, empty objects, and missing display fields before
-  printing success.
+  printing success. Use the returned resource values rather than echoing
+  request or discovery values that the server may default or normalize, and
+  test a response whose value differs from the pre-request value.
 
 ### REST endpoints through the Core gRPC proxy
 
@@ -359,7 +370,7 @@ Keep handlers thin and reuse the common surfaces already in the tree:
    `Validate`; keep auth, ownership, site readiness, and DB-backed checks in the
    handler where context is available.
 3. Use `IsProviderOrTenant` from `rest-api/api/pkg/api/handler/util/common/common.go`
-   to retrieve Provider and Tenant objects. When adding list endpoints, reuse 
+   to retrieve Provider and Tenant objects. When adding list endpoints, reuse
    `pagination.PageRequest`, `common.ValidateKnownQueryParams`, and `common.GetSearchQuery`.
 4. Put request-to-proto conversion on the API request type and entity-to-proto
    conversion on the DB model, following the "Proto conversion methods" section
@@ -575,7 +586,8 @@ stays on the entity because there's no API request body for delete.
 `InstanceType` is the reference for everything else under this rollout
 (typed-slice validation, typed-map proto behavior, ozzo composition,
 shared conversion helpers): `(*cdbm.InstanceType).ToProto/FromProto`
-+ `(*InstanceType).AttachCapabilities` on the entity,
+
+- `(*InstanceType).AttachCapabilities` on the entity,
 `APIMachineCapabilities` + `APIMachineCapability` for the list/element
 split, `cdbm.Labels` for the typed map, and
 `common/pkg/util.IntPtrToUint32Ptr` for shared casts.
@@ -849,9 +861,11 @@ When writing git commit messages, follow the conventions below:
 All commits **must** meet the following signing requirement:
 
 - **DCO sign-off** — certifies the Developer Certificate of Origin:
+
   ```bash
   git commit -s -m "Your commit message"
   ```
+
   DCO compliance is enforced automatically; unsigned commits block merging.
 
 ## Pull Request Guidelines
@@ -906,7 +920,7 @@ make pre-commit-update      # update hooks to latest versions
 ## Further Reading
 
 - [`README.md`](README.md) — Project overview and getting started
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — Contribution workflow and DCO process
+- [`CONTRIBUTING.md`](../CONTRIBUTING.md) — Contribution workflow and DCO process
 - [`openapi/README.md`](openapi/README.md) — OpenAPI schema development
 - [`cli/README.md`](cli/README.md) — CLI client reference
 - [`deploy/README.md`](deploy/README.md) — Deployment quickstart guide

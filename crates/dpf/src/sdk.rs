@@ -712,6 +712,7 @@ async fn create_dpu_flavor<R: DpuFlavorRepository>(
             .intercept_bridging
             .as_ref()
             .map(|_| resolved.interfaces.as_ref()),
+        &config.extra_bfcfg_parameters,
     )?;
     let name = flavor.unique_name(&config.flavor_name)?;
     flavor.metadata.name = Some(name.clone());
@@ -753,8 +754,12 @@ async fn create_dpu_flavor_template<R: DpuFlavorTemplateRepository>(
     config: &InitDpfResourcesConfig,
     resolved: &ResolvedInitialization<'_>,
 ) -> Result<String, DpfError> {
-    let mut template =
-        crate::flavor::flavor_bf4_astra(namespace, &config.proxy, resolved.pf_total_sf)?;
+    let mut template = crate::flavor::flavor_bf4_astra(
+        namespace,
+        &config.proxy,
+        resolved.pf_total_sf,
+        &config.extra_bfcfg_parameters,
+    )?;
     let name = template.unique_name(&config.flavor_name)?;
     template.metadata.name = Some(name.clone());
 
@@ -1514,20 +1519,17 @@ fn build_astra_patch_dpu_interfaces_vec() -> Vec<DpuServiceInterfaceTemplateDefi
         .collect()
 }
 
-/// Calculates BF3 or generic-BF4 SF capacity, preserving the legacy total without topology.
+/// Calculates BF3 or generic-BF4 SF capacity from generated endpoints and additional capacity.
+///
+/// With intercept topology, `additional_managed_sf` increases the returned total. Without
+/// topology, generated endpoints and additional capacity must fit inside `reserved`, which is the
+/// returned legacy total.
 pub fn calculate_pf_total_sf(
     interfaces: &[DpuServiceInterfaceTemplateDefinition],
     intercept_bridging: Option<&DpfInterceptBridging>,
     reserved: u32,
+    additional_managed_sf: u32,
 ) -> Result<u32, DpfError> {
-    // ROLLOUT COMPATIBILITY (DPU REPROVISIONING): inventory-free deployments must retain the
-    // historical behavior where the configured reserved value is the complete PF_TOTAL_SF pool.
-    // Adding the static endpoints here would change every existing BF3/BF4 flavor hash and force
-    // those DPUs through an unrequested re-ingestion.
-    if intercept_bridging.is_none() {
-        return Ok(reserved);
-    }
-
     // HBN's chart supports at most 32 attached interfaces. Validate the rendered topology rather
     // than relying only on the configured one-PF/VF15 limit so custom public-SDK inventories
     // cannot bypass the service boundary.
@@ -1553,9 +1555,27 @@ pub fn calculate_pf_total_sf(
             DpfError::ConfigError("DPF service endpoint count exceeds u32".to_string())
         })
     })?;
-    managed_endpoints.checked_add(reserved).ok_or_else(|| {
+    let managed_sf_count = managed_endpoints
+        .checked_add(additional_managed_sf)
+        .ok_or_else(|| DpfError::ConfigError("DPF managed SF count exceeds u32".to_string()))?;
+
+    // ROLLOUT COMPATIBILITY (DPU REPROVISIONING): inventory-free deployments must retain the
+    // historical behavior where the configured reserved value is the complete PF_TOTAL_SF pool.
+    // The managed SFs consume that pool rather than changing the flavor, but
+    // must still fit inside it.
+    if intercept_bridging.is_none() {
+        if managed_sf_count > reserved {
+            return Err(DpfError::ConfigError(format!(
+                "configured DPF managed SFs ({managed_sf_count}) exceed the legacy \
+                 dpf.pf_total_sf_reserved pool ({reserved})"
+            )));
+        }
+        return Ok(reserved);
+    }
+
+    managed_sf_count.checked_add(reserved).ok_or_else(|| {
         DpfError::ConfigError(format!(
-            "configured DPF service endpoints ({managed_endpoints}) plus \
+            "configured DPF managed SFs ({managed_sf_count}) plus \
              dpf.pf_total_sf_reserved ({reserved}) exceed u32"
         ))
     })
@@ -1614,6 +1634,13 @@ fn resolve_initialization_inventory<'a>(
     {
         return Err(DpfError::ConfigError(
             "BF4 Astra requires deployment_scoped_service_interfaces=true".to_string(),
+        ));
+    }
+    if matches!(config.deployment_type, DpuDeploymentType::Bf4Astra)
+        && config.additional_managed_sf != 0
+    {
+        return Err(DpfError::ConfigError(
+            "BF4 Astra does not support additional managed SFs".to_string(),
         ));
     }
 
@@ -1698,6 +1725,7 @@ fn resolve_initialization_inventory<'a>(
                 interfaces.as_ref(),
                 config.intercept_bridging.as_ref(),
                 config.pf_total_sf_reserved,
+                config.additional_managed_sf,
             )?
         }
     };
@@ -2295,6 +2323,7 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
             return Ok(());
         }
 
+        // Build values field from astra_nics configuration passed in.
         let values = match astra_nics {
             Some(nics) => Some(astra_underlay_configuration(&cr_name, &nics)?),
             None => None,
@@ -2371,42 +2400,47 @@ fn astra_underlay_configuration(
     device_name: &str,
     astra_nics: &[&DpaInterface],
 ) -> Result<BTreeMap<String, serde_json::Value>, DpfError> {
-    let underlay_ips = astra_nics
+    let underlay_ip_macs = astra_nics
         .iter()
         .enumerate()
-        .map(|(index, nic)| match nic.underlay_ip {
-            Some(IpAddr::V4(ip)) => Ok(ip),
-            Some(IpAddr::V6(ip)) => Err(DpfError::ConfigError(format!(
-                "Astra underlay NIC {index} has unsupported IPv6 address {ip}; expected IPv4"
-            ))),
-            None => Err(DpfError::ConfigError(format!(
-                "Astra underlay NIC {index} has no underlay IP"
-            ))),
+        .map(|(index, nic)| {
+            let ip = match nic.underlay_ip {
+                Some(IpAddr::V4(ip)) => Ok(ip),
+                Some(IpAddr::V6(ip)) => Err(DpfError::ConfigError(format!(
+                    "Astra underlay NIC {index} has unsupported IPv6 address {ip}; expected IPv4"
+                ))),
+                None => Err(DpfError::ConfigError(format!(
+                    "Astra underlay NIC {index} has no underlay IP"
+                ))),
+            }?;
+            Ok((nic.mac_address.to_string(), ip))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let values = astra_underlay_values_for_ips(&underlay_ips)?;
-    let underlay_ip_strings: Vec<String> =
-        underlay_ips.into_iter().map(|ip| ip.to_string()).collect();
+        .collect::<Result<Vec<_>, DpfError>>()?;
+    let values = astra_underlay_values_for_ip_macs(&underlay_ip_macs)?;
+    let underlay_ip_mac_strings: Vec<String> = underlay_ip_macs
+        .iter()
+        .map(|(_, ip)| ip.to_string())
+        .collect();
     tracing::info!(
-        "Setup DPUDevice {device_name} values for Astra with underlay_ips={} (mask=/31, routes=/16,/13)",
-        underlay_ip_strings.join(", ")
+        "Setup DPUDevice {device_name} values for Astra with underlay_ip_macs={} (mask=/31, routes=/16,/13)",
+        underlay_ip_mac_strings.join(", ")
     );
 
     Ok(values)
 }
 
-/// Builds the per-DPU values consumed by the BF4 Astra `DPUFlavorTemplate`.
-///
-/// `underlay_ips` must contain eight unique IPv4 addresses in this order:
-/// rails 0 through 3 on switch plane 0, followed by rails 0 through 3 on
-/// switch plane 1. For each address, this creates `railX_swpY_ip` as a `/31`
-/// address, `railX_swpY_gw` as its `/31` peer, and `railX_swpY_route1` and
-/// `railX_swpY_route2` as the corresponding `/16` and `/13` route prefixes.
-/// The BF4 Astra template uses these exact values to replace its per-DPU
-/// placeholders when the `DPUDevice` is instantiated.
-fn astra_underlay_values_for_ips(
-    underlay_ips: &[Ipv4Addr],
+/// Build the per-DPU values field for the DPU device object. This
+/// information is for consumption by the BF4 Astra `DPUFlavorTemplate`.
+/// Input order does not matter, the BF4 Astra template uses the MAC address
+/// to find the matching PCI device and bridge at runtime.
+/// For each input index `N`, `ip_N_val` as a `/31` address, `gw_N_val`
+/// `route1_N_val` (/16 route) `route2_N_val` (/13 route) and `mac_N_val`
+/// are added to the values field.
+fn astra_underlay_values_for_ip_macs(
+    underlay_ip_macs: &[(String, Ipv4Addr)],
 ) -> Result<BTreeMap<String, serde_json::Value>, DpfError> {
+    // Astra has four rails and two switch planes. This documents the required set of slots; the
+    // input pair order is intentionally not tied to this array.
     const RAIL_SWITCH_PLANES: [(u8, u8); 8] = [
         (0, 0),
         (1, 0),
@@ -2418,22 +2452,27 @@ fn astra_underlay_values_for_ips(
         (3, 1),
     ];
 
-    if underlay_ips.len() != RAIL_SWITCH_PLANES.len() {
+    // Make sure that there are 8 MAC-IP pairs and they are all unique.
+    if underlay_ip_macs.len() != RAIL_SWITCH_PLANES.len() {
         tracing::error!(
             expected_underlay_ip_count = RAIL_SWITCH_PLANES.len(),
-            actual_underlay_ip_count = underlay_ips.len(),
-            "Astra requires exactly eight underlay IPs"
+            actual_underlay_ip_count = underlay_ip_macs.len(),
+            "Astra requires exactly eight underlay MAC/IP pairs"
         );
         return Err(DpfError::ConfigError(format!(
-            "Astra requires exactly {} underlay IPs, got {}",
+            "Astra requires exactly {} underlay MAC/IP pairs, got {}",
             RAIL_SWITCH_PLANES.len(),
-            underlay_ips.len()
+            underlay_ip_macs.len()
         )));
     }
-    let unique_underlay_ip_count = underlay_ips.iter().copied().collect::<BTreeSet<_>>().len();
-    if unique_underlay_ip_count != underlay_ips.len() {
+    let unique_underlay_ip_count = underlay_ip_macs
+        .iter()
+        .map(|(_, ip)| *ip)
+        .collect::<BTreeSet<_>>()
+        .len();
+    if unique_underlay_ip_count != underlay_ip_macs.len() {
         tracing::error!(
-            underlay_ip_count = underlay_ips.len(),
+            underlay_ip_count = underlay_ip_macs.len(),
             unique_underlay_ip_count,
             "Astra underlay IPs must be unique"
         );
@@ -2441,22 +2480,40 @@ fn astra_underlay_values_for_ips(
             "Astra underlay IPs must be unique".to_string(),
         ));
     }
+    let unique_underlay_mac_count = underlay_ip_macs
+        .iter()
+        .map(|(mac, _)| mac)
+        .collect::<BTreeSet<_>>()
+        .len();
+    if unique_underlay_mac_count != underlay_ip_macs.len() {
+        tracing::error!(
+            underlay_mac_count = underlay_ip_macs.len(),
+            unique_underlay_mac_count,
+            "Astra underlay MACs must be unique"
+        );
+        return Err(DpfError::ConfigError(
+            "Astra underlay MACs must be unique".to_string(),
+        ));
+    }
 
+    // Add ip_N_val, gw_N_val, route1_N_val, route2_N_val and mac_N_val
+    // to the values field, which will be added to the DPU device object.
+    // N goes from 0 to 7, one for each of the input ip-mac pairs.
     let mut values = BTreeMap::new();
-    for ((rail, switch_plane), ip) in RAIL_SWITCH_PLANES.into_iter().zip(underlay_ips) {
-        let key = format!("rail{rail}_swp{switch_plane}");
+    for (index, (mac, ip)) in underlay_ip_macs.iter().enumerate() {
         let octets = ip.octets();
         let gateway = Ipv4Addr::from(u32::from(*ip) ^ 1);
-        values.insert(format!("{key}_ip"), json!(format!("{ip}/31")));
-        values.insert(format!("{key}_gw"), json!(gateway.to_string()));
+        values.insert(format!("ip_{index}_val"), json!(format!("{ip}/31")));
+        values.insert(format!("gw_{index}_val"), json!(gateway.to_string()));
         values.insert(
-            format!("{key}_route1"),
+            format!("route1_{index}_val"),
             json!(format!("{}.{}.0.0/16", octets[0], octets[1])),
         );
         values.insert(
-            format!("{key}_route2"),
+            format!("route2_{index}_val"),
             json!(format!("{}.{}.0.0/13", octets[0], octets[1] & 0b1111_1000)),
         );
+        values.insert(format!("mac_{index}_val"), json!(mac.clone()));
     }
     Ok(values)
 }
@@ -3697,7 +3754,8 @@ mod tests {
     use std::sync::{Arc, RwLock};
 
     use async_trait::async_trait;
-    use carbide_test_support::value_scenarios;
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::{scenarios, value_scenarios};
     use kube::Resource;
 
     use super::*;
@@ -3967,27 +4025,62 @@ mod tests {
 
         // The configured cases count every HBN, DHCP, and FMDS endpoint, including fixed uplinks.
         value_scenarios!(
-            run = |(interfaces, intercept_bridging)| {
+            run = |(interfaces, intercept_bridging, additional_managed_sf)| {
                 calculate_pf_total_sf(
                     interfaces,
                     intercept_bridging,
                     DEFAULT_PF_TOTAL_SF_RESERVED,
+                    additional_managed_sf,
                 )
                 .unwrap()
             };
             "legacy static inventory" {
                 // Static endpoints are intentionally not added because doing so would reprovision existing DPUs.
-                (&static_interfaces, None) => 30,
+                (&static_interfaces, None, 0) => 30,
+            }
+
+            "legacy static inventory does not change for an additional managed SF" {
+                (&static_interfaces, None, 1) => 30,
             }
 
             "configured PF and sixteen VF inventory" {
                 // Two fixed HBN, three PF, and two endpoints per VF consume 37 managed SFs.
-                (&configured_interfaces, Some(&configured_topology)) => 67,
+                (&configured_interfaces, Some(&configured_topology), 0) => 67,
+            }
+
+            "configured inventory with an additional managed SF" {
+                (&configured_interfaces, Some(&configured_topology), 1) => 68,
             }
         );
 
         // The maximum supported topology remains below HBN's 32-interface boundary.
         assert_eq!(interface_counts(&configured_interfaces), (0, 19, 19, 17, 1));
+    }
+
+    /// Verifies legacy managed endpoints cannot overcommit the unchanged SF pool.
+    #[test]
+    fn legacy_pf_total_sf_rejects_endpoint_overcommit() {
+        let interfaces = build_effective_dpu_interfaces(16, None);
+
+        scenarios!(
+            run = |additional_managed_sf: u32| {
+                calculate_pf_total_sf(
+                    &interfaces,
+                    None,
+                    DEFAULT_PF_TOTAL_SF_RESERVED,
+                    additional_managed_sf,
+                )
+                .map_err(drop)
+            };
+
+            "generated and additional endpoints fit" {
+                2 => Yields(DEFAULT_PF_TOTAL_SF_RESERVED),
+            }
+
+            "additional endpoints overcommit the pool" {
+                3 => Fails,
+            }
+        );
     }
 
     /// Verifies invalid SF arithmetic is rejected before it can become a wrapped NVConfig value.
@@ -3999,7 +4092,7 @@ mod tests {
 
         // Configuration failure is preferable to emitting an unusable DPUFlavor.
         assert!(matches!(
-            calculate_pf_total_sf(&interfaces, Some(&topology), u32::MAX),
+            calculate_pf_total_sf(&interfaces, Some(&topology), u32::MAX, 0),
             Err(DpfError::ConfigError(_))
         ));
     }
@@ -4028,6 +4121,7 @@ mod tests {
                 &interfaces,
                 Some(&topology),
                 DEFAULT_PF_TOTAL_SF_RESERVED,
+                0,
             ),
             Err(DpfError::ConfigError(message)) if message.contains("exceeding the supported maximum of 32")
         ));
@@ -4874,59 +4968,69 @@ mod tests {
     }
 
     #[test]
-    fn astra_underlay_values_follow_rail_and_switch_plane_order() {
-        let underlay_ips = [
-            "100.96.0.212",
-            "100.97.0.214",
-            "100.98.0.216",
-            "100.99.0.218",
-            "100.104.0.220",
-            "100.105.0.222",
-            "100.106.0.224",
-            "100.107.0.226",
+    fn astra_underlay_values_require_unique_mac_and_ip() {
+        let underlay_ip_macs = [
+            ("dc:73:fc:21:f8:20", "100.96.0.212"),
+            ("dc:73:fc:21:f9:30", "100.97.0.214"),
+            ("dc:73:fc:21:f9:20", "100.98.0.216"),
+            ("dc:73:fc:21:f8:50", "100.99.0.218"),
+            ("dc:73:fc:21:f9:50", "100.104.0.220"),
+            ("dc:73:fc:21:f8:40", "100.105.0.222"),
+            ("dc:73:fc:21:f9:40", "100.106.0.224"),
+            ("dc:73:fc:21:f8:30", "100.107.0.226"),
         ]
-        .map(|ip| ip.parse::<Ipv4Addr>().unwrap());
+        .map(|(mac, ip)| (mac.to_string(), ip.parse::<Ipv4Addr>().unwrap()));
 
-        let values = astra_underlay_values_for_ips(&underlay_ips).unwrap();
-        assert_eq!(values.len(), 32);
-        assert_eq!(values["rail0_swp0_ip"].as_str(), Some("100.96.0.212/31"));
-        assert_eq!(values["rail0_swp0_gw"].as_str(), Some("100.96.0.213"));
-        assert_eq!(values["rail0_swp0_route1"].as_str(), Some("100.96.0.0/16"));
-        assert_eq!(values["rail0_swp0_route2"].as_str(), Some("100.96.0.0/13"));
-        assert_eq!(values["rail3_swp1_ip"].as_str(), Some("100.107.0.226/31"));
-        assert_eq!(values["rail3_swp1_gw"].as_str(), Some("100.107.0.227"));
-        assert_eq!(values["rail3_swp1_route1"].as_str(), Some("100.107.0.0/16"));
-        assert_eq!(values["rail3_swp1_route2"].as_str(), Some("100.104.0.0/13"));
-        assert!(astra_underlay_values_for_ips(&underlay_ips[..7]).is_err());
+        let values = astra_underlay_values_for_ip_macs(&underlay_ip_macs).unwrap();
+        assert_eq!(values.len(), 40);
+        assert_eq!(values["mac_0_val"].as_str(), Some("dc:73:fc:21:f8:20"));
+        assert_eq!(values["ip_0_val"].as_str(), Some("100.96.0.212/31"));
+        assert_eq!(values["gw_0_val"].as_str(), Some("100.96.0.213"));
+        assert_eq!(values["route1_0_val"].as_str(), Some("100.96.0.0/16"));
+        assert_eq!(values["route2_0_val"].as_str(), Some("100.96.0.0/13"));
+        assert_eq!(values["mac_7_val"].as_str(), Some("dc:73:fc:21:f8:30"));
+        assert_eq!(values["ip_7_val"].as_str(), Some("100.107.0.226/31"));
+        assert_eq!(values["gw_7_val"].as_str(), Some("100.107.0.227"));
+        assert_eq!(values["route1_7_val"].as_str(), Some("100.107.0.0/16"));
+        assert_eq!(values["route2_7_val"].as_str(), Some("100.104.0.0/13"));
+        assert!(astra_underlay_values_for_ip_macs(&underlay_ip_macs[..7]).is_err());
 
-        let mut duplicate_ips = underlay_ips;
-        duplicate_ips[7] = duplicate_ips[0];
-        let error = astra_underlay_values_for_ips(&duplicate_ips).unwrap_err();
+        let mut duplicate_ips = underlay_ip_macs.clone();
+        duplicate_ips[7].1 = duplicate_ips[0].1;
+        let error = astra_underlay_values_for_ip_macs(&duplicate_ips).unwrap_err();
         assert!(
             matches!(error, DpfError::ConfigError(message) if message == "Astra underlay IPs must be unique")
+        );
+
+        let mut duplicate_macs = underlay_ip_macs;
+        duplicate_macs[7].0 = duplicate_macs[0].0.clone();
+        let error = astra_underlay_values_for_ip_macs(&duplicate_macs).unwrap_err();
+        assert!(
+            matches!(error, DpfError::ConfigError(message) if message == "Astra underlay MACs must be unique")
         );
     }
 
     #[test]
     fn astra_dpu_device_values_exactly_match_flavor_template_references() {
-        let underlay_ips = [
-            "100.96.0.212",
-            "100.97.0.214",
-            "100.98.0.216",
-            "100.99.0.218",
-            "100.104.0.220",
-            "100.105.0.222",
-            "100.106.0.224",
-            "100.107.0.226",
+        let underlay_ip_macs = [
+            ("dc:73:fc:21:f8:20", "100.96.0.212"),
+            ("dc:73:fc:21:f9:30", "100.97.0.214"),
+            ("dc:73:fc:21:f9:20", "100.98.0.216"),
+            ("dc:73:fc:21:f8:50", "100.99.0.218"),
+            ("dc:73:fc:21:f9:50", "100.104.0.220"),
+            ("dc:73:fc:21:f8:40", "100.105.0.222"),
+            ("dc:73:fc:21:f9:40", "100.106.0.224"),
+            ("dc:73:fc:21:f8:30", "100.107.0.226"),
         ]
-        .map(|ip| ip.parse::<Ipv4Addr>().unwrap());
-        let values = astra_underlay_values_for_ips(&underlay_ips).unwrap();
+        .map(|(mac, ip)| (mac.to_string(), ip.parse::<Ipv4Addr>().unwrap()));
+        let values = astra_underlay_values_for_ip_macs(&underlay_ip_macs).unwrap();
         let value_keys: BTreeSet<_> = values.keys().cloned().collect();
 
         let template = crate::flavor::flavor_bf4_astra(
             "astra-ns",
             &None,
             calculate_astra_pf_total_sf(build_astra_dpu_interfaces_vec().as_slice()).unwrap(),
+            &[],
         )
         .unwrap();
         let reference_keys: BTreeSet<_> = template
@@ -4961,33 +5065,20 @@ mod tests {
             .and_then(|file| file["raw"].as_str())
             .unwrap();
 
-        for ((rail, switch_plane), ip) in [
-            (0, 0),
-            (1, 0),
-            (2, 0),
-            (3, 0),
-            (0, 1),
-            (1, 1),
-            (2, 1),
-            (3, 1),
-        ]
-        .into_iter()
-        .zip(underlay_ips)
-        {
+        assert!(xplane_script.contains("bridge_for_mac()"));
+        assert!(
+            xplane_script
+                .contains("/sys/bus/pci/devices/${pci}/net/${iface_val}/smart_nic/pf/config")
+        );
+        assert!(xplane_script.contains("grep -qiF \"$target_mac\" \"$config_path\""));
+
+        for (mac, ip) in underlay_ip_macs {
             let octets = ip.octets();
             let gateway = Ipv4Addr::from(u32::from(ip) ^ 1);
-            let bridge = format!("brcx-r{rail}swpln{switch_plane}");
-            assert!(
-                xplane_script.contains(&format!(
-                    "echo \"    {bridge}:\"\n    echo \"      addresses:\"\n    echo \"        - {ip}/31\""
-                ))
-            );
             assert!(xplane_script.contains(&format!(
-                "echo \"        - to: {}.{}.0.0/16\"\n    echo \"          via: {gateway}\"",
-                octets[0], octets[1]
-            )));
-            assert!(xplane_script.contains(&format!(
-                "echo \"        - to: {}.{}.0.0/13\"\n    echo \"          via: {gateway}\"",
+                "\"{mac}|{ip}/31|{gateway}|{}.{}.0.0/16|{}.{}.0.0/13\"",
+                octets[0],
+                octets[1],
                 octets[0],
                 octets[1] & 0b1111_1000
             )));

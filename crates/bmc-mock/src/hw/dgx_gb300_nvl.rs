@@ -170,6 +170,7 @@ impl DgxGB300Nvl<'_> {
                     log_services: None,
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("GB300 1CPU:2GPU Board PC".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: None,
                     serial_console: None,
@@ -191,6 +192,7 @@ impl DgxGB300Nvl<'_> {
                     // DGX GB300: NVIDIA host system (vs Lenovo's "HG634N_V2").
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("GB300 Titania-Bianca Compute Tray".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: Some(callbacks),
                     serial_console: None,

@@ -421,6 +421,7 @@ impl ComputeTrayManager for MockComputeTrayManager {
             .iter()
             .map(|ep| ComputeTrayResult {
                 bmc_ip: ep.bmc_ip,
+                bmc_mac: ep.bmc_mac,
                 success: true,
                 error: None,
             })
@@ -438,6 +439,7 @@ impl ComputeTrayManager for MockComputeTrayManager {
             .iter()
             .map(|ep| ComputeTrayResult {
                 bmc_ip: ep.bmc_ip,
+                bmc_mac: ep.bmc_mac,
                 success: true,
                 error: None,
             })
@@ -452,6 +454,7 @@ impl ComputeTrayManager for MockComputeTrayManager {
             .iter()
             .map(|ep| ComputeTrayFirmwareUpdateStatus {
                 bmc_ip: ep.bmc_ip,
+                bmc_mac: ep.bmc_mac,
                 state: FirmwareState::Completed,
                 target_version: "mock-1.0.0".into(),
                 error: None,
