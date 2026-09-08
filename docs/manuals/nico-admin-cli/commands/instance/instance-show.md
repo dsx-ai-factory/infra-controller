@@ -1,6 +1,6 @@
 # `nico-admin-cli instance show`
 
-_[Tenant commands](../../tenant.md) › [instance](./instance.md) › **show**_
+*[Tenant commands](../../tenant.md) › [instance](./instance.md) › **show***
 
 ## NAME
 
@@ -8,10 +8,12 @@ nico-admin-cli-instance-show - Display instance information
 
 ## SYNOPSIS
 
-**nico-admin-cli instance show** \[**-e**\|**--extrainfo**\]
-\[**-t**\|**--tenant-org-id**\] \[**-v**\|**--vpc-id**\]
-\[**--label-key**\] \[**--label-value**\] \[**--instance-type-id**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\] \[*ID*\]
+```text
+nico-admin-cli instance show [-e|--extrainfo]
+[-t|--tenant-org-id] [-v|--vpc-id]
+[--label-key] [--label-value] [--instance-type-id]
+[--extended] [--sort-by] [-h|--help] [ID]
+```
 
 ## DESCRIPTION
 
@@ -19,43 +21,52 @@ Display instance information
 
 ## OPTIONS
 
-**-e**, **--extrainfo**  
-**-t**, **--tenant-org-id** *\<TENANT_ORG_ID\>*  
+`-e, --extrainfo`
+
+`-t, --tenant-org-id <TENANT_ORG_ID>`
+
 The Tenant Org ID to query
 
-**-v**, **--vpc-id** *\<VPC_ID\>*  
+`-v, --vpc-id <VPC_ID>`
+
 The VPC ID to query.
 
-**--label-key** *\<LABEL_KEY\>*  
+`--label-key <LABEL_KEY>`
+
 The key of label instance to query
 
-**--label-value** *\<LABEL_VALUE\>*  
+`--label-value <LABEL_VALUE>`
+
 The value of label instance to query
 
-**--instance-type-id** *\<INSTANCE_TYPE_ID\>*  
+`--instance-type-id <INSTANCE_TYPE_ID>`
+
 The instance type ID to query.
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\[*ID*\] \[default: \]  
+[*ID*] [default: ]
+
 The instance ID to query, leave empty for all (default)
 
 ## Examples

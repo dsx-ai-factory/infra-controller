@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot bundle list machines`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [bundle](./attestation-measured-boot-bundle.md) › [list](./attestation-measured-boot-bundle-list.md) › **machines**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [bundle](./attestation-measured-boot-bundle.md) › [list](./attestation-measured-boot-bundle-list.md) › **machines***
 
 ## NAME
 
@@ -9,9 +9,11 @@ machines for a given bundle ID.
 
 ## SYNOPSIS
 
-**nico-admin-cli attestation measured-boot bundle list machines**
-\[**--is-id**\] \[**--is-name**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*IDENTIFIER*\>
+```text
+nico-admin-cli attestation measured-boot bundle list machines
+[--is-id] [--is-name] [--extended] [--sort-by]
+[-h|--help] <IDENTIFIER>
+```
 
 ## DESCRIPTION
 
@@ -19,33 +21,38 @@ List all machines for a given bundle ID.
 
 ## OPTIONS
 
-**--is-id**  
+`--is-id`
+
 Explicitly say the identifier is bundle ID.
 
-**--is-name**  
+`--is-name`
+
 Explicitly say the identifier is a bundle name.
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*IDENTIFIER*\>  
+`<IDENTIFIER>`
+
 The existing bundle ID or name.
 
 ## Examples

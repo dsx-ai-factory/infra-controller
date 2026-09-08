@@ -1,41 +1,45 @@
 # `nico-admin-cli credential force-bmc`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **force-bmc**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **force-bmc***
 
 ## NAME
 
-nico-admin-cli-credential-force-bmc - Force-converge a single BMCs
-credentials now (operator escape hatch)
+nico-admin-cli-credential-force-bmc - Force-converge credentials for a
+single BMC now (operator escape hatch)
 
 ## SYNOPSIS
 
-**nico-admin-cli credential force-bmc** \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\] \<*subcommands*\>
+```text
+nico-admin-cli credential force-bmc [--extended]
+[--sort-by] [-h|--help] <subcommands>
+```
 
 ## DESCRIPTION
 
-Force-converge a single BMCs credentials now (operator escape hatch)
+Force-converge credentials for a single BMC now (operator escape hatch)
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples
@@ -52,8 +56,8 @@ nico-admin-cli credential force-bmc clear --id fm100ht038bg3qsho433vkg684heguv28
 
 | Subcommand | Description |
 |---|---|
-| [`set`](./credential-force-bmc-set.md) | Request an immediate BMC credential rotation of a machine, switch, or power shelf. |
-| [`clear`](./credential-force-bmc-clear.md) | Clear a pending BMC force-converge request for a machine, switch, or power shelf. |
+| [`set`](./credential-force-bmc-set.md) | Request an immediate BMC credential rotation of a machine, DPU, switch, or power shelf. |
+| [`clear`](./credential-force-bmc-clear.md) | Clear a pending BMC force-converge request for a machine, DPU, switch, or power shelf. |
 
 ---
 

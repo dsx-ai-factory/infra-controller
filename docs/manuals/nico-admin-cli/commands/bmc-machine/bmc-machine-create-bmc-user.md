@@ -1,6 +1,6 @@
 # `nico-admin-cli bmc-machine create-bmc-user`
 
-_[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **create-bmc-user**_
+*[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **create-bmc-user***
 
 ## NAME
 
@@ -8,35 +8,42 @@ nico-admin-cli-bmc-machine-create-bmc-user
 
 ## SYNOPSIS
 
-**nico-admin-cli bmc-machine create-bmc-user**
-\[**-i**\|**--ip-address**\] \[**--mac-address**\]
-\[**-m**\|**--machine**\] \<**-u**\|**--username**\>
-\<**-p**\|**--password**\> \[**-r**\|**--role-id**\] \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli bmc-machine create-bmc-user
+[-i|--ip-address] [--mac-address]
+[-m|--machine] <-u|--username>
+<-p|--password> [-r|--role-id] [--extended]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
 ## OPTIONS
 
-**-i**, **--ip-address** *\<IP_ADDRESS\>*  
+`-i, --ip-address <IP_ADDRESS>`
+
 IP of the BMC where we want to create a new user
 
-**--mac-address** *\<MAC_ADDRESS\>*  
+`--mac-address <MAC_ADDRESS>`
+
 MAC of the BMC where we want to create a new user
 
-**-m**, **--machine** *\<MACHINE\>*  
+`-m, --machine <MACHINE>`
+
 ID of the machine where we want to create a new user
 
-**-u**, **--username** *\<USERNAME\>*  
+`-u, --username <USERNAME>`
+
 Username of new BMC account
 
-**-p**, **--password** *\<PASSWORD\>*  
+`-p, --password <PASSWORD>`
+
 Password of new BMC account
 
-**-r**, **--role-id** *\<ROLE_ID\>*  
-Role of new BMC account (default: administrator)\
+`-r, --role-id <ROLE_ID>`
 
-\
+Role of new BMC account (default: administrator)
+
 *Possible values:*
 
 - administrator
@@ -47,24 +54,26 @@ Role of new BMC account (default: administrator)\
 
 - noaccess
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

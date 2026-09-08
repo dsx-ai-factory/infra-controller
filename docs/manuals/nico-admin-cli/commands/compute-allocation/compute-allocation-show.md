@@ -1,6 +1,6 @@
 # `nico-admin-cli compute-allocation show`
 
-_[Tenant commands](../../tenant.md) › [compute-allocation](./compute-allocation.md) › **show**_
+*[Tenant commands](../../tenant.md) › [compute-allocation](./compute-allocation.md) › **show***
 
 ## NAME
 
@@ -9,10 +9,12 @@ allocations
 
 ## SYNOPSIS
 
-**nico-admin-cli compute-allocation show** \[**-i**\|**--id**\]
-\[**-t**\|**--tenant-organization-id**\] \[**-n**\|**--name**\]
-\[**--instance-type-id**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli compute-allocation show [-i|--id]
+[-t|--tenant-organization-id] [-n|--name]
+[--instance-type-id] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -20,36 +22,42 @@ Show one or more compute allocations
 
 ## OPTIONS
 
-**-i**, **--id** *\<ID\>*  
+`-i, --id <ID>`
+
 Optional, compute allocation ID to restrict the search
 
-**-t**, **--tenant-organization-id** *\<TENANT_ORGANIZATION_ID\>*  
+`-t, --tenant-organization-id <TENANT_ORGANIZATION_ID>`
+
 Optional, tenant organization ID used to filter results
 
-**-n**, **--name** *\<NAME\>*  
+`-n, --name <NAME>`
+
 Optional, name used to filter results
 
-**--instance-type-id** *\<INSTANCE_TYPE_ID\>*  
+`--instance-type-id <INSTANCE_TYPE_ID>`
+
 Optional, instance type ID used to filter results
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

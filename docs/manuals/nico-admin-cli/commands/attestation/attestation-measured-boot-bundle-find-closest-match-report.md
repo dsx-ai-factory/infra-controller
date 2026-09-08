@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot bundle find-closest-match report`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [bundle](./attestation-measured-boot-bundle.md) › [find-closest-match](./attestation-measured-boot-bundle-find-closest-match.md) › **report**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [bundle](./attestation-measured-boot-bundle.md) › [find-closest-match](./attestation-measured-boot-bundle-find-closest-match.md) › **report***
 
 ## NAME
 
@@ -9,9 +9,11 @@ The existing report ID.
 
 ## SYNOPSIS
 
-**nico-admin-cli attestation measured-boot bundle find-closest-match
-report** \[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
-\<*ID*\>
+```text
+nico-admin-cli attestation measured-boot bundle find-closest-match
+report [--extended] [--sort-by] [-h|--help]
+<ID>
+```
 
 ## DESCRIPTION
 
@@ -19,27 +21,30 @@ The existing report ID.
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*ID*\>  
+`<ID>`
+
 Report ID.
 
 ## Examples

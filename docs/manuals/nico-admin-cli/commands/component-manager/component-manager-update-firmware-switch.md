@@ -1,6 +1,6 @@
 # `nico-admin-cli component-manager update-firmware switch`
 
-_[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [update-firmware](./component-manager-update-firmware.md) › **switch**_
+*[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [update-firmware](./component-manager-update-firmware.md) › **switch***
 
 ## NAME
 
@@ -9,11 +9,13 @@ on NVLink switches
 
 ## SYNOPSIS
 
-**nico-admin-cli component-manager update-firmware switch**
-\<**--switch-id**\> \[**--target-version**\] \[**--sot-json-file**\]
-\[**--access-token**\] \[**--force-update**\] \[**--component**\]
-\[**--bypass-state-controller**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli component-manager update-firmware switch
+[--switch-id] [--mac-address] [--target-version]
+[--sot-json-file] [--access-token] [--force-update]
+[--component] [--bypass-state-controller] [--extended]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -21,27 +23,37 @@ Queue firmware on NVLink switches
 
 ## OPTIONS
 
-**--switch-id** *\<SWITCH_IDS\>...*  
+`--switch-id <SWITCH_IDS>...`
+
 Switch IDs to target
 
-**--target-version** *\<TARGET_VERSION\>*  
+`--mac-address <MAC_ADDRESSES>...`
+
+Device MAC addresses to target (BMC MAC for compute/switch, PMC MAC for
+power shelf)
+
+`--target-version <TARGET_VERSION>`
+
 Firmware target version for legacy direct-update paths
 
-**--sot-json-file** *\<PATH\>*  
+`--sot-json-file <PATH>`
+
 SOT JSON file for RMS ApplyFirmwareObject
 
-**--access-token** *\<ACCESS_TOKEN\>*  
+`--access-token <ACCESS_TOKEN>`
+
 Artifact access token for RMS SOT JSON downloads; omit or pass empty for
 NOAUTH
 
-**--force-update**  
+`--force-update`
+
 Force firmware update when supported
 
-**--component** *\<COMPONENTS\>*  
-NVLink switch components to update; omit to update all supported
-components\
+`--component <COMPONENTS>`
 
-\
+NVLink switch components to update; omit to update all supported
+components
+
 *Possible values:*
 
 - bmc
@@ -52,28 +64,31 @@ components\
 
 - nvos
 
-**--bypass-state-controller**  
+`--bypass-state-controller`
+
 Bypass the state controller and dispatch directly to the component
 backend
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ---

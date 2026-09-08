@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation spdm get`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [spdm](./attestation-spdm.md) › **get**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [spdm](./attestation-spdm.md) › **get***
 
 ## NAME
 
@@ -9,8 +9,10 @@ given machine id
 
 ## SYNOPSIS
 
-**nico-admin-cli attestation spdm get** \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\] \<*MACHINE_ID*\>
+```text
+nico-admin-cli attestation spdm get [--extended]
+[--sort-by] [-h|--help] <MACHINE_ID>
+```
 
 ## DESCRIPTION
 
@@ -18,27 +20,30 @@ Get SPDM attestation details for a given machine id
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*MACHINE_ID*\>  
+`<MACHINE_ID>`
+
 Machine ID
 
 ## Examples

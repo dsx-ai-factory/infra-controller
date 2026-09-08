@@ -1,6 +1,6 @@
 # `nico-admin-cli machine metadata from-expected-machine`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › [metadata](./machine-metadata.md) › **from-expected-machine**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › [metadata](./machine-metadata.md) › **from-expected-machine***
 
 ## NAME
 
@@ -9,9 +9,11 @@ Metadata from Expected-Machine to Machine
 
 ## SYNOPSIS
 
-**nico-admin-cli machine metadata from-expected-machine**
-\[**--replace-all**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*MACHINE*\>
+```text
+nico-admin-cli machine metadata from-expected-machine
+[--replace-all] [--extended] [--sort-by]
+[-h|--help] <MACHINE>
+```
 
 ## DESCRIPTION
 
@@ -19,7 +21,8 @@ Copy Machine Metadata from Expected-Machine to Machine
 
 ## OPTIONS
 
-**--replace-all**  
+`--replace-all`
+
 Whether to fully replace the Metadata that is currently stored on the
 Machine. - If not set, existing Metadata on the Machine will not be
 touched by executing the command: - The existing Name will not be
@@ -31,27 +34,30 @@ be set to the same values as they would if the Machine would get freshly
 ingested. Metadata that is currently set on the Machine will be
 overridden.
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*MACHINE*\>  
+`<MACHINE>`
+
 The machine which should get updated metadata
 
 ## Examples

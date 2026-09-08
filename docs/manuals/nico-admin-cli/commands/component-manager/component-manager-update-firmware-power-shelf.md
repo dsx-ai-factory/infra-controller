@@ -1,6 +1,6 @@
 # `nico-admin-cli component-manager update-firmware power-shelf`
 
-_[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [update-firmware](./component-manager-update-firmware.md) › **power-shelf**_
+*[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › [update-firmware](./component-manager-update-firmware.md) › **power-shelf***
 
 ## NAME
 
@@ -9,10 +9,12 @@ firmware on power shelves
 
 ## SYNOPSIS
 
-**nico-admin-cli component-manager update-firmware power-shelf**
-\<**--power-shelf-id**\> \<**--target-version**\> \[**--force-update**\]
-\[**--component**\] \[**--bypass-state-controller**\] \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli component-manager update-firmware power-shelf
+<--power-shelf-id> <--target-version> [--force-update]
+[--component] [--bypass-state-controller] [--extended]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -20,48 +22,54 @@ Queue firmware on power shelves
 
 ## OPTIONS
 
-**--power-shelf-id** *\<POWER_SHELF_IDS\>...*  
+`--power-shelf-id <POWER_SHELF_IDS>...`
+
 Power shelf IDs to target
 
-**--target-version** *\<TARGET_VERSION\>*  
+`--target-version <TARGET_VERSION>`
+
 Firmware target version
 
-**--force-update**  
+`--force-update`
+
 Force firmware update when supported
 
-**--component** *\<COMPONENTS\>*  
-Power shelf components to update; omit to update all supported
-components\
+`--component <COMPONENTS>`
 
-\
+Power shelf components to update; omit to update all supported
+components
+
 *Possible values:*
 
 - pmc
 
 - psu
 
-**--bypass-state-controller**  
+`--bypass-state-controller`
+
 Bypass the state controller and dispatch directly to the component
 backend
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ---

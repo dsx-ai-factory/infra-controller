@@ -1,6 +1,6 @@
 # `nico-admin-cli extension-service show`
 
-_[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **show**_
+*[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **show***
 
 ## NAME
 
@@ -9,10 +9,12 @@ information
 
 ## SYNOPSIS
 
-**nico-admin-cli extension-service show** \[**-i**\|**--id**\]
-\[**-t**\|**--type**\] \[**-n**\|**--name**\]
-\[**-o**\|**--tenant-organization-id**\] \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli extension-service show [-i|--id]
+[-t|--type] [-n|--name]
+[-o|--tenant-organization-id] [--extended]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -20,41 +22,46 @@ Show extension service information
 
 ## OPTIONS
 
-**-i**, **--id** *\<ID\>*  
+`-i, --id <ID>`
+
 The extension service ID to show (leave empty to show all)
 
-**-t**, **--type** *\<SERVICE_TYPE\>*  
-Filter by service type (optional)\
+`-t, --type <SERVICE_TYPE>`
 
-\
+Filter by service type (optional)
+
 *Possible values:*
 
 - kubernetes-pod
 
-**-n**, **--name** *\<SERVICE_NAME\>*  
+`-n, --name <SERVICE_NAME>`
+
 Filter by service name (optional)
 
-**-o**, **--tenant-organization-id** *\<TENANT_ORGANIZATION_ID\>*  
+`-o, --tenant-organization-id <TENANT_ORGANIZATION_ID>`
+
 Filter by tenant organization ID (optional)
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

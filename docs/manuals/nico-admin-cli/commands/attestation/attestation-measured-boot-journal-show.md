@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot journal show`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [journal](./attestation-measured-boot-journal.md) › **show**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [journal](./attestation-measured-boot-journal.md) › **show***
 
 ## NAME
 
@@ -9,9 +9,11 @@ entry by ID, or all.
 
 ## SYNOPSIS
 
-**nico-admin-cli attestation measured-boot journal show**
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
-\[*JOURNAL_ID*\]
+```text
+nico-admin-cli attestation measured-boot journal show
+[--extended] [--sort-by] [-h|--help]
+[JOURNAL_ID]
+```
 
 ## DESCRIPTION
 
@@ -19,27 +21,30 @@ Show a journal entry by ID, or all.
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\[*JOURNAL_ID*\]  
+[*JOURNAL_ID*]
+
 The optional journal entry ID.
 
 ## Examples

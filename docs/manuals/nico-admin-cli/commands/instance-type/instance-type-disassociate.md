@@ -1,6 +1,6 @@
 # `nico-admin-cli instance-type disassociate`
 
-_[Tenant commands](../../tenant.md) › [instance-type](./instance-type.md) › **disassociate**_
+*[Tenant commands](../../tenant.md) › [instance-type](./instance-type.md) › **disassociate***
 
 ## NAME
 
@@ -9,8 +9,10 @@ association from a machines
 
 ## SYNOPSIS
 
-**nico-admin-cli instance-type disassociate** \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\] \<*MACHINE_ID*\>
+```text
+nico-admin-cli instance-type disassociate [--extended]
+[--sort-by] [-h|--help] <MACHINE_ID>
+```
 
 ## DESCRIPTION
 
@@ -18,33 +20,36 @@ Remove an instance type association from a machines
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*MACHINE_ID*\>  
+`<MACHINE_ID>`
+
 Machine Id
 
 ## Examples
 
 ```sh
-nico-admin-cli instance-type disassociate 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli instance-type disassociate fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0
 ```
 
 ---

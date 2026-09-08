@@ -1,6 +1,6 @@
 # `nico-admin-cli machine positions`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › **positions**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › **positions***
 
 ## NAME
 
@@ -9,8 +9,10 @@ machines in rack-based systems
 
 ## SYNOPSIS
 
-**nico-admin-cli machine positions** \[**-m**\|**--machine**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli machine positions [-m|--machine]
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -24,27 +26,30 @@ Associated network switch - Power shelf ID: Associated power shelf
 
 ## OPTIONS
 
-**-m**, **--machine** \[*\<MACHINE\>...*\]  
+`-m, --machine [<MACHINE>...]`
+
 The machine(s) to query, leave empty for all (default)
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

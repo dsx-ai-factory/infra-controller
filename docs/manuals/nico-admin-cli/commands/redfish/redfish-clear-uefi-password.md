@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish clear-uefi-password`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **clear-uefi-password**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **clear-uefi-password***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-redfish-clear-uefi-password - Clear UEFI password
 
 ## SYNOPSIS
 
-**nico-admin-cli redfish clear-uefi-password**
-\<**--current-password**\> \<**--new-password**\> \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli redfish clear-uefi-password
+<--current-password> <--new-password> [--extended]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,30 +20,34 @@ Clear UEFI password
 
 ## OPTIONS
 
-**--current-password** *\<CURRENT_PASSWORD\>*  
+`--current-password <CURRENT_PASSWORD>`
+
 Current UEFI password
 
-**--new-password** *\<NEW_PASSWORD\>*  
+`--new-password <NEW_PASSWORD>`
+
 New UEFI password
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

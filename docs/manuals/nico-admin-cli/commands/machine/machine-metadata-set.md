@@ -1,6 +1,6 @@
 # `nico-admin-cli machine metadata set`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › [metadata](./machine-metadata.md) › **set**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › [metadata](./machine-metadata.md) › **set***
 
 ## NAME
 
@@ -9,9 +9,11 @@ Machine
 
 ## SYNOPSIS
 
-**nico-admin-cli machine metadata set** \[**--name**\]
-\[**--description**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*MACHINE*\>
+```text
+nico-admin-cli machine metadata set [--name]
+[--description] [--extended] [--sort-by]
+[-h|--help] <MACHINE>
+```
 
 ## DESCRIPTION
 
@@ -19,33 +21,38 @@ Set the Name or Description of the Machine
 
 ## OPTIONS
 
-**--name** *\<NAME\>*  
+`--name <NAME>`
+
 The updated name of the Machine
 
-**--description** *\<DESCRIPTION\>*  
+`--description <DESCRIPTION>`
+
 The updated description of the Machine
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*MACHINE*\>  
+`<MACHINE>`
+
 The machine which should get updated metadata
 
 ## Examples

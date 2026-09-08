@@ -1,6 +1,6 @@
 # `nico-admin-cli site-explorer re-explore`
 
-_[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › **re-explore**_
+*[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › **re-explore***
 
 ## NAME
 
@@ -9,8 +9,10 @@ single host in the next exploration cycle. The results will be stored.
 
 ## SYNOPSIS
 
-**nico-admin-cli site-explorer re-explore** \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\] \<*ADDRESS*\>
+```text
+nico-admin-cli site-explorer re-explore [--extended]
+[--sort-by] [-h|--help] <ADDRESS>
+```
 
 ## DESCRIPTION
 
@@ -19,27 +21,30 @@ The results will be stored.
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*ADDRESS*\>  
+`<ADDRESS>`
+
 BMC IP address
 
 ## Examples

@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish dpu firmware update`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › [dpu](./redfish-dpu.md) › [firmware](./redfish-dpu-firmware.md) › **update**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › [dpu](./redfish-dpu.md) › [firmware](./redfish-dpu-firmware.md) › **update***
 
 ## NAME
 
@@ -9,8 +9,10 @@ FW package
 
 ## SYNOPSIS
 
-**nico-admin-cli redfish dpu firmware update** \<**-p**\|**--package**\>
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli redfish dpu firmware update <-p|--package>
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,27 +20,30 @@ Update BMCs FW to the given FW package
 
 ## OPTIONS
 
-**-p**, **--package** *\<PACKAGE\>*  
+`-p, --package <PACKAGE>`
+
 FW package to install
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

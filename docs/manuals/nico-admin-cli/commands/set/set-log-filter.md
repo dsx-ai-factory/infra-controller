@@ -1,6 +1,6 @@
 # `nico-admin-cli set log-filter`
 
-_[Hardware commands](../../hardware.md) › [set](./set.md) › **log-filter**_
+*[Hardware commands](../../hardware.md) › [set](./set.md) › **log-filter***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-set-log-filter - Set RUST_LOG
 
 ## SYNOPSIS
 
-**nico-admin-cli set log-filter** \<**-f**\|**--filter**\>
-\[**--expiry**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli set log-filter <-f|--filter>
+[--expiry] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,31 +20,35 @@ Set RUST_LOG
 
 ## OPTIONS
 
-**-f**, **--filter** *\<FILTER\>*  
+`-f, --filter <FILTER>`
+
 Set servers RUST_LOG.
 
-**--expiry** *\<EXPIRY\>* \[default: 1h\]  
-Revert to startup RUST_LOG after this much time, friendly format e.g.
-1h, 3min, https://docs.rs/duration-str/latest/duration_str/
+`--expiry <EXPIRY> [default: 1h]`
 
-**--extended**  
+Revert to startup RUST_LOG after this much time, friendly format e.g.
+1h, 3min, [duration-str documentation](https://docs.rs/duration-str/latest/duration_str/)
+
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

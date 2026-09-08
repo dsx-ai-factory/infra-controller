@@ -1,6 +1,6 @@
 # `nico-admin-cli site-prefix create`
 
-_[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **create**_
+*[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **create***
 
 ## NAME
 
@@ -9,10 +9,12 @@ datacenter-only SitePrefix in Provisioning
 
 ## SYNOPSIS
 
-**nico-admin-cli site-prefix create** \<**--tenant-organization-id**\>
-\<**--prefix**\> \<**--name**\> \[**--description**\] \[**--label**\]
-\[**--site-prefix-id**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli site-prefix create <--tenant-organization-id>
+<--prefix> <--name> [--description] [--label]
+[--site-prefix-id] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -20,42 +22,50 @@ Create a tenant-managed, datacenter-only SitePrefix in Provisioning
 
 ## OPTIONS
 
-**--tenant-organization-id** *\<TENANT_ORGANIZATION_ID\>*  
+`--tenant-organization-id <TENANT_ORGANIZATION_ID>`
+
 Tenant organization that will own the SitePrefix
 
-**--prefix** *\<CIDR\>*  
+`--prefix <CIDR>`
+
 Canonical RFC1918 IPv4 prefix with a length from /8 through /31
 
-**--name** *\<NAME\>*  
+`--name <NAME>`
+
 SitePrefix name
 
-**--description** *\<DESCRIPTION\>*  
+`--description <DESCRIPTION>`
+
 SitePrefix description
 
-**--label** *\<KEY\[:VALUE\]\>*  
+`--label <KEY[:VALUE]>`
+
 Metadata label; repeat this option to add more than one
 
-**--site-prefix-id** *\<SITE_PREFIX_ID\>*  
+`--site-prefix-id <SITE_PREFIX_ID>`
+
 Use this SitePrefix ID instead of generating one locally
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

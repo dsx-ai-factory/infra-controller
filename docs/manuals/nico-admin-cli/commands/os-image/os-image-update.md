@@ -1,6 +1,6 @@
 # `nico-admin-cli os-image update`
 
-_[Tenant commands](../../tenant.md) › [os-image](./os-image.md) › **update**_
+*[Tenant commands](../../tenant.md) › [os-image](./os-image.md) › **update***
 
 ## NAME
 
@@ -9,10 +9,12 @@ name and description for an OS image.
 
 ## SYNOPSIS
 
-**nico-admin-cli os-image update** \<**-i**\|**--id**\>
-\[**-n**\|**--name**\] \[**-d**\|**--description**\]
-\[**-y**\|**--auth-type**\] \[**-p**\|**--auth-token**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli os-image update <-i|--id>
+[-n|--name] [-d|--description]
+[-y|--auth-type] [-p|--auth-token]
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -21,39 +23,46 @@ image.
 
 ## OPTIONS
 
-**-i**, **--id** *\<ID\>*  
+`-i, --id <ID>`
+
 uuid of the OS image to update.
 
-**-n**, **--name** *\<NAME\>*  
+`-n, --name <NAME>`
+
 Optional, name of the OS image entry.
 
-**-d**, **--description** *\<DESCRIPTION\>*  
+`-d, --description <DESCRIPTION>`
+
 Optional, description of the OS image entry.
 
-**-y**, **--auth-type** *\<AUTH_TYPE\>*  
+`-y, --auth-type <AUTH_TYPE>`
+
 Optional, Authentication type, usually Bearer.
 
-**-p**, **--auth-token** *\<AUTH_TOKEN\>*  
+`-p, --auth-token <AUTH_TOKEN>`
+
 Optional, Authentication token, usually in base64.
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

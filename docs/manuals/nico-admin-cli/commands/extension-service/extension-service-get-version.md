@@ -1,6 +1,6 @@
 # `nico-admin-cli extension-service get-version`
 
-_[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **get-version**_
+*[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **get-version***
 
 ## NAME
 
@@ -9,9 +9,11 @@ version information
 
 ## SYNOPSIS
 
-**nico-admin-cli extension-service get-version**
-\<**-i**\|**--service-id**\> \[**-v**\|**--versions**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli extension-service get-version
+<-i|--service-id> [-v|--versions]
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -19,30 +21,34 @@ Get extension service version information
 
 ## OPTIONS
 
-**-i**, **--service-id** *\<SERVICE_ID\>*  
+`-i, --service-id <SERVICE_ID>`
+
 The extension service ID
 
-**-v**, **--versions** *\<VERSIONS\>*  
+`-v, --versions <VERSIONS>`
+
 Version strings to get (optional, leave empty to get all versions)
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

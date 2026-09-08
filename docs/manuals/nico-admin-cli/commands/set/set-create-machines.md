@@ -1,6 +1,6 @@
 # `nico-admin-cli set create-machines`
 
-_[Hardware commands](../../hardware.md) › [set](./set.md) › **create-machines**_
+*[Hardware commands](../../hardware.md) › [set](./set.md) › **create-machines***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-set-create-machines - Set create_machines
 
 ## SYNOPSIS
 
-**nico-admin-cli set create-machines** \[**--enable**\]
-\[**--disable**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli set create-machines [--enable]
+[--disable] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,30 +20,34 @@ Set create_machines
 
 ## OPTIONS
 
-**--enable**  
+`--enable`
+
 Enable machine creation
 
-**--disable**  
+`--disable`
+
 Disable machine creation
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

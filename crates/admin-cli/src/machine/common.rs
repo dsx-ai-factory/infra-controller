@@ -23,7 +23,7 @@ pub(crate) struct MachineQuery {
     #[clap(
         short,
         long,
-        help = "ID, IPv4, MAC or hostnmame of the machine to query"
+        help = "ID, IPv4, MAC or hostname of the machine to query"
     )]
     pub(crate) query: String,
 }

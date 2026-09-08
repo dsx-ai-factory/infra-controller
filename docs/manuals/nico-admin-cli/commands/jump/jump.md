@@ -1,6 +1,6 @@
 # `nico-admin-cli jump`
 
-_[Admin commands](../../admin.md) › **jump**_
+*[Admin commands](../../admin.md) › **jump***
 
 ## NAME
 
@@ -8,8 +8,10 @@ nico-admin-cli-jump - Broad search across multiple object types
 
 ## SYNOPSIS
 
-**nico-admin-cli jump** \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*ID*\>
+```text
+nico-admin-cli jump [--extended] [--sort-by]
+[-h|--help] <ID>
+```
 
 ## DESCRIPTION
 
@@ -17,27 +19,30 @@ Broad search across multiple object types
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*ID*\>  
+`<ID>`
+
 The machine ID, IP, UUID, etc, to find
 
 ## Examples

@@ -1,6 +1,6 @@
 # `nico-admin-cli browse nmxc`
 
-_[Hardware commands](../../hardware.md) › [browse](./browse.md) › **nmxc**_
+*[Hardware commands](../../hardware.md) › [browse](./browse.md) › **nmxc***
 
 ## NAME
 
@@ -9,27 +9,35 @@ server
 
 ## SYNOPSIS
 
-**nico-admin-cli browse nmxc** \[**--chassis-serial**\]
-\[**--rack-id**\] \<**--operation**\> \[**--gpu-uid**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli browse nmxc [--chassis-serial]
+[--rack-id] <--operation> [--gpu-uid]
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
-Run an NMX-C browse operation via the API server
+Run an NMX-C browse operation via the API server.
+
+--operation is required. Exactly one endpoint selector must be
+specified: --chassis-serial or --rack-id. Providing both selectors is
+rejected.
 
 ## OPTIONS
 
-**--chassis-serial** *\<CHASSIS_SERIAL\>*  
+`--chassis-serial <CHASSIS_SERIAL>`
+
 Chassis serial number (mutually exclusive with --rack-id)
 
-**--rack-id** *\<RACK_ID\>*  
+`--rack-id <RACK_ID>`
+
 Rack ID; resolves the NMX-C endpoint from the racks ready control-plane
 switch (mutually exclusive with --chassis-serial)
 
-**--operation** *\<OPERATION\>*  
-NMX-C browse operation to run\
+`--operation <OPERATION>`
 
-\
+NMX-C browse operation to run
+
 *Possible values:*
 
 - compute-node-info-list
@@ -44,27 +52,30 @@ NMX-C browse operation to run\
 
 - get-domain-properties
 
-**--gpu-uid** *\<GPU_UID\>* \[default: 0\]  
+`--gpu-uid <GPU_UID> [default: 0]`
+
 GPU UID (used by the gpu-info operation)
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

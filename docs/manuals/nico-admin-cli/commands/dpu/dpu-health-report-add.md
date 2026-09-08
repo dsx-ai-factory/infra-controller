@@ -1,6 +1,6 @@
 # `nico-admin-cli dpu health-report add`
 
-_[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › [health-report](./dpu-health-report.md) › **add**_
+*[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › [health-report](./dpu-health-report.md) › **add***
 
 ## NAME
 
@@ -9,10 +9,12 @@ a DPU
 
 ## SYNOPSIS
 
-**nico-admin-cli dpu health-report add** \[**--health-report**\]
-\[**--template**\] \[**--message**\] \[**--replace**\]
-\[**--print-only**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*DPU_ID*\>
+```text
+nico-admin-cli dpu health-report add [--health-report]
+[--template] [--message] [--replace]
+[--print-only] [--extended] [--sort-by]
+[-h|--help] <DPU_ID>
+```
 
 ## DESCRIPTION
 
@@ -20,13 +22,14 @@ Insert a health report source for a DPU
 
 ## OPTIONS
 
-**--health-report** *\<HEALTH_REPORT\>*  
+`--health-report <HEALTH_REPORT>`
+
 New health report as json
 
-**--template** *\<TEMPLATE\>*  
-Predefined Template name\
+`--template <TEMPLATE>`
 
-\
+Predefined Template name
+
 *Possible values:*
 
 - host-update
@@ -51,36 +54,41 @@ Predefined Template name\
 
 - request-repair
 
-**--message** *\<MESSAGE\>*  
+`--message <MESSAGE>`
+
 Message to be filled in template.
 
-**--replace**  
+`--replace`
+
 Replace the DPU health contribution with this source
 
-**--print-only**  
+`--print-only`
+
 Print the template that is going to be sent to carbide
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*DPU_ID*\>
+`<DPU_ID>`
 
 ## Examples
 

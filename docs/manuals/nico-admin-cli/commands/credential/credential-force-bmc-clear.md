@@ -1,50 +1,56 @@
 # `nico-admin-cli credential force-bmc clear`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-bmc](./credential-force-bmc.md) › **clear**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-bmc](./credential-force-bmc.md) › **clear***
 
 ## NAME
 
 nico-admin-cli-credential-force-bmc-clear - Clear a pending BMC
-force-converge request for a machine, switch, or power shelf.
+force-converge request for a machine, DPU, switch, or power shelf.
 
 ## SYNOPSIS
 
-**nico-admin-cli credential force-bmc clear** \[**-i**\|**--id**\]
-\[**--bmc-mac**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli credential force-bmc clear [-i|--id]
+[--bmc-mac] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
-Clear a pending BMC force-converge request for a machine, switch, or
-power shelf.
+Clear a pending BMC force-converge request for a machine, DPU, switch,
+or power shelf.
 
 ## OPTIONS
 
-**-i**, **--id** *\<ID\>*  
+`-i, --id <ID>`
+
 Machine, DPU, switch, or power shelf ID whose pending BMC force-converge
 request should be cleared. Provide this or --bmc-mac.
 
-**--bmc-mac** *\<BMC_MAC\>*  
+`--bmc-mac <BMC_MAC>`
+
 MAC of the BMC whose pending request should be cleared.
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

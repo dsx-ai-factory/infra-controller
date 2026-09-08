@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish create-bmc-user`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **create-bmc-user**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **create-bmc-user***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-redfish-create-bmc-user - Create new BMC user
 
 ## SYNOPSIS
 
-**nico-admin-cli redfish create-bmc-user** \<**--new-password**\>
-\<**--user**\> \[**--role-id**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli redfish create-bmc-user <--new-password>
+<--user> [--role-id] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,16 +20,18 @@ Create new BMC user
 
 ## OPTIONS
 
-**--new-password** *\<NEW_PASSWORD\>*  
+`--new-password <NEW_PASSWORD>`
+
 BMC password
 
-**--user** *\<USER\>*  
+`--user <USER>`
+
 BMC user
 
-**--role-id** *\<ROLE_ID\>*  
-BMC role for the new account (default: administrator)\
+`--role-id <ROLE_ID>`
 
-\
+BMC role for the new account (default: administrator)
+
 *Possible values:*
 
 - administrator
@@ -38,24 +42,26 @@ BMC role for the new account (default: administrator)\
 
 - noaccess
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

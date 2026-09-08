@@ -1,6 +1,6 @@
 # `nico-admin-cli credential add-host-factory-default`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-host-factory-default**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **add-host-factory-default***
 
 ## NAME
 
@@ -9,9 +9,11 @@ factory default BMC user/pass for a given vendor
 
 ## SYNOPSIS
 
-**nico-admin-cli credential add-host-factory-default**
-\<**--username**\> \<**--password**\> \<**--vendor**\>
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli credential add-host-factory-default
+<--username> <--password> <--vendor>
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -19,14 +21,16 @@ Add manufacturer factory default BMC user/pass for a given vendor
 
 ## OPTIONS
 
-**--username** *\<USERNAME\>*  
+`--username <USERNAME>`
+
 Default username: root, ADMIN, etc
 
-**--password** *\<PASSWORD\>*  
+`--password <PASSWORD>`
+
 Manufacturer default password
 
-**--vendor** *\<VENDOR\>*  
-\
+`--vendor <VENDOR>`
+
 *Possible values:*
 
 - lenovo
@@ -47,24 +51,26 @@ Manufacturer default password
 
 - unknown
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

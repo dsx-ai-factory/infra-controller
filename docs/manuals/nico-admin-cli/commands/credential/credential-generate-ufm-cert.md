@@ -1,6 +1,6 @@
 # `nico-admin-cli credential generate-ufm-cert`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **generate-ufm-cert**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **generate-ufm-cert***
 
 ## NAME
 
@@ -8,8 +8,10 @@ nico-admin-cli-credential-generate-ufm-cert - Generate UFM credential
 
 ## SYNOPSIS
 
-**nico-admin-cli credential generate-ufm-cert** \[**--fabric**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli credential generate-ufm-cert [--fabric]
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -17,27 +19,30 @@ Generate UFM credential
 
 ## OPTIONS
 
-**--fabric** *\<FABRIC\>* \[default: default\]  
+`--fabric <FABRIC> [default: default]`
+
 Infiniband fabric.
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

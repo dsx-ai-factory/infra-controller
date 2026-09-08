@@ -1,50 +1,58 @@
 # `nico-admin-cli bmc-machine probe-vendor`
 
-_[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **probe-vendor**_
+*[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **probe-vendor***
 
 ## NAME
 
-nico-admin-cli-bmc-machine-probe-vendor - Resolve a BMCs Redfish vendor
+nico-admin-cli-bmc-machine-probe-vendor - Resolve the Redfish vendor for
+a BMC
 
 ## SYNOPSIS
 
-**nico-admin-cli bmc-machine probe-vendor** \[**-i**\|**--ip-address**\]
-\[**--mac-address**\] \[**-m**\|**--machine**\] \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli bmc-machine probe-vendor [-i|--ip-address]
+[--mac-address] [-m|--machine] [--extended]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
-Resolve a BMCs Redfish vendor
+Resolve the Redfish vendor for a BMC
 
 ## OPTIONS
 
-**-i**, **--ip-address** *\<IP_ADDRESS\>*  
+`-i, --ip-address <IP_ADDRESS>`
+
 IP of the BMC whose vendor to probe
 
-**--mac-address** *\<MAC_ADDRESS\>*  
+`--mac-address <MAC_ADDRESS>`
+
 MAC of the BMC whose vendor to probe
 
-**-m**, **--machine** *\<MACHINE\>*  
+`-m, --machine <MACHINE>`
+
 ID of the machine whose BMC vendor to probe
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

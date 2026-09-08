@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish create-volume`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **create-volume**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **create-volume***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-redfish-create-volume - Create a storage volume
 
 ## SYNOPSIS
 
-**nico-admin-cli redfish create-volume** \<**--controller-id**\>
-\<**--volume-name**\> \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli redfish create-volume <--controller-id>
+<--volume-name> [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,30 +20,34 @@ Create a storage volume
 
 ## OPTIONS
 
-**--controller-id** *\<CONTROLLER_ID\>*  
+`--controller-id <CONTROLLER_ID>`
+
 controller_id
 
-**--volume-name** *\<VOLUME_NAME\>*  
+`--volume-name <VOLUME_NAME>`
+
 volume_name
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

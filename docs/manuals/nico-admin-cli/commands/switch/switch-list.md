@@ -1,6 +1,6 @@
 # `nico-admin-cli switch list`
 
-_[Hardware commands](../../hardware.md) › [switch](./switch.md) › **list**_
+*[Hardware commands](../../hardware.md) › [switch](./switch.md) › **list***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-switch-list - List all switches
 
 ## SYNOPSIS
 
-**nico-admin-cli switch list** \[**--deleted**\]
-\[**--controller-state**\] \[**--bmc-mac**\] \[**--nvos-mac**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli switch list [--deleted]
+[--controller-state] [--bmc-mac] [--nvos-mac]
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,10 +20,10 @@ List all switches
 
 ## OPTIONS
 
-**--deleted** *\<DELETED\>* \[default: exclude\]  
-Include deleted switches\
+`--deleted <DELETED> [default: exclude]`
 
-\
+Include deleted switches
+
 *Possible values:*
 
 - exclude: Exclude deleted resources (default behavior)
@@ -30,33 +32,38 @@ Include deleted switches\
 
 - include: Include both deleted and non-deleted resources
 
-**--controller-state** *\<CONTROLLER_STATE\>*  
+`--controller-state <CONTROLLER_STATE>`
+
 Filter by controller state (e.g. "ready", "initializing", "error")
 
-**--bmc-mac** *\<BMC_MAC\>*  
+`--bmc-mac <BMC_MAC>`
+
 Filter by BMC MAC address
 
-**--nvos-mac** *\<NVOS_MAC\>*  
+`--nvos-mac <NVOS_MAC>`
+
 Filter by NVOS MAC address
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

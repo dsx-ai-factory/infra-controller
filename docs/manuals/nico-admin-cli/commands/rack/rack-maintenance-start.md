@@ -1,6 +1,6 @@
 # `nico-admin-cli rack maintenance start`
 
-_[Hardware commands](../../hardware.md) › [rack](./rack.md) › [maintenance](./rack-maintenance.md) › **start**_
+*[Hardware commands](../../hardware.md) › [rack](./rack.md) › [maintenance](./rack-maintenance.md) › **start***
 
 ## NAME
 
@@ -9,11 +9,13 @@ nico-admin-cli-rack-maintenance-start - Start on-demand rack maintenance
 
 ## SYNOPSIS
 
-**nico-admin-cli rack maintenance start** \<**-r**\|**--rack**\>
-\[**--machine-ids**\] \[**--switch-ids**\] \[**--power-shelf-ids**\]
-\[**--activities**\] \[**--firmware-version**\] \[**--sot-json-file**\]
-\[**--access-token**\] \[**--force-update**\] \[**--components**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli rack maintenance start <-r|--rack>
+[--machine-ids] [--switch-ids] [--power-shelf-ids]
+[--activities] [--firmware-version] [--sot-json-file]
+[--access-token] [--force-update] [--components]
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -21,57 +23,69 @@ Start on-demand rack maintenance (full rack or partial)
 
 ## OPTIONS
 
-**-r**, **--rack** *\<RACK\>*  
+`-r, --rack <RACK>`
+
 Rack ID to start maintenance on
 
-**--machine-ids** *\<MACHINE_IDS\>...*  
+`--machine-ids <MACHINE_IDS>...`
+
 Machine IDs to include (omit for full rack)
 
-**--switch-ids** *\<SWITCH_IDS\>...*  
+`--switch-ids <SWITCH_IDS>...`
+
 Switch IDs to include (omit for full rack)
 
-**--power-shelf-ids** *\<POWER_SHELF_IDS\>...*  
+`--power-shelf-ids <POWER_SHELF_IDS>...`
+
 Power shelf IDs to include (omit for full rack)
 
-**--activities** *\<ACTIVITIES\>...*  
+`--activities <ACTIVITIES>...`
+
 Maintenance activities to perform: firmware-upgrade, nvos-update,
 configure-nmx-cluster, power-sequence (omit for all)
 
-**--firmware-version** *\<FIRMWARE_VERSION\>*  
+`--firmware-version <FIRMWARE_VERSION>`
+
 Raw SOT JSON for firmware-upgrade activity (prefer --sot-json-file)
 
-**--sot-json-file** *\<PATH\>*  
+`--sot-json-file <PATH>`
+
 SOT JSON file for RMS ApplyFirmwareObject
 
-**--access-token** *\<ACCESS_TOKEN\>*  
+`--access-token <ACCESS_TOKEN>`
+
 Artifact access token for RMS SOT JSON downloads; omit or pass empty for
 NOAUTH
 
-**--force-update**  
+`--force-update`
+
 Force firmware update when supported
 
-**--components** *\<COMPONENTS\>...*  
+`--components <COMPONENTS>...`
+
 Firmware components to update, e.g. BMC,CPLD,BIOS (omit for all
 components)
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

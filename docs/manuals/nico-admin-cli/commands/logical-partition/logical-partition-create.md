@@ -1,6 +1,6 @@
 # `nico-admin-cli logical-partition create`
 
-_[Network commands](../../network.md) › [logical-partition](./logical-partition.md) › **create**_
+*[Network commands](../../network.md) › [logical-partition](./logical-partition.md) › **create***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-logical-partition-create - Create logical partition
 
 ## SYNOPSIS
 
-**nico-admin-cli logical-partition create** \<**-n**\|**--name**\>
-\<**-t**\|**--tenant-organization-id**\> \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli logical-partition create <-n|--name>
+<-t|--tenant-organization-id> [--extended]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,30 +20,34 @@ Create logical partition
 
 ## OPTIONS
 
-**-n**, **--name** *\<NAME\>*  
+`-n, --name <NAME>`
+
 name of the partition
 
-**-t**, **--tenant-organization-id** *\<TENANT_ORGANIZATION_ID\>*  
+`-t, --tenant-organization-id <TENANT_ORGANIZATION_ID>`
+
 tenant organization id of the partition
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

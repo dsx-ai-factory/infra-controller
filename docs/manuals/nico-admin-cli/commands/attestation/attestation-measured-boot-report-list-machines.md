@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot report list machines`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [report](./attestation-measured-boot-report.md) › [list](./attestation-measured-boot-report-list.md) › **machines**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [report](./attestation-measured-boot-report.md) › [list](./attestation-measured-boot-report-list.md) › **machines***
 
 ## NAME
 
@@ -9,9 +9,11 @@ reports for a given machine ID.
 
 ## SYNOPSIS
 
-**nico-admin-cli attestation measured-boot report list machines**
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
-\<*MACHINE_ID*\>
+```text
+nico-admin-cli attestation measured-boot report list machines
+[--extended] [--sort-by] [-h|--help]
+<MACHINE_ID>
+```
 
 ## DESCRIPTION
 
@@ -19,27 +21,30 @@ List all reports for a given machine ID.
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*MACHINE_ID*\>  
+`<MACHINE_ID>`
+
 The machine ID.
 
 ## Examples

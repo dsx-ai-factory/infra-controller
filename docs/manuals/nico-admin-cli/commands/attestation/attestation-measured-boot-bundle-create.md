@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot bundle create`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [bundle](./attestation-measured-boot-bundle.md) › **create**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [bundle](./attestation-measured-boot-bundle.md) › **create***
 
 ## NAME
 
@@ -9,9 +9,11 @@ bundle with a given values, for a given profile ID.
 
 ## SYNOPSIS
 
-**nico-admin-cli attestation measured-boot bundle create**
-\[**--state**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*NAME*\> \<*PROFILE_ID*\> \<*VALUES*\>
+```text
+nico-admin-cli attestation measured-boot bundle create
+[--state] [--extended] [--sort-by]
+[-h|--help] <NAME> <PROFILE_ID> <VALUES>
+```
 
 ## DESCRIPTION
 
@@ -19,10 +21,10 @@ Create a new bundle with a given values, for a given profile ID.
 
 ## OPTIONS
 
-**--state** *\<STATE\>*  
-The state for this bundle (default: active).\
+`--state <STATE>`
 
-\
+The state for this bundle (default: active).
+
 *Possible values:*
 
 - pending
@@ -35,33 +37,38 @@ The state for this bundle (default: active).\
 
 - revoked
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*NAME*\>  
+`<NAME>`
+
 A human-readable name to give this bundle.
 
-\<*PROFILE_ID*\>  
+`<PROFILE_ID>`
+
 The profile ID of the profile to associate this bundle with.
 
-\<*VALUES*\>  
+`<VALUES>`
+
 Comma-separated list of {pcr_register:value,...} to associate with this
 bundle.
 
