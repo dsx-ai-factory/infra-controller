@@ -115,6 +115,31 @@ The telemetry endpoint is high-cardinality due to per-sensor labels. Enable it o
 your metrics backend can handle the volume and you need sensor-level visibility.
 </Tip>
 
+For power-shelf endpoints, the telemetry endpoint also publishes controller and chassis
+power evidence. Status series are informational gauges with a fixed value of `1`; the
+state lives in the labels. Every label value is a Redfish enum rendered in snake case,
+so cardinality stays bounded.
+
+| Series | Unit | Labels | Source |
+|---|---|---|---|
+| `powersupply_status` | state | `powersupply_state`, `powersupply_health` | `PowerSupply.Status` |
+| `chassis_max_power` | watts | | `Chassis.MaxPowerWatts` |
+| `chassis_status` | state | `chassis_state`, `chassis_health`, `chassis_power_state` | `Chassis.Status`, `Chassis.PowerState` |
+| `power_subsystem_status` | state | `power_subsystem_state`, `power_subsystem_health` | `Chassis.PowerSubsystem.Status` |
+| `manager_status` | state | `manager_id`, `manager_state`, `manager_health`, `manager_power_state`, `firmware_version` | `Manager.Status`, `Manager.PowerState`, `Manager.FirmwareVersion` |
+| `manager_last_reset` | seconds | `manager_id` | `Manager.LastResetTime`, as seconds since the Unix epoch |
+
+Absent Redfish fields are omitted rather than defaulted. `powersupply_status` is emitted
+for every endpoint that exposes power supplies; the chassis and manager series are
+emitted for power-shelf endpoints only. A vendor value outside the Redfish enum is
+rendered as `unsupported_value`; for example, LiteOn PF-1333-7R firmware r1.3.8 reports
+`Status.State` as `Standby`, which is not a Redfish `State` member.
+
+Log records whose Redfish `MessageId` is null carry two extra attributes derived from the
+OpenBMC `Family ( component ... )` message shape: `message_family` (for example
+`PowerDevicePresence`) and `redfish.component` (for example `powerdevice1`). Records with
+a `MessageId` keep it unchanged and do not carry these attributes.
+
 ### Network services
 
 Supporting services expose their own metrics. nico-dhcp tracks lease operations and

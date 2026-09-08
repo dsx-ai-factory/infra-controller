@@ -76,6 +76,29 @@ pub(super) fn redfish_log_type(fields: RedfishLogFields<'_>) -> RedfishLogType {
     RedfishLogType::RedfishEvent
 }
 
+/// Identity recovered from a log entry `Message` when `MessageId` is null.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct MessageIdentity<'a> {
+    /// Leading token of the message, e.g. `PowerDevicePresence`.
+    pub family: Option<&'a str>,
+    /// First token inside the parenthesised detail, e.g. `powerdevice1`.
+    pub component: Option<&'a str>,
+}
+
+/// Parses the OpenBMC `Family ( component detail... )` message shape.
+///
+/// Vendors that populate `MessageId` do not need this; the LiteOn power-shelf
+/// PMC leaves `MessageId` null on every entry and puts identity in the text.
+pub(super) fn message_identity(message: &str) -> MessageIdentity<'_> {
+    let mut tokens = message.split_whitespace();
+    let family = tokens.next();
+    let component = match tokens.next() {
+        Some("(") => tokens.next(),
+        _ => None,
+    };
+    MessageIdentity { family, component }
+}
+
 pub(super) fn nvidia_error_id(oem: Option<&Oem>) -> Option<&str> {
     oem.and_then(|oem| {
         oem.additional_properties
@@ -242,6 +265,44 @@ mod tests {
             message_args: Some(&message_args),
             has_cper: input.has_cper,
         })
+    }
+
+    #[test]
+    fn message_identity_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "openbmc family and component",
+                    input: "PowerDevicePresence ( powerdevice1 chassis_SN: 613337RXX01X75101UG Assert )",
+                    expect: MessageIdentity {
+                        family: Some("PowerDevicePresence"),
+                        component: Some("powerdevice1"),
+                    },
+                },
+                Check {
+                    scenario: "family without detail",
+                    input: "BmcSystemBootComplete",
+                    expect: MessageIdentity {
+                        family: Some("BmcSystemBootComplete"),
+                        component: None,
+                    },
+                },
+                Check {
+                    scenario: "prose message keeps only its first word",
+                    input: "Platform event occurred",
+                    expect: MessageIdentity {
+                        family: Some("Platform"),
+                        component: None,
+                    },
+                },
+                Check {
+                    scenario: "empty message",
+                    input: "",
+                    expect: MessageIdentity::default(),
+                },
+            ],
+            message_identity,
+        );
     }
 
     fn classify(input: TestFields) -> RedfishLogType {

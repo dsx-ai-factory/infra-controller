@@ -396,6 +396,7 @@ mod bmc_mock_integration_tests {
                 entities.push(DiscoveredEntity::Chassis {
                     entity: Arc::new(chassis),
                     sensors: Vec::new(),
+                    shelf_power: None,
                 });
             }
         }

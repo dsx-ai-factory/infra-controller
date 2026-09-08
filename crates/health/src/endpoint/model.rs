@@ -114,12 +114,11 @@ impl BmcEndpoint {
             Some(EndpointMetadata::Switch(switch)) => {
                 switch.endpoint_role == SwitchEndpointRole::Bmc
             }
-            Some(EndpointMetadata::PowerShelf(_)) => {
-                // Power shelves may expose compatible LogServices, but behavior depends on
-                // hardware and firmware. Keep collection disabled until future implementation
-                // and validation establish support.
-                false
-            }
+            // LiteOn PF-1333-7R (firmware r1.3.8) exposes a standard
+            // `Managers/bmc/LogServices/EventLog` whose entries carry `Severity`
+            // and `Message` but a null `MessageId`; see `message_identity` in
+            // `collectors/logs/redfish.rs` for how identity is recovered.
+            Some(EndpointMetadata::PowerShelf(_)) => true,
             None => false,
         }
     }
@@ -406,12 +405,12 @@ mod tests {
                     expect: false,
                 },
                 Check {
-                    scenario: "power shelf is not eligible",
+                    scenario: "power shelf is eligible",
                     input: Some(EndpointMetadata::PowerShelf(PowerShelfData {
                         id: None,
                         serial: "power-shelf".to_string(),
                     })),
-                    expect: false,
+                    expect: true,
                 },
                 Check {
                     scenario: "endpoint without metadata is not eligible",

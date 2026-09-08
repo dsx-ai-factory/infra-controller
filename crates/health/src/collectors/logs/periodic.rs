@@ -31,7 +31,8 @@ use super::diagnostic::{
 };
 use super::redfish::{
     RedfishLogFields, RedfishSeverity, add_redfish_analyzer_attributes,
-    log_entry_diagnostic_is_cper, nvidia_error_id, redfish_event_type_string, redfish_log_type,
+    log_entry_diagnostic_is_cper, message_identity, nvidia_error_id, redfish_event_type_string,
+    redfish_log_type,
 };
 use crate::HealthError;
 use crate::collectors::{IterationResult, PeriodicCollector};
@@ -482,8 +483,20 @@ fn entry_to_log(
         redfish_severity.unwrap_or(RedfishSeverity::Unknown),
         nvidia_error_id(entry.base.base.oem.as_ref()),
     );
-    if let Some(message_id) = &entry.message_id {
-        attributes.push((Cow::Borrowed("message_id"), message_id.clone()));
+    match (&entry.message_id, nullable_str(&entry.message)) {
+        (Some(message_id), _) => {
+            attributes.push((Cow::Borrowed("message_id"), message_id.clone()));
+        }
+        (None, Some(message)) => {
+            let identity = message_identity(message);
+            if let Some(family) = identity.family {
+                attributes.push((Cow::Borrowed("message_family"), family.to_string()));
+            }
+            if let Some(component) = identity.component {
+                attributes.push((Cow::Borrowed("redfish.component"), component.to_string()));
+            }
+        }
+        (None, None) => {}
     }
     if let Some(args) = &entry.message_args {
         attributes.push((
@@ -623,6 +636,59 @@ mod tests {
             record.severity,
             attribute(&record, "redfish.event.severity"),
         )
+    }
+
+    fn observe_message_identity(
+        message_id: Option<&str>,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let mut value = json!({
+            "@odata.id": "/redfish/v1/Managers/bmc/LogServices/EventLog/Entries/2656",
+            "Id": "2656",
+            "Name": "System Event Log Entry",
+            "EntryType": "Event",
+            "Severity": "OK",
+            "Message": "PowerDevicePresence ( powerdevice1 chassis_SN: 613337RXX01X75101UG Assert )"
+        });
+        if let Some(message_id) = message_id {
+            value["MessageId"] = json!(message_id);
+        }
+        let entry: nv_redfish::schema::log_entry::LogEntry =
+            serde_json::from_value(value).expect("valid Redfish log entry");
+        let CollectorEvent::Log(record) = entry_to_log(&entry, None, EVENTLOG, false) else {
+            panic!("expected log event");
+        };
+        (
+            attribute(&record, "message_id"),
+            attribute(&record, "message_family"),
+            attribute(&record, "redfish.component"),
+        )
+    }
+
+    #[test]
+    fn message_identity_attributes_only_without_message_id() {
+        check_values(
+            [
+                Check {
+                    scenario: "null MessageId derives identity from the message text",
+                    input: None,
+                    expect: (
+                        None,
+                        Some("PowerDevicePresence".to_string()),
+                        Some("powerdevice1".to_string()),
+                    ),
+                },
+                Check {
+                    scenario: "populated MessageId is forwarded unchanged",
+                    input: Some("ResourceEvent.1.0.ResourceStatusChangedOK"),
+                    expect: (
+                        Some("ResourceEvent.1.0.ResourceStatusChangedOK".to_string()),
+                        None,
+                        None,
+                    ),
+                },
+            ],
+            observe_message_identity,
+        );
     }
 
     #[test]

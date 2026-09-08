@@ -24,6 +24,8 @@ use nv_redfish::Resource;
 use nv_redfish::chassis::{Chassis, PowerSupply};
 use nv_redfish::computer_system::{ComputerSystem, Drive, Memory, Processor, Storage};
 use nv_redfish::core::{Bmc, ToSnakeCase};
+use nv_redfish::schema::power_subsystem::PowerSubsystem;
+use nv_redfish::schema::resource::Status;
 use nv_redfish::sensor::SensorLink;
 
 use crate::metrics::MetricLabel;
@@ -32,6 +34,54 @@ pub(crate) struct DerivedMetric {
     pub(crate) metric_type: &'static str,
     pub(crate) unit: &'static str,
     pub(crate) value: f64,
+    /// Metric-specific labels appended after the entity attributes.
+    pub(crate) labels: Vec<MetricLabel>,
+}
+
+/// Unit for informational gauges whose value is always `1.0` and whose
+/// content lives in the labels.
+const STATE_UNIT: &str = "state";
+
+/// Chassis power evidence collected only for power-shelf endpoints.
+pub(crate) struct ShelfPower {
+    /// The chassis `PowerSubsystem`, when linked and fetched successfully.
+    pub(crate) subsystem: Option<Arc<PowerSubsystem>>,
+}
+
+/// Appends `<prefix>_state` and `<prefix>_health` labels from a Redfish `Status`.
+fn push_status_labels(
+    labels: &mut Vec<MetricLabel>,
+    state_key: &'static str,
+    health_key: &'static str,
+    status: &Status,
+) {
+    if let Some(state) = status.state.flatten() {
+        labels.push((Cow::Borrowed(state_key), state.to_snake_case().to_string()));
+    }
+    if let Some(health) = status.health.flatten() {
+        labels.push((
+            Cow::Borrowed(health_key),
+            health.to_snake_case().to_string(),
+        ));
+    }
+}
+
+/// Builds an informational status gauge, or `None` when the status is absent.
+fn status_metric(
+    metric_type: &'static str,
+    state_key: &'static str,
+    health_key: &'static str,
+    status: Option<&Status>,
+) -> Option<DerivedMetric> {
+    let status = status?;
+    let mut labels = Vec::with_capacity(2);
+    push_status_labels(&mut labels, state_key, health_key, status);
+    Some(DerivedMetric {
+        metric_type,
+        unit: STATE_UNIT,
+        value: 1.0,
+        labels,
+    })
 }
 
 pub(crate) enum DiscoveredEntity<B: Bmc> {
@@ -59,6 +109,8 @@ pub(crate) enum DiscoveredEntity<B: Bmc> {
     Chassis {
         entity: Arc<Chassis<B>>,
         sensors: Vec<SensorLink<B>>,
+        /// Present only when discovery ran for a power-shelf endpoint.
+        shelf_power: Option<ShelfPower>,
     },
 }
 
@@ -193,21 +245,69 @@ impl<B: Bmc> DiscoveredEntity<B> {
                         metric_type: "drive_predicted_media_life_left",
                         unit: "percentage",
                         value,
+                        labels: Vec::new(),
                     }]
                 })
                 .unwrap_or_default(),
-            DiscoveredEntity::PowerSupply { entity, .. } => entity
-                .raw()
-                .power_capacity_watts
-                .flatten()
-                .map(|value| {
-                    vec![DerivedMetric {
+            DiscoveredEntity::PowerSupply { entity, .. } => {
+                let raw = entity.raw();
+                let mut metrics = Vec::with_capacity(2);
+                if let Some(value) = raw.power_capacity_watts.flatten() {
+                    metrics.push(DerivedMetric {
                         metric_type: "powersupply_capacity",
                         unit: "watts",
                         value,
-                    }]
-                })
-                .unwrap_or_default(),
+                        labels: Vec::new(),
+                    });
+                }
+                metrics.extend(status_metric(
+                    "powersupply_status",
+                    "powersupply_state",
+                    "powersupply_health",
+                    raw.status.as_ref(),
+                ));
+                metrics
+            }
+            DiscoveredEntity::Chassis {
+                entity,
+                shelf_power: Some(shelf_power),
+                ..
+            } => {
+                let raw = entity.raw();
+                let mut metrics = Vec::with_capacity(3);
+                if let Some(value) = raw.max_power_watts.flatten() {
+                    metrics.push(DerivedMetric {
+                        metric_type: "chassis_max_power",
+                        unit: "watts",
+                        value,
+                        labels: Vec::new(),
+                    });
+                }
+                if let Some(mut metric) = status_metric(
+                    "chassis_status",
+                    "chassis_state",
+                    "chassis_health",
+                    raw.status.as_ref(),
+                ) {
+                    if let Some(power_state) = raw.power_state.flatten() {
+                        metric.labels.push((
+                            Cow::Borrowed("chassis_power_state"),
+                            power_state.to_snake_case().to_string(),
+                        ));
+                    }
+                    metrics.push(metric);
+                }
+                metrics.extend(status_metric(
+                    "power_subsystem_status",
+                    "power_subsystem_state",
+                    "power_subsystem_health",
+                    shelf_power
+                        .subsystem
+                        .as_ref()
+                        .and_then(|subsystem| subsystem.status.as_ref()),
+                ));
+                metrics
+            }
             _ => Vec::new(),
         }
     }
@@ -233,6 +333,20 @@ mod tests {
         metric_type: &'static str,
         unit: &'static str,
         value: f64,
+        labels: Vec<(String, String)>,
+    }
+
+    fn label(key: &str, value: &str) -> (String, String) {
+        (key.to_string(), value.to_string())
+    }
+
+    fn plain(metric_type: &'static str, unit: &'static str, value: f64) -> ObservedDerivedMetric {
+        ObservedDerivedMetric {
+            metric_type,
+            unit,
+            value,
+            labels: Vec::new(),
+        }
     }
 
     #[derive(Debug, PartialEq)]
@@ -273,6 +387,11 @@ mod tests {
                     metric_type: metric.metric_type,
                     unit: metric.unit,
                     value: metric.value,
+                    labels: metric
+                        .labels
+                        .into_iter()
+                        .map(|(key, value)| (key.into_owned(), value))
+                        .collect(),
                 })
                 .collect(),
         }
@@ -373,11 +492,11 @@ mod tests {
                             "NVMe-1".to_string(),
                         )],
                         key: "/redfish/v1/Systems/SYS0/Storage/ST0/Drives/D0".to_string(),
-                        derived_metrics: vec![ObservedDerivedMetric {
-                            metric_type: "drive_predicted_media_life_left",
-                            unit: "percentage",
-                            value: 80.0,
-                        }],
+                        derived_metrics: vec![plain(
+                            "drive_predicted_media_life_left",
+                            "percentage",
+                            80.0,
+                        )],
                     },
                 },
                 Check {
@@ -413,11 +532,18 @@ mod tests {
                             "PSU-3KW".to_string(),
                         )],
                         key: "/redfish/v1/Chassis/CH0/PowerSubsystem/PowerSupplies/PS0".to_string(),
-                        derived_metrics: vec![ObservedDerivedMetric {
-                            metric_type: "powersupply_capacity",
-                            unit: "watts",
-                            value: 3000.0,
-                        }],
+                        derived_metrics: vec![
+                            plain("powersupply_capacity", "watts", 3000.0),
+                            ObservedDerivedMetric {
+                                metric_type: "powersupply_status",
+                                unit: "state",
+                                value: 1.0,
+                                labels: vec![
+                                    label("powersupply_state", "enabled"),
+                                    label("powersupply_health", "warning"),
+                                ],
+                            },
+                        ],
                     },
                 },
                 Check {
@@ -448,6 +574,40 @@ mod tests {
                         entity_specific_attributes: vec![("model".to_string(), "HGX".to_string())],
                         key: "/redfish/v1/Chassis/CH0".to_string(),
                         derived_metrics: vec![],
+                    },
+                },
+                Check {
+                    scenario: "power-shelf chassis emits power evidence",
+                    input: fixture.entity(TestEntity::ShelfChassis).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "chassis",
+                        physical_context: "chassis",
+                        base_attributes: vec![("chassis_id".to_string(), "CH0".to_string())],
+                        entity_specific_attributes: vec![("model".to_string(), "HGX".to_string())],
+                        key: "/redfish/v1/Chassis/CH0".to_string(),
+                        derived_metrics: vec![
+                            plain("chassis_max_power", "watts", 33000.0),
+                            ObservedDerivedMetric {
+                                metric_type: "chassis_status",
+                                unit: "state",
+                                value: 1.0,
+                                labels: vec![
+                                    label("chassis_state", "standby_offline"),
+                                    label("chassis_health", "ok"),
+                                    label("chassis_power_state", "on"),
+                                ],
+                            },
+                            ObservedDerivedMetric {
+                                metric_type: "power_subsystem_status",
+                                unit: "state",
+                                value: 1.0,
+                                labels: vec![
+                                    label("power_subsystem_state", "enabled"),
+                                    label("power_subsystem_health", "ok"),
+                                ],
+                            },
+                        ],
                     },
                 },
                 Check {

@@ -248,6 +248,8 @@ impl<B: Bmc + 'static> SensorCollector<B> {
         let mut attributes = entity.base_attributes();
         attributes.extend(entity.entity_specific_attributes());
         for metric in derived {
+            let mut labels = attributes.clone();
+            labels.extend(metric.labels);
             self.emit_event(CollectorEvent::Metric(
                 MetricSample {
                     key: format!("{}/{}", entity.key(), metric.metric_type),
@@ -255,7 +257,7 @@ impl<B: Bmc + 'static> SensorCollector<B> {
                     metric_type: metric.metric_type.to_string(),
                     unit: metric.unit.to_string(),
                     value: metric.value,
-                    labels: attributes.clone(),
+                    labels,
                     context: None,
                 }
                 .into(),
@@ -1185,6 +1187,7 @@ mod tests {
                     vec![DiscoveredEntity::Chassis {
                         entity: chassis,
                         sensors: vec![sensor],
+                        shelf_power: None,
                     }],
                 );
             }
@@ -1328,6 +1331,21 @@ mod tests {
                                     ("powersupply_id", "0"),
                                     ("chassis_id", "powershelf"),
                                     ("model", "PSU-3KW"),
+                                ],
+                                None,
+                            ))),
+                            ObservedEvent::Metric(Box::new(observed_metric(
+                                "/redfish/v1/Chassis/powershelf/PowerSubsystem/PowerSupplies/0/powersupply_status",
+                                "hw",
+                                "powersupply_status",
+                                "state",
+                                1.0,
+                                &[
+                                    ("powersupply_id", "0"),
+                                    ("chassis_id", "powershelf"),
+                                    ("model", "PSU-3KW"),
+                                    ("powersupply_state", "enabled"),
+                                    ("powersupply_health", "ok"),
                                 ],
                                 None,
                             ))),

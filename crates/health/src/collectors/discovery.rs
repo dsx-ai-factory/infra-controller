@@ -25,7 +25,9 @@ use nv_redfish::ServiceRoot;
 use nv_redfish::core::Bmc;
 
 use crate::HealthError;
-use crate::collectors::inventory::{DiscoveredEntity, EntityInventory, SharedInventory};
+use crate::collectors::inventory::{
+    DiscoveredEntity, EntityInventory, SharedInventory, ShelfPower,
+};
 use crate::collectors::runtime::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
 
@@ -35,6 +37,10 @@ pub struct EntityDiscoveryCollectorConfig<B: Bmc> {
 
     /// Bounds local fan-out to the endpoint Redfish operation limit.
     pub request_concurrency: NonZeroUsize,
+
+    /// Collect chassis and power-subsystem status. Enabled for power-shelf
+    /// endpoints only.
+    pub collect_shelf_power: bool,
 }
 
 pub struct EntityDiscoveryCollector<B: Bmc> {
@@ -42,6 +48,7 @@ pub struct EntityDiscoveryCollector<B: Bmc> {
     bmc: Arc<B>,
     shared: SharedInventory<B>,
     request_concurrency: usize,
+    collect_shelf_power: bool,
     generation: u64,
 }
 
@@ -58,6 +65,7 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for EntityDiscoveryCollector<B> {
             bmc,
             shared: config.shared,
             request_concurrency: config.request_concurrency.get(),
+            collect_shelf_power: config.collect_shelf_power,
             generation: 0,
         })
     }
@@ -363,13 +371,36 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
             .filter(|sensor| sensor_ids.insert(sensor.odata_id().to_string()))
             .collect();
 
-        if sensors.is_empty() {
+        let shelf_power = if self.collect_shelf_power {
+            Some(self.discover_shelf_power(chassis, fetch_failures).await)
+        } else {
+            None
+        };
+
+        if sensors.is_empty() && shelf_power.is_none() {
             return;
         }
 
         entities.push(DiscoveredEntity::Chassis {
             entity: chassis.clone(),
             sensors,
+            shelf_power,
         });
+    }
+
+    async fn discover_shelf_power(
+        &self,
+        chassis: &nv_redfish::chassis::Chassis<B>,
+        fetch_failures: &AtomicUsize,
+    ) -> ShelfPower {
+        let Some(power_subsystem_ref) = &chassis.raw().power_subsystem else {
+            return ShelfPower { subsystem: None };
+        };
+        let subsystem = self.record_failure(
+            power_subsystem_ref.get(self.bmc.as_ref()).await,
+            "get power subsystem",
+            fetch_failures,
+        );
+        ShelfPower { subsystem }
     }
 }

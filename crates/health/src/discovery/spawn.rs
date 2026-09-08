@@ -27,11 +27,12 @@ use crate::collectors::{
     EntityDiscoveryCollector, EntityDiscoveryCollectorConfig, FailureKind, FirmwareCollector,
     FirmwareCollectorConfig, GpuInventoryCollector, GpuInventoryCollectorConfig,
     LeakDetectorCollector, LeakDetectorCollectorConfig, LogsCollector, LogsCollectorConfig,
-    MetricsCollector, MetricsCollectorConfig, NmxcCollector, NmxcCollectorConfig,
-    NmxcSchemaOverrideCollector, NmxcSchemaOverrideCollectorConfig, NmxtCollector,
-    NmxtCollectorConfig, NvueRestCollector, NvueRestCollectorConfig, SensorCollector,
-    SensorCollectorConfig, SseLogCollector, SseLogCollectorConfig, StreamingCollectorStartContext,
-    TelemetryCollector, TelemetryCollectorConfig, spawn_gnmi_collector,
+    ManagerCollector, ManagerCollectorConfig, MetricsCollector, MetricsCollectorConfig,
+    NmxcCollector, NmxcCollectorConfig, NmxcSchemaOverrideCollector,
+    NmxcSchemaOverrideCollectorConfig, NmxtCollector, NmxtCollectorConfig, NvueRestCollector,
+    NvueRestCollectorConfig, SensorCollector, SensorCollectorConfig, SseLogCollector,
+    SseLogCollectorConfig, StreamingCollectorStartContext, TelemetryCollector,
+    TelemetryCollectorConfig, spawn_gnmi_collector,
 };
 use crate::config::{
     Configurable, LogCollectionMode, NmxcCollectorConfig as NmxcCollectorOptions, PeriodicLogConfig,
@@ -201,6 +202,9 @@ fn spawn_generic_redfish_collectors(
     let gpu_inventory_enabled = matches!(ctx.gpu_inventory_config, Configurable::Enabled(_))
         && ctx.api_client.is_some()
         && matches!(endpoint.metadata, Some(EndpointMetadata::Machine(_)));
+    // Chassis power evidence and Manager (PMC) status are collected for
+    // power-shelf endpoints only.
+    let power_shelf = matches!(endpoint.metadata, Some(EndpointMetadata::PowerShelf(_)));
 
     if (sensors_enabled || metrics_enabled || gpu_inventory_enabled)
         && !ctx.collectors.contains(CollectorKind::Discovery, &key)
@@ -216,6 +220,7 @@ fn spawn_generic_redfish_collectors(
             EntityDiscoveryCollectorConfig {
                 shared,
                 request_concurrency: ctx.bmc_request_concurrency,
+                collect_shelf_power: power_shelf,
             },
             CollectorStartContext {
                 limiter: ctx.limiter.clone(),
@@ -612,6 +617,45 @@ fn spawn_generic_redfish_collectors(
                     endpoint = ?endpoint.addr,
                     rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                     "Could not start GPU inventory collector"
+                );
+            }
+        }
+    }
+
+    if power_shelf && sensors_enabled && !ctx.collectors.contains(CollectorKind::Manager, &key) {
+        let collector_registry = Arc::new(
+            ctx.metrics_manager
+                .create_collector_registry(format!("manager_collector_{key}"), metrics_prefix)?,
+        );
+        match Collector::start::<ManagerCollector<BmcClient>>(
+            endpoint_arc.clone(),
+            bmc.clone(),
+            ManagerCollectorConfig {
+                data_sink: data_sink.clone(),
+            },
+            CollectorStartContext {
+                limiter: ctx.limiter.clone(),
+                iteration_interval: ctx.discovery_config.refresh_interval,
+                collector_registry,
+                metrics_manager: ctx.metrics_manager.clone(),
+            },
+        ) {
+            Ok(monitor) => {
+                ctx.collectors
+                    .insert(CollectorKind::Manager, key.clone().into(), monitor);
+                tracing::info!(
+                    endpoint_key = %key,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                    manager_collector_count = ctx.collectors.len(CollectorKind::Manager),
+                    "Started manager collection for power-shelf endpoint"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    endpoint = ?endpoint.addr,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                    "Could not start manager collector"
                 );
             }
         }
@@ -1128,6 +1172,53 @@ mod tests {
         assert_eq!(ctx.collectors.len(CollectorKind::Logs), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::Firmware), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::LeakDetector), 0);
+    }
+
+    #[tokio::test]
+    async fn test_manager_collector_starts_for_power_shelf_endpoints_only() {
+        let mut config = Config::default();
+        config.collectors.sensors = Configurable::Enabled(Default::default());
+        config.collectors.logs = Configurable::Disabled;
+        config.collectors.firmware = Configurable::Disabled;
+        config.collectors.leak_detector = Configurable::Disabled;
+
+        let mut ctx = context_with_config(config, "test_manager_power_shelf_gate");
+        let power_shelf = test_endpoint(
+            Ipv4Addr::new(10, 0, 0, 9),
+            "55:66:77:88:99:cc",
+            Some(EndpointMetadata::PowerShelf(
+                crate::endpoint::PowerShelfData {
+                    id: None,
+                    serial: "614MP1RXX03X6510035".to_string(),
+                },
+            )),
+        );
+        let machine = test_endpoint(
+            Ipv4Addr::new(10, 0, 0, 10),
+            "55:66:77:88:99:dd",
+            Some(machine_metadata()),
+        );
+
+        for endpoint in [&power_shelf, &machine] {
+            spawn_collectors_for_endpoint(
+                &mut ctx,
+                endpoint,
+                None,
+                "test_manager_power_shelf_gate",
+            )
+            .expect("spawn should succeed");
+        }
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 2);
+        assert_eq!(ctx.collectors.len(CollectorKind::Manager), 1);
+        assert!(
+            ctx.collectors
+                .contains(CollectorKind::Manager, &power_shelf.key())
+        );
+        assert!(
+            !ctx.collectors
+                .contains(CollectorKind::Manager, &machine.key())
+        );
     }
 
     #[tokio::test]

@@ -31,7 +31,7 @@ use nv_redfish::computer_system::{ComputerSystem, Drive, Memory, Processor, Stor
 use serde_json::{Value, json};
 use url::Url;
 
-use super::inventory::DiscoveredEntity;
+use super::inventory::{DiscoveredEntity, ShelfPower};
 
 #[derive(Clone)]
 enum MockResponse {
@@ -562,6 +562,9 @@ fn mock_resources() -> HashMap<String, MockResponse> {
         json!({
             "ChassisType": "RackMount",
             "Model": "HGX",
+            "MaxPowerWatts": 33000,
+            "PowerState": "On",
+            "Status": { "Health": "OK", "State": "StandbyOffline" },
             "PowerSubsystem": reference(POWER_SUBSYSTEM)
         }),
     );
@@ -579,7 +582,10 @@ fn mock_resources() -> HashMap<String, MockResponse> {
         "#PowerSubsystem.v1_1_0.PowerSubsystem",
         "PowerSubsystem",
         "Power subsystem",
-        json!({ "PowerSupplies": reference(POWER_SUPPLIES) }),
+        json!({
+            "Status": { "Health": "OK", "State": "Enabled" },
+            "PowerSupplies": reference(POWER_SUPPLIES)
+        }),
     );
 
     let power_supply_paths = [power_supply("PS0"), power_supply("PS-sparse")];
@@ -605,6 +611,7 @@ fn mock_resources() -> HashMap<String, MockResponse> {
         json!({
             "Model": "PSU-3KW",
             "PowerCapacityWatts": 3000.0,
+            "Status": { "Health": "Warning", "State": "Enabled" },
             "Metrics": reference(&psu_metrics)
         }),
     );
@@ -644,6 +651,8 @@ pub(in crate::collectors) enum TestEntity {
     PowerSupply,
     SparsePowerSupply,
     Chassis,
+    /// `CH0` discovered on a power-shelf endpoint, with its power subsystem.
+    ShelfChassis,
     SparseChassis,
 }
 
@@ -874,10 +883,30 @@ impl ProjectionFixture {
             TestEntity::Chassis => DiscoveredEntity::Chassis {
                 entity: self.chassis("CH0"),
                 sensors: Vec::new(),
+                shelf_power: None,
             },
+            TestEntity::ShelfChassis => {
+                let entity = self.chassis("CH0");
+                let subsystem = entity
+                    .raw()
+                    .power_subsystem
+                    .as_ref()
+                    .expect("CH0 links a power subsystem")
+                    .get(self.bmc.as_ref())
+                    .await
+                    .expect("power subsystem should load");
+                DiscoveredEntity::Chassis {
+                    entity,
+                    sensors: Vec::new(),
+                    shelf_power: Some(ShelfPower {
+                        subsystem: Some(subsystem),
+                    }),
+                }
+            }
             TestEntity::SparseChassis => DiscoveredEntity::Chassis {
                 entity: self.chassis("CH-sparse"),
                 sensors: Vec::new(),
+                shelf_power: None,
             },
         }
     }
