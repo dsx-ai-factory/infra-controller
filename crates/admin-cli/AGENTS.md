@@ -55,8 +55,8 @@ Formatting rules, all load-bearing:
 - For commands too long for one source line, break with a trailing `\`
   inside the string literal. clap collapses the wrapped string back to a
   single rendered line, so the example still copy-pastes as one command.
-  **Indent each continuation line four spaces** to align it under the `$ `
-  command. Rust's `\`-newline escape strips that leading whitespace, so the
+  **Indent each continuation line four spaces** to align it under the `$`
+  prompt. Rust's `\`-newline escape strips that leading whitespace, so the
   indent is invisible in the rendered help — it is purely for source
   readability, but keep it consistent:
 
@@ -245,9 +245,8 @@ in `--help`) and write to a directory you pass with `--out-dir`:
   give each page its per-flag detail; the `EXAMPLES:` block you write becomes
   that page's `## Examples`. Run it with `cargo make gen-cli-docs`.
 
-The hand-authored pages (`docs/manuals/nico-admin-cli/README.md`, `setup.md`,
-`workflows.md`, `rest-cli-parity.md`) are editorial and are **not** regenerated
-— leave them be.
+The hand-authored overview (`docs/manuals/nico-admin-cli/README.md`) is
+editorial and is **not** regenerated — leave it be.
 
 ### Categorizing a new command
 
@@ -342,7 +341,8 @@ can live with its constraints:
 #[clap(long, help = "IP:port of machine BMC. Port is optional and defaults to 443")]
 pub address: String,
 ```
-```
+
+```text
 Usage: nico-admin-cli redfish [OPTIONS] --address <ADDRESS> <COMMAND>
 ```
 

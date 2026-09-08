@@ -25,7 +25,9 @@ use rpc::forge as forgerpc;
 use crate::bmc_machine::common::ResetTypeArg;
 
 #[derive(Parser, Debug, Clone)]
-#[command(after_long_help = "\
+#[command(
+    long_about = "Reset a BMC.\n\nExactly one target must be specified: --machine, --switch, or --power-shelf. Providing more than one target is rejected.",
+    after_long_help = "\
 EXAMPLES:
 
 Reset the BMC of a machine via Redfish:
@@ -42,7 +44,8 @@ Reset a machine BMC using ipmitool instead of Redfish:
     $ nico-admin-cli bmc-machine bmc-reset --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg \
     --use-ipmitool
 
-")]
+"
+)]
 #[clap(group(
     ArgGroup::new("target")
         .required(true)
