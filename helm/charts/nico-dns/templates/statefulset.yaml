@@ -51,10 +51,11 @@ spec:
               value: {{ $value | quote }}
             {{- end }}
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
-          {{- with .Values.containerSecurityContext }}
           securityContext:
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
             {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
