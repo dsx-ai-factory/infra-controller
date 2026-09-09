@@ -1600,7 +1600,8 @@ message BuildInfo {
 }
 
 // GetRmsVersionRequest asks nico-api to forward a GetVersion call to its RMS backend.
-message GetRmsVersionRequest {}
+message GetRmsVersionRequest {
+}
 
 // GetRmsVersionResponse carries the version string returned by the RMS backend.
 message GetRmsVersionResponse {
