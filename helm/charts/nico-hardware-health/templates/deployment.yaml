@@ -26,10 +26,14 @@ spec:
         - name: {{ include "nico-hardware-health.name" . }}
           image: "{{ include "nico-hardware-health.image" . }}"
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
-          {{- with .Values.containerSecurityContext }}
           securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
+            {{- $ctxOverrides := omit . "allowPrivilegeEscalation" }}
+            {{- with $ctxOverrides }}
+            {{- toYaml $ctxOverrides | nindent 12 }}
+            {{- end }}
+            {{- end }}
           command:
             - /bin/sh
             - -c

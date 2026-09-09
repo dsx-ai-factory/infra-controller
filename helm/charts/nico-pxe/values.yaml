@@ -107,6 +107,11 @@ initContainers: []
 ## on the copied trees, including source files with mode 0600. Existing copy
 ## commands work without migration. No world permissions are added.
 ## The final init uses /bin/sh, chgrp, and chmod from the selected PXE image.
+## ⚠ That permissions init runs as UID 0 with CHOWN/FOWNER/DAC_OVERRIDE
+## capabilities, so OpenShift's restricted-v2 SCC rejects the pod regardless of
+## the containerSecurityContext/podSecurityContext overrides. On restricted
+## SCCs, either bind a more permissive SCC to the service account or bundle the
+## boot artifacts in a compatible PXE image (leave this list empty).
 ## When empty, no boot-artifacts volume is mounted, preserving image-bundled files.
 ## Quote tags (for example, tag: "1.10") to preserve their exact text.
 ## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
