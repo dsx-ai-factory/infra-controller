@@ -32,7 +32,9 @@ service Forge {
   // What version of Forge is this service running? Matches `--version` command line.
   rpc Version(VersionRequest) returns (BuildInfo);
 
-  // What version is the RMS backend running? Returns an error if RMS is not configured.
+  // What version is the RMS backend running?
+  // Returns Unavailable if RMS is not configured on this nico-api instance.
+  // Returns Unimplemented on older nico-api servers that predate this RPC.
   rpc GetRmsVersion(GetRmsVersionRequest) returns (GetRmsVersionResponse);
 
   // Domain

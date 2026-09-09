@@ -525,7 +525,9 @@ const (
 type ForgeClient interface {
 	// What version of NICo is this service running? Matches `--version` command line.
 	Version(ctx context.Context, in *VersionRequest, opts ...grpc.CallOption) (*BuildInfo, error)
-	// What version is the RMS backend running? Returns an error if RMS is not configured.
+	// What version is the RMS backend running?
+	// Returns Unavailable if RMS is not configured on this nico-api instance.
+	// Returns Unimplemented on older nico-api servers that predate this RPC.
 	GetRmsVersion(ctx context.Context, in *GetRmsVersionRequest, opts ...grpc.CallOption) (*GetRmsVersionResponse, error)
 	// Domain
 	CreateDomain(ctx context.Context, in *CreateDomainRequest, opts ...grpc.CallOption) (*Domain, error)
@@ -6394,7 +6396,9 @@ func (c *forgeClient) ReWrapSecrets(ctx context.Context, in *ReWrapSecretsReques
 type ForgeServer interface {
 	// What version of NICo is this service running? Matches `--version` command line.
 	Version(context.Context, *VersionRequest) (*BuildInfo, error)
-	// What version is the RMS backend running? Returns an error if RMS is not configured.
+	// What version is the RMS backend running?
+	// Returns Unavailable if RMS is not configured on this nico-api instance.
+	// Returns Unimplemented on older nico-api servers that predate this RPC.
 	GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error)
 	// Domain
 	CreateDomain(context.Context, *CreateDomainRequest) (*Domain, error)

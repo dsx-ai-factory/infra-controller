@@ -15,11 +15,22 @@
  * limitations under the License.
  */
 
+use std::time::Duration;
+
 use ::rpc::forge as rpc;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data};
+
+/// Per-RPC deadline for forwarding `GetVersion` to the RMS backend.
+///
+/// `librms` applies per-stream connect/read/write timeouts at the transport
+/// layer, but those do not bound the total time an active stream can remain
+/// pending without completing.  This deadline caps the end-to-end duration of
+/// the RPC so a backend that keeps the stream open without responding does not
+/// hold the nico-api request indefinitely.
+const GET_VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Forward a `GetVersion` call to the configured RMS backend and return its
 /// version string.  Returns `Unavailable` when RMS is not configured on this
@@ -32,14 +43,16 @@ pub(crate) async fn get_rms_version(
 
     let Some(rms_client) = api.rms_client.as_ref() else {
         return Err(CarbideError::UnavailableError(
-            "RMS is not configured on this API server".into(),
+            "rms is not configured on this API server".into(),
         )
         .into());
     };
 
-    let resp = rms_client
-        .get_version()
+    let resp = tokio::time::timeout(GET_VERSION_TIMEOUT, rms_client.get_version())
         .await
+        .map_err(|_elapsed| {
+            Status::deadline_exceeded("rms get_version timed out after 30 seconds")
+        })?
         .map_err(|e| -> Status { CarbideError::from(e).into() })?;
 
     Ok(Response::new(rpc::GetRmsVersionResponse {
