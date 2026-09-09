@@ -105,10 +105,14 @@ spec:
         - name: {{ include "nico-api.name" . }}
           image: "{{ include "nico-api.image" . }}"
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
-          {{- with .Values.containerSecurityContext }}
           securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
+            {{- $ctxOverrides := omit . "allowPrivilegeEscalation" }}
+            {{- with $ctxOverrides }}
+            {{- toYaml $ctxOverrides | nindent 12 }}
+            {{- end }}
+            {{- end }}
           command:
             - /bin/sh
             - -c

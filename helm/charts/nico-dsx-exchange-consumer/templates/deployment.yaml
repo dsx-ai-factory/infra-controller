@@ -26,10 +26,14 @@ spec:
         - name: {{ include "nico-dsx-exchange-consumer.name" . }}
           image: "{{ include "nico-dsx-exchange-consumer.image" . }}"
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
-          {{- with .Values.containerSecurityContext }}
           securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
+            {{- $ctxOverrides := omit . "allowPrivilegeEscalation" }}
+            {{- with $ctxOverrides }}
+            {{- toYaml $ctxOverrides | nindent 12 }}
+            {{- end }}
+            {{- end }}
           command:
             - /bin/sh
             - -c
