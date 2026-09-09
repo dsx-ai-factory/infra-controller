@@ -224,11 +224,13 @@ type TenantAccountSQLDAO struct {
 }
 
 // GetByID returns a TenantAccount by ID
-func (tasd TenantAccountSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*TenantAccount, error) {
+func (tasd TenantAccountSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *TenantAccount, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.GetByID")
 	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
+		defer func() {
+			tnaDAOSpan.EndWith(retErr)
+		}()
 
 		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "id", id.String())
 	}
@@ -253,11 +255,13 @@ func (tasd TenantAccountSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.
 }
 
 // GetCountByStatus returns count of TenantAccounts for given status
-func (tasd TenantAccountSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, tenantID *uuid.UUID) (map[string]int, error) {
+func (tasd TenantAccountSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, tenantID *uuid.UUID) (_ map[string]int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.GetCountByStatus")
 	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
+		defer func() {
+			tnaDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	ta := &TenantAccount{}
@@ -296,11 +300,13 @@ func (tasd TenantAccountSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx,
 }
 
 // GetByAccountNumber returns a TenantAccount by account number
-func (tasd TenantAccountSQLDAO) GetByAccountNumber(ctx context.Context, tx *db.Tx, accountNumber string, includeRelations []string) (*TenantAccount, error) {
+func (tasd TenantAccountSQLDAO) GetByAccountNumber(ctx context.Context, tx *db.Tx, accountNumber string, includeRelations []string) (_ *TenantAccount, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.GetByAccountNumber")
 	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
+		defer func() {
+			tnaDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	ta := &TenantAccount{}
@@ -378,11 +384,13 @@ func (tasd TenantAccountSQLDAO) setQueryWithFilter(filter TenantAccountFilterInp
 }
 
 // GetCount returns the count of TenantAccounts that match the parameters
-func (tasd TenantAccountSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter TenantAccountFilterInput) (int, error) {
+func (tasd TenantAccountSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter TenantAccountFilterInput) (_ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tenantAccountDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.GetCount")
 	if tenantAccountDAOSpan != nil {
-		defer tenantAccountDAOSpan.End()
+		defer func() {
+			tenantAccountDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	query := db.GetIDB(tx, tasd.dbSession).NewSelect().Model((*TenantAccount)(nil))
@@ -396,11 +404,13 @@ func (tasd TenantAccountSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter 
 
 // GetAll returns a list of TenantAccounts filtering by tenantID, tenantOrg, infrastructureProviderID, offset, limit and orderBy
 // if orderBy is nil, then records are ordered by column specified in TenantAccountOrderByDefault in ascending order
-func (tasd TenantAccountSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter TenantAccountFilterInput, page paginator.PageInput, includeRelations []string) ([]TenantAccount, int, error) {
+func (tasd TenantAccountSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter TenantAccountFilterInput, page paginator.PageInput, includeRelations []string) (_ []TenantAccount, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.GetAll")
 	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
+		defer func() {
+			tnaDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	tas := []TenantAccount{}
@@ -457,11 +467,13 @@ func (tasd TenantAccountSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Te
 }
 
 // Create creates a new TenantAccount from the given parameters
-func (tasd TenantAccountSQLDAO) Create(ctx context.Context, tx *db.Tx, input TenantAccountCreateInput) (*TenantAccount, error) {
+func (tasd TenantAccountSQLDAO) Create(ctx context.Context, tx *db.Tx, input TenantAccountCreateInput) (_ *TenantAccount, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.Create")
 	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
+		defer func() {
+			tnaDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	ta := &TenantAccount{
@@ -494,11 +506,13 @@ func (tasd TenantAccountSQLDAO) Create(ctx context.Context, tx *db.Tx, input Ten
 }
 
 // Update updates an existing TenantAccount from the given parameters
-func (tasd TenantAccountSQLDAO) Update(ctx context.Context, tx *db.Tx, input TenantAccountUpdateInput) (*TenantAccount, error) {
+func (tasd TenantAccountSQLDAO) Update(ctx context.Context, tx *db.Tx, input TenantAccountUpdateInput) (_ *TenantAccount, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.Update")
 	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
+		defer func() {
+			tnaDAOSpan.EndWith(retErr)
+		}()
 		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "id", input.TenantAccountID.String())
 	}
 
@@ -567,11 +581,13 @@ func (tasd TenantAccountSQLDAO) Update(ctx context.Context, tx *db.Tx, input Ten
 }
 
 // Delete deletes a TenantAccount by ID
-func (tasd TenantAccountSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (tasd TenantAccountSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, tnaDAOSpan := tasd.tracerSpan.CreateChildInCurrentContext(ctx, "TenantAccountDAO.DeleteByID")
 	if tnaDAOSpan != nil {
-		defer tnaDAOSpan.End()
+		defer func() {
+			tnaDAOSpan.EndWith(retErr)
+		}()
 		tasd.tracerSpan.SetAttribute(tnaDAOSpan, "id", id.String())
 	}
 

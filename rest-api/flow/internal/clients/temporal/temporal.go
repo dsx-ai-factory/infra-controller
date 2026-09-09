@@ -5,17 +5,13 @@ package temporal
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/contrib/opentelemetry"
-	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/interceptor"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/endpoint"
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 )
 
 const (
@@ -68,16 +64,6 @@ func New(c Config) (*Client, error) {
 		return nil, err
 	}
 
-	// Unconditional, matching the worker on the far end. The interceptor only
-	// reads context and hands it to the global propagator; with no
-	// TracerProvider the global tracer returns a non-recording span that still
-	// carries the inbound SpanContext.
-	tracingInterceptor, err := opentelemetry.NewTracingInterceptor(
-		opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
-	if err != nil {
-		return nil, fmt.Errorf("creating Temporal tracing interceptor: %w", err)
-	}
-
 	options := client.Options{
 		HostPort:  c.Endpoint.Target(),
 		Namespace: c.Namespace,
@@ -86,18 +72,10 @@ func New(c Config) (*Client, error) {
 			KeepAliveTime:    defaultKeepAliveTime,
 			KeepAliveTimeout: defaultKeepAliveTimeout,
 		},
-		DataConverter: converter.NewCompositeDataConverter(
-			converter.NewNilPayloadConverter(),
-			converter.NewByteSlicePayloadConverter(),
-			converter.NewProtoJSONPayloadConverterWithOptions(
-				converter.ProtoJSONPayloadConverterOptions{
-					AllowUnknownFields: true,
-				},
-			),
-			converter.NewProtoPayloadConverter(),
-			converter.NewJSONPayloadConverter(),
-		),
-		Interceptors: []interceptor.ClientInterceptor{tracingInterceptor},
+	}
+	options, err = ctemporal.ConfigureClientOptions(options)
+	if err != nil {
+		return nil, err
 	}
 
 	client, err := client.Dial(options)

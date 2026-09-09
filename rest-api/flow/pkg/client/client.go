@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
@@ -47,7 +49,12 @@ func New(c Config) (*Client, error) {
 		creds = insecure.NewCredentials()
 	}
 
-	conn, err := grpc.NewClient(c.Target(), grpc.WithTransportCredentials(creds))
+	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
+	if cotel.TransportEnabled() {
+		dialOptions = append(dialOptions, grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
+	}
+
+	conn, err := grpc.NewClient(c.Target(), dialOptions...)
 	if err != nil {
 		return nil, err
 	}

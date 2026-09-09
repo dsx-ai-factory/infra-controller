@@ -112,11 +112,13 @@ type SSHKeyAssociationSQLDAO struct {
 func (skasd SSHKeyAssociationSQLDAO) Create(
 	ctx context.Context, tx *db.Tx,
 	input SSHKeyAssociationCreateInput,
-) (*SSHKeyAssociation, error) {
+) (_ *SSHKeyAssociation, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sshKeyAssociationDAOSpan := skasd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyAssociationDAO.Create")
 	if sshKeyAssociationDAOSpan != nil {
-		defer sshKeyAssociationDAOSpan.End()
+		defer func() {
+			sshKeyAssociationDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	ska := &SSHKeyAssociation{
@@ -141,11 +143,13 @@ func (skasd SSHKeyAssociationSQLDAO) Create(
 
 // GetByID returns a SSHKeyAssociation by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (skasd SSHKeyAssociationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*SSHKeyAssociation, error) {
+func (skasd SSHKeyAssociationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *SSHKeyAssociation, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sshKeyAssociationDAOSpan := skasd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyAssociationDAO.GetByID")
 	if sshKeyAssociationDAOSpan != nil {
-		defer sshKeyAssociationDAOSpan.End()
+		defer func() {
+			sshKeyAssociationDAOSpan.EndWith(retErr)
+		}()
 
 		skasd.tracerSpan.SetAttribute(sshKeyAssociationDAOSpan, "id", id.String())
 	}
@@ -173,11 +177,13 @@ func (skasd SSHKeyAssociationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id 
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in SSHKeyAssociationOrderByDefault in ascending order
-func (skasd SSHKeyAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyAssociationFilterInput, page paginator.PageInput, includeRelations []string) ([]SSHKeyAssociation, int, error) {
+func (skasd SSHKeyAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyAssociationFilterInput, page paginator.PageInput, includeRelations []string) (_ []SSHKeyAssociation, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sshKeyAssociationDAOSpan := skasd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyAssociationDAO.GetAll")
 	if sshKeyAssociationDAOSpan != nil {
-		defer sshKeyAssociationDAOSpan.End()
+		defer func() {
+			sshKeyAssociationDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	skas := []SSHKeyAssociation{}
@@ -215,11 +221,13 @@ func (skasd SSHKeyAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filt
 }
 
 // Update updates specified fields of an existing SSHKeyAssociation
-func (skasd SSHKeyAssociationSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyAssociationUpdateInput) (*SSHKeyAssociation, error) {
+func (skasd SSHKeyAssociationSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyAssociationUpdateInput) (_ *SSHKeyAssociation, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sshKeyAssociationDAOSpan := skasd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyAssociationDAO.Update")
 	if sshKeyAssociationDAOSpan != nil {
-		defer sshKeyAssociationDAOSpan.End()
+		defer func() {
+			sshKeyAssociationDAOSpan.EndWith(retErr)
+		}()
 		skasd.tracerSpan.SetAttribute(sshKeyAssociationDAOSpan, "id", input.SSHKeyAssociationID.String())
 	}
 
@@ -260,11 +268,13 @@ func (skasd SSHKeyAssociationSQLDAO) Update(ctx context.Context, tx *db.Tx, inpu
 // Delete deletes an SSHKeyAssociation by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (skasd SSHKeyAssociationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (skasd SSHKeyAssociationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sshKeyAssociationDAOSpan := skasd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyAssociationDAO.Delete")
 	if sshKeyAssociationDAOSpan != nil {
-		defer sshKeyAssociationDAOSpan.End()
+		defer func() {
+			sshKeyAssociationDAOSpan.EndWith(retErr)
+		}()
 		skasd.tracerSpan.SetAttribute(sshKeyAssociationDAOSpan, "id", id.String())
 	}
 

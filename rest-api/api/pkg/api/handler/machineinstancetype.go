@@ -31,6 +31,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
@@ -38,21 +39,19 @@ import (
 
 // CreateMachineInstanceTypeHandler is the API Handler for creating new Machine/InstanceType association
 type CreateMachineInstanceTypeHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateMachineInstanceTypeHandler initializes and returns a new handler for creating Machine/Instance Type association
 func NewCreateMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateMachineInstanceTypeHandler {
 	return CreateMachineInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -69,7 +68,7 @@ func NewCreateMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 201 {object} model.APIMachineInstanceType
 // @Router /v2/org/{org}/nico/instance/type/{instance_type_id}/machine [post]
 func (cmith CreateMachineInstanceTypeHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "Create", c, cmith.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -98,7 +97,7 @@ func (cmith CreateMachineInstanceTypeHandler) Handle(c echo.Context) error {
 	// Get Instance Type ID
 	itStrID := c.Param("instanceTypeId")
 
-	cmith.tracerSpan.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID))
 
 	itID, err := uuid.Parse(itStrID)
 	if err != nil {
@@ -321,19 +320,17 @@ func (cmith CreateMachineInstanceTypeHandler) Handle(c echo.Context) error {
 
 // GetAllMachineInstanceTypeHandler is the API Handler for getting all Instance Types
 type GetAllMachineInstanceTypeHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllMachineInstanceTypeHandler initializes and returns a new handler for getting all Instance Types
 func NewGetAllMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllMachineInstanceTypeHandler {
 	return GetAllMachineInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -352,7 +349,7 @@ func NewGetAllMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 200 {object} []model.APIMachineInstanceType
 // @Router /v2/org/{org}/nico/instance/type/{instance_type_id}/machine [get]
 func (gamith GetAllMachineInstanceTypeHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "GetAll", c, gamith.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -396,7 +393,7 @@ func (gamith GetAllMachineInstanceTypeHandler) Handle(c echo.Context) error {
 	// Get Instance Type ID
 	itStrID := c.Param("instanceTypeId")
 
-	gamith.tracerSpan.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("instancetype_id", itStrID))
 
 	itID, err := uuid.Parse(itStrID)
 	if err != nil {
@@ -477,21 +474,19 @@ func (gamith GetAllMachineInstanceTypeHandler) Handle(c echo.Context) error {
 
 // DeleteMachineInstanceTypeHandler is the API Handler for deleting a Machine/InstanceType association
 type DeleteMachineInstanceTypeHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteMachineInstanceTypeHandler initializes and returns a new handler for deleting a Machine/InstanceType association
 func NewDeleteMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteMachineInstanceTypeHandler {
 	return DeleteMachineInstanceTypeHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -508,7 +503,7 @@ func NewDeleteMachineInstanceTypeHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 204
 // @Router /v2/org/{org}/nico/instance/type/{instance_type_id}/machine/{id} [delete]
 func (dmith DeleteMachineInstanceTypeHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "Delete", c, dmith.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineInstanceType", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -582,7 +577,7 @@ func (dmith DeleteMachineInstanceTypeHandler) Handle(c echo.Context) error {
 
 	// Resolve the delete identifier from either the machine ID or the deprecated association ID.
 	machineOrAssociationID := c.Param("id")
-	dmith.tracerSpan.SetAttribute(handlerSpan, attribute.String("machineinstancetype_identifier", machineOrAssociationID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machineinstancetype_identifier", machineOrAssociationID))
 
 	// Look up the association first by deprecated association ID and then by machine ID.
 	mitDAO := cdbm.NewMachineInstanceTypeDAO(dmith.dbSession)

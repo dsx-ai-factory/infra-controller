@@ -384,11 +384,13 @@ type InfiniBandPartitionSQLDAO struct {
 }
 
 // GetByID returns a InfiniBandPartition by ID
-func (ibpsd InfiniBandPartitionSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*InfiniBandPartition, error) {
+func (ibpsd InfiniBandPartitionSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *InfiniBandPartition, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, PartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "PartitionDAO.GetByID")
 	if PartitionDAOSpan != nil {
-		defer PartitionDAOSpan.End()
+		defer func() {
+			PartitionDAOSpan.EndWith(retErr)
+		}()
 
 		ibpsd.tracerSpan.SetAttribute(PartitionDAOSpan, "id", id.String())
 	}
@@ -416,11 +418,13 @@ func (ibpsd InfiniBandPartitionSQLDAO) GetByID(ctx context.Context, tx *db.Tx, i
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in InfiniBandPartitionOrderByDefault in ascending order
-func (ibpsd InfiniBandPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InfiniBandPartitionFilterInput, page paginator.PageInput, includeRelations []string) ([]InfiniBandPartition, int, error) {
+func (ibpsd InfiniBandPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InfiniBandPartitionFilterInput, page paginator.PageInput, includeRelations []string) (_ []InfiniBandPartition, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, InfiniBandPartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "PartitionDAO.GetAll")
 	if InfiniBandPartitionDAOSpan != nil {
-		defer InfiniBandPartitionDAOSpan.End()
+		defer func() {
+			InfiniBandPartitionDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	ibps := []InfiniBandPartition{}
@@ -502,11 +506,13 @@ func (ibpsd InfiniBandPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 }
 
 // Create creates a new InfiniBandPartition from the given parameters
-func (ibpsd InfiniBandPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, input InfiniBandPartitionCreateInput) (*InfiniBandPartition, error) {
+func (ibpsd InfiniBandPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, input InfiniBandPartitionCreateInput) (_ *InfiniBandPartition, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, InfiniBandPartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandPartitionDAO.Create")
 	if InfiniBandPartitionDAOSpan != nil {
-		defer InfiniBandPartitionDAOSpan.End()
+		defer func() {
+			InfiniBandPartitionDAOSpan.EndWith(retErr)
+		}()
 
 		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "name", input.Name)
 	}
@@ -555,11 +561,13 @@ func (ibpsd InfiniBandPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 }
 
 // Update updates an existing InfiniBandPartition from the given parameters
-func (ibpsd InfiniBandPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, input InfiniBandPartitionUpdateInput) (*InfiniBandPartition, error) {
+func (ibpsd InfiniBandPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, input InfiniBandPartitionUpdateInput) (_ *InfiniBandPartition, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, InfiniBandPartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandPartitionDAO.Update")
 	if InfiniBandPartitionDAOSpan != nil {
-		defer InfiniBandPartitionDAOSpan.End()
+		defer func() {
+			InfiniBandPartitionDAOSpan.EndWith(retErr)
+		}()
 
 		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "id", input.InfiniBandPartitionID)
 	}
@@ -657,11 +665,13 @@ func (ibpsd InfiniBandPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 }
 
 // Clear clears InfiniBandPartition attributes based on provided arguments
-func (ibpsd InfiniBandPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InfiniBandPartitionClearInput) (*InfiniBandPartition, error) {
+func (ibpsd InfiniBandPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InfiniBandPartitionClearInput) (_ *InfiniBandPartition, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, InfiniBandPartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandPartitionDAO.Clear")
 	if InfiniBandPartitionDAOSpan != nil {
-		defer InfiniBandPartitionDAOSpan.End()
+		defer func() {
+			InfiniBandPartitionDAOSpan.EndWith(retErr)
+		}()
 
 		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "id", input.InfiniBandPartitionID)
 	}
@@ -728,11 +738,13 @@ func (ibpsd InfiniBandPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, inp
 }
 
 // Delete deletes a InfiniBandPartition by ID
-func (ibpsd InfiniBandPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ibpsd InfiniBandPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, InfiniBandPartitionDAOSpan := ibpsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandPartitionDAO.Delete")
 	if InfiniBandPartitionDAOSpan != nil {
-		defer InfiniBandPartitionDAOSpan.End()
+		defer func() {
+			InfiniBandPartitionDAOSpan.EndWith(retErr)
+		}()
 
 		ibpsd.tracerSpan.SetAttribute(InfiniBandPartitionDAOSpan, "id", id.String())
 	}

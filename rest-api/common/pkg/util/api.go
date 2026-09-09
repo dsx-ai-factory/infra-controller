@@ -7,6 +7,8 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 const (
@@ -75,6 +77,8 @@ func NewAPIError(code int, message string, data error) *APIError {
 func NewAPIErrorResponse(c echo.Context, code int, message string, data error) error {
 	apiNameIfc := c.Get(APINameContextKey)
 	apiName, _ := apiNameIfc.(string)
+
+	cotel.RecordHTTPError(c.Request().Context(), code)
 
 	return c.JSON(code, APIError{
 		Code:    code,

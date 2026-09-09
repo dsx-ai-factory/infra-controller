@@ -421,3 +421,30 @@ site:
 		})
 	}
 }
+
+// TestConfig_GetTracingServiceName proves the binary supplies a service name
+// when the config omits or empties it, so an export never lacks service.name.
+func TestConfig_GetTracingServiceName(t *testing.T) {
+	tcs := []struct {
+		descr      string
+		configured *string
+		want       string
+	}{
+		{descr: "binary default when omitted", want: DefaultTracingServiceName},
+		{descr: "binary default when explicitly empty", configured: new(string), want: DefaultTracingServiceName},
+		{descr: "configured name wins", configured: ptr("custom-api"), want: "custom-api"},
+	}
+
+	for _, tc := range tcs {
+		t.Run(tc.descr, func(t *testing.T) {
+			v := viper.New()
+			if tc.configured != nil {
+				v.Set(ConfigTracingServiceName, *tc.configured)
+			}
+			cfg := &Config{v: v}
+			assert.Equal(t, tc.want, cfg.GetTracingServiceName())
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }

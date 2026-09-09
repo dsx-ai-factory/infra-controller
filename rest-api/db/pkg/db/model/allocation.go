@@ -210,11 +210,13 @@ type AllocationSQLDAO struct {
 // The returned Allocation will not have any related structs (InfrastructureProvider/Tenant/Site) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (asd AllocationSQLDAO) Create(ctx context.Context, tx *db.Tx, input AllocationCreateInput) (*Allocation, error) {
+func (asd AllocationSQLDAO) Create(ctx context.Context, tx *db.Tx, input AllocationCreateInput) (_ *Allocation, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, aDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.CreateFromParams")
 	if aDAOSpan != nil {
-		defer aDAOSpan.End()
+		defer func() {
+			aDAOSpan.EndWith(retErr)
+		}()
 		asd.tracerSpan.SetAttribute(aDAOSpan, "name", input.Name)
 	}
 
@@ -245,11 +247,13 @@ func (asd AllocationSQLDAO) Create(ctx context.Context, tx *db.Tx, input Allocat
 // GetByID returns a Allocation by ID
 // includedRelation are a subset of "InfrastructureProvider", "Tenant", "Site"
 // returns db.ErrDoesNotExist error if the record is not found
-func (asd AllocationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Allocation, error) {
+func (asd AllocationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Allocation, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, aDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.GetByID")
 	if aDAOSpan != nil {
-		defer aDAOSpan.End()
+		defer func() {
+			aDAOSpan.EndWith(retErr)
+		}()
 		asd.tracerSpan.SetAttribute(aDAOSpan, "id", id.String())
 	}
 
@@ -378,11 +382,13 @@ func (asd AllocationSQLDAO) setQueryWithFilter(filter AllocationFilterInput, que
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in AllocationOrderByDefault in ascending order
-func (asd AllocationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter AllocationFilterInput, page paginator.PageInput, includeRelations []string) ([]Allocation, int, error) {
+func (asd AllocationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter AllocationFilterInput, page paginator.PageInput, includeRelations []string) (_ []Allocation, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, activityDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.GetAll")
 	if activityDAOSpan != nil {
-		defer activityDAOSpan.End()
+		defer func() {
+			activityDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	var allocations []Allocation
@@ -457,11 +463,13 @@ func (asd AllocationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Alloca
 // For setting to null values, use: ClearFromParams
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (asd AllocationSQLDAO) Update(ctx context.Context, tx *db.Tx, input AllocationUpdateInput) (*Allocation, error) {
+func (asd AllocationSQLDAO) Update(ctx context.Context, tx *db.Tx, input AllocationUpdateInput) (_ *Allocation, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, aDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.Update")
 	if aDAOSpan != nil {
-		defer aDAOSpan.End()
+		defer func() {
+			aDAOSpan.EndWith(retErr)
+		}()
 
 		asd.tracerSpan.SetAttribute(aDAOSpan, "id", input.AllocationID.String())
 	}
@@ -526,11 +534,13 @@ func (asd AllocationSQLDAO) Update(ctx context.Context, tx *db.Tx, input Allocat
 // parameters displayName, description, tenantID when true, the are set to null in db
 // since there are 2 operations (UPDATE, SELECT), it is requireds that
 // this must be within a transaction
-func (asd AllocationSQLDAO) Clear(ctx context.Context, tx *db.Tx, input AllocationClearInput) (*Allocation, error) {
+func (asd AllocationSQLDAO) Clear(ctx context.Context, tx *db.Tx, input AllocationClearInput) (_ *Allocation, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, aDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.ClearFromParams")
 	if aDAOSpan != nil {
-		defer aDAOSpan.End()
+		defer func() {
+			aDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	a := &Allocation{
@@ -563,11 +573,13 @@ func (asd AllocationSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Allocati
 // Delete deletes an Allocation by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (asd AllocationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (asd AllocationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, aDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.DeleteByID")
 	if aDAOSpan != nil {
-		defer aDAOSpan.End()
+		defer func() {
+			aDAOSpan.EndWith(retErr)
+		}()
 
 		asd.tracerSpan.SetAttribute(aDAOSpan, "id", id.String())
 	}
@@ -588,7 +600,9 @@ func (asd AllocationSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter Allo
 	// Create a child span and set the attributes for current request
 	ctx, allocationDAOSpan := asd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationDAO.GetCount")
 	if allocationDAOSpan != nil {
-		defer allocationDAOSpan.End()
+		defer func() {
+			allocationDAOSpan.EndWith(err)
+		}()
 	}
 
 	query := db.GetIDB(tx, asd.dbSession).NewSelect().Model((*Allocation)(nil))

@@ -110,10 +110,12 @@ type IpxeTemplateSiteAssociationSQLDAO struct {
 func (itsasd IpxeTemplateSiteAssociationSQLDAO) Create(
 	ctx context.Context, tx *db.Tx,
 	input IpxeTemplateSiteAssociationCreateInput,
-) (*IpxeTemplateSiteAssociation, error) {
+) (_ *IpxeTemplateSiteAssociation, retErr error) {
 	ctx, span := itsasd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateSiteAssociationDAO.Create")
 	if span != nil {
-		defer span.End()
+		defer func() {
+			span.EndWith(retErr)
+		}()
 		itsasd.tracerSpan.SetAttribute(span, "ipxe_template_id", input.IpxeTemplateID.String())
 		itsasd.tracerSpan.SetAttribute(span, "site_id", input.SiteID.String())
 	}
@@ -134,10 +136,12 @@ func (itsasd IpxeTemplateSiteAssociationSQLDAO) Create(
 
 // GetByID returns an IpxeTemplateSiteAssociation by ID
 // Returns db.ErrDoesNotExist if the record is not found
-func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*IpxeTemplateSiteAssociation, error) {
+func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *IpxeTemplateSiteAssociation, retErr error) {
 	ctx, span := itsasd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateSiteAssociationDAO.GetByID")
 	if span != nil {
-		defer span.End()
+		defer func() {
+			span.EndWith(retErr)
+		}()
 		itsasd.tracerSpan.SetAttribute(span, "id", id.String())
 	}
 
@@ -161,10 +165,12 @@ func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByID(ctx context.Context, tx 
 
 // GetByIpxeTemplateIDAndSiteID returns an IpxeTemplateSiteAssociation by (template, site).
 // Returns db.ErrDoesNotExist if the record is not found.
-func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByIpxeTemplateIDAndSiteID(ctx context.Context, tx *db.Tx, ipxeTemplateID uuid.UUID, siteID uuid.UUID, includeRelations []string) (*IpxeTemplateSiteAssociation, error) {
+func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByIpxeTemplateIDAndSiteID(ctx context.Context, tx *db.Tx, ipxeTemplateID uuid.UUID, siteID uuid.UUID, includeRelations []string) (_ *IpxeTemplateSiteAssociation, retErr error) {
 	ctx, span := itsasd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateSiteAssociationDAO.GetByIpxeTemplateIDAndSiteID")
 	if span != nil {
-		defer span.End()
+		defer func() {
+			span.EndWith(retErr)
+		}()
 		itsasd.tracerSpan.SetAttribute(span, "ipxe_template_id", ipxeTemplateID.String())
 		itsasd.tracerSpan.SetAttribute(span, "site_id", siteID.String())
 	}
@@ -190,10 +196,12 @@ func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetByIpxeTemplateIDAndSiteID(ctx
 }
 
 // GetAll returns all IpxeTemplateSiteAssociation rows with optional filters
-func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IpxeTemplateSiteAssociationFilterInput, page paginator.PageInput, includeRelations []string) ([]IpxeTemplateSiteAssociation, int, error) {
+func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IpxeTemplateSiteAssociationFilterInput, page paginator.PageInput, includeRelations []string) (_ []IpxeTemplateSiteAssociation, _ int, retErr error) {
 	ctx, span := itsasd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateSiteAssociationDAO.GetAll")
 	if span != nil {
-		defer span.End()
+		defer func() {
+			span.EndWith(retErr)
+		}()
 	}
 
 	itsas := []IpxeTemplateSiteAssociation{}
@@ -242,10 +250,12 @@ func (itsasd IpxeTemplateSiteAssociationSQLDAO) GetAll(ctx context.Context, tx *
 }
 
 // Delete removes an IpxeTemplateSiteAssociation by ID
-func (itsasd IpxeTemplateSiteAssociationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (itsasd IpxeTemplateSiteAssociationSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	ctx, span := itsasd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateSiteAssociationDAO.Delete")
 	if span != nil {
-		defer span.End()
+		defer func() {
+			span.EndWith(retErr)
+		}()
 		itsasd.tracerSpan.SetAttribute(span, "id", id.String())
 	}
 

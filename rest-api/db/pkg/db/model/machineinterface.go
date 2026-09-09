@@ -153,11 +153,13 @@ type MachineInterfaceSQLDAO struct {
 
 // Create creates a new MachineInterface from the given parameters
 // The returned MachineInterface will not have any related structs filled in
-func (micd MachineInterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineInterfaceCreateInput) (*MachineInterface, error) {
+func (micd MachineInterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineInterfaceCreateInput) (_ *MachineInterface, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInterfaceDAOSpan := micd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInterfaceDAO.Create")
 	if machineInterfaceDAOSpan != nil {
-		defer machineInterfaceDAOSpan.End()
+		defer func() {
+			machineInterfaceDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	id := uuid.New()
@@ -193,11 +195,13 @@ func (micd MachineInterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input 
 // GetByID returns a MachineInterface by ID
 // returns db.ErrDoesNotExist error if the record is not found
 func (micd MachineInterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID,
-	includeRelations []string) (*MachineInterface, error) {
+	includeRelations []string) (_ *MachineInterface, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInterfaceDAOSpan := micd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInterfaceDAO.GetByID")
 	if machineInterfaceDAOSpan != nil {
-		defer machineInterfaceDAOSpan.End()
+		defer func() {
+			machineInterfaceDAOSpan.EndWith(retErr)
+		}()
 
 		micd.tracerSpan.SetAttribute(machineInterfaceDAOSpan, "id", id.String())
 	}
@@ -225,11 +229,13 @@ func (micd MachineInterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uu
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in MachineInterfaceOrderByDefault in ascending order
-func (micd MachineInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineInterfaceFilterInput, page paginator.PageInput, includeRelations []string) ([]MachineInterface, int, error) {
+func (micd MachineInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineInterfaceFilterInput, page paginator.PageInput, includeRelations []string) (_ []MachineInterface, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInterfaceDAOSpan := micd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInterfaceDAO.GetAll")
 	if machineInterfaceDAOSpan != nil {
-		defer machineInterfaceDAOSpan.End()
+		defer func() {
+			machineInterfaceDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	mis := []MachineInterface{}
@@ -297,11 +303,13 @@ func (micd MachineInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter
 // UpdateFromParams updates specified fields of an existing MachineInterface
 // The updated fields are assumed to be set to non-null values
 func (micd MachineInterfaceSQLDAO) Update(
-	ctx context.Context, tx *db.Tx, input MachineInterfaceUpdateInput) (*MachineInterface, error) {
+	ctx context.Context, tx *db.Tx, input MachineInterfaceUpdateInput) (_ *MachineInterface, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInterfaceDAOSpan := micd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInterfaceDAO.UpdateFromParams")
 	if machineInterfaceDAOSpan != nil {
-		defer machineInterfaceDAOSpan.End()
+		defer func() {
+			machineInterfaceDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	m := &MachineInterface{
@@ -376,11 +384,13 @@ func (micd MachineInterfaceSQLDAO) Update(
 // ClearFromParams sets parameters of an existing Machine Capability to null values in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (micd MachineInterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineInterfaceClearInput) (*MachineInterface, error) {
+func (micd MachineInterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input MachineInterfaceClearInput) (_ *MachineInterface, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInterfaceDAOSpan := micd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInterfaceDAO.ClearFromParams")
 	if machineInterfaceDAOSpan != nil {
-		defer machineInterfaceDAOSpan.End()
+		defer func() {
+			machineInterfaceDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	m := &MachineInterface{
@@ -432,11 +442,13 @@ func (micd MachineInterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input M
 // Delete deletes an MachineInterface by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (micd MachineInterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) error {
+func (micd MachineInterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInterfaceDAOSpan := micd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInterfaceDAO.Delete")
 	if machineInterfaceDAOSpan != nil {
-		defer machineInterfaceDAOSpan.End()
+		defer func() {
+			machineInterfaceDAOSpan.EndWith(retErr)
+		}()
 
 		micd.tracerSpan.SetAttribute(machineInterfaceDAOSpan, "id", id.String())
 	}

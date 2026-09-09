@@ -25,15 +25,13 @@ import (
 
 // GetAllMachineCapabilityHandler is an API Handler to return various Machine Capabilities
 type GetAllMachineCapabilityHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetAllMachineCapabilityHandler creates and returns a new handler for retrieving Machine Capabilities
 func NewGetAllMachineCapabilityHandler(dbSession *cdb.Session) GetAllMachineCapabilityHandler {
 	return GetAllMachineCapabilityHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
@@ -49,7 +47,7 @@ func NewGetAllMachineCapabilityHandler(dbSession *cdb.Session) GetAllMachineCapa
 // @Success 200 {object} model.APIUser
 // @Router /v2/org/{org}/nico/machine-capability [get]
 func (gamch GetAllMachineCapabilityHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineCapability", "GetAll", c, gamch.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineCapability", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

@@ -197,7 +197,6 @@ func (mskg ManageSSHKeyGroup) SyncSSHKeyGroupViaSiteAgent(ctx context.Context, s
 			if errors.As(err, &timeoutErr) || err == context.DeadlineExceeded {
 				logger.Error().Err(err).Msg(fmt.Sprintf("failed to %s SSHKeyGroup, timeout occurred executing workflow on Site.", workflowMethod))
 
-				// Create a new context deadlines
 				newctx, newcancel := context.WithTimeout(context.Background(), cwutil.WorkflowContextNewAfterTimeout)
 				defer newcancel()
 

@@ -26,6 +26,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
@@ -33,19 +34,17 @@ import (
 
 // GetAllInstanceNVLinkInterfaceHandler is the API Handler for retrieving all NVLinkInterfaces for an Instance
 type GetAllInstanceNVLinkInterfaceHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllInstanceNVLinkInterfaceHandler initializes and returns a new handler for retrieving all NVLinkInterfaces for an Instance
 func NewGetAllInstanceNVLinkInterfaceHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllInstanceNVLinkInterfaceHandler {
 	return GetAllInstanceNVLinkInterfaceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -82,7 +81,6 @@ type GetAllNVLinkInterfaceHandler struct {
 	dbSession     *cdb.Session
 	tc            temporalClient.Client
 	cfg           *config.Config
-	tracerSpan    *cutil.TracerSpan
 	queryOverride *common.QueryOverride
 }
 
@@ -98,7 +96,6 @@ func NewGetAllNVLinkInterfaceHandler(dbSession *cdb.Session, tc temporalClient.C
 		dbSession:     dbSession,
 		tc:            tc,
 		cfg:           cfg,
-		tracerSpan:    cutil.NewTracerSpan(),
 		queryOverride: override,
 	}
 }
@@ -123,7 +120,7 @@ func NewGetAllNVLinkInterfaceHandler(dbSession *cdb.Session, tc temporalClient.C
 // @Success 200 {object} model.APINVLinkInterface
 // @Router /v2/org/{org}/nico/nvlink-interface [get]
 func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkInterface", "GetAll", c, gaish.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("NVLinkInterface", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -200,7 +197,7 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 
 	if len(siteIDStrs) > 0 {
 		// Set tracer span attribute
-		gaish.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("siteIds", siteIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("siteIds", siteIDStrs))
 
 		// De-duplicate Site IDs
 		siteIDs = goset.NewSet(siteIDs...).ToSlice()
@@ -259,7 +256,7 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 
 	if len(instanceIDStrs) > 0 {
 		// Set tracer span attribute
-		gaish.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("instanceIds", instanceIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("instanceIds", instanceIDStrs))
 
 		// De-duplicate Instance IDs
 		instanceIDs = goset.NewSet(instanceIDs...).ToSlice()
@@ -304,7 +301,7 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 
 	if len(nvllpIDStrs) > 0 {
 		// Set tracer span attribute
-		gaish.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("nvLinkLogicalPartitionIds", nvllpIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("nvLinkLogicalPartitionIds", nvllpIDStrs))
 
 		// Deduplicate NVLink Logical Partition IDs
 		nvlinkLogicalPartitionIDs = goset.NewSet(nvlinkLogicalPartitionIDs...).ToSlice()
@@ -347,7 +344,7 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 
 	if len(nvLinkDomainIDStrs) > 0 {
 		// Set tracer span attribute
-		gaish.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("nvLinkDomainIds", nvLinkDomainIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("nvLinkDomainIds", nvLinkDomainIDStrs))
 
 		// Deduplicate NVLink Domain IDs
 		nvLinkDomainIDs = goset.NewSet(nvLinkDomainIDs...).ToSlice()
@@ -357,7 +354,7 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 	var statuses []string
 	qStatuses := qParams["status"]
 	for _, status := range qStatuses {
-		gaish.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", status), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", status))
 		_, ok := cdbm.NVLinkInterfaceStatusMap[status]
 		if !ok {
 			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
@@ -368,7 +365,7 @@ func (gaish GetAllNVLinkInterfaceHandler) Handle(c echo.Context) error {
 
 	if len(qStatuses) > 0 {
 		// Set tracer span attribute
-		gaish.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("statuses", qStatuses), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("statuses", qStatuses))
 	}
 
 	// Get the NVLink Logical Partition NVLink Interfaces record from the db

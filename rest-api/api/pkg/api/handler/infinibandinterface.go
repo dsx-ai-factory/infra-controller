@@ -26,6 +26,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
@@ -33,19 +34,17 @@ import (
 
 // GetAllInstanceInfiniBandInterfaceHandler is the API Handler for retrieving all InfiniBandInterfaces for an Instance
 type GetAllInstanceInfiniBandInterfaceHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllInstanceInfiniBandInterfaceHandler initializes and returns a new handler for retrieving all InfiniBandInterfaces for an Instance
 func NewGetAllInstanceInfiniBandInterfaceHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllInstanceInfiniBandInterfaceHandler {
 	return GetAllInstanceInfiniBandInterfaceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -82,7 +81,6 @@ type GetAllInfiniBandInterfaceHandler struct {
 	dbSession     *cdb.Session
 	tc            temporalClient.Client
 	cfg           *config.Config
-	tracerSpan    *cutil.TracerSpan
 	queryOverride *common.QueryOverride
 }
 
@@ -98,7 +96,6 @@ func NewGetAllInfiniBandInterfaceHandler(dbSession *cdb.Session, tc temporalClie
 		dbSession:     dbSession,
 		tc:            tc,
 		cfg:           cfg,
-		tracerSpan:    cutil.NewTracerSpan(),
 		queryOverride: override,
 	}
 }
@@ -122,7 +119,7 @@ func NewGetAllInfiniBandInterfaceHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 200 {object} model.APIInfiniBandInterface
 // @Router /v2/org/{org}/nico/infiniband-interface [get]
 func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandInterface", "GetAll", c, gaibih.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandInterface", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -199,7 +196,7 @@ func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
 
 	if len(siteIDStrs) > 0 {
 		// Set tracer span attribute
-		gaibih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("siteIds", siteIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("siteIds", siteIDStrs))
 
 		// De-duplicate Site IDs
 		siteIDs = goset.NewSet(siteIDs...).ToSlice()
@@ -259,7 +256,7 @@ func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
 
 	if len(instanceIDStrs) > 0 {
 		// Set tracer span attribute
-		gaibih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("instanceIds", instanceIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("instanceIds", instanceIDStrs))
 
 		// De-duplicate Instance IDs
 		instanceIDs = goset.NewSet(instanceIDs...).ToSlice()
@@ -294,7 +291,7 @@ func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
 	var infiniBandPartitionIDs []uuid.UUID
 	ibpIDStrs := qParams["infinibandPartitionId"]
 	for _, ibpIDStr := range ibpIDStrs {
-		gaibih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("infinibandPartitionId", ibpIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("infinibandPartitionId", ibpIDStrs))
 
 		parsedID, err := uuid.Parse(ibpIDStr)
 		if err != nil {
@@ -305,7 +302,7 @@ func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
 
 	if len(ibpIDStrs) > 0 {
 		// Set tracer span attribute
-		gaibih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("infinibandPartitionIds", ibpIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("infinibandPartitionIds", ibpIDStrs))
 
 		// Deduplicate InfiniBand Partition IDs
 		infiniBandPartitionIDs = goset.NewSet(infiniBandPartitionIDs...).ToSlice()
@@ -338,7 +335,7 @@ func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
 	var statuses []string
 	qStatuses := qParams["status"]
 	for _, status := range qStatuses {
-		gaibih.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", status), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", status))
 		_, ok := cdbm.InfiniBandInterfaceStatusMap[status]
 		if !ok {
 			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
@@ -349,7 +346,7 @@ func (gaibih GetAllInfiniBandInterfaceHandler) Handle(c echo.Context) error {
 
 	if len(qStatuses) > 0 {
 		// Set tracer span attribute
-		gaibih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("statuses", qStatuses), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("statuses", qStatuses))
 	}
 
 	// Get the InfiniBand Interfaces record from the db

@@ -300,11 +300,13 @@ type VpcPrefixSQLDAO struct {
 }
 
 // Create creates a new VpcPrefix from the given parameters
-func (vpsd VpcPrefixSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcPrefixCreateInput) (*VpcPrefix, error) {
+func (vpsd VpcPrefixSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcPrefixCreateInput) (_ *VpcPrefix, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPrefixDAO.Create")
 	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
+		defer func() {
+			vpDAOSpan.EndWith(retErr)
+		}()
 
 		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "name", input.Name)
 	}
@@ -345,11 +347,13 @@ func (vpsd VpcPrefixSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcPref
 // GetByID returns a VpcPrefix by ID
 // includeRelation can be a subset of Vpc
 // returns db.ErrDoesNotExist error if the record is not found
-func (vpsd VpcPrefixSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*VpcPrefix, error) {
+func (vpsd VpcPrefixSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *VpcPrefix, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPrefixDAO.GetByID")
 	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
+		defer func() {
+			vpDAOSpan.EndWith(retErr)
+		}()
 
 		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", id.String())
 	}
@@ -377,11 +381,13 @@ func (vpsd VpcPrefixSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in VpcPrefixOrderByDefault in ascending order
-func (vpsd VpcPrefixSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcPrefixFilterInput, page paginator.PageInput, includeRelations []string) ([]VpcPrefix, int, error) {
+func (vpsd VpcPrefixSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcPrefixFilterInput, page paginator.PageInput, includeRelations []string) (_ []VpcPrefix, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPrefixDAO.GetAll")
 	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
+		defer func() {
+			vpDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	vps := []VpcPrefix{}
@@ -465,11 +471,13 @@ func (vpsd VpcPrefixSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcPre
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (vpsd VpcPrefixSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcPrefixUpdateInput) (*VpcPrefix, error) {
+func (vpsd VpcPrefixSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcPrefixUpdateInput) (_ *VpcPrefix, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPrefixDAO.Update")
 	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
+		defer func() {
+			vpDAOSpan.EndWith(retErr)
+		}()
 
 		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", input.VpcPrefixID)
 	}
@@ -585,11 +593,13 @@ func (vpsd VpcPrefixSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcPrefi
 // Delete deletes an VpcPrefix by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (vpsd VpcPrefixSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (vpsd VpcPrefixSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPrefixDAO.Delete")
 	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
+		defer func() {
+			vpDAOSpan.EndWith(retErr)
+		}()
 
 		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", id.String())
 	}

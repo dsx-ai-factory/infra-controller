@@ -10,31 +10,31 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	goset "github.com/deckarep/golang-set/v2"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 // GetAllAuditEntryHandler is the API Handler for retrieving all AuditEntries
 type GetAllAuditEntryHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetAllAuditEntryHandler initializes and returns a new handler for retrieving all AuditEntries
 func NewGetAllAuditEntryHandler(dbSession *cdb.Session) GetAllAuditEntryHandler {
 	return GetAllAuditEntryHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
@@ -48,7 +48,7 @@ func NewGetAllAuditEntryHandler(dbSession *cdb.Session) GetAllAuditEntryHandler 
 // @Success 200 {array} []model.APIAuditEntry
 // @Router /v2/org/{org}/nico/audit [get]
 func (gaaeh GetAllAuditEntryHandler) Handle(c echo.Context) error {
-	orgName, dbUser, ctx, logger, handlerSpan := common.SetupHandler("AuditEntry", "GetAll", c, gaaeh.tracerSpan)
+	orgName, dbUser, ctx, logger, handlerSpan := common.SetupHandler("AuditEntry", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -161,15 +161,13 @@ func (gaaeh GetAllAuditEntryHandler) Handle(c echo.Context) error {
 
 // GetAuditEntryHandler is the API Handler for getting individual Audit Entry
 type GetAuditEntryHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetAuditEntryHandler initializes and returns a new handler for getting individual Audit Entry
 func NewGetAuditEntryHandler(dbSession *cdb.Session) GetAuditEntryHandler {
 	return GetAuditEntryHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
@@ -184,7 +182,7 @@ func NewGetAuditEntryHandler(dbSession *cdb.Session) GetAuditEntryHandler {
 // @Success 200 {object} model.APIAuditEntry
 // @Router /v2/org/{org}/nico/audit/{id} [get]
 func (gaeh GetAuditEntryHandler) Handle(c echo.Context) error {
-	orgName, dbUser, ctx, logger, handlerSpan := common.SetupHandler("AuditEntry", "Get", c, gaeh.tracerSpan)
+	orgName, dbUser, ctx, logger, handlerSpan := common.SetupHandler("AuditEntry", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -213,7 +211,7 @@ func (gaeh GetAuditEntryHandler) Handle(c echo.Context) error {
 	// Get AuditEntry ID from URL param
 	aeStrID := c.Param("id")
 
-	gaeh.tracerSpan.SetAttribute(handlerSpan, attribute.String("audit_entry_id", aeStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("audit_entry_id", aeStrID))
 
 	aeID, err := uuid.Parse(aeStrID)
 	if err != nil {

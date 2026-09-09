@@ -21,6 +21,8 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -41,21 +43,19 @@ import (
 
 // CreateAllocationHandler is the API Handler for creating a new Allocatio n
 type CreateAllocationHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateAllocationHandler initializes and returns a new handler for creating Allocation
 func NewCreateAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateAllocationHandler {
 	return CreateAllocationHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -71,7 +71,7 @@ func NewCreateAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Success 201 {object} model.APIAllocation
 // @Router /v2/org/{org}/nico/allocation [post]
 func (cah CreateAllocationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Allocation", "Create", c, cah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Allocation", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -476,19 +476,17 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 
 // GetAllAllocationHandler is the API Handler for getting all Allocations
 type GetAllAllocationHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllAllocationHandler initializes and returns a new handler for getting all Allocations
 func NewGetAllAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllAllocationHandler {
 	return GetAllAllocationHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -517,7 +515,7 @@ func NewGetAllAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Success 200 {object} []model.APIAllocation
 // @Router /v2/org/{org}/nico/allocation [get]
 func (gaah GetAllAllocationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Allocation", "GetAll", c, gaah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Allocation", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -573,13 +571,13 @@ func (gaah GetAllAllocationHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gaah.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
 	var statuses []string
 	if statusQuery := qParams["status"]; len(statusQuery) > 0 {
-		gaah.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", statusQuery))
 		for _, status := range statusQuery {
 			_, ok := cdbm.AllocationStatusMap[status]
 			if !ok {
@@ -596,7 +594,7 @@ func (gaah GetAllAllocationHandler) Handle(c echo.Context) error {
 	// Get resource type for resources from query param
 	var resourceTypes []string
 	if resourceTypeQuery := qParams["resourceType"]; len(resourceTypeQuery) > 0 {
-		gaah.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("resourceType", resourceTypeQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("resourceType", resourceTypeQuery))
 		for _, resourceType := range resourceTypeQuery {
 			if cdbm.AllocationConstraintResourceTypes[resourceType] {
 				resourceTypes = append(resourceTypes, resourceType)
@@ -611,7 +609,7 @@ func (gaah GetAllAllocationHandler) Handle(c echo.Context) error {
 	// Get resource type ID from query param
 	var resourceTypeIDs []uuid.UUID
 	if resourceTypeIdQuery := qParams["resourceTypeId"]; len(resourceTypeIdQuery) > 0 {
-		gaah.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("resourceTypeId", resourceTypeIdQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("resourceTypeId", resourceTypeIdQuery))
 		for _, resourceTypeId := range resourceTypeIdQuery {
 			id, err := uuid.Parse(resourceTypeId)
 			if err != nil {
@@ -810,19 +808,17 @@ func (gaah GetAllAllocationHandler) Handle(c echo.Context) error {
 
 // GetAllocationHandler is the API Handler for retrieving Allocation
 type GetAllocationHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllocationHandler initializes and returns a new handler to retrieve Allocation
 func NewGetAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllocationHandler {
 	return GetAllocationHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -841,7 +837,7 @@ func NewGetAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Success 200 {object} model.APIAllocation
 // @Router /v2/org/{org}/nico/allocation/{id} [get]
 func (gah GetAllocationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Allocation", "Get", c, gah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Allocation", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -857,7 +853,7 @@ func (gah GetAllocationHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Allocation ID in URL", nil)
 	}
 
-	gah.tracerSpan.SetAttribute(handlerSpan, attribute.String("allocation_id", aStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("allocation_id", aStrID))
 
 	// Get and validate includeRelation params
 	qParams := c.QueryParams()
@@ -922,19 +918,17 @@ func (gah GetAllocationHandler) Handle(c echo.Context) error {
 
 // UpdateAllocationHandler is the API Handler for updating a Allocation
 type UpdateAllocationHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateAllocationHandler initializes and returns a new handler for updating Allocation
 func NewUpdateAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateAllocationHandler {
 	return UpdateAllocationHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -951,7 +945,7 @@ func NewUpdateAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Success 200 {object} model.APIAllocation
 // @Router /v2/org/{org}/nico/allocation/{id} [patch]
 func (uah UpdateAllocationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Allocation", "Update", c, uah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Allocation", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -985,7 +979,7 @@ func (uah UpdateAllocationHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Allocation ID in URL", nil)
 	}
 
-	uah.tracerSpan.SetAttribute(handlerSpan, attribute.String("allocation_id", aStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("allocation_id", aStrID))
 
 	aDAO := cdbm.NewAllocationDAO(uah.dbSession)
 
@@ -1144,19 +1138,17 @@ func (uah UpdateAllocationHandler) Handle(c echo.Context) error {
 
 // DeleteAllocationHandler is the API Handler for deleting a Allocation
 type DeleteAllocationHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewDeleteAllocationHandler initializes and returns a new handler for deleting Allocation
 func NewDeleteAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) DeleteAllocationHandler {
 	return DeleteAllocationHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1172,7 +1164,7 @@ func NewDeleteAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Success 202
 // @Router /v2/org/{org}/nico/allocation/{id} [delete]
 func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Allocation", "Delete", c, dah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Allocation", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1206,7 +1198,7 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Allocation ID in URL", nil)
 	}
 
-	dah.tracerSpan.SetAttribute(handlerSpan, attribute.String("allocation_id", aStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("allocation_id", aStrID))
 
 	logger.Info().Str("Allocation", aStrID).Msg("deleting allocation")
 
