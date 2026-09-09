@@ -64,11 +64,60 @@ jobs:
           registry-password: ${{ secrets.NVCR_STG_TOKEN }}
           charts: rest-api/temporal-helm/temporal
 
+  verify-securitycontext-configurable:
+    name: Verify pod securityContext is overridable
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Assert podSecurityContext override is honored
+        # Regression guard: every nico-rest workload must let the operator
+        # replace the chart's default pod securityContext (e.g. drop the
+        # hardcoded runAsUser/fsGroup so OpenShift can inject a range UID).
+        # Rendering each subchart with its podSecurityContext set to null must
+        # leave zero runAsUser in the output; a chart that hardcodes it
+        # instead of using `{{- with .Values.podSecurityContext }}` fails here.
+        # Subcharts are rendered directly: Helm's coalescing keeps a subchart's
+        # own values.yaml default when the parent nulls the key from the
+        # umbrella (--set nico-rest-api.podSecurityContext=null has no effect),
+        # so the umbrella cannot exercise this contract.
+        run: |
+          set -euo pipefail
+          cd helm/rest/nico-rest/charts
+          for chart in nico-rest-api nico-rest-workflow nico-rest-site-manager nico-rest-cert-manager nico-rest-db; do
+            sets=(--set podSecurityContext=null)
+            if [ "${chart}" = "nico-rest-api" ]; then
+              # The api ConfigMap refuses to render without an auth issuer.
+              sets+=(
+                --set config.keycloak.enabled=true
+                --set config.keycloak.baseURL=http://keycloak:8082
+                --set config.keycloak.realm=test
+                --set config.keycloak.clientID=test
+              )
+            fi
+            rendered="$(helm template t "${chart}" "${sets[@]}")"
+            count="$(printf '%s\n' "${rendered}" | grep -c 'runAsUser' || true)"
+            if [ "${count}" -ne 0 ]; then
+              echo "::error::${chart}: podSecurityContext is not overridable — found ${count} runAsUser entries after --set podSecurityContext=null."
+              printf '%s\n' "${rendered}" | grep -n 'runAsUser' || true
+              exit 1
+            fi
+            echo "OK: ${chart} renders no runAsUser when podSecurityContext is nulled."
+          done
+
   push-charts:
     name: Push Helm Charts
     needs:
       - validate-charts
-    if: ${{ !cancelled() && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' && needs.validate-charts.result == 'success' && !contains(github.ref, 'pull-request/') }}
+      - verify-securitycontext-configurable
+    if: ${{ !cancelled() && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' && needs.validate-charts.result == 'success' && needs.verify-securitycontext-configurable.result == 'success' && !contains(github.ref, 'pull-request/') }}
     runs-on: linux-amd64-cpu4
     strategy:
       matrix:
