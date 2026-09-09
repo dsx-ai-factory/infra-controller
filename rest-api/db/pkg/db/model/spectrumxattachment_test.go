@@ -44,12 +44,12 @@ func TestSpectrumXAttachment_ToProto(t *testing.T) {
 		sxa := &SpectrumXAttachment{
 			SpectrumXPartitionID: partitionID,
 			Device:               device,
-			AttachmentType:       SpectrumXAttachmentTypeOVN,
+			AttachmentType:       SpectrumXAttachmentTypeOVS,
 			VirtualFunctionID:    cutil.GetPtr(3),
 		}
 
 		got := sxa.ToProto()
-		assert.Equal(t, corev1.SpxAttachmentType_Ovn, got.AttachmentType)
+		assert.Equal(t, corev1.SpxAttachmentType_Ovs, got.AttachmentType)
 		require.NotNil(t, got.VirtualFunctionId)
 		assert.Equal(t, uint32(3), *got.VirtualFunctionId)
 	})

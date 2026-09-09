@@ -1023,7 +1023,7 @@ type SpxAttachmentType int32
 const (
 	SpxAttachmentType_Physical SpxAttachmentType = 0
 	SpxAttachmentType_Virtual  SpxAttachmentType = 1
-	SpxAttachmentType_Ovn      SpxAttachmentType = 2 // This is WIP. Specification for this not yet finalized in Astra Spec
+	SpxAttachmentType_Ovs      SpxAttachmentType = 2 // This is WIP. Specification for this not yet finalized in Astra Spec
 )
 
 // Enum value maps for SpxAttachmentType.
@@ -1031,12 +1031,12 @@ var (
 	SpxAttachmentType_name = map[int32]string{
 		0: "Physical",
 		1: "Virtual",
-		2: "Ovn",
+		2: "Ovs",
 	}
 	SpxAttachmentType_value = map[string]int32{
 		"Physical": 0,
 		"Virtual":  1,
-		"Ovn":      2,
+		"Ovs":      2,
 	}
 )
 
@@ -71841,7 +71841,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x11SpxAttachmentType\x12\f\n" +
 	"\bPhysical\x10\x00\x12\v\n" +
 	"\aVirtual\x10\x01\x12\a\n" +
-	"\x03Ovn\x10\x02*\xe6\x01\n" +
+	"\x03Ovs\x10\x02*\xe6\x01\n" +
 	"\x1dInstanceInterfaceIpFamilyMode\x121\n" +
 	"-INSTANCE_INTERFACE_IP_FAMILY_MODE_UNSPECIFIED\x10\x00\x12/\n" +
 	"+INSTANCE_INTERFACE_IP_FAMILY_MODE_IPV4_ONLY\x10\x01\x12/\n" +

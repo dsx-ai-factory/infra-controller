@@ -3382,7 +3382,7 @@ message InstanceSpxConfig {
 enum SpxAttachmentType {
   Physical = 0;
   Virtual = 1;
-  Ovn = 2; // This is WIP. Specification for this not yet finalized in Astra Spec
+  Ovs = 2; // This is WIP. Specification for this not yet finalized in Astra Spec
 }
 
 message InstanceSpxAttachment {

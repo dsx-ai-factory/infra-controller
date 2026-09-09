@@ -20931,7 +20931,7 @@ components:
           enum:
             - Physical
             - Virtual
-            - OVN
+            - OVS
           description: 'Type of SpectrumX attachment. `Virtual` is not currently supported and is rejected'
         virtualFunctionId:
           type:
@@ -23656,7 +23656,7 @@ components:
         - spectrumXPartitionId: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
           device: 'NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC'
           deviceInstance: 3
-          attachmentType: OVN
+          attachmentType: OVS
           virtualFunctionId: null
       description: Request data to attach a SpectrumX Partition to an Instance
       properties:
@@ -23676,7 +23676,7 @@ components:
           enum:
             - Physical
             - Virtual
-            - OVN
+            - OVS
           description: 'Type of SpectrumX attachment. `Virtual` is not currently supported and is rejected.'
         virtualFunctionId:
           type:

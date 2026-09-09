@@ -22,7 +22,7 @@ type APISpectrumXAttachmentCreateOrUpdateRequest struct {
 	// DeviceInstance is the index of the device to use. This is a pointer so that an omitted
 	// property is rejected rather than decoding to 0 and attaching to the first device.
 	DeviceInstance *int `json:"deviceInstance"`
-	// AttachmentType is the type of SpectrumX attachment: Physical, Virtual, or OVN
+	// AttachmentType is the type of SpectrumX attachment: Physical, Virtual, or OVS
 	AttachmentType cdbm.SpectrumXAttachmentType `json:"attachmentType"`
 	// VirtualFunctionID must be omitted, as virtual functions are not currently supported
 	VirtualFunctionID *int `json:"virtualFunctionId"`
@@ -41,7 +41,7 @@ func (sacr APISpectrumXAttachmentCreateOrUpdateRequest) Validate() error {
 			validation.Min(0).Error("value must be equal or greater than 0")),
 		validation.Field(&sacr.AttachmentType,
 			validation.Required.Error(validationErrorValueRequired),
-			validation.In(cdbm.SpectrumXAttachmentTypePhysical, cdbm.SpectrumXAttachmentTypeVirtual, cdbm.SpectrumXAttachmentTypeOVN).Error("must be one of 'Physical', 'Virtual', or 'OVN'")),
+			validation.In(cdbm.SpectrumXAttachmentTypePhysical, cdbm.SpectrumXAttachmentTypeVirtual, cdbm.SpectrumXAttachmentTypeOVS).Error("must be one of 'Physical', 'Virtual', or 'OVS'")),
 	)
 	if err != nil {
 		return err
