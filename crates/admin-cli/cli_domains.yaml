@@ -10,6 +10,7 @@
 # matches a real command.
 
 hardware:
+  - backend
   - machine
   - managed-host
   - host

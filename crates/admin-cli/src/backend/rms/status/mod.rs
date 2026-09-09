@@ -15,20 +15,23 @@
  * limitations under the License.
  */
 
-use clap::Parser;
+mod args;
+mod cmd;
 
-#[derive(Parser, Debug)]
-#[command(after_long_help = "\
-EXAMPLES:
+#[cfg(test)]
+mod tests;
 
-Show client and server versions:
-    $ nico-admin-cli version
+pub(super) use args::Args;
 
-Also display the runtime config:
-    $ nico-admin-cli version --show-runtime-config
+use crate::cfg::dispatch::dispatch_via_run;
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
+use crate::errors::CarbideCliResult;
 
-")]
-pub(crate) struct Opts {
-    #[clap(short, long, action, help = "Display Runtime Config also.")]
-    pub(super) show_runtime_config: bool,
+impl Run for Args {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        cmd::probe(&ctx.api_client, ctx.config.format).await
+    }
 }
+
+dispatch_via_run!(Args);

@@ -21,14 +21,11 @@ use clap::Parser;
 #[command(after_long_help = "\
 EXAMPLES:
 
-Show client and server versions:
-    $ nico-admin-cli version
+Check RMS connectivity and print the version (requires RMS to be configured in nico-api):
+    $ nico-admin-cli backend rms status
 
-Also display the runtime config:
-    $ nico-admin-cli version --show-runtime-config
+Same check, JSON output:
+    $ nico-admin-cli -f json backend rms status
 
 ")]
-pub(crate) struct Opts {
-    #[clap(short, long, action, help = "Display Runtime Config also.")]
-    pub(super) show_runtime_config: bool,
-}
+pub(crate) struct Args;

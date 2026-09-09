@@ -15,20 +15,14 @@
  * limitations under the License.
  */
 
+mod status;
+
 use clap::Parser;
 
-#[derive(Parser, Debug)]
-#[command(after_long_help = "\
-EXAMPLES:
+use crate::cfg::dispatch::Dispatch;
 
-Show client and server versions:
-    $ nico-admin-cli version
-
-Also display the runtime config:
-    $ nico-admin-cli version --show-runtime-config
-
-")]
-pub(crate) struct Opts {
-    #[clap(short, long, action, help = "Display Runtime Config also.")]
-    pub(super) show_runtime_config: bool,
+#[derive(Parser, Debug, Dispatch)]
+pub(crate) enum Cmd {
+    #[clap(about = "Probe the RMS backend connectivity and version")]
+    Status(status::Args),
 }
