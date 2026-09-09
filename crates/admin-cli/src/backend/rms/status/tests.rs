@@ -15,20 +15,16 @@
  * limitations under the License.
  */
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
-#[derive(Parser, Debug)]
-#[command(after_long_help = "\
-EXAMPLES:
+use super::Args;
 
-Show client and server versions:
-    $ nico-admin-cli version
+#[test]
+fn verify_cmd_structure() {
+    Args::command().debug_assert();
+}
 
-Also display the runtime config:
-    $ nico-admin-cli version --show-runtime-config
-
-")]
-pub(crate) struct Opts {
-    #[clap(short, long, action, help = "Display Runtime Config also.")]
-    pub(super) show_runtime_config: bool,
+#[test]
+fn parses_with_no_args() {
+    Args::try_parse_from(["status"]).unwrap();
 }

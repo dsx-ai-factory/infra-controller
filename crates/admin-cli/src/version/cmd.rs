@@ -16,7 +16,6 @@
  */
 
 use ::rpc::admin_cli::OutputFormat;
-use eyre::WrapErr as _;
 use prettytable::{Cell, Row, Table, row};
 
 use super::Opts;
@@ -168,17 +167,5 @@ pub(super) async fn handle_show_version(
         async_write!(output, "{table}")?;
     }
 
-    Ok(())
-}
-
-/// Query the RMS version through nico-api (`GetRmsVersion` Forge RPC) and
-/// print the version string returned by the RMS backend.
-pub(super) async fn handle_show_rms_version(api_client: &ApiClient) -> Result<(), CarbideCliError> {
-    let response = api_client
-        .0
-        .get_rms_version()
-        .await
-        .wrap_err("failed to get RMS version from nico-api")?;
-    println!("{}", response.version);
     Ok(())
 }
