@@ -45,6 +45,7 @@ use crate::rpc::ApiClient;
 mod admission_retry;
 mod async_write;
 mod attestation;
+mod backend;
 mod bmc_machine;
 mod bmc_role;
 mod boot_interface;
@@ -224,11 +225,10 @@ async fn main() -> color_eyre::Result<()> {
         Some(s) => s,
     };
 
-    // Plain `version` (no subcommand) calls forge/Version which allows anonymous
-    // access, so no client cert is needed. Subcommands like `version rms` call
-    // forge/GetRmsVersion which requires authentication via the admin CLI client
-    // cert (trusted-certificate principal), so they must present a cert.
-    let client_cert = if matches!(command, CliCommand::Version(ref opts) if !opts.needs_auth()) {
+    // `version` calls forge/Version which allows anonymous access, so no
+    // client cert is needed. All other commands authenticate via the admin
+    // CLI client cert (trusted-certificate principal).
+    let client_cert = if matches!(command, CliCommand::Version(_)) {
         None
     } else {
         Some(get_client_cert_info(
@@ -259,6 +259,7 @@ async fn main() -> color_eyre::Result<()> {
     // Command to talk to Carbide API.
     match command {
         CliCommand::Attestation(cmd) => cmd.dispatch(ctx).await?,
+        CliCommand::Backend(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::BmcMachine(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::BootInterface(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::BootOverride(cmd) => cmd.dispatch(ctx).await?,

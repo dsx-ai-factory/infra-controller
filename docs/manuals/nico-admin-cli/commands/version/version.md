@@ -45,14 +45,7 @@ Print help (see a summary with -h)
 ```sh
 nico-admin-cli version
 nico-admin-cli version --show-runtime-config
-nico-admin-cli version rms
 ```
-
-## Subcommands
-
-| Subcommand | Description |
-|---|---|
-| [`rms`](./version-rms.md) | Show the version of the configured RMS backend via nico-api |
 
 ---
 
