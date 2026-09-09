@@ -29,9 +29,22 @@ use crate::cfg::run::Run;
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
+impl Opts {
+    /// Returns true when the subcommand calls an authenticated endpoint
+    /// (e.g. `version rms` → forge/GetRmsVersion).  Plain `version` talks to
+    /// forge/Version which is available anonymously, so it does not need a
+    /// client certificate.
+    pub(crate) fn needs_auth(&self) -> bool {
+        self.command.is_some()
+    }
+}
+
 impl Run for Opts {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
-        cmd::handle_show_version(&self, &ctx.api_client, ctx.config.format).await
+        match self.command {
+            Some(args::Cmd::Rms) => cmd::handle_show_rms_version(&ctx.api_client).await,
+            None => cmd::handle_show_version(&self, &ctx.api_client, ctx.config.format).await,
+        }
     }
 }
 

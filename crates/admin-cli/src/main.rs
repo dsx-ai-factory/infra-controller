@@ -28,7 +28,6 @@ use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use cfg::cli_options::{CliCommand, CliOptions};
 use clap::CommandFactory;
 use errors::CarbideCliResult;
-use eyre::eyre;
 use forge_tls::client_config::{
     get_api_url, get_client_cert_info, get_config_from_file, get_proxy_info, get_root_ca_path,
 };
@@ -225,7 +224,11 @@ async fn main() -> color_eyre::Result<()> {
         Some(s) => s,
     };
 
-    let client_cert = if matches!(command, CliCommand::Version(_)) {
+    // Plain `version` (no subcommand) calls forge/Version which allows anonymous
+    // access, so no client cert is needed. Subcommands like `version rms` call
+    // forge/GetRmsVersion which requires authentication via the admin CLI client
+    // cert (trusted-certificate principal), so they must present a cert.
+    let client_cert = if matches!(command, CliCommand::Version(ref opts) if !opts.needs_auth()) {
         None
     } else {
         Some(get_client_cert_info(
@@ -325,7 +328,7 @@ async fn main() -> color_eyre::Result<()> {
         CliCommand::Browse(cmd) => cmd.dispatch(ctx).await?,
         // Redfish is handled before the API client is built (see above).
         CliCommand::Redfish(_) => unreachable!("redfish is dispatched before client init"),
-        _ => return Err(eyre!("unsupported command")),
+        _ => return Err(eyre::eyre!("unsupported command")),
     }
 
     Ok(())

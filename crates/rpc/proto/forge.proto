@@ -32,6 +32,9 @@ service Forge {
   // What version of Forge is this service running? Matches `--version` command line.
   rpc Version(VersionRequest) returns (BuildInfo);
 
+  // What version is the RMS backend running? Returns an error if RMS is not configured.
+  rpc GetRmsVersion(GetRmsVersionRequest) returns (GetRmsVersionResponse);
+
   // Domain
   rpc CreateDomain(dns.CreateDomainRequest) returns (dns.Domain);
   rpc UpdateDomain(dns.UpdateDomainRequest) returns (dns.Domain);
@@ -1636,6 +1639,14 @@ message BuildInfo {
   repeated BuildCapability capabilities = 7;
 
   optional RuntimeConfig runtime_config = 50;
+}
+
+// GetRmsVersionRequest asks nico-api to forward a GetVersion call to its RMS backend.
+message GetRmsVersionRequest {}
+
+// GetRmsVersionResponse carries the version string returned by the RMS backend.
+message GetRmsVersionResponse {
+  string version = 1;
 }
 
 message RuntimeConfig {
