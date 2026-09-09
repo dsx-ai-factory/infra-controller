@@ -27,6 +27,13 @@ namespaceOverride: ""
 
 replicas: 1
 
+## Pod-level security context, rendered verbatim. Empty by default (no pod
+## securityContext). Set fsGroup when running the container as a non-root
+## UID on vanilla Kubernetes: the SSH host key Secret mounts with
+## defaultMode 0400, so the container needs a matching group to read it
+## (OpenShift SCCs assign fsGroup from the namespace range automatically).
+podSecurityContext: {}
+
 ## Container-level security context, rendered after the always-applied
 ## `allowPrivilegeEscalation: false` baseline (chart-managed; an
 ## allowPrivilegeEscalation key set here is ignored). The chart default adds IPC_LOCK.

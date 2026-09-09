@@ -2709,10 +2709,22 @@ _wait_for_secret() {
     return 1
 }
 
-echo "Waiting for Flow DB credentials..."
-_wait_for_secret "flow.nico.nico-pg-cluster.credentials" \
+# Derive the DB credentials Secret name from the rendered Flow deployment so
+# the wait matches whatever the site's Flow values configure (e.g. a Crunchy
+# PGO pguser Secret instead of the ESO default). Falls back to the ESO name.
+_flow_db_secret="flow.nico.nico-pg-cluster.credentials"
+# Stream the render straight into the extractor: never hold the Deployment in
+# a shell variable, where --debug shell tracing could log credential-bearing
+# extraEnv values.
+_flow_db_secret_configured="$(_flow_render deployment.yaml 2>/dev/null \
+    | awk '/- name: DB_USER/{found=1; next} found && /^[[:space:]]*name:/ {print $2; exit}' \
+    || true)"
+[[ -n "${_flow_db_secret_configured}" ]] && _flow_db_secret="${_flow_db_secret_configured}"
+
+echo "Waiting for Flow DB credentials (${_flow_db_secret})..."
+_wait_for_secret "${_flow_db_secret}" \
     "${NICO_FLOW_NAMESPACE}" \
-    "Synced by the flow-db-eso ClusterExternalSecret in nico-prereqs. Check 'kubectl describe clusterexternalsecret flow-db-eso'. Flow is mandatory: sites running an external PostgreSQL (helm-prereqs postgresql.enabled=false) must provision a flow database and create this Secret in the '${NICO_FLOW_NAMESPACE}' namespace themselves before running setup.sh."
+    "Synced by the flow-db-eso ClusterExternalSecret in nico-prereqs (default name), or provisioned by the site's Flow values (e.g. a Crunchy PGO pguser Secret when helm-prereqs postgresql.enabled=false). Flow is mandatory: check the database.flow.credentialsSecret in the Flow values and create that Secret in the '${NICO_FLOW_NAMESPACE}' namespace before running setup.sh."
 
 echo "Installing flow helm chart..."
 helm upgrade --install flow "${NICO_FLOW_CHART}" \
