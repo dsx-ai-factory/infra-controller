@@ -101,14 +101,21 @@ pub mod profile {
         }
     }
 
-    impl From<rpc::forge::AttesterSelectionMode> for AttesterSelectionMode {
-        fn from(value: rpc::forge::AttesterSelectionMode) -> Self {
-            match value {
+    impl TryFrom<rpc::forge::AttesterSelectionMode> for AttesterSelectionMode {
+        type Error = RpcDataConversionError;
+
+        fn try_from(value: rpc::forge::AttesterSelectionMode) -> Result<Self, Self::Error> {
+            Ok(match value {
                 rpc::forge::AttesterSelectionMode::None => Self::None,
                 rpc::forge::AttesterSelectionMode::All => Self::All,
                 rpc::forge::AttesterSelectionMode::Allowlist => Self::Allowlist,
                 rpc::forge::AttesterSelectionMode::Denylist => Self::Denylist,
-            }
+                // The sentinel an omitted mode decodes to. Refused rather than
+                // defaulted, since NONE would disable attestation for the class.
+                rpc::forge::AttesterSelectionMode::Unspecified => {
+                    return Err(RpcDataConversionError::MissingArgument("mode"));
+                }
+            })
         }
     }
 
@@ -116,17 +123,12 @@ pub mod profile {
         type Error = RpcDataConversionError;
 
         fn try_from(value: rpc::forge::AttesterSelection) -> Result<Self, Self::Error> {
-            // `mode` is `optional` in the proto precisely so an omitted mode is
-            // distinguishable from the zero value, which would silently mean
-            // ALLOWLIST.
-            let mode = value
-                .mode
-                .ok_or(RpcDataConversionError::MissingArgument("mode"))?;
+            let mode = value.mode;
             let mode = rpc::forge::AttesterSelectionMode::try_from(mode)
                 .map_err(|_| RpcDataConversionError::InvalidArgument(format!("mode {mode}")))?;
 
             Ok(Self {
-                mode: mode.into(),
+                mode: mode.try_into()?,
                 component_ids: value
                     .component_ids
                     .into_iter()
@@ -139,7 +141,7 @@ pub mod profile {
     impl From<AttesterSelection> for rpc::forge::AttesterSelection {
         fn from(value: AttesterSelection) -> Self {
             Self {
-                mode: Some(rpc::forge::AttesterSelectionMode::from(value.mode).into()),
+                mode: rpc::forge::AttesterSelectionMode::from(value.mode).into(),
                 component_ids: value.component_ids.into_iter().map(Into::into).collect(),
             }
         }

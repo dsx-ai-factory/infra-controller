@@ -14,11 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use ::rpc::forge as rpc;
-use rpc::forge_server::Forge;
-use tonic::{Code, Request};
 
-use crate::tests::common::api_fixtures::{TestEnv, create_test_env};
+use ::rpc::forge as rpc;
+use carbide_test_harness::prelude::*;
+use tonic::{Code, Request};
 
 fn exact(id: &str) -> rpc::ComponentIdMatch {
     rpc::ComponentIdMatch {
@@ -37,7 +36,7 @@ fn selection(
     component_ids: Vec<rpc::ComponentIdMatch>,
 ) -> rpc::AttesterSelection {
     rpc::AttesterSelection {
-        mode: Some(mode.into()),
+        mode: mode.into(),
         component_ids,
     }
 }
@@ -50,11 +49,11 @@ fn gpu_allowlist() -> rpc::AttesterSelection {
 }
 
 async fn create(
-    env: &TestEnv,
+    env: &TestHarness,
     hardware_class: &str,
     selection: rpc::AttesterSelection,
 ) -> Result<rpc::AttestationProfile, tonic::Status> {
-    env.api
+    env.api()
         .create_attestation_profile(Request::new(rpc::CreateAttestationProfileRequest {
             hardware_class: hardware_class.to_string(),
             selection: Some(selection),
@@ -63,9 +62,9 @@ async fn create(
         .map(tonic::Response::into_inner)
 }
 
-#[crate::sqlx_test]
-async fn a_profile_survives_the_round_trip_through_create_get_and_list(pool: sqlx::PgPool) {
-    let env = create_test_env(pool).await;
+#[sqlx_test]
+async fn a_profile_survives_the_round_trip_through_create_get_and_list(pool: PgPool) {
+    let env = TestHarness::builder(pool).build().await;
 
     let created = create(&env, "Gb200", gpu_allowlist())
         .await
@@ -90,7 +89,7 @@ async fn a_profile_survives_the_round_trip_through_create_get_and_list(pool: sql
     .expect("the reserved any fallback is writable");
 
     let fetched = env
-        .api
+        .api()
         .get_attestation_profile(Request::new(rpc::GetAttestationProfileRequest {
             hardware_class: "Gb200".to_string(),
         }))
@@ -100,7 +99,7 @@ async fn a_profile_survives_the_round_trip_through_create_get_and_list(pool: sql
     assert_eq!(fetched, created);
 
     let listed = env
-        .api
+        .api()
         .list_attestation_profiles(Request::new(()))
         .await
         .expect("profiles list")
@@ -113,13 +112,13 @@ async fn a_profile_survives_the_round_trip_through_create_get_and_list(pool: sql
     assert_eq!(classes, ["Gb200", "any"]);
 }
 
-#[crate::sqlx_test]
-async fn update_and_delete_honour_the_version_the_caller_read(pool: sqlx::PgPool) {
-    let env = create_test_env(pool).await;
+#[sqlx_test]
+async fn update_and_delete_honour_the_version_the_caller_read(pool: PgPool) {
+    let env = TestHarness::builder(pool).build().await;
     let created = create(&env, "Gb200", gpu_allowlist()).await.unwrap();
 
     let update = |selection, if_version_match| {
-        env.api
+        env.api()
             .update_attestation_profile(Request::new(rpc::UpdateAttestationProfileRequest {
                 hardware_class: "Gb200".to_string(),
                 selection: Some(selection),
@@ -154,7 +153,7 @@ async fn update_and_delete_honour_the_version_the_caller_read(pool: sqlx::PgPool
     assert_eq!(unconditional.selection, Some(gpu_allowlist()));
 
     let delete = |if_version_match| {
-        env.api
+        env.api()
             .delete_attestation_profile(Request::new(rpc::DeleteAttestationProfileRequest {
                 hardware_class: "Gb200".to_string(),
                 if_version_match,
@@ -170,7 +169,7 @@ async fn update_and_delete_honour_the_version_the_caller_read(pool: sqlx::PgPool
         .await
         .expect("the current version deletes");
     let gone = env
-        .api
+        .api()
         .get_attestation_profile(Request::new(rpc::GetAttestationProfileRequest {
             hardware_class: "Gb200".to_string(),
         }))
@@ -179,9 +178,9 @@ async fn update_and_delete_honour_the_version_the_caller_read(pool: sqlx::PgPool
     assert_eq!(gone.code(), Code::NotFound);
 }
 
-#[crate::sqlx_test]
-async fn the_api_refuses_what_section_6_2_forbids(pool: sqlx::PgPool) {
-    let env = create_test_env(pool).await;
+#[sqlx_test]
+async fn the_api_refuses_what_section_6_2_forbids(pool: PgPool) {
+    let env = TestHarness::builder(pool).build().await;
 
     let already_exists = {
         create(&env, "Gb200", gpu_allowlist()).await.unwrap();
@@ -203,14 +202,14 @@ async fn the_api_refuses_what_section_6_2_forbids(pool: sqlx::PgPool) {
         .expect_err("an empty class is not a profile key");
     assert_eq!(empty_class.code(), Code::InvalidArgument);
 
-    // An absent mode would otherwise decode as the zero value, ALLOWLIST.
+    // An omitted mode decodes to the unset sentinel.
     let no_mode = create(
         &env,
         "DgxGb300",
-        rpc::AttesterSelection {
-            mode: None,
-            component_ids: vec![prefix("HGX_IRoT_GPU_")],
-        },
+        selection(
+            rpc::AttesterSelectionMode::Unspecified,
+            vec![prefix("HGX_IRoT_GPU_")],
+        ),
     )
     .await
     .expect_err("there is no safe default mode");
@@ -235,7 +234,7 @@ async fn the_api_refuses_what_section_6_2_forbids(pool: sqlx::PgPool) {
     assert_eq!(all_with_patterns.code(), Code::InvalidArgument);
 
     let unknown_class = env
-        .api
+        .api()
         .update_attestation_profile(Request::new(rpc::UpdateAttestationProfileRequest {
             hardware_class: "LenovoGb300".to_string(),
             selection: Some(gpu_allowlist()),

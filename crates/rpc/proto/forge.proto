@@ -1195,12 +1195,17 @@ message SpdmListAttestationMachinesResponse {
 
 // Attestation profiles: one policy per hardware class, naming which attesters
 // machines of that class require.
-// Ordered from attesting nothing to naming an exact set.
+// Ordered from attesting nothing to naming an exact set, after the unset
+// sentinel.
 enum AttesterSelectionMode {
-  ATTESTER_SELECTION_MODE_NONE = 0;
-  ATTESTER_SELECTION_MODE_ALL = 1;
-  ATTESTER_SELECTION_MODE_ALLOWLIST = 2;
-  ATTESTER_SELECTION_MODE_DENYLIST = 3;
+  // Unset sentinel. The server rejects this with InvalidArgument. Zero is not
+  // a real mode because an omitted one would otherwise read as NONE and
+  // silently disable attestation for the class.
+  ATTESTER_SELECTION_MODE_UNSPECIFIED = 0;
+  ATTESTER_SELECTION_MODE_NONE = 1;
+  ATTESTER_SELECTION_MODE_ALL = 2;
+  ATTESTER_SELECTION_MODE_ALLOWLIST = 3;
+  ATTESTER_SELECTION_MODE_DENYLIST = 4;
 }
 
 // One matcher against a ComponentIntegrity Id. Matching is case-sensitive,
@@ -1215,10 +1220,8 @@ message ComponentIdMatch {
 }
 
 message AttesterSelection {
-  // Required. `optional` is load-bearing: it makes an absent mode
-  // distinguishable from NONE, which the zero value would otherwise mean, and
-  // an absent mode is rejected rather than silently disabling attestation.
-  optional AttesterSelectionMode mode = 1;
+  // Required. An omitted mode decodes to the unset sentinel and is rejected.
+  AttesterSelectionMode mode = 1;
   // Required for ALLOWLIST and DENYLIST, and must be empty for ALL and NONE.
   repeated ComponentIdMatch component_ids = 2;
 }

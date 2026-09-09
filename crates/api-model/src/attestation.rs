@@ -400,6 +400,42 @@ pub mod profile {
                 Self::Exact(value) | Self::Prefix(value) => value,
             }
         }
+
+        /// Redfish treats `Id` as opaque, so this is case-sensitive.
+        fn matches(&self, attester_id: &str) -> bool {
+            match self {
+                Self::Exact(id) => attester_id == id,
+                Self::Prefix(prefix) => attester_id.starts_with(prefix),
+            }
+        }
+    }
+
+    /// What a selection decided for the attesters a BMC reported.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum SelectionOutcome {
+        /// Attest these, in the order the BMC reported them.
+        Scheduled(Vec<String>),
+        /// The mode is `NONE`. A caller resolves this before contacting the
+        /// BMC, so reaching it here means it listed anyway.
+        AttestationDisabled,
+        /// The BMC offered nothing eligible under a policy that asserted
+        /// nothing about what must be there. Not a failure, and it points at
+        /// the hardware rather than the profile.
+        NoAttestersFound,
+        /// An operator-authored requirement went unsatisfied.
+        PolicyMatchedNothing(UnsatisfiedRequirement),
+    }
+
+    /// Which requirement went unsatisfied, so a caller can say which.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum UnsatisfiedRequirement {
+        /// These patterns matched no eligible attester. A caller holding the
+        /// attesters that failed eligibility can name the ones a pattern
+        /// matched but eligibility skipped.
+        AllowlistPatterns(Vec<ComponentIdMatch>),
+        /// A denylist removed every attester the BMC offered. `NONE` is how an
+        /// operator asks for nothing to be attested.
+        DenylistExcludedEverything,
     }
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -437,6 +473,80 @@ pub mod profile {
                 ));
             }
             Ok(())
+        }
+
+        /// Applies the selection to the attesters a BMC reported that already
+        /// passed eligibility, in the order it reported them.
+        ///
+        /// A selection is a requirement rather than a filter, so an allowlist
+        /// pattern matching nothing fails the whole selection while a denylist
+        /// pattern matching nothing excludes nothing.
+        pub fn evaluate(&self, eligible: &[&str]) -> SelectionOutcome {
+            match self.mode {
+                AttesterSelectionMode::None => SelectionOutcome::AttestationDisabled,
+
+                AttesterSelectionMode::All => {
+                    let selected: Vec<String> = eligible.iter().map(|id| id.to_string()).collect();
+                    if selected.is_empty() {
+                        SelectionOutcome::NoAttestersFound
+                    } else {
+                        SelectionOutcome::Scheduled(selected)
+                    }
+                }
+
+                AttesterSelectionMode::Allowlist => {
+                    // Every pattern is its own requirement, so one that matches
+                    // nothing fails the selection rather than attesting less.
+                    let unsatisfied: Vec<_> = self
+                        .component_ids
+                        .iter()
+                        .filter(|pattern| !eligible.iter().any(|id| pattern.matches(id)))
+                        .cloned()
+                        .collect();
+                    let selected: Vec<String> = eligible
+                        .iter()
+                        .filter(|id| self.matches_any(id))
+                        .map(|id| id.to_string())
+                        .collect();
+                    // A validated allowlist holds at least one pattern, so a
+                    // satisfied one always selects something. The second test
+                    // covers a selection built without `validate`, which would
+                    // otherwise schedule nothing and report success.
+                    if !unsatisfied.is_empty() || selected.is_empty() {
+                        return SelectionOutcome::PolicyMatchedNothing(
+                            UnsatisfiedRequirement::AllowlistPatterns(unsatisfied),
+                        );
+                    }
+                    SelectionOutcome::Scheduled(selected)
+                }
+
+                AttesterSelectionMode::Denylist => {
+                    // A denylist only subtracts, so an empty BMC is the same
+                    // situation ALL reports: nothing was excluded, and nothing
+                    // about the policy caused the emptiness.
+                    if eligible.is_empty() {
+                        return SelectionOutcome::NoAttestersFound;
+                    }
+                    let selected: Vec<String> = eligible
+                        .iter()
+                        .filter(|id| !self.matches_any(id))
+                        .map(|id| id.to_string())
+                        .collect();
+                    if selected.is_empty() {
+                        SelectionOutcome::PolicyMatchedNothing(
+                            UnsatisfiedRequirement::DenylistExcludedEverything,
+                        )
+                    } else {
+                        SelectionOutcome::Scheduled(selected)
+                    }
+                }
+            }
+        }
+
+        fn matches_any(&self, attester_id: &str) -> bool {
+            self.component_ids
+                .iter()
+                .any(|pattern| pattern.matches(attester_id))
         }
     }
 
@@ -544,6 +654,26 @@ mod profile_test {
         ComponentIdMatch::Prefix(value.to_string())
     }
 
+    // A GB200 tray, as the `libredfish/test_support.rs` fixture reports it.
+    const TRAY: [&str; 4] = [
+        "HGX_IRoT_GPU_0",
+        "HGX_IRoT_GPU_1",
+        "HGX_IRoT_GPU_2",
+        "HGX_BMC_0",
+    ];
+
+    const GPUS: [&str; 3] = ["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_1", "HGX_IRoT_GPU_2"];
+
+    fn scheduled(attester_ids: &[&str]) -> SelectionOutcome {
+        SelectionOutcome::Scheduled(attester_ids.iter().map(|id| id.to_string()).collect())
+    }
+
+    fn unsatisfied(patterns: &[ComponentIdMatch]) -> SelectionOutcome {
+        SelectionOutcome::PolicyMatchedNothing(UnsatisfiedRequirement::AllowlistPatterns(
+            patterns.to_vec(),
+        ))
+    }
+
     #[test]
     fn selection_validation() {
         scenarios!(
@@ -597,6 +727,112 @@ mod profile_test {
 
             "an empty exact ID is refused" {
                 selection(AttesterSelectionMode::Denylist, &[exact("")]) => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn selection_over_a_reported_tray() {
+        value_scenarios!(
+            run = |selection: AttesterSelection| selection.evaluate(&TRAY);
+
+            "an allowlist prefix takes the GPUs and not the BMC" {
+                selection(AttesterSelectionMode::Allowlist, &[prefix("HGX_IRoT_GPU_")]) => scheduled(&GPUS),
+            }
+
+            "a denylist of the BMC leaves the same three" {
+                selection(AttesterSelectionMode::Denylist, &[exact("HGX_BMC_0")]) => scheduled(&GPUS),
+            }
+
+            "ALL takes everything reported" {
+                selection(AttesterSelectionMode::All, &[]) => scheduled(&TRAY),
+            }
+
+            "NONE takes nothing" {
+                selection(AttesterSelectionMode::None, &[]) => SelectionOutcome::AttestationDisabled,
+            }
+
+            "mixed patterns take the union" {
+                selection(
+                    AttesterSelectionMode::Allowlist,
+                    &[prefix("HGX_IRoT_GPU_"), exact("HGX_BMC_0")],
+                ) => scheduled(&TRAY),
+            }
+
+            "an attester two patterns match is taken once" {
+                selection(
+                    AttesterSelectionMode::Allowlist,
+                    &[prefix("HGX_IRoT_GPU_"), exact("HGX_IRoT_GPU_1")],
+                ) => scheduled(&GPUS),
+            }
+
+            // Redfish treats `Id` as opaque, so the lowercase prefix matches
+            // nothing and the requirement it states goes unsatisfied.
+            "matching is case-sensitive" {
+                selection(AttesterSelectionMode::Allowlist, &[prefix("hgx_irot_gpu_")])
+                    => unsatisfied(&[prefix("hgx_irot_gpu_")]),
+            }
+
+            // An unsatisfied allowlist pattern would attest less than intended,
+            // so it fails the selection; a dead denylist pattern excludes
+            // nothing and attests exactly what was asked for.
+            "an allowlist names what must be there" {
+                selection(
+                    AttesterSelectionMode::Allowlist,
+                    &[prefix("HGX_IRoT_GPU_"), exact("VERA_CPU_0")],
+                ) => unsatisfied(&[exact("VERA_CPU_0")]),
+            }
+
+            "a denylist pattern matching nothing excludes nothing" {
+                selection(AttesterSelectionMode::Denylist, &[exact("VERA_CPU_0")]) => scheduled(&TRAY),
+            }
+
+            // An operator who wants nothing attested writes NONE.
+            "a denylist that excludes everything fails" {
+                selection(AttesterSelectionMode::Denylist, &[prefix("HGX_")])
+                    => SelectionOutcome::PolicyMatchedNothing(
+                        UnsatisfiedRequirement::DenylistExcludedEverything,
+                    ),
+            }
+        );
+    }
+
+    #[test]
+    fn selecting_nothing_is_not_one_outcome() {
+        value_scenarios!(
+            run = |(selection, eligible): (AttesterSelection, Vec<&str>)| selection.evaluate(&eligible);
+
+            // The two reasons for selecting nothing have to stay apart: ALL
+            // states no requirement, so a BMC with nothing to offer is not a
+            // failure, while an allowlist on that same BMC went unsatisfied.
+            "ALL over a BMC offering nothing eligible" {
+                (selection(AttesterSelectionMode::All, &[]), vec![])
+                    => SelectionOutcome::NoAttestersFound,
+            }
+
+            "an allowlist over that same BMC" {
+                (
+                    selection(AttesterSelectionMode::Allowlist, &[prefix("HGX_IRoT_GPU_")]),
+                    vec![],
+                ) => unsatisfied(&[prefix("HGX_IRoT_GPU_")]),
+            }
+
+            // A denylist asserts nothing about what must be there, so it lands
+            // with ALL rather than with the allowlist. It excluded nothing.
+            "a denylist over that same BMC" {
+                (
+                    selection(AttesterSelectionMode::Denylist, &[exact("HGX_BMC_0")]),
+                    vec![],
+                ) => SelectionOutcome::NoAttestersFound,
+            }
+
+            // `validate` refuses this, but the fields are public, so evaluate
+            // must not call scheduling nothing a success.
+            "an allowlist with no patterns selects nothing and fails" {
+                (
+                    selection(AttesterSelectionMode::Allowlist, &[]),
+                    vec!["HGX_BMC_0"],
+                ) => unsatisfied(&[]),
             }
         );
     }

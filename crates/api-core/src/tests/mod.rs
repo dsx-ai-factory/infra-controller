@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 
-mod attestation_profile;
 mod boot_interface_resolution;
 mod client_resolution;
 pub(in crate::tests) mod common;

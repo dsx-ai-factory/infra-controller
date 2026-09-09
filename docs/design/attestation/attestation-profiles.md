@@ -203,13 +203,11 @@ list attesters before collecting.
   is not contacted.
 6. Connect to the BMC and list its `ComponentIntegrity` resources.
 7. Keep the eligible ones: `ComponentIntegrityEnabled` true and type `SPDM`.
-   Eligibility comes before patterns because an ID alone does not identify an
-   attestable component — the `libredfish/test_support.rs` fixture has four
-   entries sharing `HGX_IRoT_GPU_1` that differ only in type, enabled state, and
-   `ComponentIntegrityTypeVersion`. That version is recorded, not filtered on,
-   which drops the `1.1.0` check in today's `get_supported_components()`.
-8. Apply the selection's patterns to what remains, deduplicate, and take the
-  outcome from §5.3.
+   Eligibility comes before patterns because an ID says nothing about whether
+   the component can be attested. `ComponentIntegrityTypeVersion` is recorded,
+   not filtered on, which drops the `1.1.0` check in today's `get_supported_components()`.
+8. Apply the selection's patterns to what remains and take the outcome from
+  §5.3.
 9. On success, write one `spdm_machine_devices_attestation` row per selected
   attester — keyed `(machine_id, device_id)`, where `device_id` is that
   attester's `ComponentIntegrity` `Id` — which the existing controller picks up.
@@ -313,15 +311,17 @@ flowchart TD
     Q2 -->|"No"| O2["EndpointUnavailable"]
     Q2 -->|"Yes"| S1["Keep only the eligible ones:<br/>enabled, type SPDM"]
 
-    S1 --> S2["Apply the patterns to what<br/>remains, and deduplicate"]
+    S1 --> S2["Apply the patterns to<br/>what remains"]
     S2 --> Q3{"How many attesters<br/>were selected?"}
 
     Q3 -->|"One or more"| O3["Scheduled.<br/>One row written per attester"]
-    Q3 -->|"None"| Q4{"Did the profile state<br/>a requirement?"}
+    Q3 -->|"None"| Q4{"Was anything eligible<br/>to begin with?"}
 
-    Q4 -->|"No, the mode was ALL"| O4["NoAttestersFound.<br/>Nothing scheduled"]
-    Q4 -->|"Yes, an allowlist<br/>or a denylist"| O5["PolicyMatchedNothing"]
+    Q4 -->|"No"| O4["NoAttestersFound.<br/>Nothing scheduled"]
+    Q4 -->|"Yes, and the policy<br/>removed all of it"| O5["PolicyMatchedNothing"]
 ```
+
+A pattern matching no eligible attester fails the selection before anything is counted.
 
 `mode: NONE` never contacts the BMC, and eligibility is applied before the
 patterns, both for the reasons in §5 steps 5 and 7.
@@ -332,9 +332,10 @@ everything. The error names what went unsatisfied, including components that
 matched but failed eligibility — diagnostic detail, not a separate outcome.
 
 `NoAttestersFound` is not a verdict. It records that the BMC had nothing
-attestable to offer, which is what such hardware already does today. Nothing
-here decides whether a machine may then proceed; that belongs to the gate that
-triggered attestation and is out of scope (§12).
+attestable to offer, which is what such hardware already does today. `ALL` and a
+denylist both report it, since neither asserts that a component must be there
+and neither caused the emptiness; an allowlist does assert that, so it fails
+instead.
 
 There are three switches and no others: `spdm_enabled` for the site, `mode: NONE`
 on a real class for one platform, and `any` for everything unprofiled.
