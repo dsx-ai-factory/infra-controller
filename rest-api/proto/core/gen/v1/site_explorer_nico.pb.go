@@ -1667,8 +1667,10 @@ type ComputerSystem struct {
 	PcieDevices        []*PCIeDevice             `protobuf:"bytes,12,rep,name=pcie_devices,json=pcieDevices,proto3" json:"pcie_devices,omitempty"`
 	PowerState         ComputerSystemPowerState  `protobuf:"varint,13,opt,name=power_state,json=powerState,proto3,enum=site_explorer.ComputerSystemPowerState" json:"power_state,omitempty"`
 	BootOrder          *BootOrder                `protobuf:"bytes,14,opt,name=boot_order,json=bootOrder,proto3,oneof" json:"boot_order,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// PF0/base MAC reported or derived for a DPU system.
+	BaseMac       *string `protobuf:"bytes,15,opt,name=base_mac,json=baseMac,proto3,oneof" json:"base_mac,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ComputerSystem) Reset() {
@@ -1762,6 +1764,13 @@ func (x *ComputerSystem) GetBootOrder() *BootOrder {
 		return x.BootOrder
 	}
 	return nil
+}
+
+func (x *ComputerSystem) GetBaseMac() string {
+	if x != nil && x.BaseMac != nil {
+		return *x.BaseMac
+	}
+	return ""
 }
 
 // `Manager` definition. Matches redfish definition
@@ -2964,7 +2973,7 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\bhost_ids\x18\x01 \x03(\tR\ahostIds\"_\n" +
 	"\x18ComputerSystemAttributes\x126\n" +
 	"\bnic_mode\x18\x01 \x01(\x0e2\x16.site_explorer.NicModeH\x00R\anicMode\x88\x01\x01B\v\n" +
-	"\t_nic_mode\"\xac\x04\n" +
+	"\t_nic_mode\"\xd9\x04\n" +
 	"\x0eComputerSystem\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12'\n" +
 	"\fmanufacturer\x18\x02 \x01(\tH\x00R\fmanufacturer\x88\x01\x01\x12\x19\n" +
@@ -2978,11 +2987,13 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\vpower_state\x18\r \x01(\x0e2'.site_explorer.ComputerSystemPowerStateR\n" +
 	"powerState\x12<\n" +
 	"\n" +
-	"boot_order\x18\x0e \x01(\v2\x18.site_explorer.BootOrderH\x03R\tbootOrder\x88\x01\x01B\x0f\n" +
+	"boot_order\x18\x0e \x01(\v2\x18.site_explorer.BootOrderH\x03R\tbootOrder\x88\x01\x01\x12\x1e\n" +
+	"\bbase_mac\x18\x0f \x01(\tH\x04R\abaseMac\x88\x01\x01B\x0f\n" +
 	"\r_manufacturerB\b\n" +
 	"\x06_modelB\x10\n" +
 	"\x0e_serial_numberB\r\n" +
-	"\v_boot_order\"l\n" +
+	"\v_boot_orderB\v\n" +
+	"\t_base_mac\"l\n" +
 	"\aManager\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12Q\n" +
 	"\x13ethernet_interfaces\x18\v \x03(\v2 .site_explorer.EthernetInterfaceR\x12ethernetInterfaces\"\x9a\x02\n" +

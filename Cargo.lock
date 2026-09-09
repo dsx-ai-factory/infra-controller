@@ -1466,6 +1466,7 @@ dependencies = [
  "carbide-health-report",
  "carbide-macros",
  "carbide-measured-boot",
+ "carbide-network",
  "carbide-redfish",
  "carbide-rpc",
  "carbide-rpc-utils",

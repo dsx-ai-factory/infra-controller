@@ -259,6 +259,8 @@ message ComputerSystem {
   repeated PCIeDevice pcie_devices = 12;
   ComputerSystemPowerState power_state = 13;
   optional BootOrder boot_order = 14;
+  // PF0/base MAC reported or derived for a DPU system.
+  optional string base_mac = 15;
 }
 
 // WARNING: This enum conflicts with PowerState in nico_nico.proto and must be renamed to ComputerSystemPowerState

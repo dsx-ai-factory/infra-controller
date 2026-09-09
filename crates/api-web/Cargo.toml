@@ -34,6 +34,7 @@ carbide-api-model = { path = "../api-model", default-features = false }
 carbide-authn = { path = "../authn" }
 carbide-health-report = { path = "../health-report" }
 carbide-measured-boot = { path = "../measured-boot", features = ["sqlx"] }
+carbide-network = { path = "../network" }
 carbide-rpc = { path = "../rpc", features = ["sqlx", "model"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-utils = { path = "../utils" }

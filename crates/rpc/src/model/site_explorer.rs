@@ -223,6 +223,7 @@ impl From<ComputerSystem> for rpc::site_explorer::ComputerSystem {
             pcie_devices: system.pcie_devices.into_iter().map(Into::into).collect(),
             power_state: rpc::site_explorer::PowerState::from(system.power_state) as _,
             boot_order: system.boot_order.map(|order| order.into()),
+            base_mac: system.base_mac.map(|mac| mac.to_string()),
         }
     }
 }
@@ -580,6 +581,7 @@ mod tests {
         manufacturer: Option<String>,
         model: Option<String>,
         serial_number: Option<String>,
+        base_mac: Option<String>,
         nic_mode: Option<i32>,
         interface_count: usize,
         interface_id: Option<String>,
@@ -651,6 +653,7 @@ mod tests {
                 manufacturer: system.manufacturer.clone(),
                 model: system.model.clone(),
                 serial_number: system.serial_number.clone(),
+                base_mac: system.base_mac.clone(),
                 nic_mode: system
                     .attributes
                     .as_ref()
@@ -1262,6 +1265,7 @@ mod tests {
         let machine_id: MachineId = MACHINE_ID.parse().expect("valid machine ID");
         let manager_mac = "02:00:00:00:10:01".parse().expect("valid test MAC");
         let system_mac = "02:00:00:00:10:02".parse().expect("valid test MAC");
+        let system_base_mac = "02:00:00:00:10:03".parse().expect("valid base MAC");
 
         let populated = EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
@@ -1285,6 +1289,7 @@ mod tests {
                 manufacturer: Some("NVIDIA".to_string()),
                 model: Some("DGX".to_string()),
                 serial_number: Some("HOST-SERIAL".to_string()),
+                base_mac: Some(system_base_mac),
                 ethernet_interfaces: vec![EthernetInterface {
                     id: Some("system-eth-1".to_string()),
                     description: Some("host interface".to_string()),
@@ -1413,6 +1418,7 @@ mod tests {
                         manufacturer: Some("NVIDIA".to_string()),
                         model: Some("DGX".to_string()),
                         serial_number: Some("HOST-SERIAL".to_string()),
+                        base_mac: Some("020000001003".to_string()),
                         nic_mode: Some(
                             rpc::site_explorer::BlueFieldOperatingMode::Dpu as i32,
                         ),
