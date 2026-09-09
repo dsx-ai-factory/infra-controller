@@ -10,8 +10,6 @@
 | Version | Date | Modified By | Description |
 | :---: | :---: | :---- | :---- |
 | 0.1 | 09/04/2026 | Binu Ramakrishnan | Initial version |
-|  |  |  |  |
-
 
 ## 1 What this changes
 
@@ -27,7 +25,6 @@ behaviour.
 
 ### 1.1 Feature requirements
 
-
 | #   | Feature                                                                              | Addressed in |
 | --- | ------------------------------------------------------------------------------------ | ------------ |
 | 1   | A new data structure, the Machine Attestation Profile                                | §4           |
@@ -37,21 +34,16 @@ behaviour.
 | 5   | The scheduler consults the profile and attests only the right attesters              | §5           |
 | 6   | Room to refine with attester details such as path or other parameters                | §4.4         |
 
-
-
-
 ## 2 The flow end to end
-
 
 | #   | Step                                                                                                 | Where                                                             |
 | --- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
 | 1   | Exploration resolves each BMC's `HwType`                                                             | Exists. `hw_type()`, called by `nv_generate_exploration_report()` |
-| 2   | The hardware class is recorded on that endpoint's row                                                | §5.1. A new `explored_endpoints.hardware_class` column            |
+| 2   | The hardware class is recorded on that endpoint's row                                                | §5.1. The `explored_endpoints.hardware_class` column              |
 | 3   | An operator writes a profile keyed to a hardware class                                               | §4, §6                                                            |
 | 4   | Attestation resolves machine → BMC → class → profile, then writes one work row per selected attester | §5                                                                |
 | 5   | The controller collects evidence per work row                                                        | Exists, unchanged                                                 |
 | 6   | The evidence is verified and recorded                                                                | Exists, unchanged                                                 |
-
 
 Steps 1 through 4 are this document's scope.
 
@@ -68,7 +60,6 @@ separate work (§12).
 
 ## 3 Terminology
 
-
 | Term               | Meaning                                                                                                                            |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
 | **Attester**       | One chip inside a machine that can produce evidence. A GPU root of trust, for example.                                             |
@@ -79,12 +70,7 @@ separate work (§12).
 | **Selection**      | The part of a profile naming which attesters are in or out.                                                                        |
 | **Pattern**        | One matcher inside a selection: `exact` (a full ID) or `prefix` (every ID starting with a string).                                 |
 
-
-
-
 ## 4 The profile
-
-
 
 ### 4.1 The hardware class is the key
 
@@ -108,14 +94,12 @@ unlikely to match either.
 
 A selection has one mode and a list of patterns.
 
-
 | Mode        | Meaning                                                                 |
 | ----------- | ----------------------------------------------------------------------- |
+| `NONE`      | Attest nothing. Attestation is disabled for this hardware.              |
+| `ALL`       | Attest every attester the BMC reports.                                  |
 | `ALLOWLIST` | Attest only the attesters matching a pattern.                           |
 | `DENYLIST`  | Attest every attester the BMC reports, except those matching a pattern. |
-| `ALL`       | Attest every attester the BMC reports.                                  |
-| `NONE`      | Attest nothing. Attestation is disabled for this hardware.              |
-
 
 One `mode` field holds one value.
 
@@ -133,12 +117,10 @@ the cases to seed that way.
 
 ### 4.3 Patterns: exact and prefix
 
-
 | Kind     | Matches                                  |
 | -------- | ---------------------------------------- |
 | `exact`  | One ID, matched in full.                 |
 | `prefix` | Every ID starting with the given string. |
-
 
 Each pattern is independently exact or prefix, and one selection may mix them.
 
@@ -220,11 +202,12 @@ list attesters before collecting.
 5. If the policy is `mode: NONE`, stop and report `AttestationDisabled`. The BMC
   is not contacted.
 6. Connect to the BMC and list its `ComponentIntegrity` resources.
-7. Keep the eligible ones: `ComponentIntegrityEnabled` true, type `SPDM`,
-  acceptable version. Eligibility comes before patterns because an ID alone
-   does not identify an attestable component — the `test_support.rs` fixture has
-   two entries sharing `HGX_IRoT_GPU_1` that differ only in type and enabled
-   state.
+7. Keep the eligible ones: `ComponentIntegrityEnabled` true and type `SPDM`.
+   Eligibility comes before patterns because an ID alone does not identify an
+   attestable component — the `libredfish/test_support.rs` fixture has four
+   entries sharing `HGX_IRoT_GPU_1` that differ only in type, enabled state, and
+   `ComponentIntegrityTypeVersion`. That version is recorded, not filtered on,
+   which drops the `1.1.0` check in today's `get_supported_components()`.
 8. Apply the selection's patterns to what remains, deduplicate, and take the
   outcome from §5.3.
 9. On success, write one `spdm_machine_devices_attestation` row per selected
@@ -263,13 +246,11 @@ A nullable `hardware_class` column on `explored_endpoints` holds it, written by
 the same two statements that write the report (§7.2). The column's three states
 are exactly the three the lookup needs to tell apart:
 
-
 | Value          | Meaning                                | Lookup                  |
 | -------------- | -------------------------------------- | ----------------------- |
 | A class name   | `hw_type()` resolved it                | Key the profile on it   |
 | `unrecognized` | Classification ran and matched nothing | Fall back to `any`      |
 | `NULL`         | No exploration has recorded a class    | Fail `ClassNotRecorded` |
-
 
 The explorer writes `unrecognized` when `hw_type()` returns `None`. `any` and `unrecognized`
 are the reserved names and `unrecognized` is not writable as a profile key (§6.2).
@@ -283,7 +264,7 @@ a wrong attestation.
 different profiles. `bmc_explorer::is_bf4_product()` already makes the
 distinction and is unit-tested for the `B4240V` and `BlueField-4` spellings.
 - `Gb200` is what any NVIDIA `GB BMC` host resolves to when it is not a GB300, so
-such a host loads the GB200 profile instead of failing to resolve (§13).
+such a host loads the GB200 profile instead of failing to resolve.
 
 For this feature implementation, we are decoupling the HwType resolution from
 profile feature that enable us to address HwType issues separately.
@@ -314,8 +295,6 @@ flowchart TD
     E -->|"No"| X3["Fail: ClassUnrecognized"]
 ```
 
-
-
 Section 6.4 shows these same situations against a real inventory.
 
 #### Policy selector and outcome
@@ -332,7 +311,7 @@ flowchart TD
 
     S0 --> Q2{"Did the BMC respond?"}
     Q2 -->|"No"| O2["EndpointUnavailable"]
-    Q2 -->|"Yes"| S1["Keep only the eligible ones:<br/>enabled, type SPDM,<br/>acceptable version"]
+    Q2 -->|"Yes"| S1["Keep only the eligible ones:<br/>enabled, type SPDM"]
 
     S1 --> S2["Apply the patterns to what<br/>remains, and deduplicate"]
     S2 --> Q3{"How many attesters<br/>were selected?"}
@@ -344,10 +323,8 @@ flowchart TD
     Q4 -->|"Yes, an allowlist<br/>or a denylist"| O5["PolicyMatchedNothing"]
 ```
 
-
-
 `mode: NONE` never contacts the BMC, and eligibility is applied before the
-patterns, both for the reasons in §5.2.
+patterns, both for the reasons in §5 steps 5 and 7.
 
 `PolicyMatchedNothing` means an operator-authored requirement went unsatisfied:
 an allowlist pattern matching no eligible attester, or a denylist excluding
@@ -364,11 +341,7 @@ on a real class for one platform, and `any` for everything unprofiled.
 
 ## 6 Managing profiles
 
-
-
 ### 6.1 The RPCs
-
-Five, following the convention used by `DpuExtensionService`.
 
 ```protobuf
 rpc CreateAttestationProfile(CreateAttestationProfileRequest) returns (AttestationProfile);
@@ -380,6 +353,8 @@ rpc ListAttestationProfiles(google.protobuf.Empty) returns (ListAttestationProfi
 
 ```protobuf
 message AttesterSelection {
+  // `optional` is load-bearing: it makes an absent mode distinguishable from
+  // NONE, which the zero value would otherwise mean.
   optional AttesterSelectionMode mode = 1;        // required; absent is rejected
   repeated ComponentIdMatch component_ids = 2;    // empty for ALL and NONE
 }
@@ -392,15 +367,15 @@ message ComponentIdMatch {
 }
 
 enum AttesterSelectionMode {
-  ATTESTER_SELECTION_MODE_ALLOWLIST = 0;
-  ATTESTER_SELECTION_MODE_DENYLIST = 1;
-  ATTESTER_SELECTION_MODE_ALL = 2;
-  ATTESTER_SELECTION_MODE_NONE = 3;
+  ATTESTER_SELECTION_MODE_NONE = 0;
+  ATTESTER_SELECTION_MODE_ALL = 1;
+  ATTESTER_SELECTION_MODE_ALLOWLIST = 2;
+  ATTESTER_SELECTION_MODE_DENYLIST = 3;
 }
 
 message AttestationProfile {
   string hardware_class = 1;
-  int64 revision = 2;
+  string version = 2;              // ConfigVersion
   AttesterSelection selection = 3;
   google.protobuf.Timestamp updated_at = 4;
   string updated_by = 5;
@@ -414,17 +389,18 @@ message CreateAttestationProfileRequest {
 message UpdateAttestationProfileRequest {
   string hardware_class = 1;
   AttesterSelection selection = 2;
-  int64 expected_revision = 3;   // rejects a concurrent update
+  optional string if_version_match = 3;
 }
 
 message DeleteAttestationProfileRequest {
   string hardware_class = 1;
+  optional string if_version_match = 2;
 }
 
 message DeleteAttestationProfileResponse {}
 ```
 
-
+`updated_by` is a response field only; the server derives it (§7.1).
 
 ### 6.2 Validation rules
 
@@ -440,8 +416,15 @@ nothing means `ALL`.
 - Every entry must set `pattern`, with a non-empty `exact` or `prefix` value. An
 empty prefix matches every ID, which already has proper spellings in `ALL` and
 `NONE`.
+- `schema_version` is `1`. It is not a request field: the server sets it when it
+builds the document, and a document carrying any other value is refused on the
+way to storage.
 - Creating a profile for a `hardware_class` that already has one is an error. Use
 update. This also makes `any` unique.
+- Update and delete against a `hardware_class` with no profile are not found.
+- `if_version_match` is optional on update and delete. When supplied it must
+match the stored version, and the write changes nothing otherwise
+(`ConcurrentModificationError`). When omitted the write proceeds.
 
 One invariant belongs in code rather than this list: the `HwType` rendering must
 never produce `any` or `unrecognized` (§5.1).
@@ -452,8 +435,8 @@ never produce `any` or `unrecognized` (§5.1).
 nico-admin-cli attestation profile list
 nico-admin-cli attestation profile get <hardware-class>
 nico-admin-cli attestation profile create <hardware-class> --mode allowlist --prefix HGX_IRoT_GPU_
-nico-admin-cli attestation profile update <hardware-class> --mode denylist --exact HGX_BMC_0
-nico-admin-cli attestation profile delete <hardware-class>
+nico-admin-cli attestation profile update <hardware-class> --mode denylist --exact HGX_BMC_0 [--if-version-match <version>]
+nico-admin-cli attestation profile delete <hardware-class> [--if-version-match <version>]
 nico-admin-cli attestation coverage
 ```
 
@@ -466,7 +449,8 @@ nico-admin-cli attestation profile create Gb200 \
 ```
 
 `--mode allowlist` and `--mode denylist` require at least one pattern flag;
-`--mode all` and `--mode none` reject both.
+`--mode all` and `--mode none` reject both. `--if-version-match` is optional;
+`get` and `list` print the version it takes.
 
 **Creating** `any` **with** `mode: none` **requires confirmation.** It is the one profile
 that switches attestation off for every class without one of its own. Every other
@@ -517,9 +501,7 @@ in flight. Deleting one does not cancel scheduled work.
 
 ## 7 Storage
 
-
-
-### 7.2 Migration
+### 7.1 Migration
 
 ```sql
 -- The hardware class resolved at discovery. NULL means classification has not run
@@ -538,15 +520,20 @@ re-probes (§14).
 -- reserved 'any'.
 CREATE TABLE attestation_profiles (
     hardware_class  text         PRIMARY KEY,
-    revision        bigint       NOT NULL DEFAULT 1,
+    version         varchar(64)  NOT NULL,
     policy_document jsonb        NOT NULL,
     updated_at      timestamptz  NOT NULL DEFAULT now(),
     updated_by      varchar(256) NOT NULL
 );
 ```
 
-`revision` increments on each update and backs `expected_revision`.
-`policy_document` holds the JSON from §4.4. There is no backfill.
+`version` is a `ConfigVersion`. A write matches on the caller's
+`if_version_match` and stores `increment()`. Delete removes the row, so a later
+create for the same class starts at `initial()`; the token carries a timestamp,
+so that new `V1` does not match the old one.
+
+`updated_by` records one identity: `Principal::audit_identity()` for the
+request's principal, from the `AuthContext` `principals: Vec<Principal>`.
 
 `hardware_class` carries no foreign key, because there is no table of hardware
 classes: the class is a string on each endpoint's row (§7.3). Rejecting the
@@ -633,7 +620,7 @@ erDiagram
     }
     attestation_profiles {
         varchar hardware_class PK "HwType name or any"
-        bigint revision
+        varchar version
         jsonb policy_document
     }
     spdm_machine_attestation {
@@ -650,8 +637,6 @@ erDiagram
         jsonb evidence
     }
 ```
-
-
 
 Two of those edges are dotted because they are joins on a value, not foreign
 keys.
@@ -726,52 +711,50 @@ so both are safe as labels. The second makes fallback reliance trendable, so a
 site accumulating unprofiled hardware shows up on a graph.
 
 Machine IDs and error text are unbounded and stay in `#[context]`. Class names
-stay there too, because §5.1 drops write-time validation, so nothing at the emit
-site bounds what a stored report can contain.
+stay there too: the explorer writes the column, so nothing at the emit site
+bounds what a stored row can contain.
 
 A profile is security policy, so every accepted change to one is recorded with
-the revision it moved from and to.
+the version it moved from and to.
 
 ```rust
 #[derive(carbide_instrument::Event)]
 #[event(event_name = "attestation_profile_changed",
     metric_name = "carbide_attestation_profile_changes_total",
-    component = "attestation", log = info, metric = counter,
-    message = "attestation profile changed",
-    describe = "Number of accepted attestation profile create, update, and delete operations")]
+    component = "nico-api", log = info, metric = counter,
+    message = "Attestation profile changed",
+    describe = "Number of accepted attestation profile create, update, and delete operations, by operation.")]
 struct AttestationProfileChanged {
     #[label] operation: AttestationProfileOperation,  // Created, Updated, Deleted
     #[context] hardware_class: String,
-    #[context] from_revision: Option<i64>,            // None on create
-    #[context] to_revision: Option<i64>,              // None on delete
+    #[context] from_version: Option<String>,          // None on create
+    #[context] to_version: Option<String>,            // None on delete
     #[context] updated_by: String,
     #[context] policy_document: Option<String>,       // the new document; None on delete
 }
 ```
 
-`operation` is the only label: it is a closed three-variant enum. 
+`operation` is the only label: it is a closed three-variant enum.
 
 Emitted from the three mutating RPCs in §6.1 after the write commits, so the
-trail records what took effect. A rejected `expected_revision` or a §6.2
+trail records what took effect. A rejected `if_version_match` or a §6.2
 validation failure changes nothing and surfaces as an ordinary API error.
 
-Together with `revision`, this gives an ordered per-class history in the logs:
-`from_revision` and `to_revision` chain, so a gap means a record was lost rather
+Together with `version`, this gives an ordered per-class history in the logs:
+`from_version` and `to_version` chain, so a gap means a record was lost rather
 than a change going unrecorded. It is a log trail, not a queryable one — it ages
-out with log retention, which is what §13 still asks about.
+out with log retention.
 
 ## 11 Testing
-
 
 | Req                                       | Tests                                                                                                                                                                                                                                                                                                                                                                                                                                      | Layer                                            |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
 | 1 The profile (§4)                        | A policy document is stored and read back unchanged, and every §6.2 validation rule is refused                                                                                                                                                                                                                                                                                                                                             | Unit, then the API boundary                      |
-| 2 CRUD (§6)                               | Create, update, delete, get and list reflect each step; `revision` increments; a stale `expected_revision` is refused; a second create for one class fails                                                                                                                                                                                                                                                                                 | API and database                                 |
+| 2 CRUD (§6)                               | Create, update, delete, get and list reflect each step; `version` increments; a stale `if_version_match` is refused on update and on delete while an omitted one proceeds; a second create for one class fails; an unknown `schema_version` is refused                                                                                                                                                                                                                                                                                 | API and database                                 |
 | 3 Enabling and disabling attesters (§4.2) | Against `HGX_IRoT_GPU_0/1/2` and `HGX_BMC_0`: an allowlist of `prefix: HGX_IRoT_GPU_` selects the three GPUs and not the BMC, a denylist of `exact: HGX_BMC_0` selects the same three, `ALL` selects four, `NONE` selects none. Mixed patterns take the union, overlapping ones select once, and `hgx_irot_gpu_` selects nothing. Per §4.5, an allowlist pattern matching nothing fails while a denylist pattern matching nothing does not | Pure function over a policy and a component list |
 | 4 The hardware class (§4.1)               | Every `HwType` variant renders a distinct non-empty string, asserted against literal spellings since profiles are keyed to them, and none renders `any` or `unrecognized`; each GB300 ODM records its own class; hardware `hw_type()` does not recognise records `unrecognized`; an unclassified endpoint stays `NULL`                                                                                                                     | Unit, then the explorer against mock BMCs        |
 | 5 The scheduler consults the profile (§5) | With `spdm_enabled` on, a mock GB200 tray resolves its class, finds its profile, and gets one work row per selected attester; every §5.3 outcome is reached, and a failing one writes nothing                                                                                                                                                                                                                                              | Attestation integration                          |
 | 6 Room to refine (§4.4)                   | A document written today reads back with its `schema_version`, so a later shape can be told apart from this one                                                                                                                                                                                                                                                                                                                            | Unit                                             |
-
 
 Four cases where an assertion can pass while the behaviour is wrong:
 
@@ -787,8 +770,6 @@ reasons for selecting nothing have to stay distinguishable.
 `any` covers the first while the second still fails. Drive the first through the
 explorer against a mock it cannot classify, so it proves `hw_type()` returned
 `None` rather than being handed a fixture.
-
-
 
 ## 12 Out of scope
 
@@ -808,4 +789,3 @@ machine row.
 - **Evidence collection through RMS,** needed for switches.
 - **Per-attester error detail in the read API.**
 - **Richer pattern matching:** glob, regex, substring.
-

@@ -3324,6 +3324,41 @@ impl Forge for Api {
         crate::handlers::attestation::get_attestation_machine(self, request).await
     }
 
+    async fn create_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::CreateAttestationProfileRequest>,
+    ) -> Result<Response<rpc::AttestationProfile>, Status> {
+        crate::handlers::attestation_profile::create(self, request).await
+    }
+
+    async fn update_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::UpdateAttestationProfileRequest>,
+    ) -> Result<Response<rpc::AttestationProfile>, Status> {
+        crate::handlers::attestation_profile::update(self, request).await
+    }
+
+    async fn delete_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::DeleteAttestationProfileRequest>,
+    ) -> Result<Response<rpc::DeleteAttestationProfileResponse>, Status> {
+        crate::handlers::attestation_profile::delete(self, request).await
+    }
+
+    async fn get_attestation_profile(
+        &self,
+        request: tonic::Request<rpc::GetAttestationProfileRequest>,
+    ) -> Result<Response<rpc::AttestationProfile>, Status> {
+        crate::handlers::attestation_profile::get(self, request).await
+    }
+
+    async fn list_attestation_profiles(
+        &self,
+        _request: tonic::Request<()>,
+    ) -> Result<Response<rpc::ListAttestationProfilesResponse>, Status> {
+        crate::handlers::attestation_profile::list(self).await
+    }
+
     async fn sign_machine_identity(
         &self,
         request: tonic::Request<rpc::MachineIdentityRequest>,

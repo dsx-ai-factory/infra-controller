@@ -932,6 +932,13 @@ service Forge {
 
   rpc ListAttestationMachines(SpdmListAttestationMachinesRequest) returns (SpdmListAttestationMachinesResponse);
   rpc GetAttestationMachine(common.MachineId) returns (SpdmGetAttestationMachineResponse);
+
+  // Attestation profiles APIs
+  rpc CreateAttestationProfile(CreateAttestationProfileRequest) returns (AttestationProfile);
+  rpc UpdateAttestationProfile(UpdateAttestationProfileRequest) returns (AttestationProfile);
+  rpc DeleteAttestationProfile(DeleteAttestationProfileRequest) returns (DeleteAttestationProfileResponse);
+  rpc GetAttestationProfile(GetAttestationProfileRequest) returns (AttestationProfile);
+  rpc ListAttestationProfiles(google.protobuf.Empty) returns (ListAttestationProfilesResponse);
   // SPDM attestation APIs end
 
   // SPIFFE Machine Identity APIs
@@ -1184,6 +1191,80 @@ message SpdmListAttestationMachinesRequest {
 message SpdmListAttestationMachinesResponse {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   repeated SpdmMachineAttestationStatus statuses = 1;
+}
+
+// Attestation profiles: one policy per hardware class, naming which attesters
+// machines of that class require.
+// Ordered from attesting nothing to naming an exact set.
+enum AttesterSelectionMode {
+  ATTESTER_SELECTION_MODE_NONE = 0;
+  ATTESTER_SELECTION_MODE_ALL = 1;
+  ATTESTER_SELECTION_MODE_ALLOWLIST = 2;
+  ATTESTER_SELECTION_MODE_DENYLIST = 3;
+}
+
+// One matcher against a ComponentIntegrity Id. Matching is case-sensitive,
+// because Redfish treats Id as opaque.
+message ComponentIdMatch {
+  oneof pattern {
+    // One ID, matched in full.
+    string exact = 1;
+    // Every ID starting with the given string.
+    string prefix = 2;
+  }
+}
+
+message AttesterSelection {
+  // Required. `optional` is load-bearing: it makes an absent mode
+  // distinguishable from NONE, which the zero value would otherwise mean, and
+  // an absent mode is rejected rather than silently disabling attestation.
+  optional AttesterSelectionMode mode = 1;
+  // Required for ALLOWLIST and DENYLIST, and must be empty for ALL and NONE.
+  repeated ComponentIdMatch component_ids = 2;
+}
+
+message AttestationProfile {
+  string hardware_class = 1;
+  string version = 2;
+  AttesterSelection selection = 3;
+  google.protobuf.Timestamp updated_at = 4;
+  // Derived by the server from the calling principal; ignored on requests.
+  string updated_by = 5;
+}
+
+message CreateAttestationProfileRequest {
+  string hardware_class = 1;
+  AttesterSelection selection = 2;
+}
+
+message UpdateAttestationProfileRequest {
+  string hardware_class = 1;
+  AttesterSelection selection = 2;
+  // If the field here is set, the update will only be applied if the version
+  // is equivalent to the current version on the Forge Site.
+  // If a concurrent update changed the site configuration, the API will return
+  // a `ConcurrentModificationError`.
+  optional string if_version_match = 3;
+}
+
+message DeleteAttestationProfileRequest {
+  string hardware_class = 1;
+  // If the field here is set, the delete will only be applied if the version
+  // is equivalent to the current version on the Forge Site.
+  // If a concurrent update changed the site configuration, the API will return
+  // a `ConcurrentModificationError`.
+  optional string if_version_match = 2;
+}
+
+message DeleteAttestationProfileResponse {
+}
+
+message GetAttestationProfileRequest {
+  string hardware_class = 1;
+}
+
+message ListAttestationProfilesResponse {
+  repeated AttestationProfile profiles = 1;
 }
 
 // Machine Identity - JWT-SVID token signing
