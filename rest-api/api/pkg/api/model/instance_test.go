@@ -2460,7 +2460,7 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 						SpectrumXPartitionID: uuid.NewString(),
 						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 						DeviceInstance:       cutil.GetPtr(0),
-						AttachmentType:       cdbm.SpectrumXAttachmentTypeOVN,
+						AttachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
 					},
 				},
 			},
@@ -3733,7 +3733,7 @@ func TestValidateSpectrumXAttachments(t *testing.T) {
 			name: "duplicate device instance is rejected",
 			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
 				attachment(0, cdbm.SpectrumXAttachmentTypePhysical, nil),
-				attachment(0, cdbm.SpectrumXAttachmentTypeOVN, nil),
+				attachment(0, cdbm.SpectrumXAttachmentTypeOVS, nil),
 			},
 			wantErr: true,
 		},
@@ -3741,7 +3741,7 @@ func TestValidateSpectrumXAttachments(t *testing.T) {
 			name: "same device at distinct device instances is valid",
 			attachments: []APISpectrumXAttachmentCreateOrUpdateRequest{
 				attachment(0, cdbm.SpectrumXAttachmentTypePhysical, nil),
-				attachment(1, cdbm.SpectrumXAttachmentTypeOVN, nil),
+				attachment(1, cdbm.SpectrumXAttachmentTypeOVS, nil),
 			},
 		},
 		{

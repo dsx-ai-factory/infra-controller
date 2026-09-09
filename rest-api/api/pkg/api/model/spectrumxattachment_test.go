@@ -53,12 +53,12 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "test validation success, OVN attachment",
+			name: "test validation success, OVS attachment",
 			fields: fields{
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(0),
-				attachmentType:       cdbm.SpectrumXAttachmentTypeOVN,
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
 			},
 			wantErr: false,
 		},

@@ -30,8 +30,8 @@ const (
 	SpectrumXAttachmentTypePhysical SpectrumXAttachmentType = "Physical"
 	// SpectrumXAttachmentTypeVirtual attaches the SpectrumX Partition over a virtual function
 	SpectrumXAttachmentTypeVirtual SpectrumXAttachmentType = "Virtual"
-	// SpectrumXAttachmentTypeOVN attaches the SpectrumX Partition over OVN
-	SpectrumXAttachmentTypeOVN SpectrumXAttachmentType = "OVN"
+	// SpectrumXAttachmentTypeOVS attaches the SpectrumX Partition over Open vSwitch
+	SpectrumXAttachmentTypeOVS SpectrumXAttachmentType = "OVS"
 )
 
 // ToProto converts a SpectrumXAttachmentType into its Core proto enum. An unrecognized value
@@ -43,8 +43,8 @@ func (t SpectrumXAttachmentType) ToProto() corev1.SpxAttachmentType {
 		return corev1.SpxAttachmentType_Physical
 	case SpectrumXAttachmentTypeVirtual:
 		return corev1.SpxAttachmentType_Virtual
-	case SpectrumXAttachmentTypeOVN:
-		return corev1.SpxAttachmentType_Ovn
+	case SpectrumXAttachmentTypeOVS:
+		return corev1.SpxAttachmentType_Ovs
 	default:
 		return corev1.SpxAttachmentType_Physical
 	}

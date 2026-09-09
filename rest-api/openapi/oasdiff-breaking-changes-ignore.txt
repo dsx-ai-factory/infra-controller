@@ -255,3 +255,6 @@ GET /v2/org/{org}/nico/tray/{id}/validation the `diffs/items/id` response's prop
 GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/id` became nullable for the status `200`
 API POST /v2/org/{org}/nico/operating-system added the pattern `^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$` to the request property `imageDisk`
 API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} added the pattern `^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$` to the request property `imageDisk`
+API POST /v2/org/{org}/nico/instance removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
+API POST /v2/org/{org}/nico/instance/batch removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
