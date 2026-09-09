@@ -1,0 +1,41 @@
+suite: SSH listener port configurability (service.port)
+templates:
+  - configmap.yaml
+  - deployment.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: keeps the packaged listen_address on port 22 by default
+    template: configmap.yaml
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'listen_address = "\*:22"'
+
+  - it: rewrites listen_address for an unprivileged port
+    template: configmap.yaml
+    documentIndex: 0
+    set:
+      service:
+        port: 2222
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'listen_address = "\*:2222"'
+
+  - it: follows service.port in containerPort and named probe ports
+    template: deployment.yaml
+    set:
+      service:
+        port: 2222
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 2222
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.tcpSocket.port
+          value: ssh
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.tcpSocket.port
+          value: ssh
