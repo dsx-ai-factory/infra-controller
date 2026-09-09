@@ -32,7 +32,7 @@ spec:
     {{- include "nico-ssh-console-rs.selectorLabels" . | nindent 4 }}
   ports:
     - port: {{ $port }}
-      targetPort: 22
+      targetPort: {{ .Values.service.port }}
       name: ssh
       protocol: TCP
 {{- end }}
