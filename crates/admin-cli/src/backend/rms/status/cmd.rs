@@ -15,11 +15,11 @@
  * limitations under the License.
  */
 
-use std::io::Write as _;
-
 use ::rpc::admin_cli::OutputFormat;
 use serde::Serialize;
+use tokio::io::AsyncWriteExt as _;
 
+use crate::async_writeln;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
@@ -39,7 +39,7 @@ impl Report {
     fn connected(version: String) -> Self {
         Self {
             status: "connected",
-            message: "RMS status probe successful".to_owned(),
+            message: "rms status probe successful".to_owned(),
             version: Some(version),
         }
     }
@@ -52,7 +52,7 @@ impl Report {
 ///
 /// - **CLI → nico-api**: A transport-level `UNAVAILABLE` means nico-api is
 ///   down or unreachable from this host.
-/// - **nico-api → RMS (not configured)**: Our handler returns a specific
+/// - **nico-api → RMS (not configured)**: The handler returns a specific
 ///   `UNAVAILABLE` message when no RMS endpoint is configured.
 /// - **nico-api → RMS (mTLS rejected)**: `UNAUTHENTICATED` from the server
 ///   usually means a cert was presented but rejected.
@@ -60,9 +60,9 @@ fn classify(s: tonic::Status) -> Report {
     let msg = s.message().to_owned();
     match s.code() {
         tonic::Code::Unavailable => {
-            if msg.contains("RMS is not configured") {
-                const NOT_CFG: &str = "RMS is not configured on this nico-api instance. \
-                     Set the RMS endpoint in the nico-api configuration.";
+            if msg.contains("rms is not configured") {
+                const NOT_CFG: &str = "rms is not configured on this nico-api instance \
+                    — set the rms endpoint in the nico-api configuration";
                 Report {
                     status: "not-configured",
                     message: NOT_CFG.to_owned(),
@@ -79,9 +79,8 @@ fn classify(s: tonic::Status) -> Report {
                 Report {
                     status: "api-unreachable",
                     message: format!(
-                        "Could not connect to nico-api. \
-                         Check that the API server is running and reachable. \
-                         Detail: {}",
+                        "could not connect to nico-api — check that the api server is \
+                         running and reachable: {}",
                         if msg.is_empty() {
                             "connection refused or service unavailable"
                         } else {
@@ -95,7 +94,7 @@ fn classify(s: tonic::Status) -> Report {
                 // reached RMS but the RMS connection failed.
                 Report {
                     status: "rms-unreachable",
-                    message: format!("nico-api cannot reach the RMS backend: {msg}"),
+                    message: format!("nico-api cannot reach the rms backend: {msg}"),
                     version: None,
                 }
             }
@@ -104,22 +103,21 @@ fn classify(s: tonic::Status) -> Report {
         tonic::Code::Unauthenticated => Report {
             status: "auth-failed",
             message: format!(
-                "Authentication was rejected. \
-                 Check the mTLS certificate on the CLI→nico-api or \
-                 nico-api→RMS path. Detail: {msg}"
+                "authentication was rejected — check the mtls certificate on the \
+                 cli→nico-api or nico-api→rms path: {msg}"
             ),
             version: None,
         },
 
         tonic::Code::PermissionDenied => Report {
             status: "auth-failed",
-            message: format!("Permission denied: {msg}"),
+            message: format!("permission denied: {msg}"),
             version: None,
         },
 
         tonic::Code::DeadlineExceeded => Report {
             status: "timeout",
-            message: "The connection attempt timed out before RMS responded.".to_owned(),
+            message: "the connection attempt timed out before rms responded".to_owned(),
             version: None,
         },
 
@@ -131,33 +129,41 @@ fn classify(s: tonic::Status) -> Report {
     }
 }
 
-fn print_report(report: &Report, format: OutputFormat) -> CarbideCliResult<()> {
+async fn print_report(
+    report: &Report,
+    format: OutputFormat,
+    out: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
+) -> CarbideCliResult<()> {
     if format == OutputFormat::Json {
-        println!("{}", serde_json::to_string_pretty(report)?);
+        async_writeln!(out, "{}", serde_json::to_string_pretty(report)?)?;
     } else {
-        println!("status:  {}", report.status);
-        println!("message: {}", report.message);
-        println!("version: {}", report.version.as_deref().unwrap_or("-"));
+        async_writeln!(out, "status:  {}", report.status)?;
+        async_writeln!(out, "message: {}", report.message)?;
+        async_writeln!(out, "version: {}", report.version.as_deref().unwrap_or("-"))?;
     }
     Ok(())
 }
 
 /// Probe the RMS backend via `GetRmsVersion` and print a connection status
-/// report.
+/// report to `out`.
 ///
 /// Exits with status code `1` when the probe does not return `connected`,
-/// after flushing the status report to stdout so it is always visible.
-pub(super) async fn probe(api_client: &ApiClient, format: OutputFormat) -> CarbideCliResult<()> {
+/// after flushing `out` so the status report is always visible.
+pub(super) async fn probe(
+    api_client: &ApiClient,
+    format: OutputFormat,
+    out: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
+) -> CarbideCliResult<()> {
     let report = match api_client.0.get_rms_version().await {
         Ok(resp) => Report::connected(resp.version),
         Err(status) => classify(status),
     };
 
     let is_error = report.status != "connected";
-    print_report(&report, format)?;
+    print_report(&report, format, out).await?;
 
     if is_error {
-        let _ = std::io::stdout().flush();
+        out.flush().await?;
         std::process::exit(1);
     }
 

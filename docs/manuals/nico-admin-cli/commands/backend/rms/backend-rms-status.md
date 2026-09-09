@@ -35,7 +35,7 @@ three fields.
 | `rms-unreachable` | nico-api reached but cannot contact the RMS backend. |
 | `auth-failed` | A certificate was rejected on the CLI→nico-api or nico-api→RMS path. |
 | `timeout` | Connection attempt exceeded the deadline. |
-| `error` | Unexpected error; see the `message` field for the gRPC code and detail. |
+| `error` | Unexpected error; see the `message` field for the gRPC code and detail. Note: `Unimplemented` falls here when the targeted nico-api predates the `GetRmsVersion` RPC. |
 
 ## OPTIONS
 
@@ -70,7 +70,7 @@ nico-admin-cli -f json backend rms status
 
 ```text
 status:  connected
-message: RMS status probe successful
+message: rms status probe successful
 version: 1.2.3
 ```
 
@@ -78,7 +78,7 @@ version: 1.2.3
 
 ```text
 status:  not-configured
-message: RMS is not configured on this nico-api instance. Set the RMS endpoint in the nico-api configuration.
+message: rms is not configured on this nico-api instance — set the rms endpoint in the nico-api configuration
 version: -
 ```
 
