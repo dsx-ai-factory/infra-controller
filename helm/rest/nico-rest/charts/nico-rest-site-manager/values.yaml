@@ -16,7 +16,12 @@ image:
 ## runAsNonRoot needs the number spelled out here. Override for OpenShift, where
 ## the restricted SCC assigns UIDs from the namespace range and rejects fixed
 ## numeric UIDs:
-##   podSecurityContext: null
+## Keep runAsNonRoot: true and null only the fixed UID/GID so the SCC assigns
+## them from the range while the non-root assertion is preserved:
+##   podSecurityContext:
+##     runAsNonRoot: true
+##     runAsUser: null
+##     fsGroup: null
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
