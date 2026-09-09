@@ -27,8 +27,22 @@ Show client and server versions:
 Also display the runtime config:
     $ nico-admin-cli version --show-runtime-config
 
+Show the RMS backend version (requires RMS to be configured in nico-api):
+    $ nico-admin-cli version rms
+
 ")]
 pub(crate) struct Opts {
     #[clap(short, long, action, help = "Display Runtime Config also.")]
     pub(super) show_runtime_config: bool,
+
+    #[clap(subcommand)]
+    pub(super) command: Option<Cmd>,
+}
+
+/// Optional subcommands for `nico-admin-cli version`.
+#[derive(Parser, Debug, Clone)]
+#[clap(rename_all = "kebab_case")]
+pub(super) enum Cmd {
+    #[clap(about = "Show the version of the configured RMS backend via nico-api")]
+    Rms,
 }
