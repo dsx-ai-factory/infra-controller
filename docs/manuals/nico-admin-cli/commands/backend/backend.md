@@ -44,7 +44,7 @@ Print help (see a summary with -h)
 
 | Subcommand | Description |
 |---|---|
-| [`rms`](./rms/backend-rms.md) | RMS backend operations |
+| [`rms`](./backend-rms.md) | RMS backend operations |
 
 ---
 
