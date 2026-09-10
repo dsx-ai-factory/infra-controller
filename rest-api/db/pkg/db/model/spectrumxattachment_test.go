@@ -40,6 +40,7 @@ func TestSpectrumXAttachment_ToProto(t *testing.T) {
 		assert.Nil(t, got.VirtualFunctionId, "an unset virtual function must stay unset on the wire")
 	})
 
+	// OVS maps onto Core's `Ovn`, which is the same attachment under its older name.
 	t.Run("carries a set virtual function", func(t *testing.T) {
 		sxa := &SpectrumXAttachment{
 			SpectrumXPartitionID: partitionID,
@@ -49,7 +50,7 @@ func TestSpectrumXAttachment_ToProto(t *testing.T) {
 		}
 
 		got := sxa.ToProto()
-		assert.Equal(t, corev1.SpxAttachmentType_Ovs, got.AttachmentType)
+		assert.Equal(t, corev1.SpxAttachmentType_Ovn, got.AttachmentType)
 		require.NotNil(t, got.VirtualFunctionId)
 		assert.Equal(t, uint32(3), *got.VirtualFunctionId)
 	})
