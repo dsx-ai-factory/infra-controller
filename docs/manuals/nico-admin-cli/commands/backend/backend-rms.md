@@ -1,6 +1,6 @@
 # `nico-admin-cli backend rms`
 
-_[Hardware commands](../../../hardware.md) › [backend](../backend.md) › **rms**_
+_[Hardware commands](../../hardware.md) › [backend](./backend.md) › **rms**_
 
 ## NAME
 
@@ -45,4 +45,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../../hardware.md) · [CLI reference index](../../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

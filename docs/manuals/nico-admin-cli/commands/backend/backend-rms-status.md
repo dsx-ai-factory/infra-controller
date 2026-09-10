@@ -1,6 +1,6 @@
 # `nico-admin-cli backend rms status`
 
-_[Hardware commands](../../../hardware.md) › [backend](../backend.md) › [rms](./backend-rms.md) › **status**_
+_[Hardware commands](../../hardware.md) › [backend](./backend.md) › [rms](./backend-rms.md) › **status**_
 
 ## NAME
 
@@ -33,9 +33,11 @@ three fields.
 | `not-configured` | RMS endpoint is not set in this nico-api instance. |
 | `api-unreachable` | CLI could not connect to nico-api (server down or wrong URL). |
 | `rms-unreachable` | nico-api reached but cannot contact the RMS backend. |
+| `cli-config-error` | Local CLI configuration problem (e.g. missing CA file) prevented connecting to nico-api. |
 | `auth-failed` | A certificate was rejected on the CLI→nico-api or nico-api→RMS path. |
+| `auth-or-version-mismatch` | Permission denied — either a missing role or an older nico-api that rejects the RPC via RBAC before dispatch. |
 | `timeout` | Connection attempt exceeded the deadline. |
-| `error` | Unexpected error; see the `message` field for the gRPC code and detail. Note: `Unimplemented` falls here when the targeted nico-api predates the `GetRmsVersion` RPC. |
+| `error` | Unexpected error; see the `message` field for the gRPC code and detail. |
 
 ## OPTIONS
 
@@ -84,4 +86,4 @@ version: -
 
 ---
 
-**See also:** [Hardware commands](../../../hardware.md) · [CLI reference index](../../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
