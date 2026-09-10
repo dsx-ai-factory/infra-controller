@@ -239,96 +239,107 @@ func TestReencryptTenantIdentitySecretsHandler_Handle(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	var proxiedRequest grpcproxy.Request
-	workflowRun := &tmocks.WorkflowRun{}
-	workflowRun.On("Get", mock.Anything, mock.Anything).Return(nil).Run(func(args mock.Arguments) {
-		response := args.Get(1).(*grpcproxy.Response)
-		response.ResponseJSON = responseJSON
-	})
-
-	temporalClient := &tmocks.Client{}
-	temporalClient.On(
-		"ExecuteWorkflow",
-		mock.Anything,
-		mock.AnythingOfType("internal.StartWorkflowOptions"),
-		grpcproxy.Core.WorkflowName,
-		mock.MatchedBy(func(request grpcproxy.Request) bool {
-			proxiedRequest = request
-			return true
-		}),
-	).Return(workflowRun, nil).Twice()
-
 	testConfig := common.GetTestConfig()
 	temporalConfig, _ := testConfig.GetTemporalConfig()
 	siteClientPool := sc.NewClientPool(temporalConfig)
-	siteClientPool.IDClientMap[site.ID.String()] = temporalClient
-
 	echoServer := echo.New()
 	handler := NewReencryptTenantIdentitySecretsHandler(dbSession, siteClientPool)
-	performRequest := func(apiRequest model.APIReencryptTenantIdentitySecretsRequest) (*httptest.ResponseRecorder, []byte) {
-		requestBody, marshalErr := json.Marshal(apiRequest)
-		require.NoError(t, marshalErr)
 
-		httpRequest := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(requestBody)))
-		httpRequest.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
-		recorder := httptest.NewRecorder()
-		echoContext := echoServer.NewContext(httpRequest, recorder)
-		echoContext.SetParamNames("orgName", "siteID")
-		echoContext.SetParamValues(providerOrg, site.ID.String())
-		echoContext.Set("user", providerUser)
-
-		require.NoError(t, handler.Handle(echoContext))
-		return recorder, requestBody
+	tests := []struct {
+		name       string
+		body       string
+		wantOrg    *string
+		wantDryRun bool
+		wantError  string
+	}{
+		{
+			name:       "omitted organization targets all organizations",
+			body:       `{"dryRun":true}`,
+			wantDryRun: true,
+		},
+		{
+			name: "null organization targets all organizations",
+			body: `{"organizationId":null}`,
+		},
+		{
+			name:      "blank organization is rejected before scope lookup or proxy dispatch",
+			body:      `{"organizationId":" \t"}`,
+			wantError: "Error validating Reencrypt Tenant Identity Secrets request data",
+		},
+		{
+			name:    "tenant with allocation on selected site is forwarded",
+			body:    `{"organizationId":"` + tenantOrg + `"}`,
+			wantOrg: cutil.GetPtr(tenantOrg),
+		},
+		{
+			name:      "unknown tenant organization is rejected before proxy dispatch",
+			body:      `{"organizationId":"` + unknownTenantOrg + `"}`,
+			wantError: "Could not find Tenant for organizationId specified in request data",
+		},
+		{
+			name:      "tenant allocated only on another site is rejected before proxy dispatch",
+			body:      `{"organizationId":"` + otherSiteTenantOrg + `"}`,
+			wantError: "Tenant organization does not have an allocation on the Site",
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var proxiedRequest grpcproxy.Request
+			temporalClient := &tmocks.Client{}
+			if tt.wantError == "" {
+				workflowRun := &tmocks.WorkflowRun{}
+				workflowRun.On("Get", mock.Anything, mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+					response := args.Get(1).(*grpcproxy.Response)
+					response.ResponseJSON = responseJSON
+				}).Once()
+				temporalClient.On(
+					"ExecuteWorkflow",
+					mock.Anything,
+					mock.AnythingOfType("internal.StartWorkflowOptions"),
+					grpcproxy.Core.WorkflowName,
+					mock.MatchedBy(func(request grpcproxy.Request) bool {
+						proxiedRequest = request
+						return true
+					}),
+				).Return(workflowRun, nil).Once()
+			}
+			siteClientPool.IDClientMap[site.ID.String()] = temporalClient
 
-	t.Run("omitted organization targets all organizations", func(t *testing.T) {
-		recorder, requestBody := performRequest(model.APIReencryptTenantIdentitySecretsRequest{DryRun: true})
-		assert.JSONEq(t, `{"dryRun":true}`, string(requestBody))
-		require.Equal(t, http.StatusOK, recorder.Code, "body=%s", recorder.Body.String())
-		assert.Equal(t, corev1.Forge_ReencryptTenantIdentitySecrets_FullMethodName, proxiedRequest.FullMethod)
+			httpRequest := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tt.body))
+			httpRequest.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			recorder := httptest.NewRecorder()
+			echoContext := echoServer.NewContext(httpRequest, recorder)
+			echoContext.SetParamNames("orgName", "siteID")
+			echoContext.SetParamValues(providerOrg, site.ID.String())
+			echoContext.Set("user", providerUser)
 
-		var coreRequest corev1.ReencryptTenantIdentitySecretsRequest
-		require.NoError(t, protojson.Unmarshal(proxiedRequest.RequestJSON, &coreRequest))
-		assert.True(t, coreRequest.GetDryRun())
-		assert.Nil(t, coreRequest.OrganizationId)
+			require.NoError(t, handler.Handle(echoContext))
+			if tt.wantError != "" {
+				assert.Equal(t, http.StatusBadRequest, recorder.Code)
+				assert.Contains(t, recorder.Body.String(), tt.wantError)
+				assert.Zero(t, countMockCalls(&temporalClient.Mock, "ExecuteWorkflow"))
+				return
+			}
+			require.Equal(t, http.StatusOK, recorder.Code, "body=%s", recorder.Body.String())
+			assert.Equal(t, corev1.Forge_ReencryptTenantIdentitySecrets_FullMethodName, proxiedRequest.FullMethod)
+			var coreRequest corev1.ReencryptTenantIdentitySecretsRequest
+			require.NoError(t, protojson.Unmarshal(proxiedRequest.RequestJSON, &coreRequest))
+			assert.Equal(t, tt.wantOrg, coreRequest.OrganizationId)
+			assert.Equal(t, tt.wantDryRun, coreRequest.GetDryRun())
 
-		var apiResponse model.APIReencryptTenantIdentitySecretsResponse
-		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &apiResponse))
-		assert.Equal(t, 3, apiResponse.RowsExamined)
-		assert.Equal(t, 2, apiResponse.RowsUpdated)
-		assert.Equal(t, "key-2", apiResponse.CurrentEncryptionKeyID)
-	})
-
-	t.Run("tenant with allocation on selected site is forwarded", func(t *testing.T) {
-		recorder, _ := performRequest(model.APIReencryptTenantIdentitySecretsRequest{
-			OrganizationID: cutil.GetPtr(tenantOrg),
+			assert.JSONEq(t, `{
+				"rowsExamined": 3,
+				"rowsUpdated": 2,
+				"rowsSkippedAllOnTarget": 1,
+				"fieldsReencrypted": 4,
+				"fieldsSkippedOnTarget": 2,
+				"rowsFailed": 0,
+				"failures": [],
+				"currentEncryptionKeyId": "key-2"
+			}`, recorder.Body.String())
+			temporalClient.AssertExpectations(t)
 		})
-		require.Equal(t, http.StatusOK, recorder.Code, "body=%s", recorder.Body.String())
-
-		var coreRequest corev1.ReencryptTenantIdentitySecretsRequest
-		require.NoError(t, protojson.Unmarshal(proxiedRequest.RequestJSON, &coreRequest))
-		assert.Equal(t, tenantOrg, coreRequest.GetOrganizationId())
-	})
-
-	t.Run("unknown tenant organization is rejected before proxy dispatch", func(t *testing.T) {
-		recorder, _ := performRequest(model.APIReencryptTenantIdentitySecretsRequest{
-			OrganizationID: cutil.GetPtr(unknownTenantOrg),
-		})
-		assert.Equal(t, http.StatusBadRequest, recorder.Code)
-		assert.Contains(t, recorder.Body.String(), "Could not find Tenant for organizationId specified in request data")
-		assert.Equal(t, 2, countMockCalls(&temporalClient.Mock, "ExecuteWorkflow"))
-	})
-
-	t.Run("tenant allocated only on another site is rejected before proxy dispatch", func(t *testing.T) {
-		recorder, _ := performRequest(model.APIReencryptTenantIdentitySecretsRequest{
-			OrganizationID: cutil.GetPtr(otherSiteTenantOrg),
-		})
-		assert.Equal(t, http.StatusBadRequest, recorder.Code)
-		assert.Contains(t, recorder.Body.String(), "Tenant organization does not have an allocation on the Site")
-		assert.Equal(t, 2, countMockCalls(&temporalClient.Mock, "ExecuteWorkflow"))
-	})
-
-	temporalClient.AssertExpectations(t)
+	}
 }
 
 // TestGetJWKS_AbsentCasesReturn404AndPresentPassesThrough verifies absent JWKS paths return 404 (including the "tenant has no allocation" case so already-issued JWT-SVIDs remain verifiable) and a present JWKS passes through unchanged.

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the TenantIdentityReencryptFailure type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,24 @@ var _ MappedNullable = &TenantIdentityReencryptFailure{}
 // TenantIdentityReencryptFailure A single per-field re-wrap failure.
 type TenantIdentityReencryptFailure struct {
 	// Org whose secret failed to re-wrap.
-	OrganizationId *string `json:"organizationId,omitempty"`
+	OrganizationId string `json:"organizationId"`
 	// Name of the field that failed to re-wrap.
-	Field *string `json:"field,omitempty"`
+	Field string `json:"field"`
 	// Error describing why the field could not be re-wrapped.
-	Error *string `json:"error,omitempty"`
+	Error string `json:"error"`
 }
+
+type _TenantIdentityReencryptFailure TenantIdentityReencryptFailure
 
 // NewTenantIdentityReencryptFailure instantiates a new TenantIdentityReencryptFailure object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantIdentityReencryptFailure() *TenantIdentityReencryptFailure {
+func NewTenantIdentityReencryptFailure(organizationId string, field string, error_ string) *TenantIdentityReencryptFailure {
 	this := TenantIdentityReencryptFailure{}
+	this.OrganizationId = organizationId
+	this.Field = field
+	this.Error = error_
 	return &this
 }
 
@@ -47,100 +54,76 @@ func NewTenantIdentityReencryptFailureWithDefaults() *TenantIdentityReencryptFai
 	return &this
 }
 
-// GetOrganizationId returns the OrganizationId field value if set, zero value otherwise.
+// GetOrganizationId returns the OrganizationId field value
 func (o *TenantIdentityReencryptFailure) GetOrganizationId() string {
-	if o == nil || IsNil(o.OrganizationId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.OrganizationId
+
+	return o.OrganizationId
 }
 
-// GetOrganizationIdOk returns a tuple with the OrganizationId field value if set, nil otherwise
+// GetOrganizationIdOk returns a tuple with the OrganizationId field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityReencryptFailure) GetOrganizationIdOk() (*string, bool) {
-	if o == nil || IsNil(o.OrganizationId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.OrganizationId, true
+	return &o.OrganizationId, true
 }
 
-// HasOrganizationId returns a boolean if a field has been set.
-func (o *TenantIdentityReencryptFailure) HasOrganizationId() bool {
-	if o != nil && !IsNil(o.OrganizationId) {
-		return true
-	}
-
-	return false
-}
-
-// SetOrganizationId gets a reference to the given string and assigns it to the OrganizationId field.
+// SetOrganizationId sets field value
 func (o *TenantIdentityReencryptFailure) SetOrganizationId(v string) {
-	o.OrganizationId = &v
+	o.OrganizationId = v
 }
 
-// GetField returns the Field field value if set, zero value otherwise.
+// GetField returns the Field field value
 func (o *TenantIdentityReencryptFailure) GetField() string {
-	if o == nil || IsNil(o.Field) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Field
+
+	return o.Field
 }
 
-// GetFieldOk returns a tuple with the Field field value if set, nil otherwise
+// GetFieldOk returns a tuple with the Field field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityReencryptFailure) GetFieldOk() (*string, bool) {
-	if o == nil || IsNil(o.Field) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Field, true
+	return &o.Field, true
 }
 
-// HasField returns a boolean if a field has been set.
-func (o *TenantIdentityReencryptFailure) HasField() bool {
-	if o != nil && !IsNil(o.Field) {
-		return true
-	}
-
-	return false
-}
-
-// SetField gets a reference to the given string and assigns it to the Field field.
+// SetField sets field value
 func (o *TenantIdentityReencryptFailure) SetField(v string) {
-	o.Field = &v
+	o.Field = v
 }
 
-// GetError returns the Error field value if set, zero value otherwise.
+// GetError returns the Error field value
 func (o *TenantIdentityReencryptFailure) GetError() string {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Error
+
+	return o.Error
 }
 
-// GetErrorOk returns a tuple with the Error field value if set, nil otherwise
+// GetErrorOk returns a tuple with the Error field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityReencryptFailure) GetErrorOk() (*string, bool) {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Error, true
+	return &o.Error, true
 }
 
-// HasError returns a boolean if a field has been set.
-func (o *TenantIdentityReencryptFailure) HasError() bool {
-	if o != nil && !IsNil(o.Error) {
-		return true
-	}
-
-	return false
-}
-
-// SetError gets a reference to the given string and assigns it to the Error field.
+// SetError sets field value
 func (o *TenantIdentityReencryptFailure) SetError(v string) {
-	o.Error = &v
+	o.Error = v
 }
 
 func (o TenantIdentityReencryptFailure) MarshalJSON() ([]byte, error) {
@@ -153,16 +136,48 @@ func (o TenantIdentityReencryptFailure) MarshalJSON() ([]byte, error) {
 
 func (o TenantIdentityReencryptFailure) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.OrganizationId) {
-		toSerialize["organizationId"] = o.OrganizationId
-	}
-	if !IsNil(o.Field) {
-		toSerialize["field"] = o.Field
-	}
-	if !IsNil(o.Error) {
-		toSerialize["error"] = o.Error
-	}
+	toSerialize["organizationId"] = o.OrganizationId
+	toSerialize["field"] = o.Field
+	toSerialize["error"] = o.Error
 	return toSerialize, nil
+}
+
+func (o *TenantIdentityReencryptFailure) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"organizationId",
+		"field",
+		"error",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTenantIdentityReencryptFailure := _TenantIdentityReencryptFailure{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTenantIdentityReencryptFailure)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TenantIdentityReencryptFailure(varTenantIdentityReencryptFailure)
+
+	return err
 }
 
 type NullableTenantIdentityReencryptFailure struct {

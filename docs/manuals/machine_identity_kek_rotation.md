@@ -6,7 +6,7 @@ This is **not** the same as **per-org JWT signing key rotation** (see [JWT Signi
 
 Design background: [SPIFFE JWT-SVID SDD §3.1.1](../design/machine-identity/spiffe-svid-sdd.md).
 
-> **API surface:** Re-wrap is available through NICo-rest at `POST /v2/org/{org}/nico/site/{siteID}/tenant-identity/reencrypt` for provider admins and directly through Core gRPC (`ReencryptTenantIdentitySecrets`) with a Forge Admin CLI mTLS certificate. There is no `nico-admin-cli` subcommand for re-wrap.
+> **API surface:** Re-wrap is available through NICo-rest at `POST /v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt` for provider admins and directly through Core gRPC (`ReencryptTenantIdentitySecrets`) with a Forge Admin CLI mTLS certificate. There is no `nico-admin-cli` subcommand for re-wrap.
 
 ---
 
@@ -80,7 +80,7 @@ Restart `nico-api` (this setting is **not** hot-reloaded). New encrypts (new org
 
 ### Step 3 — Dry-run re-wrap
 
-> The examples below use direct gRPC. For NICo-rest, use the JSON field names `dryRun` and `organizationId`; organization values are passed unchanged. The URL `{org}` identifies the provider, while a supplied `organizationId` identifies a tenant that must have an allocation and tenant identity configuration on the selected Site. NICo-rest returns Bad Request when the tenant is unknown or has no allocation on the selected Site. On either surface, a valid scoped tenant without tenant identity configuration returns Not Found.
+> The examples below use direct gRPC. For NICo-rest, use the JSON field names `dryRun` and `organizationId`. The URL `{org}` identifies the provider; a non-null `organizationId` is the tenant's `org` identifier, not its REST resource UUID or display name. It must contain one or more ASCII letters, digits, underscores, or hyphens and is passed unchanged. The tenant must have an allocation and tenant identity configuration on the selected Site. Omission or JSON `null` selects all organizations; empty and whitespace-containing strings return Bad Request instead of broadening the scope. Direct gRPC trims `organization_id` and treats an omitted or blank value as all organizations. NICo-rest also returns Bad Request when the tenant is unknown or has no allocation on the selected Site. On either surface, a valid scoped tenant without tenant identity configuration returns Not Found.
 
 Call **`ReencryptTenantIdentitySecrets`** with `dry_run: true`. Optionally scope to one org.
 
