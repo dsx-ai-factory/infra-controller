@@ -195,6 +195,12 @@ func (msxp ManageSpectrumXPartition) UpdateSpectrumXPartitionsInDB(ctx context.C
 			continue
 		}
 
+		// Already recorded as missing, so re-applying it would only append a duplicate
+		// status detail on every inventory cycle.
+		if sxp.IsMissingOnSite && sxp.Status == cdbm.SpectrumXPartitionStatusError {
+			continue
+		}
+
 		// Set isMissingOnSite flag to true and update status, user can decide on deletion
 		_, serr := sxpDAO.Update(
 			ctx,

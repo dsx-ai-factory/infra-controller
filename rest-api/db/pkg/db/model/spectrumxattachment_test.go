@@ -62,23 +62,6 @@ func TestSpectrumXAttachment_ToProto(t *testing.T) {
 	})
 }
 
-func testSpectrumXSetupSchema(t *testing.T, dbSession *db.Session) {
-	err := dbSession.DB.ResetModel(context.Background(), (*Tenant)(nil))
-	require.NoError(t, err)
-
-	err = dbSession.DB.ResetModel(context.Background(), (*Site)(nil))
-	require.NoError(t, err)
-
-	err = dbSession.DB.ResetModel(context.Background(), (*InfrastructureProvider)(nil))
-	require.NoError(t, err)
-
-	err = dbSession.DB.ResetModel(context.Background(), (*SpectrumXPartition)(nil))
-	require.NoError(t, err)
-
-	err = dbSession.DB.ResetModel(context.Background(), (*SpectrumXAttachment)(nil))
-	require.NoError(t, err)
-}
-
 // spectrumXFixture is the Site, Tenant, Instance and Partition chain a SpectrumX
 // Attachment needs before it can be inserted.
 type spectrumXFixture struct {
@@ -146,7 +129,7 @@ func TestSpectrumXPartitionSQLDAO_Lifecycle(t *testing.T) {
 
 	dbSession := testInitDB(t)
 	defer dbSession.Close()
-	testSpectrumXSetupSchema(t, dbSession)
+	TestSetupSchema(t, dbSession)
 
 	ipu := testBuildUser(t, dbSession, nil, testGenerateStarfleetID(), cutil.GetPtr("johnd@test.com"), cutil.GetPtr("John"), cutil.GetPtr("Doe"))
 	ip := testBuildInfrastructureProvider(t, dbSession, nil, "test-ip", "Test Provider", ipu.ID)
@@ -262,7 +245,7 @@ func TestSpectrumXAttachmentSQLDAO_CreateMultiple(t *testing.T) {
 
 	dbSession := testInitDB(t)
 	defer dbSession.Close()
-	testSpectrumXSetupSchema(t, dbSession)
+	TestSetupSchema(t, dbSession)
 
 	fx := testBuildSpectrumXFixture(t, dbSession)
 	sxaDAO := NewSpectrumXAttachmentDAO(dbSession)
@@ -304,7 +287,7 @@ func TestSpectrumXAttachmentSQLDAO_Lifecycle(t *testing.T) {
 
 	dbSession := testInitDB(t)
 	defer dbSession.Close()
-	testSpectrumXSetupSchema(t, dbSession)
+	TestSetupSchema(t, dbSession)
 
 	fx := testBuildSpectrumXFixture(t, dbSession)
 	sxaDAO := NewSpectrumXAttachmentDAO(dbSession)

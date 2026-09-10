@@ -190,9 +190,13 @@ func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
 	}
 	if tot > 0 {
 		logger.Warn().Str("tenantId", orgTenant.ID.String()).Str("name", apiRequest.Name).Msg("SpectrumX Partition with same name already exists for Tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Another SpectrumX Partition with specified name already exists for Tenant", validation.Errors{
-			"id": errors.New(existing[0].ID.String()),
-		})
+		// The count and the row scan are separate queries, so a concurrent delete between
+		// them can report a match with no row to name.
+		var conflictData validation.Errors
+		if len(existing) > 0 {
+			conflictData = validation.Errors{"id": errors.New(existing[0].ID.String())}
+		}
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Another SpectrumX Partition with specified name already exists for Tenant", conflictData)
 	}
 
 	stc, derr := csxph.scp.GetClientByID(site.ID)
