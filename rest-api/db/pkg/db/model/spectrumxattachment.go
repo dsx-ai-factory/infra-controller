@@ -37,6 +37,10 @@ const (
 // ToProto converts a SpectrumXAttachmentType into its Core proto enum. An unrecognized value
 // returns Physical, the zero enum, because API-side validation is the gate that rejects it
 // long before a row reaches the wire.
+//
+// OVS maps onto Core's `Ovn`, which is the same attachment under its older name. Core renames
+// that enum value to `Ovs` in a separate proto sync, and this mapping follows once that lands.
+// The name matters on the wire because attachments reach the Site as protojson.
 func (t SpectrumXAttachmentType) ToProto() corev1.SpxAttachmentType {
 	switch t {
 	case SpectrumXAttachmentTypePhysical:
@@ -44,7 +48,7 @@ func (t SpectrumXAttachmentType) ToProto() corev1.SpxAttachmentType {
 	case SpectrumXAttachmentTypeVirtual:
 		return corev1.SpxAttachmentType_Virtual
 	case SpectrumXAttachmentTypeOVS:
-		return corev1.SpxAttachmentType_Ovs
+		return corev1.SpxAttachmentType_Ovn
 	default:
 		return corev1.SpxAttachmentType_Physical
 	}
