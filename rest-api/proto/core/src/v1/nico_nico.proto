@@ -9591,6 +9591,7 @@ message GetComponentInventoryRequest {
     PowerShelfIdList power_shelf_ids = 3;
     MacAddressList compute_bmc_macs = 4;
     MacAddressList switch_bmc_macs = 5;
+    MacAddressList power_shelf_pmc_macs = 6;
   }
 }
 
@@ -9612,6 +9613,7 @@ message ComponentPowerControlRequest {
     PowerShelfIdList power_shelf_ids = 3;
     MacAddressList compute_bmc_macs = 6;
     MacAddressList switch_bmc_macs = 7;
+    MacAddressList power_shelf_pmc_macs = 8;
   }
   common.SystemPowerControl action = 4;
   // When true, bypass the state controller and dispatch directly to the
@@ -9705,8 +9707,14 @@ message UpdateSwitchFirmwareTarget {
 }
 
 message UpdatePowerShelfFirmwareTarget {
+  // Exactly one of power_shelf_ids or pmc_macs must be set (the server rejects
+  // neither/both). power_shelf_ids targets ingested power shelves; pmc_macs
+  // targets by PMC MAC, including pre-ingestion. These are plain fields rather
+  // than a oneof so field 1 stays wire-compatible with earlier releases that
+  // predate pmc_macs.
   PowerShelfIdList power_shelf_ids = 1;
   repeated PowerShelfComponent components = 2;
+  MacAddressList pmc_macs = 3;
 }
 
 // Whole-rack firmware update target. All eligible compute and switch devices
@@ -9750,6 +9758,7 @@ message GetComponentFirmwareStatusRequest {
     RackIdList rack_ids = 4;
     MacAddressList compute_bmc_macs = 5;
     MacAddressList switch_bmc_macs = 6;
+    MacAddressList power_shelf_pmc_macs = 7;
   }
 }
 
@@ -9765,6 +9774,7 @@ message ListComponentFirmwareVersionsRequest {
     RackIdList rack_ids = 4;
     MacAddressList compute_bmc_macs = 5;
     MacAddressList switch_bmc_macs = 6;
+    MacAddressList power_shelf_pmc_macs = 7;
   }
 }
 
