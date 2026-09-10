@@ -625,6 +625,45 @@ pub async fn find_power_shelf_endpoints_by_ids(
         .map_err(|err| DatabaseError::new("power_shelf::find_power_shelf_endpoints_by_ids", err))
 }
 
+/// Endpoint info (PMC MAC + PMC IP) for a power shelf that may not be ingested
+/// yet.
+#[derive(Debug, sqlx::FromRow)]
+pub struct PreIngestionPowerShelfEndpointRow {
+    pub pmc_mac: MacAddress,
+    pub pmc_ip: IpAddr,
+}
+
+/// Resolve PMC MACs to endpoint info (PMC MAC + IP) for power shelves that may
+/// not be ingested yet.
+///
+/// Identical joins to [`find_power_shelf_endpoints_by_ids`] but anchored on
+/// `expected_power_shelves.bmc_mac_address` instead of a `power_shelves` row, so
+/// it works before ingestion creates the power shelf. `DISTINCT ON
+/// (eps.bmc_mac_address)` collapses duplicate address rows.
+pub async fn find_power_shelf_endpoints_by_bmc_macs(
+    db: impl crate::db_read::DbReader<'_>,
+    pmc_macs: &[MacAddress],
+) -> DatabaseResult<Vec<PreIngestionPowerShelfEndpointRow>> {
+    let sql = r#"
+        SELECT DISTINCT ON (eps.bmc_mac_address)
+            eps.bmc_mac_address  AS pmc_mac,
+            mia.address          AS pmc_ip
+        FROM expected_power_shelves eps
+        JOIN machine_interfaces mi ON mi.mac_address = eps.bmc_mac_address
+        JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
+        WHERE eps.bmc_mac_address = ANY($1)
+        ORDER BY eps.bmc_mac_address
+    "#;
+
+    sqlx::query_as(sql)
+        .bind(pmc_macs)
+        .fetch_all(db)
+        .await
+        .map_err(|err| {
+            DatabaseError::new("power_shelf::find_power_shelf_endpoints_by_bmc_macs", err)
+        })
+}
+
 pub async fn update_metadata(
     txn: &mut PgConnection,
     power_shelf_id: &PowerShelfId,
