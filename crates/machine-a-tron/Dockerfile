@@ -38,6 +38,7 @@ ENV CI_COMMIT_SHORT_SHA=${CI_COMMIT_SHORT_SHA}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    make \
     pkg-config \
     protobuf-compiler \
     libprotobuf-dev \

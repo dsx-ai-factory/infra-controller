@@ -49,6 +49,14 @@ use tokio::sync::mpsc;
 use crate::logging::init_logging;
 use crate::ufm_mock::HostedUfmMock;
 
+// Simulated fleets allocate and free short-lived Redfish state from many worker threads. With
+// glibc malloc that memory stayed in per-thread arenas and resident size ratcheted up to the pod
+// limit under sustained Redfish load; jemalloc's decay-based purging returns freed pages to the
+// OS and kept resident size bounded under the same load. Purging is triggered by allocation
+// activity rather than by background threads, so an idle process is slower to shrink.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 32)]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = MachineATronArgs::parse();

@@ -64,6 +64,7 @@ tempfile = { workspace = true }
 duration-str = { workspace = true }
 rand = { workspace = true }
 russh = { workspace = true }
+tikv-jemallocator = { workspace = true }
 
 # [local-dependencies]
 carbide-api-model = { path = "../api-model" }
