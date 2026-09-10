@@ -18,6 +18,7 @@
 use std::time::Duration;
 
 use ::rpc::forge as rpc;
+use librms::RackManagerError;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -53,7 +54,17 @@ pub(crate) async fn get_rms_version(
         .map_err(|_elapsed| {
             Status::deadline_exceeded("rms get_version timed out after 30 seconds")
         })?
-        .map_err(|e| -> Status { CarbideError::from(e).into() })?;
+        .map_err(|e| -> Status {
+            // Preserve the gRPC status code from the RMS backend so the CLI
+            // can distinguish Unavailable, Unauthenticated, etc.  Going through
+            // CarbideError would collapse every variant into Internal.
+            match e {
+                RackManagerError::ApiInvocationError(status) => {
+                    Status::new(status.code(), format!("rms: {}", status.message()))
+                }
+                other => Status::internal(format!("rms: {other}")),
+            }
+        })?;
 
     Ok(Response::new(rpc::GetRmsVersionResponse {
         version: resp.version,

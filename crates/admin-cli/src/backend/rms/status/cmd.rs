@@ -51,11 +51,19 @@ impl Report {
 /// about:
 ///
 /// - **CLI → nico-api**: A transport-level `UNAVAILABLE` means nico-api is
-///   down or unreachable from this host.
+///   down or unreachable from this host.  `ForgeTlsClientError` also maps
+///   local configuration failures (missing root CA, bad cert, etc.) to
+///   `UNAVAILABLE`; those are identified by their message prefix.
 /// - **nico-api → RMS (not configured)**: The handler returns a specific
 ///   `UNAVAILABLE` message when no RMS endpoint is configured.
 /// - **nico-api → RMS (mTLS rejected)**: `UNAUTHENTICATED` from the server
 ///   usually means a cert was presented but rejected.
+///
+/// `PermissionDenied` is inherently ambiguous: the server's RBAC middleware
+/// rejects calls that have no matching rule with HTTP 403 (which tonic maps to
+/// `PermissionDenied`) *before* the gRPC layer can return `Unimplemented`.
+/// On older nico-api servers that predate `GetRmsVersion`, the RBAC rule is
+/// absent and the result is `PermissionDenied`, not `Unimplemented`.
 fn classify(s: tonic::Status) -> Report {
     let msg = s.message().to_owned();
     match s.code() {
@@ -72,6 +80,8 @@ fn classify(s: tonic::Status) -> Report {
                 || msg.contains("transport error")
                 || msg.contains("error trying to connect")
                 || msg.contains("connection refused")
+                // ForgeTlsClientError::Connection surfaces as "ConnectError error: …"
+                || msg.contains("ConnectError")
             {
                 // Tonic transport errors surface as UNAVAILABLE with a
                 // message that describes the underlying TCP/TLS failure;
@@ -86,6 +96,16 @@ fn classify(s: tonic::Status) -> Report {
                         } else {
                             &msg
                         }
+                    ),
+                    version: None,
+                }
+            } else if msg.contains("configuration error") {
+                // ForgeTlsClientError::Configuration (missing CA file, invalid
+                // cert, etc.) — the CLI never contacted nico-api.
+                Report {
+                    status: "cli-config-error",
+                    message: format!(
+                        "cli configuration problem prevented connecting to nico-api: {msg}"
                     ),
                     version: None,
                 }
@@ -109,11 +129,21 @@ fn classify(s: tonic::Status) -> Report {
             version: None,
         },
 
-        tonic::Code::PermissionDenied => Report {
-            status: "auth-failed",
-            message: format!("permission denied: {msg}"),
-            version: None,
-        },
+        tonic::Code::PermissionDenied => {
+            // Ambiguous: either a genuine authorisation failure, or the
+            // targeted nico-api server predates GetRmsVersion (its RBAC rules
+            // reject the call with HTTP 403 before gRPC can return
+            // Unimplemented).
+            Report {
+                status: "auth-or-version-mismatch",
+                message: format!(
+                    "permission denied — either the cli certificate lacks the required \
+                     role, or this nico-api server predates the GetRmsVersion rpc and \
+                     its rbac rules reject the call before dispatch: {msg}"
+                ),
+                version: None,
+            }
+        }
 
         tonic::Code::DeadlineExceeded => Report {
             status: "timeout",
