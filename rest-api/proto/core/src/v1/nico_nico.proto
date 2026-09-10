@@ -7162,6 +7162,10 @@ message MachineValidationRunItem {
   optional string skip_reason = 16;
   optional string failure_reason = 17;
   common.UUID current_attempt_id = 18;
+  // Immutable plugin configuration selected when the run plan was created.
+  optional MachineValidationPlugin plugin = 19;
+  // Full-host approval captured with the selected plugin revision.
+  bool plugin_full_host_approved = 20;
 }
 
 message MachineValidationAttemptGetRequest {
