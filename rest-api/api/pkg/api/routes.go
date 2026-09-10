@@ -1367,7 +1367,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewDeleteHostFirmwareConfigHandler(dbSession, scp),
 		},
 		{
-			Path:    apiPathPrefix + "/site/:siteID/tenant-identity/reencrypt",
+			Path:    apiPathPrefix + "/site/:siteID/tenant-identity/re-encrypt",
 			Method:  http.MethodPost,
 			Handler: apiHandler.NewReencryptTenantIdentitySecretsHandler(dbSession, scp),
 		},

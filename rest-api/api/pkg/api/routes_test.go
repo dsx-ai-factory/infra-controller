@@ -119,6 +119,8 @@ func TestNewAPIRoutes(t *testing.T) {
 
 			bmcCredentialPath := "/org/:orgName/" + cfg.GetAPIName() + "/credential/bmc"
 			assertRouteExists(t, got, http.MethodPut, bmcCredentialPath)
+			reencryptPath := "/org/:orgName/" + cfg.GetAPIName() + "/site/:siteID/tenant-identity/re-encrypt"
+			assertRouteExists(t, got, http.MethodPost, reencryptPath)
 			siteExplorerEndpointPath := "/org/:orgName/" + cfg.GetAPIName() + "/site-explorer/endpoint"
 			assertRouteExists(t, got, http.MethodGet, siteExplorerEndpointPath)
 			siteExplorerActionPath := "/org/:orgName/" + cfg.GetAPIName() + "/site-explorer/endpoint/action"

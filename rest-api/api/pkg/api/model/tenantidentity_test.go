@@ -291,7 +291,7 @@ func TestAPITenantIdentityConfig_FromResponseProto(t *testing.T) {
 	})
 }
 
-// TestAPIReencryptTenantIdentitySecretsRequest_Validate verifies omission targets all organizations and a supplied organization must be non-empty.
+// TestAPIReencryptTenantIdentitySecretsRequest_Validate verifies an optional scope uses the Core tenant organization identifier format without accepting blank scopes.
 func TestAPIReencryptTenantIdentitySecretsRequest_Validate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -302,7 +302,7 @@ func TestAPIReencryptTenantIdentitySecretsRequest_Validate(t *testing.T) {
 		{
 			name: "organization supplied",
 			req: APIReencryptTenantIdentitySecretsRequest{
-				OrganizationID: cutil.GetPtr("tenant-corp"),
+				OrganizationID: cutil.GetPtr("Tenant-Corp_01"),
 				DryRun:         true,
 			},
 		},
@@ -312,6 +312,20 @@ func TestAPIReencryptTenantIdentitySecretsRequest_Validate(t *testing.T) {
 				OrganizationID: cutil.GetPtr(""),
 			},
 			wantErr: "organizationId must not be empty",
+		},
+		{
+			name: "blank organization cannot select all organizations",
+			req: APIReencryptTenantIdentitySecretsRequest{
+				OrganizationID: cutil.GetPtr(" \t"),
+			},
+			wantErr: "organizationId must contain only ASCII letters, digits, underscores, and hyphens",
+		},
+		{
+			name: "invalid identifier character",
+			req: APIReencryptTenantIdentitySecretsRequest{
+				OrganizationID: cutil.GetPtr("tenant.corp"),
+			},
+			wantErr: "organizationId must contain only ASCII letters, digits, underscores, and hyphens",
 		},
 	}
 
@@ -356,6 +370,57 @@ func TestAPIReencryptTenantIdentitySecretsRequest_ToProto(t *testing.T) {
 			assert.Equal(t, tt.wantOrg, protoRequest.GetOrganizationId())
 			assert.Equal(t, tt.wantOrgPresent, protoRequest.OrganizationId != nil)
 			assert.Equal(t, tt.wantDryRun, protoRequest.GetDryRun())
+		})
+	}
+}
+
+// TestAPIReencryptTenantIdentitySecretsResponse_FromProto verifies failure mapping and replacement, including an empty result and the nil-input no-op contract.
+func TestAPIReencryptTenantIdentitySecretsResponse_FromProto(t *testing.T) {
+	previous := APIReencryptTenantIdentitySecretsResponse{
+		RowsFailed: 1,
+		Failures: []APIReencryptTenantIdentityFailure{{
+			OrganizationID: "tenant-corp",
+			Field:          "encrypted_signing_key_1",
+			Error:          "decryption failed",
+		}},
+	}
+	tests := []struct {
+		name    string
+		initial APIReencryptTenantIdentitySecretsResponse
+		proto   *corev1.ReencryptTenantIdentitySecretsResponse
+		want    APIReencryptTenantIdentitySecretsResponse
+	}{
+		{
+			name: "map per-field failure",
+			proto: &corev1.ReencryptTenantIdentitySecretsResponse{
+				RowsFailed: 1,
+				Failures: []*corev1.ReencryptTenantIdentityFailure{{
+					OrganizationId: "tenant-corp",
+					Field:          "encrypted_signing_key_1",
+					Error:          "decryption failed",
+				}},
+			},
+			want: previous,
+		},
+		{
+			name:    "empty result clears prior failures to a non-nil slice",
+			initial: previous,
+			proto:   &corev1.ReencryptTenantIdentitySecretsResponse{},
+			want: APIReencryptTenantIdentitySecretsResponse{
+				Failures: []APIReencryptTenantIdentityFailure{},
+			},
+		},
+		{
+			name:    "nil input preserves the receiver",
+			initial: previous,
+			want:    previous,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := tt.initial
+			response.FromProto(tt.proto)
+			assert.Equal(t, tt.want, response)
 		})
 	}
 }

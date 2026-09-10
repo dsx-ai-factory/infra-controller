@@ -16600,7 +16600,7 @@ paths:
           $ref: '#/components/responses/GenericHttpError'
         '503':
           $ref: '#/components/responses/TenantIdentityCoreUnavailable'
-  '/v2/org/{org}/nico/site/{siteID}/tenant-identity/reencrypt':
+  '/v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt':
     parameters:
       - schema:
           type: string
@@ -16628,13 +16628,16 @@ paths:
         User must have authorization role with `PROVIDER_ADMIN` suffix in the URL `{org}`.
 
         The URL `{org}` identifies the provider whose admin authorizes the
-        operation. Omit `organizationId` to re-wrap every org's secrets on
-        the Site, or set it to a tenant organization that has an allocation
-        on the Site. Set `dryRun` to decrypt and validate without writing any
-        changes.
+        operation. Omit `organizationId` or set it to `null` to re-wrap every
+        org's secrets on the Site, or set it to a tenant organization identifier
+        that has an allocation on the Site. This identifier is the tenant's
+        `org` value, not its REST resource UUID or display name. Set `dryRun`
+        to decrypt and validate without writing any changes.
 
-        Returns `400 Bad Request` when a scoped tenant organization does not
-        exist or has no allocation on the Site. Returns `404 Not Found` when
+        Returns `400 Bad Request` when a supplied organization identifier is
+        empty or contains characters other than ASCII letters, digits,
+        underscores, and hyphens, or when the tenant does not exist or has no
+        allocation on the Site. Returns `404 Not Found` when
         `{org}` has no Infrastructure Provider, or when a scoped organization
         has no tenant identity configuration on the Site. An unknown, invalid,
         or unregistered `siteID` returns `400 Bad Request`.
@@ -31279,15 +31282,26 @@ components:
         Request to re-wrap stored tenant identity secrets with the Site's
         current master encryption key (KEK rotation).
       type: object
+      example:
+        organizationId: tenant-corp
+        dryRun: true
       properties:
         organizationId:
-          type: string
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          pattern: '^[A-Za-z0-9_-]+$'
           description: |-
-            If set, this identifies a tenant organization that must have an
-            allocation and tenant identity configuration on the Site; only that
-            organization's secrets are re-wrapped. The URL `{org}` separately
-            identifies the provider authorizing the operation. If omitted, every
-            row in the Site's tenant identity store is processed.
+            Optional tenant organization identifier (`org`), not the tenant's
+            REST resource UUID or display name. A non-null value must contain
+            one or more ASCII letters, digits, underscores, or hyphens; empty
+            and whitespace-containing strings are rejected, not treated as
+            site-wide scope. The tenant must have an allocation and tenant
+            identity configuration on the Site; only that organization's secrets
+            are re-wrapped. The URL `{org}` separately identifies the provider
+            authorizing the operation. If omitted or null, every row in the
+            Site's tenant identity store is processed.
         dryRun:
           type: boolean
           description: When true, decrypt and validate only; no changes are written.
@@ -31296,6 +31310,10 @@ components:
       title: TenantIdentityReencryptFailure
       description: A single per-field re-wrap failure.
       type: object
+      required:
+        - organizationId
+        - field
+        - error
       properties:
         organizationId:
           type: string
@@ -31310,6 +31328,24 @@ components:
       title: TenantIdentityReencryptSecretsResponse
       description: Counters and per-field failures from a reencrypt run.
       type: object
+      example:
+        rowsExamined: 3
+        rowsUpdated: 2
+        rowsSkippedAllOnTarget: 1
+        fieldsReencrypted: 4
+        fieldsSkippedOnTarget: 2
+        rowsFailed: 0
+        failures: []
+        currentEncryptionKeyId: key-2
+      required:
+        - rowsExamined
+        - rowsUpdated
+        - rowsSkippedAllOnTarget
+        - fieldsReencrypted
+        - fieldsSkippedOnTarget
+        - rowsFailed
+        - failures
+        - currentEncryptionKeyId
       properties:
         rowsExamined:
           type: integer
@@ -31331,7 +31367,7 @@ components:
           description: Number of rows with at least one field that failed to re-wrap.
         failures:
           type: array
-          description: Per-field re-wrap failures, when any occurred.
+          description: Per-field re-wrap failures; an empty array when none occurred.
           items:
             $ref: '#/components/schemas/TenantIdentityReencryptFailure'
         currentEncryptionKeyId:

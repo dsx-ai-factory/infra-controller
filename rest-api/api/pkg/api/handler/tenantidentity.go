@@ -1024,7 +1024,7 @@ func (goidch GetOpenIDConfigurationHandler) Handle(c echo.Context) error {
 
 // ~~~~~ Reencrypt Secrets Handler ~~~~~ //
 
-// ReencryptTenantIdentitySecretsHandler handles POST /tenant-identity/reencrypt.
+// ReencryptTenantIdentitySecretsHandler handles POST /tenant-identity/re-encrypt.
 type ReencryptTenantIdentitySecretsHandler struct {
 	dbSession  *cdb.Session
 	scp        *sc.ClientPool
@@ -1052,7 +1052,7 @@ func NewReencryptTenantIdentitySecretsHandler(dbSession *cdb.Session, scp *sc.Cl
 // @Param message body model.APIReencryptTenantIdentitySecretsRequest true "Reencrypt Tenant Identity Secrets request"
 // @Success 200 {object} model.APIReencryptTenantIdentitySecretsResponse
 // @Failure 503 {object} util.APIError
-// @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/reencrypt [post]
+// @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt [post]
 func (rtish ReencryptTenantIdentitySecretsHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "ReencryptSecrets", c, rtish.tracerSpan)
 	if handlerSpan != nil {
@@ -1130,6 +1130,6 @@ func (rtish ReencryptTenantIdentitySecretsHandler) Handle(c echo.Context) error 
 	}
 
 	apiResponse := &model.APIReencryptTenantIdentitySecretsResponse{}
-	apiResponse.FromResponseProto(&protoResponse)
+	apiResponse.FromProto(&protoResponse)
 	return c.JSON(http.StatusOK, apiResponse)
 }

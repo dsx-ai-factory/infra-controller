@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the TenantIdentityReencryptSecretsResponse type satisfies the MappedNullable interface at compile time
@@ -23,29 +25,39 @@ var _ MappedNullable = &TenantIdentityReencryptSecretsResponse{}
 // TenantIdentityReencryptSecretsResponse Counters and per-field failures from a reencrypt run.
 type TenantIdentityReencryptSecretsResponse struct {
 	// Number of rows examined.
-	RowsExamined *int32 `json:"rowsExamined,omitempty"`
+	RowsExamined int32 `json:"rowsExamined"`
 	// Number of rows re-wrapped with the current key.
-	RowsUpdated *int32 `json:"rowsUpdated,omitempty"`
+	RowsUpdated int32 `json:"rowsUpdated"`
 	// Number of rows skipped because all fields were already on the target key.
-	RowsSkippedAllOnTarget *int32 `json:"rowsSkippedAllOnTarget,omitempty"`
+	RowsSkippedAllOnTarget int32 `json:"rowsSkippedAllOnTarget"`
 	// Number of individual fields re-wrapped.
-	FieldsReencrypted *int32 `json:"fieldsReencrypted,omitempty"`
+	FieldsReencrypted int32 `json:"fieldsReencrypted"`
 	// Number of fields skipped because they were already on the target key.
-	FieldsSkippedOnTarget *int32 `json:"fieldsSkippedOnTarget,omitempty"`
+	FieldsSkippedOnTarget int32 `json:"fieldsSkippedOnTarget"`
 	// Number of rows with at least one field that failed to re-wrap.
-	RowsFailed *int32 `json:"rowsFailed,omitempty"`
-	// Per-field re-wrap failures, when any occurred.
-	Failures []TenantIdentityReencryptFailure `json:"failures,omitempty"`
+	RowsFailed int32 `json:"rowsFailed"`
+	// Per-field re-wrap failures; an empty array when none occurred.
+	Failures []TenantIdentityReencryptFailure `json:"failures"`
 	// Site machine_identity.current_encryption_key_id used as the re-wrap target.
-	CurrentEncryptionKeyId *string `json:"currentEncryptionKeyId,omitempty"`
+	CurrentEncryptionKeyId string `json:"currentEncryptionKeyId"`
 }
+
+type _TenantIdentityReencryptSecretsResponse TenantIdentityReencryptSecretsResponse
 
 // NewTenantIdentityReencryptSecretsResponse instantiates a new TenantIdentityReencryptSecretsResponse object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantIdentityReencryptSecretsResponse() *TenantIdentityReencryptSecretsResponse {
+func NewTenantIdentityReencryptSecretsResponse(rowsExamined int32, rowsUpdated int32, rowsSkippedAllOnTarget int32, fieldsReencrypted int32, fieldsSkippedOnTarget int32, rowsFailed int32, failures []TenantIdentityReencryptFailure, currentEncryptionKeyId string) *TenantIdentityReencryptSecretsResponse {
 	this := TenantIdentityReencryptSecretsResponse{}
+	this.RowsExamined = rowsExamined
+	this.RowsUpdated = rowsUpdated
+	this.RowsSkippedAllOnTarget = rowsSkippedAllOnTarget
+	this.FieldsReencrypted = fieldsReencrypted
+	this.FieldsSkippedOnTarget = fieldsSkippedOnTarget
+	this.RowsFailed = rowsFailed
+	this.Failures = failures
+	this.CurrentEncryptionKeyId = currentEncryptionKeyId
 	return &this
 }
 
@@ -57,260 +69,196 @@ func NewTenantIdentityReencryptSecretsResponseWithDefaults() *TenantIdentityReen
 	return &this
 }
 
-// GetRowsExamined returns the RowsExamined field value if set, zero value otherwise.
+// GetRowsExamined returns the RowsExamined field value
 func (o *TenantIdentityReencryptSecretsResponse) GetRowsExamined() int32 {
-	if o == nil || IsNil(o.RowsExamined) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.RowsExamined
+
+	return o.RowsExamined
 }
 
-// GetRowsExaminedOk returns a tuple with the RowsExamined field value if set, nil otherwise
+// GetRowsExaminedOk returns a tuple with the RowsExamined field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityReencryptSecretsResponse) GetRowsExaminedOk() (*int32, bool) {
-	if o == nil || IsNil(o.RowsExamined) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RowsExamined, true
+	return &o.RowsExamined, true
 }
 
-// HasRowsExamined returns a boolean if a field has been set.
-func (o *TenantIdentityReencryptSecretsResponse) HasRowsExamined() bool {
-	if o != nil && !IsNil(o.RowsExamined) {
-		return true
-	}
-
-	return false
-}
-
-// SetRowsExamined gets a reference to the given int32 and assigns it to the RowsExamined field.
+// SetRowsExamined sets field value
 func (o *TenantIdentityReencryptSecretsResponse) SetRowsExamined(v int32) {
-	o.RowsExamined = &v
+	o.RowsExamined = v
 }
 
-// GetRowsUpdated returns the RowsUpdated field value if set, zero value otherwise.
+// GetRowsUpdated returns the RowsUpdated field value
 func (o *TenantIdentityReencryptSecretsResponse) GetRowsUpdated() int32 {
-	if o == nil || IsNil(o.RowsUpdated) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.RowsUpdated
+
+	return o.RowsUpdated
 }
 
-// GetRowsUpdatedOk returns a tuple with the RowsUpdated field value if set, nil otherwise
+// GetRowsUpdatedOk returns a tuple with the RowsUpdated field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityReencryptSecretsResponse) GetRowsUpdatedOk() (*int32, bool) {
-	if o == nil || IsNil(o.RowsUpdated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RowsUpdated, true
+	return &o.RowsUpdated, true
 }
 
-// HasRowsUpdated returns a boolean if a field has been set.
-func (o *TenantIdentityReencryptSecretsResponse) HasRowsUpdated() bool {
-	if o != nil && !IsNil(o.RowsUpdated) {
-		return true
-	}
-
-	return false
-}
-
-// SetRowsUpdated gets a reference to the given int32 and assigns it to the RowsUpdated field.
+// SetRowsUpdated sets field value
 func (o *TenantIdentityReencryptSecretsResponse) SetRowsUpdated(v int32) {
-	o.RowsUpdated = &v
+	o.RowsUpdated = v
 }
 
-// GetRowsSkippedAllOnTarget returns the RowsSkippedAllOnTarget field value if set, zero value otherwise.
+// GetRowsSkippedAllOnTarget returns the RowsSkippedAllOnTarget field value
 func (o *TenantIdentityReencryptSecretsResponse) GetRowsSkippedAllOnTarget() int32 {
-	if o == nil || IsNil(o.RowsSkippedAllOnTarget) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.RowsSkippedAllOnTarget
+
+	return o.RowsSkippedAllOnTarget
 }
 
-// GetRowsSkippedAllOnTargetOk returns a tuple with the RowsSkippedAllOnTarget field value if set, nil otherwise
+// GetRowsSkippedAllOnTargetOk returns a tuple with the RowsSkippedAllOnTarget field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityReencryptSecretsResponse) GetRowsSkippedAllOnTargetOk() (*int32, bool) {
-	if o == nil || IsNil(o.RowsSkippedAllOnTarget) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RowsSkippedAllOnTarget, true
+	return &o.RowsSkippedAllOnTarget, true
 }
 
-// HasRowsSkippedAllOnTarget returns a boolean if a field has been set.
-func (o *TenantIdentityReencryptSecretsResponse) HasRowsSkippedAllOnTarget() bool {
-	if o != nil && !IsNil(o.RowsSkippedAllOnTarget) {
-		return true
-	}
-
-	return false
-}
-
-// SetRowsSkippedAllOnTarget gets a reference to the given int32 and assigns it to the RowsSkippedAllOnTarget field.
+// SetRowsSkippedAllOnTarget sets field value
 func (o *TenantIdentityReencryptSecretsResponse) SetRowsSkippedAllOnTarget(v int32) {
-	o.RowsSkippedAllOnTarget = &v
+	o.RowsSkippedAllOnTarget = v
 }
 
-// GetFieldsReencrypted returns the FieldsReencrypted field value if set, zero value otherwise.
+// GetFieldsReencrypted returns the FieldsReencrypted field value
 func (o *TenantIdentityReencryptSecretsResponse) GetFieldsReencrypted() int32 {
-	if o == nil || IsNil(o.FieldsReencrypted) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.FieldsReencrypted
+
+	return o.FieldsReencrypted
 }
 
-// GetFieldsReencryptedOk returns a tuple with the FieldsReencrypted field value if set, nil otherwise
+// GetFieldsReencryptedOk returns a tuple with the FieldsReencrypted field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityReencryptSecretsResponse) GetFieldsReencryptedOk() (*int32, bool) {
-	if o == nil || IsNil(o.FieldsReencrypted) {
+	if o == nil {
 		return nil, false
 	}
-	return o.FieldsReencrypted, true
+	return &o.FieldsReencrypted, true
 }
 
-// HasFieldsReencrypted returns a boolean if a field has been set.
-func (o *TenantIdentityReencryptSecretsResponse) HasFieldsReencrypted() bool {
-	if o != nil && !IsNil(o.FieldsReencrypted) {
-		return true
-	}
-
-	return false
-}
-
-// SetFieldsReencrypted gets a reference to the given int32 and assigns it to the FieldsReencrypted field.
+// SetFieldsReencrypted sets field value
 func (o *TenantIdentityReencryptSecretsResponse) SetFieldsReencrypted(v int32) {
-	o.FieldsReencrypted = &v
+	o.FieldsReencrypted = v
 }
 
-// GetFieldsSkippedOnTarget returns the FieldsSkippedOnTarget field value if set, zero value otherwise.
+// GetFieldsSkippedOnTarget returns the FieldsSkippedOnTarget field value
 func (o *TenantIdentityReencryptSecretsResponse) GetFieldsSkippedOnTarget() int32 {
-	if o == nil || IsNil(o.FieldsSkippedOnTarget) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.FieldsSkippedOnTarget
+
+	return o.FieldsSkippedOnTarget
 }
 
-// GetFieldsSkippedOnTargetOk returns a tuple with the FieldsSkippedOnTarget field value if set, nil otherwise
+// GetFieldsSkippedOnTargetOk returns a tuple with the FieldsSkippedOnTarget field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityReencryptSecretsResponse) GetFieldsSkippedOnTargetOk() (*int32, bool) {
-	if o == nil || IsNil(o.FieldsSkippedOnTarget) {
+	if o == nil {
 		return nil, false
 	}
-	return o.FieldsSkippedOnTarget, true
+	return &o.FieldsSkippedOnTarget, true
 }
 
-// HasFieldsSkippedOnTarget returns a boolean if a field has been set.
-func (o *TenantIdentityReencryptSecretsResponse) HasFieldsSkippedOnTarget() bool {
-	if o != nil && !IsNil(o.FieldsSkippedOnTarget) {
-		return true
-	}
-
-	return false
-}
-
-// SetFieldsSkippedOnTarget gets a reference to the given int32 and assigns it to the FieldsSkippedOnTarget field.
+// SetFieldsSkippedOnTarget sets field value
 func (o *TenantIdentityReencryptSecretsResponse) SetFieldsSkippedOnTarget(v int32) {
-	o.FieldsSkippedOnTarget = &v
+	o.FieldsSkippedOnTarget = v
 }
 
-// GetRowsFailed returns the RowsFailed field value if set, zero value otherwise.
+// GetRowsFailed returns the RowsFailed field value
 func (o *TenantIdentityReencryptSecretsResponse) GetRowsFailed() int32 {
-	if o == nil || IsNil(o.RowsFailed) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.RowsFailed
+
+	return o.RowsFailed
 }
 
-// GetRowsFailedOk returns a tuple with the RowsFailed field value if set, nil otherwise
+// GetRowsFailedOk returns a tuple with the RowsFailed field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityReencryptSecretsResponse) GetRowsFailedOk() (*int32, bool) {
-	if o == nil || IsNil(o.RowsFailed) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RowsFailed, true
+	return &o.RowsFailed, true
 }
 
-// HasRowsFailed returns a boolean if a field has been set.
-func (o *TenantIdentityReencryptSecretsResponse) HasRowsFailed() bool {
-	if o != nil && !IsNil(o.RowsFailed) {
-		return true
-	}
-
-	return false
-}
-
-// SetRowsFailed gets a reference to the given int32 and assigns it to the RowsFailed field.
+// SetRowsFailed sets field value
 func (o *TenantIdentityReencryptSecretsResponse) SetRowsFailed(v int32) {
-	o.RowsFailed = &v
+	o.RowsFailed = v
 }
 
-// GetFailures returns the Failures field value if set, zero value otherwise.
+// GetFailures returns the Failures field value
 func (o *TenantIdentityReencryptSecretsResponse) GetFailures() []TenantIdentityReencryptFailure {
-	if o == nil || IsNil(o.Failures) {
+	if o == nil {
 		var ret []TenantIdentityReencryptFailure
 		return ret
 	}
+
 	return o.Failures
 }
 
-// GetFailuresOk returns a tuple with the Failures field value if set, nil otherwise
+// GetFailuresOk returns a tuple with the Failures field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityReencryptSecretsResponse) GetFailuresOk() ([]TenantIdentityReencryptFailure, bool) {
-	if o == nil || IsNil(o.Failures) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Failures, true
 }
 
-// HasFailures returns a boolean if a field has been set.
-func (o *TenantIdentityReencryptSecretsResponse) HasFailures() bool {
-	if o != nil && !IsNil(o.Failures) {
-		return true
-	}
-
-	return false
-}
-
-// SetFailures gets a reference to the given []TenantIdentityReencryptFailure and assigns it to the Failures field.
+// SetFailures sets field value
 func (o *TenantIdentityReencryptSecretsResponse) SetFailures(v []TenantIdentityReencryptFailure) {
 	o.Failures = v
 }
 
-// GetCurrentEncryptionKeyId returns the CurrentEncryptionKeyId field value if set, zero value otherwise.
+// GetCurrentEncryptionKeyId returns the CurrentEncryptionKeyId field value
 func (o *TenantIdentityReencryptSecretsResponse) GetCurrentEncryptionKeyId() string {
-	if o == nil || IsNil(o.CurrentEncryptionKeyId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.CurrentEncryptionKeyId
+
+	return o.CurrentEncryptionKeyId
 }
 
-// GetCurrentEncryptionKeyIdOk returns a tuple with the CurrentEncryptionKeyId field value if set, nil otherwise
+// GetCurrentEncryptionKeyIdOk returns a tuple with the CurrentEncryptionKeyId field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityReencryptSecretsResponse) GetCurrentEncryptionKeyIdOk() (*string, bool) {
-	if o == nil || IsNil(o.CurrentEncryptionKeyId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.CurrentEncryptionKeyId, true
+	return &o.CurrentEncryptionKeyId, true
 }
 
-// HasCurrentEncryptionKeyId returns a boolean if a field has been set.
-func (o *TenantIdentityReencryptSecretsResponse) HasCurrentEncryptionKeyId() bool {
-	if o != nil && !IsNil(o.CurrentEncryptionKeyId) {
-		return true
-	}
-
-	return false
-}
-
-// SetCurrentEncryptionKeyId gets a reference to the given string and assigns it to the CurrentEncryptionKeyId field.
+// SetCurrentEncryptionKeyId sets field value
 func (o *TenantIdentityReencryptSecretsResponse) SetCurrentEncryptionKeyId(v string) {
-	o.CurrentEncryptionKeyId = &v
+	o.CurrentEncryptionKeyId = v
 }
 
 func (o TenantIdentityReencryptSecretsResponse) MarshalJSON() ([]byte, error) {
@@ -323,31 +271,58 @@ func (o TenantIdentityReencryptSecretsResponse) MarshalJSON() ([]byte, error) {
 
 func (o TenantIdentityReencryptSecretsResponse) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.RowsExamined) {
-		toSerialize["rowsExamined"] = o.RowsExamined
-	}
-	if !IsNil(o.RowsUpdated) {
-		toSerialize["rowsUpdated"] = o.RowsUpdated
-	}
-	if !IsNil(o.RowsSkippedAllOnTarget) {
-		toSerialize["rowsSkippedAllOnTarget"] = o.RowsSkippedAllOnTarget
-	}
-	if !IsNil(o.FieldsReencrypted) {
-		toSerialize["fieldsReencrypted"] = o.FieldsReencrypted
-	}
-	if !IsNil(o.FieldsSkippedOnTarget) {
-		toSerialize["fieldsSkippedOnTarget"] = o.FieldsSkippedOnTarget
-	}
-	if !IsNil(o.RowsFailed) {
-		toSerialize["rowsFailed"] = o.RowsFailed
-	}
-	if !IsNil(o.Failures) {
-		toSerialize["failures"] = o.Failures
-	}
-	if !IsNil(o.CurrentEncryptionKeyId) {
-		toSerialize["currentEncryptionKeyId"] = o.CurrentEncryptionKeyId
-	}
+	toSerialize["rowsExamined"] = o.RowsExamined
+	toSerialize["rowsUpdated"] = o.RowsUpdated
+	toSerialize["rowsSkippedAllOnTarget"] = o.RowsSkippedAllOnTarget
+	toSerialize["fieldsReencrypted"] = o.FieldsReencrypted
+	toSerialize["fieldsSkippedOnTarget"] = o.FieldsSkippedOnTarget
+	toSerialize["rowsFailed"] = o.RowsFailed
+	toSerialize["failures"] = o.Failures
+	toSerialize["currentEncryptionKeyId"] = o.CurrentEncryptionKeyId
 	return toSerialize, nil
+}
+
+func (o *TenantIdentityReencryptSecretsResponse) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"rowsExamined",
+		"rowsUpdated",
+		"rowsSkippedAllOnTarget",
+		"fieldsReencrypted",
+		"fieldsSkippedOnTarget",
+		"rowsFailed",
+		"failures",
+		"currentEncryptionKeyId",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTenantIdentityReencryptSecretsResponse := _TenantIdentityReencryptSecretsResponse{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTenantIdentityReencryptSecretsResponse)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TenantIdentityReencryptSecretsResponse(varTenantIdentityReencryptSecretsResponse)
+
+	return err
 }
 
 type NullableTenantIdentityReencryptSecretsResponse struct {

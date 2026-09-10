@@ -11,7 +11,7 @@
 | 0.3 | 05/11/2026 | Binu Ramakrishnan | DPU agent / FMDS optional HTTP sign proxy (`[machine-identity]` `sign-proxy-url`, `sign-proxy-tls-root-ca`); `FmdsMachineIdentityConfig` in FMDS config push |
 | 0.4 | 05/11/2026 | Binu Ramakrishnan | Signing key rotation (two slots), overlap policy on rotate only |
 | 0.5 | 06/02/2026 | Binu Ramakrishnan | Site master encryption key re-wrap (`ReencryptTenantIdentitySecrets` gRPC); envelope `key_id` in ciphertext (drop DB `encryption_key_id` column) |
-| 0.6 | 08/07/2026 | Parham Armani | Expose re-wrap via NICo-rest (`POST .../tenant-identity/reencrypt`, provider-admin), keeping `dryRun`; previously gRPC/Forge-Admin-CLI only |
+| 0.6 | 08/07/2026 | Parham Armani | Expose re-wrap via NICo-rest (`POST .../tenant-identity/re-encrypt`, provider-admin), keeping `dryRun`; previously gRPC/Forge-Admin-CLI only |
 |  |  |  |  |
 
 ## 1. Introduction
@@ -649,18 +649,18 @@ Site operators use this admin RPC after changing **`current_encryption_key_id`**
 
 **Surfaces:** Two entry points invoke the same **`Forge.ReencryptTenantIdentitySecrets`** gRPC:
 
-* **NICo-rest:** `POST /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/reencrypt` — for provider admins using a bearer token / `nicocli`; the handler dispatches only this operation through the generic Core gRPC proxy.
+* **NICo-rest:** `POST /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/re-encrypt` — for provider admins using a bearer token / `nicocli`; the handler dispatches only this operation through the generic Core gRPC proxy.
 * **Forge Admin CLI (gRPC/mTLS):** direct call for internal operators.
 
 **Auth:** The NICo-rest endpoint requires the **provider-admin** role (validated by NICo-rest before dispatching to the site); the direct gRPC path uses Forge Admin CLI internal RBAC. This is a site-wide administrative operation, **not** a per-tenant call — it is deliberately gated to provider admins rather than tenant admins.
 
-**Scope:** The NICo-rest URL `{org-id}` identifies the provider whose admin authorizes the operation, while the URL `{site-id}` selects the Site. If **`organizationId`** (REST) or **`organization_id`** (gRPC) is set, only that tenant org is processed, and it must have tenant identity configuration on the Site. NICo-rest additionally requires the tenant org to have an allocation on the selected Site. If the field is omitted, all rows in `tenant_identity_config` on that Site are examined in stable order. (The re-wrap target key comes from the running site API config, not the request; the organization field selects *which* rows, not the key.)
+**Scope:** The NICo-rest URL `{org-id}` identifies the provider whose admin authorizes the operation, while the URL `{site-id}` selects the Site. A non-null **`organizationId`** (REST) selects the tenant's `org` identifier, not its REST resource UUID or display name. It must contain one or more ASCII letters, digits, underscores, or hyphens, and the tenant must have an allocation and tenant identity configuration on the selected Site. Omission or JSON `null` examines all rows in `tenant_identity_config` on that Site in stable order. REST rejects empty and whitespace-containing strings to avoid broadening a malformed scoped request. Direct gRPC instead trims **`organization_id`**, treating an omitted or blank value as all organizations; a non-blank value selects one tenant with identity configuration. The re-wrap target key comes from the running site API config, not the request; the organization field selects *which* rows, not the key.
 
 **Dry run:** When **`dryRun`** is **`true`**, decrypt and validate only; **no DB writes**. Counters still reflect what would change. `dryRun` is exposed on both surfaces so operators can preview blast radius and confirm `rowsFailed == 0` before applying a bulk re-wrap of secret material (see the runbook's dry-run → apply → verify flow).
 
 ```http
 # NICo-rest (provider-admin)
-POST /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/reencrypt
+POST /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/re-encrypt
 # gRPC (Forge service; Forge Admin CLI)
 Forge.ReencryptTenantIdentitySecrets
 ```
@@ -1096,7 +1096,7 @@ service NICo {
 | `GET /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/token-delegation` | `NICo.GetTokenDelegation` | Retrieve token delegation config. **Tenant-admin.** |
 | `PUT /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/token-delegation` | `NICo.SetTokenDelegation` | Create or replace token delegation. **Tenant-admin.** |
 | `DELETE /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/token-delegation` | `NICo.DeleteTokenDelegation` | Delete token delegation. **Tenant-admin.** |
-| `POST /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/reencrypt` | `Forge.ReencryptTenantIdentitySecrets` | Re-wrap tenant identity ciphertext with site **`current_encryption_key_id`** (§3.1.1). **Provider-admin only.** Also invokable directly as a Forge Admin CLI gRPC call. |
+| `POST /v2/org/{org-id}/nico/site/{site-id}/tenant-identity/re-encrypt` | `Forge.ReencryptTenantIdentitySecrets` | Re-wrap tenant identity ciphertext with site **`current_encryption_key_id`** (§3.1.1). **Provider-admin only.** Also invokable directly as a Forge Admin CLI gRPC call. |
 
 ##### 3.5.2.2 Error Handling
 
