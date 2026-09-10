@@ -62,19 +62,26 @@ RUN case "${TARGETARCH}" in \
       *) echo "unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac
 
-# Select mold only for ARM64 output. The wrapper keeps the native Clang and
-# cross-GCC drivers responsible for their platform-specific defaults.
+COPY --chmod=0755 dev/linkers/clang-mold /usr/local/bin/clang-mold
+
+# Select mold only for ARM64 output. Native builds reuse the repository's
+# Clang wrapper. Cross-GCC retains sysroot selection and uses mold's -B
+# directory because collect2 does not search /usr/bin for ld.mold.
 RUN if [ "${TARGETARCH}" = arm64 ]; then \
       case "$(uname -m)" in \
-        aarch64) linker=clang; reader=readelf ;; \
-        x86_64) linker=aarch64-linux-gnu-gcc; reader=aarch64-linux-gnu-readelf ;; \
+        aarch64) \
+          linker=/usr/local/bin/clang-mold; \
+          reader=readelf ;; \
+        x86_64) \
+          printf '#!/bin/sh\nexec aarch64-linux-gnu-gcc -B/usr/libexec/mold "$@"\n' \
+            >/usr/local/bin/aarch64-linux-gnu-gcc-mold && \
+          chmod 0755 /usr/local/bin/aarch64-linux-gnu-gcc-mold && \
+          linker=/usr/local/bin/aarch64-linux-gnu-gcc-mold && \
+          reader=aarch64-linux-gnu-readelf ;; \
         *) echo "unsupported ARM64 build architecture: $(uname -m)" >&2; exit 1 ;; \
       esac && \
-      printf '#!/bin/sh\nexec %s -fuse-ld=mold "$@"\n' "${linker}" \
-        >/usr/local/bin/aarch64-mold-linker && \
-      chmod 0755 /usr/local/bin/aarch64-mold-linker && \
       printf 'int main(void) { return 0; }\n' | \
-        /usr/local/bin/aarch64-mold-linker -x c - -o /tmp/mold-smoke && \
+        "${linker}" -x c - -o /tmp/mold-smoke && \
       "${reader}" -p .comment /tmp/mold-smoke | grep -q mold && \
       rm /tmp/mold-smoke; \
     fi
@@ -98,10 +105,13 @@ RUN --mount=type=cache,id=nico-bmc-mock-cross-cargo-home,target=/cargo-home,shar
         fi ;; \
       arm64) \
         rust_target=aarch64-unknown-linux-gnu; \
-        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/aarch64-mold-linker; \
-        if [ "$(uname -m)" != aarch64 ]; then \
-          export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc; \
-        fi ;; \
+        case "$(uname -m)" in \
+          aarch64) \
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold ;; \
+          x86_64) \
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/aarch64-linux-gnu-gcc-mold \
+                   CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc ;; \
+        esac ;; \
       *) echo "unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
     cargo build -p bmc-mock --bin bmc-mock --locked --release \
