@@ -38,6 +38,7 @@ type APIExploredEndpoint struct {
 	LastRedfishReboot     string                        `json:"lastRedfishReboot"`
 	LastRedfishPowercycle string                        `json:"lastRedfishPowercycle"`
 	PauseRemediation      bool                          `json:"pauseRemediation"`
+	Warnings              []string                      `json:"warnings"`
 }
 
 // APIEndpointExplorationReport is data gathered about an endpoint during site exploration.
@@ -235,6 +236,7 @@ func (r *APIExploredEndpoint) FromProto(ep *corev1.ExploredEndpoint) {
 		LastRedfishReboot:     ep.GetLastRedfishReboot(),
 		LastRedfishPowercycle: ep.GetLastRedfishPowercycle(),
 		PauseRemediation:      ep.GetPauseRemediation(),
+		Warnings:              append([]string{}, ep.GetWarnings()...),
 	}
 	if report := ep.GetReport(); report != nil {
 		r.Report = newAPIEndpointExplorationReport(report)

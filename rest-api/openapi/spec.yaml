@@ -16732,6 +16732,11 @@ components:
         pauseRemediation:
           type: boolean
           description: When true, Site Explorer will not take remediation actions for Redfish errors.
+        warnings:
+          type: array
+          description: Operator-visible warnings derived from the current exploration report.
+          items:
+            type: string
     EndpointExplorationReport:
       type: object
       title: EndpointExplorationReport

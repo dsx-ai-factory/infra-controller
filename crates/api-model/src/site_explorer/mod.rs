@@ -278,17 +278,11 @@ fn locally_administered_manager_mac_warnings(
         .collect()
 }
 
-fn dpu_system(report: &EndpointExplorationReport) -> Option<&ComputerSystem> {
-    report
-        .systems
-        .first()
-        .filter(|system| is_bluefield_system(system))
-}
-
 fn missing_dpu_oob_interface_warning(
     report: &EndpointExplorationReport,
 ) -> Vec<ExplorationReportWarning> {
-    dpu_system(report)
+    report
+        .dpu_system()
         .is_some_and(|system| {
             !system.ethernet_interfaces.iter().any(|interface| {
                 interface
@@ -305,21 +299,15 @@ fn missing_dpu_oob_interface_warning(
 fn missing_bf4_base_mac_warning(
     report: &EndpointExplorationReport,
 ) -> Vec<ExplorationReportWarning> {
-    let dpu_system = dpu_system(report);
-    let is_bf4 = dpu_system.is_some()
-        && report.chassis.iter().any(|chassis| {
-            chassis.id == "BlueField_0"
-                && chassis
-                    .network_adapters
-                    .iter()
-                    .any(|adapter| adapter.id == "BlueField_NIC_0")
-        })
-        && report
-            .managers
-            .iter()
-            .any(|manager| manager.id == "BlueField_BMC_0");
+    let Some(dpu_system) = report.dpu_system() else {
+        return Vec::new();
+    };
+    let is_bf4 = report
+        .chassis
+        .iter()
+        .any(|chassis| chassis.id == "BlueField_0");
 
-    (is_bf4 && dpu_system.is_some_and(|system| system.base_mac.is_none()))
+    (is_bf4 && dpu_system.base_mac.is_none())
         .then_some(ExplorationReportWarning::MissingBf4BaseMac)
         .into_iter()
         .collect()
@@ -974,17 +962,12 @@ impl EndpointExplorationReport {
     }
 
     pub fn bluefield_operating_mode(&self) -> Option<BlueFieldOperatingMode> {
-        if self.is_dpu() && !self.systems.is_empty() {
-            self.systems[0].attributes.nic_mode
-        } else {
-            None
-        }
+        self.dpu_system()
+            .and_then(|system| system.attributes.nic_mode)
     }
 
     pub fn dpu_part_number(&self) -> Option<&str> {
-        if !self.is_dpu() {
-            return None;
-        }
+        self.dpu_system()?;
 
         self.chassis
             .iter()
@@ -1001,9 +984,16 @@ impl EndpointExplorationReport {
             })
     }
 
-    /// Return `true` if the explored endpoint is a DPU
+    /// Return the DPU system if this report belongs to a BlueField endpoint.
+    pub fn dpu_system(&self) -> Option<&ComputerSystem> {
+        self.systems
+            .first()
+            .filter(|system| is_bluefield_system(system))
+    }
+
+    /// Return `true` if the explored endpoint is a DPU.
     pub fn is_dpu(&self) -> bool {
-        self.identify_dpu().is_some()
+        self.dpu_system().is_some()
     }
 
     /// Return `true` if the explored endpoint is a PowerShelf.
@@ -1033,14 +1023,7 @@ impl EndpointExplorationReport {
 
     /// Return `DpuModel` if the explored endpoint is a DPU
     pub fn identify_dpu(&self) -> Option<DpuModel> {
-        if !self
-            .systems
-            .first()
-            .map(is_bluefield_system)
-            .unwrap_or(false)
-        {
-            return None;
-        }
+        self.dpu_system()?;
 
         let chassis_map = self
             .chassis
@@ -4397,10 +4380,6 @@ mod tests {
             }],
             chassis: vec![Chassis {
                 id: "BlueField_0".to_string(),
-                network_adapters: vec![NetworkAdapter {
-                    id: "BlueField_NIC_0".to_string(),
-                    ..Default::default()
-                }],
                 ..Default::default()
             }],
             ..Default::default()

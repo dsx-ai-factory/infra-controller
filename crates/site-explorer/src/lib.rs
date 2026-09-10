@@ -57,7 +57,7 @@ use model::site_explorer::{
     EndpointType, ExploredDpu, ExploredEndpoint, ExploredManagedHost, ExploredManagedSwitch,
     HostPrimaryInterfaceSelection, MachineExpectation, PowerState, PreingestionState, Service,
     SiteExplorerLastRun, is_bf3_dpu_part_number, is_bf3_supernic_part_number,
-    is_bluefield_part_number, is_bluefield_system,
+    is_bluefield_part_number,
 };
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -503,8 +503,8 @@ struct SiteExplorerRunContext {
 pub struct SiteExplorerIterationData {
     /// Managed hosts identified during the iteration.
     pub identified_hosts: SiteIdentifiedHosts,
-    /// Current persisted exploration reports for all endpoints.
-    pub exploration_reports: Vec<ExploredEndpoint>,
+    /// Current persisted explored endpoints.
+    pub explored_endpoints: Vec<ExploredEndpoint>,
 }
 
 impl SiteExplorer {
@@ -596,7 +596,7 @@ impl SiteExplorer {
                     Ok(result) => {
                         let now = Instant::now();
                         self.exploration_warning_tracker
-                            .track_reports(now, &result.exploration_reports);
+                            .track_reports(now, &result.explored_endpoints);
                         self.boot_order_tracker
                             .track_hosts(now, &result.identified_hosts);
                     }
@@ -1191,7 +1191,7 @@ impl SiteExplorer {
 
         // Audit after everything has been explored, identified, and created.
         let audit_exploration_results_start = Instant::now();
-        let exploration_reports = self
+        let explored_endpoints = self
             .audit_exploration_results(metrics, &expected_endpoint_index)
             .await?;
         metrics.record_phase_latency(
@@ -1230,7 +1230,7 @@ impl SiteExplorer {
                 .into_iter()
                 .map(|identified| (identified.explored_host, identified.report))
                 .collect(),
-            exploration_reports,
+            explored_endpoints,
         })
     }
 
@@ -4436,8 +4436,7 @@ fn find_host_pf_mac_address(dpu_ep: &ExploredEndpoint) -> Result<MacAddress, Str
 }
 
 fn is_bf4_dpu_report(report: &EndpointExplorationReport) -> bool {
-    let has_bluefield_system = report.systems.first().is_some_and(is_bluefield_system);
-    if !has_bluefield_system {
+    if report.dpu_system().is_none() {
         return false;
     }
 

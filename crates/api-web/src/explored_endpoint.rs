@@ -25,12 +25,11 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::{Form, Json};
 use carbide_api_core::{Api, DefaultCredential};
 use hyper::http::StatusCode;
-use model::site_explorer::ExplorationReportWarning;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc, BmcEndpointRequest, admin_power_control_request};
 use rpc::site_explorer::{
-    EndpointExplorationReport, ExploredEndpoint, InternalLockdownStatus, LockdownStatus,
-    MachineSetupStatus, SecureBootStatus, SiteExplorationReport,
+    ExploredEndpoint, InternalLockdownStatus, LockdownStatus, MachineSetupStatus, SecureBootStatus,
+    SiteExplorationReport,
 };
 use serde::Deserialize;
 
@@ -431,7 +430,7 @@ async fn fetch_explored_endpoints(api: &Api) -> Result<SiteExplorationReport, to
 #[template(path = "explored_endpoint_detail.html")]
 struct ExploredEndpointDetail<'a> {
     endpoint: ExploredEndpoint,
-    exploration_warnings: Vec<ExplorationReportWarning>,
+    exploration_warnings: Vec<String>,
     has_exploration_error: bool,
     last_exploration_error: String,
     machine_setup_status: String,
@@ -450,103 +449,6 @@ struct ExploredEndpointInfo {
     endpoint: ExploredEndpoint,
     credentials_set: String,
     has_machine: bool,
-}
-
-type ExplorationReportWarningCheck =
-    fn(&EndpointExplorationReport) -> Vec<ExplorationReportWarning>;
-
-const EXPLORATION_REPORT_WARNING_CHECKS: &[ExplorationReportWarningCheck] = &[
-    locally_administered_manager_mac_warnings,
-    missing_dpu_oob_interface_warning,
-    missing_bf4_base_mac_warning,
-];
-
-fn exploration_report_warnings(
-    report: &EndpointExplorationReport,
-) -> Vec<ExplorationReportWarning> {
-    EXPLORATION_REPORT_WARNING_CHECKS
-        .iter()
-        .flat_map(|check| check(report))
-        .collect()
-}
-
-fn locally_administered_manager_mac_warnings(
-    report: &EndpointExplorationReport,
-) -> Vec<ExplorationReportWarning> {
-    report
-        .managers
-        .iter()
-        .flat_map(|manager| {
-            manager
-                .ethernet_interfaces
-                .iter()
-                .filter(|interface| {
-                    interface
-                        .id
-                        .as_deref()
-                        .is_some_and(|id| id.eq_ignore_ascii_case("eth0"))
-                })
-                .filter_map(|interface| {
-                    interface
-                        .mac_address
-                        .as_deref()
-                        .and_then(|address| address.parse().ok())
-                })
-                .filter(|mac_address| carbide_network::is_locally_administered_mac(*mac_address))
-                .map(
-                    |mac_address| ExplorationReportWarning::LocallyAdministeredManagerMac {
-                        manager_id: manager.id.clone(),
-                        mac_address,
-                    },
-                )
-        })
-        .collect()
-}
-
-fn missing_dpu_oob_interface_warning(
-    report: &EndpointExplorationReport,
-) -> Vec<ExplorationReportWarning> {
-    let dpu_system = report
-        .systems
-        .first()
-        .filter(|system| matches!(system.id.as_str(), "Bluefield" | "BlueField_0"));
-    dpu_system
-        .is_some_and(|system| {
-            !system.ethernet_interfaces.iter().any(|interface| {
-                interface
-                    .id
-                    .as_deref()
-                    .is_some_and(|id| id.to_lowercase().contains("oob"))
-            })
-        })
-        .then_some(ExplorationReportWarning::MissingDpuOobInterface)
-        .into_iter()
-        .collect()
-}
-
-fn missing_bf4_base_mac_warning(
-    report: &EndpointExplorationReport,
-) -> Vec<ExplorationReportWarning> {
-    let dpu_system = report
-        .systems
-        .first()
-        .filter(|system| matches!(system.id.as_str(), "Bluefield" | "BlueField_0"));
-    let is_bf4 = dpu_system.is_some()
-        && report.chassis.iter().any(|chassis| {
-            chassis.id == "BlueField_0"
-                && chassis
-                    .network_adapters
-                    .iter()
-                    .any(|adapter| adapter.id == "BlueField_NIC_0")
-        })
-        && report
-            .managers
-            .iter()
-            .any(|manager| manager.id == "BlueField_BMC_0");
-    (is_bf4 && dpu_system.is_some_and(|system| system.base_mac.is_none()))
-        .then_some(ExplorationReportWarning::MissingBf4BaseMac)
-        .into_iter()
-        .collect()
 }
 
 impl From<ExploredEndpointInfo> for ExploredEndpointDetail<'_> {
@@ -590,9 +492,7 @@ impl From<ExploredEndpointInfo> for ExploredEndpointDetail<'_> {
             lockdown_status: lockdown_status_to_string(
                 report_ref.and_then(|report| report.lockdown_status.as_ref()),
             ),
-            exploration_warnings: report_ref
-                .map(exploration_report_warnings)
-                .unwrap_or_default(),
+            exploration_warnings: endpoint_info.endpoint.warnings.clone(),
             endpoint: endpoint_info.endpoint,
             credentials_set: endpoint_info.credentials_set,
             has_machine: endpoint_info.has_machine,
@@ -1450,15 +1350,9 @@ mod tests {
     use std::collections::HashMap;
 
     use askama::Template;
-    use rpc::site_explorer::{
-        Chassis, ComputerSystem, EndpointExplorationReport, EthernetInterface, ExploredEndpoint,
-        Manager, NetworkAdapter, OperatorErrorSchema,
-    };
+    use rpc::site_explorer::{EndpointExplorationReport, ExploredEndpoint, OperatorErrorSchema};
 
-    use super::{
-        ExplorationReportWarning, ExploredEndpointDisplay, ExploredEndpointsShow,
-        exploration_report_warnings, query_filter_for,
-    };
+    use super::{ExploredEndpointDisplay, ExploredEndpointsShow, query_filter_for};
     use crate::pagination::PageContext;
 
     fn endpoint(address: &str, schema: Option<OperatorErrorSchema>) -> ExploredEndpoint {
@@ -1510,75 +1404,5 @@ mod tests {
         assert!(rendered.contains("192.0.2.20"));
         assert!(rendered.contains("192.0.2.21"));
         assert_eq!(rendered.matches("clearlasterror_action").count(), 1);
-    }
-
-    #[test]
-    fn exploration_warnings_are_derived_from_report() {
-        let bf4_report = EndpointExplorationReport {
-            managers: vec![Manager {
-                id: "BlueField_BMC_0".to_string(),
-                ethernet_interfaces: vec![EthernetInterface {
-                    id: Some("eth0".to_string()),
-                    mac_address: Some("02:00:00:00:00:0A".to_string()),
-                    ..Default::default()
-                }],
-            }],
-            systems: vec![ComputerSystem {
-                id: "BlueField_0".to_string(),
-                ..Default::default()
-            }],
-            chassis: vec![Chassis {
-                id: "BlueField_0".to_string(),
-                network_adapters: vec![NetworkAdapter {
-                    id: "BlueField_NIC_0".to_string(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        assert_eq!(
-            exploration_report_warnings(&bf4_report),
-            vec![
-                ExplorationReportWarning::LocallyAdministeredManagerMac {
-                    manager_id: "BlueField_BMC_0".to_string(),
-                    mac_address: "02:00:00:00:00:0A".parse().expect("valid MAC"),
-                },
-                ExplorationReportWarning::MissingDpuOobInterface,
-                ExplorationReportWarning::MissingBf4BaseMac,
-            ]
-        );
-
-        let clean_bf4_report = EndpointExplorationReport {
-            managers: vec![Manager {
-                id: "BlueField_BMC_0".to_string(),
-                ethernet_interfaces: vec![EthernetInterface {
-                    id: Some("eth0".to_string()),
-                    mac_address: Some("00:00:00:00:00:0A".to_string()),
-                    ..Default::default()
-                }],
-            }],
-            systems: vec![ComputerSystem {
-                id: "BlueField_0".to_string(),
-                ethernet_interfaces: vec![EthernetInterface {
-                    id: Some("OOB".to_string()),
-                    ..Default::default()
-                }],
-                base_mac: Some("000000000001".to_string()),
-                ..Default::default()
-            }],
-            chassis: vec![Chassis {
-                id: "BlueField_0".to_string(),
-                network_adapters: vec![NetworkAdapter {
-                    id: "BlueField_NIC_0".to_string(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        assert!(exploration_report_warnings(&clean_bf4_report).is_empty());
     }
 }

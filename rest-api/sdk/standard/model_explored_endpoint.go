@@ -43,6 +43,8 @@ type ExploredEndpoint struct {
 	LastRedfishPowercycle string `json:"lastRedfishPowercycle"`
 	// When true, Site Explorer will not take remediation actions for Redfish errors.
 	PauseRemediation bool `json:"pauseRemediation"`
+	// Operator-visible warnings derived from the current exploration report.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type _ExploredEndpoint ExploredEndpoint
@@ -321,6 +323,38 @@ func (o *ExploredEndpoint) SetPauseRemediation(v bool) {
 	o.PauseRemediation = v
 }
 
+// GetWarnings returns the Warnings field value if set, zero value otherwise.
+func (o *ExploredEndpoint) GetWarnings() []string {
+	if o == nil || IsNil(o.Warnings) {
+		var ret []string
+		return ret
+	}
+	return o.Warnings
+}
+
+// GetWarningsOk returns a tuple with the Warnings field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *ExploredEndpoint) GetWarningsOk() ([]string, bool) {
+	if o == nil || IsNil(o.Warnings) {
+		return nil, false
+	}
+	return o.Warnings, true
+}
+
+// HasWarnings returns a boolean if a field has been set.
+func (o *ExploredEndpoint) HasWarnings() bool {
+	if o != nil && !IsNil(o.Warnings) {
+		return true
+	}
+
+	return false
+}
+
+// SetWarnings gets a reference to the given []string and assigns it to the Warnings field.
+func (o *ExploredEndpoint) SetWarnings(v []string) {
+	o.Warnings = v
+}
+
 func (o ExploredEndpoint) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -343,6 +377,9 @@ func (o ExploredEndpoint) ToMap() (map[string]interface{}, error) {
 	toSerialize["lastRedfishReboot"] = o.LastRedfishReboot
 	toSerialize["lastRedfishPowercycle"] = o.LastRedfishPowercycle
 	toSerialize["pauseRemediation"] = o.PauseRemediation
+	if !IsNil(o.Warnings) {
+		toSerialize["warnings"] = o.Warnings
+	}
 	return toSerialize, nil
 }
 

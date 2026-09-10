@@ -498,8 +498,10 @@ type ExploredEndpoint struct {
 	LastRedfishPowercycle string `protobuf:"bytes,9,opt,name=last_redfish_powercycle,json=lastRedfishPowercycle,proto3" json:"last_redfish_powercycle,omitempty"`
 	// Flag to prevent site explorer from taking remediation actions on redfish errors
 	PauseRemediation bool `protobuf:"varint,10,opt,name=pause_remediation,json=pauseRemediation,proto3" json:"pause_remediation,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Operator-visible warnings derived from `report`; computed on demand and not persisted.
+	Warnings      []string `protobuf:"bytes,11,rep,name=warnings,proto3" json:"warnings,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ExploredEndpoint) Reset() {
@@ -600,6 +602,13 @@ func (x *ExploredEndpoint) GetPauseRemediation() bool {
 		return x.PauseRemediation
 	}
 	return false
+}
+
+func (x *ExploredEndpoint) GetWarnings() []string {
+	if x != nil {
+		return x.Warnings
+	}
+	return nil
 }
 
 // Information about explored DPU that was discovered via Site Exploration
@@ -1667,10 +1676,8 @@ type ComputerSystem struct {
 	PcieDevices        []*PCIeDevice             `protobuf:"bytes,12,rep,name=pcie_devices,json=pcieDevices,proto3" json:"pcie_devices,omitempty"`
 	PowerState         ComputerSystemPowerState  `protobuf:"varint,13,opt,name=power_state,json=powerState,proto3,enum=site_explorer.ComputerSystemPowerState" json:"power_state,omitempty"`
 	BootOrder          *BootOrder                `protobuf:"bytes,14,opt,name=boot_order,json=bootOrder,proto3,oneof" json:"boot_order,omitempty"`
-	// PF0/base MAC reported or derived for a DPU system.
-	BaseMac       *string `protobuf:"bytes,15,opt,name=base_mac,json=baseMac,proto3,oneof" json:"base_mac,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ComputerSystem) Reset() {
@@ -1764,13 +1771,6 @@ func (x *ComputerSystem) GetBootOrder() *BootOrder {
 		return x.BootOrder
 	}
 	return nil
-}
-
-func (x *ComputerSystem) GetBaseMac() string {
-	if x != nil && x.BaseMac != nil {
-		return *x.BaseMac
-	}
-	return ""
 }
 
 // `Manager` definition. Matches redfish definition
@@ -2875,7 +2875,7 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\v_machine_idB\x1b\n" +
 	"\x19_last_exploration_latencyB\t\n" +
 	"\a_vendorB \n" +
-	"\x1e_last_exploration_error_schema\"\xfa\x03\n" +
+	"\x1e_last_exploration_error_schema\"\x96\x04\n" +
 	"\x10ExploredEndpoint\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12@\n" +
 	"\x06report\x18\x02 \x01(\v2(.site_explorer.EndpointExplorationReportR\x06report\x12%\n" +
@@ -2887,7 +2887,8 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\x13last_redfish_reboot\x18\b \x01(\tR\x11lastRedfishReboot\x126\n" +
 	"\x17last_redfish_powercycle\x18\t \x01(\tR\x15lastRedfishPowercycle\x12+\n" +
 	"\x11pause_remediation\x18\n" +
-	" \x01(\bR\x10pauseRemediation\"p\n" +
+	" \x01(\bR\x10pauseRemediation\x12\x1a\n" +
+	"\bwarnings\x18\v \x03(\tR\bwarnings\"p\n" +
 	"\vExploredDpu\x12\x15\n" +
 	"\x06bmc_ip\x18\x01 \x01(\tR\x05bmcIp\x122\n" +
 	"\x13host_pf_mac_address\x18\x02 \x01(\tH\x00R\x10hostPfMacAddress\x88\x01\x01B\x16\n" +
@@ -2973,7 +2974,7 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\bhost_ids\x18\x01 \x03(\tR\ahostIds\"_\n" +
 	"\x18ComputerSystemAttributes\x126\n" +
 	"\bnic_mode\x18\x01 \x01(\x0e2\x16.site_explorer.NicModeH\x00R\anicMode\x88\x01\x01B\v\n" +
-	"\t_nic_mode\"\xd9\x04\n" +
+	"\t_nic_mode\"\xac\x04\n" +
 	"\x0eComputerSystem\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12'\n" +
 	"\fmanufacturer\x18\x02 \x01(\tH\x00R\fmanufacturer\x88\x01\x01\x12\x19\n" +
@@ -2987,13 +2988,11 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\vpower_state\x18\r \x01(\x0e2'.site_explorer.ComputerSystemPowerStateR\n" +
 	"powerState\x12<\n" +
 	"\n" +
-	"boot_order\x18\x0e \x01(\v2\x18.site_explorer.BootOrderH\x03R\tbootOrder\x88\x01\x01\x12\x1e\n" +
-	"\bbase_mac\x18\x0f \x01(\tH\x04R\abaseMac\x88\x01\x01B\x0f\n" +
+	"boot_order\x18\x0e \x01(\v2\x18.site_explorer.BootOrderH\x03R\tbootOrder\x88\x01\x01B\x0f\n" +
 	"\r_manufacturerB\b\n" +
 	"\x06_modelB\x10\n" +
 	"\x0e_serial_numberB\r\n" +
-	"\v_boot_orderB\v\n" +
-	"\t_base_mac\"l\n" +
+	"\v_boot_order\"l\n" +
 	"\aManager\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12Q\n" +
 	"\x13ethernet_interfaces\x18\v \x03(\v2 .site_explorer.EthernetInterfaceR\x12ethernetInterfaces\"\x9a\x02\n" +
