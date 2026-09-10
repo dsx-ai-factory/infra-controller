@@ -2444,6 +2444,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-ipmi",
  "carbide-network",
+ "carbide-rms-sim",
  "carbide-rpc",
  "carbide-test-support",
  "carbide-tls",
@@ -2944,6 +2945,18 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "carbide-rms-sim"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "librms",
+ "serde",
+ "tokio",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]

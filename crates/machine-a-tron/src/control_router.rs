@@ -22,10 +22,11 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
-use bmc_mock::HardwareType;
 use bmc_mock::injection::{InjectionStore, Rule, RuleId};
+use bmc_mock::{HardwareType, RackPlacement};
 use carbide_uuid::rack::RackId;
 use chrono::{SecondsFormat, Utc};
+use rms_sim::{RmsInventory, SimNode, SimNodeKind};
 use tower::Service;
 use ufm_mock::{
     EpochId, Generation, InventoryId, InventoryMachine as UfmInventoryMachine, InventoryPort,
@@ -171,6 +172,59 @@ impl ControlState {
 // This adapter connects machine-a-tron's live control state to the hosted UFM mock. It lets the
 // mock consume the same in-process inventory when `include_local_inventory` is enabled, without
 // polling machine-a-tron over HTTP.
+/// Report simulated hardware to the hosted RMS simulator.
+///
+/// Placement comes from the same `RackPlacement` the device's Redfish chassis
+/// is built from, so RMS and Redfish cannot disagree about where a node sits.
+/// Compute trays report their chassis slot and compute tray index; switch
+/// trays report the rack unit they occupy and their index among the rack's
+/// switch trays. Power shelves carry a placement too, but RMS does not
+/// report one for them and NICo does not ask.
+impl RmsInventory for ControlState {
+    fn nodes(&self) -> Vec<SimNode> {
+        self.simulators
+            .devices()
+            .iter()
+            .map(|simulator| {
+                let handle = simulator.handle();
+                let info = handle.host_info();
+                let placement = info.rack_placement;
+                let kind = match handle.kind() {
+                    DeviceKind::Switch => SimNodeKind::Switch,
+                    DeviceKind::PowerShelf => SimNodeKind::PowerShelf,
+                    // A DPU is never a top-level simulator, so anything
+                    // else here is a compute tray.
+                    _ => SimNodeKind::Compute,
+                };
+                let (slot_number, tray_index) = match kind {
+                    SimNodeKind::Compute => (
+                        placement.and_then(RackPlacement::chassis_physical_slot_number),
+                        placement.and_then(RackPlacement::compute_tray_index),
+                    ),
+                    SimNodeKind::Switch => (
+                        placement.and_then(RackPlacement::switch_slot_number),
+                        placement.and_then(RackPlacement::switch_tray_index),
+                    ),
+                    SimNodeKind::PowerShelf => (None, None),
+                };
+                SimNode {
+                    kind: Some(kind),
+                    bmc_mac: Some(rms_sim::normalize_mac(&info.bmc_mac_address.to_string())),
+                    bmc_ip: handle.bmc_ip().map(|ip| ip.to_string()),
+                    host_mac: info
+                        .nvos_mac_addresses
+                        .first()
+                        .map(|mac| rms_sim::normalize_mac(&mac.to_string())),
+                    host_ip: handle.host_ip().map(|ip| ip.to_string()),
+                    rack_id: None,
+                    slot_number,
+                    tray_index: tray_index.map(u32::from),
+                }
+            })
+            .collect()
+    }
+}
+
 impl InventoryProvider for ControlState {
     fn inventory_snapshot(&self) -> InventorySnapshot {
         let status = self.devices_status();

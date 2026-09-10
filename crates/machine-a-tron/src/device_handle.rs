@@ -221,6 +221,16 @@ impl DeviceHandle {
         }
     }
 
+    /// The address of the device's host-side endpoint: a switch's NVOS
+    /// management address once it has one. Hosts and power shelves have no
+    /// host endpoint that RMS addresses.
+    pub fn host_ip(&self) -> Option<Ipv4Addr> {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => handle.nvos_ip(),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_control_test(dpus: Vec<DpuMachineHandle>, ipmi_port: Option<u16>) -> Self {
         Self::machine(MachineHandle::for_control_test(dpus, ipmi_port))

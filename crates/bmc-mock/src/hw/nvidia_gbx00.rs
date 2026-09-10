@@ -23,7 +23,6 @@ use serde_json::json;
 
 use crate::{RackPlacement, redfish};
 
-const CBC_CHASSIS_PHYSICAL_SLOT_OFFSET: u32 = 10;
 const CBC_REVISION_ID: u32 = 2;
 
 pub(crate) struct Topology {
@@ -37,7 +36,7 @@ impl Topology {
     pub(crate) fn from_rack_placement(placement: RackPlacement) -> Option<Self> {
         let compute_tray_index = u32::from(placement.compute_tray_index()?);
         Some(Self {
-            chassis_physical_slot_number: compute_tray_index + CBC_CHASSIS_PHYSICAL_SLOT_OFFSET,
+            chassis_physical_slot_number: placement.chassis_physical_slot_number()?,
             compute_tray_index,
             revision_id: CBC_REVISION_ID,
             topology_id: placement.topology_id(),

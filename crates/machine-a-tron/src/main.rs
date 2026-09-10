@@ -17,6 +17,7 @@
 #![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 mod logging;
+mod rms_sim;
 mod ufm_mock;
 
 use std::error::Error;
@@ -47,6 +48,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::logging::init_logging;
+use crate::rms_sim::HostedRmsSim;
 use crate::ufm_mock::HostedUfmMock;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 32)]
@@ -139,6 +141,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let bmc_mock_certs_dir = app_config.bmc_mock_certs_dir.clone();
+    let rms_sim_config = app_config.rms_sim.clone();
 
     let app_context = Arc::new(MachineATronContext {
         app_config,
@@ -187,6 +190,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // ControlState can be injected as an in-process inventory provider; the standalone binary
     // initializes the same mock without this provider and relies on configured HTTP sources.
     let hosted_ufm = HostedUfmMock::start(ufm_config, &control_state)?;
+    let hosted_rms = HostedRmsSim::start(rms_sim_config, &control_state);
     let ufm_router = hosted_ufm.as_ref().map(HostedUfmMock::router);
     let certs_dir = app_context
         .bmc_mock_certs_dir
@@ -205,6 +209,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             None => bmc_router,
         };
         let router = append_control_routes(Some(bmc_router), control_state.clone());
+        // Merged onto the outermost router, and deliberately after the control
+        // routes. Those add a `/{*all}` catch-all, but axum matches the RMS
+        // services' static first segment ahead of it. Merging any lower would
+        // put gRPC behind a handler that rebuilds the request and resets it to
+        // HTTP/1.1, which fails without an obvious cause.
+        let router = router.merge(hosted_rms.router());
         bmc_mock::CombinedServer::run_router(
             "bmc-mock",
             router,
