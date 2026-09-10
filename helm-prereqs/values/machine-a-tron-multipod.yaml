@@ -66,7 +66,7 @@ pods:
         hostCount: 100
         dpuPerHostCount: 2
         bmcDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
-        underlayDhcpRelayAddress: "192.168.176.1"
+        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
   mat-1:
     machines:
       compute:
@@ -74,7 +74,7 @@ pods:
         hostCount: 100
         dpuPerHostCount: 2
         bmcDhcpRelayAddress: "10.96.64.1"  # NICo assigns unique IPs
-        underlayDhcpRelayAddress: "192.168.176.1"
+        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
 
 resources:
   limits:

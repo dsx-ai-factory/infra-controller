@@ -129,7 +129,7 @@ pods:
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
         bmcDhcpRelayAddress: "10.96.64.1"  # Must be within K8s ServiceCIDR
-        underlayDhcpRelayAddress: "192.168.176.1"
+        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
         dpusInNicMode: false
 
 extraEnv:

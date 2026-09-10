@@ -297,8 +297,8 @@ hwMacAddressRanges:
 ##   - bmcDhcpRelayAddress: BMC (OOB) network gateway, the relay for BMC DHCP
 ##   - underlayDhcpRelayAddress: underlay segment gateway, the relay for DPU OOB
 ##     and switch NVOS DHCP
-##     (bmcDhcpRelayAddress and underlayDhcpRelayAddress are accepted as deprecated
-##     aliases; rack groups use bmc_dhcp_relay_address / underlay_dhcp_relay_address)
+##     (the previous names oobDhcpRelayAddress and adminDhcpRelayAddress are accepted as
+##     deprecated aliases; rack groups use bmc_dhcp_relay_address / underlay_dhcp_relay_address)
 ##
 ## All other settings inherit from machineDefaults above.
 ##

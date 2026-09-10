@@ -224,7 +224,7 @@ Copy `helm-prereqs/values/machine-a-tron.yaml` and fill in the site-specific val
 |-------|-------------|
 | `image.tag` | Tag produced by [building the container image](#building-the-container-image) (e.g. `8c35783af-amd64`) |
 | `machines.dell-hosts.bmcDhcpRelayAddress` | Gateway of the BMC (OOB) network from nico-core site config; relay for BMC DHCP |
-| `machines.dell-hosts.underlayDhcpRelayAddress` | Gateway of the underlay segment that serves DPU OOB and switch NVOS DHCP (`bmcDhcpRelayAddress` and `underlayDhcpRelayAddress` remain accepted as deprecated aliases) |
+| `machines.dell-hosts.underlayDhcpRelayAddress` | Gateway of the underlay segment that serves DPU OOB and switch NVOS DHCP (the previous names `oobDhcpRelayAddress` and `adminDhcpRelayAddress` remain accepted as deprecated aliases) |
 | `machines.dell-hosts.hostCount` | Must not exceed available OOB DHCP addresses (`hostCount + hostCount×dpuPerHostCount`) |
 
 ### SPIFFE URI override
@@ -380,7 +380,7 @@ seeds, SPIFFE URI). Multi-pod with controller adds the following requirements:
             hostCount: 100
             dpuPerHostCount: 2
             bmcDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
-            underlayDhcpRelayAddress: "192.168.176.1"
+            underlayDhcpRelayAddress: "10.104.0.1"
       mat-1:
         machines:
           compute:
@@ -388,7 +388,7 @@ seeds, SPIFFE URI). Multi-pod with controller adds the following requirements:
             hostCount: 100
             dpuPerHostCount: 2
             bmcDhcpRelayAddress: "10.96.64.1"  # NICo assigns unique IPs
-            underlayDhcpRelayAddress: "192.168.176.1"
+            underlayDhcpRelayAddress: "10.104.0.1"
 
     macAddressPool:
       enabled: true

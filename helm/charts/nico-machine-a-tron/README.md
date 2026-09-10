@@ -134,7 +134,7 @@ pods:
         hostCount: 5
         dpuPerHostCount: 2
         bmcDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
-        underlayDhcpRelayAddress: "192.168.176.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
   mat-1:
     machines:
       rack-machines:
@@ -142,7 +142,7 @@ pods:
         hostCount: 5
         dpuPerHostCount: 2
         bmcDhcpRelayAddress: "10.96.64.1"
-        underlayDhcpRelayAddress: "192.168.176.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
 
 macAddressPool:
   enabled: true
@@ -263,7 +263,7 @@ pods:
         hostCount: 10
         dpuPerHostCount: 2
         bmcDhcpRelayAddress: "10.96.64.1"
-        underlayDhcpRelayAddress: "192.168.176.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
 ```
 
 ### IPMI/SOL Simulation
