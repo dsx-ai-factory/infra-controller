@@ -22,7 +22,8 @@ use std::ops::Deref;
 
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{
-    HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait, MachineType,
+    AsMachineId, DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
+    MachineType,
 };
 use carbide_uuid::rack::RackId;
 use itertools::Itertools;
@@ -34,30 +35,16 @@ use crate::db_read::DbReader;
 use crate::{DatabaseError, queries};
 
 /// Loads a ManagedHost snapshot from the database
-pub async fn load_snapshot<DB, ID>(
+pub async fn load_snapshot<DB>(
     txn: &mut DB,
-    machine_id: &ID,
+    machine_id: &MachineId,
     options: LoadSnapshotOptions,
 ) -> Result<Option<ManagedHostStateSnapshot>, DatabaseError>
 where
     for<'db> &'db mut DB: DbReader<'db>,
-    ID: MachineIdSubtypeTrait,
-    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
 {
-    let mut snapshots = load_by_machine_ids(txn, &[*machine_id], options).await?;
+    let mut snapshots = load_by_machine_ids(txn, std::slice::from_ref(machine_id), options).await?;
     Ok(snapshots.remove(machine_id))
-}
-
-/// Loads a managed-host snapshot for a host or predicted-host ID.
-pub async fn load_host_snapshot<DB>(
-    txn: &mut DB,
-    machine_id: &HostMachineId,
-    options: LoadSnapshotOptions,
-) -> Result<Option<ManagedHostStateSnapshot>, DatabaseError>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
-    load_snapshot(txn, machine_id, options).await
 }
 
 /// Loads all ManagedHosts, including predicted hosts
@@ -148,7 +135,7 @@ where
     for machine_id in requested_machine_ids {
         match machine_id.host_or_dpu_id() {
             HostOrDpuId::Dpu(dpu_machine_id) => requested_dpu_ids.push(dpu_machine_id),
-            HostOrDpuId::Host(host_machine_id) => requested_host_ids.push(*host_machine_id),
+            HostOrDpuId::Host(host_machine_id) => requested_host_ids.push(host_machine_id),
         }
     }
 
@@ -190,7 +177,7 @@ where
     // Index snapshots into a HashMap by their machine_id, while calling derive_aggregate_health on
     // each. It's mut because we are going to re-index by the ID's that the user requested, which
     // may be different from the managed_host ID.
-    let mut snapshots_by_host_id: HashMap<MachineId, ManagedHostStateSnapshot> = query
+    let mut snapshots_by_host_id: HashMap<HostMachineId, ManagedHostStateSnapshot> = query
         .build_query_as()
         .fetch_all(txn)
         .await
@@ -203,7 +190,7 @@ where
         .collect();
 
     // Make another level of index that gets the host snapshot ID's by a DPU ID
-    let host_ids_by_dpu_id: HashMap<MachineId, MachineId> = snapshots_by_host_id
+    let host_ids_by_dpu_id: HashMap<DpuMachineId, HostMachineId> = snapshots_by_host_id
         .values()
         .flat_map(|snapshot| {
             snapshot

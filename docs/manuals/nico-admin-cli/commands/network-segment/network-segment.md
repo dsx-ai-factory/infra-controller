@@ -20,7 +20,7 @@ Network Segment related handling
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -42,7 +42,9 @@ Print help (see a summary with -h)
 | Subcommand | Description |
 |---|---|
 | [`show`](./network-segment-show.md) | Display Network Segment information |
+| [`attach-vpc`](./network-segment-attach-vpc.md) | Attach Network Segment to VPC |
 | [`delete`](./network-segment-delete.md) | Delete Network Segment |
+| [`create`](./network-segment-create.md) | Create Network Segment |
 
 ---
 

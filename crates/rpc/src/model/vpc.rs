@@ -34,6 +34,7 @@ impl From<rpc::forge::VpcSearchFilter> for VpcSearchFilter {
         VpcSearchFilter {
             name: filter.name,
             tenant_org_id: filter.tenant_org_id,
+            network_virtualization_type: None,
             label: filter.label.map(LabelFilter::from),
         }
     }

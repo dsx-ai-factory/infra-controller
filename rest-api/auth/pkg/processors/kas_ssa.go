@@ -27,7 +27,9 @@ const (
 // Ensure SSAProcessor implements config.TokenProcessor interface
 var _ config.TokenProcessor = (*SSAProcessor)(nil)
 
-// SSAProcessor processes SSA JWT tokens
+// SSAProcessor processes SSA JWT tokens.
+//
+// Deprecated: Support is limited to existing deployments.
 type SSAProcessor struct {
 	dbSession *cdb.Session
 }

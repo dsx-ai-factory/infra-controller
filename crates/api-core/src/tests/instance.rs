@@ -24,6 +24,7 @@ use std::time::{Duration, SystemTime};
 use ::rpc::forge::forge_server::Forge;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::instance::InstanceId;
+use carbide_uuid::machine::StableHostMachineId;
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
@@ -35,7 +36,7 @@ use common::api_fixtures::instance::{
 use common::api_fixtures::tenant::create_fixture_tenant;
 use common::api_fixtures::tpm_attestation::{CA_CERT_SERIALIZED, EK_CERT_SERIALIZED};
 use common::api_fixtures::{
-    TestEnvOverrides, create_managed_host, create_test_env, create_test_env_with_overrides, dpu,
+    TestEnvOverrides, create_managed_host, create_test_env, create_test_env_with_overrides,
     get_config, inject_machine_measurements, network_configured_with_health,
     network_configured_with_health_and_ext_services, persist_machine_validation_result,
     populate_network_security_groups, site_explorer,
@@ -50,16 +51,12 @@ use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use itertools::Itertools;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpu_machine_update::DpuMachineUpdate;
-use model::instance::config::extension_services::InstanceExtensionServicesConfig;
-use model::instance::config::infiniband::InstanceInfinibandConfig;
 use model::instance::config::network::{
     DeviceLocator, InstanceInterfaceIpFamilyMode, InstanceInterfaceVpcSelection,
     InstanceNetworkConfig, Ipv6InterfaceConfig, NetworkDetails,
 };
-use model::instance::config::nvlink::InstanceNvLinkConfig;
-use model::instance::config::spx::InstanceSpxConfig;
 use model::machine::{
-    AttestationMode, CleanupContext, CleanupState, FailureDetails, InstanceState, Machine,
+    AttestationMode, CleanupContext, CleanupState, FailureDetails, HostMachine, InstanceState,
     MachineState, MachineValidatingState, ManagedHostState, MeasuringState,
     NetworkConfigUpdateState, SpdmMeasuringState, ValidationState,
 };
@@ -82,7 +79,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tonic::Request;
 
 use crate::cfg::file::VmaasConfig;
-use crate::instance::{allocate_instance, allocate_network};
+use crate::instance::allocate_network;
 use crate::network_segment::allocate::PrefixAllocator;
 use crate::test_support::fixture_config::FixtureDefault as _;
 use crate::test_support::metadata;
@@ -343,8 +340,7 @@ async fn test_allocate_and_release_instance_impl(
     txn.commit().await.unwrap();
 }
 
-#[crate::sqlx_test]
-async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready(
+async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready_body(
     _: PgPoolOptions,
     options: PgConnectOptions,
 ) {
@@ -421,7 +417,7 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
         .api
         .allocate_instance(tonic::Request::new(rpc::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: Some(mh.host().id.into()),
+            machine_id: Some(mh.host().id),
             instance_type_id: None,
             config: Some(instance_config),
             metadata: None,
@@ -829,6 +825,25 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
     txn.commit().await.unwrap();
 }
 
+#[test]
+fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready() {
+    let mut args = ::sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready"
+    ));
+    args.fixtures(Box::leak(Box::new(vec![])));
+
+    let test_fn: fn(PgPoolOptions, PgConnectOptions) -> _ =
+        test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready_body;
+
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .expect("failed to spawn measurement test thread")
+        .join()
+        .expect("measurement test thread panicked");
+}
+
 #[crate::sqlx_test]
 async fn test_allocate_instance_with_labels(_: PgPoolOptions, options: PgConnectOptions) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
@@ -916,10 +931,7 @@ async fn test_allocate_instance_with_labels(_: PgPoolOptions, options: PgConnect
                 metadata
             });
 
-    assert_eq!(
-        instance_matched_by_label.machine_id.unwrap(),
-        mh.host().id.into()
-    );
+    assert_eq!(instance_matched_by_label.machine_id.unwrap(), mh.host().id);
 
     assert_eq!(instance_matched_by_label.metadata, Some(instance_metadata));
 }
@@ -1065,7 +1077,7 @@ async fn test_instance_dns_resolution(_: PgPoolOptions, options: PgConnectOption
         .api
         .get_managed_host_network_config(tonic::Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(mh.dpu().id.into()),
+                dpu_machine_id: Some(mh.dpu().id),
             },
         ))
         .await
@@ -1127,7 +1139,7 @@ async fn test_instance_null_hostname(_: PgPoolOptions, options: PgConnectOptions
         .api
         .get_managed_host_network_config(tonic::Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(mh.dpu().id.into()),
+                dpu_machine_id: Some(mh.dpu().id),
             },
         ))
         .await
@@ -1863,53 +1875,6 @@ async fn test_instance_cloud_init_metadata(
 }
 
 #[crate::sqlx_test]
-async fn test_can_not_create_instance_for_dpu(_: PgPoolOptions, options: PgConnectOptions) {
-    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-    let vpc_id = db::vpc::find_by_segment(&env.pool, segment_id)
-        .await
-        .unwrap()
-        .unwrap()
-        .id;
-    let host_config = env.managed_host_config();
-    let dpu_machine_id = dpu::create_dpu_machine(&env, &host_config).await;
-    let request = crate::instance::InstanceAllocationRequest {
-        instance_id: InstanceId::new(),
-        machine_id: dpu_machine_id.into(),
-        instance_type_id: None,
-        config: model::instance::config::InstanceConfig {
-            os: default_os_config().try_into().unwrap(),
-            tenant: default_tenant_config().try_into().unwrap(),
-            network: InstanceNetworkConfig::for_segment_ids(&[segment_id], &[], &[vpc_id]),
-            infiniband: InstanceInfinibandConfig::default(),
-            nvlink: InstanceNvLinkConfig::default(),
-            spxconfig: InstanceSpxConfig::default(),
-            network_security_group_id: None,
-            extension_services: InstanceExtensionServicesConfig::default(),
-            power_profile: None,
-        },
-        metadata: Metadata {
-            name: "test_instance".to_string(),
-            description: "tests/instance".to_string(),
-            labels: HashMap::new(),
-        },
-        allow_unhealthy_machine: false,
-    };
-
-    // Note: This also requests a background task in the DB for creating managed
-    // resources. That's however ok - we will just ignore it and not execute
-    // that task. Later we might also verify that the creation of those resources
-    // is requested
-    let result = allocate_instance(&env.api, request, env.config.host_health).await;
-    let error = result.expect_err("expected allocation to fail").to_string();
-    assert!(
-        error.contains("is of type DPU and can not be converted into an instance"),
-        "Error message should contain 'is of type Dpu and can not be converted into an instance', but is {error}"
-    );
-}
-
-#[crate::sqlx_test]
 // This test verifies parity between `addresses` and the compatibility fields.
 #[allow(deprecated)]
 async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOptions) {
@@ -2018,7 +1983,7 @@ async fn test_instance_address_creation(_: PgPoolOptions, options: PgConnectOpti
         .api
         .get_managed_host_network_config(tonic::Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(mh.dpu().id.into()),
+                dpu_machine_id: Some(mh.dpu().id),
             },
         ))
         .await
@@ -3248,7 +3213,7 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
         .api
         .get_managed_host_network_config(Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(managed_host.dpu().id.into()),
+                dpu_machine_id: Some(managed_host.dpu().id),
             },
         ))
         .await
@@ -3461,7 +3426,7 @@ async fn test_slaac_vpc_allocation_preserves_prefix_without_ipv6_address(pool: P
         .api
         .get_managed_host_network_config(Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(dual_stack_host.dpu().id.into()),
+                dpu_machine_id: Some(dual_stack_host.dpu().id),
             },
         ))
         .await
@@ -3589,12 +3554,12 @@ async fn create_manual_slaac_segment_fixture(
 /// explicit in each test.
 async fn seed_empty_instance_for_network_allocation(
     env: &TestEnv,
-) -> (InstanceId, Machine, ConfigVersion) {
+) -> (InstanceId, HostMachine, ConfigVersion) {
     let managed_host = create_managed_host(env).await;
     let instance_id = InstanceId::new();
     let network_config_version = ConfigVersion::initial();
     let mut txn = env.db_txn().await;
-    let machine = managed_host.host().db_machine(&mut txn).await;
+    let machine = managed_host.host_as_any().db_machine(&mut txn).await;
     sqlx::query(
         "INSERT INTO instances (id, machine_id, network_config, network_config_version, \
                                 nvlink_config) \
@@ -4430,7 +4395,7 @@ async fn assert_ipv6_only_resolution(
         .api
         .get_managed_host_network_config(Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(managed_host.dpu().id.into()),
+                dpu_machine_id: Some(managed_host.dpu().id),
             },
         ))
         .await
@@ -4574,7 +4539,7 @@ async fn assert_dual_stack_resolution(
         .api
         .get_managed_host_network_config(Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(managed_host.dpu().id.into()),
+                dpu_machine_id: Some(managed_host.dpu().id),
             },
         ))
         .await
@@ -4889,6 +4854,11 @@ async fn test_allocate_and_update_with_network_security_group(
     let mh = site_explorer::new_host(&env, ManagedHostConfig::default())
         .await
         .unwrap();
+    let host_machine_id: StableHostMachineId = mh
+        .host_snapshot
+        .id
+        .try_into()
+        .expect("newly ingested host should have a stable ID");
 
     let segment_id = env.create_vpc_and_tenant_segment().await;
 
@@ -4900,7 +4870,7 @@ async fn test_allocate_and_update_with_network_security_group(
         .api
         .allocate_instance(
             InstanceAllocationRequest::builder(false)
-                .machine_id(mh.host_snapshot.id)
+                .machine_id(host_machine_id)
                 .config(
                     InstanceConfig::default_tenant_and_os()
                         .network(single_interface_network_config(segment_id))
@@ -4923,7 +4893,7 @@ async fn test_allocate_and_update_with_network_security_group(
         .api
         .allocate_instance(
             InstanceAllocationRequest::builder(false)
-                .machine_id(mh.host_snapshot.id)
+                .machine_id(host_machine_id)
                 .config(
                     InstanceConfig::default_tenant_and_os()
                         .network(single_interface_network_config(segment_id))
@@ -5364,8 +5334,15 @@ async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
     options: PgConnectOptions,
 ) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
+
+    // Register the tenant required by both FNN VPCs used in this allocation scenario.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
 
     // Create two FNN VPCs and prefixes to exercise cross-VPC allocation.
     let first_vpc = env
@@ -5536,7 +5513,7 @@ async fn test_fnn_vrf_loopbacks_are_per_vpc_for_pf_and_vf_on_one_dpu(pool: sqlx:
         .api
         .get_managed_host_network_config(Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(dpu_id.into()),
+                dpu_machine_id: Some(dpu_id),
             },
         ))
         .await
@@ -5663,8 +5640,15 @@ async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
     options: PgConnectOptions,
 ) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
     let mh = create_managed_host(&env).await;
+
+    // Register the tenant required by both FNN VPCs used in this validation scenario.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
 
     // Create two FNN VPCs so the global multi-FNN check passes.
     let first_vpc = env
@@ -6325,7 +6309,7 @@ async fn test_instance_creation_when_reprovision_is_triggered_parallel(
     // Step 2: Trigger DPU reprovision.
     let mut txn = env.db_txn().await;
     let machine_update = DpuMachineUpdate {
-        host_machine_id: mh.id,
+        host_machine_id: mh.id.into(),
         dpu_machine_id: mh.dpu_ids[0],
         firmware_version: "test".to_string(),
         dpf_managed: false,
@@ -6676,7 +6660,7 @@ async fn test_public_instance_endpoints_reject_out_of_range_wire_vfs(
         let create_error = env
             .api
             .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
-                machine_id: Some(create_host.id.into()),
+                machine_id: Some(create_host.id),
                 config: Some(config_with_wire_vf(wire_vf_id)),
                 instance_id: None,
                 instance_type_id: None,
@@ -6713,7 +6697,7 @@ async fn test_public_instance_endpoints_reject_out_of_range_wire_vfs(
     // VF15 is the inclusive boundary and must pass the same public create and update paths.
     env.api
         .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: Some(create_host.id.into()),
+            machine_id: Some(create_host.id),
             config: Some(config_with_wire_vf(15)),
             instance_id: None,
             instance_type_id: None,
@@ -6849,7 +6833,7 @@ async fn test_allocate_instance_with_extension_services_rejected_on_dpf_host(
     let result = env
         .api
         .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: Some(mh.id.into()),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),
@@ -7001,7 +6985,7 @@ async fn test_allocate_instance_with_duplicate_extension_services(
     let instance = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: Some(mh.id.into()),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
                 tenant: Some(default_tenant_config()),
@@ -7732,7 +7716,7 @@ async fn test_extension_services_status_observation(
     assert_eq!(service_status.dpu_statuses.len(), 1,);
 
     let dpu_status = &service_status.dpu_statuses[0];
-    assert_eq!(dpu_status.dpu_machine_id, Some(mh.dpu().id.into()));
+    assert_eq!(dpu_status.dpu_machine_id, Some(mh.dpu().id));
     assert_eq!(
         dpu_status.status,
         rpc::forge::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceRunning as i32,
@@ -7770,7 +7754,7 @@ async fn test_allocate_instance_with_invalid_os_image(
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: Some(mh.id.into()),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
                 tenant: Some(default_tenant_config()),
@@ -7833,7 +7817,7 @@ async fn test_allocate_instance_with_invalid_ib_partition(
     let result = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: Some(mh.id.into()),
+            machine_id: Some(mh.id),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
                 tenant: Some(default_tenant_config()),

@@ -298,6 +298,15 @@ cross-namespace requirement), and the nico-core `bmc_proxy` setting both
 enables that path and covers the case where the runtime call has not happened
 yet.
 
+Both mechanisms configure the dynamic `site_explorer.bmc_proxy` redirect.
+This redirect applies to clients built from `nico-api`'s direct Redfish pool.
+
+The redirect is independent of the static `[bmc_proxy]` configuration, which
+routes eligible `nico-api` Redfish traffic through `nico-bmc-proxy`. When
+the static section is enabled, eligible traffic uses a proxied pool that
+ignores the dynamic redirect. The admin Redfish passthrough also uses the
+static configuration when both are configured.
+
 Apply via `helm upgrade` of the nico-core chart, or patch the configmap and
 restart nico-api (site-explorer runs in-process in nico-api):
 

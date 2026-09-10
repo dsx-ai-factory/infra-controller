@@ -126,21 +126,21 @@ struct DhcpServerPaths {
     host_config: FPath,
 }
 
-/// Stores addresses of dependent services that the DHCP module announces.
-/// Note that these can apply to both IPv4 and IPv6; pxe_ips is actually
-/// UEFI HTTP boot in this case, and NTP is still NTP. We should be able
-/// to leverage this struct even in DHCPv6 land (whereas other things don't
-/// really carry through to DHCPv6).
+/// Stores dual-stack PXE/UEFI HTTP, NTP, and DNS service addresses.
+///
+/// These are remote dependent services advertised as DHCP options; none is a
+/// local listener address.
+// TODO(dhcpv6-server-address): Populate `carbide_dhcp_server_v6` only after a
+// non-gating consumer and authoritative server-address source are defined.
 pub(super) struct ServiceAddresses {
     pub(super) pxe_ips: Vec<IpAddr>,
     pub(super) ntpservers: Vec<IpAddr>,
     pub(super) nameservers: Vec<IpAddr>,
 }
 
-/// Split a dual-stack nameserver list into its IPv4 and IPv6 members, so the
-/// gRPC and file-write DHCP-config paths derive both families the same way.
-fn split_nameservers_by_family(nameservers: &[IpAddr]) -> (Vec<Ipv4Addr>, Vec<Ipv6Addr>) {
-    nameservers
+/// Split a dual-stack address list into its IPv4 and IPv6 members.
+fn split_addresses_by_family(addresses: &[IpAddr]) -> (Vec<Ipv4Addr>, Vec<Ipv6Addr>) {
+    addresses
         .iter()
         .copied()
         .fold((Vec::new(), Vec::new()), |(mut v4, mut v6), addr| {
@@ -152,50 +152,38 @@ fn split_nameservers_by_family(nameservers: &[IpAddr]) -> (Vec<Ipv4Addr>, Vec<Ip
         })
 }
 
+/// Resolve site-configured DHCPv4 NTP and DNS-discovered DHCPv6 NTP options.
 fn build_dhcp_ntp_servers(
     nc: &rpc::ManagedHostNetworkConfigResponse,
     service_addrs: &ServiceAddresses,
-) -> Vec<Ipv4Addr> {
+) -> (Vec<Ipv4Addr>, Vec<Ipv6Addr>) {
     // Start with the NTP servers from the service addresses, which is read from carbide-ntp.forge.
-    let mut ntp_servers = service_addrs
-        .ntpservers
-        .iter()
-        .filter_map(|x| match x {
-            IpAddr::V4(x) => Some(*x),
-            _ => None,
-        })
-        .collect::<Vec<Ipv4Addr>>();
+    let (mut ntpservers_v4, ntpservers_v6) = split_addresses_by_family(&service_addrs.ntpservers);
 
-    // If the site has configured NTP servers, use them instead.
+    // The site configuration contract is IPv4-only, so it replaces option 42
+    // without suppressing the DNS-derived DHCPv6 option 56 fallback.
     if !nc.ntp_servers.is_empty() {
-        let site_ntp_servers: Vec<Ipv4Addr> = nc.ntp_servers
-        .iter()
-        .filter_map(|s| match IpAddr::from_str(s) {
-            Ok(IpAddr::V4(ip)) => Some(ip),
-            Ok(IpAddr::V6(_)) => {
-                tracing::debug!(
-                    ntp_server = %s,
-                    "IPv6 NTP server from ManagedHostNetworkConfigResponse is ignored for DHCPv4 config"
-                );
-                None
-            }
-            Err(e) => {
-                tracing::debug!(
-                    ntp_server = %s,
-                    error = %e,
-                    "Invalid NTP server IP from ManagedHostNetworkConfigResponse, ignoring"
-                );
-                None
-            }
-        })
-        .collect();
-
-        if !site_ntp_servers.is_empty() {
-            ntp_servers = site_ntp_servers;
+        let site_v4 = nc
+            .ntp_servers
+            .iter()
+            .filter_map(|server| match Ipv4Addr::from_str(server) {
+                Ok(address) => Some(address),
+                Err(error) => {
+                    tracing::debug!(
+                        ntp_server = %server,
+                        error = %error,
+                        "Invalid IPv4 NTP server from ManagedHostNetworkConfigResponse, ignoring"
+                    );
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if !site_v4.is_empty() {
+            ntpservers_v4 = site_v4;
         }
     }
 
-    ntp_servers
+    (ntpservers_v4, ntpservers_v6)
 }
 
 /// How we tell HBN to notice the new file we wrote
@@ -969,9 +957,9 @@ async fn update_dhcp_via_grpc(
     };
     let loopback_ip: Ipv4Addr = mh_nc.loopback_ip.parse()?;
 
-    let (nameservers_v4, nameservers_v6) = split_nameservers_by_family(&service_addrs.nameservers);
+    let (nameservers_v4, nameservers_v6) = split_addresses_by_family(&service_addrs.nameservers);
 
-    let ntpservers_v4 = build_dhcp_ntp_servers(network_config, service_addrs);
+    let (ntpservers_v4, ntpservers_v6) = build_dhcp_ntp_servers(network_config, service_addrs);
 
     let pxe_ip_v4 = service_addrs
         .pxe_ips
@@ -987,13 +975,18 @@ async fn update_dhcp_via_grpc(
             )
         })?;
 
-    let dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig::from_forge_dhcp_config(
+    let mut dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig::from_forge_dhcp_config(
         pxe_ip_v4,
         ntpservers_v4,
         nameservers_v4,
         nameservers_v6,
         loopback_ip,
     )?;
+
+    // Keep the gRPC model byte-equivalent to the file-backed YAML builder.
+    dhcp_config.carbide_ntpservers_v6 = ntpservers_v6;
+    dhcp_config.dhcpv6_preferred_lifetime_secs = dhcp::DHCPV6_PREFERRED_LIFETIME_SECS;
+    dhcp_config.dhcpv6_valid_lifetime_secs = dhcp::DHCPV6_VALID_LIFETIME_SECS;
     let mut host_config = carbide_rpc_utils::dhcp::HostConfig::try_from(
         network_config.clone(),
         hbn_device_names.reps[0],
@@ -1380,12 +1373,11 @@ fn write_dhcp_v4_server_config(
 
     let loopback_ip = mh_nc.loopback_ip.parse()?;
 
-    // Split the dual-stack nameservers by family: the IPv4 set drives the
-    // DHCPv4 options written here, while the IPv6 set is held in the config for
-    // the eventual DHCPv6 / RA consumer (inert in this path for now).
-    let (nameservers_v4, nameservers_v6) = split_nameservers_by_family(&service_addrs.nameservers);
+    // Split the dual-stack nameservers by family for the sibling v4 and v6
+    // listeners that consume this shared server configuration.
+    let (nameservers_v4, nameservers_v6) = split_addresses_by_family(&service_addrs.nameservers);
 
-    let ntpservers_v4 = build_dhcp_ntp_servers(nc, service_addrs);
+    let (ntpservers_v4, ntpservers_v6) = build_dhcp_ntp_servers(nc, service_addrs);
 
     let pxe_ip_v4 = service_addrs
         .pxe_ips
@@ -1425,6 +1417,7 @@ fn write_dhcp_v4_server_config(
     let next_contents = dhcp::build_server_config(
         pxe_ip_v4,
         ntpservers_v4,
+        ntpservers_v6,
         nameservers_v4,
         nameservers_v6,
         loopback_ip,
@@ -1860,6 +1853,9 @@ mod tests {
         InterfaceState, ServiceAddresses, needed_interface_state,
     };
     use crate::{HBNDeviceNames, dhcp, nvue};
+    /// Verifies managed-host loopbacks preserve optional IPv6 and reject invalid families.
+    ///
+    /// This keeps family validation at the NVUE rendering boundary.
     #[test]
     fn test_parse_managed_host_loopback_ips() {
         use carbide_test_support::Outcome::*;
@@ -1912,51 +1908,48 @@ mod tests {
         );
     }
 
+    /// Verifies IPv4 site NTP overrides do not suppress DNS-derived DHCPv6 NTP.
     #[test]
     fn test_build_dhcp_ntp_servers() {
+        use carbide_test_support::value_scenarios;
+
         let service_addrs = ServiceAddresses {
             pxe_ips: vec![],
-            ntpservers: vec![IpAddr::from([192, 0, 2, 20])],
-            nameservers: vec![],
-        };
-        let nc = rpc::ManagedHostNetworkConfigResponse {
-            ntp_servers: vec!["198.51.100.1".to_string(), "198.51.100.2".to_string()],
-            ..Default::default()
-        };
-
-        let out = build_dhcp_ntp_servers(&nc, &service_addrs);
-        assert_eq!(
-            out,
-            vec![
-                Ipv4Addr::from([198, 51, 100, 1]),
-                Ipv4Addr::from([198, 51, 100, 2])
-            ]
-        );
-    }
-
-    #[test]
-    fn test_build_dhcp_ntp_servers_fallback() {
-        let service_addrs = ServiceAddresses {
-            pxe_ips: vec![],
-            ntpservers: vec![IpAddr::from([192, 0, 2, 20])],
+            ntpservers: vec![
+                IpAddr::from([192, 0, 2, 20]),
+                "2001:db8::20".parse().unwrap(),
+            ],
             nameservers: vec![],
         };
 
-        let empty_nc = rpc::ManagedHostNetworkConfigResponse::default();
-
-        assert_eq!(
-            build_dhcp_ntp_servers(&empty_nc, &service_addrs),
-            vec![Ipv4Addr::from([192, 0, 2, 20])]
-        );
-
-        let invalid_nc = rpc::ManagedHostNetworkConfigResponse {
-            ntp_servers: vec!["not-an-ip".to_string(), "2001:db8::1".to_string()],
-            ..Default::default()
-        };
-
-        assert_eq!(
-            build_dhcp_ntp_servers(&invalid_nc, &service_addrs),
-            vec![Ipv4Addr::from([192, 0, 2, 20])]
+        value_scenarios!(run = |ntp_servers: Vec<String>| {
+                let nc = rpc::ManagedHostNetworkConfigResponse {
+                    ntp_servers,
+                    ..Default::default()
+                };
+                build_dhcp_ntp_servers(&nc, &service_addrs)
+            };
+            "configured overrides" {
+                // The supported site IPv4 value replaces only its service fallback.
+                vec!["198.51.100.1".to_string()] => (
+                    vec![Ipv4Addr::from([198, 51, 100, 1])],
+                    vec!["2001:db8::20".parse::<Ipv6Addr>().unwrap()],
+                ),
+            }
+            "empty configuration fallback" {
+                // With no site values, both service-provided families survive.
+                vec![] => (
+                    vec![Ipv4Addr::from([192, 0, 2, 20])],
+                    vec!["2001:db8::20".parse::<Ipv6Addr>().unwrap()],
+                ),
+            }
+            "invalid-address fallback" {
+                // An invalid site IPv4 value retains both service-provided families.
+                vec!["not-an-ip".to_string()] => (
+                    vec![Ipv4Addr::from([192, 0, 2, 20])],
+                    vec!["2001:db8::20".parse::<Ipv6Addr>().unwrap()],
+                ),
+            }
         );
     }
 
@@ -3189,15 +3182,17 @@ mod tests {
         Ok(())
     }
 
+    /// Verifies generic service-address partitioning preserves order within each family.
     #[test]
-    fn split_nameservers_by_family_partitions_by_family() {
+    fn split_addresses_by_family_partitions_by_family() {
         use carbide_test_support::value_scenarios;
 
         value_scenarios!(
             run = |input: Vec<IpAddr>| -> (Vec<Ipv4Addr>, Vec<Ipv6Addr>) {
-                split_nameservers_by_family(&input)
+                split_addresses_by_family(&input)
             };
             "splits nameservers by family" {
+                // Mixed input preserves the original order within each family.
                 vec![
                     IpAddr::from([10, 0, 0, 1]),
                     "2001:db8::1".parse::<IpAddr>().unwrap(),
@@ -3206,9 +3201,12 @@ mod tests {
                     vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
                     vec!["2001:db8::1".parse::<Ipv6Addr>().unwrap()],
                 ),
+                // IPv4-only input leaves the IPv6 result empty.
                 vec![IpAddr::from([10, 0, 0, 1])] => (vec![Ipv4Addr::new(10, 0, 0, 1)], vec![]),
+                // IPv6-only input leaves the IPv4 result empty.
                 vec!["2001:db8::1".parse::<IpAddr>().unwrap()]
                     => (vec![], vec!["2001:db8::1".parse::<Ipv6Addr>().unwrap()]),
+                // Empty input produces two empty family lists.
                 vec![] => (vec![], vec![]),
             }
         );
@@ -3226,6 +3224,26 @@ mod tests {
             expected.carbide_provisioning_server_ipv4
         );
         assert_eq!(received.carbide_dhcp_server, expected.carbide_dhcp_server);
+        assert_eq!(
+            received.carbide_nameservers_v6,
+            expected.carbide_nameservers_v6
+        );
+        assert_eq!(
+            received.carbide_ntpservers_v6,
+            expected.carbide_ntpservers_v6
+        );
+        assert_eq!(
+            received.carbide_dhcp_server_v6,
+            expected.carbide_dhcp_server_v6
+        );
+        assert_eq!(
+            received.dhcpv6_preferred_lifetime_secs,
+            expected.dhcpv6_preferred_lifetime_secs
+        );
+        assert_eq!(
+            received.dhcpv6_valid_lifetime_secs,
+            expected.dhcpv6_valid_lifetime_secs
+        );
     }
 
     fn validate_host_config(received: HostConfig, expected: HostConfig) {
@@ -3248,15 +3266,16 @@ mod tests {
             assert_eq!(ip_config_received.gateway, ip_config_expected.gateway);
             assert_eq!(ip_config_received.address, ip_config_expected.address);
             assert_eq!(ip_config_received.prefix, ip_config_expected.prefix);
+            assert_eq!(ip_config_received.ipv6, ip_config_expected.ipv6);
         }
     }
 
-    // Exercises the DHCP renderer's deprecated compatibility input.
+    /// Verifies the deprecated file-backed DHCP compatibility input renders
+    /// dual-stack options and host state.
     #[test]
     #[allow(deprecated)]
     fn test_with_tenant_dhcp_server() -> Result<(), Box<dyn std::error::Error>> {
-        // The config we received from API server
-        // Admin won't be used
+        // Model the API-provided admin interface with both address families.
         let admin_interface_prefix: IpNetwork = "10.217.5.123/32".parse().unwrap();
         let admin_interface = rpc::FlatInterfaceConfig {
             function_type: rpc::InterfaceFunctionType::Physical.into(),
@@ -3282,7 +3301,23 @@ mod tests {
             ipv6_interface_config: None,
             vpc_routing_profile: None,
             interface_routing_profile: None,
-            addresses: vec![],
+            addresses: vec![
+                rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V4.into(),
+                    gateway: Some("10.217.5.123".to_string()),
+                    ip: "10.217.5.123".to_string(),
+                    interface_prefix: admin_interface_prefix.to_string(),
+                    prefix: "10.217.5.123".to_string(),
+                    tenant_vrf_loopback_ip: Some("10.213.2.1".to_string()),
+                    ..Default::default()
+                },
+                rpc::InterfaceAddressConfig {
+                    address_family: rpc::AddressFamily::V6.into(),
+                    ip: "2001:db8::123".to_string(),
+                    interface_prefix: "2001:db8::/64".to_string(),
+                    ..Default::default()
+                },
+            ],
         };
 
         let mut admin_interface_with_mtu = admin_interface.clone();
@@ -3372,12 +3407,16 @@ mod tests {
                 Ipv4Addr::from([127, 0, 0, 2]),
                 Ipv4Addr::from([127, 0, 0, 3]),
             ],
+            carbide_nameservers_v6: vec!["2001:db8::53".parse().unwrap()],
+            carbide_ntpservers_v6: vec!["2001:db8::123".parse().unwrap()],
             carbide_provisioning_server_ipv4: Ipv4Addr::from([10, 0, 0, 1]),
             lease_time_secs: 604800,
             renewal_time_secs: 3600,
             rebinding_time_secs: 432000,
             carbide_api_url: None,
             carbide_dhcp_server: Ipv4Addr::from([10, 217, 5, 39]),
+            dhcpv6_preferred_lifetime_secs: dhcp::DHCPV6_PREFERRED_LIFETIME_SECS,
+            dhcpv6_valid_lifetime_secs: dhcp::DHCPV6_VALID_LIFETIME_SECS,
             ..Default::default()
         };
 
@@ -3476,13 +3515,16 @@ mod tests {
                 IpAddr::from([127, 0, 0, 1]),
                 IpAddr::from([127, 0, 0, 2]),
                 IpAddr::from([127, 0, 0, 3]),
+                "2001:db8::123".parse().unwrap(),
             ],
-            nameservers: vec![IpAddr::from([10, 1, 1, 1])],
+            nameservers: vec![IpAddr::from([10, 1, 1, 1]), "2001:db8::53".parse().unwrap()],
         };
 
         let mut host_config_str =
             dhcp::build_server_host_config(network_config.clone(), &HBNDeviceNames::pre_23())?;
         assert!(!host_config_str.contains("mtu"));
+        assert!(host_config_str.contains("ipv6:"));
+        assert!(host_config_str.contains("2001:db8::123"));
 
         let mut network_config2 = network_config.clone();
         network_config2.admin_interface = Some(admin_interface_with_mtu);
@@ -3573,6 +3615,8 @@ mod tests {
             rebinding_time_secs: 432000,
             carbide_api_url: None,
             carbide_dhcp_server: Ipv4Addr::from([10, 217, 5, 39]),
+            dhcpv6_preferred_lifetime_secs: dhcp::DHCPV6_PREFERRED_LIFETIME_SECS,
+            dhcpv6_valid_lifetime_secs: dhcp::DHCPV6_VALID_LIFETIME_SECS,
             ..Default::default()
         };
         let dhcp_contents = super::read_limited(g.path())?;

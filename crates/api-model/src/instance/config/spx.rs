@@ -48,7 +48,7 @@ impl InstanceSpxConfig {
 pub enum SpxAttachmentType {
     Physical = 0,
     Virtual = 1,
-    Ovn = 2,
+    Ovs = 2,
 }
 
 impl TryFrom<i32> for SpxAttachmentType {
@@ -58,7 +58,7 @@ impl TryFrom<i32> for SpxAttachmentType {
         match value {
             0 => Ok(SpxAttachmentType::Physical),
             1 => Ok(SpxAttachmentType::Virtual),
-            2 => Ok(SpxAttachmentType::Ovn),
+            2 => Ok(SpxAttachmentType::Ovs),
             _ => Err("Invalid SpxAttachmentType value"),
         }
     }

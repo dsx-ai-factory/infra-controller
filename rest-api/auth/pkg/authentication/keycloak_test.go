@@ -876,19 +876,19 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 	e := echo.New()
 	tc := &tmocks.Client{}
 
-	// Setup JWT origin config with Keycloak token origin
-	joCfg := config.NewJWTOriginConfig()
-	joCfg.AddConfig("keycloak", jwksServer.URL+"/realms/nico", jwksServer.URL+"/realms/nico/protocol/openid-connect/certs", config.TokenOriginKeycloak, true, nil, nil)
+	// Setup token origin config with Keycloak token origin
+	toCfg := config.NewTokenOriginConfig()
+	toCfg.AddConfig("keycloak", jwksServer.URL+"/realms/nico", jwksServer.URL+"/realms/nico/protocol/openid-connect/certs", config.TokenOriginKeycloak, true, nil, nil)
 
 	// Initialize JWKS data for testing
-	if err := joCfg.UpdateAllJWKS(); err != nil {
+	if err := toCfg.UpdateAllJWKS(); err != nil {
 		t.Fatal(err)
 	}
 
 	encCfg := commonConfig.NewPayloadEncryptionConfig("test-encryption-key")
 
 	// Initialize processors for testing
-	processors.InitializeProcessors(joCfg, dbSession, tc, encCfg, nil)
+	processors.InitializeProcessors(toCfg, dbSession, tc, encCfg, nil)
 
 	tests := []struct {
 		name           string
@@ -1013,7 +1013,7 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 			c.SetPath(tt.path)
 
 			// Execute auth processor
-			apiErr := AuthProcessor(c, joCfg)
+			apiErr := AuthProcessor(c, toCfg)
 
 			if tt.wantErr {
 				require.NotNil(t, apiErr)
@@ -1070,19 +1070,19 @@ func TestAuthProcessor_KeycloakServiceAccountsDisabled(t *testing.T) {
 		false, // ServiceAccountEnabled = false
 	)
 
-	// Setup JWT origin config with Keycloak token origin
-	joCfg := config.NewJWTOriginConfig()
-	joCfg.AddConfig("keycloak", jwksServer.URL+"/realms/nico", jwksServer.URL+"/realms/nico/protocol/openid-connect/certs", config.TokenOriginKeycloak, keycloakConfigDisabled.ServiceAccountEnabled, nil, nil)
+	// Setup token origin config with Keycloak token origin
+	toCfg := config.NewTokenOriginConfig()
+	toCfg.AddConfig("keycloak", jwksServer.URL+"/realms/nico", jwksServer.URL+"/realms/nico/protocol/openid-connect/certs", config.TokenOriginKeycloak, keycloakConfigDisabled.ServiceAccountEnabled, nil, nil)
 
 	// Initialize JWKS data for testing
-	if err := joCfg.UpdateAllJWKS(); err != nil {
+	if err := toCfg.UpdateAllJWKS(); err != nil {
 		t.Fatal(err)
 	}
 
 	encCfg := commonConfig.NewPayloadEncryptionConfig("test-encryption-key")
 
 	// Initialize processors for testing with service accounts DISABLED
-	processors.InitializeProcessors(joCfg, dbSession, tc, encCfg, keycloakConfigDisabled)
+	processors.InitializeProcessors(toCfg, dbSession, tc, encCfg, keycloakConfigDisabled)
 
 	tests := []struct {
 		name           string
@@ -1157,7 +1157,7 @@ func TestAuthProcessor_KeycloakServiceAccountsDisabled(t *testing.T) {
 			c.SetPath(tt.path)
 
 			// Execute auth processor with service accounts DISABLED
-			apiErr := AuthProcessor(c, joCfg)
+			apiErr := AuthProcessor(c, toCfg)
 
 			if tt.wantErr {
 				require.NotNil(t, apiErr, "Expected error but got none")

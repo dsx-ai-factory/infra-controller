@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use clap::Parser;
 
 use crate::errors::{CarbideCliError, CarbideCliResult};
@@ -23,10 +23,10 @@ use crate::errors::{CarbideCliError, CarbideCliResult};
 #[derive(Parser, Debug)]
 pub(super) struct DpfQuery {
     #[clap(help = "Host machine id")]
-    pub(super) host: Option<MachineId>,
+    pub(super) host: Option<HostMachineId>,
 }
 
-impl TryFrom<&DpfQuery> for MachineId {
+impl TryFrom<&DpfQuery> for HostMachineId {
     type Error = CarbideCliError;
 
     fn try_from(query: &DpfQuery) -> CarbideCliResult<Self> {
@@ -35,12 +35,6 @@ impl TryFrom<&DpfQuery> for MachineId {
                 "Host id is required!!".to_string(),
             ));
         };
-
-        if host.machine_type() == carbide_uuid::machine::MachineType::Dpu {
-            return Err(CarbideCliError::GenericError(
-                "Only host id is expected!!".to_string(),
-            ));
-        }
 
         Ok(host)
     }

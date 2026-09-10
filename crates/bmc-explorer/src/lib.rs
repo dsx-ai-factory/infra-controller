@@ -279,10 +279,17 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .transpose()?
         .and_then(identity);
 
-    let secure_boot_status = explored_system
-        .secure_boot_status()
-        .inspect_err(|error| tracing::warn!(%error, "Failed to fetch forge secure boot status."))
-        .ok();
+    let secure_boot_status = match hw_type {
+        Some(hw::HwType::LiteonPowerShelf | hw::HwType::DeltaPowerShelf | hw::HwType::NvSwitch) => {
+            None
+        }
+        _ => explored_system
+            .secure_boot_status()
+            .inspect_err(
+                |error| tracing::warn!(%error, "Failed to fetch forge secure boot status."),
+            )
+            .ok(),
+    };
 
     let machine_setup_status = hw_type
         .map(|hw_type| {

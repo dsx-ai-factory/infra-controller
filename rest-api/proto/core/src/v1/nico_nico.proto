@@ -50,7 +50,13 @@ service Forge {
   // VPC
   rpc CreateVpc(VpcCreationRequest) returns (Vpc);
   rpc UpdateVpc(VpcUpdateRequest) returns (VpcUpdateResult);
+  // Operator cleanup after independently verifying that no DPU or fabric route
+  // still uses the retained VNI. Core does not verify dataplane convergence.
+  rpc ReleaseVpcInactiveVni(VpcReleaseInactiveVniRequest) returns (VpcReleaseInactiveVniResult);
   rpc UpdateVpcVirtualization(VpcUpdateVirtualizationRequest) returns (VpcUpdateVirtualizationResult);
+  // Deletion does not release a retained VNI implicitly. Call
+  // ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+  // Retained or inconsistent owned allocations cause FailedPrecondition.
   rpc DeleteVpc(VpcDeletionRequest) returns (VpcDeletionResult);
   rpc FindVpcIds(VpcSearchFilter) returns (VpcIdList);
   rpc FindVpcsByIds(VpcsByIdsRequest) returns (VpcList);
@@ -1044,7 +1050,8 @@ service Forge {
   // Helm/docker versions for the nico DPF mandatory services, from both
   // the nico config and the live DPUServiceTemplate CRs.
   rpc GetDPFServiceVersions(GetDPFServiceVersionsRequest) returns (DPFServiceVersionsResponse);
-  // Machines DPF is waiting on before a changed DPUService can roll out.
+  // Predicted or stable host machines DPF is waiting on before a changed
+  // DPUService can roll out.
   //
   // Required rather than convenient: the release RPC has no fleet-wide form, so
   // this is the only way to discover which machines to name. Split ids-then-
@@ -1414,6 +1421,8 @@ enum CredentialType {
   NmxM = 10;
   BgpSiteWideLeafPassword = 11;
   SiteWideNicLockdownIkm = 12;
+  // Named credential used to authorize firmware artifact downloads.
+  FirmwareArtifactAccessToken = 13;
 }
 
 message CredentialCreationRequest {
@@ -1425,16 +1434,29 @@ message CredentialCreationRequest {
   optional string username = 2;
   // The password of credential for HostBMC, DPUBMC, DpuUefi.
   // For UFM, the password is the token of UFM.
+  // For FirmwareArtifactAccessToken, the password is the non-empty artifact
+  // access token. Its contents are stored verbatim, including whitespace and
+  // line endings.
   string password = 3;
   // For the BMC factory default credential: "dell", "lenovo", "hpe", "supermicro", etc
   optional string vendor = 4;
   optional string mac_address = 5;
+  // Required and non-empty for FirmwareArtifactAccessToken. The server returns
+  // InvalidArgument when this field is omitted or empty. This is an opaque,
+  // non-secret lookup name. Setting the same name replaces the stored token;
+  // username, vendor, and mac_address are ignored for this credential type.
+  optional string credential_name = 6;
 }
 
 message CredentialDeletionRequest {
   CredentialType credential_type = 1;
   optional string username = 2;
   optional string mac_address = 3;
+  // Required and non-empty for FirmwareArtifactAccessToken. The server returns
+  // InvalidArgument when this field is omitted or empty. This opaque,
+  // non-secret lookup name selects the token to delete; username and
+  // mac_address are ignored for this credential type.
+  optional string credential_name = 4;
 }
 
 message CredentialCreationResult {
@@ -1839,6 +1861,7 @@ message Vpc {
 
 message VpcCreationRequest {
   string name = 2; // Removed in v0.9.x and above, retained here for backwards compatibility
+  // Must identify an existing tenant with a routing profile when creating an FNN VPC.
   string tenantOrganizationId = 3; // protolint:disable:this FIELD_NAMES_LOWER_SNAKE_CASE
   // this keyset will enable any key contained within it to access any instance associated with this VPC.
   optional string tenantKeysetId = 4; // protolint:disable:this FIELD_NAMES_LOWER_SNAKE_CASE
@@ -5924,7 +5947,9 @@ message UpdateTenantRequest {
 
   reserved 4;
 
-  // Updating will only be allowed if the tenant has no active VPCs
+  // Core treats omission as a replacement with no profile, not patch-preserve behavior.
+  // When FNN is enabled, omission is rejected. When FNN is disabled, omission clears any existing
+  // profile, subject to the restriction against profile changes while active FNN VPCs exist.
   optional string routing_profile_type = 5;
 }
 message UpdateTenantResponse {
@@ -9409,15 +9434,16 @@ message DPFServiceVersionsResponse {
 // services under every tenant at once.
 message ReleaseDPUServiceSyncHoldRequest {
   oneof target {
-    // Host machines to release. DPU machine ids are rejected: the hold is per
-    // node, so accepting one would silently widen the request from a single DPU
-    // to every DPU on its host. Assigned hosts are declined -- name the instance
-    // instead.
+    // Predicted or stable host machines to release. DPU machine ids are
+    // rejected: the hold is per node, so accepting one would silently widen the
+    // request from a single DPU to every DPU on its host. Assigned hosts are
+    // declined -- name the instance instead.
     common.MachineIdList machine_ids = 1;
     // Release the hosts currently holding these instances, even though they are
     // assigned. Naming an instance is the acknowledgement that its tenant will
     // be disrupted, and each consent covers only the instance named: if a host
-    // has since been reallocated, that release is declined.
+    // has since been reallocated, that release is declined. Instances resolve
+    // only to stable host machines.
     InstanceIdList instance_ids = 2;
   }
 }
@@ -9445,6 +9471,7 @@ enum DPUServiceSyncReleaseStatus {
 }
 
 message DPUServiceSyncReleaseResult {
+  // The predicted or stable host acted on.
   common.MachineId machine_id = 1;
   DPUServiceSyncReleaseStatus status = 2;
   // Names the DPU or instance responsible on the deferred statuses, and the
@@ -9462,17 +9489,20 @@ message FindPendingDPUServiceSyncIdsRequest {
 }
 
 message FindPendingDPUServiceSyncsByIdsRequest {
-  // Bounded by the server's `max_find_by_ids`, like every other by-ids call.
+  // Predicted and stable host IDs are accepted. Bounded by the server's
+  // `max_find_by_ids`, like every other by-ids call.
   repeated common.MachineId machine_ids = 1;
 }
 
 message ListDPUServiceSyncHistoryRequest {
+  // The predicted or stable host whose history to return.
   common.MachineId machine_id = 1;
 }
 
 // One recorded DPU service sync. Completed entries appear only in the history
 // form.
 message PendingDPUServiceSync {
+  // The predicted or stable host waiting for service sync.
   common.MachineId machine_id = 1;
   // First time DPF was seen waiting on this machine. Survives repeat requests,
   // so it measures the whole wait rather than the last observation.
@@ -9537,6 +9567,7 @@ message GetComponentInventoryRequest {
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     MacAddressList compute_bmc_macs = 4;
+    MacAddressList switch_bmc_macs = 5;
   }
 }
 
@@ -9557,6 +9588,7 @@ message ComponentPowerControlRequest {
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     MacAddressList compute_bmc_macs = 6;
+    MacAddressList switch_bmc_macs = 7;
   }
   common.SystemPowerControl action = 4;
   // When true, bypass the state controller and dispatch directly to the
@@ -9639,8 +9671,14 @@ message UpdateComputeTrayFirmwareTarget {
 }
 
 message UpdateSwitchFirmwareTarget {
+  // Exactly one of switch_ids or bmc_macs must be set (the server rejects
+  // neither/both). switch_ids targets ingested switches; bmc_macs targets by
+  // BMC MAC, including pre-ingestion. These are plain fields rather than a oneof
+  // so field 1 stays wire-compatible with earlier releases that predate
+  // bmc_macs.
   SwitchIdList switch_ids = 1;
   repeated NvSwitchComponent components = 2;
+  MacAddressList bmc_macs = 3;
 }
 
 message UpdatePowerShelfFirmwareTarget {
@@ -9688,6 +9726,7 @@ message GetComponentFirmwareStatusRequest {
     PowerShelfIdList power_shelf_ids = 3;
     RackIdList rack_ids = 4;
     MacAddressList compute_bmc_macs = 5;
+    MacAddressList switch_bmc_macs = 6;
   }
 }
 
@@ -9702,6 +9741,7 @@ message ListComponentFirmwareVersionsRequest {
     PowerShelfIdList power_shelf_ids = 3;
     RackIdList rack_ids = 4;
     MacAddressList compute_bmc_macs = 5;
+    MacAddressList switch_bmc_macs = 6;
   }
 }
 
@@ -10346,4 +10386,31 @@ enum DpuNvConfigProfile {
   DPU_NV_CONFIG_PROFILE_UNSPECIFIED = 0;
   // Version 1 of the validated GB200/B3240 CPU as Root Complex profile.
   DPU_NV_CONFIG_PROFILE_GB200_B3240_V1 = 1;
+}
+
+// Releases the VNI retained after a routing-profile change. The active VNI and
+// VPC configuration remain unchanged. Before calling, operators must verify
+// that affected DPUs (including peers) and fabric routes no longer use the
+// inactive VNI, and prevent attachment, peering, and routing changes through
+// cleanup. Unreachable consumers require retaining the allocation unless they
+// have been isolated. Core validates ownership, not dataplane convergence.
+message VpcReleaseInactiveVniRequest {
+  // Required VPC whose inactive allocation will be released.
+  common.VpcId id = 1;
+  // Required version from the operator's original observation. Repeating that
+  // exact request cannot release a later allocation. A lost response leaves the
+  // outcome unknown: a stale-version error does not prove whether cleanup ran.
+  // Inspect current state; never substitute a fresh version in an automatic retry.
+  optional string if_version_match = 2;
+  // Required exact inactive VNI observed with this version, in 1..16777215.
+  // It must differ from the active VNI and match the VPC-owned allocation in
+  // the other pool. Cleanup fails on missing or inconsistent allocations.
+  optional uint32 expected_inactive_vni = 3;
+}
+
+message VpcReleaseInactiveVniResult {
+  // Authoritative VPC with its advanced version after cleanup committed.
+  Vpc vpc = 1;
+  // Exact inactive allocation released by this operation.
+  uint32 released_inactive_vni = 2;
 }

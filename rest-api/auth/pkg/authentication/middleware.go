@@ -23,13 +23,13 @@ import (
 )
 
 // Auth middleware reviews request parameters and validates authentication
-func Auth(dbSession *cdb.Session, tc temporalClient.Client, joCfg *config.JWTOriginConfig, encCfg *commonConfig.PayloadEncryptionConfig, kcfg *config.KeycloakConfig) echo.MiddlewareFunc {
+func Auth(dbSession *cdb.Session, tc temporalClient.Client, toCfg *config.TokenOriginConfig, encCfg *commonConfig.PayloadEncryptionConfig, kcfg *config.KeycloakConfig) echo.MiddlewareFunc {
 	// Initialize processors once during middleware creation
-	processors.InitializeProcessors(joCfg, dbSession, tc, encCfg, kcfg)
+	processors.InitializeProcessors(toCfg, dbSession, tc, encCfg, kcfg)
 
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			apiErr := AuthProcessor(c, joCfg)
+			apiErr := AuthProcessor(c, toCfg)
 			if apiErr != nil {
 				return util.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 			}
@@ -40,7 +40,7 @@ func Auth(dbSession *cdb.Session, tc temporalClient.Client, joCfg *config.JWTOri
 }
 
 // AuthProcessor validates auth header forwarded by NGC KAS and gets or creates/updates user record
-func AuthProcessor(c echo.Context, joCfg *config.JWTOriginConfig) *util.APIError {
+func AuthProcessor(c echo.Context, toCfg *config.TokenOriginConfig) *util.APIError {
 	logger := log.With().Str("Middleware", "Auth").Logger()
 
 	orgName := c.Param("orgName")
@@ -64,8 +64,8 @@ func AuthProcessor(c echo.Context, joCfg *config.JWTOriginConfig) *util.APIError
 
 	// Extract token from Authorization header more robustly
 	parts := strings.Fields(authTypeAndToken)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		logger.Warn().Msgf("invalid Authorization header format: %s", authTypeAndToken)
+	hasBearerScheme := len(parts) > 0 && strings.EqualFold(parts[0], "Bearer")
+	if len(parts) != 2 || !hasBearerScheme {
 		return util.NewAPIError(http.StatusUnauthorized, "Invalid Authorization header format", nil)
 	}
 
@@ -74,6 +74,13 @@ func AuthProcessor(c echo.Context, joCfg *config.JWTOriginConfig) *util.APIError
 	// Parse the token without validating it yet to get the issuer
 	unverifiedToken, _, uErr := new(jwt.Parser).ParseUnverified(tokenStr, jwt.MapClaims{})
 	if uErr != nil {
+		// A bearer that is not a JWT is an NGC API key when a kas origin issuer is
+		// configured.
+		if processor := toCfg.GetProcessorByOrigin(config.TokenOriginKas); processor != nil {
+			_, apiErr := processor.ProcessToken(c, tokenStr, toCfg.GetFirstConfigByOrigin(config.TokenOriginKas), logger)
+			return apiErr
+		}
+
 		logger.Error().Err(uErr).Msg("Error parsing the token claims")
 		return util.NewAPIError(http.StatusUnauthorized, "Error parsing the token claims", nil)
 	}
@@ -92,14 +99,14 @@ func AuthProcessor(c echo.Context, joCfg *config.JWTOriginConfig) *util.APIError
 	}
 
 	// Get the appropriate processor for this issuer
-	processor := joCfg.GetProcessorByIssuer(issuer)
+	processor := toCfg.GetProcessorByIssuer(issuer)
 	if processor == nil {
 		logger.Error().Str("issuer", issuer).Msg("No processor found for token issuer")
 		return util.NewAPIError(http.StatusUnauthorized, "Invalid authorization token in request", nil)
 	}
 
 	// Use the processor to process the token
-	_, apiErr := processor.ProcessToken(c, tokenStr, joCfg.GetConfig(issuer), logger)
+	_, apiErr := processor.ProcessToken(c, tokenStr, toCfg.GetConfig(issuer), logger)
 	if apiErr != nil {
 		return apiErr
 	}

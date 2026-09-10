@@ -972,6 +972,7 @@ pub(super) async fn clear_bmc_credentials(
             credential_type: rpc::CredentialType::RootBmcByMacAddress.into(),
             username: None,
             mac_address: Some(mac_address),
+            credential_name: None,
         }))
         .await
         .map(|response| response.into_inner())

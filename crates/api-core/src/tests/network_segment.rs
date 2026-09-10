@@ -54,6 +54,7 @@ use crate::db_init;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::network_segment::FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS;
+use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
 use crate::tests::common::api_fixtures::{
     TEST_SITE_PREFIXES, TestEnvOverrides, create_test_env, create_test_env_with_overrides,
     get_vpc_fixture_id,
@@ -1698,9 +1699,13 @@ async fn test_create_dual_stack_tenant_segment(pool: sqlx::PgPool) -> Result<(),
             create_network_segments: Some(false),
             site_prefixes: Some(site_prefixes),
             ..Default::default()
-        },
+        }
+        .with_fnn_config(None),
     )
     .await;
+
+    // Register the tenant required by the FNN VPC before exercising dual-stack segments.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
 
     let vpc = env
         .api
@@ -1788,9 +1793,13 @@ async fn test_ipv6_tenant_prefix_rejected_when_not_in_site_fabric(
             create_network_segments: Some(false),
             site_prefixes: Some(site_prefixes),
             ..Default::default()
-        },
+        }
+        .with_fnn_config(None),
     )
     .await;
+
+    // Register the tenant required by the FNN VPC before exercising prefix containment.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
 
     let vpc = env
         .api

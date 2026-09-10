@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
@@ -734,7 +734,7 @@ impl std::fmt::Display for MaintenanceActivity {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MaintenanceScope {
     #[serde(default)]
-    pub machine_ids: Vec<MachineId>,
+    pub machine_ids: Vec<HostMachineId>,
     #[serde(default)]
     pub switch_ids: Vec<SwitchId>,
     #[serde(default)]
@@ -855,7 +855,7 @@ pub fn state_sla(state: &RackState, state_version: &ConfigVersion) -> StateSla {
 mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::scenarios;
-    use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
     use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
     use carbide_uuid::switch::{SwitchIdSource, SwitchType};
 
@@ -936,11 +936,11 @@ mod tests {
     #[test]
     fn is_not_full_rack_with_machines() {
         let scope = MaintenanceScope {
-            machine_ids: vec![MachineId::new(
-                MachineIdSource::Tpm,
-                [0; 32],
-                MachineType::Host,
-            )],
+            machine_ids: vec![
+                MachineId::new(MachineIdSource::Tpm, [0; 32], MachineType::Host)
+                    .try_into()
+                    .unwrap(),
+            ],
             ..Default::default()
         };
         assert!(!scope.is_full_rack());

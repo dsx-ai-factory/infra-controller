@@ -25,7 +25,7 @@ use ::rpc::forge::{
 };
 use carbide_instrument::testing::MetricsCapture;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
-use carbide_uuid::machine::DpuMachineId;
+use carbide_uuid::machine::{AsMachineId, DpuMachineId};
 use common::api_fixtures::network_segment::{
     FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, create_tenant_network_segment,
 };
@@ -91,7 +91,7 @@ async fn record_dpu_network_status(
 ) {
     env.api
         .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
             dpu_agent_version: Some(dpu::TEST_DPU_AGENT_VERSION.to_string()),
             observed_at: Some(SystemTime::now().into()),
             dpu_health: Some(rpc::health::HealthReport {
@@ -167,7 +167,7 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -211,7 +211,7 @@ async fn test_managed_host_network_config_does_not_clear_use_admin_network_chang
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -236,7 +236,7 @@ async fn test_record_dpu_network_status_clears_use_admin_network_changed_for_mat
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -337,7 +337,7 @@ async fn test_managed_host_network_config_with_sitewide_bgp_password(pool: sqlx:
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -452,7 +452,7 @@ async fn test_managed_host_network_config_narrows_interface_anycast_prefixes(poo
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(mh.dpu().id.into()),
+            dpu_machine_id: Some(mh.dpu().id),
         }))
         .await
         .unwrap()
@@ -629,7 +629,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(mh.dpu().id.into()),
+            dpu_machine_id: Some(mh.dpu().id),
         }))
         .await
         .unwrap()
@@ -733,7 +733,7 @@ async fn test_managed_host_network_config_omits_fnn_vrf_loopback_by_default(pool
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -812,7 +812,7 @@ async fn test_managed_host_network_config_includes_fnn_vrf_loopback_when_enabled
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -882,7 +882,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -966,7 +966,7 @@ async fn test_managed_host_network_config_errors_when_sitewide_bgp_password_miss
     let err = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .expect_err("missing site-wide BGP password should fail");
@@ -1132,7 +1132,7 @@ async fn test_managed_host_network_status(pool: sqlx::PgPool) {
     // Now fetch the instance and check that knows its configs have synced
     let response = env
         .api
-        .find_instance_by_machine_id(tonic::Request::new(mh.id.into()))
+        .find_instance_by_machine_id(tonic::Request::new(mh.id.to_machine_id()))
         .await
         .unwrap()
         .into_inner();
@@ -1267,7 +1267,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_1_id.into()),
+            dpu_machine_id: Some(dpu_1_id),
         }))
         .await
         .unwrap()
@@ -1321,7 +1321,7 @@ async fn test_dpu_health_is_required(pool: sqlx::PgPool) {
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -1333,7 +1333,7 @@ async fn test_dpu_health_is_required(pool: sqlx::PgPool) {
     let err = env
         .api
         .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
             dpu_agent_version: Some(dpu::TEST_DPU_AGENT_VERSION.to_string()),
             observed_at: Some(SystemTime::now().into()),
             dpu_health: None,

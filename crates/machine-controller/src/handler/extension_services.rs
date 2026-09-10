@@ -121,8 +121,8 @@ pub(super) async fn get_extension_services_status(
     let all_dpus = mh_snapshot
         .dpu_snapshots
         .iter()
-        .map(|dpu| dpu.dpu_machine_id())
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|dpu| dpu.id)
+        .collect::<Vec<_>>();
     let dpf_helm_chart_dpus = if instance_deleted_at.is_some() {
         all_dpus
     } else {
@@ -213,7 +213,7 @@ pub(super) async fn reconcile_dpf_helm_chart_placement(
     let mut observations = HashMap::new();
     let mut ignored_non_target_failure_count = 0;
     for dpu in &mh_snapshot.dpu_snapshots {
-        let dpu_id = dpu.dpu_machine_id()?;
+        let dpu_id = dpu.id;
         let is_target = target_dpu_ids.contains(&dpu_id);
         let is_required = is_target || instance_deleted_at.is_some();
         let label_reconciliation = match dpu.dpf_id() {

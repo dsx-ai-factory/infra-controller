@@ -34,6 +34,7 @@ const (
 	Forge_FindDomainLegacy_FullMethodName                                   = "/forge.Forge/FindDomainLegacy"
 	Forge_CreateVpc_FullMethodName                                          = "/forge.Forge/CreateVpc"
 	Forge_UpdateVpc_FullMethodName                                          = "/forge.Forge/UpdateVpc"
+	Forge_ReleaseVpcInactiveVni_FullMethodName                              = "/forge.Forge/ReleaseVpcInactiveVni"
 	Forge_UpdateVpcVirtualization_FullMethodName                            = "/forge.Forge/UpdateVpcVirtualization"
 	Forge_DeleteVpc_FullMethodName                                          = "/forge.Forge/DeleteVpc"
 	Forge_FindVpcIds_FullMethodName                                         = "/forge.Forge/FindVpcIds"
@@ -539,7 +540,13 @@ type ForgeClient interface {
 	// VPC
 	CreateVpc(ctx context.Context, in *VpcCreationRequest, opts ...grpc.CallOption) (*Vpc, error)
 	UpdateVpc(ctx context.Context, in *VpcUpdateRequest, opts ...grpc.CallOption) (*VpcUpdateResult, error)
+	// Operator cleanup after independently verifying that no DPU or fabric route
+	// still uses the retained VNI. Core does not verify dataplane convergence.
+	ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(ctx context.Context, in *VpcUpdateVirtualizationRequest, opts ...grpc.CallOption) (*VpcUpdateVirtualizationResult, error)
+	// Deletion does not release a retained VNI implicitly. Call
+	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+	// Retained or inconsistent owned allocations cause FailedPrecondition.
 	DeleteVpc(ctx context.Context, in *VpcDeletionRequest, opts ...grpc.CallOption) (*VpcDeletionResult, error)
 	FindVpcIds(ctx context.Context, in *VpcSearchFilter, opts ...grpc.CallOption) (*VpcIdList, error)
 	FindVpcsByIds(ctx context.Context, in *VpcsByIdsRequest, opts ...grpc.CallOption) (*VpcList, error)
@@ -1369,7 +1376,8 @@ type ForgeClient interface {
 	// Helm/docker versions for the nico DPF mandatory services, from both
 	// the nico config and the live DPUServiceTemplate CRs.
 	GetDPFServiceVersions(ctx context.Context, in *GetDPFServiceVersionsRequest, opts ...grpc.CallOption) (*DPFServiceVersionsResponse, error)
-	// Machines DPF is waiting on before a changed DPUService can roll out.
+	// Predicted or stable host machines DPF is waiting on before a changed
+	// DPUService can roll out.
 	//
 	// Required rather than convenient: the release RPC has no fleet-wide form, so
 	// this is the only way to discover which machines to name. Split ids-then-
@@ -1528,6 +1536,16 @@ func (c *forgeClient) UpdateVpc(ctx context.Context, in *VpcUpdateRequest, opts 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VpcUpdateResult)
 	err := c.cc.Invoke(ctx, Forge_UpdateVpc_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VpcReleaseInactiveVniResult)
+	err := c.cc.Invoke(ctx, Forge_ReleaseVpcInactiveVni_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6354,7 +6372,13 @@ type ForgeServer interface {
 	// VPC
 	CreateVpc(context.Context, *VpcCreationRequest) (*Vpc, error)
 	UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error)
+	// Operator cleanup after independently verifying that no DPU or fabric route
+	// still uses the retained VNI. Core does not verify dataplane convergence.
+	ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error)
+	// Deletion does not release a retained VNI implicitly. Call
+	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+	// Retained or inconsistent owned allocations cause FailedPrecondition.
 	DeleteVpc(context.Context, *VpcDeletionRequest) (*VpcDeletionResult, error)
 	FindVpcIds(context.Context, *VpcSearchFilter) (*VpcIdList, error)
 	FindVpcsByIds(context.Context, *VpcsByIdsRequest) (*VpcList, error)
@@ -7184,7 +7208,8 @@ type ForgeServer interface {
 	// Helm/docker versions for the nico DPF mandatory services, from both
 	// the nico config and the live DPUServiceTemplate CRs.
 	GetDPFServiceVersions(context.Context, *GetDPFServiceVersionsRequest) (*DPFServiceVersionsResponse, error)
-	// Machines DPF is waiting on before a changed DPUService can roll out.
+	// Predicted or stable host machines DPF is waiting on before a changed
+	// DPUService can roll out.
 	//
 	// Required rather than convenient: the release RPC has no fleet-wide form, so
 	// this is the only way to discover which machines to name. Split ids-then-
@@ -7266,6 +7291,9 @@ func (UnimplementedForgeServer) CreateVpc(context.Context, *VpcCreationRequest) 
 }
 func (UnimplementedForgeServer) UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateVpc not implemented")
+}
+func (UnimplementedForgeServer) ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReleaseVpcInactiveVni not implemented")
 }
 func (UnimplementedForgeServer) UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateVpcVirtualization not implemented")
@@ -8918,6 +8946,24 @@ func _Forge_UpdateVpc_Handler(srv interface{}, ctx context.Context, dec func(int
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).UpdateVpc(ctx, req.(*VpcUpdateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ReleaseVpcInactiveVni_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VpcReleaseInactiveVniRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ReleaseVpcInactiveVni(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ReleaseVpcInactiveVni_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ReleaseVpcInactiveVni(ctx, req.(*VpcReleaseInactiveVniRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -17583,6 +17629,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateVpc",
 			Handler:    _Forge_UpdateVpc_Handler,
+		},
+		{
+			MethodName: "ReleaseVpcInactiveVni",
+			Handler:    _Forge_ReleaseVpcInactiveVni_Handler,
 		},
 		{
 			MethodName: "UpdateVpcVirtualization",

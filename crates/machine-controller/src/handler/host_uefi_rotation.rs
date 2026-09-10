@@ -410,7 +410,7 @@ async fn set_rotating_host_uefi_password(
             if state.host_snapshot.uefi_credential_rotation_requested {
                 db::machine::clear_uefi_credential_rotation_requested(
                     &mut txn,
-                    state.host_snapshot.id,
+                    state.host_snapshot.id.into(),
                 )
                 .await?;
             }
@@ -475,8 +475,11 @@ async fn finish_rotating_host_uefi(
     }
     tracing::info!(mac = %host_bmc_mac, "host UEFI converged to site-wide rotation target");
     if state.host_snapshot.uefi_credential_rotation_requested {
-        db::machine::clear_uefi_credential_rotation_requested(&mut txn, state.host_snapshot.id)
-            .await?;
+        db::machine::clear_uefi_credential_rotation_requested(
+            &mut txn,
+            state.host_snapshot.id.into(),
+        )
+        .await?;
     }
     Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
 }

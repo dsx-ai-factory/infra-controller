@@ -58,6 +58,7 @@ Use `site_explorer.dpu_policy` instead.
 | `dpu_ipmi_reboot_attempts` | `Option<u32>` | — | `machines` | Retry count when IPMI errors during DPU reboot. |
 | `bmc_session_lockout_threshold` | `u32` | `3` | `security` | Consecutive BMC HTTP 401/403 responses before session-token login attempts stop for that BMC. |
 | `bmc_max_sessions_per_caller` | `usize` | `4` | `security` | Cap on outstanding Redfish sessions per calling service identity per BMC; a `GetBmcCredentials` mint past the cap revokes that caller's oldest sessions. Values below 1 are treated as 1. |
+| `bmc_proxy` | `Option<BmcProxyConfig>` | — | `security` | Routes this instance's ordinary BMC Redfish traffic — including established-endpoint credentialed exploration — through nico-bmc-proxy. Credential setup and rotation, session minting, exploration's anonymous vendor probes, and component-manager compute-tray power control (explicit per-endpoint credentials) always stay direct. |
 | `ib_fabrics` | `HashMap<String, IbFabricDefinition>` | `{}` | `hardware` | InfiniBand fabrics managed by the site. Currently only one fabric is supported. |
 | `initial_domain_name` | `Option<String>` | — | `machines` | Domain to create if none exist. Most sites use a single domain. |
 | `initial_dpu_agent_upgrade_policy` | `Option<AgentUpgradePolicyChoice>` | — | `machines` | Policy for nico-dpu-agent upgrades. Also settable via `nico-admin-cli`. |
@@ -304,6 +305,78 @@ available for topology-specific flows.
 ---
 
 ## Sub-Structs
+
+### `BmcProxyConfig` — `bmc_proxy`
+
+Routes `nico-api` BMC Redfish traffic through `nico-bmc-proxy`. The proxy
+authenticates upstream itself, so clients from the proxied pools carry no BMC
+credentials.
+
+The proxied pools handle:
+
+- Machine-lifecycle Redfish traffic.
+- Credentialed exploration for endpoints with established stored root
+  credentials. The proxy resolves the same per-BMC credential key.
+
+Some traffic remains on the direct pools:
+
+- Every exploration cycle starts with a direct anonymous service-root probe
+  because vendor detection has no proxy path.
+- The power-shelf vendor fallback authenticates directly.
+- Component-manager compute-tray power control—the `core` compute-tray
+  backend and standalone servers—uses explicit per-endpoint credentials.
+- Credential-subject operations remain direct: first-contact exploration,
+  credential setup with factory or expected credentials, BMC session minting,
+  password rotation, and UEFI password management.
+
+The proxied pool rejects explicit credentials, so a misrouted request returns
+an error. The proxy presents a verifiable certificate, and connections to it
+keep certificate verification enabled.
+
+Keep these constraints in mind:
+
+- **Precedence.** This static section is independent of the dynamic
+  `site_explorer.bmc_proxy` development redirect configured by the
+  `set bmc-proxy` CLI command. The proxied pool ignores the dynamic redirect,
+  and the admin Redfish passthrough uses this section when both are configured.
+  The dynamic redirect continues to apply to clients from the direct pools.
+- **Basic authentication.** For BMCs without a `SessionService`, the proxy
+  uses HTTP Basic authentication. `GetBmcCredentials` provides these
+  credentials only when `allow_bmc_basic_auth_fallback` is enabled.
+  Otherwise, the BMC is unreachable through the proxied pool.
+- **Port.** `nico-bmc-proxy` always connects to the BMC through the standard
+  HTTPS port, 443. A BMC recorded with another Redfish port returns a
+  client-creation error that identifies the unsupported port.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | `bool` | `false` | Master switch for routing through `nico-bmc-proxy`. When `false`, traffic uses the direct pools; the independent dynamic `site_explorer.bmc_proxy` redirect remains in effect. |
+| `address` | `String` | `""` | Proxy address as `host:port` or `host` (the port defaults to the BMC proxy's 1079). Required when `enabled` is true; startup fails on an enabled section with an empty `address`. |
+| `client_cert` | `String` | `/var/run/secrets/spiffe.io/tls.crt` | PEM client certificate presented to the proxy's mTLS listener. |
+| `client_key` | `String` | `/var/run/secrets/spiffe.io/tls.key` | PEM private key for `client_cert`. |
+| `root_ca` | `String` | `/var/run/secrets/spiffe.io/ca.crt` | PEM bundle that verifies the proxy's server certificate. |
+
+#### Certificate lifecycle
+
+`client_cert`, `client_key`, and `root_ca` are read from disk, so certificate
+rotation is picked up without a restart:
+
+- The proxied Redfish pool and the admin passthrough client read the files at
+  startup, and an unreadable file fails startup. Each rebuilds its TLS client
+  from disk on the first request after a five-minute interval. A failed rebuild
+  keeps the previous client in service, increments
+  `carbide_api_bmc_proxy_client_reload_failures_total`, and defers the next
+  attempt until another five-minute interval has passed.
+- The nv-redfish proxied pool that site-explorer uses builds its client on
+  first use and rebuilds it at most once per five-minute interval, off the
+  request path. A failed rebuild keeps the previous client and logs a warning.
+  Until a first client exists, every request retries the build and returns the
+  read error.
+
+Rotate so that the outgoing certificate stays valid for at least five minutes
+after the new files are written, and alert on the reload-failure counter: a
+persistent failure means proxied BMC traffic stops when the stale certificate
+expires.
 
 ### `ApiAdmissionControlConfig`
 
@@ -859,7 +932,7 @@ events, so consumers handle them identically.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `enabled` | `bool` | `false` | Enable DPF Kubernetes deployment. |
-| `deployment_scoped_service_interfaces` | `bool` | `false` | Opt the complete DPF namespace into deployment-scoped `-bf3`, `-bf4`, and `-astra` DPUServiceInterfaces. Each resource selects Nodes in the remote DPU cluster through DPF's propagated `svc.dpu.nvidia.com/owned-by-dpudeployment=<namespace>_<deployment_name>` ownership label; management-cluster DPUNode deployment labels are not used for this selector. Enabling or disabling is a planned migration: stop NICo, remove old-mode NICo ServiceInterfaces in both transition directions, perform DPU re-ingestion, and restart. NICo neither detects nor deletes old-mode resources; skipping cleanup can leave competing interface generations active. Astra requires this setting. |
+| `deployment_scoped_service_interfaces` | `bool` | `false` | Migration knob for deployment-scoped DPUServiceInterfaces. BF3 sites (including BF3 GB200) and BF4-generic-only sites use unscoped interfaces by default for backward compatibility. BF4 Astra requires this setting so the whole DPF namespace uses scoped ServiceInterfaces and legacy unscoped ServiceInterfaces cannot also bind Astra nodes. When enabled, NICo removes legacy unscoped ServiceInterfaces before creating scoped replacements. If cleanup remains incomplete for ten minutes, NICo logs an error and continues waiting. If an operator manually completes unscoped cleanup, NICo creates scoped replacements. The setting is read only at startup. To return to unscoped interfaces, stop NICo, delete the scoped ServiceInterfaces and wait for their deletion, then restart NICo with this set to `false`. If scoped ServiceInterfaces exist, DPF initialization rejects a `false` value. |
 | `pf_total_sf_reserved` | `u32` | `30` | SF capacity reserved beyond the NICo-managed HBN, DHCP, and FMDS endpoints when an intercept-bridging inventory is configured. NICo sets `PF_TOTAL_SF` to the effective inventory's endpoint count plus this value for BF3 and generic BF4. Without configured intercept bridging, this value is the complete `PF_TOTAL_SF`, preserving the legacy default of `30`; BF4 Astra retains its fixed flavor and ignores this setting. Changing this value changes the BF3/generic-BF4 flavor. Every intercept-inventory change requires controlled ServiceInterface cleanup and DPU re-ingestion, even when the serialized flavor and its hash remain unchanged. Operators must select a value compatible with their platform's SF and BAR capacity. With configured intercept bridging, startup rejects configurations whose managed endpoint count plus reserve exceeds `u32::MAX`. |
 | `dpu_service_sync_enabled` | `bool` | `true` | Whether NICo rolls a changed DPUService out on its own, by releasing the DPF maintenance hold on hosts whose DPUs already match their DPUDeployment. Selects *who* opens the gate, never whether one exists: DPF is always configured to park a changed DPUService behind a hold, so no service update reaches a DPU unchecked. Setting `false` does not resume unchecked rollout — the held DPUs wait for an operator to release them deliberately. Hosts still awaiting reprovisioning, and hosts carrying a live tenant instance, keep their hold either way. |
 | `dpu_agent_bootstrap_ca` | `DpfDpuAgentBootstrapCa` | `legacy_download` | Bootstrap trust for the containerized DPU agent. Supports `legacy_download` and `mounted`, as described in the following examples. |

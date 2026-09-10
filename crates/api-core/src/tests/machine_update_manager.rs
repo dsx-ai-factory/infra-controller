@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use carbide_machine_controller::health_report::create_host_update_health_report;
-use carbide_uuid::machine::{HostMachineId, MachineId};
+use carbide_uuid::machine::HostMachineId;
 use common::api_fixtures::create_test_env;
 use figment::Figment;
 use figment::providers::{Format, Toml};
@@ -45,8 +45,8 @@ const TEST_DATA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/cfg/test_d
 
 #[derive(Clone)]
 struct TestUpdateModule {
-    pub(in crate::tests) updates_in_progress: Vec<MachineId>,
-    pub(in crate::tests) updates_started: HashSet<MachineId>,
+    pub(in crate::tests) updates_in_progress: Vec<HostMachineId>,
+    pub(in crate::tests) updates_started: HashSet<HostMachineId>,
     start_updates_called: Arc<Mutex<i32>>,
     clear_completed_updates_called: Arc<Mutex<i32>>,
 }
@@ -56,7 +56,7 @@ impl MachineUpdateModule for TestUpdateModule {
     async fn get_updates_in_progress(
         &self,
         _txn: &mut PgConnection,
-    ) -> CarbideResult<HashSet<MachineId>> {
+    ) -> CarbideResult<HashSet<HostMachineId>> {
         Ok(self.updates_in_progress.clone().into_iter().collect())
     }
 
@@ -64,9 +64,9 @@ impl MachineUpdateModule for TestUpdateModule {
         &self,
         _pool: &sqlx::Pool<sqlx::Postgres>,
         _available_updates: i32,
-        _updating_machines: &HashSet<MachineId>,
+        _updating_machines: &HashSet<HostMachineId>,
         _snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
-    ) -> CarbideResult<HashSet<MachineId>> {
+    ) -> CarbideResult<HashSet<HostMachineId>> {
         if let Ok(mut guard) = self.start_updates_called.lock() {
             (*guard) += 1;
         }
@@ -92,8 +92,8 @@ impl MachineUpdateModule for TestUpdateModule {
 
 impl TestUpdateModule {
     pub(in crate::tests) fn new(
-        updates_in_progress: Vec<MachineId>,
-        updates_started: HashSet<MachineId>,
+        updates_in_progress: Vec<HostMachineId>,
+        updates_started: HashSet<HostMachineId>,
     ) -> Self {
         TestUpdateModule {
             updates_in_progress,
@@ -123,7 +123,7 @@ async fn test_max_outstanding_updates(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     create_managed_host(&env).await;
-    let (_, dpu_machine_id) = create_managed_host(&env).await.into();
+    let (host_machine_id, _) = create_managed_host(&env).await.into();
 
     let config: Arc<CarbideConfig> = Arc::new(
         Figment::new()
@@ -133,7 +133,7 @@ async fn test_max_outstanding_updates(
     );
 
     let mut machines_started = HashSet::default();
-    machines_started.insert(dpu_machine_id.into());
+    machines_started.insert(host_machine_id.into());
 
     let module1 = Box::new(TestUpdateModule::new(vec![], machines_started));
     let module2 = Box::new(TestUpdateModule::new(vec![], HashSet::default()));
@@ -165,7 +165,7 @@ async fn test_remove_machine_update_markers(
     let (host_machine_id, dpu_machine_id) = create_managed_host(&env).await.into();
 
     let machine_update = DpuMachineUpdate {
-        host_machine_id,
+        host_machine_id: host_machine_id.into(),
         dpu_machine_id,
         firmware_version: "1".to_owned(),
         dpf_managed: false,

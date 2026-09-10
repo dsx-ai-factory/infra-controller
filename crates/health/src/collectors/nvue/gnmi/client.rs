@@ -30,7 +30,10 @@ use super::proto::{
     SubscriptionMode,
 };
 use crate::HealthError;
-use crate::config::{MtlsProfileConfig, NvueGnmiPaths};
+use crate::config::{
+    MtlsProfileConfig, NvueGnmiEncoding, NvueGnmiPaths, NvueGnmiSubscriptionConfig,
+    NvueGnmiSubscriptionMode,
+};
 
 pub(super) fn nvue_subscribe_paths(paths_config: &NvueGnmiPaths) -> Vec<Path> {
     let mut paths = Vec::with_capacity(5);
@@ -277,20 +280,8 @@ impl GnmiClient {
         paths: &[Path],
         sample_interval_nanos: u64,
     ) -> Result<tonic::Streaming<proto::SubscribeResponse>, HealthError> {
-        let mut client = self.connect().await?;
-
         let subscribe_request = build_sample_subscribe_request(paths, sample_interval_nanos);
-
-        let auth = build_auth_metadata(&self.username, &self.password)?;
-
-        let stream = tokio_stream::once(subscribe_request).chain(tokio_stream::pending());
-
-        let request = Request::from_parts(auth, Extensions::default(), stream);
-
-        let response = client
-            .subscribe(request)
-            .await
-            .map_err(HealthError::GnmiStatus)?;
+        let response = self.subscribe_request(subscribe_request).await?;
 
         tracing::debug!(
             switch_id = %self.switch_id,
@@ -299,7 +290,7 @@ impl GnmiClient {
             "gNMI SAMPLE stream opened"
         );
 
-        Ok(response.into_inner())
+        Ok(response)
     }
 
     /// open a gNMI ON_CHANGE streaming subscription
@@ -308,26 +299,31 @@ impl GnmiClient {
         prefix: &Path,
         paths: &[Path],
     ) -> Result<tonic::Streaming<proto::SubscribeResponse>, HealthError> {
-        let mut client = self.connect().await?;
-
         let subscribe_request = build_on_change_subscribe_request(prefix, paths);
-
-        let auth = build_auth_metadata(&self.username, &self.password)?;
-
-        let stream = tokio_stream::once(subscribe_request).chain(tokio_stream::pending());
-
-        let request = Request::from_parts(auth, Extensions::default(), stream);
-
-        let response = client
-            .subscribe(request)
-            .await
-            .map_err(HealthError::GnmiStatus)?;
+        let response = self.subscribe_request(subscribe_request).await?;
 
         tracing::debug!(
             switch_id = %self.switch_id,
             rack_id = self.rack_id.as_ref().map(tracing::field::display),
             "gNMI ON_CHANGE stream opened"
         );
+
+        Ok(response)
+    }
+
+    pub(super) async fn subscribe_request(
+        &self,
+        subscribe_request: SubscribeRequest,
+    ) -> Result<tonic::Streaming<proto::SubscribeResponse>, HealthError> {
+        let mut client = self.connect().await?;
+        let auth = build_auth_metadata(&self.username, &self.password)?;
+        let stream = tokio_stream::once(subscribe_request).chain(tokio_stream::pending());
+        let request = Request::from_parts(auth, Extensions::default(), stream);
+
+        let response = client
+            .subscribe(request)
+            .await
+            .map_err(HealthError::GnmiStatus)?;
 
         Ok(response.into_inner())
     }
@@ -401,6 +397,93 @@ fn build_sample_subscribe_request(paths: &[Path], sample_interval_nanos: u64) ->
         )),
         extension: vec![],
     }
+}
+
+/// Builds a fixed-STREAM request from one validated additional subscription.
+pub(super) fn build_extended_subscribe_request(
+    config: &NvueGnmiSubscriptionConfig,
+) -> Result<SubscribeRequest, HealthError> {
+    let prefix = Path {
+        origin: config.origin.clone(),
+        elem: path_elements(&config.prefix),
+        target: config.target.clone(),
+        ..Default::default()
+    };
+
+    let subscription = config
+        .paths
+        .iter()
+        .map(|path| {
+            Ok(Subscription {
+                path: Some(Path {
+                    elem: path_elements(path),
+                    ..Default::default()
+                }),
+                mode: match config.mode {
+                    NvueGnmiSubscriptionMode::TargetDefined => SubscriptionMode::TargetDefined,
+                    NvueGnmiSubscriptionMode::OnChange => SubscriptionMode::OnChange,
+                    NvueGnmiSubscriptionMode::Sample => SubscriptionMode::Sample,
+                }
+                .into(),
+                sample_interval: duration_nanos(
+                    config.sample_interval,
+                    "sample_interval",
+                    &config.name,
+                )?,
+                suppress_redundant: config.suppress_redundant,
+                heartbeat_interval: duration_nanos(
+                    config.heartbeat_interval,
+                    "heartbeat_interval",
+                    &config.name,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, HealthError>>()?;
+
+    Ok(SubscribeRequest {
+        request: Some(proto::subscribe_request::Request::Subscribe(
+            SubscriptionList {
+                prefix: Some(prefix),
+                subscription,
+                mode: SubscriptionListMode::Stream.into(),
+                encoding: match config.encoding {
+                    NvueGnmiEncoding::Json => Encoding::Json,
+                    NvueGnmiEncoding::Ascii => Encoding::Ascii,
+                    NvueGnmiEncoding::JsonIetf => Encoding::JsonIetf,
+                }
+                .into(),
+                updates_only: config.updates_only,
+                ..Default::default()
+            },
+        )),
+        extension: Vec::new(),
+    })
+}
+
+fn path_elements(elements: &[String]) -> Vec<PathElem> {
+    elements
+        .iter()
+        .map(|name| PathElem {
+            name: name.clone(),
+            key: Default::default(),
+        })
+        .collect()
+}
+
+fn duration_nanos(
+    duration: Option<Duration>,
+    field: &str,
+    subscription_name: &str,
+) -> Result<u64, HealthError> {
+    let Some(duration) = duration else {
+        return Ok(0);
+    };
+
+    u64::try_from(duration.as_nanos()).map_err(|_| {
+        HealthError::GnmiError(format!(
+            "extended gNMI subscription {subscription_name:?} {field} does not fit in u64 nanoseconds"
+        ))
+    })
 }
 
 fn build_auth_metadata(
@@ -941,5 +1024,61 @@ mod tests {
                 .is_some_and(|path| path.elem.is_empty()),
             "empty path subscribes to all events under prefix"
         );
+    }
+
+    #[test]
+    fn extended_subscribe_request_preserves_subscription_contract() {
+        let config = NvueGnmiSubscriptionConfig {
+            name: "external_metrics".to_string(),
+            target: "switch".to_string(),
+            origin: "openconfig".to_string(),
+            prefix: vec!["interfaces".to_string()],
+            encoding: NvueGnmiEncoding::JsonIetf,
+            updates_only: true,
+            mode: NvueGnmiSubscriptionMode::Sample,
+            sample_interval: Some(Duration::from_secs(10)),
+            suppress_redundant: true,
+            heartbeat_interval: Some(Duration::from_secs(60)),
+            paths: vec![
+                vec!["interface".to_string(), "state".to_string()],
+                vec!["interface".to_string(), "counter".to_string()],
+            ],
+            metrics: Vec::new(),
+        };
+
+        let request = build_extended_subscribe_request(&config)
+            .expect("validated extended request should build");
+
+        let Some(proto::subscribe_request::Request::Subscribe(list)) = request.request else {
+            panic!("extended request should contain a subscription list");
+        };
+
+        assert_eq!(list.mode, i32::from(SubscriptionListMode::Stream));
+        assert_eq!(list.encoding, i32::from(Encoding::JsonIetf));
+        assert!(list.updates_only);
+
+        let prefix = list
+            .prefix
+            .expect("extended request should contain a prefix");
+
+        assert_eq!(prefix.target, "switch");
+        assert_eq!(prefix.origin, "openconfig");
+        assert_eq!(prefix.elem[0].name, "interfaces");
+
+        assert_eq!(list.subscription.len(), 2);
+
+        for subscription in &list.subscription {
+            assert_eq!(subscription.mode, i32::from(SubscriptionMode::Sample));
+            assert_eq!(subscription.sample_interval, 10_000_000_000);
+            assert!(subscription.suppress_redundant);
+            assert_eq!(subscription.heartbeat_interval, 60_000_000_000);
+        }
+
+        assert!(list.subscription.iter().all(|subscription| {
+            subscription
+                .path
+                .as_ref()
+                .is_some_and(|path| path.elem.iter().all(|element| element.key.is_empty()))
+        }));
     }
 }

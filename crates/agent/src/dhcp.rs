@@ -44,6 +44,11 @@ pub(super) const RELOAD_DHCP_SERVER: &str =
 pub(super) const STOP_DHCP_SERVER: &str =
     "supervisorctl update;supervisorctl stop forge-dhcp-server-default";
 
+/// Preferred lifetime advertised for DPU-side DHCPv6 address bindings.
+pub(super) const DHCPV6_PREFERRED_LIFETIME_SECS: u32 = 3600;
+/// Valid lifetime advertised for DPU-side DHCPv6 address bindings.
+pub(super) const DHCPV6_VALID_LIFETIME_SECS: u32 = 7200;
+
 /// Generate default-forge-dhcp-server.conf
 pub(super) fn build_server_supervisord_config(
     conf: DhcpServerSupervisordConfig,
@@ -63,17 +68,24 @@ pub(super) fn blank() -> String {
 pub(super) fn build_server_config(
     pxe_ip: Ipv4Addr,
     ntpservers: Vec<Ipv4Addr>,
+    ntpservers_v6: Vec<Ipv6Addr>,
     nameservers: Vec<Ipv4Addr>,
     nameservers_v6: Vec<Ipv6Addr>,
     loopback_ip: Ipv4Addr,
 ) -> Result<String, eyre::Report> {
-    let dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig::from_forge_dhcp_config(
+    let mut dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig::from_forge_dhcp_config(
         pxe_ip,
         ntpservers,
         nameservers,
         nameservers_v6,
         loopback_ip,
     )?;
+
+    // The legacy constructor owns common/v4 fields; apply the new v6-only
+    // option source and explicit nonzero address lifetimes here.
+    dhcp_config.carbide_ntpservers_v6 = ntpservers_v6;
+    dhcp_config.dhcpv6_preferred_lifetime_secs = DHCPV6_PREFERRED_LIFETIME_SECS;
+    dhcp_config.dhcpv6_valid_lifetime_secs = DHCPV6_VALID_LIFETIME_SECS;
 
     Ok(serde_yaml::to_string(&dhcp_config)?)
 }

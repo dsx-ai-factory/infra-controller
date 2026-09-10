@@ -88,7 +88,7 @@ pub(crate) async fn run_baseline_test_environment(
     let mock_bmc_handles: Vec<(MockBmcHandle, MachineId, MockBmcType)> =
         join_all(machines.iter().map(|bmc_type| {
             // Generate random machine ID's for each mocked host
-            let machine_id = carbide_uuid::machine::MachineId::new(
+            let machine_id = MachineId::new(
                 MachineIdSource::Tpm,
                 rand::random(),
                 match bmc_type {
@@ -287,6 +287,10 @@ impl BaselineTestEnvironment {
                         }
                     }
                     BaselineTestAssertion::ConnectAsInstanceId => {
+                        // Instances are assigned to stable hosts, never directly to DPUs.
+                        if mock_host.machine_id.machine_type().is_dpu() {
+                            continue;
+                        }
                         let connection_config = ConnectionConfig {
                             connection_name: &format!("{connection_name} to instance").to_string(),
                             user: &mock_host.instance_id.to_string(),

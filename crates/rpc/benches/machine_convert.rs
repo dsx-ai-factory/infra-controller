@@ -27,6 +27,7 @@
 
 use std::hint::black_box;
 
+use carbide_uuid::machine::MachineIdSubtypeTrait;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use model::machine::Machine;
 use model::test_support::alloc_counter::{CountingAllocator, measure_allocs};
@@ -35,7 +36,7 @@ use model::test_support::machine_snapshot;
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
 
-fn clone_and_convert(machine: &Machine) -> rpc::forge::Machine {
+fn clone_and_convert<ID: MachineIdSubtypeTrait>(machine: &Machine<ID>) -> rpc::forge::Machine {
     machine.clone().into()
 }
 

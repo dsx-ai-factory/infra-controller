@@ -21,7 +21,8 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 
 use crate::component_manager::common::{
     ComputeTrayComponentArg, ComputeTraySelection, ComputeTrayTargetArgs, NvSwitchComponentArg,
-    PowerShelfComponentArg, PowerShelfTargetArgs, RackTargetArgs, SwitchTargetArgs,
+    PowerShelfComponentArg, PowerShelfTargetArgs, RackTargetArgs, SwitchSelection,
+    SwitchTargetArgs,
 };
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
@@ -37,6 +38,10 @@ Update only specific switch components, forcing the update:
     $ nico-admin-cli component-manager update-firmware switch \
     --switch-id 12345678-1234-5678-90ab-cdef01234567 --component bmc,bios --force-update \
     --target-version fw-1.2.3
+
+Queue firmware on a switch by BMC MAC (targets the switch before ingestion):
+    $ nico-admin-cli component-manager update-firmware switch \
+    --mac-address 00:11:22:33:44:55 --target-version fw-1.2.3
 
 Queue firmware on compute trays from an RMS SOT JSON file:
     $ nico-admin-cli component-manager update-firmware compute-tray \
@@ -242,9 +247,14 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                     force_update: target.force_update,
                     bypass_state_controller: target.bypass_state_controller,
                     target: Some(
-                        rpc::forge::update_component_firmware_request::Target::Switches(
+                        rpc::forge::update_component_firmware_request::Target::Switches({
+                            let (switch_ids, bmc_macs) = match target.ids.into_selection() {
+                                SwitchSelection::SwitchIds(list) => (Some(list), None),
+                                SwitchSelection::Macs(macs) => (None, Some(macs)),
+                            };
                             rpc::forge::UpdateSwitchFirmwareTarget {
-                                switch_ids: Some(target.ids.into()),
+                                switch_ids,
+                                bmc_macs,
                                 components: target
                                     .components
                                     .into_iter()
@@ -252,8 +262,8 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                                         rpc::forge::NvSwitchComponent::from(component) as i32
                                     })
                                     .collect(),
-                            },
-                        ),
+                            }
+                        }),
                     ),
                 })
             }
@@ -499,6 +509,10 @@ mod tests {
 
         assert_eq!(switch_ids.ids.len(), 1);
         assert_eq!(switch_ids.ids[0].to_string(), SWITCH_ID);
+        assert!(
+            target.bmc_macs.is_none(),
+            "switch-id target must not also set bmc_macs",
+        );
 
         assert_eq!(
             target.components,
@@ -507,6 +521,34 @@ mod tests {
                 rpc::forge::NvSwitchComponent::Nvos as i32,
             ]
         );
+
+        let switch_mac_request = rpc::forge::UpdateComponentFirmwareRequest::try_from(
+            Args::try_parse_from([
+                "update-firmware",
+                "switch",
+                "--mac-address",
+                MAC_ADDRESS,
+                "--target-version",
+                "fw-1.2.3",
+            ])
+            .expect("switch MAC command should parse"),
+        )
+        .expect("switch MAC command should build a request");
+
+        let Some(rpc::forge::update_component_firmware_request::Target::Switches(target)) =
+            switch_mac_request.target
+        else {
+            panic!("switch MAC command should build a switch target");
+        };
+
+        let Some(bmc_macs) = target.bmc_macs else {
+            panic!("switch MAC command should build a bmc-macs target");
+        };
+        assert!(
+            target.switch_ids.is_none(),
+            "MAC target must not also set switch_ids",
+        );
+        assert_eq!(bmc_macs.mac_addresses, [MAC_ADDRESS]);
 
         let compute_request = rpc::forge::UpdateComponentFirmwareRequest::try_from(
             Args::try_parse_from([

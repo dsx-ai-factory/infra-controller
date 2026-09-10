@@ -8,12 +8,12 @@ use std::time::Duration;
 use carbide_rack::firmware_object::rack_maintenance_access_token_key;
 use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_secrets::credentials::{CredentialManager, Credentials};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use db::{ObjectColumnFilter, WithTransaction};
 use librms::RmsApi;
-use model::machine::MachineMaintenanceOperation;
+use model::machine::{HostMachine, MachineMaintenanceOperation};
 use model::rack::{MaintenanceActivity, MaintenanceScope, RackState};
 use model::rack_type::{RackHardwareTopology, RackProfileConfig};
 use model::switch::SwitchMaintenanceOperation;
@@ -62,7 +62,7 @@ pub struct SwitchMaintenanceRequestResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineMaintenanceRequestResult {
-    pub machine_id: MachineId,
+    pub machine_id: HostMachineId,
     pub error: Option<String>,
 }
 
@@ -366,7 +366,7 @@ impl ComponentManager {
     pub async fn request_machine_maintenance_via_state_controller(
         &self,
         db_pool: &PgPool,
-        machine_ids: &[MachineId],
+        machine_ids: &[HostMachineId],
         operation: MachineMaintenanceOperation,
         initiator: &str,
     ) -> Result<Vec<MachineMaintenanceRequestResult>, ComponentManagerError> {
@@ -390,7 +390,7 @@ impl ComponentManager {
                     .await
                     .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
 
-                    let by_id: HashMap<MachineId, model::machine::Machine> = existing
+                    let by_id: HashMap<HostMachineId, HostMachine> = existing
                         .into_iter()
                         .map(|machine| (machine.id, machine))
                         .collect();
@@ -404,14 +404,6 @@ impl ComponentManager {
                             });
                             continue;
                         };
-
-                        if !machine_id.machine_type().is_host() {
-                            results.push(MachineMaintenanceRequestResult {
-                                machine_id: *machine_id,
-                                error: Some(format!("machine {machine_id} is not a host machine")),
-                            });
-                            continue;
-                        }
 
                         if matches!(
                             machine.state.value,
@@ -781,6 +773,7 @@ pub async fn build_component_manager(
 
 #[cfg(test)]
 mod tests {
+    use api_test_helper::mock_rms::MockRmsApi;
     use async_trait::async_trait;
     use carbide_secrets::SecretsError;
     use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialWriter};
@@ -1402,6 +1395,34 @@ mod tests {
         assert_eq!(cm.nv_switch.name(), "mock-nsm");
         assert_eq!(cm.power_shelf.name(), "mock-psm");
         assert_eq!(cm.compute_tray.name(), "mock-ctm");
+    }
+
+    #[tokio::test]
+    async fn rms_password_rotation_support_ignores_legacy_config() {
+        let config = ComponentManagerConfig {
+            nv_switch_backend: NvSwitchBackend::Rms,
+            power_shelf_backend: PowerShelfBackend::Mock,
+            compute_tray_backend: ComputeBackend::Mock,
+            nvos_password_rotation_enabled: false,
+            ..Default::default()
+        };
+
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://postgres:postgres@localhost/test")
+            .expect("test database URL should be valid");
+
+        let cm = build_component_manager(
+            &config,
+            rms_rack_profiles(rms_rack_profile()),
+            Some(Arc::new(MockRmsApi::new())),
+            None,
+            Some(db),
+            None,
+        )
+        .await
+        .expect("RMS switch backend should build");
+
+        assert!(cm.nv_switch.supports_password_rotation());
     }
 
     #[test]

@@ -47,6 +47,7 @@ impl TryFrom<Args> for forgerpc::CredentialCreationRequest {
             password: args.token,
             mac_address: None,
             vendor: None,
+            credential_name: None,
         })
     }
 }

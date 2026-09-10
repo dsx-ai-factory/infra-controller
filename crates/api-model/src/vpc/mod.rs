@@ -117,6 +117,7 @@ pub struct VpcDefinition {
 pub struct VpcSearchFilter {
     pub name: Option<String>,
     pub tenant_org_id: Option<String>,
+    pub network_virtualization_type: Option<VpcVirtualizationType>,
     pub label: Option<LabelFilter>,
 }
 

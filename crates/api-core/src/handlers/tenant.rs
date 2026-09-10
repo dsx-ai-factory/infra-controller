@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
+use carbide_network::virtualization::VpcVirtualizationType;
 use model::ConfigValidationError;
 use model::metadata::Metadata;
 use tonic::{Request, Response, Status};
@@ -210,6 +211,14 @@ pub(crate) async fn update(
         .into());
     };
 
+    // FNN tenant policy must always have a named profile from which VPC policy can inherit.
+    if api.runtime_config.fnn.is_some() && routing_profile_type.is_none() {
+        return Err(CarbideError::InvalidArgument(
+            "`routing_profile_type` is required when FNN is enabled".to_string(),
+        )
+        .into());
+    }
+
     // We won't use it if FNN isn't enabled, but we can still map so a caller integrating
     // with us before FNN is enabled on a site will be told if they're sending invalid values.
     if let Some(profile) = routing_profile_type.as_ref() {
@@ -230,18 +239,14 @@ pub(crate) async fn update(
         }
     };
 
-    // If a tenant routing profile is being updated,
-    // it can only be allowed if there are no existing VPCs
-    // for the tenant.  Technically, at the moment, it's probably
-    // ok to allow it as long it's not switching between profiles
-    // that have a differing `internal` value (e.g., switching from
-    // internal==true to false), but total restriction is safer
-    // and easy to loosen later if we find we need it.
+    // Tenant routing profiles affect only FNN VPC policy, so non-FNN VPCs do not block
+    // an update needed to prepare a historical profileless tenant for FNN.
     if current_tenant.routing_profile_type != routing_profile_type
         && !db::vpc::find_ids(
             &mut txn,
             model::vpc::VpcSearchFilter {
                 tenant_org_id: Some(organization_id.clone()),
+                network_virtualization_type: Some(VpcVirtualizationType::Fnn),
                 ..Default::default()
             },
         )
@@ -249,7 +254,7 @@ pub(crate) async fn update(
         .is_empty()
     {
         return Err(CarbideError::FailedPrecondition(
-            "cannot update tenant routing profile type for tenant with active VPCs".to_string(),
+            "cannot update tenant routing profile type for tenant with active FNN VPCs".to_string(),
         )
         .into());
     }

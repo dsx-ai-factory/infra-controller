@@ -307,6 +307,7 @@ pub fn parse_carbide_config(
 
     // Validate that admin-UI tool entries have unique names.
     config.validate_web_ui_sidebar_tools()?;
+    config.validate_service_vpc_slots()?;
     config.api_admission_control.validate()?;
 
     if let Some(config) = &config.dsx_exchange_event_bus {

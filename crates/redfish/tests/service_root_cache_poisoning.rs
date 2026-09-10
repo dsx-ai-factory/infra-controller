@@ -144,7 +144,7 @@ async fn poisoned_service_root_cache_recovers_after_bmc_heals() {
     // 1st exploration: the BMC transiently serves a Chassis-less root, which
     // must NOT be cached.
     let first = pool
-        .service_root_with_cache_predicate(addr, creds(), root_has_chassis)
+        .service_root_with_cache_predicate(addr, Some(creds()), root_has_chassis)
         .await
         .unwrap();
     assert!(
@@ -157,7 +157,7 @@ async fn poisoned_service_root_cache_recovers_after_bmc_heals() {
     // root was rejected by the cache predicate, the pool must re-fetch and
     // observe the recovered root.
     let second = pool
-        .service_root_with_cache_predicate(addr, creds(), root_has_chassis)
+        .service_root_with_cache_predicate(addr, Some(creds()), root_has_chassis)
         .await
         .unwrap();
 
@@ -176,7 +176,7 @@ async fn poisoned_service_root_cache_recovers_after_bmc_heals() {
     // The recovered root passed the predicate, so it IS cached now: a third
     // call must be served from cache with no extra fetch.
     let third = pool
-        .service_root_with_cache_predicate(addr, creds(), root_has_chassis)
+        .service_root_with_cache_predicate(addr, Some(creds()), root_has_chassis)
         .await
         .unwrap();
     assert_eq!(root_hits.load(Ordering::SeqCst), 2);
@@ -199,8 +199,8 @@ async fn expired_service_root_is_refetched_without_invalidating_existing_holders
         password: "placeholder".to_string(),
     };
 
-    let first = pool.service_root(addr, creds()).await.unwrap();
-    let second = pool.service_root(addr, creds()).await.unwrap();
+    let first = pool.service_root(addr, Some(creds())).await.unwrap();
+    let second = pool.service_root(addr, Some(creds())).await.unwrap();
 
     assert_eq!(
         root_hits.load(Ordering::SeqCst),

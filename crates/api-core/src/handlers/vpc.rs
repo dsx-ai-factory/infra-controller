@@ -20,6 +20,7 @@ use ::rpc::network::vpc_virtualization_type_try_from_rpc;
 use carbide_network::virtualization::{DEFAULT_NETWORK_VIRTUALIZATION_TYPE, VpcVirtualizationType};
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::vpc::VpcId;
+use config_version::ConfigVersion;
 use db::resource_pool::ResourcePoolDatabaseError;
 use db::vpc::{self};
 use db::{self, ObjectColumnFilter, network_security_group};
@@ -46,24 +47,10 @@ pub(crate) async fn create(
     let mut txn = api.txn_begin().await?;
 
     // Grab the tenant details and a row-lock if found so we can coordinate around the tenant record.
-    // If we're still allowing VPC creation for tenant org IDs that don't actually exist
-    // in the DB, we're limited with the coordinating we can do, but it also doesn't matter
-    // because those VPCs are going to default to external and force us to deal with the missing,
-    // tenant records.
+    // Missing tenants remain supported for non-FNN VPCs; FNN creation rejects them below after
+    // resolving the requested virtualization type.
     let tenant =
         db::tenant::find(&vpc_creation_request.tenant_organization_id, true, &mut txn).await?;
-
-    // A lot of tests seem to still allow tenant IDs for tenants that don't
-    // exist.  We should audit and see if there are still sites with missing tenants
-    // if we expect NICo-core to have knowledge of tenants.  Otherwise, this would just go away
-    // when we _remove_ any expectation of tenant knowledge from NICo-core, and the details we
-    // need from tenant would just come in from the VPC creation request.
-    if tenant.is_none() {
-        tracing::warn!(
-            tenant_organization_id = vpc_creation_request.tenant_organization_id.clone(),
-            "Database record for tenant ID in VPC creation request not found"
-        );
-    };
 
     if let Some(ref nsg_id) = vpc_creation_request.network_security_group_id {
         let id = nsg_id.parse::<NetworkSecurityGroupId>().map_err(|e| {
@@ -107,6 +94,23 @@ pub(crate) async fn create(
         None => DEFAULT_NETWORK_VIRTUALIZATION_TYPE,
         Some(v) => vpc_virtualization_type_try_from_rpc(v).map_err(CarbideError::from)?,
     };
+
+    // FNN routing policy requires tenant context for inheritance and authorization.
+    if requested_virtualization_type == VpcVirtualizationType::Fnn && tenant.is_none() {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "tenant `{}` must exist before creating an FNN VPC",
+            vpc_creation_request.tenant_organization_id
+        ))
+        .into());
+    }
+
+    // Non-FNN VPC creation retains the legacy missing-tenant behavior.
+    if tenant.is_none() {
+        tracing::warn!(
+            tenant_organization_id = vpc_creation_request.tenant_organization_id.clone(),
+            "Database record for tenant ID in VPC creation request not found"
+        );
+    }
 
     if vpc_creation_request.routing_profile_type.is_some()
         || vpc_creation_request.routing_profile_overrides.is_some()
@@ -259,6 +263,145 @@ pub(crate) async fn update(
     }))
 }
 
+/// Releases the operator-selected inactive allocation without changing VPC configuration.
+pub(crate) async fn release_inactive_vni(
+    api: &Api,
+    request: Request<rpc::VpcReleaseInactiveVniRequest>,
+) -> Result<Response<rpc::VpcReleaseInactiveVniResult>, Status> {
+    log_request_data(&request);
+    let request = request.into_inner();
+    let vpc_id = request.id.ok_or(CarbideError::MissingArgument("id"))?;
+    let version = request
+        .if_version_match
+        .ok_or(CarbideError::MissingArgument("if_version_match"))?;
+    let expected_version = version
+        .parse::<ConfigVersion>()
+        .map_err(|_| CarbideError::from(RpcDataConversionError::InvalidConfigVersion(version)))?;
+    let expected_inactive_vni = request
+        .expected_inactive_vni
+        .ok_or(CarbideError::MissingArgument("expected_inactive_vni"))?;
+    if !(1..=0x00ff_ffff).contains(&expected_inactive_vni) {
+        return Err(CarbideError::InvalidArgument(
+            "expected_inactive_vni must be between 1 and 16777215".to_string(),
+        )
+        .into());
+    }
+
+    let mut txn = api.txn_begin().await?;
+    let mut vpc = db::vpc::find_by_with_lock(
+        txn.as_mut(),
+        ObjectColumnFilter::One(vpc::IdColumn, &vpc_id),
+        db::vpc::VpcRowLock::Mutation,
+    )
+    .await?
+    .pop()
+    .ok_or_else(|| CarbideError::NotFoundError {
+        kind: "Vpc",
+        id: vpc_id.to_string(),
+    })?;
+
+    // Check the original version before inspecting allocations: repeating a
+    // committed request must not release a subsequently retained allocation.
+    if vpc.version != expected_version {
+        return Err(
+            CarbideError::ConcurrentModificationError("vpc", expected_version.to_string()).into(),
+        );
+    }
+
+    let released_inactive_vni =
+        release_inactive_vpc_vni(api, &mut txn, &vpc, expected_inactive_vni)
+            .await?
+            .try_into()
+            .map_err(|_| {
+                CarbideError::internal(
+                    "released VPC VNI cannot be represented by the RPC API".to_string(),
+                )
+            })?;
+    vpc.version = db::vpc::increment_vpc_version(&mut txn, vpc_id, expected_version).await?;
+
+    txn.commit().await?;
+
+    Ok(Response::new(rpc::VpcReleaseInactiveVniResult {
+        vpc: Some(vpc_to_rpc(vpc, api.runtime_config.fnn.as_ref())),
+        released_inactive_vni,
+    }))
+}
+
+async fn release_inactive_vpc_vni(
+    api: &Api,
+    txn: &mut PgConnection,
+    vpc: &model::vpc::Vpc,
+    expected_inactive_vni: u32,
+) -> Result<i32, CarbideError> {
+    let active_vni = vpc.status.vni.ok_or_else(|| {
+        CarbideError::FailedPrecondition(format!("VPC `{}` does not have an active VNI", vpc.id))
+    })?;
+
+    let internal_pool = &api.common_pools.ethernet.pool_vpc_vni;
+    let external_pool = &api.common_pools.ethernet.pool_external_vpc_vni;
+    let owner_id = vpc.id.to_string();
+    let internal_vni = db::resource_pool::find_owned_allocation(
+        internal_pool,
+        txn,
+        resource_pool::OwnerType::Vpc,
+        &owner_id,
+    )
+    .await
+    .map_err(db::DatabaseError::from)?;
+    let external_vni = db::resource_pool::find_owned_allocation(
+        external_pool,
+        txn,
+        resource_pool::OwnerType::Vpc,
+        &owner_id,
+    )
+    .await
+    .map_err(db::DatabaseError::from)?;
+
+    let (inactive_pool, inactive_vni) = match (internal_vni, external_vni) {
+        (Some(internal_vni), Some(external_vni))
+            if internal_vni == active_vni && external_vni != active_vni =>
+        {
+            (external_pool, external_vni)
+        }
+        (Some(internal_vni), Some(external_vni))
+            if external_vni == active_vni && internal_vni != active_vni =>
+        {
+            (internal_pool, internal_vni)
+        }
+        (Some(internal_vni), None) if internal_vni == active_vni => {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "VPC `{}` does not have an inactive VNI allocation (active VNI `{active_vni}`)",
+                vpc.id,
+            )));
+        }
+        (None, Some(external_vni)) if external_vni == active_vni => {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "VPC `{}` does not have an inactive VNI allocation (active VNI `{active_vni}`)",
+                vpc.id,
+            )));
+        }
+        _ => {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "VPC `{}` has inconsistent VNI allocations: active VNI `{active_vni}`, internal allocation {internal_vni:?}, external allocation {external_vni:?}",
+                vpc.id,
+            )));
+        }
+    };
+
+    if i64::from(inactive_vni) != i64::from(expected_inactive_vni) {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "VPC `{}` has inactive VNI `{inactive_vni}`, not expected VNI `{expected_inactive_vni}`",
+            vpc.id,
+        )));
+    }
+
+    // The ownership lookup holds this allocation's row lock through commit,
+    // so releasing the checked value cannot free another owner's allocation.
+    db::resource_pool::release(inactive_pool, txn, inactive_vni).await?;
+
+    Ok(inactive_vni)
+}
+
 pub(crate) async fn update_virtualization(
     api: &Api,
     request: Request<rpc::VpcUpdateVirtualizationRequest>,
@@ -338,13 +481,46 @@ pub(crate) async fn delete(
         .id
         .ok_or(CarbideError::MissingArgument("id"))?;
 
-    let vpcs = db::vpc::find_by_with_lock(
+    let vpc = db::vpc::find_by_with_lock(
         txn.as_mut(),
         ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_id),
         db::vpc::VpcRowLock::Mutation,
     )
-    .await?;
-    if vpcs.is_empty() {
+    .await?
+    .pop()
+    .ok_or_else(|| CarbideError::NotFoundError {
+        kind: "vpc",
+        id: vpc_id.to_string(),
+    })?;
+
+    // An empty VPC can still have peer DPUs importing its previous VNI.
+    // Deletion must not bypass the operator's explicit inactive-VNI release.
+    let owner_id = vpc_id.to_string();
+    let mut owned_allocation = None;
+    for pool in [
+        &api.common_pools.ethernet.pool_vpc_vni,
+        &api.common_pools.ethernet.pool_external_vpc_vni,
+    ] {
+        if let Some(vni) = db::resource_pool::find_owned_allocation(
+            pool,
+            &mut txn,
+            resource_pool::OwnerType::Vpc,
+            &owner_id,
+        )
+        .await
+        .map_err(db::DatabaseError::from)?
+        {
+            if owned_allocation.is_some() || Some(vni) != vpc.status.vni {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "VPC `{vpc_id}` has an inactive or inconsistent VNI allocation; release the inactive VNI before deleting the VPC",
+                )).into());
+            }
+            owned_allocation = Some((pool, vni));
+        }
+    }
+
+    if db::vpc::try_delete(&mut txn, vpc_id).await?.is_none() {
+        // Release an allocation only when this transaction deleted the VPC.
         return Err(CarbideError::NotFoundError {
             kind: "vpc",
             id: vpc_id.to_string(),
@@ -352,55 +528,9 @@ pub(crate) async fn delete(
         .into());
     }
 
-    let vpc = match db::vpc::try_delete(&mut txn, vpc_id).await? {
-        Some(vpc) => vpc,
-        None => {
-            // VPC didn't exist or was deleted in the past. We are not allowed
-            // to free the VNI again
-            return Err(CarbideError::NotFoundError {
-                kind: "vpc",
-                id: vpc_id.to_string(),
-            }
-            .into());
-        }
-    };
-
-    if let Some(vni) = vpc.status.vni {
-        // We can just keep deriving int/ext from the routing profile
-        // because a VPC is not allowed to change its profile after
-        // creation. VPC types that don't carry a routing profile
-        // (ETV, Flat) land in the internal pool on create -- mirror
-        // that here so the VNI is released back to the same pool.
-        let internal = match (
-            api.runtime_config.fnn.as_ref(),
-            vpc.config.routing_profile_type,
-        ) {
-            (None, _) | (Some(_), None) => true,
-            (Some(f), Some(profile_type)) => {
-                let Some(profile) = f.routing_profiles.get(&profile_type) else {
-                    return Err(CarbideError::NotFoundError {
-                        kind: "routing_profile_type",
-                        id: profile_type,
-                    }
-                    .into());
-                };
-                profile.internal.unwrap_or_default()
-            }
-        };
-
-        if internal {
-            db::resource_pool::release(&api.common_pools.ethernet.pool_vpc_vni, &mut txn, vni)
-                .await
-                .map_err(CarbideError::from)?;
-        } else {
-            db::resource_pool::release(
-                &api.common_pools.ethernet.pool_external_vpc_vni,
-                &mut txn,
-                vni,
-            )
-            .await
-            .map_err(CarbideError::from)?;
-        }
+    if let Some((pool, vni)) = owned_allocation {
+        // The ownership lookup above keeps the allocation locked until commit.
+        db::resource_pool::release(pool, &mut txn, vni).await?;
     }
 
     // Delete associated VPC peerings
@@ -650,19 +780,10 @@ fn resolve_vpc_routing(
     let tenant_profile_type = tenant.and_then(|t| t.routing_profile_type.as_deref());
 
     match (requested_profile_type, tenant_profile_type) {
-        // No VPC routing profile requested and no tenant profile.
-        // Falling back to a default. With FNN disabled, assume
-        // internal (legacy/pre-FNN behavior); with FNN enabled,
-        // external must be assumed.
-        (None, None) if vpc_profile_overrides.is_none() => Ok(ResolvedVpcRouting {
-            profile_type: None,
-            internal: fnn_config.is_none(),
-        }),
-
-        // A requested profile type or inline profile needs tenant context
-        // to establish and authorize its named base profile.
+        // Every FNN VPC needs a tenant profile to establish its named routing policy and
+        // authorize any explicitly requested profile or inline overrides.
         (_, None) => Err(CarbideError::FailedPrecondition(format!(
-            "VPC routing profile type or overrides requested but no tenant or routing profile type found for organization id `{organization_id}`"
+            "tenant `{organization_id}` must have a routing profile before creating an FNN VPC"
         ))),
 
         // Tenant has a routing profile; resolve the request against it.
@@ -817,24 +938,24 @@ mod tests {
                 } => Yields((None, true)),
             }
 
-            "missing tenant context" {
-                // Without FNN or explicit routing properties, preserve the legacy internal
-                // allocation default even when no tenant record is available.
+            "missing tenant routing profile" {
+                // An FNN VPC cannot use the legacy internal default without a named tenant
+                // profile because downstream policy resolution requires that name.
                 RoutingResolutionInput {
                     network_virtualization_type: Fnn,
                     requested_profile_type: None,
                     routing_profile_overrides: None,
                     tenant: None,
                     fnn_config: None,
-                } => Yields((None, true)),
-                // Enabling FNN changes the no-profile allocation default to external.
+                } => FailsWith(FailedPrecondition),
+                // Enabling FNN cannot make missing tenant routing context resolvable.
                 RoutingResolutionInput {
                     network_virtualization_type: Fnn,
                     requested_profile_type: None,
                     routing_profile_overrides: None,
                     tenant: None,
                     fnn_config: Some(fnn_with_profiles(&[])),
-                } => Yields((None, false)),
+                } => FailsWith(FailedPrecondition),
                 // A named profile request needs tenant context to authorize its access tier.
                 RoutingResolutionInput {
                     network_virtualization_type: Fnn,

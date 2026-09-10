@@ -134,8 +134,7 @@ void add_ia_na_status6(Pkt6Ptr query6_ptr, Pkt6Ptr response6_ptr,
 }
 
 void record_dropped_v6_request(const char *reason) {
-  // Preserve the shared v4/v6 counter while emitting the required v6 series.
-  carbide_increment_dropped_requests(reason);
+  // DHCPv6 has its own metric family; the unsuffixed counter remains DHCPv4.
   carbide_increment_dropped_v6_requests(reason);
 }
 
@@ -1198,7 +1197,7 @@ int pkt6_receive(CalloutHandle &handle) {
   Pkt6Ptr query6_ptr;
   handle.getArgument("query6", query6_ptr);
 
-  carbide_increment_total_requests();
+  carbide_increment_v6_requests(query6_ptr ? query6_ptr->getType() : 0);
 
   if (!query6_ptr) {
     LOG_ERROR(logger, "LOG_CARBIDE_PKT6_RECEIVE: missing query6 argument");

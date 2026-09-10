@@ -16,7 +16,9 @@
  */
 use std::net::IpAddr;
 
-use carbide_uuid::machine::{MACHINE_ID_PREFIX_LENGTH, MachineId, MachineType};
+use carbide_uuid::machine::{
+    MACHINE_ID_PREFIX_LENGTH, MachineId, MachineType, StableHostMachineId,
+};
 use carbide_uuid::rack::RackId;
 use common::api_fixtures::dpu::create_dpu_machine;
 use common::api_fixtures::{create_managed_host, create_test_env, site_explorer};
@@ -404,7 +406,7 @@ async fn test_find_machine_ids(pool: sqlx::PgPool) {
     .unwrap();
     let mut txn = env.pool.begin().await.unwrap();
 
-    let machine_ids = db::machine::find_machine_ids(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
         .await
         .unwrap();
 
@@ -446,12 +448,12 @@ async fn test_find_machine_ids(pool: sqlx::PgPool) {
     };
 
     // Try to find machines for the instance type.
-    let machine_ids = db::machine::find_machine_ids(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<StableHostMachineId>(txn.as_mut(), config)
         .await
         .unwrap();
 
     assert_eq!(machine_ids.len(), 1);
-    assert_eq!(machine_ids[0], host_machine_id.into());
+    assert_eq!(machine_ids[0], host_machine_id);
 }
 
 #[crate::sqlx_test]
@@ -471,7 +473,7 @@ async fn test_find_dpu_machine_ids(pool: sqlx::PgPool) {
     .unwrap();
     let mut txn = env.pool.begin().await.unwrap();
 
-    let machine_ids = db::machine::find_machine_ids(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
         .await
         .unwrap();
 
@@ -496,7 +498,7 @@ async fn test_find_predicted_host_machine_ids(pool: sqlx::PgPool) {
     .unwrap();
     let mut txn = env.pool.begin().await.unwrap();
 
-    let machine_ids = db::machine::find_machine_ids(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
         .await
         .unwrap();
 
@@ -514,7 +516,7 @@ async fn test_find_host_machine_ids_when_predicted(pool: sqlx::PgPool) {
     let _dpu_machine_id = create_dpu_machine(&env, &host_config).await;
     let mut txn = env.pool.begin().await.unwrap();
 
-    let machine_ids = db::machine::find_machine_ids(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
         .await
         .unwrap();
 
@@ -558,7 +560,7 @@ async fn test_find_mixed_host_machine_ids(pool: sqlx::PgPool) {
     let mut txn = env.pool.begin().await.unwrap();
 
     tracing::info!("finding machine ids");
-    let machine_ids = db::machine::find_machine_ids(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
         .await
         .unwrap();
     assert_eq!(machine_ids.len(), 2);
@@ -622,7 +624,7 @@ async fn test_machine_capabilities_response(
         .api
         .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
             include_history: false,
-            machine_ids: vec![mh.host_snapshot.id],
+            machine_ids: vec![mh.host_snapshot.id.into()],
         }))
         .await
         .unwrap()

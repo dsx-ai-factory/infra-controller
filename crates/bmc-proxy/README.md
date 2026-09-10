@@ -94,6 +94,9 @@ Path matching syntax:
 - `prefix*` matches one path component with the given prefix.
 - `*suffix` matches one path component with the given suffix.
 - `**` matches zero or more path components.
+- A single trailing slash does not create another path component. For example,
+  `/redfish/v1/` matches `/redfish/v1`. Some clients include this slash when
+  requesting the Redfish service root.
 - A single `*` may appear by itself, at the beginning, or at the end of a path component.
   Valid: `/redfish/v1/Systems/*/SecureBoot/**`
   Valid: `/redfish/v1/Systems/system*/SecureBoot`
@@ -127,7 +130,6 @@ curl --http2 \
 
 The client chooses the BMC by IP. The proxy performs authentication, credential lookup, and backend authentication.
 
-
 ## Why?
 
 We have at least two valid constraints at the same time:
@@ -141,19 +143,17 @@ An alternative approach is to have nico-api be the only service that talks to BM
 
 ## What's Using It?
 
-Currently (as of 2026-04-10), nothing yet.
+nico-api routes its own eligible BMC Redfish traffic through nico-bmc-proxy when its static `[bmc_proxy]` configuration section is enabled: machine-lifecycle traffic and the credentialed exploration of endpoints whose stored root credential is established. Credential-subject operations (credential setup, BMC session minting, password rotation, UEFI password management) and the other documented exceptions stay direct, so nico-api still holds BMC credentials. The routing contract, including every direct-path exception, is in [`crates/api-core/src/cfg/README.md`](../api-core/src/cfg/README.md#bmcproxyconfig--bmc_proxy).
 
 We soon expect that [DPS] will support configuration of an authenticating proxy like this one, to manage power configuration on BMC's. DPS is a standalone service that should not have a direct dependency on nico-api. So nico-bmc-proxy serves an implementation of such a proxy, although any proxy that implements similar functionality can work.
 
-nico-api itself is *not* using this, yet. But it does support configuring a bmc-proxy URL via the `bmc_proxy` config setting, which will work if pointed at a running instance of this crate.
-
-Future work can implement a mode in nico-api where it doesn't know about any BMC credentials, and would make all calls through nico-bmc-proxy instead.
+Future work can move the remaining direct paths behind the proxy so that nico-api no longer holds BMC credentials at all.
 
 ## Architecture
 
 Today, the proxy reuses existing NICo-adjacent building blocks:
 
-- `nico-authn`:  mTLS and SPIFFE principal extraction
+- `nico-authn`: mTLS and SPIFFE principal extraction
 - `nico-rpc`: nico-api gRPC client used for BMC IP resolution and credential lookup
 
 ### Dependency View
@@ -171,7 +171,7 @@ flowchart LR
     Proxy --> BMC
 ```
 
-The important point in this picture is that both `nico-api` and external peers can consume the same proxy. Neither needs direct access to BMC passwords.
+The important point in this picture is that both `nico-api` and external peers consume the same proxy. External peers never need BMC passwords. nico-api still holds them: it is the proxy's credential source, and its credential-subject operations dial BMCs directly.
 
 ### Trust Boundary View
 

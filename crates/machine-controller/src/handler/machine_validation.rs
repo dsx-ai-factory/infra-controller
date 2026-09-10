@@ -139,7 +139,7 @@ async fn handle_validation_boot_config_stage(
                     failed_at: Utc::now(),
                     source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
                 },
-                machine_id,
+                machine_id: machine_id.into(),
                 retry_count: 0,
             })
             .with_txn(txn))
@@ -338,7 +338,7 @@ pub(crate) async fn handle_machine_validation_state(
                     );
                     return Ok(StateHandlerOutcome::transition(ManagedHostState::Failed {
                         details: mh_snapshot.host_snapshot.status.failure_details.clone(),
-                        machine_id: mh_snapshot.host_snapshot.id,
+                        machine_id: mh_snapshot.host_snapshot.id.into(),
                         retry_count: 0,
                     }));
                 }

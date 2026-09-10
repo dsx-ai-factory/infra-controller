@@ -502,6 +502,62 @@ platform_general_enabled = true
 # Enable only on NVOS releases that support this path. Default: false.
 leak_sensors_enabled = false
 
+# Additional subscriptions are optional and default to an empty list. Each
+# entry opens an independent gNMI STREAM RPC for every switch host eligible for
+# NVUE gNMI and can bundle multiple paths. A rejected path affects its bundled
+# subscription; connection and stream failures retry only that subscription.
+# Configuration changes require a service restart.
+#
+# [[collectors.nvue.gnmi.additional_subscriptions]]
+# Required unique lower_snake_case name. The name is emitted as the
+# `subscription` metric label and in stream diagnostics.
+# name = "external_platform"
+# Optional gNMI prefix fields. target defaults to "nvos"; origin and prefix
+# default to empty. Path arrays contain unkeyed element names.
+# target = "nvos"
+# origin = "openconfig-platform"
+# prefix = ["components"]
+# Optional response encoding. Default: "json". Accepted values: "json",
+# "ascii", and "json_ietf". These encodings provide scalar values that the
+# extended metric outputs can project.
+# encoding = "json_ietf"
+# Optional. Default: false. When true, the target omits its initial snapshot.
+# updates_only = false
+# mode defaults to "target_defined" and also accepts "on_change" or "sample".
+# sample_interval is required only for "sample". heartbeat_interval is supported
+# for "sample" and "on_change". Both intervals must be greater than zero.
+# suppress_redundant defaults to false and is supported only for "sample".
+# mode = "sample"
+# sample_interval = "30s"
+# suppress_redundant = true
+# heartbeat_interval = "5m"
+#
+# At least one request path is required. Each path is relative to prefix.
+# paths = [["component"]]
+#
+# Each metric maps one exact response path below prefix. Multiple metrics can
+# map descendant leaves from one request path. Optional labels copy named keys
+# from response path elements; an update without every configured key is
+# ignored. Each selected element must occur exactly once in prefix plus the
+# metric path. Label names cannot use `subscription`, `state`, or the endpoint
+# and hardware metadata labels added by the service. Each distinct key
+# combination creates a metric series. At least one metric is required.
+# [[collectors.nvue.gnmi.additional_subscriptions.metrics]]
+# path = ["component", "state", "reading"]
+# metric_type = "component_reading"
+# labels = [{ name = "component_name", element = "component", key = "name" }]
+# output = { kind = "gauge", unit = "count" }
+#
+# The output can instead use a finite state_set or info domain. Values outside
+# the declared domain, malformed values, and unsupported value encodings do
+# not produce metrics. Delete notifications are ignored; emitted metrics remain
+# until the collector is removed.
+# A state_set output uses the reserved `state` label and emits one series per
+# declared state: 1 for the current state and 0 for the others. An info output
+# emits one constant-1 series with the matched value in its configured label.
+# output = { kind = "state_set", states = ["normal", "attention"] }
+# output = { kind = "info", label = "mode", values = ["active", "standby"] }
+
 # ==============================================================================
 # Processors
 # ==============================================================================

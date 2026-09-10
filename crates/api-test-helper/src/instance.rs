@@ -17,7 +17,7 @@
 
 use std::net::SocketAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, StableHostMachineId};
 use eyre::{ContextCompat, WrapErr};
 use rpc::forge::instance_interface_config::NetworkDetails;
 use rpc::forge::instance_operating_system_config::Variant as OperatingSystemVariant;
@@ -33,7 +33,7 @@ use crate::api_client;
 
 pub async fn create(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     segment_id: &str,
     hostname: Option<&str>,
     phone_home_enable: bool,
@@ -71,7 +71,7 @@ pub async fn create(
 /// within the requested Flat VPC.
 pub async fn create_with_auto_host_inband_networking(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     flat_vpc_id: &str,
 ) -> eyre::Result<String> {
     tracing::info!(
@@ -93,7 +93,7 @@ pub async fn create_with_auto_host_inband_networking(
 
 async fn create_with_network(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     network: InstanceNetworkConfig,
     hostname: Option<&str>,
     phone_home_enable: bool,
@@ -165,7 +165,7 @@ async fn create_with_network(
 /// Takes a primary (v4) VPC prefix ID and an optional v6 VPC prefix ID.
 pub async fn create_with_vpc_prefixes(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     tenant_organization_id: &str,
     vpc_prefix_ids: &[&str],
 ) -> eyre::Result<String> {

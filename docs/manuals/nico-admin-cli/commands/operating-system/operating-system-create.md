@@ -10,7 +10,7 @@ definition.
 ## SYNOPSIS
 
 **nico-admin-cli operating-system create** \<**-n**\|**--name**\>
-\<**-o**\|**--org**\> \[**--id**\] \[**-d**\|**--description**\]
+\[**-o**\|**--org**\] \[**--id**\] \[**-d**\|**--description**\]
 \[**--is-active**\] \[**--allow-override**\]
 \[**--phone-home-enabled**\] \[**--user-data**\] \[**--ipxe-script**\]
 \[**--ipxe-template-id**\] \[**--param**\] \[**--extended**\]
@@ -26,7 +26,8 @@ Create a new operating system definition.
 Name of the operating system definition.
 
 **-o**, **--org** *\<ORG\>*  
-Organization identifier for this OS definition.
+Optional tenant organization identifier for this OS definition. Omit for
+OS definitions owned by provider.
 
 **--id** *\<ID\>*  
 Optional UUID for the new OS definition (default: server-generated).
@@ -48,13 +49,7 @@ Whether this OS definition is active (default: true).\
 Allow users to override OS parameters.
 
 **--phone-home-enabled**  
-Hold the instance in a provisioning state until the booted OS calls back
-("phones home") to NICo's metadata service, instead of reporting it ready as
-soon as provisioning finishes. NICo injects the cloud-init `phone_home` block
-into your user-data for you, so your `userData` must be valid cloud-init YAML
-when this is enabled. Refer to
-[Phone-home](../../../../configuration/tenant_management.md#phone-home) for
-what it injects, the endpoint, and usage guidance.
+Enable phone-home on first boot.
 
 **--user-data** *\<USER_DATA\>*  
 Optional cloud-init / user-data script.
@@ -71,7 +66,7 @@ iPXE parameter in KEY=VALUE format. May be repeated.
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -97,4 +92,4 @@ nico-admin-cli operating-system create --name ubuntu-22.04 --org fds34511233a --
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)

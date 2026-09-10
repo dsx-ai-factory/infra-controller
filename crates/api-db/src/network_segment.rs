@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
@@ -651,7 +651,7 @@ where
 /// Find network segments attached to a machine through machine_interfaces, optionally of a certain type
 pub async fn find_ids_by_machine_id(
     txn: &mut PgConnection,
-    machine_id: &::carbide_uuid::machine::MachineId,
+    machine_id: &HostMachineId,
     network_segment_type: Option<NetworkSegmentType>,
 ) -> Result<Vec<NetworkSegmentId>, DatabaseError> {
     let result = batch_find_ids_by_machine_ids(txn, &[*machine_id], network_segment_type).await?;
@@ -663,9 +663,9 @@ pub async fn find_ids_by_machine_id(
 /// Returns a HashMap mapping each machine ID to its list of segment IDs.
 pub async fn batch_find_ids_by_machine_ids(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
     network_segment_type: Option<NetworkSegmentType>,
-) -> Result<HashMap<MachineId, Vec<NetworkSegmentId>>, DatabaseError> {
+) -> Result<HashMap<HostMachineId, Vec<NetworkSegmentId>>, DatabaseError> {
     if machine_ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -698,9 +698,9 @@ pub async fn batch_find_ids_by_machine_ids(
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
-    let mut result: HashMap<MachineId, Vec<NetworkSegmentId>> = HashMap::new();
+    let mut result: HashMap<HostMachineId, Vec<NetworkSegmentId>> = HashMap::new();
     for (machine_id_str, segment_id) in rows {
-        if let Ok(machine_id) = machine_id_str.parse::<MachineId>() {
+        if let Ok(machine_id) = machine_id_str.parse::<HostMachineId>() {
             result.entry(machine_id).or_default().push(segment_id);
         }
     }

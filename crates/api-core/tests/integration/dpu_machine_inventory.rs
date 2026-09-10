@@ -49,7 +49,7 @@ async fn test_create_inventory(pool: PgPool) -> Result<(), eyre::Report> {
 
     env.api()
         .update_agent_reported_inventory(Request::new(rpc::DpuAgentInventoryReport {
-            machine_id: Some(dpu.id.into()),
+            machine_id: Some(dpu.id),
             inventory: Some(expected_inventory.clone()),
         }))
         .await?;

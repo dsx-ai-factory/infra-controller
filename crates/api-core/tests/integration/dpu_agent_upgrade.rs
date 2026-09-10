@@ -58,7 +58,7 @@ async fn init(pool: PgPool) -> (TestHarness, TestManagedHost) {
 async fn report_old_agent_version(env: &TestHarness, dpu_machine_id: DpuMachineId) {
     env.api()
         .record_dpu_network_status(tonic::Request::new(rpc::DpuNetworkStatus {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
             dpu_agent_version: Some("v2023.06-rc2-1-gc5c05de3".to_string()),
             observed_at: None,
             dpu_health: Some(::rpc::health::HealthReport {
@@ -193,7 +193,7 @@ async fn test_upgrade_check(db_pool: PgPool) -> Result<(), eyre::Report> {
         .api()
         .get_managed_host_network_config(tonic::Request::new(
             rpc::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(dpu_machine_id.into()),
+                dpu_machine_id: Some(dpu_machine_id),
             },
         ))
         .await?
@@ -204,7 +204,7 @@ async fn test_upgrade_check(db_pool: PgPool) -> Result<(), eyre::Report> {
     let network_config_version = response.managed_host_config_version.clone();
     env.api()
         .record_dpu_network_status(tonic::Request::new(rpc::DpuNetworkStatus {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
             // BEGIN This is the important line for this test
             dpu_agent_version: Some("v2023.06-rc2-1-gc5c05de3".to_string()),
             // END
@@ -310,7 +310,7 @@ async fn test_dpu_agent_version_staleness(db_pool: PgPool) -> Result<(), eyre::R
         .api()
         .get_managed_host_network_config(tonic::Request::new(
             rpc::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some(mh.first_dpu().id.into()),
+                dpu_machine_id: Some(mh.first_dpu().id),
             },
         ))
         .await?
@@ -400,7 +400,7 @@ impl TestManagedHostDpuAgentExt for TestManagedHost {
         test_env
             .api()
             .record_dpu_network_status(tonic::Request::new(rpc::DpuNetworkStatus {
-                dpu_machine_id: Some(self.first_dpu().id.into()),
+                dpu_machine_id: Some(self.first_dpu().id),
                 dpu_agent_version: agent_version.map(Into::into),
                 observed_at: None,
                 dpu_health: Some(::rpc::health::HealthReport {

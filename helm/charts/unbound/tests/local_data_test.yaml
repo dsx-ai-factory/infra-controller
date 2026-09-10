@@ -1,4 +1,4 @@
-suite: unbound local DNS A records (localData)
+suite: unbound local DNS records (localData)
 templates:
   - configmap.yaml
 release:
@@ -35,6 +35,20 @@ tests:
       - matchRegex:
           path: data["local_data.conf"]
           pattern: 'local-data: "nico-ntp\.nico 60 IN A 10\.0\.0\.4"'
+
+  - it: renders IPv6 addresses as AAAA records
+    documentIndex: 1
+    set:
+      localData:
+        - name: carbide-ntp.forge
+          addresses: ["10.0.0.2", "2001:db8::2"]
+    asserts:
+      - matchRegex:
+          path: data["local_data.conf"]
+          pattern: 'local-data: "carbide-ntp\.forge 300 IN A 10\.0\.0\.2"'
+      - matchRegex:
+          path: data["local_data.conf"]
+          pattern: 'local-data: "carbide-ntp\.forge 300 IN AAAA 2001:db8::2"'
 
   - it: supports a legacy alias resolving to the same address
     documentIndex: 1

@@ -70,11 +70,16 @@ pub(crate) async fn find_network_devices_by_device_ids(
 
 pub(crate) async fn find_connected_devices_by_dpu_machine_ids(
     api: &Api,
-    request: Request<::rpc::common::MachineIdList>,
+    request: Request<::rpc::common::DpuMachineIdList>,
 ) -> Result<Response<rpc::ConnectedDeviceList>, Status> {
     log_request_data(&request);
 
-    let dpu_ids = request.into_inner().machine_ids;
+    let dpu_ids = request
+        .into_inner()
+        .machine_ids
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>();
 
     let connected_devices = db::network_devices::dpu_to_network_device_map::find_by_dpu_ids(
         &api.database_connection,

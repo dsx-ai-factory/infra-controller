@@ -372,7 +372,7 @@ async fn force_request_converges_quarantined_bmc_when_disabled(
             Utc::now() + Duration::seconds(3600),
         )
         .await?;
-        db::machine::set_bmc_credential_rotation_requested(&mut conn, machine_id).await?;
+        db::machine::set_bmc_credential_rotation_requested(&mut conn, &machine_id).await?;
     }
 
     // Iteration 1: the force request drives entry into RotatingBmc despite the

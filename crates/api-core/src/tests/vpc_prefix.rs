@@ -1141,7 +1141,7 @@ async fn test_deleted_vpc_prefix_cannot_allocate_new_instance_interface(
         .api
         .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: Some(managed_host.host().id.into()),
+            machine_id: Some(managed_host.host().id),
             instance_type_id: None,
             config: Some(rpc::forge::InstanceConfig {
                 tenant: Some(fixture_tenant_config()),
@@ -1660,7 +1660,9 @@ async fn test_vpc_prefix_search(pool: PgPool) -> Result<(), Box<dyn std::error::
 async fn exact_site_prefix_attachment_enforces_lineage_and_round_trips(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
     let tenant = "site-prefix-tenant-a";
     let other_tenant = "site-prefix-tenant-b";
     create_fixture_tenant(&env, tenant).await?;
@@ -1893,7 +1895,8 @@ async fn omitted_site_prefix_id_checks_only_the_vpc_tenant(
             site_prefixes: Some(Vec::new()),
             create_network_segments: Some(false),
             ..Default::default()
-        },
+        }
+        .with_fnn_config(None),
     )
     .await;
     let tenant = "legacy-prefix-tenant-a";
@@ -1968,7 +1971,8 @@ async fn omitted_site_prefix_id_serializes_with_tenant_root_creation(
             site_prefixes: Some(Vec::new()),
             create_network_segments: Some(false),
             ..Default::default()
-        },
+        }
+        .with_fnn_config(None),
     )
     .await;
     let tenant = "legacy-prefix-creation-race";
@@ -2018,7 +2022,8 @@ async fn omitted_site_prefix_id_serializes_with_first_operator_root_reconciliati
             site_prefixes: Some(Vec::new()),
             create_network_segments: Some(false),
             ..Default::default()
-        },
+        }
+        .with_fnn_config(None),
     )
     .await;
     let tenant = "legacy-operator-creation-race";
@@ -2055,7 +2060,9 @@ async fn omitted_site_prefix_id_serializes_with_first_operator_root_reconciliati
 async fn vpc_prefix_create_rechecks_parent_after_concurrent_retirement(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
     let tenant = "site-prefix-retirement-race";
     create_fixture_tenant(&env, tenant).await?;
     let vpc_id = create_fnn_vpc_for_tenant(&env, tenant, "retirement race VPC", None).await;
@@ -2109,7 +2116,9 @@ async fn vpc_prefix_create_rechecks_parent_after_concurrent_retirement(
 async fn tenant_managed_lineage_blocks_virtualization_transition_and_race(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
     let tenant = "site-prefix-virtualization-guard";
     create_fixture_tenant(&env, tenant).await?;
 

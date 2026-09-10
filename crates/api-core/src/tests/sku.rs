@@ -337,7 +337,7 @@ pub(in crate::tests) mod tests {
     async fn get_machine_by_id(
         txn: &mut PgConnection,
         machine_id: &MachineId,
-    ) -> Result<model::machine::Machine, eyre::Error> {
+    ) -> Result<model::machine::AnyMachine, eyre::Error> {
         db::machine::find(
             txn,
             ObjectFilter::One(*machine_id),

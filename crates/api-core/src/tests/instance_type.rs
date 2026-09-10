@@ -474,7 +474,7 @@ async fn test_instance_type_delete(pool: sqlx::PgPool) -> Result<(), Box<dyn std
         .api
         .allocate_instance(tonic::Request::new(rpc::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: Some(tmp_mh.host().id.into()),
+            machine_id: Some(tmp_mh.host().id),
             instance_type_id: Some(id.to_string()),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
@@ -679,7 +679,7 @@ async fn test_instance_type_associate(
         .api
         .allocate_instance(tonic::Request::new(rpc::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: Some(tmp_mh.host().id.into()),
+            machine_id: Some(tmp_mh.host().id),
             instance_type_id: Some("1fcd4e9a-be16-11ef-b892-0fad889bcd2b".to_string()),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
@@ -706,7 +706,7 @@ async fn test_instance_type_associate(
         .api
         .allocate_instance(tonic::Request::new(rpc::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: Some(tmp_mh.host().id.into()),
+            machine_id: Some(tmp_mh.host().id),
             instance_type_id: machine.config.as_ref().unwrap().instance_type_id.clone(),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,

@@ -38,6 +38,7 @@ use carbide_rack_controller::fabric_manager::{
 };
 use carbide_rack_controller::validating::strip_rv_labels;
 use carbide_secrets::credentials::{CredentialManager, Credentials};
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use component_manager::NvosUpdateRequest;
 use component_manager::component_manager::ComponentManager;
@@ -49,6 +50,7 @@ use db::{
     power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
 };
 use librms::protos::rack_manager as rms;
+use model::machine::HostMachine;
 use model::rack::{
     ConfigureNmxClusterState, FirmwareUpgradeDeviceInfo, FirmwareUpgradeDeviceStatus,
     FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosUpdateState,
@@ -97,7 +99,7 @@ fn rack_maintenance_initiator(rack_id: &RackId) -> String {
 async fn trigger_rack_firmware_reprovisioning_requests(
     txn: &mut sqlx::PgConnection,
     rack_id: &RackId,
-    machine_ids: &[carbide_uuid::machine::MachineId],
+    machine_ids: &[carbide_uuid::machine::HostMachineId],
     switch_ids: &[carbide_uuid::switch::SwitchId],
     power_shelf_ids: &[carbide_uuid::power_shelf::PowerShelfId],
     activities: &[MaintenanceActivity],
@@ -130,7 +132,7 @@ async fn trigger_rack_firmware_reprovisioning_requests(
 
 async fn clear_rack_firmware_device_statuses(
     txn: &mut sqlx::PgConnection,
-    machine_ids: &[carbide_uuid::machine::MachineId],
+    machine_ids: &[carbide_uuid::machine::HostMachineId],
     switch_ids: &[carbide_uuid::switch::SwitchId],
     power_shelf_ids: &[carbide_uuid::power_shelf::PowerShelfId],
 ) -> Result<(), StateHandlerError> {
@@ -158,7 +160,7 @@ async fn clear_nvos_update_statuses(
 
 #[derive(Debug)]
 struct RackMaintenanceTargetIds {
-    machine_ids: Vec<carbide_uuid::machine::MachineId>,
+    machine_ids: Vec<carbide_uuid::machine::HostMachineId>,
     switch_ids: Vec<carbide_uuid::switch::SwitchId>,
     power_shelf_ids: Vec<carbide_uuid::power_shelf::PowerShelfId>,
 }
@@ -337,8 +339,8 @@ enum DeviceFirmwareOutcome {
 
 async fn desired_off_machine_ids(
     txn: &mut sqlx::PgConnection,
-    machine_ids: &[carbide_uuid::machine::MachineId],
-) -> Result<Vec<carbide_uuid::machine::MachineId>, StateHandlerError> {
+    machine_ids: &[HostMachineId],
+) -> Result<Vec<HostMachineId>, StateHandlerError> {
     if machine_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -347,13 +349,13 @@ async fn desired_off_machine_ids(
         .await?
         .into_iter()
         .filter(|options| options.desired_power_state == model::power_manager::PowerState::Off)
-        .map(|options| options.host_id.into())
+        .map(|options| options.host_id)
         .collect::<Vec<_>>();
     machine_ids.sort_by_key(ToString::to_string);
     Ok(machine_ids)
 }
 
-fn format_machine_ids(machine_ids: &[carbide_uuid::machine::MachineId]) -> String {
+fn format_machine_ids(machine_ids: &[HostMachineId]) -> String {
     machine_ids
         .iter()
         .map(ToString::to_string)
@@ -365,8 +367,8 @@ async fn load_scoped_machines(
     txn: &mut sqlx::PgConnection,
     rack_id: &RackId,
     scope: &MaintenanceScope,
-) -> Result<Vec<model::machine::Machine>, StateHandlerError> {
-    let machine_ids = db_machine::find_machine_ids(
+) -> Result<Vec<HostMachine>, StateHandlerError> {
+    let machine_ids = db_machine::find_machine_ids::<HostMachineId>(
         &mut *txn,
         model::machine::machine_search_config::MachineSearchConfig {
             rack_id: Some(rack_id.clone()),
@@ -374,6 +376,7 @@ async fn load_scoped_machines(
         },
     )
     .await?;
+
     let machines = if machine_ids.is_empty() {
         Vec::new()
     } else {
@@ -391,7 +394,7 @@ async fn power_blocked_rack_firmware_machine_ids(
     txn: &mut sqlx::PgConnection,
     rack_id: &RackId,
     scope: &MaintenanceScope,
-) -> Result<Vec<carbide_uuid::machine::MachineId>, StateHandlerError> {
+) -> Result<Vec<HostMachineId>, StateHandlerError> {
     let machines = load_scoped_machines(txn, rack_id, scope).await?;
     let initiator = rack_maintenance_initiator(rack_id);
     let ready_rack_requested_ids = machines
@@ -411,18 +414,15 @@ async fn power_blocked_rack_firmware_machine_ids(
 async fn resolve_machine_id_for_firmware_device(
     txn: &mut sqlx::PgConnection,
     device: &FirmwareUpgradeDeviceStatus,
-) -> Result<Option<carbide_uuid::machine::MachineId>, StateHandlerError> {
+) -> Result<Option<HostMachineId>, StateHandlerError> {
     if !device.node_id.is_empty() {
-        return Ok(device
-            .node_id
-            .parse::<carbide_uuid::machine::MachineId>()
-            .ok());
+        return Ok(device.node_id.parse::<HostMachineId>().ok());
     }
     let mac: mac_address::MacAddress = match device.mac.parse() {
         Ok(mac) => mac,
         Err(_) => return Ok(None),
     };
-    Ok(db_machine_topology::find_machine_id_by_bmc_mac(txn, mac).await?)
+    Ok(db_machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(txn, mac).await?)
 }
 
 async fn resolve_switch_id_for_firmware_device(
@@ -481,7 +481,7 @@ async fn resolve_power_shelf_id_for_firmware_device(
     .copied())
 }
 
-fn machine_firmware_outcome(machine: &model::machine::Machine) -> DeviceFirmwareOutcome {
+fn machine_firmware_outcome(machine: &HostMachine) -> DeviceFirmwareOutcome {
     match &machine.state.value {
         model::machine::ManagedHostState::HostReprovision {
             reprovision_state: model::machine::HostReprovisionState::WaitingForRackFirmwareUpgrade,
@@ -653,9 +653,9 @@ async fn evaluate_firmware_progress_from_devices(
 }
 
 fn filter_machines_by_scope(
-    mut machines: Vec<model::machine::Machine>,
+    mut machines: Vec<HostMachine>,
     scope: &MaintenanceScope,
-) -> Vec<model::machine::Machine> {
+) -> Vec<HostMachine> {
     if scope.is_full_rack() {
         return machines;
     }
@@ -1020,7 +1020,7 @@ fn filter_inventory_by_scope(
         let allowed: std::collections::HashSet<_> = scope.machine_ids.iter().collect();
         inventory.machine_ids.retain(|id| allowed.contains(id));
         inventory.machines.retain(|d| {
-            match d.node_id.parse::<carbide_uuid::machine::MachineId>() {
+            match d.node_id.parse::<carbide_uuid::machine::HostMachineId>() {
                 Ok(ref id) => allowed.contains(id),
                 Err(_) => false,
             }
@@ -2884,7 +2884,7 @@ mod tests {
     use carbide_rack::firmware_update::{RackFirmwareInventory, RackSwitchFirmwareInventory};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::{Check, check_values};
-    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+    use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
     use model::rack::{
@@ -2902,10 +2902,12 @@ mod tests {
         summarize_firmware_outcomes, validate_complete_nmx_fabric_inventory,
     };
 
-    fn test_machine_id(seed: u8) -> MachineId {
+    fn test_machine_id(seed: u8) -> HostMachineId {
         let mut hash = [0u8; 32];
         hash[0] = seed;
         MachineId::new(MachineIdSource::Tpm, hash, MachineType::Host)
+            .try_into()
+            .unwrap()
     }
 
     fn test_switch_id(seed: u8) -> SwitchId {

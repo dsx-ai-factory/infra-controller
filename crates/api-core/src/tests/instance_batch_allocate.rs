@@ -18,7 +18,7 @@
 //! Tests for batch instance allocation API
 
 use ::rpc::forge::forge_server::Forge;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, StableHostMachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use common::api_fixtures::instance::{
     default_os_config, default_tenant_config, single_interface_network_config,
@@ -83,7 +83,7 @@ async fn test_batch_allocate_instances_success(_: PgPoolOptions, options: PgConn
         assert!(snapshot.instance.is_some());
 
         let instance_snapshot = snapshot.instance.unwrap();
-        assert_eq!(instance_snapshot.machine_id, machine_id);
+        assert_eq!(instance_snapshot.machine_id, machine_id.into());
         assert!(!instance_snapshot.config.network.interfaces.is_empty());
     }
 }
@@ -104,7 +104,9 @@ async fn test_batch_allocate_instances_rollback_on_failure(
 
     // Create an invalid machine ID that doesn't exist
     #[allow(deprecated)]
-    let invalid_machine_id = MachineId::default();
+    let invalid_machine_id: StableHostMachineId = MachineId::default()
+        .try_into()
+        .expect("default test ID should identify a stable host");
 
     let batch_request = rpc::forge::BatchInstanceAllocationRequest {
         instance_requests: vec![
@@ -380,7 +382,7 @@ fn build_test_instance_allocation_request(
     segment_id: NetworkSegmentId,
 ) -> rpc::forge::InstanceAllocationRequest {
     rpc::forge::InstanceAllocationRequest {
-        machine_id: Some(mh.host().id.into()),
+        machine_id: Some(mh.host().id),
         config: Some(rpc::forge::InstanceConfig {
             tenant: Some(default_tenant_config()),
             os: Some(default_os_config()),

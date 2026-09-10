@@ -40,13 +40,15 @@ use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, CredentialType, Credentials,
 };
 use carbide_site_explorer::{AuthenticatedBmc, EndpointExplorationService, EndpointExplorer};
-use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait, MachineInterfaceId};
+use carbide_uuid::machine::{
+    AsMachineId, DpuMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
+};
 use db::db_read::PgPoolReader;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{DatabaseError, DatabaseResult, WithTransaction};
 use libnmxc::NmxcPool;
 use librms::RmsApi;
-use model::machine::Machine;
+use model::machine::AnyMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::resource_pool::common::CommonPools;
 use sqlx::PgTransaction;
@@ -68,19 +70,24 @@ pub struct Api {
     pub database_connection: sqlx::PgPool,
     pub(crate) credential_manager: Arc<dyn CredentialManager>,
     pub(crate) certificate_provider: Arc<dyn CertificateProvider>,
+    /// Ordinary BMC Redfish traffic: nico-bmc-proxy when `[bmc_proxy]` is
+    /// enabled, the direct pool otherwise.
     pub(crate) redfish_pool: Arc<dyn RedfishClientPool>,
     /// Credential-lifecycle operations (password set/rotate/clear, candidate
     /// validation). A sealed trait implemented only by the direct pool, so
     /// handing these to a wrapper pool is a compile error (a wrong-pool
     /// guard, not a wire-path guarantee -- see [`BmcCredentialOps`]).
     pub(crate) bmc_credential_ops: Arc<dyn BmcCredentialOps>,
+    /// HTTP client for the raw Redfish passthrough when `[bmc_proxy]` is
+    /// enabled; `None` keeps the passthrough dialing BMCs directly.
+    pub(crate) bmc_proxy_passthrough: Option<Arc<crate::bmc_proxy::PassthroughClient>>,
     pub(crate) bmc_session_manager: Arc<crate::credentials::BmcSessionManager>,
     pub(crate) eth_data: EthVirtData,
     pub(crate) common_pools: Arc<CommonPools>,
     pub(crate) ib_fabric_manager: Arc<dyn IBFabricManager>,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI for config-derived display.
     pub runtime_config: Arc<CarbideConfig>,
-    pub(crate) dpu_health_log_limiter: LogLimiter<MachineId>,
+    pub(crate) dpu_health_log_limiter: LogLimiter<DpuMachineId>,
     pub dynamic_settings: DynamicSettings,
     pub(crate) endpoint_explorer: Arc<dyn EndpointExplorer>,
     /// Authenticated BMC client for admin operations, supplied independently of
@@ -188,6 +195,13 @@ impl Forge for Api {
         request: Request<rpc::VpcUpdateRequest>,
     ) -> Result<Response<rpc::VpcUpdateResult>, Status> {
         crate::handlers::vpc::update(self, request).await
+    }
+
+    async fn release_vpc_inactive_vni(
+        &self,
+        request: Request<rpc::VpcReleaseInactiveVniRequest>,
+    ) -> Result<Response<rpc::VpcReleaseInactiveVniResult>, Status> {
+        crate::handlers::vpc::release_inactive_vni(self, request).await
     }
 
     async fn update_vpc_virtualization(
@@ -1965,7 +1979,7 @@ impl Forge for Api {
 
     async fn find_connected_devices_by_dpu_machine_ids(
         &self,
-        request: Request<::rpc::common::MachineIdList>,
+        request: Request<::rpc::common::DpuMachineIdList>,
     ) -> Result<Response<rpc::ConnectedDeviceList>, Status> {
         crate::handlers::network_devices::find_connected_devices_by_dpu_machine_ids(self, request)
             .await
@@ -2910,7 +2924,7 @@ impl Forge for Api {
 
     async fn reset_host_reprovisioning(
         &self,
-        request: Request<MachineId>,
+        request: Request<StableHostMachineId>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::host_reprovisioning::reset_host_reprovisioning(self, request).await
     }
@@ -3398,7 +3412,7 @@ impl Forge for Api {
     async fn find_pending_dpu_service_sync_ids(
         &self,
         request: Request<rpc::FindPendingDpuServiceSyncIdsRequest>,
-    ) -> Result<Response<::rpc::common::MachineIdList>, Status> {
+    ) -> Result<Response<::rpc::common::HostMachineIdList>, Status> {
         crate::handlers::dpu_service_sync::find_pending_dpu_service_sync_ids(self, request).await
     }
 
@@ -3781,6 +3795,7 @@ pub struct DefaultCredential {
 
 #[cfg(any(test, feature = "test-support"))]
 impl DefaultCredential {
+    #[cfg(feature = "test-support")]
     pub(crate) fn key(&self) -> &str {
         &self._key
     }
@@ -3868,9 +3883,9 @@ impl Api {
     #[track_caller]
     pub(crate) fn load_machine(
         &self,
-        machine_id: &impl MachineIdSubtypeTrait,
+        machine_id: &MachineId,
         search_config: MachineSearchConfig,
-    ) -> impl Future<Output = CarbideResult<(Machine, db::Transaction<'_>)>> {
+    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'_>)>> {
         let loc = Location::caller();
         let machine_id = machine_id.to_machine_id();
         async move {

@@ -4,12 +4,15 @@
 package config
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	cauth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/viper"
@@ -61,10 +64,17 @@ func TestNewConfig(t *testing.T) {
 	}
 }
 
-func TestGetIssuersConfigClaimMappingAudiences(t *testing.T) {
-	v := viper.New()
-	v.SetConfigType("yaml")
-	require.NoError(t, v.ReadConfig(strings.NewReader(`
+func TestConfig_GetIssuersConfig(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     string
+		wantErr    string
+		wantLength int
+		check      func(t *testing.T, issuers []IssuerConfig)
+	}{
+		{
+			name: "claim mapping audiences",
+			config: `
 issuers:
   - name: custom-issuer
     issuer: https://auth.example.com
@@ -75,14 +85,47 @@ issuers:
       - orgName: acme
         roles: [TENANT_ADMIN]
         audiences: [org-audience]
-`)))
+`,
+			wantLength: 1,
+			check: func(t *testing.T, issuers []IssuerConfig) {
+				require.Len(t, issuers[0].ClaimMappings, 1)
+				assert.Equal(t, []string{"issuer-audience"}, issuers[0].Audiences)
+				assert.Equal(t, []string{"org-audience"}, issuers[0].ClaimMappings[0].Audiences)
+			},
+		},
+		{
+			name:   "absent issuers",
+			config: "metrics:\n  enabled: true\n",
+		},
+		{
+			name: "malformed issuer entry",
+			config: `
+issuers:
+  - invalid
+`,
+			wantErr: "unmarshal issuers configuration",
+		},
+	}
 
-	c := &Config{v: v}
-	issuers := c.GetIssuersConfig()
-	require.Len(t, issuers, 1)
-	require.Len(t, issuers[0].ClaimMappings, 1)
-	assert.Equal(t, []string{"issuer-audience"}, issuers[0].Audiences)
-	assert.Equal(t, []string{"org-audience"}, issuers[0].ClaimMappings[0].Audiences)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := viper.New()
+			v.SetConfigType("yaml")
+			require.NoError(t, v.ReadConfig(strings.NewReader(tt.config)))
+
+			issuers, err := (&Config{v: v}).GetIssuersConfig()
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Len(t, issuers, tt.wantLength)
+			if tt.check != nil {
+				tt.check(t, issuers)
+			}
+		})
+	}
 }
 
 func TestConfig_ValidatePowerProvisioningConfig(t *testing.T) {
@@ -158,6 +201,156 @@ func TestConfig_ValidatePowerProvisioningConfig(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestConfig_ValidateIssuersConfig(t *testing.T) {
+	jwtIssuer := func(name, origin string) IssuerConfig {
+		return IssuerConfig{
+			Name:   name,
+			Origin: origin,
+			Issuer: "https://" + name + ".example.com",
+			JWKS:   "https://" + name + ".example.com/jwks",
+		}
+	}
+	kasIssuer := IssuerConfig{Name: "kas-api-key", Origin: cauth.TokenOriginKas, Issuer: "https://ngc-api.example.com"}
+
+	tests := []struct {
+		name    string
+		issuers []IssuerConfig
+		wantErr string
+	}{
+		{
+			name: "direct and legacy KAS",
+			issuers: []IssuerConfig{
+				kasIssuer,
+				jwtIssuer("kas-legacy", cauth.TokenOriginKasLegacy),
+			},
+		},
+		{
+			name:    "direct KAS without rate limiter",
+			issuers: []IssuerConfig{kasIssuer},
+		},
+		{
+			name:    "direct KAS over plaintext HTTP",
+			issuers: []IssuerConfig{{Name: "kas-api-key", Origin: cauth.TokenOriginKas, Issuer: "http://ngc-api.example.com"}},
+			wantErr: "issuer must be an absolute HTTPS NGC API URL",
+		},
+		{
+			name:    "direct KAS with URL credentials",
+			issuers: []IssuerConfig{{Name: "kas-api-key", Origin: cauth.TokenOriginKas, Issuer: "https://user:pass@ngc-api.example.com"}},
+			wantErr: "issuer must not contain user info, query, or fragment",
+		},
+		{
+			name:    "legacy KAS alone",
+			issuers: []IssuerConfig{jwtIssuer("kas-legacy", cauth.TokenOriginKasLegacy)},
+		},
+		{
+			name: "SSA and legacy KAS",
+			issuers: []IssuerConfig{
+				jwtIssuer("kas-ssa", cauth.TokenOriginKasSsa),
+				jwtIssuer("kas-legacy", cauth.TokenOriginKasLegacy),
+			},
+		},
+		{
+			name: "multiple custom issuers",
+			issuers: []IssuerConfig{
+				jwtIssuer("custom-one", cauth.TokenOriginCustom),
+				jwtIssuer("custom-two", cauth.TokenOriginCustom),
+			},
+		},
+		{
+			name: "direct KAS and custom",
+			issuers: []IssuerConfig{
+				kasIssuer,
+				jwtIssuer("custom", cauth.TokenOriginCustom),
+			},
+			wantErr: "origin: custom cannot be configured with any other origin",
+		},
+		{
+			name: "legacy KAS and custom",
+			issuers: []IssuerConfig{
+				jwtIssuer("kas-legacy", cauth.TokenOriginKasLegacy),
+				jwtIssuer("custom", cauth.TokenOriginCustom),
+			},
+			wantErr: "origin: custom cannot be configured with any other origin",
+		},
+		{
+			name: "direct KAS and SSA",
+			issuers: []IssuerConfig{
+				kasIssuer,
+				jwtIssuer("kas-ssa", cauth.TokenOriginKasSsa),
+			},
+			wantErr: "origin: kas and kas-ssa cannot be configured together",
+		},
+		{
+			name:    "keycloak in the issuers list",
+			issuers: []IssuerConfig{jwtIssuer("keycloak", cauth.TokenOriginKeycloak)},
+			wantErr: "origin: keycloak is configured through the keycloak settings",
+		},
+		{
+			name: "multiple direct KAS issuers",
+			issuers: []IssuerConfig{
+				kasIssuer,
+				{Name: "kas-api-key-2", Origin: cauth.TokenOriginKas, Issuer: "https://ngc-api.example.com"},
+			},
+			wantErr: "only one issuer with origin: kas is allowed",
+		},
+		{
+			name: "multiple legacy KAS issuers",
+			issuers: []IssuerConfig{
+				jwtIssuer("kas-legacy-one", cauth.TokenOriginKasLegacy),
+				jwtIssuer("kas-legacy-two", cauth.TokenOriginKasLegacy),
+			},
+			wantErr: "only one issuer with origin: kas-legacy is allowed",
+		},
+		{
+			name: "multiple SSA issuers",
+			issuers: []IssuerConfig{
+				jwtIssuer("kas-ssa-one", cauth.TokenOriginKasSsa),
+				jwtIssuer("kas-ssa-two", cauth.TokenOriginKasSsa),
+			},
+			wantErr: "only one issuer with origin: kas-ssa is allowed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := viper.New()
+			cfg := &Config{v: v}
+
+			err := cfg.ValidateIssuersConfig(tt.issuers)
+
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestGetOrInitTokenOriginConfig(t *testing.T) {
+	t.Run("retains Keycloak config when JWKS is unavailable", func(t *testing.T) {
+		testServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+			res.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer testServer.Close()
+
+		v := viper.New()
+		v.Set(ConfigKeycloakEnabled, true)
+		v.Set(ConfigKeycloakBaseURL, testServer.URL)
+		v.Set(ConfigKeycloakExternalBaseURL, "https://keycloak.example.com")
+		v.Set(ConfigKeycloakRealm, "test-realm")
+		v.Set(ConfigKeycloakClientID, "test-client")
+		v.Set(ConfigKeycloakClientSecret, "test-secret")
+
+		c := &Config{v: v}
+		tokenOriginConfig := c.GetOrInitTokenOriginConfig()
+
+		require.NotNil(t, tokenOriginConfig)
+		jwksConfig := tokenOriginConfig.GetConfig("https://keycloak.example.com/realms/test-realm")
+		require.NotNil(t, jwksConfig)
+		assert.Nil(t, jwksConfig.GetJWKS())
+	})
 }
 
 func TestConfig_WatchConfigFile(t *testing.T) {

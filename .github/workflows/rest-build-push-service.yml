@@ -151,9 +151,14 @@ jobs:
           fi
           # Per-arch tag; the bare manifest tag is assembled by the merge job.
           ARCH_TAG="${{ inputs.target_registry }}/${{ inputs.service_name }}:${PRIMARY_TAG}-${{ matrix.arch }}"
+          # Moving major.minor tag (e.g. v2.2-latest), mirroring core ci.yaml's
+          # major_minor_version. semantic_version is `git describe`, so this collapses
+          # dev builds and releases in the same X.Y line onto one tag.
+          MAJOR_MINOR=$(echo "${{ inputs.semantic_version }}" | cut -d. -f1,2)
           echo "primary_tag=$PRIMARY_TAG" >> $GITHUB_OUTPUT
           echo "arch_tag=$ARCH_TAG" >> $GITHUB_OUTPUT
           echo "artifact_version=$ARTIFACT_VERSION" >> $GITHUB_OUTPUT
+          echo "major_minor_tag=$MAJOR_MINOR" >> $GITHUB_OUTPUT
 
       - name: Build ${{ inputs.service_name }} (${{ matrix.arch }})
         uses: docker/build-push-action@v5
@@ -308,8 +313,10 @@ jobs:
           else
             PRIMARY_TAG="${{ inputs.branch_sha_tag }}"
           fi
+          MAJOR_MINOR=$(echo "${{ inputs.semantic_version }}" | cut -d. -f1,2)
           echo "primary_tag=$PRIMARY_TAG" >> $GITHUB_OUTPUT
           echo "artifact_version=$ARTIFACT_VERSION" >> $GITHUB_OUTPUT
+          echo "major_minor_tag=$MAJOR_MINOR" >> $GITHUB_OUTPUT
 
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
@@ -320,9 +327,13 @@ jobs:
           command: |
             REG="${{ inputs.target_registry }}/${{ inputs.service_name }}"
             TAG="${{ steps.docker-tags.outputs.primary_tag }}"
+            MAJOR_MINOR="${{ steps.docker-tags.outputs.major_minor_tag }}"
             docker buildx imagetools create -t "${REG}:${TAG}" "${REG}:${TAG}-amd64" "${REG}:${TAG}-arm64"
             if [ "${{ inputs.is_main_branch }}" == "true" ]; then
               docker buildx imagetools create -t "${REG}:latest" "${REG}:${TAG}-amd64" "${REG}:${TAG}-arm64"
+            fi
+            if [ -n "${MAJOR_MINOR}" ]; then
+              docker buildx imagetools create -t "${REG}:${MAJOR_MINOR}-latest" "${REG}:${TAG}-amd64" "${REG}:${TAG}-arm64"
             fi
 
       - name: Export Docker image

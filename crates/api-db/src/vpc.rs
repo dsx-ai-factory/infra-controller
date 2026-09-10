@@ -112,6 +112,14 @@ pub async fn find_ids(
         builder.push_bind(tenant_org_id);
         has_filter = true;
     }
+    if let Some(network_virtualization_type) = filter.network_virtualization_type {
+        if has_filter {
+            builder.push(" AND ");
+        }
+        builder.push("network_virtualization_type = ");
+        builder.push_bind(network_virtualization_type);
+        has_filter = true;
+    }
     if let Some(label) = filter.label {
         if has_filter {
             builder.push(" AND ");

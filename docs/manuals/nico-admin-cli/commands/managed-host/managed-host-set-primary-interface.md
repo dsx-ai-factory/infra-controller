@@ -25,26 +25,26 @@ is eligible.
 
 ## OPTIONS
 
-**--force-reconcile**\
+**--force-reconcile**  
 Request a fresh machine-controller reconciliation even when this
 interface is already selected. Sends only force_reconcile=true; servers
 without force_reconcile support ignore it, while supporting servers
 leave any required restart to machine-controller
 
-**--reboot**\
+**--reboot**  
 Deprecated compatibility option for servers without force_reconcile
 support. Sends reboot=true and force_reconcile=true; supporting servers
 treat it as reconciliation, while older servers force-restart the host
 after changing the target
 
-**--extended**\
+**--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]\
+**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
 Sort output by specified field\
 
 \
@@ -54,13 +54,13 @@ Sort output by specified field\
 
 - state: Sort by state
 
-**-h**, **--help**\
+**-h**, **--help**  
 Print help (see a summary with -h)
 
-\<*HOST_MACHINE_ID*\>\
+\<*HOST_MACHINE_ID*\>  
 ID of the host machine
 
-\<*INTERFACE_ID*\>\
+\<*INTERFACE_ID*\>  
 ID of the machine interface to make primary (the boot device)
 
 ## Examples

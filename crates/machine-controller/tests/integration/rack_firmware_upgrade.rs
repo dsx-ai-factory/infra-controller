@@ -79,7 +79,7 @@ async fn create_instance(env: &TestHarness, host: &TestManagedHost) -> InstanceI
     let instances = db::instance::batch_persist(
         vec![NewInstance {
             instance_id,
-            machine_id: host.host.id.into(),
+            machine_id: host.host.id,
             instance_type_id: None,
             config: &config,
             metadata: Metadata::default(),

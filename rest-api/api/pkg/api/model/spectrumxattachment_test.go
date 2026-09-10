@@ -181,7 +181,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_ToProto(t *testing.T) {
 			wantVirtualFunctionID: cutil.GetPtr(uint32(2)),
 		},
 		{
-			name: "OVN attachment maps to the Ovn enum",
+			name: "OVN attachment maps to the Ovs enum",
 			request: APISpectrumXAttachmentCreateOrUpdateRequest{
 				SpectrumXPartitionID: partitionID,
 				Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",

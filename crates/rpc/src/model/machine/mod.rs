@@ -18,13 +18,15 @@ use std::collections::HashSet;
 use std::ops::Deref;
 
 use base64::prelude::*;
-use carbide_uuid::machine::{DpuMachineId, MachineId, MachineType};
+use carbide_uuid::machine::{
+    DpuMachineId, MachineId, MachineIdSubtypeTrait, MachineType, StableHostMachineId,
+};
 use health_report::HealthReport;
 use model::errors::{ModelError, ModelResult};
 use model::health::HealthReportSources;
 use model::machine::{
     Dpf, DpfState, DpuInfo, DpuInfoStatusObservation, DpuInitState, DpuOsOperationalState,
-    DpuRepresentorStatus, FailureCause, InstanceState, Machine, MachineInterfaceSnapshot,
+    DpuRepresentorStatus, FailureCause, HostMachine, InstanceState, MachineInterfaceSnapshot,
     MachineValidationFilter, ManagedHostState, ManagedHostStateSnapshot, ReprovisionRequest,
     ReprovisionState, slas, state_sla,
 };
@@ -140,7 +142,14 @@ impl RpcTryFrom<ManagedHostStateSnapshot> for Option<rpc::Instance> {
 
         Ok(Some(rpc::Instance {
             id: Some(instance.id),
-            machine_id: Some(instance.machine_id),
+            machine_id: Some(StableHostMachineId::try_from(instance.machine_id).map_err(
+                |error| {
+                    RpcDataConversionError::InvalidValue(
+                        "machine_id".to_string(),
+                        error.to_string(),
+                    )
+                },
+            )?),
             config: Some(instance.config.try_into()?),
             status: Some(status.try_into()?),
             config_version: instance.config_version.version_string(),
@@ -160,8 +169,8 @@ impl RpcTryFrom<ManagedHostStateSnapshot> for Option<rpc::Instance> {
     }
 }
 
-impl From<Machine> for rpc::forge::dpf_state_response::DpfState {
-    fn from(value: Machine) -> Self {
+impl From<HostMachine> for rpc::forge::dpf_state_response::DpfState {
+    fn from(value: HostMachine) -> Self {
         Self {
             machine_id: value.id.into(),
             enabled: value.config.dpf.enabled,
@@ -200,9 +209,10 @@ impl From<Dpf> for rpc::forge::DpfMachineState {
 // The deprecated flat fields on `rpc::forge::Machine` must still be populated here for
 // backwards-compat until a follow-up PR migrates callers to the new config/status sub-messages.
 #[allow(deprecated)]
-impl From<Machine> for rpc::forge::Machine {
-    fn from(mut machine: Machine) -> Self {
-        let dpu_machine_id = machine.dpu_machine_id().ok();
+impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge::Machine {
+    fn from(mut machine: model::machine::Machine<ID>) -> Self {
+        let machine_id: MachineId = machine.id.into();
+        let dpu_machine_id = DpuMachineId::try_from(machine_id).ok();
         // Capture source origins before the DPU arm below empties machine.health_reports via
         // std::mem::take, which would otherwise leave health_sources empty for DPU machines.
         let health_sources: Vec<rpc::forge::HealthSourceOrigin> = machine
@@ -348,11 +358,7 @@ impl From<Machine> for rpc::forge::Machine {
             last_reboot_time: machine.status.last_reboot_time.map(|t| t.into()),
             last_observation_time,
             associated_host_machine_id: None, // Gets filled in the `ManagedHostStateSnapshot` conversion
-            associated_dpu_machine_ids: associated_dpu_machine_ids
-                .iter()
-                .copied()
-                .map(Into::into)
-                .collect(),
+            associated_dpu_machine_ids: associated_dpu_machine_ids.to_vec(),
             last_reboot_requested_time: machine
                 .status
                 .last_reboot_requested
@@ -395,7 +401,7 @@ impl From<Machine> for rpc::forge::Machine {
         };
 
         rpc::Machine {
-            id: Some(machine.id),
+            id: Some(machine_id),
             rack_id: machine.rack_id.clone(),
             state: rpc_state,
             capabilities,
@@ -420,10 +426,7 @@ impl From<Machine> for rpc::forge::Machine {
             maintenance_reference,
             maintenance_start_time: maintenance_start_time.map(rpc::Timestamp::from),
             associated_host_machine_id: None, // Gets filled in the `ManagedHostStateSnapshot` conversion
-            associated_dpu_machine_ids: associated_dpu_machine_ids
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            associated_dpu_machine_ids: associated_dpu_machine_ids.into_iter().collect(),
             inventory: Some(machine.status.inventory.unwrap_or_default().into()),
             last_reboot_requested_time: machine
                 .status
@@ -571,7 +574,7 @@ impl From<MachineInterfaceSnapshot> for rpc::MachineInterface {
 
         rpc::MachineInterface {
             id: Some(machine_interface.id),
-            attached_dpu_machine_id: machine_interface.attached_dpu_machine_id.map(Into::into),
+            attached_dpu_machine_id: machine_interface.attached_dpu_machine_id,
             machine_id: machine_interface.machine_id,
             segment_id: Some(machine_interface.segment_id),
             hostname: machine_interface.hostname,
@@ -598,7 +601,7 @@ impl From<MachineInterfaceSnapshot> for rpc::MachineInterface {
 pub trait ManagedHostStateSnapshotRpc {
     fn into_rpc_machine_state(
         self,
-        dpu_machine_id: Option<&MachineId>,
+        dpu_machine_id: Option<&DpuMachineId>,
         sla_config: &slas::MachineSlaConfig,
     ) -> Option<rpc::forge::Machine>;
 }
@@ -614,7 +617,7 @@ impl ManagedHostStateSnapshotRpc for ManagedHostStateSnapshot {
     /// the next candidate for this same move-instead-of-clone treatment.
     fn into_rpc_machine_state(
         self,
-        dpu_machine_id: Option<&MachineId>,
+        dpu_machine_id: Option<&DpuMachineId>,
         sla_config: &slas::MachineSlaConfig,
     ) -> Option<rpc::forge::Machine> {
         let ManagedHostStateSnapshot {
@@ -679,7 +682,7 @@ impl ManagedHostStateSnapshotRpc for ManagedHostStateSnapshot {
 }
 
 fn machine_instance_network_restrictions(
-    machine: &Machine,
+    machine: &model::machine::Machine<impl MachineIdSubtypeTrait>,
 ) -> rpc::forge::InstanceNetworkRestrictions {
     let inband_interfaces = machine
         .status
@@ -737,7 +740,7 @@ mod test {
     #[allow(deprecated)]
     fn clone_based_rpc_machine_state(
         snapshot: &ManagedHostStateSnapshot,
-        dpu_machine_id: Option<&carbide_uuid::machine::MachineId>,
+        dpu_machine_id: Option<&carbide_uuid::machine::DpuMachineId>,
         sla_config: &slas::MachineSlaConfig,
     ) -> Option<rpc::forge::Machine> {
         match dpu_machine_id {
@@ -768,7 +771,7 @@ mod test {
                 let dpu_snapshot = snapshot
                     .dpu_snapshots
                     .iter()
-                    .find(|dpu| dpu.id == *dpu_machine_id)?;
+                    .find(|dpu| &dpu.id == dpu_machine_id)?;
                 let sla: rpc::forge::StateSla = state_sla(
                     &dpu_snapshot.id,
                     &dpu_snapshot.state.value,
@@ -872,7 +875,7 @@ mod test {
                 .status
                 .as_ref()
                 .and_then(|s| s.associated_host_machine_id),
-            Some(machine_snapshot::host_machine_id()),
+            Some(machine_snapshot::host_machine_id().into()),
         );
         assert_eq!(normalized(expected), normalized(actual));
     }

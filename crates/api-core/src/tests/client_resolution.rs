@@ -363,7 +363,7 @@ async fn test_zero_dpu_cloud_init_prefers_instance_when_ip_matches_host_interfac
     let instance = env
         .api
         .allocate_instance(tonic::Request::new(rpc::InstanceAllocationRequest {
-            machine_id: Some(mh.id.into()),
+            machine_id: Some(mh.id),
             instance_type_id: None,
             config: Some(rpc::InstanceConfig {
                 tenant: Some(rpc::TenantConfig {
@@ -578,7 +578,7 @@ async fn test_cloud_init_local_hostname_set_from_instance_name(pool: sqlx::PgPoo
     let instance = env
         .api
         .allocate_instance(tonic::Request::new(rpc::InstanceAllocationRequest {
-            machine_id: Some(mh.id.into()),
+            machine_id: Some(mh.id),
             instance_type_id: None,
             config: Some(rpc::InstanceConfig {
                 tenant: Some(rpc::TenantConfig {
@@ -684,7 +684,7 @@ async fn test_cloud_init_local_hostname_omitted_when_instance_name_is_not_a_vali
     let instance = env
         .api
         .allocate_instance(tonic::Request::new(rpc::InstanceAllocationRequest {
-            machine_id: Some(mh.id.into()),
+            machine_id: Some(mh.id),
             instance_type_id: None,
             config: Some(rpc::InstanceConfig {
                 tenant: Some(rpc::TenantConfig {

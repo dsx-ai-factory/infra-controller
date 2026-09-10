@@ -28,7 +28,7 @@ use carbide_rpc_utils::{ManagedHostMetadata, reason_to_user_string};
 use db::managed_host;
 use hyper::http::StatusCode;
 use itertools::Itertools;
-use model::machine::{LoadSnapshotOptions, Machine, ManagedHostStateSnapshot};
+use model::machine::{DpuMachine, LoadSnapshotOptions, ManagedHostStateSnapshot};
 use model::{self, machine};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc};
@@ -218,8 +218,8 @@ impl ManagedHostRowDisplay {
     }
 }
 
-impl From<model::machine::Machine> for AttachedDpuRowDisplay {
-    fn from(item: Machine) -> Self {
+impl From<DpuMachine> for AttachedDpuRowDisplay {
+    fn from(item: DpuMachine) -> Self {
         let bmc_ip = item
             .status
             .bmc_info

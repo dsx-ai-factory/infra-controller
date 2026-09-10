@@ -116,7 +116,7 @@ impl From<AppliedRemediation> for rpc::forge::AppliedRemediation {
             name: String::new(),
         };
         Self {
-            dpu_machine_id: Some(value.dpu_machine_id.into()),
+            dpu_machine_id: Some(value.dpu_machine_id),
             remediation_id: Some(value.id),
             attempt: value.attempt,
             metadata: Some(metadata.into()),

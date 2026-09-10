@@ -26,7 +26,7 @@ use carbide_rack_controller::metrics::RackMetrics;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
-use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use db::db_read::DbReader;
@@ -273,7 +273,7 @@ async fn set_machine_host_reprovision_state(
 
 async fn set_machine_power_states(
     pool: &sqlx::PgPool,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     desired_power_state: model::power_manager::PowerState,
     actual_power_state: model::power_manager::PowerState,
 ) -> Result<(), Box<dyn std::error::Error>> {

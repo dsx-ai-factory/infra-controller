@@ -10,6 +10,10 @@ global:
 nico-api:
   legacyAlias:
     enabled: false
+  # Under test: route core's ordinary BMC Redfish traffic via nico-bmc-proxy
+  # (which chains to bmc-mock through its own bmc_proxy override).
+  bmcProxy:
+    enabled: true
   automountServiceAccountToken: false
   migrationJob:
     sslMode: disable
@@ -81,8 +85,8 @@ nico-api:
 
       [networks.DEV-K3S-X86-BMC-UNDERLAY-ACORN-X86-0]
       type = "underlay"
-      prefix = "192.168.192.0/18"
-      gateway = "192.168.192.1"
+      prefix = "10.96.64.0/18"
+      gateway = "10.96.64.1"
       mtu = 1500
       reserve_first = 2
 
@@ -115,8 +119,6 @@ nico-api:
       [site_explorer]
       enabled = true
       create_machines = true
-      allow_changing_bmc_proxy = true
-      bmc_proxy = "nico-machine-a-tron-mat-0-bmc-mock.nico-system.svc.cluster.local:1266"
       run_interval = "10s"
       machines_created_per_run = 1000
       explorations_per_run = 1000
@@ -147,7 +149,6 @@ nico-bmc-proxy:
       metrics_endpoint = "[::]:1080"
       database_url = "postgres://replaced-by-env-var"
       allowed_principals = ["trusted-certificate"]
-      bmc_proxy = "nico-machine-a-tron-mat-0-bmc-mock.nico-system.svc.cluster.local:1266"
 
       [tls]
       identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
@@ -207,6 +208,10 @@ nico-machine-a-tron:
   enabled: true
   machineATron:
     nicoApiUrl: https://nico-api.nico-system.svc.cluster.local:1079
+  mat-k8s-controller:
+    enabled: true
+    config:
+      insecureSkipVerify: true
   machineDefaults:
     discoveryRetryInterval: "5s"
   persistence:
@@ -241,7 +246,7 @@ nico-machine-a-tron:
         host_reboot_delay = 10
         acceleration_factor = 0.01
         discovery_retry_interval = "5s"
-        oob_dhcp_relay_address = "192.168.192.1"
+        oob_dhcp_relay_address = "10.96.64.1"
         admin_dhcp_relay_address = "192.168.176.1"
 
         [machines.rack-machines]
@@ -256,7 +261,7 @@ nico-machine-a-tron:
         run_interval_working = "1s"
         run_interval_idle = "10s"
         network_status_run_interval = "20s"
-        oob_dhcp_relay_address = "192.168.192.1"
+        oob_dhcp_relay_address = "10.96.64.1"
         admin_dhcp_relay_address = "192.168.176.1"
         dpus_in_nic_mode = false
   pods:
@@ -269,14 +274,14 @@ nico-machine-a-tron:
             - rack-001
           dpu_reboot_delay: 20
           host_reboot_delay: 10
-          oob_dhcp_relay_address: 192.168.192.1
+          oob_dhcp_relay_address: 10.96.64.1
           admin_dhcp_relay_address: 192.168.176.1
       machines:
         rack-machines:
           hwType: wiwynn_gb200_nvl
           hostCount: 2
           dpuPerHostCount: 2
-          oobDhcpRelayAddress: 192.168.192.1
+          oobDhcpRelayAddress: 10.96.64.1
           adminDhcpRelayAddress: 192.168.176.1
 
 tilt:

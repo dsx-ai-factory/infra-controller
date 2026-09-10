@@ -37,9 +37,10 @@ use crate::machine::nvlink::MachineNvLinkStatusObservation;
 use crate::machine::spx::MachineSpxStatusObservation;
 use crate::machine::topology::MachineTopology;
 use crate::machine::{
-    Dpf, FailureDetails, HostProfile, HostReprovisionRequest, Machine, MachineConfig,
-    MachineInterfaceSnapshot, MachineLastRebootRequested, MachineMaintenanceRequest, MachineStatus,
-    ManagedHostState, ReprovisionRequest, UpgradeDecision,
+    AnyMachine, Dpf, DpuMachine, FailureDetails, HostMachine, HostProfile, HostReprovisionRequest,
+    MachineConfig, MachineInterfaceSnapshot, MachineLastRebootRequested, MachineMaintenanceRequest,
+    MachineStatus, ManagedHostState, PredictedHostMachine, ReprovisionRequest, StableHostMachine,
+    UpgradeDecision,
 };
 use crate::machine_boot_interface::{
     BootInterfaceSelection, BootInterfaceSelectionSource, BootInterfaceStatusObservation,
@@ -251,10 +252,9 @@ fn decode_boot_interface_status_observation(
     }
 }
 
-impl TryFrom<MachineSnapshotPgJson> for Machine {
+impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
     type Error = sqlx::Error;
-
-    fn try_from(value: MachineSnapshotPgJson) -> sqlx::Result<Self> {
+    fn try_from(value: MachineSnapshotPgJson) -> Result<Self, Self::Error> {
         let hardware_info = value
             .topology
             .into_iter()
@@ -399,6 +399,28 @@ impl TryFrom<MachineSnapshotPgJson> for Machine {
         })
     }
 }
+
+macro_rules! delegate_try_from_machine_snapshot_pg_json_impl {
+    ($type:ty) => {
+        impl TryFrom<MachineSnapshotPgJson> for $type {
+            type Error = sqlx::Error;
+
+            fn try_from(value: MachineSnapshotPgJson) -> Result<Self, Self::Error> {
+                AnyMachine::try_from(value)?
+                    .try_into_subtype()
+                    .map_err(|e| sqlx::Error::ColumnDecode {
+                        index: "id".to_string(),
+                        source: Box::new(e),
+                    })
+            }
+        }
+    };
+}
+
+delegate_try_from_machine_snapshot_pg_json_impl!(HostMachine);
+delegate_try_from_machine_snapshot_pg_json_impl!(DpuMachine);
+delegate_try_from_machine_snapshot_pg_json_impl!(PredictedHostMachine);
+delegate_try_from_machine_snapshot_pg_json_impl!(StableHostMachine);
 
 #[cfg(test)]
 mod tests {

@@ -25,7 +25,7 @@
 
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId, StableHostMachineId};
 use clap::{CommandFactory, Parser};
 
 use super::*;
@@ -139,7 +139,7 @@ fn parse_quarantine_routes_to_quarantine() {
             let matches = parse_leaf::<Cmd>(argv, &["quarantine", action]).map_err(drop)?;
             Ok::<_, ()>((
                 matches
-                    .get_one::<MachineId>("host")
+                    .get_one::<HostMachineId>("host")
                     .copied()
                     .expect("host is required"),
                 if action == "on" {
@@ -158,7 +158,7 @@ fn parse_quarantine_routes_to_quarantine() {
                 TEST_MACHINE_ID,
                 "--reason",
                 "Security issue",
-            ][..] => Yields((TEST_MACHINE_ID.parse::<MachineId>().unwrap(), "Security issue".to_string())),
+            ][..] => Yields((TEST_MACHINE_ID.parse::<HostMachineId>().unwrap(), "Security issue".to_string())),
         }
 
         "off with host" {
@@ -168,7 +168,7 @@ fn parse_quarantine_routes_to_quarantine() {
                 "off",
                 "--host",
                 TEST_MACHINE_ID,
-            ][..] => Yields((TEST_MACHINE_ID.parse::<MachineId>().unwrap(), String::new())),
+            ][..] => Yields((TEST_MACHINE_ID.parse::<HostMachineId>().unwrap(), String::new())),
         }
     );
 }
@@ -187,8 +187,8 @@ fn parse_reset_host_reprovisioning() {
         .expect("should parse reset-host-reprovisioning");
 
     assert_eq!(
-        matches.get_one::<MachineId>("machine"),
-        Some(&TEST_MACHINE_ID.parse::<MachineId>().unwrap())
+        matches.get_one::<StableHostMachineId>("machine"),
+        Some(&TEST_MACHINE_ID.parse().unwrap())
     );
 }
 
@@ -241,7 +241,7 @@ fn parse_power_options_routes_to_power_options() {
                 "--desired-power-state",
                 "on",
             ][..] => Yields((
-                Some(TEST_MACHINE_ID.parse::<MachineId>().unwrap()),
+                Some(TEST_MACHINE_ID.parse::<HostMachineId>().unwrap()),
                 Some(rpc::forge::PowerState::On as i32),
             )),
         }

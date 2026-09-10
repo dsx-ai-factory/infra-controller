@@ -167,6 +167,30 @@ fn sim_http_error(status: http::StatusCode, url: &str, body: &str) -> RedfishErr
 pub struct CreateClientCall {
     pub host: String,
     pub vendor: Option<RedfishVendor>,
+    /// Which [`RedfishAuth`] variant the caller supplied, so tests can pin
+    /// routing decisions (e.g. established traffic authenticating by key).
+    pub auth: RedfishAuthKind,
+    /// For [`RedfishAuth::Key`], the key's string form, so tests can pin
+    /// WHICH credential the caller named, not just the auth class.
+    pub auth_key: Option<String>,
+}
+
+/// Discriminant of [`RedfishAuth`], recorded per `create_client` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedfishAuthKind {
+    Anonymous,
+    Key,
+    Direct,
+}
+
+impl From<&RedfishAuth> for RedfishAuthKind {
+    fn from(auth: &RedfishAuth) -> Self {
+        match auth {
+            RedfishAuth::Anonymous => RedfishAuthKind::Anonymous,
+            RedfishAuth::Key(_) => RedfishAuthKind::Key,
+            RedfishAuth::Direct(..) => RedfishAuthKind::Direct,
+        }
+    }
 }
 
 /// Credential and result observed when the simulator checks direct authentication.
@@ -2546,6 +2570,11 @@ impl RedfishClientPool for RedfishSim {
             state.create_client_calls.push(CreateClientCall {
                 host: host.to_string(),
                 vendor,
+                auth: (&auth).into(),
+                auth_key: match &auth {
+                    RedfishAuth::Key(key) => Some(key.to_key_str().to_string()),
+                    _ => None,
+                },
             });
             if let Some(error) = state.create_client_error.clone() {
                 return Err(RedfishClientCreationError::RedfishError(

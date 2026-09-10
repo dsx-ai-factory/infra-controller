@@ -4,8 +4,8 @@ _[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › 
 
 ## NAME
 
-nico-admin-cli-bmc-machine-set-root-password - Set a BMC's root password
-out-of-band (for fleet rotation use `credential rotate`)
+nico-admin-cli-bmc-machine-set-root-password - Set a BMCs root password
+out-of-band (for fleet rotation use \`credential rotate\`)
 
 ## SYNOPSIS
 
@@ -16,8 +16,8 @@ out-of-band (for fleet rotation use `credential rotate`)
 
 ## DESCRIPTION
 
-Set a BMC's root password out-of-band (for fleet rotation use
-`credential rotate`)
+Set a BMCs root password out-of-band (for fleet rotation use
+\`credential rotate\`)
 
 ## OPTIONS
 
@@ -36,7 +36,7 @@ New BMC root password to set
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 

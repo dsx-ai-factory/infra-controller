@@ -30,7 +30,6 @@ pub fn host_id_from_dpu_hardware_info(
     hardware_info: &HardwareInfo,
 ) -> Result<MachineId, MissingHardwareInfo> {
     assert!(hardware_info.is_dpu(), "Method can only be called on a DPU");
-
     from_hardware_info_with_type(hardware_info, MachineType::PredictedHost)
 }
 

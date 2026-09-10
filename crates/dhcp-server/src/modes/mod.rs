@@ -18,7 +18,7 @@ use std::net::SocketAddrV4;
 use std::sync::Arc;
 
 use lru::LruCache;
-use rpc::forge::{DhcpDiscovery, DhcpRecord};
+use rpc::forge::{DhcpDiscovery, DhcpRecord, MessageKind};
 use tokio::sync::Mutex;
 use tonic::async_trait;
 
@@ -27,11 +27,22 @@ use crate::cache::CacheEntry;
 use crate::errors::DhcpError;
 use crate::packet_handler::{DecodedPacket, Packet};
 
-pub(super) mod controller;
-pub(super) mod dpu;
+pub mod controller;
+pub mod dpu;
+
+/// Result of resolving one DHCPv6 request against the selected serving mode.
+#[derive(Debug, Clone)]
+pub enum V6Outcome {
+    /// A stateful address and configuration options are available.
+    Stateful(DhcpRecord),
+    /// Configuration options are available without an address assignment.
+    OptionsOnly(DhcpRecord),
+    /// The interface is IPv6-enabled but has no stateful address binding.
+    NoAddress,
+}
 
 #[async_trait]
-pub(super) trait DhcpMode: Send + Sync + std::fmt::Debug {
+pub trait DhcpMode: Send + Sync + std::fmt::Debug {
     /// Method to determine IP address to be returned to client.
     async fn discover_dhcp(
         &self,
@@ -39,6 +50,13 @@ pub(super) trait DhcpMode: Send + Sync + std::fmt::Debug {
         config: &Config,
         machine_cache: &mut Arc<Mutex<LruCache<String, CacheEntry>>>,
     ) -> Result<DhcpRecord, DhcpError>;
+    /// Resolve a DHCPv6 request without collapsing address-less outcomes into a record.
+    async fn discover_dhcp_v6(
+        &self,
+        discovery_request: DhcpDiscovery,
+        config: &Config,
+        machine_cache: &mut Arc<Mutex<LruCache<String, CacheEntry>>>,
+    ) -> Result<V6Outcome, DhcpError>;
     /// And at what address?
     fn get_destination_address(&self, packet: &Packet) -> SocketAddrV4 {
         packet.dst_address()
@@ -52,4 +70,17 @@ pub(super) trait DhcpMode: Send + Sync + std::fmt::Debug {
     fn should_be_relayed(&self) -> bool {
         true
     }
+}
+
+/// Return the message kind carried by the discovery request built from the
+/// DHCPv6 wire message.
+fn v6_message_kind(discovery_request: &DhcpDiscovery) -> Result<MessageKind, DhcpError> {
+    let message_kind = discovery_request.message_kind.ok_or_else(|| {
+        DhcpError::InvalidInput("DHCPv6 discovery request is missing message kind".to_string())
+    })?;
+    MessageKind::try_from(message_kind).map_err(|_| {
+        DhcpError::InvalidInput(format!(
+            "DHCPv6 discovery request has unknown message kind {message_kind}"
+        ))
+    })
 }

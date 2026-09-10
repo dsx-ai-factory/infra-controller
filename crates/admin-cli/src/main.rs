@@ -43,6 +43,7 @@ use crate::cfg::runtime::{RuntimeConfig, RuntimeContext};
 use crate::errors::CarbideCliError;
 use crate::rpc::ApiClient;
 
+mod admission_retry;
 mod async_write;
 mod attestation;
 mod bmc_machine;
@@ -113,6 +114,7 @@ mod sku;
 mod spx_partition;
 mod ssh;
 mod switch;
+mod table_utils;
 mod tenant;
 mod tenant_keyset;
 #[cfg(test)]
