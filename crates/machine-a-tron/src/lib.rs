@@ -45,7 +45,7 @@ mod switch_simulator;
 
 use std::time::{Duration, Instant};
 
-pub use bmc_mock_wrapper::BmcMockRegistry;
+pub use bmc_mock_wrapper::{BmcMockRegistry, RegisteredBmc};
 pub use config::{
     DhcpType, LenovoGb300RackConfig, LogFormat, MachineATronArgs, MachineATronConfig,
     MachineATronContext, MachineConfig, PersistedDevice, PersistedDpuMachine, RackConfig,

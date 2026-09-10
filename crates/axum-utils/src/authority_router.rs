@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -34,18 +35,34 @@ use crate::router::call_router_with_new_request;
 /// The lookup order is the `host` parameter of `Forwarded`, the `Host`
 /// header, the URI authority, and finally the router stored under an empty
 /// string.
-pub fn authority_router(routers: Arc<RwLock<HashMap<String, Router>>>) -> Router {
+///
+/// Map values only have to borrow as the router to dispatch to, so callers
+/// can keep bookkeeping about each entry next to its router.
+pub fn authority_router<R>(routers: Arc<RwLock<HashMap<String, R>>>) -> Router
+where
+    R: Borrow<Router> + Send + Sync + 'static,
+{
     Router::new()
-        .route("/{*all}", any(process))
+        .route("/{*all}", any(process::<R>))
         .with_state(AuthorityRouter { routers })
 }
 
-#[derive(Clone)]
-struct AuthorityRouter {
-    routers: Arc<RwLock<HashMap<String, Router>>>,
+struct AuthorityRouter<R> {
+    routers: Arc<RwLock<HashMap<String, R>>>,
 }
 
-async fn process(State(state): State<AuthorityRouter>, request: Request<Body>) -> Response {
+impl<R> Clone for AuthorityRouter<R> {
+    fn clone(&self) -> Self {
+        Self {
+            routers: self.routers.clone(),
+        }
+    }
+}
+
+async fn process<R>(State(state): State<AuthorityRouter<R>>, request: Request<Body>) -> Response
+where
+    R: Borrow<Router> + Send + Sync + 'static,
+{
     let forwarded_host = forwarded_host(&request);
     let host = request
         .headers()
@@ -96,18 +113,26 @@ fn forwarded_host<B>(request: &Request<B>) -> Option<String> {
         })
 }
 
-async fn find_router(
-    routers: &Arc<RwLock<HashMap<String, Router>>>,
+async fn find_router<R>(
+    routers: &RwLock<HashMap<String, R>>,
     forwarded_host: Option<&str>,
     host: Option<&str>,
     authority: Option<&str>,
-) -> Option<Router> {
+) -> Option<Router>
+where
+    R: Borrow<Router>,
+{
     let routers = routers.read().await;
+    let lookup = |key: &str| {
+        routers
+            .get(key)
+            .map(|entry| Borrow::<Router>::borrow(entry).clone())
+    };
     forwarded_host
-        .and_then(|forwarded_host| routers.get(forwarded_host).cloned())
-        .or_else(|| host.and_then(|host| routers.get(host).cloned()))
-        .or_else(|| authority.and_then(|authority| routers.get(authority).cloned()))
-        .or_else(|| routers.get("").cloned())
+        .and_then(lookup)
+        .or_else(|| host.and_then(lookup))
+        .or_else(|| authority.and_then(lookup))
+        .or_else(|| lookup(""))
 }
 
 fn no_router_response(

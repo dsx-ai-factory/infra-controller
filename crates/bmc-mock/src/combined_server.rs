@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
@@ -71,12 +72,18 @@ impl Drop for CombinedServer {
 }
 
 impl CombinedServer {
-    pub fn run(
+    /// Serves every router in `routers_by_ip_address`, dispatching by request authority. Map
+    /// values only have to borrow as a [`Router`], so callers can store bookkeeping beside each
+    /// router.
+    pub fn run<R>(
         name: &str,
-        routers_by_ip_address: Arc<RwLock<HashMap<String, Router>>>,
+        routers_by_ip_address: Arc<RwLock<HashMap<String, R>>>,
         listener_or_address: Option<ListenerOrAddress>,
         server_config: rustls::ServerConfig,
-    ) -> Self {
+    ) -> Self
+    where
+        R: Borrow<Router> + Send + Sync + 'static,
+    {
         Self::run_router(
             name,
             combined_router(routers_by_ip_address),

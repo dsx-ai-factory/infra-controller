@@ -36,7 +36,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::api_client::{ClientApiError, DpuNetworkStatusArgs, MockDiscoveryData};
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle, ConsoleSimulators};
 use crate::config::{MachineATronContext, MachineConfig};
 use crate::dhcp_wrapper::{
     DhcpRelayError, DhcpRelayResult, DhcpRequestInfo, DhcpRequester, DhcpResponseInfo,
@@ -120,6 +120,11 @@ pub(super) struct MachineStateMachine {
     pub(super) installed_os: OsImage,
 
     fsm: MachineFsm,
+    /// Built on the first `SetupBmc` and kept for the life of the process. `SetupBmc` runs once
+    /// per machine, after the BMC's DHCP lease is obtained; a retry after a failed start
+    /// re-publishes this wrapper under that lease instead of building a new one. It is never
+    /// unregistered: the BMC stays reachable while the host is off.
+    bmc_mock_wrapper: Option<BmcMockWrapper>,
     bmc_mock: Option<Arc<BmcMockWrapperHandle>>,
     bmc_state: Option<BmcState>,
     bmc_injection: Arc<InjectionStore>,
@@ -342,6 +347,7 @@ impl MachineStateMachine {
         MachineStateMachine {
             fsm,
             actions: actions.into_iter().collect(),
+            bmc_mock_wrapper: None,
             bmc_mock: None,
             bmc_state: None,
             bmc_injection: Arc::new(InjectionStore::new()),
@@ -390,6 +396,7 @@ impl MachineStateMachine {
             fsm,
             actions: actions.into_iter().collect(),
             bmc_dhcp_info: None,
+            bmc_mock_wrapper: None,
             bmc_mock: None,
             bmc_state: None,
             bmc_injection: Arc::new(InjectionStore::new()),
@@ -671,12 +678,13 @@ impl MachineStateMachine {
     }
 
     async fn setup_bmc(
-        &self,
+        &mut self,
     ) -> Result<(Option<Arc<BmcMockWrapperHandle>>, BmcState), MachineStateError> {
         let Some(dhcp_info) = &self.bmc_dhcp_info else {
             return Err(MachineStateError::NoBmcDhcpInfo);
         };
-        self.run_bmc_mock(dhcp_info.ip_address).await
+        let ip_address = dhcp_info.ip_address;
+        self.run_bmc_mock(ip_address).await
     }
 
     async fn bmc_dhcp_discovery(&self) -> DhcpRelayResult<DhcpResponseInfo> {
@@ -1229,13 +1237,13 @@ impl MachineStateMachine {
         MaybeOsImage(self.fsm.booted_os())
     }
 
-    async fn run_bmc_mock(
-        &self,
-        ip_address: Ipv4Addr,
-    ) -> Result<(Option<Arc<BmcMockWrapperHandle>>, BmcState), MachineStateError> {
+    /// Builds this machine's BMC mock. Called once per machine: `SetupBmc` runs once and its
+    /// retry path reuses the wrapper, so accounts, sessions and applied firmware persist in
+    /// memory until the process exits.
+    fn build_bmc_mock(&self) -> BmcMockWrapper {
         let bmc_mock = BmcMockWrapper::new(
             &self.machine_info,
-            self.app_context.clone(),
+            ConsoleSimulators::from(&self.app_context.app_config),
             Arc::new(LiveStateCallbacks::new(
                 self.live_state.clone(),
                 self.bmc_command_channel.clone(),
@@ -1257,15 +1265,24 @@ impl MachineStateMachine {
                 .account_service_state
                 .change_factory_default_password(pw);
         }
+        bmc_mock
+    }
 
-        let maybe_bmc_mock_handle = {
-            self.app_context
-                .bmc_registry
-                .write()
-                .await
-                .insert(ip_address.to_string(), bmc_mock.router().clone());
-            bmc_mock.start().await?.map(Arc::new)
+    async fn run_bmc_mock(
+        &mut self,
+        ip_address: Ipv4Addr,
+    ) -> Result<(Option<Arc<BmcMockWrapperHandle>>, BmcState), MachineStateError> {
+        let bmc_mock = match &mut self.bmc_mock_wrapper {
+            Some(bmc_mock) => bmc_mock,
+            None => {
+                let bmc_mock = self.build_bmc_mock();
+                self.bmc_mock_wrapper.insert(bmc_mock)
+            }
         };
+        bmc_mock
+            .register(&self.app_context.bmc_registry, ip_address)
+            .await;
+        let maybe_bmc_mock_handle = bmc_mock.start().await?.map(Arc::new);
         if let Some(ssh_host_key) = maybe_bmc_mock_handle
             .as_ref()
             .and_then(|handle| handle.ssh_handle.as_ref())
