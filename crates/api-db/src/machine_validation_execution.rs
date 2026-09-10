@@ -188,8 +188,16 @@ pub async fn record_result(
     let state = state_from_result(result);
     let stdout_summary = truncate_summary(&result.stdout);
     let stderr_summary = truncate_summary(&result.stderr);
-    let failure_classification =
-        (state == MachineValidationAttemptState::Failed).then(|| "CommandFailed".to_string());
+    let failure_classification = match state {
+        MachineValidationAttemptState::Failed if result.exit_code == -1 => {
+            Some("FrameworkError".to_string())
+        }
+        MachineValidationAttemptState::Failed if result.exit_code == -2 => {
+            Some("PluginReportedError".to_string())
+        }
+        MachineValidationAttemptState::Failed => Some("CommandFailed".to_string()),
+        _ => None,
+    };
 
     let updated_first_terminal = update_pending_attempt_from_result(
         txn,
@@ -553,9 +561,11 @@ async fn upsert_run_item_from_test(
                 order_index,
                 attempt,
                 max_attempts,
-                timeout_seconds
+                timeout_seconds,
+                plugin,
+                plugin_full_host_approved
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 1, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 1, $10, $11, $12)
             ON CONFLICT (run_id, test_id) DO UPDATE
             SET
                 test_version=EXCLUDED.test_version,
@@ -587,6 +597,8 @@ async fn upsert_run_item_from_test(
         .bind(MachineValidationRunItemState::Pending.to_string())
         .bind(order_index)
         .bind(test.timeout.unwrap_or(DEFAULT_TIMEOUT_SECONDS))
+        .bind(test.plugin.clone().map(sqlx::types::Json))
+        .bind(test.full_host_approved)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))

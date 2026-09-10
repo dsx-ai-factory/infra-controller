@@ -240,6 +240,10 @@ pub struct MachineValidationRunItem {
     pub attempt: i32,
     pub max_attempts: i32,
     pub timeout_seconds: i64,
+    /// The selected plugin configuration, frozen when the run plan is created.
+    pub plugin: Option<MachineValidationPlugin>,
+    /// Full-host approval as it existed when this run plan was created.
+    pub plugin_full_host_approved: bool,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
@@ -271,6 +275,10 @@ impl<'r> FromRow<'r, PgRow> for MachineValidationRunItem {
             attempt: row.try_get("attempt")?,
             max_attempts: row.try_get("max_attempts")?,
             timeout_seconds: row.try_get("timeout_seconds")?,
+            plugin: row
+                .try_get::<Option<sqlx::types::Json<MachineValidationPlugin>>, _>("plugin")?
+                .map(|plugin| plugin.0),
+            plugin_full_host_approved: row.try_get("plugin_full_host_approved")?,
             started_at: row.try_get("started_at")?,
             ended_at: row.try_get("ended_at")?,
             last_heartbeat_at: row.try_get("last_heartbeat_at")?,

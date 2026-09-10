@@ -168,8 +168,11 @@ the image pull and never exposes it to the plugin, logs, or catalog. The legacy
 ## **3.2 Plugin Contract**
 
 Every plugin receives a versioned, non-secret JSON input at
-`/opt/nico/mv/input/input.json` and writes one versioned JSON result to
-`/opt/nico/mv/output/result.json`. The input identifies the run, attempt,
+`/opt/forge/mv/input/input.json` by default and writes one versioned JSON result
+to `/opt/forge/mv/output/result.json` by default. A Scout deployment can set its
+common container-visible base directory with
+`--machine-validation-plugin-contract-dir <absolute-path>`; Scout then mounts
+`<base>/input` and `<base>/output` in every plugin container. The input identifies the run, attempt,
 machine, context, plugin revision, deadline, and site-defined parameters. The
 result declares `pass`, `fail`, or `error` with a short summary and optional
 findings.
@@ -382,7 +385,7 @@ health tool.
      --version 1.0.0
    ```
 
-4. Scout writes `/opt/nico/mv/input/input.json`, starts the privileged
+4. Scout writes `/opt/forge/mv/input/input.json`, starts the privileged
    `/plugin/entrypoint`, and provides the writable host root at `/host`. The
    adapter receives this illustrative input file inside its container:
 
@@ -416,7 +419,7 @@ health tool.
    ```
 
    If the tool finds eight healthy GPUs, the adapter writes this result file at
-   `/opt/nico/mv/output/result.json`:
+   `/opt/forge/mv/output/result.json`:
 
    ```json
    {
