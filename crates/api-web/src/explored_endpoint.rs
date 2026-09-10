@@ -16,7 +16,6 @@
  */
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -26,6 +25,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::{Form, Json};
 use carbide_api_core::{Api, DefaultCredential};
 use hyper::http::StatusCode;
+use model::site_explorer::ExplorationReportWarning;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc, BmcEndpointRequest, admin_power_control_request};
 use rpc::site_explorer::{
@@ -452,16 +452,6 @@ struct ExploredEndpointInfo {
     has_machine: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ExplorationReportWarning {
-    LocallyAdministeredManagerMac {
-        manager_id: String,
-        mac_address: mac_address::MacAddress,
-    },
-    MissingDpuOobInterface,
-    MissingBf4BaseMac,
-}
-
 type ExplorationReportWarningCheck =
     fn(&EndpointExplorationReport) -> Vec<ExplorationReportWarning>;
 
@@ -470,26 +460,6 @@ const EXPLORATION_REPORT_WARNING_CHECKS: &[ExplorationReportWarningCheck] = &[
     missing_dpu_oob_interface_warning,
     missing_bf4_base_mac_warning,
 ];
-
-impl fmt::Display for ExplorationReportWarning {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LocallyAdministeredManagerMac {
-                manager_id,
-                mac_address,
-            } => write!(
-                formatter,
-                "Manager {manager_id} eth0 MAC {mac_address} is locally administered; it may be transient pre-sync data."
-            ),
-            Self::MissingDpuOobInterface => {
-                formatter.write_str("DPU OOB interface is missing from the exploration report.")
-            }
-            Self::MissingBf4BaseMac => {
-                formatter.write_str("BF4 PF0 base MAC is missing from the exploration report.")
-            }
-        }
-    }
-}
 
 fn exploration_report_warnings(
     report: &EndpointExplorationReport,

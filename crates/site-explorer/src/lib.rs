@@ -82,6 +82,8 @@ pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
+mod exploration_warning_tracker;
+use exploration_warning_tracker::ExplorationWarningTracker;
 mod machine_creator;
 pub use machine_creator::MachineCreator;
 pub mod explored_endpoint_index;
@@ -484,6 +486,7 @@ pub struct SiteExplorer {
     machine_creator: MachineCreator,
     switch_creator: SwitchCreator,
     boot_order_tracker: BootOrderTracker,
+    exploration_warning_tracker: ExplorationWarningTracker,
     /// Backstops the persisted BMC-reset timestamps for the reset rate limit,
     /// so a reset whose timestamp write failed still throttles the next reset.
     recent_bmc_resets: RecentBmcResets,
@@ -493,6 +496,15 @@ pub struct SiteExplorer {
 /// State captured once and applied throughout a Site Explorer iteration.
 struct SiteExplorerRunContext {
     suppressed_bmc_macs: HashSet<MacAddress>,
+}
+
+/// Data produced by one successful Site Explorer iteration.
+#[derive(Debug)]
+pub struct SiteExplorerIterationData {
+    /// Managed hosts identified during the iteration.
+    pub identified_hosts: SiteIdentifiedHosts,
+    /// Current persisted exploration reports for all endpoints.
+    pub exploration_reports: Vec<ExploredEndpoint>,
 }
 
 impl SiteExplorer {
@@ -554,6 +566,7 @@ impl SiteExplorer {
             endpoint_exploration_service,
             work_lock_manager_handle,
             boot_order_tracker: BootOrderTracker::default(),
+            exploration_warning_tracker: ExplorationWarningTracker::default(),
             recent_bmc_resets: RecentBmcResets::default(),
         }
     }
@@ -580,9 +593,13 @@ impl SiteExplorer {
 
             if self.config.enabled.load(Ordering::Relaxed) {
                 match self.run_single_iteration().await {
-                    Ok(identified_hosts) => self
-                        .boot_order_tracker
-                        .track_hosts(Instant::now(), &identified_hosts),
+                    Ok(result) => {
+                        let now = Instant::now();
+                        self.exploration_warning_tracker
+                            .track_reports(now, &result.exploration_reports);
+                        self.boot_order_tracker
+                            .track_hosts(now, &result.identified_hosts);
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "SiteExplorer error");
                     }
@@ -614,7 +631,7 @@ impl SiteExplorer {
         started_at: chrono::DateTime<Utc>,
         finished_at: chrono::DateTime<Utc>,
         metrics: &SiteExplorationMetrics,
-        result: &SiteExplorerResult<SiteIdentifiedHosts>,
+        result: &SiteExplorerResult<SiteExplorerIterationData>,
     ) -> SiteExplorerLastRun {
         let failure_category = result.as_ref().err().map(Self::run_failure_category);
         SiteExplorerLastRun {
@@ -668,7 +685,7 @@ impl SiteExplorer {
 
     fn record_run_status_metric(
         metrics: &mut SiteExplorationMetrics,
-        result: &SiteExplorerResult<SiteIdentifiedHosts>,
+        result: &SiteExplorerResult<SiteExplorerIterationData>,
     ) {
         metrics.run_failure_category = result.as_ref().err().map(Self::run_failure_category);
     }
@@ -698,7 +715,7 @@ impl SiteExplorer {
         &self,
         started_at: chrono::DateTime<Utc>,
         metrics: &SiteExplorationMetrics,
-        result: &SiteExplorerResult<SiteIdentifiedHosts>,
+        result: &SiteExplorerResult<SiteExplorerIterationData>,
     ) {
         let last_run = Self::last_run_status(started_at, Utc::now(), metrics, result);
         if let Err(error) = self.record_last_run(&last_run).await {
@@ -706,7 +723,8 @@ impl SiteExplorer {
         }
     }
 
-    pub async fn run_single_iteration(&self) -> SiteExplorerResult<SiteIdentifiedHosts> {
+    /// Runs one Site Explorer iteration and returns the data it produced.
+    pub async fn run_single_iteration(&self) -> SiteExplorerResult<SiteExplorerIterationData> {
         let started_at = Utc::now();
         let mut metrics = SiteExplorationMetrics::new();
 
@@ -817,7 +835,7 @@ impl SiteExplorer {
         &self,
         metrics: &mut SiteExplorationMetrics,
         expected_endpoint_index: &ExploredEndpointIndex,
-    ) -> SiteExplorerResult<()> {
+    ) -> SiteExplorerResult<Vec<ExploredEndpoint>> {
         let audit_load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
 
@@ -853,7 +871,7 @@ impl SiteExplorer {
 
         // Go through all the explored endpoints and collect metrics and submit
         // health reports
-        for ep in explored_endpoints.into_iter() {
+        for ep in &explored_endpoints {
             if ep.report.endpoint_type != EndpointType::Bmc {
                 // Skip anything that isn't a BMC.
                 continue;
@@ -1030,13 +1048,13 @@ impl SiteExplorer {
             );
         }
 
-        Ok(())
+        Ok(explored_endpoints)
     }
 
     async fn explore_site(
         &self,
         metrics: &mut SiteExplorationMetrics,
-    ) -> SiteExplorerResult<SiteIdentifiedHosts> {
+    ) -> SiteExplorerResult<SiteExplorerIterationData> {
         let suppressed_bmc_macs = self.acknowledge_site_explorer_suppressions().await?;
         let run_context = SiteExplorerRunContext {
             suppressed_bmc_macs,
@@ -1173,7 +1191,8 @@ impl SiteExplorer {
 
         // Audit after everything has been explored, identified, and created.
         let audit_exploration_results_start = Instant::now();
-        self.audit_exploration_results(metrics, &expected_endpoint_index)
+        let exploration_reports = self
+            .audit_exploration_results(metrics, &expected_endpoint_index)
             .await?;
         metrics.record_phase_latency(
             "audit_exploration_results",
@@ -1206,10 +1225,13 @@ impl SiteExplorer {
             }
         }
 
-        Ok(identified_hosts
-            .into_iter()
-            .map(|identified| (identified.explored_host, identified.report))
-            .collect())
+        Ok(SiteExplorerIterationData {
+            identified_hosts: identified_hosts
+                .into_iter()
+                .map(|identified| (identified.explored_host, identified.report))
+                .collect(),
+            exploration_reports,
+        })
     }
 
     async fn create_power_shelves(
@@ -2919,6 +2941,7 @@ impl SiteExplorer {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
+
         // Any transaction touching multiple explored_endpoints needs to sort them the same way to
         // avoid deadlocks: sort by IP.
         exploration_results.sort_by_key(|result| result.endpoint.address);

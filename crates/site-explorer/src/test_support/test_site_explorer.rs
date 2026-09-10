@@ -23,7 +23,7 @@ use model::site_explorer::{EndpointExplorationError, EndpointExplorationReport};
 
 use super::mock_endpoint_explorer::MockEndpointExplorer;
 use crate::errors::SiteExplorerResult;
-use crate::{EndpointExplorationService, SiteExplorer, SiteIdentifiedHosts};
+use crate::{EndpointExplorationService, SiteExplorer, SiteExplorerIterationData};
 
 pub struct TestSiteExplorer {
     endpoint_explorer: Arc<MockEndpointExplorer>,
@@ -69,7 +69,7 @@ impl TestSiteExplorer {
         self.endpoint_explorer.insert_endpoint_results(endpoints);
     }
 
-    pub async fn run_single_iteration(&self) -> SiteExplorerResult<SiteIdentifiedHosts> {
+    pub async fn run_single_iteration(&self) -> SiteExplorerResult<SiteExplorerIterationData> {
         self.site_explorer.run_single_iteration().await
     }
 }

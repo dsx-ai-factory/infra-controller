@@ -47,6 +47,7 @@ use regex::Regex;
 
 const NOT_FOUND: u16 = 404;
 const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
+const DPU_OOB_INTERFACE_MISSING_ERROR: &str = "oob interface missing for dpu";
 
 // RedfishClient is a wrapper around a redfish client pool and implements redfish utility functions that the site explorer utilizes.
 // TODO: In the future, we should refactor a lot of this client's work to api/src/redfish.rs because other components in carbide can utilize this functionality.
@@ -902,22 +903,6 @@ async fn fetch_manager(client: &dyn Redfish) -> Result<Manager, RedfishError> {
             _ => Err(err),
         })?;
 
-    // Warn if the manager eth0 MAC is locally-administered: a real BMC MAC is
-    // globally unique, so this signals transient pre-sync data (seen briefly
-    // after a BMC reboot) that would poison anything keyed on the BMC MAC.
-    if let Some(eth0) = ethernet_interfaces.iter().find(|e| {
-        e.id.as_deref()
-            .is_some_and(|id| id.eq_ignore_ascii_case("eth0"))
-    }) && let Some(mac) = eth0.mac_address
-        && crate::is_locally_administered_mac(mac)
-    {
-        tracing::warn!(
-            manager_id = %manager.id,
-            eth0_mac_address = %mac,
-            "manager eth0 MAC is locally-administered (transient pre-sync data?)",
-        );
-    }
-
     Ok(Manager {
         ethernet_interfaces,
         id: manager.id,
@@ -951,6 +936,11 @@ async fn fetch_system(client: &dyn Redfish) -> Result<FetchedSystem, EndpointExp
     let is_dpu = system.id.to_lowercase().contains("bluefield");
     let ethernet_interfaces = match fetch_ethernet_interfaces(client, true, is_dpu).await {
         Ok(interfaces) => Ok(interfaces),
+        Err(RedfishError::GenericError { error })
+            if is_dpu && error == DPU_OOB_INTERFACE_MISSING_ERROR =>
+        {
+            Ok(Vec::default())
+        }
         Err(e) if is_dpu => {
             tracing::warn!(
                 error = %e,
@@ -1012,11 +1002,6 @@ async fn fetch_system(client: &dyn Redfish) -> Result<FetchedSystem, EndpointExp
             // be absent when NIC firmware is in recovery/uninitialized states or
             // when NIC-side inventory endpoints are not populated/responding.
             base_mac = get_base_mac_from_bf4_ndf0(client).await.map(Into::into);
-            if base_mac.is_none() {
-                tracing::warn!(
-                    "BF4 NDF0 fallback did not provide PF0 base MAC (NIC inventory unavailable/uninitialized?)"
-                );
-            }
         }
         nic_mode = match client.get_nic_mode().await {
             Ok(nic_mode) => nic_mode,
@@ -1174,7 +1159,7 @@ async fn fetch_ethernet_interfaces(
             eth_ifs.push(oob_iface);
         } else {
             return Err(RedfishError::GenericError {
-                error: "oob interface missing for dpu".to_string(),
+                error: DPU_OOB_INTERFACE_MISSING_ERROR.to_string(),
             });
         }
     }
