@@ -34,7 +34,7 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(inventoryManager.DiscoverSpectrumXPartitionInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("SpectrumXPartition: Successfully registered DiscoverSpectrumXPartitionInventory activity")
 
-	api.RegisterCron()
-
-	return nil
+	// Surfaced rather than discarded: without the cron nothing ever discovers Partition
+	// inventory, and startup would otherwise report healthy.
+	return api.RegisterCron()
 }

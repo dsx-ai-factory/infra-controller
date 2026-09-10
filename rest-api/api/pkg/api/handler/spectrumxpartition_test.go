@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -355,9 +356,18 @@ func TestGetAllSpectrumXPartitionHandler_Handle(t *testing.T) {
 	fx := newSpectrumXPartitionFixture(t)
 	handler := NewGetAllSpectrumXPartitionHandler(fx.dbSession, common.GetTestConfig())
 
-	testBuildSpectrumXPartition(t, fx.dbSession, "ready-net", fx.org, fx.site, fx.tenant, cutil.GetPtr(10200), cdbm.SpectrumXPartitionStatusReady)
-	testBuildSpectrumXPartition(t, fx.dbSession, "pending-net", fx.org, fx.site, fx.tenant, nil, cdbm.SpectrumXPartitionStatusPending)
+	readyNet := testBuildSpectrumXPartition(t, fx.dbSession, "ready-net", fx.org, fx.site, fx.tenant, cutil.GetPtr(10200), cdbm.SpectrumXPartitionStatusReady)
+	pendingNet := testBuildSpectrumXPartition(t, fx.dbSession, "pending-net", fx.org, fx.site, fx.tenant, nil, cdbm.SpectrumXPartitionStatusPending)
 	testBuildSpectrumXPartition(t, fx.dbSession, "other-tenant-net", fx.otherOrg, fx.site, fx.otherTenant, nil, cdbm.SpectrumXPartitionStatusReady)
+
+	// BeforeAppendModel stamps `created` on insert, so rows written in the same
+	// microsecond tie and CREATED_ASC has no defined order between them. Space them out
+	// so the ordering assertion below tests the ordering rather than insertion luck.
+	for offset, sxp := range []*cdbm.SpectrumXPartition{readyNet, pendingNet} {
+		_, err := fx.dbSession.DB.Exec("UPDATE spectrumx_partition SET created = ? WHERE id = ?",
+			time.Now().Add(time.Duration(offset-10)*time.Minute), sxp.ID.String())
+		require.NoError(t, err)
+	}
 
 	list := func(t *testing.T, target string, user *cdbm.User, org string) []model.APISpectrumXPartition {
 		t.Helper()

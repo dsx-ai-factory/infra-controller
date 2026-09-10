@@ -3975,7 +3975,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				if existingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
 					continue
 				}
-				key := fmt.Sprintf("%s:%s:%d", existingSxAs[i].SpectrumXPartitionID.String(), existingSxAs[i].Device, existingSxAs[i].DeviceInstance)
+				key := fmt.Sprintf("%s:%s:%d:%s", existingSxAs[i].SpectrumXPartitionID.String(), existingSxAs[i].Device, existingSxAs[i].DeviceInstance, existingSxAs[i].AttachmentType)
 				existingSxAByKey[key] = existingSxAs[i]
 			}
 
@@ -3988,7 +3988,9 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to parse SpectrumX Partition ID specified in request: %s", apiSxA.SpectrumXPartitionID), nil)
 				}
 
-				key := fmt.Sprintf("%s:%s:%d", partitionID.String(), apiSxA.Device, *apiSxA.DeviceInstance)
+				// The attachment type is part of the key, so changing it retires the old row
+				// and creates a new one rather than silently keeping the previous type.
+				key := fmt.Sprintf("%s:%s:%d:%s", partitionID.String(), apiSxA.Device, *apiSxA.DeviceInstance, apiSxA.AttachmentType)
 				if existing, ok := existingSxAByKey[key]; ok {
 					retainedSxAIDs[existing.ID] = true
 					newOrExistingSxAs = append(newOrExistingSxAs, existing)
@@ -4417,15 +4419,15 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			},
 		}
 
-		// A nil list leaves the Instance's attachments untouched, so Spxconfig stays unset
-		// and the persisted rows are left alone. An explicit list replaces them.
-		if apiRequest.SpectrumXAttachments != nil {
-			spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(newOrExistingSxAs))
-			for i := range newOrExistingSxAs {
-				spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, newOrExistingSxAs[i].ToProto())
-			}
-			updateInstanceRequest.Config.Spxconfig = &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs}
+		// The Site treats the config as a full replacement rather than a merge, so this
+		// always carries the current attachments. A nil request list leaves the persisted
+		// rows alone, and newOrExistingSxAs is then the existing set, which keeps an
+		// unrelated PATCH from clearing the Instance's attachments on the Site.
+		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(newOrExistingSxAs))
+		for i := range newOrExistingSxAs {
+			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, newOrExistingSxAs[i].ToProto())
 		}
+		updateInstanceRequest.Config.Spxconfig = &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs}
 
 		workflowOptions := temporalClient.StartWorkflowOptions{
 			ID:                       "instance-update-" + instance.ID.String(),

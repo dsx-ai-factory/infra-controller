@@ -4881,6 +4881,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		expectedPropagationDetailedStatus     *string
 		expectedPropagationStatus             *string
 		expectedSitePowerProfile              *string
+		expectedSiteSpectrumXAttachmentCount  *int
 		// When true, only assert len(siteReq.Config.Nvlink.GpuConfigs) matches the request (e.g. NVLink no-op where workflow uses DB order).
 		nvLinkGpuConfigsVerifyCountOnly bool
 		// When non-nil, expected len(siteReq.Config.Nvlink.GpuConfigs) for verifySiteControllerRequest (default: len(reqData.NVLinkInterfaces)).
@@ -4953,6 +4954,29 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:                tnOrg1,
 				reqUser:               tnu1,
 				respCode:              http.StatusOK,
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update carries existing SpectrumX Attachments when the request omits them",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				// Runs directly after the SpectrumX-only case, which left inst1 with one
+				// attachment. Omitting the list here must not clear it on the Site.
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+				},
+				reqInstance:                          inst1.ID.String(),
+				cleanInstanceToStatus:                inst1.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(1),
 			},
 			verifySiteControllerRequest: true,
 		},
@@ -7845,6 +7869,14 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 								assert.Equal(t, siteReq.Config.Nvlink.GpuConfigs[i].DeviceInstance, uint32(tt.args.reqData.NVLinkInterfaces[i].DeviceInstance))
 							}
 						}
+					}
+
+					// The Site config is a replacement rather than a merge, so it is always sent.
+					require.NotNil(t, siteReq.Config.Spxconfig)
+
+					if tt.args.expectedSiteSpectrumXAttachmentCount != nil {
+						assert.Len(t, siteReq.Config.Spxconfig.SpxAttachments, *tt.args.expectedSiteSpectrumXAttachmentCount,
+							"an update that omits spectrumXAttachments must still carry the persisted set")
 					}
 
 					// Verify the SpectrumX Attachments are in the Site Controller request

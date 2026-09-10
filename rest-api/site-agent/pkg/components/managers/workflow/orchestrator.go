@@ -234,7 +234,9 @@ func workflowOrchestrator() error {
 	ManagerAccess.API.VpcPeering.RegisterPublisher()
 
 	// Inventory only: SpectrumX Partition CRUD goes through the generic Core gRPC proxy.
-	ManagerAccess.API.SpectrumXPartition.RegisterPublisher()
+	if err := ManagerAccess.API.SpectrumXPartition.RegisterPublisher(); err != nil {
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("SpectrumXPartition: failed to register inventory publisher")
+	}
 
 	ManagerAccess.API.Subnet.RegisterSubscriber()
 	ManagerAccess.API.Subnet.RegisterPublisher()
