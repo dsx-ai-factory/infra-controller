@@ -1246,6 +1246,7 @@ mod tests {
                         entity: power_supply,
                         chassis,
                         sensors: Vec::new(),
+                        liteon_capacity_watts: None,
                     }],
                 );
             }

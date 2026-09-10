@@ -187,6 +187,9 @@ pub(crate) enum DiscoveredEntity<B: Bmc> {
         entity: Arc<PowerSupply<B>>,
         chassis: Arc<Chassis<B>>,
         sensors: Vec<SensorLink<B>>,
+        /// Parsed LiteOn OEM capacity used only when standard
+        /// `PowerCapacityWatts` is absent.
+        liteon_capacity_watts: Option<f64>,
     },
     Chassis {
         entity: Arc<Chassis<B>>,
@@ -382,10 +385,18 @@ impl<B: Bmc> DiscoveredEntity<B> {
                     }]
                 })
                 .unwrap_or_default(),
-            DiscoveredEntity::PowerSupply { entity, .. } => {
+            DiscoveredEntity::PowerSupply {
+                entity,
+                liteon_capacity_watts,
+                ..
+            } => {
                 let raw = entity.raw();
                 let mut metrics = Vec::with_capacity(2);
-                if let Some(value) = raw.power_capacity_watts.flatten() {
+                if let Some(value) = raw
+                    .power_capacity_watts
+                    .flatten()
+                    .or(*liteon_capacity_watts)
+                {
                     metrics.push(DerivedMetric {
                         metric_type: "powersupply_capacity",
                         unit: "watts",

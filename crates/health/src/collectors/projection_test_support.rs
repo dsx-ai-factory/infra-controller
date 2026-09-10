@@ -879,11 +879,13 @@ impl ProjectionFixture {
                 entity: self.power_supply("PS0"),
                 chassis: self.chassis("CH0"),
                 sensors: Vec::new(),
+                liteon_capacity_watts: None,
             },
             TestEntity::SparsePowerSupply => DiscoveredEntity::PowerSupply {
                 entity: self.power_supply("PS-sparse"),
                 chassis: self.chassis("CH0"),
                 sensors: Vec::new(),
+                liteon_capacity_watts: None,
             },
             TestEntity::Chassis => DiscoveredEntity::Chassis {
                 entity: self.chassis("CH0"),

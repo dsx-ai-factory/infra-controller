@@ -62,8 +62,8 @@ opentelemetry-semantic-conventions = "0.32.1"
 tracing-opentelemetry = "0.33.0"
 
 # NV-Redfish
-nv-redfish = { version = "0.15.0" }
-nv-redfish-dispatcher = { version = "0.15.0" }
+nv-redfish = { version = "0.16.0" }
+nv-redfish-dispatcher = { version = "0.16.0" }
 
 ########
 # MARK: - Pinned packages that we can't upgrade due to conflicts or just bugs

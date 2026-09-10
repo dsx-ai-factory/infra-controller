@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -26,7 +26,7 @@ use nv_redfish::{Resource, ServiceRoot};
 
 use crate::HealthError;
 use crate::collectors::inventory::{
-    DiscoveredEntity, EntityInventory, GpuIdentity, SharedInventory, ShelfPower,
+    DiscoveredEntity, EntityInventory, GpuIdentity, SharedInventory, ShelfPower, normalize_odata_id,
 };
 use crate::collectors::runtime::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
@@ -339,6 +339,30 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
         entities: &mut Vec<DiscoveredEntity<B>>,
         sensor_ids: &mut HashSet<String>,
     ) {
+        let liteon_links = self
+            .record_failure(
+                chassis.oem_liteon_power_supply_links().await,
+                "get LiteOn OEM power supply links",
+                fetch_failures,
+            )
+            .flatten()
+            .unwrap_or_default();
+        let fetched_liteon: Vec<_> = stream::iter(liteon_links)
+            .map(|link| async move {
+                let id = normalize_odata_id(&link.odata_id().to_string()).to_string();
+                (id, link.fetch().await)
+            })
+            .buffer_unordered(self.request_concurrency)
+            .collect()
+            .await;
+        let liteon_by_id: HashMap<_, _> = fetched_liteon
+            .into_iter()
+            .filter_map(|(id, result)| {
+                self.record_failure(result, "get LiteOn OEM power supply", fetch_failures)
+                    .map(|supply| (id, supply))
+            })
+            .collect();
+
         let power_supplies = self
             .record_failure(
                 chassis.power_supplies().await,
@@ -364,10 +388,37 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
             for sensor in &sensors {
                 sensor_ids.insert(sensor.odata_id().to_string());
             }
+            let entity_id = entity.odata_id().to_string();
+            let liteon_capacity_watts = if entity.raw().power_capacity_watts.flatten().is_some() {
+                None
+            } else {
+                liteon_by_id
+                    .get(normalize_odata_id(&entity_id))
+                    .and_then(|supply| {
+                        supply
+                            .capacity_watts
+                            .as_ref()
+                            .and_then(Option::as_deref)
+                    })
+                    .and_then(|raw| {
+                        let parsed = parse_liteon_capacity_watts(raw);
+                        if parsed.is_none() {
+                            tracing::warn!(
+                                capacity_watts = raw,
+                                power_supply = %entity.odata_id(),
+                                bmc_address = ?self.endpoint.addr,
+                                rack_id = self.endpoint.rack_id.as_ref().map(tracing::field::display),
+                                "Ignoring invalid LiteOn OEM power supply capacity"
+                            );
+                        }
+                        parsed
+                    })
+            };
             entities.push(DiscoveredEntity::PowerSupply {
                 entity,
                 chassis: chassis.clone(),
                 sensors,
+                liteon_capacity_watts,
             });
         }
     }
@@ -442,6 +493,13 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
         );
         ShelfPower { subsystem }
     }
+}
+
+fn parse_liteon_capacity_watts(raw: &str) -> Option<f64> {
+    raw.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
 }
 
 /// Whether a processor is a GPU, per the Redfish `ProcessorType` enumeration.
