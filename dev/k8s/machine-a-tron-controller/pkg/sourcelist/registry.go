@@ -14,6 +14,11 @@
 //	  "sources": [ {"name": "...", "base_url": "https://...", "pod": "..."} ]  // sorted by name
 //	}
 //	GET /v1/healthz -> 200 when the controller is serving
+//
+// The generation is an in-memory counter that restarts from 0 with the
+// process, so it can repeat a value for a different set after a controller
+// restart. Consumers compare the (name, base_url) set and treat the generation
+// as a change hint only.
 package sourcelist
 
 import (

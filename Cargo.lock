@@ -2581,6 +2581,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-mat-protocol-gateway"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "axum-server",
+ "carbide-test-support",
+ "carbide-ufm-mock",
+ "carbide-utils",
+ "clap",
+ "duration-str",
+ "eyre",
+ "figment",
+ "metrics-endpoint",
+ "rcgen",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "carbide-measured-boot"
 version = "0.0.0"
 dependencies = [
