@@ -269,7 +269,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
         });
 
         let is_infinite_boot_enabled = hw_type
-            .and_then(|hw_type| hw_type.infinite_boot_enabled_attr())
+            .and_then(hw::infinite_boot_enabled_attr)
             .and_then(|attr| self.bios_attr_eq(&attr));
 
         let pcie_devices = pcie_devices

@@ -31,78 +31,41 @@ pub mod supermicro_gb300;
 pub mod vera_rubin;
 pub mod viking;
 
-/// `Display` renders the variant name, which is recorded as an endpoint's
-/// hardware class. Renaming a variant renames the class stored against every
-/// endpoint already explored as it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, strum_macros::Display, strum_macros::EnumIter)]
-pub enum HwType {
-    Ami,
-    Bluefield,
-    Dell,
-    Gb200,
-    DgxGb300,
-    Hpe,
-    Lenovo,
-    LenovoAmi,
-    LenovoGb300,
-    SupermicroGb300,
-    Supermicro,
-    Viking,
-    LiteonPowerShelf,
-    DeltaPowerShelf,
-    NvSwitch,
-    VeraRubin,
-}
+/// Re-exported so the many `hw::HwType` paths in this crate keep reading as
+/// explorer vocabulary. The enum itself lives in the model because its rendered
+/// variant names are the hardware classes an attestation profile is keyed to.
+pub use model::site_explorer::HwType;
 
-impl HwType {
-    pub const fn bmc_vendor(&self) -> Option<bmc_vendor::BMCVendor> {
-        match self {
-            Self::Ami => None,
-            Self::Bluefield => Some(bmc_vendor::BMCVendor::Nvidia),
-            Self::Dell => Some(bmc_vendor::BMCVendor::Dell),
-            Self::Gb200 => Some(bmc_vendor::BMCVendor::Nvidia),
-            // DGX GB300 uses the NVIDIA "GB BMC" (same BMC family as GB200).
-            Self::DgxGb300 => Some(bmc_vendor::BMCVendor::Nvidia),
-            Self::Hpe => Some(bmc_vendor::BMCVendor::Hpe),
-            Self::Lenovo => Some(bmc_vendor::BMCVendor::Lenovo),
-            Self::LenovoAmi => Some(bmc_vendor::BMCVendor::LenovoAMI),
-            Self::LenovoGb300 => Some(bmc_vendor::BMCVendor::LenovoAMI),
-            // SMC GB300 runs a Supermicro (OpenBMC) host BMC.
-            Self::SupermicroGb300 => Some(bmc_vendor::BMCVendor::Supermicro),
-            Self::LiteonPowerShelf => Some(bmc_vendor::BMCVendor::Liteon),
-            Self::DeltaPowerShelf => Some(bmc_vendor::BMCVendor::Delta),
-            Self::NvSwitch => Some(bmc_vendor::BMCVendor::Nvidia),
-            Self::Supermicro => Some(bmc_vendor::BMCVendor::Supermicro),
-            Self::Viking => Some(bmc_vendor::BMCVendor::Nvidia),
-            Self::VeraRubin => Some(bmc_vendor::BMCVendor::Nvidia),
-        }
-    }
-
-    pub const fn infinite_boot_enabled_attr(&self) -> Option<BiosAttr<'static>> {
-        match self {
-            Self::Ami => Some(BiosAttr::new_str("EndlessBoot", "Enabled")),
-            Self::Bluefield => None,
-            Self::Dell => Some(BiosAttr::new_str("BootSeqRetry", "Enabled")),
-            Self::Gb200 => Some(BiosAttr::new_str("EmbeddedUefiShell", "Disabled")),
-            // The DGX GB300 BIOS exposes EmbeddedUefiShell, but the value that means
-            // infinite-boot-enabled is not yet characterized on hardware (GB200's polarity
-            // is not assumed to carry over). Left None until confirmed on a tray.
-            // TODO(dgx-gb300): set the infinite-boot attribute from the DGX GB300 BIOS.
-            Self::DgxGb300 => None,
-            Self::Hpe => None,
-            Self::Lenovo => Some(BiosAttr::new_str("BootModes_InfiniteBootRetry", "Enabled")),
-            Self::LenovoAmi => Some(BiosAttr::new_str("EndlessBoot", "Enabled")),
-            Self::LenovoGb300 => Some(BiosAttr::new_int("LEM0003", 50)),
-            // TODO(smc): confirm the SMC GB300 infinite-boot BIOS attribute from the tray BIOS.
-            Self::SupermicroGb300 => None,
-            Self::LiteonPowerShelf => None,
-            Self::DeltaPowerShelf => None,
-            Self::NvSwitch => None,
-            Self::Supermicro => None,
-            Self::Viking => Some(BiosAttr::new_str("NvidiaInfiniteboot", "Enable")),
-            // Same EmbeddedUefiShell polarity as GB200 / libredfish NvidiaGBx00.
-            Self::VeraRubin => Some(BiosAttr::new_str("EmbeddedUefiShell", "Disabled")),
-        }
+/// The BIOS attribute, and the value it has to hold, for this hardware to retry
+/// booting indefinitely. `None` where the platform has no such attribute or its
+/// polarity is not yet characterized.
+///
+/// A free function rather than a method on `HwType`, because `BiosAttr` is this
+/// crate's vocabulary and the enum is declared in the model.
+pub const fn infinite_boot_enabled_attr(hw_type: HwType) -> Option<BiosAttr<'static>> {
+    match hw_type {
+        HwType::Ami => Some(BiosAttr::new_str("EndlessBoot", "Enabled")),
+        HwType::Bluefield => None,
+        HwType::Dell => Some(BiosAttr::new_str("BootSeqRetry", "Enabled")),
+        HwType::Gb200 => Some(BiosAttr::new_str("EmbeddedUefiShell", "Disabled")),
+        // The DGX GB300 BIOS exposes EmbeddedUefiShell, but the value that means
+        // infinite-boot-enabled is not yet characterized on hardware (GB200's polarity
+        // is not assumed to carry over). Left None until confirmed on a tray.
+        // TODO(dgx-gb300): set the infinite-boot attribute from the DGX GB300 BIOS.
+        HwType::DgxGb300 => None,
+        HwType::Hpe => None,
+        HwType::Lenovo => Some(BiosAttr::new_str("BootModes_InfiniteBootRetry", "Enabled")),
+        HwType::LenovoAmi => Some(BiosAttr::new_str("EndlessBoot", "Enabled")),
+        HwType::LenovoGb300 => Some(BiosAttr::new_int("LEM0003", 50)),
+        // TODO(smc): confirm the SMC GB300 infinite-boot BIOS attribute from the tray BIOS.
+        HwType::SupermicroGb300 => None,
+        HwType::LiteonPowerShelf => None,
+        HwType::DeltaPowerShelf => None,
+        HwType::NvSwitch => None,
+        HwType::Supermicro => None,
+        HwType::Viking => Some(BiosAttr::new_str("NvidiaInfiniteboot", "Enable")),
+        // Same EmbeddedUefiShell polarity as GB200 / libredfish NvidiaGBx00.
+        HwType::VeraRubin => Some(BiosAttr::new_str("EmbeddedUefiShell", "Disabled")),
     }
 }
 
@@ -158,67 +121,5 @@ impl fmt::Display for BiosAttrValue<'_> {
             BiosAttrValue::Int(v) => v.fmt(f),
             BiosAttrValue::AnyStr(v) => write!(f, "any({})", v.iter().join(",")),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use bmc_vendor::BMCVendor;
-    use carbide_test_support::value_scenarios;
-    use model::site_explorer::UNRECOGNIZED_HARDWARE_CLASS;
-    use strum::IntoEnumIterator;
-
-    use super::*;
-
-    /// The rendered name is persisted as an endpoint's hardware class and is
-    /// what an attestation profile is keyed on, so it has to identify exactly
-    /// one variant and stay clear of the markers reserved for a missing class.
-    #[test]
-    fn hw_type_renders_a_distinct_hardware_class_for_every_variant() {
-        let mut rendered = HashSet::new();
-        for hardware_type in HwType::iter() {
-            let class = hardware_type.to_string();
-            assert!(
-                !class.is_empty(),
-                "{hardware_type:?} renders an empty hardware class"
-            );
-            assert!(
-                class != UNRECOGNIZED_HARDWARE_CLASS && class != "any",
-                "{hardware_type:?} renders the reserved hardware class {class}"
-            );
-            assert!(
-                rendered.insert(class.clone()),
-                "more than one variant renders the hardware class {class}"
-            );
-        }
-    }
-
-    #[test]
-    fn hw_type_bmc_vendor_maps_each_variant() {
-        value_scenarios!(run = |hardware_type: HwType| hardware_type.bmc_vendor();
-            "generic AMI has no canonical vendor" {
-                HwType::Ami => None,
-            }
-
-            "hardware types map to canonical vendors" {
-                HwType::Bluefield => Some(BMCVendor::Nvidia),
-                HwType::Dell => Some(BMCVendor::Dell),
-                HwType::Gb200 => Some(BMCVendor::Nvidia),
-                HwType::DgxGb300 => Some(BMCVendor::Nvidia),
-                HwType::Hpe => Some(BMCVendor::Hpe),
-                HwType::Lenovo => Some(BMCVendor::Lenovo),
-                HwType::LenovoAmi => Some(BMCVendor::LenovoAMI),
-                HwType::LenovoGb300 => Some(BMCVendor::LenovoAMI),
-                HwType::SupermicroGb300 => Some(BMCVendor::Supermicro),
-                HwType::Supermicro => Some(BMCVendor::Supermicro),
-                HwType::Viking => Some(BMCVendor::Nvidia),
-                HwType::LiteonPowerShelf => Some(BMCVendor::Liteon),
-                HwType::DeltaPowerShelf => Some(BMCVendor::Delta),
-                HwType::NvSwitch => Some(BMCVendor::Nvidia),
-                HwType::VeraRubin => Some(BMCVendor::Nvidia),
-            }
-        );
     }
 }

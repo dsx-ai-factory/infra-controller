@@ -53,6 +53,62 @@ use crate::switch::switch_id;
 /// since the class was introduced, which has no class at all.
 pub const UNRECOGNIZED_HARDWARE_CLASS: &str = "unrecognized";
 
+/// Every kind of hardware exploration can recognise.
+///
+/// `Display` renders the variant name, which is recorded as an endpoint's
+/// hardware class. Renaming a variant renames the class stored against every
+/// endpoint already explored as it.
+///
+/// This lives here rather than in `bmc-explorer`, which is the only crate that
+/// decides which variant an endpoint is, because the rendered names are also
+/// the vocabulary an attestation profile may be keyed to. Keeping the enum in
+/// the model lets the admin CLI refuse a misspelled key without depending on
+/// the explorer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum_macros::Display, strum_macros::EnumIter)]
+pub enum HwType {
+    Ami,
+    Bluefield,
+    Dell,
+    Gb200,
+    DgxGb300,
+    Hpe,
+    Lenovo,
+    LenovoAmi,
+    LenovoGb300,
+    SupermicroGb300,
+    Supermicro,
+    Viking,
+    LiteonPowerShelf,
+    DeltaPowerShelf,
+    NvSwitch,
+    VeraRubin,
+}
+
+impl HwType {
+    pub const fn bmc_vendor(&self) -> Option<bmc_vendor::BMCVendor> {
+        match self {
+            Self::Ami => None,
+            Self::Bluefield => Some(bmc_vendor::BMCVendor::Nvidia),
+            Self::Dell => Some(bmc_vendor::BMCVendor::Dell),
+            Self::Gb200 => Some(bmc_vendor::BMCVendor::Nvidia),
+            // DGX GB300 uses the NVIDIA "GB BMC" (same BMC family as GB200).
+            Self::DgxGb300 => Some(bmc_vendor::BMCVendor::Nvidia),
+            Self::Hpe => Some(bmc_vendor::BMCVendor::Hpe),
+            Self::Lenovo => Some(bmc_vendor::BMCVendor::Lenovo),
+            Self::LenovoAmi => Some(bmc_vendor::BMCVendor::LenovoAMI),
+            Self::LenovoGb300 => Some(bmc_vendor::BMCVendor::LenovoAMI),
+            // SMC GB300 runs a Supermicro (OpenBMC) host BMC.
+            Self::SupermicroGb300 => Some(bmc_vendor::BMCVendor::Supermicro),
+            Self::LiteonPowerShelf => Some(bmc_vendor::BMCVendor::Liteon),
+            Self::DeltaPowerShelf => Some(bmc_vendor::BMCVendor::Delta),
+            Self::NvSwitch => Some(bmc_vendor::BMCVendor::Nvidia),
+            Self::Supermicro => Some(bmc_vendor::BMCVendor::Supermicro),
+            Self::Viking => Some(bmc_vendor::BMCVendor::Nvidia),
+            Self::VeraRubin => Some(bmc_vendor::BMCVendor::Nvidia),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ExploredEndpointSearchFilter {}
 
@@ -2594,14 +2650,67 @@ mod explored_mlx_device_tests {
 
 #[cfg(test)]
 mod tests {
+    use bmc_vendor::BMCVendor;
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{
         Case, Check, check_cases, check_values, scenarios, value_scenarios,
     };
+    use strum::IntoEnumIterator;
 
     use super::*;
+    use crate::attestation::profile::ANY_HARDWARE_CLASS;
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
+
+    /// The rendered name is persisted as an endpoint's hardware class and is
+    /// what an attestation profile is keyed on, so it has to identify exactly
+    /// one variant and stay clear of the markers reserved for a missing class.
+    #[test]
+    fn hw_type_renders_a_distinct_hardware_class_for_every_variant() {
+        let mut rendered = HashSet::new();
+        for hardware_type in HwType::iter() {
+            let class = hardware_type.to_string();
+            assert!(
+                !class.is_empty(),
+                "{hardware_type:?} renders an empty hardware class"
+            );
+            assert!(
+                class != UNRECOGNIZED_HARDWARE_CLASS && class != ANY_HARDWARE_CLASS,
+                "{hardware_type:?} renders the reserved hardware class {class}"
+            );
+            assert!(
+                rendered.insert(class.clone()),
+                "more than one variant renders the hardware class {class}"
+            );
+        }
+    }
+
+    #[test]
+    fn hw_type_bmc_vendor_maps_each_variant() {
+        value_scenarios!(run = |hardware_type: HwType| hardware_type.bmc_vendor();
+            "generic AMI has no canonical vendor" {
+                HwType::Ami => None,
+            }
+
+            "hardware types map to canonical vendors" {
+                HwType::Bluefield => Some(BMCVendor::Nvidia),
+                HwType::Dell => Some(BMCVendor::Dell),
+                HwType::Gb200 => Some(BMCVendor::Nvidia),
+                HwType::DgxGb300 => Some(BMCVendor::Nvidia),
+                HwType::Hpe => Some(BMCVendor::Hpe),
+                HwType::Lenovo => Some(BMCVendor::Lenovo),
+                HwType::LenovoAmi => Some(BMCVendor::LenovoAMI),
+                HwType::LenovoGb300 => Some(BMCVendor::LenovoAMI),
+                HwType::SupermicroGb300 => Some(BMCVendor::Supermicro),
+                HwType::Supermicro => Some(BMCVendor::Supermicro),
+                HwType::Viking => Some(BMCVendor::Nvidia),
+                HwType::LiteonPowerShelf => Some(BMCVendor::Liteon),
+                HwType::DeltaPowerShelf => Some(BMCVendor::Delta),
+                HwType::NvSwitch => Some(BMCVendor::Nvidia),
+                HwType::VeraRubin => Some(BMCVendor::Nvidia),
+            }
+        );
+    }
 
     #[test]
     fn identify_dpu_recognizes_bluefield_model_variants() {
