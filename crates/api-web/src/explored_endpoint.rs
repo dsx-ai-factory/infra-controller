@@ -430,6 +430,7 @@ async fn fetch_explored_endpoints(api: &Api) -> Result<SiteExplorationReport, to
 #[template(path = "explored_endpoint_detail.html")]
 struct ExploredEndpointDetail<'a> {
     endpoint: ExploredEndpoint,
+    exploration_warnings: Vec<String>,
     has_exploration_error: bool,
     last_exploration_error: String,
     machine_setup_status: String,
@@ -491,6 +492,7 @@ impl From<ExploredEndpointInfo> for ExploredEndpointDetail<'_> {
             lockdown_status: lockdown_status_to_string(
                 report_ref.and_then(|report| report.lockdown_status.as_ref()),
             ),
+            exploration_warnings: endpoint_info.endpoint.warnings.clone(),
             endpoint: endpoint_info.endpoint,
             credentials_set: endpoint_info.credentials_set,
             has_machine: endpoint_info.has_machine,

@@ -68,6 +68,9 @@ func TestNewAPIExploredEndpoint_FromProto(t *testing.T) {
 		LastRedfishReboot:     "2026-01-03T00:00:00Z",
 		LastRedfishPowercycle: "2026-01-04T00:00:00Z",
 		PauseRemediation:      true,
+		Warnings: []string{
+			"DPU OOB interface is missing from the exploration report.",
+		},
 		Report: &corev1.EndpointExplorationReport{
 			EndpointType:           "HostBmc",
 			LastExplorationError:   &lastErr,
@@ -132,6 +135,7 @@ func TestNewAPIExploredEndpoint_FromProto(t *testing.T) {
 	assert.True(t, got.ExplorationRequested)
 	assert.Equal(t, "WaitingForNetwork", got.PreingestionState)
 	assert.True(t, got.PauseRemediation)
+	assert.Equal(t, protoEP.Warnings, got.Warnings)
 	require.NotNil(t, got.Report)
 	assert.Equal(t, "HostBmc", got.Report.EndpointType)
 	require.NotNil(t, got.Report.LastExplorationError)
@@ -196,11 +200,24 @@ func TestExploredEnum_FromProto(t *testing.T) {
 }
 
 func TestAPIExploredEndpoint_ResponseFieldsAreNotOmitted(t *testing.T) {
-	data, err := json.Marshal(APIExploredEndpoint{})
-	require.NoError(t, err)
-	assert.JSONEq(t, `{
+	for _, tc := range []struct {
+		name     string
+		warnings []string
+	}{
+		{name: "nil warnings"},
+		{name: "empty warnings", warnings: []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint := NewAPIExploredEndpoint(&corev1.ExploredEndpoint{Warnings: tc.warnings})
+			require.NotNil(t, endpoint.Warnings)
+			data, err := json.Marshal(endpoint)
+			require.NoError(t, err)
+			assert.JSONEq(t, `{
 		"address":"", "report":null, "reportVersion":"", "explorationRequested":false,
 		"preingestionState":"", "lastRedfishBmcReset":"", "lastIpmitoolBmcReset":"",
-		"lastRedfishReboot":"", "lastRedfishPowercycle":"", "pauseRemediation":false
+		"lastRedfishReboot":"", "lastRedfishPowercycle":"", "pauseRemediation":false,
+		"warnings":[]
 	}`, string(data))
+		})
+	}
 }

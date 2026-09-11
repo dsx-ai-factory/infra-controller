@@ -240,11 +240,6 @@ impl<B: Bmc> ExploredComputerSystem<B> {
                 // BF4 temporary patch: some BMC firmware misses ComputerSystem
                 // BaseMAC; patch from NDF0-derived base MAC (NDF0 - 0x10) if available.
                 base_mac = chassis.dpu_bf4_ndf0_permanent_mac();
-                if base_mac.is_none() {
-                    tracing::warn!(
-                        "BF4 NDF0 fallback did not provide PF0 base MAC (NIC inventory unavailable/uninitialized?)"
-                    );
-                }
             }
         }
 
@@ -497,8 +492,6 @@ impl<B: Bmc> ExploredComputerSystem<B> {
             // interface from boot options as workaround.
             if let Some(oob_iface) = self.oob_interface_from_boot_options()? {
                 result.push(oob_iface);
-            } else {
-                tracing::warn!("Error getting OOB interface for the DPU");
             }
         }
         Ok(result)

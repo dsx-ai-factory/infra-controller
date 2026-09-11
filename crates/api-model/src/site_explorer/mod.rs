@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 use std::collections::{HashMap, HashSet};
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -128,7 +128,60 @@ pub struct EndpointExplorationReport {
     pub remediation_error: Option<EndpointExplorationError>,
 }
 
+/// An operator-visible condition derived from an endpoint exploration report.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ExplorationReportWarning {
+    /// The manager's eth0 MAC is locally administered and may be transient.
+    LocallyAdministeredManagerMac {
+        /// Redfish manager identifier that reported the address.
+        manager_id: String,
+        /// Locally administered address reported for eth0.
+        mac_address: MacAddress,
+    },
+    /// A BlueField report contains no DPU out-of-band interface.
+    MissingDpuOobInterface,
+    /// A BlueField-4 report contains no PF0 base MAC address.
+    MissingBf4BaseMac,
+}
+
+impl Display for ExplorationReportWarning {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LocallyAdministeredManagerMac {
+                manager_id,
+                mac_address,
+            } => write!(
+                formatter,
+                "Manager {manager_id} eth0 MAC {mac_address} is locally administered; it may be transient pre-sync data."
+            ),
+            Self::MissingDpuOobInterface => {
+                formatter.write_str("DPU OOB interface is missing from the exploration report.")
+            }
+            Self::MissingBf4BaseMac => {
+                formatter.write_str("BF4 PF0 base MAC is missing from the exploration report.")
+            }
+        }
+    }
+}
+
+type ExplorationReportWarningCheck =
+    fn(&EndpointExplorationReport) -> Vec<ExplorationReportWarning>;
+
+const EXPLORATION_REPORT_WARNING_CHECKS: &[ExplorationReportWarningCheck] = &[
+    locally_administered_manager_mac_warnings,
+    missing_dpu_oob_interface_warning,
+    missing_bf4_base_mac_warning,
+];
+
 impl EndpointExplorationReport {
+    /// Computes the operator-visible warnings represented by this report.
+    pub fn warnings(&self) -> Vec<ExplorationReportWarning> {
+        EXPLORATION_REPORT_WARNING_CHECKS
+            .iter()
+            .flat_map(|check| check(self))
+            .collect()
+    }
+
     /// model does a best effort to find a model name within the report
     pub fn model(&self) -> Option<String> {
         // Prefer Systems, not Chassis; at least for Lenovo, Chassis has what is more of a SKU instead of the actual model name.
@@ -195,6 +248,69 @@ impl EndpointExplorationReport {
             .flat_map(|s| s.ethernet_interfaces.iter())
             .filter_map(|e| MachineBootInterface::from_parts(e.mac_address, e.id.clone()))
     }
+}
+
+fn locally_administered_manager_mac_warnings(
+    report: &EndpointExplorationReport,
+) -> Vec<ExplorationReportWarning> {
+    report
+        .managers
+        .iter()
+        .flat_map(|manager| {
+            manager
+                .ethernet_interfaces
+                .iter()
+                .filter(|interface| {
+                    interface
+                        .id
+                        .as_deref()
+                        .is_some_and(|id| id.eq_ignore_ascii_case("eth0"))
+                })
+                .filter_map(|interface| interface.mac_address)
+                .filter(|mac_address| carbide_network::is_locally_administered_mac(*mac_address))
+                .map(
+                    |mac_address| ExplorationReportWarning::LocallyAdministeredManagerMac {
+                        manager_id: manager.id.clone(),
+                        mac_address,
+                    },
+                )
+        })
+        .collect()
+}
+
+fn missing_dpu_oob_interface_warning(
+    report: &EndpointExplorationReport,
+) -> Vec<ExplorationReportWarning> {
+    report
+        .dpu_system()
+        .is_some_and(|system| {
+            !system.ethernet_interfaces.iter().any(|interface| {
+                interface
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| id.to_lowercase().contains("oob"))
+            })
+        })
+        .then_some(ExplorationReportWarning::MissingDpuOobInterface)
+        .into_iter()
+        .collect()
+}
+
+fn missing_bf4_base_mac_warning(
+    report: &EndpointExplorationReport,
+) -> Vec<ExplorationReportWarning> {
+    let Some(dpu_system) = report.dpu_system() else {
+        return Vec::new();
+    };
+    let is_bf4 = report
+        .chassis
+        .iter()
+        .any(|chassis| chassis.id == "BlueField_0");
+
+    (is_bf4 && dpu_system.base_mac.is_none())
+        .then_some(ExplorationReportWarning::MissingBf4BaseMac)
+        .into_iter()
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -846,17 +962,12 @@ impl EndpointExplorationReport {
     }
 
     pub fn bluefield_operating_mode(&self) -> Option<BlueFieldOperatingMode> {
-        if self.is_dpu() && !self.systems.is_empty() {
-            self.systems[0].attributes.nic_mode
-        } else {
-            None
-        }
+        self.dpu_system()
+            .and_then(|system| system.attributes.nic_mode)
     }
 
     pub fn dpu_part_number(&self) -> Option<&str> {
-        if !self.is_dpu() {
-            return None;
-        }
+        self.dpu_system()?;
 
         self.chassis
             .iter()
@@ -873,9 +984,16 @@ impl EndpointExplorationReport {
             })
     }
 
-    /// Return `true` if the explored endpoint is a DPU
+    /// Return the DPU system if this report belongs to a BlueField endpoint.
+    pub fn dpu_system(&self) -> Option<&ComputerSystem> {
+        self.systems
+            .first()
+            .filter(|system| is_bluefield_system(system))
+    }
+
+    /// Return `true` if the explored endpoint is a DPU.
     pub fn is_dpu(&self) -> bool {
-        self.identify_dpu().is_some()
+        self.dpu_system().is_some()
     }
 
     /// Return `true` if the explored endpoint is a PowerShelf.
@@ -905,14 +1023,7 @@ impl EndpointExplorationReport {
 
     /// Return `DpuModel` if the explored endpoint is a DPU
     pub fn identify_dpu(&self) -> Option<DpuModel> {
-        if !self
-            .systems
-            .first()
-            .map(is_bluefield_system)
-            .unwrap_or(false)
-        {
-            return None;
-        }
+        self.dpu_system()?;
 
         let chassis_map = self
             .chassis
@@ -4248,6 +4359,42 @@ mod tests {
                     "PowerState": "On"
                 }) => Yields(None),
             }
+        );
+    }
+
+    #[test]
+    fn exploration_warnings_are_derived_from_report() {
+        let report = EndpointExplorationReport {
+            managers: vec![Manager {
+                id: "BlueField_BMC_0".to_string(),
+                ethernet_interfaces: vec![EthernetInterface {
+                    id: Some("eth0".to_string()),
+                    mac_address: Some("02:00:00:00:00:0A".parse().expect("valid MAC")),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            systems: vec![ComputerSystem {
+                id: "BlueField_0".to_string(),
+                ..Default::default()
+            }],
+            chassis: vec![Chassis {
+                id: "BlueField_0".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            report.warnings(),
+            vec![
+                ExplorationReportWarning::LocallyAdministeredManagerMac {
+                    manager_id: "BlueField_BMC_0".to_string(),
+                    mac_address: "02:00:00:00:00:0A".parse().expect("valid MAC"),
+                },
+                ExplorationReportWarning::MissingDpuOobInterface,
+                ExplorationReportWarning::MissingBf4BaseMac,
+            ]
         );
     }
 }

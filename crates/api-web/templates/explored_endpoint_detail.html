@@ -72,6 +72,16 @@
 		</tr>
 		{% else %}
 		{% endmatch %}
+		{% if !exploration_warnings.is_empty() %}
+		<tr>
+			<th>Warnings</th>
+			<td>
+				{% for warning in exploration_warnings %}
+					<span class="bubble warning">{{ warning }}</span>
+				{% endfor %}
+			</td>
+		</tr>
+		{% endif %}
 		<tr><th>Preingestion State</th><td><span class="bubble">{{ endpoint.preingestion_state }}</span></td></tr>
 		<tr><th>Report Version</th><td style="display: flex; align-items: center; gap: 1rem;">
 			<span>{{ endpoint.report_version|config_version|safe }}</span>

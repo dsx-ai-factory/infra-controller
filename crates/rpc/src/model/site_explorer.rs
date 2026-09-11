@@ -69,6 +69,13 @@ impl From<PCIeDevice> for rpc::site_explorer::PcIeDevice {
 
 impl From<ExploredEndpoint> for rpc::site_explorer::ExploredEndpoint {
     fn from(endpoint: ExploredEndpoint) -> Self {
+        let warnings = endpoint
+            .report
+            .warnings()
+            .into_iter()
+            .map(|warning| warning.to_string())
+            .collect();
+
         rpc::site_explorer::ExploredEndpoint {
             address: endpoint.address.to_string(),
             report: Some(endpoint.report.into()),
@@ -92,6 +99,7 @@ impl From<ExploredEndpoint> for rpc::site_explorer::ExploredEndpoint {
                 .map(|time| time.to_string())
                 .unwrap_or_else(|| "no timestamp available".to_string()),
             pause_remediation: endpoint.pause_remediation,
+            warnings,
         }
     }
 }
@@ -538,6 +546,7 @@ mod tests {
         last_redfish_reboot: String,
         last_redfish_powercycle: String,
         pause_remediation: bool,
+        warnings: Vec<String>,
     }
 
     fn summarize_endpoint(endpoint: ExploredEndpoint) -> EndpointSummary {
@@ -557,6 +566,7 @@ mod tests {
             last_redfish_reboot: endpoint.last_redfish_reboot,
             last_redfish_powercycle: endpoint.last_redfish_powercycle,
             pause_remediation: endpoint.pause_remediation,
+            warnings: endpoint.warnings,
         }
     }
 
@@ -905,6 +915,10 @@ mod tests {
             report: EndpointExplorationReport {
                 endpoint_type: EndpointType::Bmc,
                 vendor: Some("nvidia".into()),
+                systems: vec![ComputerSystem {
+                    id: "Bluefield".to_string(),
+                    ..Default::default()
+                }],
                 ..Default::default()
             },
             report_version: populated_version,
@@ -935,6 +949,7 @@ mod tests {
                     last_redfish_reboot: NO_TIMESTAMP.to_string(),
                     last_redfish_powercycle: NO_TIMESTAMP.to_string(),
                     pause_remediation: false,
+                    warnings: Vec::new(),
                 },
             }
 
@@ -951,6 +966,9 @@ mod tests {
                     last_redfish_reboot: reboot.to_string(),
                     last_redfish_powercycle: powercycle.to_string(),
                     pause_remediation: true,
+                    warnings: vec![
+                        "DPU OOB interface is missing from the exploration report.".to_string(),
+                    ],
                 },
             }
         );

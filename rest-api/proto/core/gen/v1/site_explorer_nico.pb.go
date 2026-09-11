@@ -498,8 +498,10 @@ type ExploredEndpoint struct {
 	LastRedfishPowercycle string `protobuf:"bytes,9,opt,name=last_redfish_powercycle,json=lastRedfishPowercycle,proto3" json:"last_redfish_powercycle,omitempty"`
 	// Flag to prevent site explorer from taking remediation actions on redfish errors
 	PauseRemediation bool `protobuf:"varint,10,opt,name=pause_remediation,json=pauseRemediation,proto3" json:"pause_remediation,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Operator-visible warnings derived from `report`; computed on demand and not persisted.
+	Warnings      []string `protobuf:"bytes,11,rep,name=warnings,proto3" json:"warnings,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ExploredEndpoint) Reset() {
@@ -600,6 +602,13 @@ func (x *ExploredEndpoint) GetPauseRemediation() bool {
 		return x.PauseRemediation
 	}
 	return false
+}
+
+func (x *ExploredEndpoint) GetWarnings() []string {
+	if x != nil {
+		return x.Warnings
+	}
+	return nil
 }
 
 // Information about explored DPU that was discovered via Site Exploration
@@ -2866,7 +2875,7 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\v_machine_idB\x1b\n" +
 	"\x19_last_exploration_latencyB\t\n" +
 	"\a_vendorB \n" +
-	"\x1e_last_exploration_error_schema\"\xfa\x03\n" +
+	"\x1e_last_exploration_error_schema\"\x96\x04\n" +
 	"\x10ExploredEndpoint\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12@\n" +
 	"\x06report\x18\x02 \x01(\v2(.site_explorer.EndpointExplorationReportR\x06report\x12%\n" +
@@ -2878,7 +2887,8 @@ const file_site_explorer_nico_proto_rawDesc = "" +
 	"\x13last_redfish_reboot\x18\b \x01(\tR\x11lastRedfishReboot\x126\n" +
 	"\x17last_redfish_powercycle\x18\t \x01(\tR\x15lastRedfishPowercycle\x12+\n" +
 	"\x11pause_remediation\x18\n" +
-	" \x01(\bR\x10pauseRemediation\"p\n" +
+	" \x01(\bR\x10pauseRemediation\x12\x1a\n" +
+	"\bwarnings\x18\v \x03(\tR\bwarnings\"p\n" +
 	"\vExploredDpu\x12\x15\n" +
 	"\x06bmc_ip\x18\x01 \x01(\tR\x05bmcIp\x122\n" +
 	"\x13host_pf_mac_address\x18\x02 \x01(\tH\x00R\x10hostPfMacAddress\x88\x01\x01B\x16\n" +
