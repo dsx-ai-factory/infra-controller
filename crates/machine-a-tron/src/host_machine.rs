@@ -359,8 +359,6 @@ impl HostMachine {
         tokio::select! {
             _ = tokio::time::sleep_until(self.sleep_until.into()) => {}
             _ = self.api_refresh_interval.tick() => {
-                // Pick up any change to the API-configured firmware targets
-                // before refreshing the API state (issue #4688).
                 self.refresh_desired_host_firmware();
                 // Wake up to refresh the API state
                 if DeviceKind::from(self.host_info.hw_type) == DeviceKind::Machine
@@ -442,10 +440,8 @@ impl HostMachine {
         }
     }
 
-    /// Re-derive this host's firmware targets from the (periodically
-    /// refreshed) API-wide desired versions and, when they changed, re-stage
-    /// the live BMC mock's pending upgrades. No-op while the targets are
-    /// unchanged, so the per-tick cost is one map lookup.
+    /// Pick up changes to the periodically refreshed desired firmware
+    /// versions; no-op (one lookup + compare) while they are unchanged.
     fn refresh_desired_host_firmware(&mut self) {
         let desired = desired_host_firmware(self.host_info.hw_type, &self.app_context);
         if desired == self.host_info.desired_host_firmware {

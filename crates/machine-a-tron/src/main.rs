@@ -152,13 +152,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         mac_address_pool: Mutex::new(mac_address_pool).into(),
     });
 
-    // Periodically re-fetch the desired firmware versions so target changes in
-    // the API reach live machines without a restart (issue #4688). Runs on the
-    // same cadence as the per-machine API refresh; each machine re-derives its
-    // own targets on its next tick. An empty response is treated as "nothing
-    // configured" rather than "clear all targets", so the existing
-    // preingestion flow without desired versions is unaffected. Fetch errors
-    // keep the last known targets.
+    // Re-fetch desired firmware versions on the API refresh cadence so target
+    // changes reach live machines without a restart (#4688); machines pick the
+    // change up on their own tick. Empty responses and fetch errors keep the
+    // last known targets, leaving flows without desired versions unaffected.
     {
         let app_context = app_context.clone();
         tokio::spawn(async move {
@@ -178,14 +175,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         if *current != response.entries {
                             tracing::info!(
                                 desired_firmware_versions = ?response.entries,
-                                "Desired firmware versions changed; live machines pick up the new targets on their next refresh tick",
+                                "Desired firmware versions changed",
                             );
                             *current = response.entries;
                         }
                     }
                     Err(error) => tracing::warn!(
                         %error,
-                        "Failed to refresh desired firmware versions; keeping the last known targets",
+                        "Failed to refresh desired firmware versions; keeping last known",
                     ),
                 }
             }

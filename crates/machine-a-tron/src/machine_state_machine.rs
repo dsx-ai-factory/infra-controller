@@ -1040,13 +1040,9 @@ impl MachineStateMachine {
         }
     }
 
-    /// Apply refreshed desired host firmware targets to a live machine.
-    ///
-    /// Updates the retained `machine_info` (so a later BMC re-setup derives the
-    /// same targets) and, when the BMC mock is already running, re-stages its
-    /// pending upgrades in place. The active firmware inventory is never
-    /// touched: components already at the target get their pending entry
-    /// cleared rather than a re-queued upgrade.
+    /// Apply refreshed desired host firmware targets to a live machine:
+    /// update the retained `machine_info` (a later BMC re-setup then derives
+    /// the same targets) and re-stage a running mock's pending upgrades.
     pub(super) fn set_desired_host_firmware(
         &mut self,
         desired: Option<bmc_mock::HostFirmwareVersions>,
