@@ -453,6 +453,11 @@ const (
 	Forge_CancelMachineAttestation_FullMethodName                           = "/forge.Forge/CancelMachineAttestation"
 	Forge_ListAttestationMachines_FullMethodName                            = "/forge.Forge/ListAttestationMachines"
 	Forge_GetAttestationMachine_FullMethodName                              = "/forge.Forge/GetAttestationMachine"
+	Forge_CreateAttestationProfile_FullMethodName                           = "/forge.Forge/CreateAttestationProfile"
+	Forge_UpdateAttestationProfile_FullMethodName                           = "/forge.Forge/UpdateAttestationProfile"
+	Forge_DeleteAttestationProfile_FullMethodName                           = "/forge.Forge/DeleteAttestationProfile"
+	Forge_GetAttestationProfile_FullMethodName                              = "/forge.Forge/GetAttestationProfile"
+	Forge_ListAttestationProfiles_FullMethodName                            = "/forge.Forge/ListAttestationProfiles"
 	Forge_SignMachineIdentity_FullMethodName                                = "/forge.Forge/SignMachineIdentity"
 	Forge_GetTenantIdentityConfiguration_FullMethodName                     = "/forge.Forge/GetTenantIdentityConfiguration"
 	Forge_SetTenantIdentityConfiguration_FullMethodName                     = "/forge.Forge/SetTenantIdentityConfiguration"
@@ -1264,6 +1269,12 @@ type ForgeClient interface {
 	CancelMachineAttestation(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	ListAttestationMachines(ctx context.Context, in *SpdmListAttestationMachinesRequest, opts ...grpc.CallOption) (*SpdmListAttestationMachinesResponse, error)
 	GetAttestationMachine(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*SpdmGetAttestationMachineResponse, error)
+	// Attestation profiles APIs
+	CreateAttestationProfile(ctx context.Context, in *CreateAttestationProfileRequest, opts ...grpc.CallOption) (*AttestationProfile, error)
+	UpdateAttestationProfile(ctx context.Context, in *UpdateAttestationProfileRequest, opts ...grpc.CallOption) (*AttestationProfile, error)
+	DeleteAttestationProfile(ctx context.Context, in *DeleteAttestationProfileRequest, opts ...grpc.CallOption) (*DeleteAttestationProfileResponse, error)
+	GetAttestationProfile(ctx context.Context, in *GetAttestationProfileRequest, opts ...grpc.CallOption) (*AttestationProfile, error)
+	ListAttestationProfiles(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListAttestationProfilesResponse, error)
 	// SPIFFE Machine Identity APIs
 	// Signs a JWT-SVID token for machine identity
 	SignMachineIdentity(ctx context.Context, in *MachineIdentityRequest, opts ...grpc.CallOption) (*MachineIdentityResponse, error)
@@ -5742,6 +5753,56 @@ func (c *forgeClient) GetAttestationMachine(ctx context.Context, in *MachineId, 
 	return out, nil
 }
 
+func (c *forgeClient) CreateAttestationProfile(ctx context.Context, in *CreateAttestationProfileRequest, opts ...grpc.CallOption) (*AttestationProfile, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AttestationProfile)
+	err := c.cc.Invoke(ctx, Forge_CreateAttestationProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) UpdateAttestationProfile(ctx context.Context, in *UpdateAttestationProfileRequest, opts ...grpc.CallOption) (*AttestationProfile, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AttestationProfile)
+	err := c.cc.Invoke(ctx, Forge_UpdateAttestationProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) DeleteAttestationProfile(ctx context.Context, in *DeleteAttestationProfileRequest, opts ...grpc.CallOption) (*DeleteAttestationProfileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteAttestationProfileResponse)
+	err := c.cc.Invoke(ctx, Forge_DeleteAttestationProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetAttestationProfile(ctx context.Context, in *GetAttestationProfileRequest, opts ...grpc.CallOption) (*AttestationProfile, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AttestationProfile)
+	err := c.cc.Invoke(ctx, Forge_GetAttestationProfile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ListAttestationProfiles(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListAttestationProfilesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListAttestationProfilesResponse)
+	err := c.cc.Invoke(ctx, Forge_ListAttestationProfiles_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) SignMachineIdentity(ctx context.Context, in *MachineIdentityRequest, opts ...grpc.CallOption) (*MachineIdentityResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MachineIdentityResponse)
@@ -7121,6 +7182,12 @@ type ForgeServer interface {
 	CancelMachineAttestation(context.Context, *MachineId) (*emptypb.Empty, error)
 	ListAttestationMachines(context.Context, *SpdmListAttestationMachinesRequest) (*SpdmListAttestationMachinesResponse, error)
 	GetAttestationMachine(context.Context, *MachineId) (*SpdmGetAttestationMachineResponse, error)
+	// Attestation profiles APIs
+	CreateAttestationProfile(context.Context, *CreateAttestationProfileRequest) (*AttestationProfile, error)
+	UpdateAttestationProfile(context.Context, *UpdateAttestationProfileRequest) (*AttestationProfile, error)
+	DeleteAttestationProfile(context.Context, *DeleteAttestationProfileRequest) (*DeleteAttestationProfileResponse, error)
+	GetAttestationProfile(context.Context, *GetAttestationProfileRequest) (*AttestationProfile, error)
+	ListAttestationProfiles(context.Context, *emptypb.Empty) (*ListAttestationProfilesResponse, error)
 	// SPIFFE Machine Identity APIs
 	// Signs a JWT-SVID token for machine identity
 	SignMachineIdentity(context.Context, *MachineIdentityRequest) (*MachineIdentityResponse, error)
@@ -8580,6 +8647,21 @@ func (UnimplementedForgeServer) ListAttestationMachines(context.Context, *SpdmLi
 }
 func (UnimplementedForgeServer) GetAttestationMachine(context.Context, *MachineId) (*SpdmGetAttestationMachineResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetAttestationMachine not implemented")
+}
+func (UnimplementedForgeServer) CreateAttestationProfile(context.Context, *CreateAttestationProfileRequest) (*AttestationProfile, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateAttestationProfile not implemented")
+}
+func (UnimplementedForgeServer) UpdateAttestationProfile(context.Context, *UpdateAttestationProfileRequest) (*AttestationProfile, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateAttestationProfile not implemented")
+}
+func (UnimplementedForgeServer) DeleteAttestationProfile(context.Context, *DeleteAttestationProfileRequest) (*DeleteAttestationProfileResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteAttestationProfile not implemented")
+}
+func (UnimplementedForgeServer) GetAttestationProfile(context.Context, *GetAttestationProfileRequest) (*AttestationProfile, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAttestationProfile not implemented")
+}
+func (UnimplementedForgeServer) ListAttestationProfiles(context.Context, *emptypb.Empty) (*ListAttestationProfilesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAttestationProfiles not implemented")
 }
 func (UnimplementedForgeServer) SignMachineIdentity(context.Context, *MachineIdentityRequest) (*MachineIdentityResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SignMachineIdentity not implemented")
@@ -16530,6 +16612,96 @@ func _Forge_GetAttestationMachine_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_CreateAttestationProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateAttestationProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).CreateAttestationProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_CreateAttestationProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).CreateAttestationProfile(ctx, req.(*CreateAttestationProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_UpdateAttestationProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateAttestationProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).UpdateAttestationProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_UpdateAttestationProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).UpdateAttestationProfile(ctx, req.(*UpdateAttestationProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_DeleteAttestationProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteAttestationProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).DeleteAttestationProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_DeleteAttestationProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).DeleteAttestationProfile(ctx, req.(*DeleteAttestationProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetAttestationProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAttestationProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetAttestationProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetAttestationProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetAttestationProfile(ctx, req.(*GetAttestationProfileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ListAttestationProfiles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ListAttestationProfiles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ListAttestationProfiles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ListAttestationProfiles(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_SignMachineIdentity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MachineIdentityRequest)
 	if err := dec(in); err != nil {
@@ -19379,6 +19551,26 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetAttestationMachine",
 			Handler:    _Forge_GetAttestationMachine_Handler,
+		},
+		{
+			MethodName: "CreateAttestationProfile",
+			Handler:    _Forge_CreateAttestationProfile_Handler,
+		},
+		{
+			MethodName: "UpdateAttestationProfile",
+			Handler:    _Forge_UpdateAttestationProfile_Handler,
+		},
+		{
+			MethodName: "DeleteAttestationProfile",
+			Handler:    _Forge_DeleteAttestationProfile_Handler,
+		},
+		{
+			MethodName: "GetAttestationProfile",
+			Handler:    _Forge_GetAttestationProfile_Handler,
+		},
+		{
+			MethodName: "ListAttestationProfiles",
+			Handler:    _Forge_ListAttestationProfiles_Handler,
 		},
 		{
 			MethodName: "SignMachineIdentity",

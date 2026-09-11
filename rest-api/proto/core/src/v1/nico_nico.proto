@@ -920,6 +920,13 @@ service Forge {
 
   rpc ListAttestationMachines(SpdmListAttestationMachinesRequest) returns (SpdmListAttestationMachinesResponse);
   rpc GetAttestationMachine(common.MachineId) returns (SpdmGetAttestationMachineResponse);
+
+  // Attestation profiles APIs
+  rpc CreateAttestationProfile(CreateAttestationProfileRequest) returns (AttestationProfile);
+  rpc UpdateAttestationProfile(UpdateAttestationProfileRequest) returns (AttestationProfile);
+  rpc DeleteAttestationProfile(DeleteAttestationProfileRequest) returns (DeleteAttestationProfileResponse);
+  rpc GetAttestationProfile(GetAttestationProfileRequest) returns (AttestationProfile);
+  rpc ListAttestationProfiles(google.protobuf.Empty) returns (ListAttestationProfilesResponse);
   // SPDM attestation APIs end
 
   // SPIFFE Machine Identity APIs
@@ -1126,9 +1133,49 @@ message SpdmMachineAttestationStatus {
   SpdmAttestationStatus attestation_status = 2;
 }
 
+// Why one attestation scheduling attempt ended as it did. Only SCHEDULED
+// wrote work; the rest are the ways a machine can end up attesting nothing,
+// kept apart because an operator fixes each differently.
+enum SpdmSchedulingOutcome {
+  // Unset sentinel. The server always reports a real outcome, so this only
+  // appears to a client newer than the server it is talking to.
+  SPDM_SCHEDULING_OUTCOME_UNSPECIFIED = 0;
+  // One work row was written per selected attester.
+  SPDM_SCHEDULING_OUTCOME_SCHEDULED = 1;
+  // The profile's mode is NONE. The BMC is not contacted.
+  SPDM_SCHEDULING_OUTCOME_ATTESTATION_DISABLED = 2;
+  // The BMC offered nothing eligible, under a policy that asserted nothing
+  // about what must be there. Points at the hardware, not the profile.
+  SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND = 3;
+  // An operator-authored requirement went unsatisfied.
+  SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING = 4;
+  // No exploration has recorded a hardware class for this machine's BMC.
+  SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED = 5;
+  // Neither the machine's class nor `any` has a profile.
+  SPDM_SCHEDULING_OUTCOME_NO_PROFILE = 6;
+  // Classification matched no hardware class, and no `any` profile is stored.
+  SPDM_SCHEDULING_OUTCOME_CLASS_UNRECOGNIZED = 7;
+}
+
 message SpdmMachineAttestationTriggerResponse {
   common.MachineId machine_id = 1;
   int32 devices_under_attestation = 2;
+  // The hardware class recorded for the machine's BMC, empty when exploration
+  // has not recorded one.
+  string resolved_hardware_class = 3;
+  // Why nothing was scheduled, or that something was.
+  SpdmSchedulingOutcome outcome = 4;
+  // Whether the reserved "any" profile supplied the policy rather than one
+  // written for this machine's own class.
+  bool used_any_fallback = 5;
+  // Version of the profile that decided this call, absent when no profile
+  // applied. Scoped to this call: a later trigger replaces the machine's whole
+  // work set, so this is not a lasting claim about the attestation in flight.
+  optional string profile_version = 6;
+  // When the scheduled devices were written, absent unless something was
+  // scheduled. Every device row this call wrote carries it, so a caller can
+  // tell whether its scheduling is still the live one or was replaced.
+  optional google.protobuf.Timestamp scheduled_at = 7;
 }
 
 message SpdmAttestationDetails{
@@ -1164,6 +1211,83 @@ message SpdmListAttestationMachinesRequest {
 
 message SpdmListAttestationMachinesResponse {
   repeated SpdmMachineAttestationStatus statuses = 1;
+}
+
+// Attestation profiles: one policy per hardware class, naming which attesters
+// machines of that class require.
+// Ordered from attesting nothing to naming an exact set, after the unset
+// sentinel.
+enum AttesterSelectionMode {
+  // Unset sentinel. The server rejects this with InvalidArgument. Zero is not
+  // a real mode because an omitted one would otherwise read as NONE and
+  // silently disable attestation for the class.
+  ATTESTER_SELECTION_MODE_UNSPECIFIED = 0;
+  ATTESTER_SELECTION_MODE_NONE = 1;
+  ATTESTER_SELECTION_MODE_ALL = 2;
+  ATTESTER_SELECTION_MODE_ALLOWLIST = 3;
+  ATTESTER_SELECTION_MODE_DENYLIST = 4;
+}
+
+// One matcher against a ComponentIntegrity Id. Matching is case-sensitive,
+// because Redfish treats Id as opaque.
+message ComponentIdMatch {
+  oneof pattern {
+    // One ID, matched in full.
+    string exact = 1;
+    // Every ID starting with the given string.
+    string prefix = 2;
+  }
+}
+
+message AttesterSelection {
+  // Required. An omitted mode decodes to the unset sentinel and is rejected.
+  AttesterSelectionMode mode = 1;
+  // Required for ALLOWLIST and DENYLIST, and must be empty for ALL and NONE.
+  repeated ComponentIdMatch component_ids = 2;
+}
+
+message AttestationProfile {
+  string hardware_class = 1;
+  string version = 2;
+  AttesterSelection selection = 3;
+  google.protobuf.Timestamp updated_at = 4;
+  // Derived by the server from the calling principal; ignored on requests.
+  string updated_by = 5;
+}
+
+message CreateAttestationProfileRequest {
+  string hardware_class = 1;
+  AttesterSelection selection = 2;
+}
+
+message UpdateAttestationProfileRequest {
+  string hardware_class = 1;
+  AttesterSelection selection = 2;
+  // If the field here is set, the update will only be applied if the version
+  // is equivalent to the current version on the NICo Site.
+  // If a concurrent update changed the site configuration, the API will return
+  // a `ConcurrentModificationError`.
+  optional string if_version_match = 3;
+}
+
+message DeleteAttestationProfileRequest {
+  string hardware_class = 1;
+  // If the field here is set, the delete will only be applied if the version
+  // is equivalent to the current version on the NICo Site.
+  // If a concurrent update changed the site configuration, the API will return
+  // a `ConcurrentModificationError`.
+  optional string if_version_match = 2;
+}
+
+message DeleteAttestationProfileResponse {
+}
+
+message GetAttestationProfileRequest {
+  string hardware_class = 1;
+}
+
+message ListAttestationProfilesResponse {
+  repeated AttestationProfile profiles = 1;
 }
 
 // Machine Identity - JWT-SVID token signing
