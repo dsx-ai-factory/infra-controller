@@ -30,7 +30,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
-use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcMockWrapper, BmcMockWrapperHandle, ConsoleSimulators};
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRequestInfo, DhcpRequester, DhcpResponseInfo, vendor_class};
 use crate::machine_state_machine::{MachineStateError, OsImage};
@@ -114,6 +114,9 @@ pub(crate) struct SwitchActor {
     config: Arc<MachineConfig>,
     live_state: Arc<RwLock<SwitchLiveState>>,
     bmc_injection: Arc<InjectionStore>,
+    /// Built on the first `SetupBmc` attempt and re-published, not rebuilt, if that action is
+    /// retried after a failed start.
+    bmc_mock_wrapper: Option<BmcMockWrapper>,
     _bmc_mock: Option<Arc<BmcMockWrapperHandle>>,
     bmc_dhcp_info: Option<DhcpResponseInfo>,
     fsm: SwitchFsm,
@@ -144,6 +147,7 @@ impl SwitchActor {
             config,
             live_state: Arc::new(RwLock::new(SwitchLiveState::new(&fsm))),
             bmc_injection: Arc::new(InjectionStore::new()),
+            bmc_mock_wrapper: None,
             _bmc_mock: None,
             bmc_dhcp_info: None,
             fsm,
@@ -184,6 +188,7 @@ impl SwitchActor {
             config,
             live_state: Arc::new(RwLock::new(SwitchLiveState::new(&fsm))),
             bmc_injection: Arc::new(InjectionStore::new()),
+            bmc_mock_wrapper: None,
             _bmc_mock: None,
             bmc_dhcp_info: None,
             fsm,
@@ -380,18 +385,11 @@ impl SwitchActor {
             .await?)
     }
 
-    async fn setup_bmc(
-        &mut self,
-        mailbox: &ActorMailbox<SwitchMessage>,
-    ) -> Result<(), MachineStateError> {
-        let dhcp_info = self
-            .bmc_dhcp_info
-            .as_ref()
-            .ok_or(MachineStateError::NoBmcDhcpInfo)?;
+    fn build_bmc_mock(&self, mailbox: &ActorMailbox<SwitchMessage>) -> BmcMockWrapper {
         let machine_info = MachineInfo::Host(self.host_info.clone());
         let bmc_mock = BmcMockWrapper::new(
             &machine_info,
-            self.app_context.clone(),
+            ConsoleSimulators::from(&self.app_context.app_config),
             Arc::new(SwitchCallbacks {
                 state: self.live_state.clone(),
                 mailbox: mailbox.clone(),
@@ -408,15 +406,29 @@ impl SwitchActor {
                 .account_service_state
                 .change_factory_default_password(password);
         }
+        bmc_mock
+    }
 
-        let bmc_handle = {
-            self.app_context
-                .bmc_registry
-                .write()
-                .await
-                .insert(dhcp_info.ip_address.to_string(), bmc_mock.router().clone());
-            bmc_mock.start().await?.map(Arc::new)
+    async fn setup_bmc(
+        &mut self,
+        mailbox: &ActorMailbox<SwitchMessage>,
+    ) -> Result<(), MachineStateError> {
+        let ip_address = self
+            .bmc_dhcp_info
+            .as_ref()
+            .ok_or(MachineStateError::NoBmcDhcpInfo)?
+            .ip_address;
+        let bmc_mock = match &mut self.bmc_mock_wrapper {
+            Some(bmc_mock) => bmc_mock,
+            None => {
+                let bmc_mock = self.build_bmc_mock(mailbox);
+                self.bmc_mock_wrapper.insert(bmc_mock)
+            }
         };
+        bmc_mock
+            .register(&self.app_context.bmc_registry, ip_address)
+            .await;
+        let bmc_handle = bmc_mock.start().await?.map(Arc::new);
 
         if let Some(ssh_host_key) = bmc_handle
             .as_ref()
@@ -428,7 +440,7 @@ impl SwitchActor {
 
         {
             let mut state = self.live_state.write().unwrap();
-            state.bmc_ip = Some(dhcp_info.ip_address);
+            state.bmc_ip = Some(ip_address);
             state.ipmi_port = bmc_handle.as_ref().and_then(|handle| handle.ipmi_port());
             state.ssh_endpoint_port = bmc_handle
                 .as_ref()
