@@ -101,8 +101,8 @@ fn desired_host_firmware(
     hw_type: bmc_mock::HardwareType,
     app_context: &MachineATronContext,
 ) -> Option<HostFirmwareVersions> {
-    let entry = app_context
-        .desired_firmware_versions
+    let versions = app_context.desired_firmware_versions.read().unwrap();
+    let entry = versions
         .iter()
         .find(|e| firmware_entry_matches_host_hw_type(hw_type, e))?;
     let bmc = entry
@@ -359,6 +359,9 @@ impl HostMachine {
         tokio::select! {
             _ = tokio::time::sleep_until(self.sleep_until.into()) => {}
             _ = self.api_refresh_interval.tick() => {
+                // Pick up any change to the API-configured firmware targets
+                // before refreshing the API state (issue #4688).
+                self.refresh_desired_host_firmware();
                 // Wake up to refresh the API state
                 if DeviceKind::from(self.host_info.hw_type) == DeviceKind::Machine
                     && let Some(machine_id) = self.live_state.read().unwrap().observed_machine_id
@@ -437,6 +440,25 @@ impl HostMachine {
             self.state_machine.detach_dpu_dhcp_relay();
             self.state_machine.drop_managed_dpus();
         }
+    }
+
+    /// Re-derive this host's firmware targets from the (periodically
+    /// refreshed) API-wide desired versions and, when they changed, re-stage
+    /// the live BMC mock's pending upgrades. No-op while the targets are
+    /// unchanged, so the per-tick cost is one map lookup.
+    fn refresh_desired_host_firmware(&mut self) {
+        let desired = desired_host_firmware(self.host_info.hw_type, &self.app_context);
+        if desired == self.host_info.desired_host_firmware {
+            return;
+        }
+        tracing::info!(
+            machine = %self.machine_config_section,
+            previous = ?self.host_info.desired_host_firmware,
+            new = ?desired,
+            "Desired host firmware changed; re-staging pending upgrades",
+        );
+        self.host_info.desired_host_firmware = desired.clone();
+        self.state_machine.set_desired_host_firmware(desired);
     }
 
     fn handle_actor_message(&mut self, message: HostMachineMessage) -> HandleMessageResult {

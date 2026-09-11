@@ -970,7 +970,10 @@ pub struct MachineATronContext {
     pub api_throttler: ApiThrottler,
     /// These are the firmware versions the server wants us to be on. If not configured for other
     /// firmware, DPU's can mock that they already have this installed.
-    pub desired_firmware_versions: Vec<DesiredFirmwareVersionEntry>,
+    /// Firmware targets fetched from the API. Behind a lock because a
+    /// background task refreshes them periodically (issue #4688); live
+    /// machines re-read on their own api_refresh_interval tick.
+    pub desired_firmware_versions: std::sync::RwLock<Vec<DesiredFirmwareVersionEntry>>,
     pub forge_api_client: ForgeApiClient,
     pub dhcp_client: crate::dhcp_wrapper::DhcpClient,
     pub mac_address_pool: Arc<Mutex<MacAddressPool>>,

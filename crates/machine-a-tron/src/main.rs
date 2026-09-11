@@ -146,11 +146,51 @@ async fn main() -> Result<(), Box<dyn Error>> {
         bmc_mock_certs_dir,
         bmc_registry,
         api_throttler,
-        desired_firmware_versions,
+        desired_firmware_versions: std::sync::RwLock::new(desired_firmware_versions),
         forge_api_client,
         dhcp_client,
         mac_address_pool: Mutex::new(mac_address_pool).into(),
     });
+
+    // Periodically re-fetch the desired firmware versions so target changes in
+    // the API reach live machines without a restart (issue #4688). Runs on the
+    // same cadence as the per-machine API refresh; each machine re-derives its
+    // own targets on its next tick. An empty response is treated as "nothing
+    // configured" rather than "clear all targets", so the existing
+    // preingestion flow without desired versions is unaffected. Fetch errors
+    // keep the last known targets.
+    {
+        let app_context = app_context.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(app_context.app_config.api_refresh_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await; // the startup fetch above already populated the context
+            loop {
+                interval.tick().await;
+                match app_context.forge_api_client.get_desired_firmware_versions().await {
+                    Ok(response) => {
+                        if response.entries.is_empty() {
+                            continue;
+                        }
+                        let mut current =
+                            app_context.desired_firmware_versions.write().unwrap();
+                        if *current != response.entries {
+                            tracing::info!(
+                                desired_firmware_versions = ?response.entries,
+                                "Desired firmware versions changed; live machines pick up the new targets on their next refresh tick",
+                            );
+                            *current = response.entries;
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "Failed to refresh desired firmware versions; keeping the last known targets",
+                    ),
+                }
+            }
+        });
+    }
 
     let info = app_context.forge_api_client.version(false).await?;
     tracing::info!(
