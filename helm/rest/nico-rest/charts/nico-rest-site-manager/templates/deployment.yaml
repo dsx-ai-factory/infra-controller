@@ -65,6 +65,9 @@ spec:
             {{- end }}
           {{- end }}
           volumeMounts:
+            - name: creds-manager-token
+              mountPath: /var/run/secrets/nico-rest-cert-manager
+              readOnly: true
             - name: tls-certs
               mountPath: /etc/tls
               readOnly: true
@@ -90,6 +93,13 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 15
       volumes:
+        - name: creds-manager-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: nico-rest-cert-manager
+                  expirationSeconds: 3600
         - name: tls-certs
           secret:
             secretName: {{ .Values.certificate.secretName }}
