@@ -58,6 +58,9 @@ service Forge {
   // VPC
   rpc CreateVpc(VpcCreationRequest) returns (Vpc);
   rpc UpdateVpc(VpcUpdateRequest) returns (VpcUpdateResult);
+  // Changes an FNN VPC's named profile and active VNI while retaining the old
+  // allocation. Success means Core committed, not that the dataplane converged.
+  rpc ChangeVpcRoutingProfile(VpcChangeRoutingProfileRequest) returns (VpcRoutingState);
   // Operator cleanup after independently verifying that no DPU or fabric route
   // still uses the retained VNI. Core does not verify dataplane convergence.
   rpc ReleaseVpcInactiveVni(VpcReleaseInactiveVniRequest) returns (VpcReleaseInactiveVniResult);
@@ -68,6 +71,8 @@ service Forge {
   rpc DeleteVpc(VpcDeletionRequest) returns (VpcDeletionResult);
   rpc FindVpcIds(VpcSearchFilter) returns (VpcIdList);
   rpc FindVpcsByIds(VpcsByIdsRequest) returns (VpcList);
+  // Reads persisted VPC routing and allocation state without changing it.
+  rpc GetVpcRoutingState(VpcRoutingStateRequest) returns (VpcRoutingState);
 
   rpc CreateSpxPartition(SpxPartitionCreationRequest) returns (SpxPartition);
   rpc DeleteSpxPartition(SpxPartitionDeletionRequest) returns (SpxPartitionDeletionResult);
@@ -1882,9 +1887,8 @@ message VpcConfig {
 
 message VpcStatus {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  // The actual VNI allocated to the VPC. If a VNI had been
-  // explicitly requested, we'd expect this to match config.vni.
-  // If not explicitly requested, we'd expect config.vni to be unset.
+  // Active VNI allocated to the VPC. `config.vni` retains the optional
+  // creation-time request and can differ after a routing-profile change.
   optional uint32 vni = 1;
   // Computed from the API server's current named profile and the persisted
   // VPC overrides. This value is not persisted and may change when the API
@@ -10833,4 +10837,100 @@ message VpcReleaseInactiveVniResult {
   Vpc vpc = 1;
   // Exact inactive allocation released by this operation.
   uint32 released_inactive_vni = 2;
+}
+
+// Selects one VPC for authoritative allocation inspection.
+message VpcRoutingStateRequest {
+  // Required VPC ID. Missing IDs fail INVALID_ARGUMENT; unknown or deleted
+  // VPCs fail NOT_FOUND.
+  common.VpcId id = 1;
+}
+
+// Persisted routing state, read together with the VPC-owned allocations.
+// Supports any virtualization type with one owned allocation matching its
+// active VNI and at most one distinct allocation in the other pool. Missing,
+// duplicate, or inconsistent ownership fails instead of reporting no retained
+// allocation. VPCs without pool ownership (including configured admin VPCs)
+// fail FAILED_PRECONDITION. Pool values that cannot be parsed as signed 32-bit
+// integers fail INTERNAL; parsed negative values fail FAILED_PRECONDITION.
+// This is not an effective routing profile or evidence of DPU/fabric convergence;
+// a site-global VNI override is not reflected here. Inspection must not silently
+// replace the version or VNI an operator approved for a mutation.
+message VpcRoutingState {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // VPC whose persisted state was read.
+  common.VpcId id = 1;
+  // VPC version observed with these allocations. Profile changes advance it;
+  // inspection does not.
+  string version = 2;
+  // Persisted profile name, omitted when none is configured on the VPC.
+  // The name is returned even if its runtime profile definition is unavailable.
+  optional string routing_profile_type = 3;
+  // Persisted active VNI, verified against exact pool ownership. Inspection
+  // accepts stored nonnegative values, including zero in non-FNN pools.
+  uint32 active_vni = 4;
+  // Omitted only when the valid active allocation is the VPC's sole allocation.
+  VpcRetainedVniAllocation retained_allocation = 5;
+}
+
+// Allocation retained by the VPC in the pool other than its active allocation.
+message VpcRetainedVniAllocation {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Exact resource-pool name: vpc-vni or external-vpc-vni.
+  string pool_name = 1;
+  // Persisted nonnegative VNI. Distinct from the active VNI; inspection does
+  // not establish whether it is valid for a routing-profile transition.
+  uint32 vni = 2;
+}
+
+// Changes a supported FNN VPC between configured profiles with opposite
+// internal settings. The destination must satisfy the persisted tenant's
+// access tier (omitted tiers retain the creation-time default of zero).
+// Reuses an existing destination allocation, otherwise claims the requested
+// VNI or automatically selects an available VNI from the destination pool.
+// The previous allocation remains reserved; ReleaseVpcInactiveVni is a
+// separate operator action.
+//
+// Requires FNN configuration, named source/destination profiles, distinct
+// nonoverlapping materialized pools, and VNIs in 1..16777215. Site-global VNIs,
+// substantive VPC/interface routing overrides, and tenant-managed SitePrefix
+// attachments are unsupported. Empty override reset objects are allowed.
+// Same-polarity changes and a destination pool already holding the active VNI
+// are rejected. Unsupported configurations and inconsistent ownership fail
+// FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; automatic allocation
+// from an exhausted pool fails RESOURCE_EXHAUSTED. Rejected requests commit
+// no changes.
+//
+// Preserves the VPC ID, prefixes, instances, addresses, NSGs, metadata, and
+// creation-time requested VNI. External routing does not supply public
+// addressing, NAT, fabric routes, or firewall changes.
+//
+// Operators must hold attachment, peering, deletion, and profile-definition
+// changes until all attached and directly peered DPUs and fabric routes have
+// been independently verified and the inactive allocation released. Core
+// does not enforce that hold or verify convergence. A later change back must
+// name the desired profile and pass current validation; retained ownership
+// does not guarantee reversal or authorize broader tenant access.
+message VpcChangeRoutingProfileRequest {
+  // Required live VPC ID. Omission fails INVALID_ARGUMENT.
+  common.VpcId id = 1;
+  // Required version from the original observation; missing/malformed values
+  // fail INVALID_ARGUMENT and stale versions fail FAILED_PRECONDITION. Keep this exact
+  // version on retries. A lost response leaves commit status unknown: inspect
+  // GetVpcRoutingState and never automatically substitute a fresh version.
+  optional string if_version_match = 2;
+  // Required nonempty configuration-defined destination name, not a closed
+  // INTERNAL/EXTERNAL enum. Omission or an empty name fails INVALID_ARGUMENT.
+  string routing_profile_type = 3;
+  // Optional exact destination VNI. Omission reuses a retained destination,
+  // otherwise allocates automatically. A retained destination must match an
+  // explicit request; a different value fails FAILED_PRECONDITION even if free.
+  // Without a retained destination, the requested value must be a free
+  // materialized destination-pool entry, regardless of its auto_assign flag.
+  // Missing or occupied entries and the active VNI fail FAILED_PRECONDITION
+  // without falling back. Zero and values above 16777215 fail INVALID_ARGUMENT.
+  // Use only when every serving Core supports this field: older Core ignores
+  // it and may choose another VNI. Verify the returned profile and active VNI;
+  // a mismatched or lost response does not undo a committed change.
+  optional uint32 vni = 4;
 }

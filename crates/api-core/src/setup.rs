@@ -2431,7 +2431,7 @@ mod tests {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix,
             prefix_v6: None,
-            gateway: prefix.network(),
+            gateway: Some(prefix.network()),
             dhcpv6_link_address: None,
             mtu,
             reserve_first: 0,

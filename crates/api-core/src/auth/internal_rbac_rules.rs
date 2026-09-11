@@ -71,10 +71,12 @@ impl InternalRBACRules {
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ChangeVpcRoutingProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateVpcVirtualization", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteVpc", vec![Machineatron, SiteAgent]);
         x.perm("FindVpcIds", vec![SiteAgent, ForgeAdminCLI, Machineatron]);
         x.perm("FindVpcsByIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetVpcRoutingState", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
@@ -1127,7 +1129,7 @@ mod rbac_rule_tests {
     }
 
     #[test]
-    fn inactive_vni_release_permissions() {
+    fn vpc_allocation_operation_permissions() {
         // Operator certificates map to ExternalUser; its group label is not
         // compared when matching the rule.
         for (principal, allowed) in [
@@ -1150,15 +1152,21 @@ mod rbac_rule_tests {
             (Principal::SpiffeMachineIdentifier("dpu".to_string()), false),
             (Principal::Anonymous, false),
         ] {
-            assert_eq!(
-                InternalRBACRules::allowed_from_static(
-                    "ReleaseVpcInactiveVni",
-                    std::slice::from_ref(&principal),
-                ),
-                allowed,
-                "{}",
-                principal.as_identifier(),
-            );
+            for method in [
+                "ReleaseVpcInactiveVni",
+                "GetVpcRoutingState",
+                "ChangeVpcRoutingProfile",
+            ] {
+                assert_eq!(
+                    InternalRBACRules::allowed_from_static(
+                        method,
+                        std::slice::from_ref(&principal),
+                    ),
+                    allowed,
+                    "{method}: {}",
+                    principal.as_identifier(),
+                );
+            }
         }
     }
 

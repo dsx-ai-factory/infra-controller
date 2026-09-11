@@ -18,6 +18,7 @@ calls it `imageDisk`. Set the value according to the following table:
 | `smallest` | Selects the smallest enumerated whole disk. If multiple disks have the same smallest size, NICo prefers one containing an existing EFI System Partition; otherwise it makes a deterministic name-based choice. |
 | `/dev/nvme<controller>n<namespace>` | Selects an NVMe namespace, for example `/dev/nvme0n1`. |
 | `/dev/sd<letters>` | Selects a SCSI-style whole disk, for example `/dev/sda` or `/dev/sdaa`. |
+| `/dev/vd<letters>` | Selects a virtio whole disk, for example `/dev/vda` or `/dev/vdaa`. |
 | `/dev/disk/by-id/<identifier>` | Resolves a stable Linux disk identifier to its backing device. The identifier cannot contain a slash or whitespace. |
 | Omitted or empty on creation | Prefers the first deterministically ordered disk containing an EFI System Partition, then `/dev/nvme0n1`, then `/dev/sda`. |
 

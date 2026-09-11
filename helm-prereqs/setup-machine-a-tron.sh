@@ -164,10 +164,15 @@ BMC_USERNAME="${BMC_USERNAME:-root}"
 # no-op and the mock keeps rejecting with "Factory-default password must be
 # changed" (403) forever.
 BMC_PASSWORD="${BMC_PASSWORD:-NicoSiteRoot1}"
-# Factory defaults HARDCODED in the bmc-mock binary (crates/bmc-mock/src/lib.rs):
-#   host BMCs:  DUMMY_FACTORY_PASSWORD     = "factory_password"
-#   DPU BMCs:   DUMMY_FACTORY_DPU_PASSWORD = "0penBmc"
-# Do not change unless the mock changes.
+# Factory defaults used by this simulation:
+#   host BMCs:  `bmc_mock::DUMMY_FACTORY_PASSWORD` = "factory_password"
+#   DPU BMCs:   `bmc_vendor::DpuModel::default_factory_credentials()` is shared
+#               by `bmc-mock` and site-explorer
+# site-explorer checks a model-specific entry, the catch-all seeded below, then
+# its per-model code fallback. This catch-all matches BF2/BF3 and unrecognized
+# models (`root`/`0penBmc`). BF4 needs a model-specific `bf4` entry for its
+# `admin` username.
+# Do not change unless those factory defaults change.
 FACTORY_HOST_BMC_PASSWORD="factory_password"
 FACTORY_DPU_BMC_PASSWORD="0penBmc"
 # Vendor path segment for the host factory cred. LOWERCASE is required: the

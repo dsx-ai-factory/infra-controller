@@ -20791,7 +20791,7 @@ components:
           type:
             - string
             - 'null'
-          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$'
+          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\s]+))$'
           not:
             type: string
             pattern: '^/dev/disk/by-id/.*-part[0-9]+$'
@@ -20800,7 +20800,7 @@ components:
             - /dev/disk/by-id/nvme-Dell_BOSS-N1_VNOWW12345V0123451UT
           description: >-
             Whole-disk target that will be overwritten with the image. Accepts
-            `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or
+            `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, `/dev/vd<letters>`, or
             `/dev/disk/by-id/<identifier>`. `smallest` selects the smallest enumerated
             whole disk, preferring one with an EFI partition to break a size tie.
             Partition aliases ending in `-part<digits>` are rejected.
@@ -21170,7 +21170,7 @@ components:
           type:
             - string
             - 'null'
-          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$'
+          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\s]+))$'
           not:
             type: string
             pattern: '^/dev/disk/by-id/.*-part[0-9]+$'
@@ -21180,7 +21180,7 @@ components:
           description: >-
             Optional whole-disk target that will be overwritten with the image.
             Accepts `smallest`, `/dev/nvme<controller>n<namespace>`,
-            `/dev/sd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest`
+            `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest`
             selects the smallest enumerated whole disk, preferring one with an EFI
             partition to break a size tie. Partition aliases ending in
             `-part<digits>` are rejected. When omitted, null, or empty on creation,
@@ -21292,7 +21292,7 @@ components:
           type:
             - string
             - 'null'
-          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$'
+          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\s]+))$'
           not:
             type: string
             pattern: '^/dev/disk/by-id/.*-part[0-9]+$'
@@ -21302,7 +21302,7 @@ components:
           description: >-
             Optional whole-disk target that will be overwritten with the image.
             Accepts `smallest`, `/dev/nvme<controller>n<namespace>`,
-            `/dev/sd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest`
+            `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest`
             selects the smallest enumerated whole disk, preferring one with an EFI
             partition to break a size tie. Partition aliases ending in
             `-part<digits>` are rejected. Omitting this field or sending null preserves

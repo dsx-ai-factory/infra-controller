@@ -20,7 +20,8 @@ use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
 use model::vpc::{
-    NewVpc, PowerResourceGroupUpdate, UpdateVpc, UpdateVpcVirtualization, Vpc, VpcStatus,
+    ChangeVpcRoutingProfile, NewVpc, PowerResourceGroupUpdate, UpdateVpc, UpdateVpcVirtualization,
+    Vpc, VpcStatus,
 };
 use sqlx::{PgConnection, PgTransaction};
 
@@ -233,9 +234,9 @@ pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, D
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-/// Updates both persisted VNI locations for a VPC.
+/// Pins the configured admin VPC's requested and active VNI together.
+/// Routing-profile transitions preserve creation intent with [`change_routing_profile`].
 pub async fn set_vni(value: &Vpc, txn: &mut PgConnection, vni: i32) -> DatabaseResult<Vpc> {
-    // Keep the requested VNI column and the actual status VNI in sync.
     let query = "UPDATE vpcs
             SET vni=$1, status=jsonb_set(status, '{vni}', to_jsonb($1::integer), true), updated=NOW()
             WHERE id=$2 AND deleted is null
@@ -246,6 +247,43 @@ pub async fn set_vni(value: &Vpc, txn: &mut PgConnection, vni: i32) -> DatabaseR
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Changes a VPC's named routing profile and active VNI, advancing its version.
+///
+/// The caller must hold [`VpcRowLock::Mutation`] on the live VPC, check the
+/// observed version, and validate profile access and VNI ownership in this
+/// transaction. Only the profile, status VNI, version, and update time change;
+/// the creation-time VNI request remains intact. A version mismatch returns
+/// [`DatabaseError::ConcurrentModificationError`].
+pub async fn change_routing_profile(
+    value: &ChangeVpcRoutingProfile,
+    txn: &mut PgConnection,
+    vni: i32,
+) -> DatabaseResult<Vpc> {
+    let query = "UPDATE vpcs
+        SET routing_profile_type = $1,
+            status = jsonb_set(status, '{vni}', to_jsonb($2::integer), true),
+            version = $3, updated = NOW()
+        WHERE id = $4 AND version = $5 AND deleted IS NULL
+        RETURNING *";
+    let result = sqlx::query_as(query)
+        .bind(&value.routing_profile_type)
+        .bind(vni)
+        .bind(value.if_version_match.increment())
+        .bind(value.id)
+        .bind(value.if_version_match)
+        .fetch_one(txn)
+        .await;
+
+    match result {
+        Ok(vpc) => Ok(vpc),
+        Err(sqlx::Error::RowNotFound) => Err(DatabaseError::ConcurrentModificationError(
+            "vpc",
+            value.if_version_match.to_string(),
+        )),
+        Err(error) => Err(DatabaseError::query(query, error)),
+    }
 }
 
 pub async fn find_by_name(txn: impl DbReader<'_>, name: &str) -> Result<Vec<Vpc>, DatabaseError> {
@@ -519,6 +557,60 @@ pub async fn increment_vpc_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn routing_profile_migration_preserves_rows_and_active_vni_uniqueness(
+        pool: sqlx::PgPool,
+    ) {
+        // The harness applies every migration before this test. Restore the
+        // one removed index to exercise the populated predecessor schema.
+        sqlx::raw_sql(
+            "CREATE UNIQUE INDEX vpcs_unique_active_vni ON vpcs (vni)
+                 WHERE deleted IS NULL;
+             INSERT INTO vpcs (name, version, vni, status, deleted) VALUES
+                 ('explicit', 'V1-T0', 20001, '{\"vni\":20001}', NULL),
+                 ('automatic', 'V1-T0', NULL, '{\"vni\":20002}', NULL),
+                 ('deleted', 'V1-T0', 20001, '{\"vni\":20001}', NOW());",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let snapshot = "SELECT to_jsonb(vpcs) FROM vpcs ORDER BY id";
+        let before: Vec<serde_json::Value> =
+            sqlx::query_scalar(snapshot).fetch_all(&pool).await.unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/20260910185712_vpc_vni_creation_intent.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let after: Vec<serde_json::Value> =
+            sqlx::query_scalar(snapshot).fetch_all(&pool).await.unwrap();
+        assert_eq!(after, before);
+
+        // Once the explicit VPC moves, its original request must not prevent
+        // another VPC from using the released VNI.
+        sqlx::raw_sql(
+            "UPDATE vpcs SET status = '{\"vni\":51000}' WHERE name = 'explicit';
+             INSERT INTO vpcs (name, version, vni, status)
+                 VALUES ('reused', 'V1-T0', 20001, '{\"vni\":20001}');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let error = sqlx::query(
+            "INSERT INTO vpcs (name, version, vni, status)
+             VALUES ('duplicate-active', 'V1-T0', 20003, '{\"vni\":51000}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().constraint(),
+            Some("unique_active_vpc_status_vni")
+        );
+    }
 
     /// Repeating deletion preserves its `Ok(None)` contract even if retained
     /// instance JSON still references the historical VPC.

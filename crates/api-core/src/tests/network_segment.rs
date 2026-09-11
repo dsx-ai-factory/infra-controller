@@ -34,6 +34,8 @@ use common::network_segment::{
 use db::ObjectColumnFilter;
 use db::network_segment::VpcColumn;
 use db::vpc::IdColumn;
+use figment::Figment;
+use figment::providers::{Format, Toml};
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::network_prefix::NewNetworkPrefix;
@@ -50,6 +52,7 @@ use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
 use tonic::Request;
 
+use crate::cfg::file::InitialObjectsConfig;
 use crate::db_init;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common;
@@ -425,7 +428,7 @@ fn initial_underlay_definition(prefix: &str, gateway: &str) -> NetworkDefinition
         segment_type: NetworkDefinitionSegmentType::Underlay,
         prefix: prefix.parse().unwrap(),
         prefix_v6: None,
-        gateway: gateway.parse().unwrap(),
+        gateway: Some(gateway.parse().unwrap()),
         dhcpv6_link_address: None,
         mtu: 1500,
         reserve_first: 5,
@@ -456,6 +459,88 @@ async fn persist_initial_network_without_reverse_zone(
     db::network_segment::insert_network_def(txn.as_mut(), name, segment.id, definition).await?;
     txn.commit().await?;
     Ok(segment)
+}
+
+#[crate::sqlx_test]
+async fn test_initial_network_toml_persists_ipv4_dual_stack_and_ipv6_only(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let config: InitialObjectsConfig = Figment::new()
+        .merge(Toml::string(
+            r#"
+                [networks.ipv4]
+                type = "underlay"
+                prefix = "192.0.2.0/24"
+                gateway = "192.0.2.1"
+                mtu = 1500
+                reserve_first = 5
+
+                [networks.dual-stack]
+                type = "underlay"
+                prefix = "198.51.100.0/24"
+                prefix_v6 = "2001:db8:1::/64"
+                gateway = "198.51.100.1"
+                dhcpv6_link_address = "2001:db8:ffff::1"
+                mtu = 1500
+                reserve_first = 5
+
+                [networks.ipv6-only]
+                type = "underlay"
+                prefix = "2001:db8:2::/64"
+                dhcpv6_link_address = "2001:db8:ffff::2"
+                mtu = 1500
+                reserve_first = 5
+            "#,
+        ))
+        .extract()?;
+    let networks = config.networks.expect("configured networks");
+    assert_eq!(networks["ipv6-only"].gateway, None);
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
+
+    let mut txn = env.pool.begin().await?;
+    assert_eq!(
+        db::network_segment::all_stored_defs(txn.as_mut()).await?,
+        networks,
+    );
+
+    for (name, expected_prefixes) in [
+        ("ipv4", vec![("192.0.2.0/24", Some("192.0.2.1"), None)]),
+        (
+            "dual-stack",
+            vec![
+                ("198.51.100.0/24", Some("198.51.100.1"), None),
+                ("2001:db8:1::/64", None, Some("2001:db8:ffff::1")),
+            ],
+        ),
+        (
+            "ipv6-only",
+            vec![("2001:db8:2::/64", None, Some("2001:db8:ffff::2"))],
+        ),
+    ] {
+        let segment = db::network_segment::find_by_name(&mut txn, name).await?;
+        assert_eq!(segment.prefixes.len(), expected_prefixes.len(), "{name}");
+        for (prefix, gateway, dhcpv6_link_address) in expected_prefixes {
+            let prefix = prefix.parse::<ipnetwork::IpNetwork>()?;
+            let stored = segment
+                .prefixes
+                .iter()
+                .find(|stored| stored.prefix == prefix)
+                .expect("configured prefix must be persisted");
+            assert_eq!(
+                stored.gateway,
+                gateway.map(str::parse).transpose()?,
+                "{name}"
+            );
+            assert_eq!(
+                stored.dhcpv6_link_address,
+                dhcpv6_link_address.map(str::parse).transpose()?,
+                "{name}",
+            );
+        }
+    }
+    txn.commit().await?;
+    Ok(())
 }
 
 #[crate::sqlx_test]
@@ -578,7 +663,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
             segment_type: NetworkDefinitionSegmentType::HostInband,
             prefix: "10.217.18.192/30".parse().unwrap(),
             prefix_v6: None,
-            gateway: "10.217.18.193".parse().unwrap(),
+            gateway: Some("10.217.18.193".parse().unwrap()),
             dhcpv6_link_address: None,
             mtu: 1500,
             reserve_first: 1,
@@ -849,7 +934,7 @@ pub(in crate::tests) async fn test_create_initial_network_fails_for_missing_vpc_
             segment_type: NetworkDefinitionSegmentType::HostInband,
             prefix: "10.217.18.192/30".parse().unwrap(),
             prefix_v6: None,
-            gateway: "10.217.18.193".parse().unwrap(),
+            gateway: Some("10.217.18.193".parse().unwrap()),
             dhcpv6_link_address: None,
             mtu: 1500,
             reserve_first: 1,

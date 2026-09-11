@@ -197,6 +197,13 @@ impl Forge for Api {
         crate::handlers::vpc::update(self, request).await
     }
 
+    async fn change_vpc_routing_profile(
+        &self,
+        request: Request<rpc::VpcChangeRoutingProfileRequest>,
+    ) -> Result<Response<rpc::VpcRoutingState>, Status> {
+        crate::handlers::vpc::change_routing_profile(self, request).await
+    }
+
     async fn release_vpc_inactive_vni(
         &self,
         request: Request<rpc::VpcReleaseInactiveVniRequest>,
@@ -230,6 +237,13 @@ impl Forge for Api {
         request: Request<rpc::VpcsByIdsRequest>,
     ) -> Result<Response<rpc::VpcList>, Status> {
         crate::handlers::vpc::find_by_ids(self, request).await
+    }
+
+    async fn get_vpc_routing_state(
+        &self,
+        request: Request<rpc::VpcRoutingStateRequest>,
+    ) -> Result<Response<rpc::VpcRoutingState>, Status> {
+        crate::handlers::vpc::get_routing_state(self, request).await
     }
 
     async fn find_site_prefix_ids(

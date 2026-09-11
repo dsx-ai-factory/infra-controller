@@ -225,6 +225,10 @@ spec:
               value: {{ .Values.env.RUST_BACKTRACE | quote }}
             - name: RUST_LIB_BACKTRACE
               value: {{ .Values.env.RUST_LIB_BACKTRACE | quote }}
+            {{- with .Values.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }}
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.dsxExchangeEventBusConfig }}
             - name: CARBIDE_API_DSX_EXCHANGE_EVENT_BUS
               value: {{ . | quote }}

@@ -421,17 +421,6 @@ pub(in crate::tests) async fn advance_created_instance_into_state(
     )
     .await;
 
-    env.run_machine_state_controller_iteration_until_state_matches(
-        &mh.host().id,
-        20,
-        ManagedHostState::Assigned {
-            instance_state: model::machine::InstanceState::WaitingForRebootToReady,
-        },
-    )
-    .await;
-    env.run_machine_state_controller_iteration().await;
-    mh.host().reboot_completed().await;
-
     // State controller continues to run till target state
     env.run_machine_state_controller_iteration_until_state_condition(
         &mh.host().id,

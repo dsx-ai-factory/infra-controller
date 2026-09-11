@@ -1364,8 +1364,6 @@ async fn test_instance_deletion_before_provisioning_finishes(
         },
     )
     .await;
-    env.run_machine_state_controller_iteration().await;
-    mh.host().reboot_completed().await;
 
     // Now go through regular deletion
     mh.delete_instance(&env, instance_id).await;
@@ -1571,8 +1569,6 @@ async fn test_instance_waits_for_primary_dpu_bgp_before_pxe_reboot(
 
     // Clearing the last PXE blocking Merge report lets provisioning reach Ready.
     remove_health_report_entry(&env, &dpu_id, "test-pxe-bgp-merge".to_string()).await;
-    env.run_machine_state_controller_iteration().await;
-    mh.host().reboot_completed().await;
     env.run_machine_state_controller_iteration_until_state_matches(
         &mh.host().id,
         1,
