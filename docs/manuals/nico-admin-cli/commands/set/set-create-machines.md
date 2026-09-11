@@ -1,6 +1,6 @@
 # `nico-admin-cli set create-machines`
 
-_[Hardware commands](../../hardware.md) › [set](./set.md) › **create-machines**_
+*[Hardware commands](../../hardware.md) › [set](./set.md) › **create-machines***
 
 ## NAME
 
@@ -53,4 +53,4 @@ nico-admin-cli set create-machines --disable
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

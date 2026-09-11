@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-rack delete`
 
-_[Tenant commands](../../tenant.md) › [expected-rack](./expected-rack.md) › **delete**_
+*[Tenant commands](../../tenant.md) › [expected-rack](./expected-rack.md) › **delete***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli expected-rack delete 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

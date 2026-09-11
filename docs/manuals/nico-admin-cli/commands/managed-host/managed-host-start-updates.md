@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host start-updates`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **start-updates**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **start-updates***
 
 ## NAME
 
@@ -62,4 +62,4 @@ nico-admin-cli managed-host start-updates --machines 12345678-1234-5678-90ab-cde
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

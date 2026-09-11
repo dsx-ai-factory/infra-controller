@@ -1,6 +1,6 @@
 # `nico-admin-cli credential delete-ufm`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **delete-ufm**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **delete-ufm***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli credential delete-ufm --url https://192.0.2.10
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli dpu network`
 
-_[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › **network**_
+*[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › **network***
 
 ## NAME
 
@@ -53,4 +53,4 @@ nico-admin-cli dpu network config --machine-id 12345678-1234-5678-90ab-cdef01234
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli inventory`
 
-_[Hardware commands](../../hardware.md) › **inventory**_
+*[Hardware commands](../../hardware.md) › **inventory***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli inventory --filename ./inventory.ini
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

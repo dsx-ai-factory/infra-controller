@@ -2,7 +2,7 @@
 
 CLI and system utilities.
 
-For global flags and setup, see [the overview](./README.md) and [`setup.md`](./setup.md). For task-oriented sequences see [`workflows.md`](./workflows.md).
+For global flags, setup, and task-oriented documentation, see [the CLI reference overview](./index.md).
 
 | Command | Description |
 |---|---|

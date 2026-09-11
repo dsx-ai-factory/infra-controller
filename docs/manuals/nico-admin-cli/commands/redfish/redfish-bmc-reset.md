@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish bmc-reset`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **bmc-reset**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **bmc-reset***
 
 ## NAME
 
@@ -49,4 +49,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

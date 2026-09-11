@@ -1,6 +1,6 @@
 # `nico-admin-cli ssh get-rshim-status`
 
-_[Admin commands](../../admin.md) › [ssh](./ssh.md) › **get-rshim-status**_
+*[Admin commands](../../admin.md) › [ssh](./ssh.md) › **get-rshim-status***
 
 ## NAME
 
@@ -55,4 +55,4 @@ nico-admin-cli ssh get-rshim-status 192.0.2.10:22 admin mypassword
 
 ---
 
-**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../README.md)
+**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../index.md)

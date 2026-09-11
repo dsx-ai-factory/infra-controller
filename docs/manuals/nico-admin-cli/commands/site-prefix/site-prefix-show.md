@@ -1,6 +1,6 @@
 # `nico-admin-cli site-prefix show`
 
-_[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **show**_
+*[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **show***
 
 ## NAME
 
@@ -100,4 +100,4 @@ nico-admin-cli site-prefix show --contains 10.0.8.0/24 --lifecycle-state ready
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

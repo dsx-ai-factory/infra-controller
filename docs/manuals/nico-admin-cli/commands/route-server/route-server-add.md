@@ -1,6 +1,6 @@
 # `nico-admin-cli route-server add`
 
-_[Network commands](../../network.md) › [route-server](./route-server.md) › **add**_
+*[Network commands](../../network.md) › [route-server](./route-server.md) › **add***
 
 ## NAME
 
@@ -59,4 +59,4 @@ nico-admin-cli route-server add 10.0.0.1 --source-type config_file
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

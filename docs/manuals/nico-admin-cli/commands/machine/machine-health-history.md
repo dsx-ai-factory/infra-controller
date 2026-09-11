@@ -1,6 +1,6 @@
 # `nico-admin-cli machine health-history`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › **health-history**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › **health-history***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli machine health-history fm100ht038bg3qsho433vkg684heguv282qaggmrsh
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

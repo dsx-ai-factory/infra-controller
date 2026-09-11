@@ -1,6 +1,6 @@
 # `nico-admin-cli machine-validation external-config show`
 
-_[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › [external-config](./machine-validation-external-config.md) › **show**_
+*[Hardware commands](../../hardware.md) › [machine-validation](./machine-validation.md) › [external-config](./machine-validation-external-config.md) › **show***
 
 ## NAME
 
@@ -44,4 +44,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

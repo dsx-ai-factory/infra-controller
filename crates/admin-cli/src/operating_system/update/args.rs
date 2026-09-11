@@ -49,7 +49,10 @@ pub(crate) struct Args {
     #[clap(long, help = "Set whether this OS definition is active.")]
     pub(super) is_active: Option<bool>,
 
-    #[clap(long, help = "Set whether users can override OS parameters.")]
+    #[clap(
+        long,
+        help = "Set whether an Instance request can override the user data of this OS definition."
+    )]
     pub(super) allow_override: Option<bool>,
 
     #[clap(long, help = "Set whether phone-home on first boot is enabled.")]

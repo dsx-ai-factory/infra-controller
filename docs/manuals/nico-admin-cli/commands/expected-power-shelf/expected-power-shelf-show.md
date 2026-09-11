@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-power-shelf show`
 
-_[Tenant commands](../../tenant.md) › [expected-power-shelf](./expected-power-shelf.md) › **show**_
+*[Tenant commands](../../tenant.md) › [expected-power-shelf](./expected-power-shelf.md) › **show***
 
 ## NAME
 
@@ -55,4 +55,4 @@ nico-admin-cli expected-power-shelf show --id 12345678-1234-5678-90ab-cdef012345
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

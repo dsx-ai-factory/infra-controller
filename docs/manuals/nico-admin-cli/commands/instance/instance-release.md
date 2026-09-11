@@ -1,6 +1,6 @@
 # `nico-admin-cli instance release`
 
-_[Tenant commands](../../tenant.md) › [instance](./instance.md) › **release**_
+*[Tenant commands](../../tenant.md) › [instance](./instance.md) › **release***
 
 ## NAME
 
@@ -50,10 +50,10 @@ Print help (see a summary with -h)
 
 ```sh
 nico-admin-cli instance release --instance 12345678-1234-5678-90ab-cdef01234567
-nico-admin-cli instance release --machine 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli instance release --machine fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0
 nico-admin-cli instance release --label-key role --label-value training
 ```
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

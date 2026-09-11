@@ -1,6 +1,6 @@
 # `nico-admin-cli rms`
 
-_[Hardware commands](../../hardware.md) › **rms**_
+*[Hardware commands](../../hardware.md) › **rms***
 
 ## NAME
 
@@ -69,4 +69,4 @@ nico-admin-cli rms --url https://rms.example.com:8443 --root-ca /etc/rms/ca.crt 
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

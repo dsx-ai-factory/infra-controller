@@ -1,6 +1,6 @@
 # `nico-admin-cli vpc show`
 
-_[Network commands](../../network.md) › [vpc](./vpc.md) › **show**_
+*[Network commands](../../network.md) › [vpc](./vpc.md) › **show***
 
 ## NAME
 
@@ -64,4 +64,4 @@ nico-admin-cli vpc show --label-key env --label-value prod
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host set-primary-interface`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **set-primary-interface**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **set-primary-interface***
 
 ## NAME
 
@@ -72,4 +72,4 @@ nico-admin-cli managed-host set-primary-interface 12345678-1234-5678-90ab-cdef01
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

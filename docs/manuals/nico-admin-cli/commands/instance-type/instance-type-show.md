@@ -1,6 +1,6 @@
 # `nico-admin-cli instance-type show`
 
-_[Tenant commands](../../tenant.md) › [instance-type](./instance-type.md) › **show**_
+*[Tenant commands](../../tenant.md) › [instance-type](./instance-type.md) › **show***
 
 ## NAME
 
@@ -61,4 +61,4 @@ nico-admin-cli instance-type show --show-stats true
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli machine nvlink-info show`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › [nvlink-info](./machine-nvlink-info.md) › **show**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › [nvlink-info](./machine-nvlink-info.md) › **show***
 
 ## NAME
 
@@ -42,4 +42,4 @@ Machine ID to query
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

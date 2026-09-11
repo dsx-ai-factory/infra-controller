@@ -1,6 +1,6 @@
 # `nico-admin-cli machine hardware-info`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › **hardware-info**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › **hardware-info***
 
 ## NAME
 
@@ -53,4 +53,4 @@ nico-admin-cli machine hardware-info update gpus --machine 12345678-1234-5678-90
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

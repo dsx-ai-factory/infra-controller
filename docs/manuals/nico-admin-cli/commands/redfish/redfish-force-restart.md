@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish force-restart`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **force-restart**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **force-restart***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypasswo
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

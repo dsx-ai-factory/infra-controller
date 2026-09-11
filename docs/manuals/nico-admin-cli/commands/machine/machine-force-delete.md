@@ -1,6 +1,6 @@
 # `nico-admin-cli machine force-delete`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › **force-delete**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › **force-delete***
 
 ## NAME
 
@@ -25,7 +25,7 @@ Force delete a machine
 ## OPTIONS
 
 **--machine** *\<MACHINE\>*  
-UUID, IPv4, MAC or hostnmame of the host or DPU machine to delete
+UUID, IPv4, MAC or hostname of the host or DPU machine to delete
 
 **-d**, **--delete-interfaces**  
 Delete interfaces.
@@ -84,4 +84,4 @@ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef012345
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

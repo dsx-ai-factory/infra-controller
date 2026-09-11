@@ -1,6 +1,6 @@
 # `nico-admin-cli browse nmxc`
 
-_[Hardware commands](../../hardware.md) › [browse](./browse.md) › **nmxc**_
+*[Hardware commands](../../hardware.md) › [browse](./browse.md) › **nmxc***
 
 ## NAME
 
@@ -15,7 +15,11 @@ server
 
 ## DESCRIPTION
 
-Run an NMX-C browse operation via the API server
+Run an NMX-C browse operation via the API server.
+
+--operation is required. Exactly one endpoint selector must be
+specified: --chassis-serial or --rack-id. Providing both selectors is
+rejected.
 
 ## OPTIONS
 
@@ -81,4 +85,4 @@ nico-admin-cli browse nmxc --chassis-serial 1234567890 --operation get-domain-pr
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

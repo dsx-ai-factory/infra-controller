@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-machine add`
 
-_[Tenant commands](../../tenant.md) › [expected-machine](./expected-machine.md) › **add**_
+*[Tenant commands](../../tenant.md) › [expected-machine](./expected-machine.md) › **add***
 
 ## NAME
 
@@ -205,4 +205,4 @@ nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-us
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

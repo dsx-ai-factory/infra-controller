@@ -1,6 +1,6 @@
 # `nico-admin-cli sku show`
 
-_[Hardware commands](../../hardware.md) › [sku](./sku.md) › **show**_
+*[Hardware commands](../../hardware.md) › [sku](./sku.md) › **show***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli sku show DGX-H100-640GB
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

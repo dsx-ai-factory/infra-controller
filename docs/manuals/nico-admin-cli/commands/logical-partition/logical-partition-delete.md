@@ -1,6 +1,6 @@
 # `nico-admin-cli logical-partition delete`
 
-_[Network commands](../../network.md) › [logical-partition](./logical-partition.md) › **delete**_
+*[Network commands](../../network.md) › [logical-partition](./logical-partition.md) › **delete***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli logical-partition delete --name my-partition
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

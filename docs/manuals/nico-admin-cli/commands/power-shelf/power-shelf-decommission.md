@@ -1,6 +1,6 @@
 # `nico-admin-cli power-shelf decommission`
 
-_[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › **decommission**_
+*[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › **decommission***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli power-shelf decommission ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7j
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

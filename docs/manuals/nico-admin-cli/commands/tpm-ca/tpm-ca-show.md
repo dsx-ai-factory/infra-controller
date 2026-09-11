@@ -1,6 +1,6 @@
 # `nico-admin-cli tpm-ca show`
 
-_[Hardware commands](../../hardware.md) › [tpm-ca](./tpm-ca.md) › **show**_
+*[Hardware commands](../../hardware.md) › [tpm-ca](./tpm-ca.md) › **show***
 
 ## NAME
 
@@ -39,4 +39,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

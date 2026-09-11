@@ -1,6 +1,6 @@
 # `nico-admin-cli boot-interface set`
 
-_[Hardware commands](../../hardware.md) › [boot-interface](./boot-interface.md) › **set**_
+*[Hardware commands](../../hardware.md) › [boot-interface](./boot-interface.md) › **set***
 
 ## NAME
 
@@ -74,4 +74,4 @@ nico-admin-cli boot-interface set 12345678-1234-5678-90ab-cdef01234567 00:11:22:
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -2,7 +2,7 @@
 
 Tenants and tenant keysets, instances and instance types, compute allocations, the declarative `expected-*` inventory, operating systems and OS images, iPXE templates, extension services, and the site explorer.
 
-For global flags and setup, see [the overview](./README.md) and [`setup.md`](./setup.md). For task-oriented sequences see [`workflows.md`](./workflows.md).
+For global flags, setup, and task-oriented documentation, see [the CLI reference overview](./index.md).
 
 | Command | Description |
 |---|---|

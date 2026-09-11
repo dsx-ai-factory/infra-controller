@@ -1,6 +1,6 @@
 # `nico-admin-cli component-manager get-firmware-versions`
 
-_[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › **get-firmware-versions**_
+*[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › **get-firmware-versions***
 
 ## NAME
 
@@ -43,6 +43,7 @@ Print help (see a summary with -h)
 
 ```sh
 nico-admin-cli component-manager get-firmware-versions switch --switch-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli component-manager get-firmware-versions switch --mac-address 00:11:22:33:44:55
 nico-admin-cli component-manager get-firmware-versions compute-tray --mac-address 00:11:22:33:44:55
 nico-admin-cli component-manager get-firmware-versions power-shelf --power-shelf-id 12345678-1234-5678-90ab-cdef01234567
 nico-admin-cli component-manager get-firmware-versions rack --rack-id 12345678-1234-5678-90ab-cdef01234567
@@ -59,4 +60,4 @@ nico-admin-cli component-manager get-firmware-versions rack --rack-id 12345678-1
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

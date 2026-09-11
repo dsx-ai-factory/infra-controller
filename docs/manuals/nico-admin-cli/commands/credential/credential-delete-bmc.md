@@ -1,6 +1,6 @@
 # `nico-admin-cli credential delete-bmc`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **delete-bmc**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **delete-bmc***
 
 ## NAME
 
@@ -62,4 +62,4 @@ nico-admin-cli credential delete-bmc --kind=bmc-root --mac-address 00:11:22:33:4
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

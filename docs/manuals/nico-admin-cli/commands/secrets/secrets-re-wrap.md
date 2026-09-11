@@ -1,6 +1,6 @@
 # `nico-admin-cli secrets re-wrap`
 
-_[Admin commands](../../admin.md) › [secrets](./secrets.md) › **re-wrap**_
+*[Admin commands](../../admin.md) › [secrets](./secrets.md) › **re-wrap***
 
 ## NAME
 
@@ -51,4 +51,4 @@ nico-admin-cli secrets re-wrap --batch-size 25
 
 ---
 
-**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../README.md)
+**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../index.md)

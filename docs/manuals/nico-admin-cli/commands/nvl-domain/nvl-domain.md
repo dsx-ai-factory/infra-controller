@@ -1,6 +1,6 @@
 # `nico-admin-cli nvl-domain`
 
-_[Network commands](../../network.md) › **nvl-domain**_
+*[Network commands](../../network.md) › **nvl-domain***
 
 ## NAME
 
@@ -45,4 +45,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

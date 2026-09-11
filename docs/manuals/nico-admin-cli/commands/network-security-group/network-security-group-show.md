@@ -1,6 +1,6 @@
 # `nico-admin-cli network-security-group show`
 
-_[Network commands](../../network.md) › [network-security-group](./network-security-group.md) › **show**_
+*[Network commands](../../network.md) › [network-security-group](./network-security-group.md) › **show***
 
 ## NAME
 
@@ -50,4 +50,4 @@ nico-admin-cli network-security-group show 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

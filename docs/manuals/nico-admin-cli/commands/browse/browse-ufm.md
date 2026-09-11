@@ -1,6 +1,6 @@
 # `nico-admin-cli browse ufm`
 
-_[Hardware commands](../../hardware.md) › [browse](./browse.md) › **ufm**_
+*[Hardware commands](../../hardware.md) › [browse](./browse.md) › **ufm***
 
 ## NAME
 
@@ -51,4 +51,4 @@ nico-admin-cli browse ufm --fabric-id default --path /ufmRest/resources/systems
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

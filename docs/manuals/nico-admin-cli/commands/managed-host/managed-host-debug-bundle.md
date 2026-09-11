@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host debug-bundle`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **debug-bundle**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **debug-bundle***
 
 ## NAME
 
@@ -36,7 +36,7 @@ Interpret start-time and end-time as UTC instead of local timezone
 Output directory path for the debug bundle (default: /tmp)
 
 **--grafana-url** *\<GRAFANA_URL\>*  
-Grafana base URL (e.g., https://grafana.example.com). If not provided,
+Grafana base URL (e.g., [https://grafana.example.com](https://grafana.example.com)). If not provided,
 log collection is skipped.
 
 **--batch-size** *\<BATCH_SIZE\>* \[default: 5000\]  
@@ -74,4 +74,4 @@ nico-admin-cli managed-host debug-bundle 12345678-1234-5678-90ab-cdef01234567 --
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

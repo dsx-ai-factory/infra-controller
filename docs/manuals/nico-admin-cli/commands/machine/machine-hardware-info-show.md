@@ -1,6 +1,6 @@
 # `nico-admin-cli machine hardware-info show`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › [hardware-info](./machine-hardware-info.md) › **show**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › [hardware-info](./machine-hardware-info.md) › **show***
 
 ## NAME
 
@@ -43,4 +43,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

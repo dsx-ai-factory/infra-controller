@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-switch replace-all`
 
-_[Tenant commands](../../tenant.md) › [expected-switch](./expected-switch.md) › **replace-all**_
+*[Tenant commands](../../tenant.md) › [expected-switch](./expected-switch.md) › **replace-all***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli expected-switch replace-all --filename ./switches.json
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

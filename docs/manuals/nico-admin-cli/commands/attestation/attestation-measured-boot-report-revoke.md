@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot report revoke`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [report](./attestation-measured-boot-report.md) › **revoke**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [report](./attestation-measured-boot-report.md) › **revoke***
 
 ## NAME
 
@@ -54,4 +54,4 @@ nico-admin-cli attestation measured-boot report revoke 12345678-1234-5678-90ab-c
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli machine metadata add-label`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › [metadata](./machine-metadata.md) › **add-label**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › [metadata](./machine-metadata.md) › **add-label***
 
 ## NAME
 
@@ -57,4 +57,4 @@ nico-admin-cli machine metadata add-label 12345678-1234-5678-90ab-cdef01234567 -
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

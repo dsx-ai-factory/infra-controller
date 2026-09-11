@@ -1,6 +1,6 @@
 # `nico-admin-cli instance-type update`
 
-_[Tenant commands](../../tenant.md) › [instance-type](./instance-type.md) › **update**_
+*[Tenant commands](../../tenant.md) › [instance-type](./instance-type.md) › **update***
 
 ## NAME
 
@@ -72,4 +72,4 @@ nico-admin-cli instance-type update --id 12345678-1234-5678-90ab-cdef01234567 --
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

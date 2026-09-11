@@ -1,6 +1,6 @@
 # `nico-admin-cli route-server get`
 
-_[Network commands](../../network.md) › [route-server](./route-server.md) › **get**_
+*[Network commands](../../network.md) › [route-server](./route-server.md) › **get***
 
 ## NAME
 
@@ -45,4 +45,4 @@ nico-admin-cli route-server get
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

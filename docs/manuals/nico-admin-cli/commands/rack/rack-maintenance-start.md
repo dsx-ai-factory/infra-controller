@@ -1,6 +1,6 @@
 # `nico-admin-cli rack maintenance start`
 
-_[Hardware commands](../../hardware.md) › [rack](./rack.md) › [maintenance](./rack-maintenance.md) › **start**_
+*[Hardware commands](../../hardware.md) › [rack](./rack.md) › [maintenance](./rack-maintenance.md) › **start***
 
 ## NAME
 
@@ -84,4 +84,4 @@ nico-admin-cli rack maintenance start --rack 12345678-1234-5678-90ab-cdef0123456
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

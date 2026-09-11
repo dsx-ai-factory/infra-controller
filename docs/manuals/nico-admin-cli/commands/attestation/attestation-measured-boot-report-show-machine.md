@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot report show machine`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [report](./attestation-measured-boot-report.md) › [show](./attestation-measured-boot-report-show.md) › **machine**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [report](./attestation-measured-boot-report.md) › [show](./attestation-measured-boot-report-show.md) › **machine***
 
 ## NAME
 
@@ -50,4 +50,4 @@ nico-admin-cli attestation measured-boot report show machine 12345678-1234-5678-
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

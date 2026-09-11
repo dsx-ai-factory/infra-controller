@@ -1,6 +1,6 @@
 # `nico-admin-cli site-explorer`
 
-_[Tenant commands](../../tenant.md) › **site-explorer**_
+*[Tenant commands](../../tenant.md) › **site-explorer***
 
 ## NAME
 
@@ -55,4 +55,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

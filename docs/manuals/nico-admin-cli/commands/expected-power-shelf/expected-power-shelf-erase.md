@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-power-shelf erase`
 
-_[Tenant commands](../../tenant.md) › [expected-power-shelf](./expected-power-shelf.md) › **erase**_
+*[Tenant commands](../../tenant.md) › [expected-power-shelf](./expected-power-shelf.md) › **erase***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli expected-power-shelf erase --confirm
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

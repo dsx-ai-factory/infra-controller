@@ -1,6 +1,6 @@
 # `nico-admin-cli extension-service update`
 
-_[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **update**_
+*[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **update***
 
 ## NAME
 
@@ -80,4 +80,4 @@ nico-admin-cli extension-service update --id 12345678-1234-5678-90ab-cdef0123456
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

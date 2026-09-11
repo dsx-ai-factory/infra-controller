@@ -1,6 +1,6 @@
 # `nico-admin-cli bmc-machine is-infinite-boot-enabled`
 
-_[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **is-infinite-boot-enabled**_
+*[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **is-infinite-boot-enabled***
 
 ## NAME
 
@@ -53,4 +53,4 @@ nico-admin-cli bmc-machine is-infinite-boot-enabled --machine 12345678-1234-5678
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

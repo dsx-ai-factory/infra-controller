@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish dpu firmware status`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › [dpu](./redfish-dpu.md) › [firmware](./redfish-dpu-firmware.md) › **status**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › [dpu](./redfish-dpu.md) › [firmware](./redfish-dpu-firmware.md) › **status***
 
 ## NAME
 
@@ -39,4 +39,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

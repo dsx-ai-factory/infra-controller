@@ -1,6 +1,6 @@
 # `nico-admin-cli version`
 
-_[Admin commands](../../admin.md) › **version**_
+*[Admin commands](../../admin.md) › **version***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli version --show-runtime-config
 
 ---
 
-**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../README.md)
+**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli power-shelf metadata set`
 
-_[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › [metadata](./power-shelf-metadata.md) › **set**_
+*[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › [metadata](./power-shelf-metadata.md) › **set***
 
 ## NAME
 
@@ -56,4 +56,4 @@ nico-admin-cli power-shelf metadata set 12345678-1234-5678-90ab-cdef01234567 --n
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli operating-system set-cached-url`
 
-_[Tenant commands](../../tenant.md) › [operating-system](./operating-system.md) › **set-cached-url**_
+*[Tenant commands](../../tenant.md) › [operating-system](./operating-system.md) › **set-cached-url***
 
 ## NAME
 
@@ -15,6 +15,10 @@ on OS artifacts.
 ## DESCRIPTION
 
 Set or clear cached_url on OS artifacts.
+
+For cache strategies, readiness behavior, and the complete templated
+iPXE workflow, see
+[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md).
 
 ## OPTIONS
 
@@ -54,4 +58,4 @@ nico-admin-cli operating-system set-cached-url 12345678-1234-5678-90ab-cdef01234
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

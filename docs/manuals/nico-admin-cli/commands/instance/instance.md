@@ -1,6 +1,6 @@
 # `nico-admin-cli instance`
 
-_[Tenant commands](../../tenant.md) › **instance**_
+*[Tenant commands](../../tenant.md) › **instance***
 
 ## NAME
 
@@ -52,4 +52,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli mlx profile`
 
-_[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › **profile**_
+*[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › **profile***
 
 ## NAME
 
@@ -57,4 +57,4 @@ nico-admin-cli mlx profile compare 12345678-1234-5678-90ab-cdef01234567 0000:01:
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

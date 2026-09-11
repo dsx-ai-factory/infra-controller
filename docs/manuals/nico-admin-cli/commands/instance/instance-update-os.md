@@ -1,6 +1,6 @@
 # `nico-admin-cli instance update-os`
 
-_[Tenant commands](../../tenant.md) › [instance](./instance.md) › **update-os**_
+*[Tenant commands](../../tenant.md) › [instance](./instance.md) › **update-os***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli instance update-os --instance 12345678-1234-5678-90ab-cdef0123456
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

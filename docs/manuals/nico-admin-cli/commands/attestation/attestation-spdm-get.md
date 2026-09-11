@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation spdm get`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [spdm](./attestation-spdm.md) › **get**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [spdm](./attestation-spdm.md) › **get***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli attestation spdm get 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

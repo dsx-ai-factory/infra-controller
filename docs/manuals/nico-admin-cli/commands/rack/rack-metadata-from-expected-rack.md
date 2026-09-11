@@ -1,6 +1,6 @@
 # `nico-admin-cli rack metadata from-expected-rack`
 
-_[Hardware commands](../../hardware.md) › [rack](./rack.md) › [metadata](./rack-metadata.md) › **from-expected-rack**_
+*[Hardware commands](../../hardware.md) › [rack](./rack.md) › [metadata](./rack-metadata.md) › **from-expected-rack***
 
 ## NAME
 
@@ -62,4 +62,4 @@ nico-admin-cli rack metadata from-expected-rack 12345678-1234-5678-90ab-cdef0123
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

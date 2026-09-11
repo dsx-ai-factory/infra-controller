@@ -1,6 +1,6 @@
 # `nico-admin-cli host set-uefi-password`
 
-_[Hardware commands](../../hardware.md) › [host](./host.md) › **set-uefi-password**_
+*[Hardware commands](../../hardware.md) › [host](./host.md) › **set-uefi-password***
 
 ## NAME
 
@@ -18,7 +18,7 @@ Set Host UEFI password
 ## OPTIONS
 
 **-q**, **--query** *\<QUERY\>*  
-ID, IPv4, MAC or hostnmame of the machine to query
+ID, IPv4, MAC or hostname of the machine to query
 
 **--extended**  
 Extended result output.
@@ -49,4 +49,4 @@ nico-admin-cli host set-uefi-password --query 00:11:22:33:44:55
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

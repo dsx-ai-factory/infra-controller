@@ -1,6 +1,6 @@
 # `nico-admin-cli machine health-report print-empty-template`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › [health-report](./machine-health-report.md) › **print-empty-template**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › [health-report](./machine-health-report.md) › **print-empty-template***
 
 ## NAME
 
@@ -40,4 +40,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

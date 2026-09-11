@@ -1,6 +1,6 @@
 # `nico-admin-cli sku generate`
 
-_[Hardware commands](../../hardware.md) › [sku](./sku.md) › **generate**_
+*[Hardware commands](../../hardware.md) › [sku](./sku.md) › **generate***
 
 ## NAME
 
@@ -53,4 +53,4 @@ nico-admin-cli sku generate 12345678-1234-5678-90ab-cdef01234567 --id DGX-H100-6
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

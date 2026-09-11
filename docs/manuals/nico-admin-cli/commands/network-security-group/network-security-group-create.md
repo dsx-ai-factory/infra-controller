@@ -1,6 +1,6 @@
 # `nico-admin-cli network-security-group create`
 
-_[Network commands](../../network.md) › [network-security-group](./network-security-group.md) › **create**_
+*[Network commands](../../network.md) › [network-security-group](./network-security-group.md) › **create***
 
 ## NAME
 
@@ -73,4 +73,4 @@ nico-admin-cli network-security-group create --tenant-organization-id fds3451123
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

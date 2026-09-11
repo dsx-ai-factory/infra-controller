@@ -146,6 +146,8 @@ navigation:
           path: configuration/tenant_management.md
         - page: Image-Based Operating Systems
           path: configuration/image-based-operating-systems.md
+        - page: Templated iPXE Operating Systems
+          path: configuration/templated-ipxe-operating-systems.md
         - page: Organization & Permissions
           path: configuration/org-permissions.md
         - page: Machine Identity

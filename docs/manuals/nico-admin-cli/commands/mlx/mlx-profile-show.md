@@ -1,6 +1,6 @@
 # `nico-admin-cli mlx profile show`
 
-_[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › [profile](./mlx-profile.md) › **show**_
+*[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › [profile](./mlx-profile.md) › **show***
 
 ## NAME
 
@@ -42,4 +42,4 @@ Profile name to show
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

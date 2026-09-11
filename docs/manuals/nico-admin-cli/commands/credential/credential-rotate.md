@@ -1,6 +1,6 @@
 # `nico-admin-cli credential rotate`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **rotate**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **rotate***
 
 ## NAME
 
@@ -77,4 +77,4 @@ nico-admin-cli credential rotate --type=dpu-bmc-service
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

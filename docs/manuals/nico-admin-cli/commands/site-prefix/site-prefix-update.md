@@ -1,6 +1,6 @@
 # `nico-admin-cli site-prefix update`
 
-_[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **update**_
+*[Network commands](../../network.md) › [site-prefix](./site-prefix.md) › **update***
 
 ## NAME
 
@@ -71,4 +71,4 @@ nico-admin-cli site-prefix update 12345678-1234-5678-90ab-cdef01234567 --tenant-
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

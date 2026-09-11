@@ -1,6 +1,6 @@
 # `nico-admin-cli dpu health-report remove`
 
-_[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › [health-report](./dpu-health-report.md) › **remove**_
+*[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › [health-report](./dpu-health-report.md) › **remove***
 
 ## NAME
 
@@ -50,4 +50,4 @@ nico-admin-cli dpu health-report remove 12345678-1234-5678-90ab-cdef01234567 int
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

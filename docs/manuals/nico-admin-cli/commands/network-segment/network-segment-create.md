@@ -1,6 +1,6 @@
 # `nico-admin-cli network-segment create`
 
-_[Network commands](../../network.md) › [network-segment](./network-segment.md) › **create**_
+*[Network commands](../../network.md) › [network-segment](./network-segment.md) › **create***
 
 ## NAME
 
@@ -97,4 +97,4 @@ nico-admin-cli --cloud-unsafe-op=admin network-segment create --name host-inband
 
 ---
 
-**See also:** [Network commands](../../network.md) · [CLI reference index](../../README.md)
+**See also:** [Network commands](../../network.md) · [CLI reference index](../../index.md)

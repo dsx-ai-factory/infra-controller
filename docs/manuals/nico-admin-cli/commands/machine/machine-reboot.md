@@ -1,6 +1,6 @@
 # `nico-admin-cli machine reboot`
 
-_[Hardware commands](../../hardware.md) › [machine](./machine.md) › **reboot**_
+*[Hardware commands](../../hardware.md) › [machine](./machine.md) › **reboot***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli machine reboot --machine 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

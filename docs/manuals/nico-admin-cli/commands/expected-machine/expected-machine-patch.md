@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-machine patch`
 
-_[Tenant commands](../../tenant.md) › [expected-machine](./expected-machine.md) › **patch**_
+*[Tenant commands](../../tenant.md) › [expected-machine](./expected-machine.md) › **patch***
 
 ## NAME
 
@@ -218,4 +218,4 @@ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --inte
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

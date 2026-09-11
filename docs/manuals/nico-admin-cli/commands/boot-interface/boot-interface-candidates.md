@@ -1,6 +1,6 @@
 # `nico-admin-cli boot-interface candidates`
 
-_[Hardware commands](../../hardware.md) › [boot-interface](./boot-interface.md) › **candidates**_
+*[Hardware commands](../../hardware.md) › [boot-interface](./boot-interface.md) › **candidates***
 
 ## NAME
 
@@ -63,4 +63,4 @@ nico-admin-cli --format json boot-interface candidates 12345678-1234-5678-90ab-c
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

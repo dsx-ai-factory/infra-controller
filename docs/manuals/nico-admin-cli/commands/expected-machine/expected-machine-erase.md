@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-machine erase`
 
-_[Tenant commands](../../tenant.md) › [expected-machine](./expected-machine.md) › **erase**_
+*[Tenant commands](../../tenant.md) › [expected-machine](./expected-machine.md) › **erase***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli expected-machine erase --confirm
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

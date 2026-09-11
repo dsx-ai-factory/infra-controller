@@ -1,6 +1,6 @@
 # `nico-admin-cli ssh show-obmc-log`
 
-_[Admin commands](../../admin.md) › [ssh](./ssh.md) › **show-obmc-log**_
+*[Admin commands](../../admin.md) › [ssh](./ssh.md) › **show-obmc-log***
 
 ## NAME
 
@@ -55,4 +55,4 @@ nico-admin-cli ssh show-obmc-log 192.0.2.10:22 admin mypassword
 
 ---
 
-**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../README.md)
+**See also:** [Admin commands](../../admin.md) · [CLI reference index](../../index.md)

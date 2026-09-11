@@ -128,6 +128,7 @@ fn render_node(
     // roff mangles — we re-render them from the clap command instead).
     let man_file = man_dir.join(format!("{}.1", path.join("-")));
     let body = strip_sections(&man_to_markdown(&man_file)?, &["SUBCOMMANDS", "EXTRA"]);
+    let body = format_markdown_links(&body);
 
     let children: Vec<&Command> = cmd
         .get_subcommands()
@@ -186,7 +187,7 @@ fn render_command_page(
     let _ = writeln!(s, "---\n");
     let _ = writeln!(
         s,
-        "**See also:** [{} commands](../../{}.md) · [CLI reference index](../../README.md)",
+        "**See also:** [{} commands](../../{}.md) · [CLI reference index](../../index.md)",
         domain.title(),
         slug(domain),
     );
@@ -199,9 +200,8 @@ fn render_domain_index(domain: CliDomain, rows: &[&(String, String, CliDomain)])
     let _ = writeln!(s, "{}\n", intro(domain));
     let _ = writeln!(
         s,
-        "For global flags and setup, see [the overview](./README.md) and \
-         [`setup.md`](./setup.md). For task-oriented sequences see \
-         [`workflows.md`](./workflows.md).\n"
+        "For global flags, setup, and task-oriented documentation, see \
+         [the CLI reference overview](./index.md).\n"
     );
     let _ = writeln!(s, "| Command | Description |");
     let _ = writeln!(s, "|---|---|");
@@ -247,7 +247,7 @@ fn breadcrumb(path: &[String], domain: CliDomain) -> String {
         path.last()
             .expect("a command path always has at least the binary")
     ));
-    format!("_{}_", parts.join(" › "))
+    format!("*{}*", parts.join(" › "))
 }
 
 /// Removes the named top-level (`## `) sections from pandoc's markdown, heading
@@ -270,6 +270,32 @@ fn strip_sections(md: &str, names: &[&str]) -> String {
         }
     }
     out
+}
+
+/// Turns repository-relative documentation paths used in terminal help into
+/// links that work from generated command-reference pages. Terminal help keeps
+/// the plain path, while the Markdown reference gains a reader-friendly label.
+fn format_markdown_links(md: &str) -> String {
+    md.replace(
+        "docs/configuration/templated-ipxe-operating-systems.md",
+        "[Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md)",
+    )
+    .replace(
+        "https://docs.rs/duration-str/latest/duration_str/",
+        "[duration-str documentation](https://docs.rs/duration-str/latest/duration_str/)",
+    )
+    .replace(
+        "https://grafana.example.com",
+        "[https://grafana.example.com](https://grafana.example.com)",
+    )
+    .replace(
+        "https://github.com/NVIDIA/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/managed-host/managed-host-set-primary-interface.md",
+        "[primary-interface command documentation](https://github.com/NVIDIA/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/managed-host/managed-host-set-primary-interface.md)",
+    )
+    .replace(
+        "https://host:50051",
+        "[https://host:50051](https://host:50051)",
+    )
 }
 
 /// Converts a roff man page to GitHub-flavored markdown via pandoc, demoting the
@@ -344,5 +370,28 @@ fn intro(d: CliDomain) -> &'static str {
              and OS images, iPXE templates, extension services, and the site explorer."
         }
         CliDomain::Admin => "CLI and system utilities.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_markdown_links;
+
+    #[test]
+    fn repository_doc_paths_become_links_in_generated_markdown() {
+        let markdown = "See docs/configuration/templated-ipxe-operating-systems.md.";
+        assert_eq!(
+            format_markdown_links(markdown),
+            "See [Templated iPXE Operating Systems](../../../../configuration/templated-ipxe-operating-systems.md)."
+        );
+    }
+
+    #[test]
+    fn bare_urls_become_valid_markdown_links() {
+        let markdown = "See https://docs.rs/duration-str/latest/duration_str/, https://grafana.example.com, or https://host:50051.";
+        assert_eq!(
+            format_markdown_links(markdown),
+            "See [duration-str documentation](https://docs.rs/duration-str/latest/duration_str/), [https://grafana.example.com](https://grafana.example.com), or [https://host:50051](https://host:50051)."
+        );
     }
 }

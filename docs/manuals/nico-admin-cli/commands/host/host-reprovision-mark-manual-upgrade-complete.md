@@ -1,6 +1,6 @@
 # `nico-admin-cli host reprovision mark-manual-upgrade-complete`
 
-_[Hardware commands](../../hardware.md) › [host](./host.md) › [reprovision](./host-reprovision.md) › **mark-manual-upgrade-complete**_
+*[Hardware commands](../../hardware.md) › [host](./host.md) › [reprovision](./host-reprovision.md) › **mark-manual-upgrade-complete***
 
 ## NAME
 
@@ -50,4 +50,4 @@ nico-admin-cli host reprovision mark-manual-upgrade-complete --id 12345678-1234-
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

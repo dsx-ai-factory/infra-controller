@@ -1,6 +1,6 @@
 # `nico-admin-cli component-manager configure-switch-certificate`
 
-_[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › **configure-switch-certificate**_
+*[Hardware commands](../../hardware.md) › [component-manager](./component-manager.md) › **configure-switch-certificate***
 
 ## NAME
 
@@ -63,4 +63,4 @@ nico-admin-cli component-manager configure-switch-certificate --switch-id 123456
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

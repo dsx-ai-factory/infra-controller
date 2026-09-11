@@ -1,6 +1,6 @@
 # `nico-admin-cli bmc-machine admin-power-control`
 
-_[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **admin-power-control**_
+*[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **admin-power-control***
 
 ## NAME
 
@@ -70,4 +70,4 @@ nico-admin-cli bmc-machine admin-power-control --machine 12345678-1234-5678-90ab
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

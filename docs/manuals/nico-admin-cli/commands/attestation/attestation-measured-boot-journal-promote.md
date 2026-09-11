@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot journal promote`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [journal](./attestation-measured-boot-journal.md) › **promote**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [journal](./attestation-measured-boot-journal.md) › **promote***
 
 ## NAME
 
@@ -54,4 +54,4 @@ nico-admin-cli attestation measured-boot journal promote 12345678-1234-5678-90ab
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

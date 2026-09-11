@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-machine show`
 
-_[Tenant commands](../../tenant.md) › [expected-machine](./expected-machine.md) › **show**_
+*[Tenant commands](../../tenant.md) › [expected-machine](./expected-machine.md) › **show***
 
 ## NAME
 
@@ -53,4 +53,4 @@ nico-admin-cli expected-machine show --id 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

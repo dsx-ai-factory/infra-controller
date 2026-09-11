@@ -1,6 +1,6 @@
 # `nico-admin-cli rack state-history`
 
-_[Hardware commands](../../hardware.md) › [rack](./rack.md) › **state-history**_
+*[Hardware commands](../../hardware.md) › [rack](./rack.md) › **state-history***
 
 ## NAME
 
@@ -48,4 +48,4 @@ nico-admin-cli rack state-history ipp6-b03-gb-nvl-124-mini2
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

@@ -1,6 +1,6 @@
 # `nico-admin-cli dpu agent-upgrade-policy`
 
-_[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › **agent-upgrade-policy**_
+*[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › **agent-upgrade-policy***
 
 ## NAME
 
@@ -59,4 +59,4 @@ nico-admin-cli dpu agent-upgrade-policy --set off
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

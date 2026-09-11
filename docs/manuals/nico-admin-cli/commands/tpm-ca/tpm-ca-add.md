@@ -1,6 +1,6 @@
 # `nico-admin-cli tpm-ca add`
 
-_[Hardware commands](../../hardware.md) › [tpm-ca](./tpm-ca.md) › **add**_
+*[Hardware commands](../../hardware.md) › [tpm-ca](./tpm-ca.md) › **add***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli tpm-ca add --filename /path/to/tpm-ca.der
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

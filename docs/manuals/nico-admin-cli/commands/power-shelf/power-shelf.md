@@ -1,6 +1,6 @@
 # `nico-admin-cli power-shelf`
 
-_[Hardware commands](../../hardware.md) › **power-shelf**_
+*[Hardware commands](../../hardware.md) › **power-shelf***
 
 ## NAME
 
@@ -53,4 +53,4 @@ Print help (see a summary with -h)
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

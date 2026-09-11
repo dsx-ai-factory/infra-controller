@@ -1,6 +1,6 @@
 # `nico-admin-cli mlx info device`
 
-_[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › [info](./mlx-info.md) › **device**_
+*[Hardware commands](../../hardware.md) › [mlx](./mlx.md) › [info](./mlx-info.md) › **device***
 
 ## NAME
 
@@ -46,4 +46,4 @@ Device ID is the PCI or mst path on the target machine
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

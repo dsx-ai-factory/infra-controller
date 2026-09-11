@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot site trusted-profile`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [site](./attestation-measured-boot-site.md) › **trusted-profile**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [measured-boot](./attestation-measured-boot.md) › [site](./attestation-measured-boot-site.md) › **trusted-profile***
 
 ## NAME
 
@@ -57,4 +57,4 @@ nico-admin-cli attestation measured-boot site trusted-profile remove by-profile-
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

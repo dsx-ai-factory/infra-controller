@@ -1,6 +1,6 @@
 # `nico-admin-cli tenant update`
 
-_[Tenant commands](../../tenant.md) › [tenant](./tenant.md) › **update**_
+*[Tenant commands](../../tenant.md) › [tenant](./tenant.md) › **update***
 
 ## NAME
 
@@ -62,4 +62,4 @@ nico-admin-cli tenant update fds34511233a --name "Acme Corp" --version 7
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

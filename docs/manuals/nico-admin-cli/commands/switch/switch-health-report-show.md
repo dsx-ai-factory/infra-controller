@@ -1,6 +1,6 @@
 # `nico-admin-cli switch health-report show`
 
-_[Hardware commands](../../hardware.md) › [switch](./switch.md) › [health-report](./switch-health-report.md) › **show**_
+*[Hardware commands](../../hardware.md) › [switch](./switch.md) › [health-report](./switch-health-report.md) › **show***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli switch health-report show 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

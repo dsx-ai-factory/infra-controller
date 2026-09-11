@@ -16,8 +16,41 @@
  */
 
 use carbide_uuid::vpc::VpcId;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use rpc::{Metadata, forge};
+
+#[derive(ValueEnum, Debug, Clone)]
+#[clap(rename_all = "kebab-case")]
+enum VpcVirtualizationTypeArg {
+    EthernetVirtualizer,
+    /// Deprecated. NVUE is implied; use ethernet-virtualizer.
+    EthernetVirtualizerWithNvue,
+    /// Deprecated. Use fnn.
+    FnnClassic,
+    /// Deprecated. Use fnn.
+    FnnL3,
+    Fnn,
+    /// Flat networking for instances attached directly to the underlay.
+    /// NICo does not manage routing or ACL enforcement between Flat VPCs and
+    /// other VPCs; that is the responsibility of the network operator.
+    Flat,
+}
+
+#[allow(deprecated)]
+impl From<VpcVirtualizationTypeArg> for forge::VpcVirtualizationType {
+    fn from(value: VpcVirtualizationTypeArg) -> Self {
+        match value {
+            VpcVirtualizationTypeArg::EthernetVirtualizer => Self::EthernetVirtualizer,
+            VpcVirtualizationTypeArg::EthernetVirtualizerWithNvue => {
+                Self::EthernetVirtualizerWithNvue
+            }
+            VpcVirtualizationTypeArg::FnnClassic => Self::FnnClassic,
+            VpcVirtualizationTypeArg::FnnL3 => Self::FnnL3,
+            VpcVirtualizationTypeArg::Fnn => Self::Fnn,
+            VpcVirtualizationTypeArg::Flat => Self::Flat,
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
@@ -37,7 +70,7 @@ pub(crate) struct Args {
     #[clap(long, help = "Name to give the new VPC")]
     name: String,
 
-    #[clap(long, help = "Discription for the new VPC")]
+    #[clap(long, help = "Description for the new VPC")]
     description: Option<String>,
 
     #[clap(
@@ -59,7 +92,7 @@ pub(crate) struct Args {
         default_value = "ethernet-virtualizer",
         help = "Network virtualization type"
     )]
-    virtualization_type: forge::VpcVirtualizationType,
+    virtualization_type: VpcVirtualizationTypeArg,
 
     #[clap(
         long,
@@ -75,7 +108,9 @@ impl From<Args> for forge::VpcCreationRequest {
         Self {
             tenant_organization_id: args.org_id,
             tenant_keyset_id: None,
-            network_virtualization_type: Some(args.virtualization_type as _),
+            network_virtualization_type: Some(forge::VpcVirtualizationType::from(
+                args.virtualization_type,
+            ) as _),
             id: None,
             metadata: Some(Metadata {
                 name: args.name,
@@ -95,9 +130,11 @@ impl From<Args> for forge::VpcCreationRequest {
 
 #[cfg(test)]
 mod tests {
+    use ::rpc::forge::{self, VpcVirtualizationType};
     use carbide_test_support::value_scenarios;
+    use clap::Parser;
 
-    use super::*;
+    use super::Args;
 
     #[test]
     fn vpc_creation_request_preserves_slaac_presence() {
@@ -123,6 +160,55 @@ mod tests {
                 Some("false") => Some(false),
                 Some("true") => Some(true),
             }
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn virtualization_types_preserve_the_rpc_values() {
+        let cases = [
+            (
+                "ethernet-virtualizer",
+                VpcVirtualizationType::EthernetVirtualizer,
+            ),
+            (
+                "ethernet-virtualizer-with-nvue",
+                VpcVirtualizationType::EthernetVirtualizerWithNvue,
+            ),
+            ("fnn-classic", VpcVirtualizationType::FnnClassic),
+            ("fnn-l3", VpcVirtualizationType::FnnL3),
+            ("fnn", VpcVirtualizationType::Fnn),
+            ("flat", VpcVirtualizationType::Flat),
+        ];
+
+        for (cli_value, expected) in cases {
+            let args = Args::try_parse_from([
+                "create",
+                "--name",
+                "test-vpc",
+                "--org-id",
+                "test-org",
+                "--virtualization-type",
+                cli_value,
+            ])
+            .unwrap_or_else(|error| panic!("failed to parse {cli_value}: {error}"));
+
+            assert_eq!(
+                VpcVirtualizationType::from(args.virtualization_type),
+                expected,
+                "CLI value: {cli_value}"
+            );
+        }
+    }
+
+    #[test]
+    fn virtualization_type_defaults_to_ethernet_virtualizer() {
+        let args = Args::try_parse_from(["create", "--name", "test-vpc", "--org-id", "test-org"])
+            .expect("default virtualization type should parse");
+
+        assert_eq!(
+            VpcVirtualizationType::from(args.virtualization_type),
+            VpcVirtualizationType::EthernetVirtualizer
         );
     }
 }

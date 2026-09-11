@@ -1,6 +1,6 @@
 # `nico-admin-cli dpu reprovision restart`
 
-_[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › [reprovision](./dpu-reprovision.md) › **restart**_
+*[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › [reprovision](./dpu-reprovision.md) › **restart***
 
 ## NAME
 
@@ -51,4 +51,4 @@ nico-admin-cli dpu reprovision restart --id 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

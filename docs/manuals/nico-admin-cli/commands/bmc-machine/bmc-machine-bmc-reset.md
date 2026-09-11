@@ -1,6 +1,6 @@
 # `nico-admin-cli bmc-machine bmc-reset`
 
-_[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **bmc-reset**_
+*[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **bmc-reset***
 
 ## NAME
 
@@ -15,7 +15,10 @@ nico-admin-cli-bmc-machine-bmc-reset - Reset BMC
 
 ## DESCRIPTION
 
-Reset BMC
+Reset a BMC.
+
+Exactly one target must be specified: --machine, --switch, or
+--power-shelf. Providing more than one target is rejected.
 
 ## OPTIONS
 
@@ -74,4 +77,4 @@ nico-admin-cli bmc-machine bmc-reset --machine fm100ht038bg3qsho433vkg684heguv28
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

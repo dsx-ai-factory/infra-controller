@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish change-bmc-username`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **change-bmc-username**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **change-bmc-username***
 
 ## NAME
 
@@ -52,4 +52,4 @@ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypasswo
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

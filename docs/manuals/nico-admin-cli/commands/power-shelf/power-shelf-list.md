@@ -1,6 +1,6 @@
 # `nico-admin-cli power-shelf list`
 
-_[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › **list**_
+*[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › **list***
 
 ## NAME
 
@@ -67,4 +67,4 @@ nico-admin-cli power-shelf list --bmc-mac 00:11:22:33:44:55
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

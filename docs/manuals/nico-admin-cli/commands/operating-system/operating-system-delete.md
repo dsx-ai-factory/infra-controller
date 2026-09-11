@@ -1,6 +1,6 @@
 # `nico-admin-cli operating-system delete`
 
-_[Tenant commands](../../tenant.md) › [operating-system](./operating-system.md) › **delete**_
+*[Tenant commands](../../tenant.md) › [operating-system](./operating-system.md) › **delete***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli operating-system delete 12345678-1234-5678-90ab-cdef01234567
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

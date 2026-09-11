@@ -554,7 +554,7 @@ An instance in NICo is a bare-metal machine assigned to a tenant within a VPC. C
 | `--vpc-id` | yes | Parent VPC |
 | `--machine-id` | no | Pin to a specific machine (requires `targetedInstanceCreation: true` on the tenant) |
 | `--instance-type-id` | no | Pick from the pool of machines of this type (alternative to `--machine-id`) |
-| `--operating-system-id` | no | OS for PXE provisioning |
+| `--operating-system-id` | no | OS for PXE provisioning; see [Templated iPXE Operating Systems](templated-ipxe-operating-systems.md) |
 | `--allow-unhealthy-machine` | no | Override health checks |
 | `--ipxe-script` | no | Custom iPXE script |
 | `--user-data` | no | cloud-init style user data |
@@ -1002,6 +1002,7 @@ Flag-first ordering -- always put flags before positional args.
 ## Related Documentation
 
 - [Network Isolation](network-isolation.md) -- Per-plane tenant isolation (Ethernet, InfiniBand, NVLink)
+- [Templated iPXE Operating Systems](templated-ipxe-operating-systems.md) -- Reusable template-based boot definitions and Site synchronization
 - [Organization & Permissions](org-permissions.md) -- IdP-managed roles and user setup
 - [Quick Start Guide](../getting-started/quick-start.md) -- NICo deployment and Day Zero walkthrough
 - [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md) -- Profile configuration and behavior

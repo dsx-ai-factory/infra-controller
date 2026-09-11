@@ -1,6 +1,6 @@
 # `nico-admin-cli rack profile list`
 
-_[Hardware commands](../../hardware.md) › [rack](./rack.md) › [profile](./rack-profile.md) › **list**_
+*[Hardware commands](../../hardware.md) › [rack](./rack.md) › [profile](./rack-profile.md) › **list***
 
 ## NAME
 
@@ -47,4 +47,4 @@ nico-admin-cli rack profile list
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

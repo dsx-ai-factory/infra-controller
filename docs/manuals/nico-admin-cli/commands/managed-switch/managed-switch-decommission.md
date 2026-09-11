@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-switch decommission`
 
-_[Hardware commands](../../hardware.md) › [managed-switch](./managed-switch.md) › **decommission**_
+*[Hardware commands](../../hardware.md) › [managed-switch](./managed-switch.md) › **decommission***
 
 ## NAME
 
@@ -49,4 +49,4 @@ nico-admin-cli managed-switch decommission sw100nsner0op5osl6n85t7772j010jmhafm9
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

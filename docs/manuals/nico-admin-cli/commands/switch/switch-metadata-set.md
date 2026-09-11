@@ -1,6 +1,6 @@
 # `nico-admin-cli switch metadata set`
 
-_[Hardware commands](../../hardware.md) › [switch](./switch.md) › [metadata](./switch-metadata.md) › **set**_
+*[Hardware commands](../../hardware.md) › [switch](./switch.md) › [metadata](./switch-metadata.md) › **set***
 
 ## NAME
 
@@ -56,4 +56,4 @@ nico-admin-cli switch metadata set 12345678-1234-5678-90ab-cdef01234567 --name s
 
 ---
 
-**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)
+**See also:** [Hardware commands](../../hardware.md) · [CLI reference index](../../index.md)

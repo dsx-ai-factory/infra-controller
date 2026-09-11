@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-machine replace-all`
 
-_[Tenant commands](../../tenant.md) › [expected-machine](./expected-machine.md) › **replace-all**_
+*[Tenant commands](../../tenant.md) › [expected-machine](./expected-machine.md) › **replace-all***
 
 ## NAME
 
@@ -58,4 +58,4 @@ nico-admin-cli expected-machine replace-all --filename ./expected-machines.json
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)

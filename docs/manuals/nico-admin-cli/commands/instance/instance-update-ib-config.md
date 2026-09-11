@@ -1,6 +1,6 @@
 # `nico-admin-cli instance update-ib-config`
 
-_[Tenant commands](../../tenant.md) › [instance](./instance.md) › **update-ib-config**_
+*[Tenant commands](../../tenant.md) › [instance](./instance.md) › **update-ib-config***
 
 ## NAME
 
@@ -51,4 +51,4 @@ nico-admin-cli instance update-ib-config --instance 12345678-1234-5678-90ab-cdef
 
 ---
 
-**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../README.md)
+**See also:** [Tenant commands](../../tenant.md) · [CLI reference index](../../index.md)
