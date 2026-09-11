@@ -40,7 +40,13 @@ spec:
             capabilities:
               drop:
                 - ALL
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           args:
+            - --allowed-service-account=system:serviceaccount:$(POD_NAMESPACE):carbide-rest-site-manager
             - --ca-common-name=NICo Local Dev CA
             - --ca-organization=NVIDIA
             - --ca-cert-file=/etc/pki/ca/tls.crt
