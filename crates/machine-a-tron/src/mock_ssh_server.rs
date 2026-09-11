@@ -29,6 +29,7 @@ use russh::server::{Auth, ChannelOpenHandle, Config, Msg, Server as _, Session, 
 use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty, server};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 #[derive(Debug)]
@@ -279,8 +280,14 @@ impl server::Handler for MockSshHandler {
 
         if let Some(mut log_message_rx) = self.log_message_rx.take() {
             tokio::spawn(async move {
-                while let Ok(msg) = log_message_rx.recv().await {
-                    channel.data_bytes(msg).await.ok();
+                loop {
+                    match log_message_rx.recv().await {
+                        Ok(msg) => {
+                            channel.data_bytes(msg).await.ok();
+                        }
+                        Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => break,
+                    }
                 }
             });
         }

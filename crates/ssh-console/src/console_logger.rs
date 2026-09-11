@@ -246,11 +246,13 @@ impl ConsoleLogger {
                         ClientCommand::Snapshot { reply_tx } => {
                             let result = self.capture_snapshot(&mut log_file).await;
                             if let Err(error) = &result {
-                                self.health_tx.send_replace(error.clone());
+                                tracing::warn!(
+                                    machine_id = %self.machine_id,
+                                    ?error,
+                                    "console_logger: snapshot capture failed"
+                                );
                             }
-                            let failed = result.is_err();
                             reply_tx.send(result).ok();
-                            if failed { return; }
                         }
                     }
                 }

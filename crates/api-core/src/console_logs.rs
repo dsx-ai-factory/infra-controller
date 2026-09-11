@@ -145,9 +145,9 @@ impl ConsoleLogSource for GrpcSource {
                 .await
                 .map_err(|e| {
                     if is_transport_error(&e) {
-                        Status::unavailable(status.message().to_owned())
+                        Status::unavailable(e.message().to_owned())
                     } else {
-                        status
+                        e
                     }
                 })?,
             Err(status) => return Err(status),

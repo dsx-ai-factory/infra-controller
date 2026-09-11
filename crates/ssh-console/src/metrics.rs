@@ -73,6 +73,12 @@ pub(crate) async fn spawn(
                 }
                 Err(error) => {
                     tracing::error!(%error, "error accepting metrics connection");
+                    // Avoid a hot loop when the listener keeps failing (e.g. file descriptor limits).
+                    cancel_token
+                        .run_until_cancelled(tokio::time::sleep(std::time::Duration::from_millis(
+                            100,
+                        )))
+                        .await;
                 }
             }
         }

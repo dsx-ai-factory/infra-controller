@@ -337,12 +337,12 @@ async fn wait_until_host_is_up(
             _ = interval.tick() => {
                 match kind {
                     connection::Kind::Ssh => {
-                        if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr)).await {
+                        if let Some(Ok(Ok(_))) = cancel_token.run_until_cancelled(tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))).await {
                             break Ok(());
                         }
                     }
                     connection::Kind::Ipmi => {
-                        if check_ipmi_reachable(addr, Duration::from_secs(2)).await {
+                        if let Some(true) = cancel_token.run_until_cancelled(check_ipmi_reachable(addr, Duration::from_secs(2))).await {
                             break Ok(());
                         }
                     }

@@ -454,8 +454,18 @@ pub(crate) async fn spawn(
         let acceptor = acceptor.clone();
         async move {
             while let Some(result) = cancel_token.run_until_cancelled(listener.accept()).await {
-                let Ok((tcp, _)) = result else {
-                    continue;
+                let (tcp, _) = match result {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        // We want to retry indefinitely if we can't accept (like if we're hitting a
+                        // file descriptor limit), but we should yield for a bit so that we're not
+                        // consuming a whole CPU core indefinitely.
+                        tracing::warn!(%error, "could not accept TCP connection");
+                        cancel_token
+                            .run_until_cancelled(tokio::time::sleep(Duration::from_millis(100)))
+                            .await;
+                        continue;
+                    }
                 };
                 let tls = acceptor.load_full();
                 let tx = incoming_tx.clone();
