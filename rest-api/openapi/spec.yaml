@@ -11387,15 +11387,13 @@ paths:
         - schema:
             type: string
             enum:
-              - STATUS_ASC
-              - STATUS_DESC
-              - CREATED_ASC
-              - CREATED_DESC
-              - UPDATED_ASC
-              - UPDATED_DESC
+              - TYPE_ASC
+              - TYPE_DESC
+            default: TYPE_ASC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: |-
+            Ordering for pagination query. TYPE_ASC orders capability type ascending and TYPE_DESC orders it descending. Defaults to TYPE_ASC. Ties are ordered by name, frequency, capacity, vendor, count, deviceType, inactiveDevices, and internal ID, all ascending with null values last.
   '/v2/org/{org}/nico/rack':
     parameters:
       - schema:

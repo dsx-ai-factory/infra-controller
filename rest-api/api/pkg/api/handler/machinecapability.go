@@ -84,7 +84,7 @@ func (gamch GetAllMachineCapabilityHandler) Handle(c echo.Context) error {
 	}
 
 	// Validate request attributes
-	err = pageRequest.Validate(cdbm.MachineCapabilityOrderByFields)
+	err = pageRequest.Validate(cdbm.MachineCapabilityDistinctOrderByFields)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error validating pagination request data")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate pagination request data", err)
