@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestCreateHash(t *testing.T) {
@@ -56,4 +58,33 @@ func TestEncryptAndDecryptWithWrongPassphrase(t *testing.T) {
 
 	// Attempt to decrypt with wrong passphrase (should cause a panic)
 	DecryptData(encryptedData, wrongPassphrase)
+}
+
+func TestRedactSecret(t *testing.T) {
+	tcs := []struct {
+		descr  string
+		secret string
+		want   string
+	}{
+		{
+			descr:  "registration OTP keeps an identifying prefix",
+			secret: "8Nn5Qk0mVQqHqk2hXwfXQz1Yk5A=",
+			want:   "8Nn5[REDACTED] len=28",
+		},
+		{
+			descr:  "value no longer than the prefix keeps nothing",
+			secret: "8Nn5",
+			want:   "[REDACTED] len=4",
+		},
+		{
+			descr:  "absent secret reports its length",
+			secret: "",
+			want:   "[REDACTED] len=0",
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.descr, func(t *testing.T) {
+			assert.Equal(t, tc.want, RedactSecret(tc.secret))
+		})
+	}
 }

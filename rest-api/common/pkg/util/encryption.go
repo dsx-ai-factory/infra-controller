@@ -8,10 +8,35 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"fmt"
 	"io"
 
 	"github.com/rs/zerolog/log"
 )
+
+const (
+	// secretLogPrefixLen is how much of a secret a diagnostic log may carry. The
+	// shortest secret this covers is a Site registration OTP, 20 random bytes in
+	// base64, so four characters tell two of them apart and leave the remaining
+	// 136 bits out of the logs.
+	secretLogPrefixLen = 4
+
+	// redactedMarker stands in for the withheld remainder. It repeats the text of
+	// grpcproxy.RedactedPlaceholder rather than importing it, because a test in
+	// that package already imports this one.
+	redactedMarker = "[REDACTED]"
+)
+
+// RedactSecret renders a secret for a diagnostic log: a short identifying
+// prefix, a marker for the withheld remainder, and the length. That is enough
+// to tell which value a failure was about, and never enough to reuse it. A
+// secret no longer than the prefix keeps none of its characters.
+func RedactSecret(secret string) string {
+	if len(secret) <= secretLogPrefixLen {
+		return fmt.Sprintf("%s len=%d", redactedMarker, len(secret))
+	}
+	return fmt.Sprintf("%s%s len=%d", secret[:secretLogPrefixLen], redactedMarker, len(secret))
+}
 
 // CreateHash takes a string and returns SHA 256 digest in a byte array
 func CreateHash(key string) []byte {
