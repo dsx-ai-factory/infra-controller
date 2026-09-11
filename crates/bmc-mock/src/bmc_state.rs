@@ -15,12 +15,17 @@
  * limitations under the License.
  */
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use chrono::SecondsFormat;
+use serde_json::json;
 
 use crate::injection::InjectionStore;
 use crate::redfish;
 use crate::redfish::account_service::AccountServiceState;
 use crate::redfish::chassis::ChassisState;
 use crate::redfish::computer_system::SystemState;
+use crate::redfish::log_service::LogEntryDraft;
 use crate::redfish::manager::ManagerState;
 use crate::redfish::session_service::SessionServiceState;
 use crate::redfish::update_service::UpdateServiceState;
@@ -38,9 +43,12 @@ pub struct BmcState {
     pub account_service_state: Arc<AccountServiceState>,
     pub(crate) session_service_state: Arc<SessionServiceState>,
     pub injection: Arc<InjectionStore>,
-    /// BMC self-reset simulation window (None = feature disabled; resets
-    /// stay no-ops as before).
+    /// Enabled SSE event service for this BMC, or None when unsupported.
+    pub event_service: Option<Arc<crate::EventServiceState>>,
+    /// Optional BMC outage simulation. None leaves requests available during reset.
     pub availability: Option<Arc<crate::availability::BmcAvailabilityState>>,
+    /// Sequence of lifecycle Events this BMC has published.
+    pub(crate) event_sequence: Arc<AtomicU64>,
     pub(crate) callbacks: Option<Arc<dyn crate::Callbacks>>,
     /// Whether this BMC advertises and serves the `/redfish/v1/Systems`
     /// collection. Delta power shelves expose no `ComputerSystem` collection,
@@ -56,6 +64,63 @@ pub enum BmcEvent {
 }
 
 impl BmcState {
+    /// Simulate a BMC reset without changing host power: begin the outage
+    /// window, if one is configured, then close event streams and clear replay
+    /// history. Returns the outage duration, zero when downtime is disabled.
+    pub(crate) fn reset(&self) -> std::time::Duration {
+        let window = self
+            .availability
+            .as_ref()
+            .map_or(std::time::Duration::ZERO, |a| a.begin_reset());
+        if let Some(events) = &self.event_service {
+            events.reset();
+        }
+        window
+    }
+
+    /// Record a lifecycle event the way a BMC does: append a LogEntry to the
+    /// system event log when the profile has one, then publish a Redfish Event
+    /// to SSE subscribers with the record inline. The event's origin is the
+    /// new LogEntry when one exists, else the affected resource.
+    pub(crate) fn record_event(&self, draft: LogEntryDraft) {
+        let (created, entry) = self.record_log(draft.clone());
+        let Some(events) = &self.event_service else {
+            return;
+        };
+        let sequence = self.event_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let event_id = format!("/redfish/v1/EventService/Events/{sequence}");
+        let payload = json!({
+            "@odata.type": "#Event.v1_6_0.Event",
+            "@odata.id": event_id,
+            "Id": sequence.to_string(),
+            "Name": "Event Array",
+            "Events": [{
+                "@odata.id": format!("{event_id}#/Events/0"),
+                "MemberId": "0",
+                "EventId": sequence.to_string(),
+                "EventType": "Alert",
+                "EventTimestamp": created,
+                "MessageId": draft.message_id,
+                "Message": draft.message,
+                "MessageSeverity": draft.severity.as_str(),
+                "OriginOfCondition": {"@odata.id": entry.unwrap_or(draft.origin)},
+            }],
+        });
+        if let Err(error) = events.publish(payload) {
+            tracing::warn!(error = %error, "lifecycle event not published");
+        }
+    }
+
+    /// Append a LogEntry to the system event log when the profile has one,
+    /// without publishing an Event. Returns the timestamp used and the new
+    /// entry's `@odata.id`. BMC resets use this: the reset closes every stream
+    /// before a subscriber could observe an announcement, as on real hardware.
+    pub(crate) fn record_log(&self, draft: LogEntryDraft) -> (String, Option<String>) {
+        let created = chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let entry = self.system_state.record_log(draft, &created);
+        (created, entry)
+    }
+
     /// Returns whether this BMC advertises an enabled SSH serial console.
     pub fn has_enabled_ssh_serial_console(&self) -> bool {
         self.system_state.has_enabled_ssh_serial_console()
@@ -73,6 +138,7 @@ impl BmcState {
     }
 
     pub fn on_event(&self, event: &BmcEvent) {
+        let system = self.system_state.primary_system_odata_id();
         match event {
             BmcEvent::PowerOn => {
                 self.complete_all_bios_jobs();
@@ -80,9 +146,15 @@ impl BmcState {
                 // Move any staged firmware versions into the active inventory so
                 // that site-explorer observes the upgraded version after reset.
                 self.update_service_state.apply_staged_firmware();
+                if let Some(system) = system {
+                    self.record_event(LogEntryDraft::powered_on(&system));
+                }
             }
             BmcEvent::BootCompleted => {
                 self.system_state.on_boot_completed();
+                if let Some(system) = system {
+                    self.record_event(LogEntryDraft::boot_completed(&system));
+                }
             }
         }
     }

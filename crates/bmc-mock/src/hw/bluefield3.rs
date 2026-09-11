@@ -21,7 +21,7 @@ use std::sync::Arc;
 use mac_address::MacAddress;
 use serde_json::json;
 
-use crate::{BootOptionKind, Callbacks, LogService, LogServices, hw, redfish};
+use crate::{BootOptionKind, Callbacks, hw, redfish};
 
 pub(crate) struct Bluefield3<'a> {
     pub(crate) product_serial_number: Cow<'a, str>,
@@ -176,14 +176,9 @@ impl Bluefield3<'_> {
                         }))
                         .build(),
                 ),
-                log_services: Some(Arc::new(Bf3LogServices {
-                    event_log: DpuEventLog {
-                        // Simulate that we always completed reboot
-                        // when requested. Better implementation
-                        // should work together with power control...
-                        entries: vec!["DPU Warm Reset".to_string()],
-                    },
-                })),
+                log_services: Some(redfish::log_service::LogServices::event_log([
+                    "DPU Warm Reset",
+                ])),
                 storage: None,
                 processors: None,
                 memory: None,
@@ -191,6 +186,10 @@ impl Bluefield3<'_> {
                 secure_boot_available: true,
             }],
         }
+    }
+
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
     }
 
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
@@ -297,42 +296,5 @@ impl Bluefield3<'_> {
             Mode::SuperNIC { nic_mode: true } => "9009D3B400CCEA",
             Mode::SuperNIC { nic_mode: false } => "9009D3B600CVAA",
         }
-    }
-}
-
-struct DpuEventLog {
-    entries: Vec<String>,
-}
-
-impl LogService for DpuEventLog {
-    fn id(&self) -> &str {
-        "EventLog"
-    }
-
-    fn entries(&self, collection: &redfish::Collection<'_>) -> Vec<serde_json::Value> {
-        self.entries
-            .iter()
-            .enumerate()
-            .map(|(idx, entry)| {
-                redfish::log_service::event_entry(collection, &idx.to_string())
-                    .message(entry)
-                    // These are not required by specification but
-                    // required by libredfish. Making it happy. However, in future
-                    // we may want to simulate these fields as well.
-                    .severity("OK")
-                    .created("2026-02-12T02:06:58+00:00")
-                    .build()
-            })
-            .collect()
-    }
-}
-
-struct Bf3LogServices {
-    event_log: DpuEventLog,
-}
-
-impl LogServices for Bf3LogServices {
-    fn services(&self) -> Vec<&(dyn LogService + '_)> {
-        vec![&self.event_log as &dyn LogService]
     }
 }

@@ -59,10 +59,11 @@ async fn process(State(mut state): State<Expander>, request: Request<Body>) -> R
         return response;
     }
 
-    let (parts, body) = response.into_parts();
-    let response_bytes = match axum::body::to_bytes(body, usize::MAX).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
+    let (parts, response_bytes) = match json_bytes(response).await {
+        Ok(buffered) => buffered,
+        // Expansion is defined for JSON collections, never streaming bodies.
+        Err(BufferError::NotJson(response)) => return response,
+        Err(BufferError::Read(e)) => {
             // Pretty sure this would only fail if body > usize::MAX.
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -126,7 +127,7 @@ async fn process(State(mut state): State<Expander>, request: Request<Body>) -> R
                     let req = Request::builder()
                         .method(Method::GET)
                         .uri(format!(
-                            "{}?$expand=.($level={})",
+                            "{}?$expand=.($levels={})",
                             uri.clone(),
                             expand_level - 1
                         ))
@@ -141,11 +142,12 @@ async fn process(State(mut state): State<Expander>, request: Request<Body>) -> R
                         .unwrap();
                     state.call_inner_router(req).await
                 };
-                let (parts, body) = response.into_parts();
-
-                let response_bytes = match axum::body::to_bytes(body, usize::MAX).await {
-                    Ok(b) => b,
-                    Err(e) => return Err(MemberRequestError::Axum(uri, e)),
+                let (parts, response_bytes) = match json_bytes(response).await {
+                    Ok(buffered) => buffered,
+                    Err(BufferError::NotJson(response)) => {
+                        return Err(MemberRequestError::NotJson(uri, response.status()));
+                    }
+                    Err(BufferError::Read(e)) => return Err(MemberRequestError::Axum(uri, e)),
                 };
 
                 // Don't bother deserializing if it's unsuccessful
@@ -180,11 +182,10 @@ async fn process(State(mut state): State<Expander>, request: Request<Body>) -> R
 
     json.insert("Members".to_string(), Value::Array(expanded_members));
 
-    (
-        StatusCode::OK,
-        serde_json::to_vec(&json).expect("serde error"),
-    )
-        .into_response()
+    // Keep the inner response's headers, including its JSON content type.
+    let mut parts = parts;
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    (parts, serde_json::to_vec(&json).expect("serde error")).into_response()
 }
 
 fn expansion_level<T>(request: &Request<T>) -> Option<u8> {
@@ -214,10 +215,33 @@ struct Expander {
     inner: Router,
 }
 
+enum BufferError {
+    /// The response does not declare JSON; it is returned untouched.
+    NotJson(Response),
+    Read(axum::Error),
+}
+
+/// Buffer a JSON response body. Streaming and other non-JSON bodies are never
+/// read to their end, which for an open event stream would be never.
+async fn json_bytes(
+    response: Response,
+) -> Result<(axum::http::response::Parts, bytes::Bytes), BufferError> {
+    if !carbide_axum_utils::is_json_response(&response) {
+        return Err(BufferError::NotJson(response));
+    }
+    let (parts, body) = response.into_parts();
+    axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map(|bytes| (parts, bytes))
+        .map_err(BufferError::Read)
+}
+
 #[derive(thiserror::Error, Debug)]
 enum MemberRequestError {
     #[error("inner request to URI {0} returned failure: {1:?}, body: {2}")]
     UnsuccessfulResponse(String, axum::http::response::Parts, String),
+    #[error("inner request to URI {0} returned a non-JSON {1} response")]
+    NotJson(String, StatusCode),
     #[error("inner request to URI {0} returned a malformed response: {1}")]
     MalformedResponse(String, String),
     #[error("error reading bytes from inner request to {0}")]
@@ -233,6 +257,41 @@ impl Expander {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn expansion_passes_through_an_open_stream() {
+        use futures::{StreamExt, stream};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let router = super::append(axum::Router::new().route(
+            "/stream",
+            axum::routing::get(|| async {
+                let body = axum::body::Body::from_stream(
+                    stream::once(async { Ok::<_, std::io::Error>("data: {}\n\n") })
+                        .chain(stream::pending()),
+                );
+                ([("content-type", "text/event-stream")], body)
+            }),
+        ));
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            router.oneshot(
+                axum::http::Request::builder()
+                    .uri("/stream?$expand=.($levels=1)")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("expansion must not wait for stream EOF")
+        .unwrap();
+        let mut body = response.into_body();
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            "data: {}\n\n"
+        );
+    }
+
     use std::sync::Arc;
 
     use axum::Router;

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use mac_address::MacAddress;
 use serde_json::json;
 
-use crate::{BootOptionKind, Callbacks, LogService, LogServices, hw, redfish};
+use crate::{BootOptionKind, Callbacks, hw, redfish};
 
 pub(crate) struct DellPowerEdgeR750<'a> {
     pub(crate) bmc_mac_address: MacAddress,
@@ -35,42 +35,6 @@ pub(crate) struct EmbeddedNic {
     pub(crate) port_2: MacAddress,
 }
 
-struct DellEventLog {
-    entries: Vec<String>,
-}
-
-impl LogService for DellEventLog {
-    fn id(&self) -> &str {
-        "EventLog"
-    }
-
-    fn entries(&self, collection: &redfish::Collection<'_>) -> Vec<serde_json::Value> {
-        self.entries
-            .iter()
-            .enumerate()
-            .map(|(idx, entry)| {
-                redfish::log_service::event_entry(collection, &idx.to_string())
-                    .message(entry)
-                    // Severity + Created are not required by the Redfish spec but
-                    // libredfish expects them (mirrors the BlueField event log).
-                    .severity("OK")
-                    .created("2026-02-12T02:06:58+00:00")
-                    .build()
-            })
-            .collect()
-    }
-}
-
-struct DellLogServices {
-    event_log: DellEventLog,
-}
-
-impl LogServices for DellLogServices {
-    fn services(&self) -> Vec<&(dyn LogService + '_)> {
-        vec![&self.event_log as &dyn LogService]
-    }
-}
-
 impl DellPowerEdgeR750<'_> {
     fn sensor_layout() -> redfish::sensor::Layout {
         redfish::sensor::Layout {
@@ -80,6 +44,10 @@ impl DellPowerEdgeR750<'_> {
             current: 10,
             voltage: 0,
         }
+    }
+
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
     }
 
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
@@ -181,14 +149,10 @@ impl DellPowerEdgeR750<'_> {
                 boot_options: Some(boot_options),
                 bios_mode: redfish::computer_system::BiosMode::DellOem,
                 oem: redfish::computer_system::Oem::Generic,
-                log_services: Some(Arc::new(DellLogServices {
-                    event_log: DellEventLog {
-                        // Always report a completed reboot so the controller's
-                        // restart verification (which reads the host BMC event
-                        // log) can confirm reboots for this host.
-                        entries: vec!["Server reset.".to_string()],
-                    },
-                })),
+                // iDRAC serves its Lifecycle Log fifty entries at a time.
+                log_services: Some(
+                    redfish::log_service::LogServices::event_log(["Server reset."]).paged(50),
+                ),
                 // Today carbide need for any Dell to have storage
                 // collection. It tries to find BOSS controller
                 // there. So we provide empty collection to avoid 404

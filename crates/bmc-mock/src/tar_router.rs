@@ -117,10 +117,12 @@ pub(super) fn tar_router(
 
     let cache = TarRouterCache { entries };
 
+    // Archive mocks answer errors in the same Redfish envelope as generated ones.
     Ok(Router::new()
         .route("/{*path}", get(get_from_tar))
         .fallback(not_found_handler)
-        .with_state(cache))
+        .with_state(cache)
+        .layer(axum::middleware::from_fn(super::redfish_error_envelope)))
 }
 
 lazy_static::lazy_static! {

@@ -266,6 +266,13 @@ impl ManagerState {
         }
     }
 
+    /// `@odata.id` of the BMC's own manager resource, the first configured one.
+    pub(crate) fn primary_odata_id(&self) -> Option<String> {
+        self.managers
+            .first()
+            .map(|manager| resource(manager.id).odata_id.into_owned())
+    }
+
     pub(crate) fn find(&self, manager_id: &str) -> Option<&SingleManagerState> {
         self.managers.iter().find(|c| c.id == manager_id)
     }
@@ -645,14 +652,19 @@ async fn post_reset_manager(
     // bmc_reset window (the middleware answers 503 until it expires).
     // The SERVER's power state is deliberately untouched — a BMC reset
     // interrupts management visibility, not the machine.
-    if let Some(availability) = state.availability.as_ref() {
-        let window = availability.begin_reset();
-        tracing::info!(
-            manager_id,
-            offline_for = ?window,
-            "BMC self-reset: going offline"
-        );
-    }
+    // Logged, not announced: the reset closes every stream before a
+    // subscriber could observe an Event, as when a real BMC goes dark.
+    state.record_log(redfish::log_service::LogEntryDraft::manager_resetting(
+        &resource(&manager_id).odata_id,
+        "Manager.Reset",
+    ));
+    let offline_for = state.reset();
+    tracing::info!(
+        manager_id,
+        ?offline_for,
+        event_service = state.event_service.is_some(),
+        "BMC self-reset"
+    );
     json!({}).into_ok_response()
 }
 
@@ -661,5 +673,5 @@ async fn get_log_services() -> Response {
 }
 
 fn not_implemented() -> Response {
-    json!("").into_response(StatusCode::NOT_IMPLEMENTED)
+    http::redfish_error(StatusCode::NOT_IMPLEMENTED, "not implemented")
 }

@@ -47,16 +47,21 @@ pub use bmc_state::{BmcEvent, BmcState};
 pub use carbide_axum_utils::authority_router::authority_router as combined_router;
 pub use carbide_axum_utils::injection;
 pub use combined_server::{CombinedServer, ListenerOrAddress};
+pub use http::redfish_error_envelope;
 pub use hw::rack::{RackElevation, RackPlacement, RackUnit};
 pub use machine_info::{
     DpuFirmwareVersions, DpuMachineInfo, DpuSettings, HostFirmwareVersions, HostMachineInfo,
     MachineInfo,
 };
 pub use mock_machine_router::{
-    BmcCommand, MachineRouterOptions, SetSystemPowerError, SetSystemPowerResult, machine_router,
-    machine_router_with_injection_store,
+    BmcCommand, EventServiceOverride, MachineRouterOptions, SetSystemPowerError,
+    SetSystemPowerResult, machine_router, machine_router_with_injection_store,
 };
 pub use rack_info::RackInfo;
+pub use redfish::event_service::{
+    EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState,
+    EventServiceStats, StreamStep,
+};
 pub use redfish::virtual_media::DeviceConfig as VirtualMediaDeviceConfig;
 
 pub const DUMMY_FACTORY_USERNAME: &str = "root";
@@ -272,23 +277,6 @@ pub enum SystemPowerControl {
     // VM / Hypervisor
     Pause,
     Resume,
-}
-
-trait LogServices: Send + Sync {
-    fn services(&self) -> Vec<&(dyn LogService + '_)>;
-
-    fn find(&self, id: &str) -> Option<&(dyn LogService + '_)> {
-        self.services()
-            .iter()
-            .find(|service| service.id() == id)
-            .copied()
-    }
-}
-
-trait LogService: Send + Sync {
-    fn id(&self) -> &str;
-
-    fn entries(&self, collection: &redfish::Collection<'_>) -> Vec<serde_json::Value>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
