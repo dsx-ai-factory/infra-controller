@@ -44,6 +44,7 @@ spec:
               drop:
                 - ALL
           args:
+            - --allowed-service-account=system:serviceaccount:{{ default (include "nico-rest-cert-manager.namespace" .) .Values.config.siteManagerNamespace }}:{{ .Values.config.siteManagerServiceAccount }}
             - --ca-common-name={{ .Values.config.caCommonName }}
             - --ca-organization={{ .Values.config.caOrganization }}
             - --ca-cert-file={{ .Values.config.caCertFile }}
