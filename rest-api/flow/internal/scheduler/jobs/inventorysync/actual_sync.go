@@ -13,46 +13,54 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-// runActualSync runs every per-type actual-vs-expected drift detector, projects
-// observed NVLink domain topology, concatenates the component drifts, and logs
-// a per-type inventory summary. Each type-specific function handles its own
-// errors internally and falls back to nil drifts; one type's snapshot or
-// reconciliation failure doesn't suppress the others.
-//
-// allSyncOK is true only when every type obtained a complete drift-affecting
-// snapshot and safely reconciled the identity state needed to interpret it. The
-// drift table is a full-table replace with no per-type discriminator, so the
-// caller must not overwrite it from a partial view: if any type failed, the
-// previously persisted drifts are kept rather than being wiped. The
-// observed-domain projection is best effort and does not affect allSyncOK
-// because it does not contribute component drifts. The returned drifts are not
-// yet persisted — runInventoryOne owns the table-replacement transaction.
+type actualSyncResult struct {
+	componentType devicetypes.ComponentType
+	drifts        []model.ComponentDrift
+	syncOK        bool
+}
+
+// runActualSync runs every per-type actual-vs-expected drift detector and
+// returns each type's result independently. A type's result is authoritative
+// only when syncOK is true. The observed-domain projection remains best effort
+// because it does not contribute component drifts.
 func runActualSync(
 	ctx context.Context,
 	pool *cdb.Session,
 	nicoClient nicoapi.Client,
-) (drifts []model.ComponentDrift, allSyncOK bool) {
-	allSyncOK = true
+) []actualSyncResult {
+	results := make([]actualSyncResult, 0, 3)
 
 	computeReceived, machineDrifts, machineOK := syncMachines(ctx, pool, nicoClient)
-	drifts = append(drifts, machineDrifts...)
-	allSyncOK = allSyncOK && machineOK
+	results = append(results, actualSyncResult{
+		componentType: devicetypes.ComponentTypeCompute,
+		drifts:        machineDrifts,
+		syncOK:        machineOK,
+	})
 
 	switchesReceived, nvSwitchDrifts, switchOK := syncNVSwitchesNICo(ctx, pool, nicoClient)
-	drifts = append(drifts, nvSwitchDrifts...)
-	allSyncOK = allSyncOK && switchOK
+	results = append(results, actualSyncResult{
+		componentType: devicetypes.ComponentTypeNVSwitch,
+		drifts:        nvSwitchDrifts,
+		syncOK:        switchOK,
+	})
 
 	// Domain membership is observed topology rather than expected inventory.
 	// Project it after switch sync so this cycle's switch links are available.
 	syncObservedNVLinkDomainTopology(ctx, pool, nicoClient)
 
 	powershelvesReceived, powershelfDrifts, powershelfOK := syncPowershelvesNICo(ctx, pool, nicoClient)
-	drifts = append(drifts, powershelfDrifts...)
-	allSyncOK = allSyncOK && powershelfOK
+	results = append(results, actualSyncResult{
+		componentType: devicetypes.ComponentTypePowerShelf,
+		drifts:        powershelfDrifts,
+		syncOK:        powershelfOK,
+	})
+
+	allSyncOK := machineOK && switchOK && powershelfOK
 
 	log.Info().
 		Int("compute", computeReceived).
@@ -66,7 +74,7 @@ func runActualSync(
 		Msgf("Inventory received from Core: compute=%d nvswitches=%d powershelves=%d",
 			computeReceived, switchesReceived, powershelvesReceived)
 
-	return drifts, allSyncOK
+	return results
 }
 
 // mapKeys returns the keys of a string-keyed component map in arbitrary

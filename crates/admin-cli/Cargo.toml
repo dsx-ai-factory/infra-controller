@@ -45,6 +45,7 @@ carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-rpc = { path = "../rpc", features = ["cli"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-utils = { path = "../utils" }
+config-version = { path = "../config-version" }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 
 chrono = { workspace = true }
@@ -82,6 +83,10 @@ hex.workspace = true
 
 [dev-dependencies]
 carbide-test-support = { path = "../test-support" }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+prost = { workspace = true }
 
 [build-dependencies]
 clap = { workspace = true }

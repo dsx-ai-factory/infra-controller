@@ -17,7 +17,7 @@
 
 use ::rpc::forge::host_reprovisioning_request::Mode;
 use ::rpc::forge::{HostReprovisioningRequest, UpdateInitiator};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::StableHostMachineId;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
@@ -64,7 +64,7 @@ Set into reprovisioning mode and raise a health alert with a message:
 ")]
 pub(crate) struct ReprovisionSet {
     #[clap(short, long, help = "Machine ID for which reprovisioning is needed.")]
-    pub(super) id: MachineId,
+    pub(super) id: StableHostMachineId,
 
     #[clap(short, long, action)]
     update_firmware: bool,
@@ -105,7 +105,7 @@ pub(crate) struct ReprovisionClear {
         long,
         help = "Machine ID for which reprovisioning should be cleared."
     )]
-    id: MachineId,
+    id: StableHostMachineId,
 
     #[clap(short, long, action)]
     update_firmware: bool,
@@ -136,5 +136,5 @@ pub(crate) struct ManualFirmwareUpgradeComplete {
         long,
         help = "Machine ID for which manual firmware upgrade should be set."
     )]
-    pub(super) id: MachineId,
+    pub(super) id: StableHostMachineId,
 }

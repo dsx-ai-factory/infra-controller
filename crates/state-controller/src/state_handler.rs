@@ -323,7 +323,7 @@ pub enum StateHandlerError {
     #[error("error releasing from resource pool: {0}")]
     PoolReleaseError(#[source] Box<ResourcePoolError>),
 
-    #[error("invalid host state {1} for DPU {0}")]
+    #[error("invalid host state {1} for machine {0}")]
     InvalidHostState(MachineId, Box<ManagedHostState>),
 
     #[error(transparent)]

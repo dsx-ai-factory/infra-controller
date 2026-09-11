@@ -22,14 +22,11 @@ use ::rpc::forge::{BatchInstanceReleaseResponse, InstanceReleaseRequest};
 use carbide_uuid::instance::InstanceId;
 
 use super::args::Args;
+use crate::admission_retry::{resolve_backoff_delay, retry_on_admission_exhaustion};
 use crate::cfg::runtime::RuntimeContext;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 
-/// gRPC metadata key the API attaches to a `RESOURCE_EXHAUSTED` admission
-/// rejection, carrying the advertised backoff in whole milliseconds. Must match
-/// `GRPC_RETRY_PUSHBACK_HEADER` in `api-core/src/admission/mod.rs`.
-const ADMISSION_RETRY_PUSHBACK_HEADER: &str = "grpc-retry-pushback-ms";
 /// Attempt cap for the single batch RPC call, bounding how many times a
 /// completed `RESOURCE_EXHAUSTED` rejection is retried. This does NOT bound
 /// how long any single in-flight attempt can take: neither this loop nor the
@@ -40,108 +37,24 @@ const MAX_BATCH_ATTEMPTS: usize = 8;
 /// Cumulative backoff cap across retries of the one batch call; give up past
 /// this rather than retrying indefinitely.
 const MAX_TOTAL_BACKOFF: Duration = Duration::from_secs(120);
-/// Backoff used when the server omits an (unexpected) parseable pushback value.
-const DEFAULT_ADMISSION_BACKOFF: Duration = Duration::from_secs(5);
-/// Bounds mirroring the server's own advertised range in `admission/retry.rs`.
-const MIN_ADMISSION_BACKOFF: Duration = Duration::from_secs(1);
-const MAX_ADMISSION_BACKOFF: Duration = Duration::from_secs(30);
 /// Attempt cap for the one-off preflight lookup that resolves `--label-key`/
 /// `--machine` into a concrete instance list, mirroring [`MAX_BATCH_ATTEMPTS`].
 const MAX_PREFLIGHT_LOOKUP_ATTEMPTS: usize = 8;
 
-/// Outcome of parsing the server-advertised `grpc-retry-pushback-ms` header.
-enum PushbackAdvice {
-    /// No header present -- the caller should fall back to its own default.
-    Absent,
-    /// A valid non-negative delay was advertised.
-    Delay(Duration),
-    /// The header was present but negative or otherwise unparseable. Per the
-    /// gRPC retry-pushback spec, this is an explicit "do not retry" signal
-    /// from the server, distinct from simply omitting the header -- treating
-    /// it the same as `Absent` (and retrying anyway with a default delay)
-    /// would ignore the server's request to stop.
-    StopRetrying,
-}
-
-/// Parses the server-advertised retry delay from a rejection's metadata.
-fn admission_retry_delay(status: &tonic::Status) -> PushbackAdvice {
-    let Some(raw) = status.metadata().get(ADMISSION_RETRY_PUSHBACK_HEADER) else {
-        return PushbackAdvice::Absent;
-    };
-    let Ok(raw) = raw.to_str() else {
-        return PushbackAdvice::StopRetrying;
-    };
-    match raw.parse::<i64>() {
-        Ok(millis) if millis >= 0 => PushbackAdvice::Delay(Duration::from_millis(millis as u64)),
-        // Negative (explicit stop signal) or unparseable -- both mean "stop".
-        _ => PushbackAdvice::StopRetrying,
-    }
-}
-
-/// Resolves the delay to sleep for one retry attempt, given a
-/// `RESOURCE_EXHAUSTED` rejection. Returns `None` if the server signaled to
-/// stop retrying (a negative or malformed pushback value), in which case the
-/// caller should surface the error immediately rather than retry.
-fn resolve_backoff_delay(status: &tonic::Status) -> Option<Duration> {
-    match admission_retry_delay(status) {
-        PushbackAdvice::Absent => Some(DEFAULT_ADMISSION_BACKOFF),
-        PushbackAdvice::Delay(delay) => {
-            Some(delay.clamp(MIN_ADMISSION_BACKOFF, MAX_ADMISSION_BACKOFF))
-        }
-        PushbackAdvice::StopRetrying => None,
-    }
-}
-
-/// Retries a fallible preflight lookup call on `RESOURCE_EXHAUSTED` admission
-/// rejections, honoring the server's advertised `grpc-retry-pushback-ms`
-/// backoff exactly like [`release_batch_with_retry`] does for the batch
-/// release call itself. Any other error surfaces immediately so real failures
-/// are not masked.
-///
-/// Motivation: resolving `--label-key`/`--machine` into a concrete instance
-/// list (`get_all_instances` / `find_instance_by_machine_id`) happens *before*
-/// the batch release call. Without this, a `RESOURCE_EXHAUSTED` rejection on
-/// that single preflight call aborted the whole release command with zero
-/// instances attempted, even though the batch call itself was already
-/// retry-safe -- observed live at ~4,500-instance scale, where under
-/// sustained admission pressure some release invocations failed instantly
-/// with no progress purely because this one lookup call happened to land in a
-/// saturated window.
-async fn retry_lookup_on_admission_exhaustion<T, F, Fut>(mut attempt: F) -> CarbideCliResult<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = CarbideCliResult<T>>,
-{
-    let mut total_backoff = Duration::ZERO;
-    for attempt_number in 1..=MAX_PREFLIGHT_LOOKUP_ATTEMPTS {
-        match attempt().await {
-            Ok(value) => return Ok(value),
-            Err(CarbideCliError::ApiInvocationError(status))
-                if status.code() == tonic::Code::ResourceExhausted =>
-            {
-                if attempt_number == MAX_PREFLIGHT_LOOKUP_ATTEMPTS {
-                    return Err(CarbideCliError::ApiInvocationError(status));
-                }
-                let Some(delay) = resolve_backoff_delay(&status) else {
-                    return Err(CarbideCliError::ApiInvocationError(status));
-                };
-                if total_backoff.saturating_add(delay) > MAX_TOTAL_BACKOFF {
-                    return Err(CarbideCliError::ApiInvocationError(status));
-                }
-                total_backoff = total_backoff.saturating_add(delay);
-                tokio::time::sleep(delay).await;
-            }
-            Err(other) => return Err(other),
-        }
-    }
-    unreachable!("loop returns on the final attempt")
-}
-
 /// Runs the single batch-release call, retrying only `RESOURCE_EXHAUSTED`
 /// admission rejections of the call itself by honoring the server's advertised
-/// `grpc-retry-pushback-ms` backoff. Retries are bounded by attempt count and
-/// cumulative backoff; any other error surfaces immediately so real failures
-/// are not masked.
+/// `grpc-retry-pushback-ms` backoff (parsed via
+/// [`crate::admission_retry::resolve_backoff_delay`], the same logic every
+/// other admission-retry loop in this crate uses). Retries are bounded by
+/// attempt count and cumulative backoff; any other error surfaces immediately
+/// so real failures are not masked.
+///
+/// Keeps its own loop rather than delegating to
+/// [`crate::admission_retry::retry_on_admission_exhaustion`]: that helper is
+/// typed around `CarbideCliResult<T>`/`CarbideCliError`, while this call
+/// returns `Result<BatchInstanceReleaseResponse, tonic::Status>` directly
+/// (the raw RPC result, not yet converted) -- see the module doc comment on
+/// `crate::admission_retry` for the full rationale.
 ///
 /// Per-instance retry/backoff no longer lives here: the server-side
 /// `ReleaseInstances` RPC releases the whole batch in one call (best-effort
@@ -197,13 +110,17 @@ pub(super) async fn release(
                 .into(),
         ),
         (_, Some(machine_id), _) => {
-            let instances = retry_lookup_on_admission_exhaustion(|| async move {
-                api_client
-                    .0
-                    .find_instance_by_machine_id(machine_id)
-                    .await
-                    .map_err(CarbideCliError::from)
-            })
+            let instances = retry_on_admission_exhaustion(
+                MAX_PREFLIGHT_LOOKUP_ATTEMPTS,
+                MAX_TOTAL_BACKOFF,
+                || async move {
+                    api_client
+                        .0
+                        .find_instance_by_machine_id(machine_id)
+                        .await
+                        .map_err(CarbideCliError::from)
+                },
+            )
             .await?
             .instances;
             let Some(instance_id) = instances.into_iter().next().and_then(|i| i.id) else {
@@ -214,8 +131,15 @@ pub(super) async fn release(
             instance_ids.push(instance_id);
         }
         (_, _, Some(key)) => {
-            let instances = retry_lookup_on_admission_exhaustion(|| {
-                api_client.get_all_instances(
+            // No outer retry wrap here: `get_all_instances` retries each of its
+            // own internal calls (the id listing and every id-chunk fetch)
+            // individually on `RESOURCE_EXHAUSTED`, so it is already retry-safe
+            // end-to-end. Wrapping the whole call again would re-run it from
+            // scratch on a late failure, discarding every chunk already fetched
+            // and burning a second retry budget -- the exact waste the internal
+            // per-call retry was added to avoid.
+            let instances = api_client
+                .get_all_instances(
                     None,
                     None,
                     Some(key.clone()),
@@ -223,8 +147,7 @@ pub(super) async fn release(
                     None,
                     ctx.config.page_size,
                 )
-            })
-            .await?;
+                .await?;
             if instances.instances.is_empty() {
                 return Err(CarbideCliError::GenericError(
                     "No instances with the passed label.key exist".to_string(),
@@ -326,6 +249,7 @@ mod tests {
     use tonic::metadata::MetadataValue;
 
     use super::*;
+    use crate::admission_retry::ADMISSION_RETRY_PUSHBACK_HEADER;
 
     fn exhausted(pushback_millis: u64) -> tonic::Status {
         let mut status = tonic::Status::resource_exhausted("API admission capacity exhausted");
@@ -405,33 +329,9 @@ mod tests {
         assert!(summarize_release_response(ids.len(), response).is_err());
     }
 
-    #[test]
-    fn parses_advertised_pushback_delay() {
-        assert!(matches!(
-            admission_retry_delay(&exhausted(7_000)),
-            PushbackAdvice::Delay(d) if d == Duration::from_secs(7)
-        ));
-        assert!(matches!(
-            admission_retry_delay(&tonic::Status::resource_exhausted("no header")),
-            PushbackAdvice::Absent
-        ));
-    }
-
-    #[test]
-    fn negative_pushback_is_a_stop_retrying_signal() {
-        assert!(matches!(
-            admission_retry_delay(&pushback_status("-1")),
-            PushbackAdvice::StopRetrying
-        ));
-    }
-
-    #[test]
-    fn malformed_pushback_is_a_stop_retrying_signal() {
-        assert!(matches!(
-            admission_retry_delay(&pushback_status("not-a-number")),
-            PushbackAdvice::StopRetrying
-        ));
-    }
+    // Pushback-parsing (`PushbackAdvice`/`admission_retry_delay`/`resolve_backoff_delay`) is
+    // covered by `crate::admission_retry`'s own tests now that this module delegates to it --
+    // no need to duplicate that coverage here.
 
     #[tokio::test(start_paused = true)]
     async fn retries_after_advertised_delay_then_succeeds() {

@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"time"
 
 	provisioningv1 "github.com/nvidia/doca-platform/api/provisioning/v1alpha1"
@@ -49,13 +51,17 @@ type DPUDeviceReconciler struct {
 	Concurrency int
 }
 
-// RBAC — least privilege on exactly the DPF CRs the simulator touches. No
-// delete verb: DPU cleanup rides the ownerRef GC when the DPUDevice goes away.
+// RBAC - least privilege on exactly the DPF CRs the simulator touches. DPU
+// cleanup rides the ownerRef GC when the DPUDevice goes away; delete on dpus
+// exists only to recreate a DPU whose immutable flavor drifted from the
+// deployment selecting its node.
 //+kubebuilder:rbac:groups=provisioning.dpu.nvidia.com,resources=dpudevices,verbs=get;list;watch
 //+kubebuilder:rbac:groups=provisioning.dpu.nvidia.com,resources=dpunodes,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=provisioning.dpu.nvidia.com,resources=dpunodemaintenances,verbs=get;list;watch;create
-//+kubebuilder:rbac:groups=provisioning.dpu.nvidia.com,resources=dpus,verbs=get;list;watch;create;update;patch
+//+kubebuilder:rbac:groups=provisioning.dpu.nvidia.com,resources=dpus,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=provisioning.dpu.nvidia.com,resources=dpus/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=svc.dpu.nvidia.com,resources=dpudeployments,verbs=get;list;watch
+//+kubebuilder:rbac:groups=svc.dpu.nvidia.com,resources=dpudeployments/status,verbs=get;update;patch
 
 // errNoReferencingNode reports that no DPUNode currently lists the DPUDevice —
 // the expected transient at creation time (NICo creates the two CRs in either
@@ -101,6 +107,10 @@ func (r *DPUDeviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	//    ownerRef set to the DPUDevice.
 	dpu, err := r.ensureDPU(ctx, &device, dpuName, nodeName)
 	if err != nil {
+		if errors.Is(err, errDPURecreating) {
+			l.Info("DPU recreated under its DPUDeployment", "dpu", dpuName)
+			return ctrl.Result{RequeueAfter: r.PhaseDwell}, nil
+		}
 		if errors.Is(err, errDeviceNotReady) {
 			// NICo has not finished populating the DPUDevice; poll until it has.
 			l.V(1).Info("DPUDevice not fully populated yet; requeueing", "device", device.Name, "reason", err.Error())
@@ -178,6 +188,12 @@ func (r *DPUDeviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{RequeueAfter: r.PhaseDwell}, nil
 	}
 	dpu.Status.Phase = next
+	if next == provisioningv1.DPUReady && dpu.Spec.BFB != "" {
+		// NICo checks a Ready DPU against its DPUDeployment by comparing the
+		// basename of status.bfbFile with "<namespace>-<bfb>.bfb"; a missing
+		// or different file is treated as a failed deployment migration.
+		dpu.Status.BFBFile = r.bfbFileFor(dpu.Spec.BFB)
+	}
 	if err := r.Status().Update(ctx, dpu); err != nil {
 		if apierrors.IsConflict(err) {
 			l.V(1).Info("phase advance conflicted; retrying", "dpu", dpuName, "phase", next)
@@ -237,12 +253,244 @@ func (r *DPUDeviceReconciler) resolveNodeID(ctx context.Context, device *provisi
 // ensureDPU creates the DPU CR if absent, seeded at Initializing with the
 // machine-id label copied off the DPUDevice (required for NICo reverse lookup)
 // and a controller ownerRef to the DPUDevice for GC and Owns() re-enqueue.
+// dpuDeploymentGVK addresses DPUDeployment without importing the svc API
+// package: the pinned doca-platform module does not ship it, and the simulator
+// reads only a few spec.dpus fields and status.conditions from the object.
+var dpuDeploymentGVK = schema.GroupVersionKind{
+	Group: "svc.dpu.nvidia.com", Version: "v1alpha1", Kind: "DPUDeployment",
+}
+
+// selectedDeployment mirrors the DPF DPUSet controller: a DPU belongs to the
+// DPUDeployment whose dpuNodeSelector matches its DPUNode's labels. NICo uses
+// the same rule when it resolves a node's deployment type to a DPUDeployment,
+// so the simulator must land on the same object or NICo waits for a DPU that
+// never appears. ok=false means no usable deployment selects the node; the
+// legacy "sim" flavor is kept and NICo's name-based lookup still works.
+//
+// A deployment provisions from exactly one of spec.dpus.bfb or
+// spec.dpus.blueFieldSoftware and names exactly one of spec.dpus.flavor or
+// spec.dpus.flavorTemplate (both enforced by the DPUDeployment CRD). NICo
+// compares a Ready DPU's status.bfbFile against bfb or spec.blueFieldSoftware
+// against blueFieldSoftware, and spec.dpuFlavor against flavor. It does not
+// compare dpuFlavor for flavorTemplate deployments because real DPF renders the
+// template into a per-DPU DPUFlavor; the simulator has nothing to render, so it
+// uses the template name as the flavor: non-empty as the DPU CRD requires,
+// stable across recreates, and never compared by NICo.
+type selectedDeployment struct {
+	name, flavor, bfb, blueFieldSoftware string
+}
+
+// deploymentFields reads the provisioning source and flavor off a
+// DPUDeployment. usable=false means the deployment declares no single source
+// or no flavor and must not be selected; err reports a field of the wrong type.
+func deploymentFields(d *unstructured.Unstructured) (dep selectedDeployment, usable bool, err error) {
+	get := func(field string) (string, error) {
+		v, _, err := unstructured.NestedString(d.Object, "spec", "dpus", field)
+		if err != nil {
+			return "", fmt.Errorf("spec.dpus.%s: %w", field, err)
+		}
+		return v, nil
+	}
+	dep.name = d.GetName()
+	if dep.bfb, err = get("bfb"); err != nil {
+		return dep, false, err
+	}
+	if dep.blueFieldSoftware, err = get("blueFieldSoftware"); err != nil {
+		return dep, false, err
+	}
+	if dep.flavor, err = get("flavor"); err != nil {
+		return dep, false, err
+	}
+	if dep.flavor == "" {
+		if dep.flavor, err = get("flavorTemplate"); err != nil {
+			return dep, false, err
+		}
+	}
+	usable = (dep.bfb != "") != (dep.blueFieldSoftware != "") && dep.flavor != ""
+	return dep, usable, nil
+}
+
+func (r *DPUDeviceReconciler) selectDeployment(ctx context.Context, nodeName string) (selectedDeployment, bool, error) {
+	l := log.FromContext(ctx)
+	var node provisioningv1.DPUNode
+	if err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: nodeName}, &node); err != nil {
+		return selectedDeployment{}, false, client.IgnoreNotFound(err)
+	}
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: dpuDeploymentGVK.Group, Version: dpuDeploymentGVK.Version, Kind: dpuDeploymentGVK.Kind + "List",
+	})
+	if err := r.List(ctx, list, client.InNamespace(r.Namespace)); err != nil {
+		return selectedDeployment{}, false, err
+	}
+	var matches []selectedDeployment
+	var matchIdx []int
+	for i := range list.Items {
+		d := &list.Items[i]
+		sets, _, err := unstructured.NestedSlice(d.Object, "spec", "dpus", "dpuSets")
+		if err != nil {
+			l.V(1).Info("DPUDeployment spec.dpus.dpuSets has unexpected type; ignoring", "deployment", d.GetName(), "err", err.Error())
+			continue
+		}
+		selects := false
+		for _, raw := range sets {
+			set, _ := raw.(map[string]interface{})
+			ml, _, err := unstructured.NestedStringMap(set, "dpuNodeSelector", "matchLabels")
+			if err != nil {
+				l.V(1).Info("DPUDeployment dpuNodeSelector.matchLabels has unexpected type; ignoring DPUSet", "deployment", d.GetName(), "err", err.Error())
+				continue
+			}
+			if len(ml) == 0 {
+				continue
+			}
+			all := true
+			for k, v := range ml {
+				if node.Labels[k] != v {
+					all = false
+					break
+				}
+			}
+			if all {
+				selects = true
+				break
+			}
+		}
+		if !selects {
+			continue
+		}
+		dep, usable, err := deploymentFields(d)
+		if err != nil {
+			l.V(1).Info("DPUDeployment field has unexpected type; ignoring", "deployment", d.GetName(), "err", err.Error())
+			continue
+		}
+		if !usable {
+			l.Info("DPUDeployment selects the node but declares no usable provisioning source or flavor; ignoring",
+				"deployment", d.GetName(), "node", nodeName)
+			continue
+		}
+		matches = append(matches, dep)
+		matchIdx = append(matchIdx, i)
+	}
+	if len(matches) == 0 {
+		return selectedDeployment{}, false, nil
+	}
+	if len(matches) > 1 {
+		names := make([]string, len(matches))
+		for i, m := range matches {
+			names[i] = m.name
+		}
+		l.Info("several DPUDeployments select the node; not selecting any", "node", nodeName, "deployments", names)
+		return selectedDeployment{}, false, nil
+	}
+	if err := r.markDeploymentReady(ctx, &list.Items[matchIdx[0]]); err != nil {
+		return selectedDeployment{}, false, err
+	}
+	return matches[0], true, nil
+}
+
+// markDeploymentReady reports the DPUDeployment as reconciled, which is what
+// the real DPF DPUDeployment controller does once it has created the
+// deployment's DPUSets. NICo refuses to look at any DPU under a deployment
+// whose DPUSetsReconciled condition is not True at the current generation, so
+// without this every host waits forever for a DPU that is already there.
+// Idempotent: a current condition is left untouched. Only DPUSetsReconciled is
+// replaced; the merge patch carries the whole conditions array, so the other
+// conditions are copied through unchanged.
+func (r *DPUDeviceReconciler) markDeploymentReady(ctx context.Context, d *unstructured.Unstructured) error {
+	gen := d.GetGeneration()
+	conds, _, err := unstructured.NestedSlice(d.Object, "status", "conditions")
+	if err != nil {
+		return fmt.Errorf("DPUDeployment %s status.conditions: %w", d.GetName(), err)
+	}
+	kept := make([]interface{}, 0, len(conds)+1)
+	for _, raw := range conds {
+		c, _ := raw.(map[string]interface{})
+		if c["type"] != "DPUSetsReconciled" {
+			kept = append(kept, raw)
+			continue
+		}
+		if c["status"] == "True" {
+			if n, ok := c["observedGeneration"].(int64); ok && n == gen {
+				return nil
+			}
+		}
+	}
+	patch := d.DeepCopy()
+	now := time.Now().UTC().Format(time.RFC3339)
+	cond := map[string]interface{}{
+		"type":               "DPUSetsReconciled",
+		"status":             "True",
+		"reason":             "Simulated",
+		"message":            "dpf-sim-controller: DPUSets reconciled",
+		"lastTransitionTime": now,
+		"observedGeneration": gen,
+	}
+	if err := unstructured.SetNestedSlice(patch.Object, append(kept, cond), "status", "conditions"); err != nil {
+		return err
+	}
+	if err := unstructured.SetNestedField(patch.Object, gen, "status", "observedGeneration"); err != nil {
+		return err
+	}
+	return r.Status().Patch(ctx, patch, client.MergeFrom(d))
+}
+
+// ownedByValue is the label value NICo computes: "<namespace>_<deployment>".
+func (r *DPUDeviceReconciler) ownedByValue(dep selectedDeployment) string {
+	return r.Namespace + "_" + dep.name
+}
+
+// bfbFileFor is the installed-image filename NICo compares against a Ready
+// DPU: "<namespace>-<bfb CR name>.bfb".
+func (r *DPUDeviceReconciler) bfbFileFor(bfb string) string {
+	return r.Namespace + "-" + bfb + ".bfb"
+}
+
+// errDPURecreating reports that an existing DPU was deleted because its
+// immutable spec no longer matches the deployment selecting its node; the
+// next reconcile recreates it.
+var errDPURecreating = errors.New("DPU deleted for recreation under its DPUDeployment")
+
 func (r *DPUDeviceReconciler) ensureDPU(
 	ctx context.Context, device *provisioningv1.DPUDevice, dpuName, nodeName string,
 ) (*provisioningv1.DPU, error) {
 	var dpu provisioningv1.DPU
 	err := r.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: dpuName}, &dpu)
 	if err == nil {
+		dep, ok, derr := r.selectDeployment(ctx, nodeName)
+		if derr != nil {
+			return nil, derr
+		}
+		if ok {
+			// spec.dpuFlavor is immutable on the CRD, so a DPU created before
+			// the deployment existed (or under the legacy "sim" flavor) cannot
+			// be patched into compliance. Real DPF deletes the source-owned DPU
+			// and lets the target deployment recreate it; do the same.
+			// A DPU already terminating needs no second Delete, but is still
+			// not ours to relabel or advance.
+			if dpu.Spec.DPUFlavor != dep.flavor {
+				if dpu.DeletionTimestamp == nil {
+					if err := r.Delete(ctx, &dpu); err != nil && !apierrors.IsNotFound(err) {
+						return nil, err
+					}
+				}
+				return nil, errDPURecreating
+			}
+			wantCtl := device.Labels[carbide.LabelControlledDev]
+			if dpu.Labels[carbide.LabelOwnedByDPUDeployment] != r.ownedByValue(dep) ||
+				(wantCtl != "" && dpu.Labels[carbide.LabelControlledDev] != wantCtl) {
+				patch := client.MergeFrom(dpu.DeepCopy())
+				if dpu.Labels == nil {
+					dpu.Labels = map[string]string{}
+				}
+				dpu.Labels[carbide.LabelOwnedByDPUDeployment] = r.ownedByValue(dep)
+				if wantCtl != "" {
+					dpu.Labels[carbide.LabelControlledDev] = wantCtl
+				}
+				if err := r.Patch(ctx, &dpu, patch); err != nil {
+					return nil, err
+				}
+			}
+		}
 		return &dpu, nil
 	}
 	if !apierrors.IsNotFound(err) {
@@ -262,16 +510,32 @@ func (r *DPUDeviceReconciler) ensureDPU(
 		return nil, fmt.Errorf("%w: label %s is empty on %s", errDeviceNotReady, carbide.LabelHostBMCIP, device.Name)
 	}
 
+	// Fallback when no usable deployment selects the node: the CRD requires
+	// dpuFlavor and exactly one of bfb/blueFieldSoftware, none of which mean
+	// anything to the simulator, so placeholder values keep the create accepted.
+	flavor, bfb, blueFieldSoftware := "sim", "sim", ""
+	labels := map[string]string{
+		// MUST propagate: NICo maps DPU events back to a machine by this.
+		carbide.LabelDPUMachineID: device.Labels[carbide.LabelDPUMachineID],
+		carbide.LabelHostBMCIP:    device.Labels[carbide.LabelHostBMCIP],
+	}
+	// NICo scopes its DPU watch to controlled devices; the real DPUSet
+	// controller carries this label from the DPUDevice onto the DPU.
+	if v := device.Labels[carbide.LabelControlledDev]; v != "" {
+		labels[carbide.LabelControlledDev] = v
+	}
+	if dep, ok, derr := r.selectDeployment(ctx, nodeName); derr != nil {
+		return nil, derr
+	} else if ok {
+		flavor, bfb, blueFieldSoftware = dep.flavor, dep.bfb, dep.blueFieldSoftware
+		labels[carbide.LabelOwnedByDPUDeployment] = r.ownedByValue(dep)
+	}
 	noEffect := true
 	dpu = provisioningv1.DPU{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dpuName,
 			Namespace: r.Namespace,
-			Labels: map[string]string{
-				// MUST propagate — NICo maps DPU events back to a machine by this.
-				carbide.LabelDPUMachineID: device.Labels[carbide.LabelDPUMachineID],
-				carbide.LabelHostBMCIP:    device.Labels[carbide.LabelHostBMCIP],
-			},
+			Labels:    labels,
 			Annotations: map[string]string{
 				carbide.AnnSimPhaseEnteredAt: time.Now().UTC().Format(time.RFC3339),
 			},
@@ -285,10 +549,13 @@ func (r *DPUDeviceReconciler) ensureDPU(
 			// machine when the DPU reaches Rebooting. NOT the DPU's own BMC
 			// (DPUDevice.spec.bmcIp) — NICo publishes the host's on this label.
 			BMCIP: device.Labels[carbide.LabelHostBMCIP],
-			// DPUFlavor and BFB are required by the CRD but have no meaning for
-			// the simulator; use placeholder values so the CR is accepted.
-			DPUFlavor: "sim",
-			BFB:       "sim",
+			// Inherited from the selecting deployment (see selectedDeployment)
+			// or the fallback above. The pinned doca-platform DPUSpec has no
+			// omitempty on bfb, so a blueFieldSoftware-only DPU is created
+			// below as unstructured with spec.bfb removed.
+			DPUFlavor:         flavor,
+			BFB:               bfb,
+			BlueFieldSoftware: blueFieldSoftware,
 			// NoEffect: the simulator never touches real K8s node taints/drains.
 			// NodeEffect embeds Action; NoEffect lives on Action, not NodeEffect directly.
 			NodeEffect: provisioningv1.NodeEffect{
@@ -304,7 +571,23 @@ func (r *DPUDeviceReconciler) ensureDPU(
 		controllerutil.WithBlockOwnerDeletion(false)); err != nil {
 		return nil, err
 	}
-	if err := r.Create(ctx, &dpu); err != nil {
+	if blueFieldSoftware != "" && bfb == "" {
+		// Unstructured only because the pinned type cannot omit bfb: the CRD
+		// rejects an empty bfb next to blueFieldSoftware.
+		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&dpu)
+		if err != nil {
+			return nil, err
+		}
+		unstructured.RemoveNestedField(obj, "spec", "bfb")
+		u := &unstructured.Unstructured{Object: obj}
+		u.SetGroupVersionKind(provisioningv1.DPUGroupVersionKind)
+		if err := r.Create(ctx, u); err != nil {
+			return nil, err
+		}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &dpu); err != nil {
+			return nil, err
+		}
+	} else if err := r.Create(ctx, &dpu); err != nil {
 		return nil, err
 	}
 	// Create does not persist the status subresource, so write the initial

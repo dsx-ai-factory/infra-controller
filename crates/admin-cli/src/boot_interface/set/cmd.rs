@@ -35,7 +35,9 @@ pub(super) async fn handle_set(args: Args, api_client: &ApiClient) -> CarbideCli
     let interface_id = match args.interface {
         InterfaceSelector::Id(id) => id,
         InterfaceSelector::Mac(mac) => {
-            let response = api_client.get_machine_boot_interfaces(args.machine).await?;
+            let response = api_client
+                .get_machine_boot_interfaces(args.machine.into())
+                .await?;
             resolve_mac_to_interface_id(&response, mac)?
         }
     };

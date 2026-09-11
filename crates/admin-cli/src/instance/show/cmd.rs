@@ -515,7 +515,7 @@ async fn show_instance_details(
     api_client: &ApiClient,
     extrainfo: bool,
 ) -> CarbideCliResult<()> {
-    let instance = if let Ok(id) = MachineId::from_str(&id) {
+    let instance = if let Ok(id) = id.parse::<MachineId>() {
         api_client.0.find_instance_by_machine_id(id).await?
     } else {
         let instance_id = InstanceId::from_str(&id)

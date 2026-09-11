@@ -482,9 +482,9 @@ pub(crate) async fn discover_machine(
             .await?;
 
             // Update host and DPUs state correctly.
-            let host_machine_id = proactive_machine
-                .host_machine_id()
-                .map_err(|error| CarbideError::internal(error.to_string()))?;
+            let host_machine_id =
+                carbide_uuid::machine::HostMachineId::try_from(proactive_machine.id)
+                    .map_err(|error| CarbideError::internal(error.to_string()))?;
             db::machine::update_state(
                 &mut txn,
                 &host_machine_id,
@@ -679,7 +679,7 @@ pub(crate) async fn discovery_completed(
     log_request_data(&request);
 
     let req = request.into_inner();
-    let machine_id = convert_and_log_machine_id::<MachineId>(req.machine_id.as_ref())?;
+    let machine_id: MachineId = convert_and_log_machine_id(req.machine_id.as_ref())?;
 
     let (machine, mut txn) = api
         .load_machine(&machine_id, MachineSearchConfig::default())

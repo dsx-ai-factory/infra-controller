@@ -43,7 +43,12 @@ RUN rustup target add aarch64-unknown-linux-gnu
 # Keep the cross-GCC driver so it supplies the ARM64 sysroot, but make mold an
 # invariant of that driver rather than relying on a mounted checkout's Cargo
 # configuration.
-RUN printf '#!/bin/sh\nexec aarch64-linux-gnu-gcc -fuse-ld=mold "$@"\n' \
+#
+# collect2 searches PATH only for the target-prefixed linker name, and looks for
+# the unprefixed ld.mold solely within the cross toolchain's own directories, so
+# the /usr/bin/ld.mold Debian installs never resolves for this driver.
+RUN ln -s /usr/bin/mold /usr/bin/aarch64-linux-gnu-ld.mold && \
+    printf '#!/bin/sh\nexec aarch64-linux-gnu-gcc -fuse-ld=mold "$@"\n' \
       >/usr/local/bin/aarch64-linux-gnu-gcc-mold && \
     chmod 0755 /usr/local/bin/aarch64-linux-gnu-gcc-mold && \
     printf 'int main(void) { return 0; }\n' | \

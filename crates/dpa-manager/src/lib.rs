@@ -367,16 +367,7 @@ impl DpaMonitor {
         // in the slice are harmless for `= ANY($1)`, and the non-consuming
         // `get` keeps the assignment correct even when two entries resolve to
         // the same host snapshot.
-        let machine_ids: Vec<HostMachineId> = res
-            .values()
-            .map(|mh| {
-                mh.host_snapshot
-                    .host_machine_id()
-                    .map_err(|error| DpaManagerError::Internal {
-                        message: error.to_string(),
-                    })
-            })
-            .collect::<Result<_, _>>()?;
+        let machine_ids: Vec<HostMachineId> = res.values().map(|mh| mh.host_snapshot.id).collect();
         let dpa_search_config = DpaSearchConfig {
             only_svpc: false,
             only_astra: false,
@@ -388,11 +379,7 @@ impl DpaMonitor {
 
         for mh in res.values_mut() {
             mh.dpa_interface_snapshots = dpa_snapshots_by_machine
-                .get(&mh.host_snapshot.host_machine_id().map_err(|error| {
-                    DpaManagerError::Internal {
-                        message: error.to_string(),
-                    }
-                })?)
+                .get(&mh.host_snapshot.id)
                 .cloned()
                 .unwrap_or_default();
         }

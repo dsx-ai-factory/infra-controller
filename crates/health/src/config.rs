@@ -37,6 +37,23 @@ const DEFAULT_BMC_REQUEST_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturati
 const ENDPOINT_SOURCES_CONFIG_KEY: &str = "endpoint_sources";
 const NICO_API_CONFIG_KEY: &str = "nico_api";
 const CARBIDE_API_CONFIG_ALIAS: &str = "carbide_api";
+const RESERVED_ENDPOINT_LABELS: &[&str] = &[
+    "collector_type",
+    "endpoint_ip",
+    "endpoint_key",
+    "endpoint_mac",
+    "machine_id",
+    "machine_slot_number",
+    "machine_tray_index",
+    "nvlink_domain_uuid",
+    "power_shelf_id",
+    "rack_id",
+    "serial_number",
+    "switch_id",
+    "switch_slot_number",
+    "switch_tray_index",
+    "system_uuid",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -370,24 +387,6 @@ impl StaticBmcEndpoint {
             ));
         }
 
-        const RESERVED_LABELS: &[&str] = &[
-            "collector_type",
-            "endpoint_ip",
-            "endpoint_key",
-            "endpoint_mac",
-            "machine_id",
-            "machine_slot_number",
-            "machine_tray_index",
-            "nvlink_domain_uuid",
-            "power_shelf_id",
-            "rack_id",
-            "serial_number",
-            "switch_id",
-            "switch_slot_number",
-            "switch_tray_index",
-            "system_uuid",
-        ];
-
         if self.labels.len() > 32 {
             return Err(format!(
                 "{config_path}[{index}].labels supports at most 32 labels"
@@ -405,7 +404,7 @@ impl StaticBmcEndpoint {
                     "{config_path}[{index}].labels key {name:?} must match [a-zA-Z_][a-zA-Z0-9_]*"
                 ));
             }
-            if RESERVED_LABELS.contains(&name.as_str()) {
+            if RESERVED_ENDPOINT_LABELS.contains(&name.as_str()) {
                 return Err(format!(
                     "{config_path}[{index}].labels key {name:?} is reserved"
                 ));
@@ -1862,6 +1861,12 @@ pub struct NvueGnmiConfig {
 
     /// gNMI SAMPLE subscription paths.
     pub paths: NvueGnmiPaths,
+
+    /// Additional independent gNMI STREAM subscriptions.
+    ///
+    /// Each entry defines its request paths and metric projections. The list is
+    /// loaded at startup; omission leaves only the built-in subscriptions.
+    pub additional_subscriptions: Vec<NvueGnmiSubscriptionConfig>,
 }
 
 impl Default for NvueGnmiConfig {
@@ -1873,8 +1878,451 @@ impl Default for NvueGnmiConfig {
             dangerously_skip_tls_verification: false,
             system_events_enabled: true,
             paths: NvueGnmiPaths::default(),
+            additional_subscriptions: Vec::new(),
         }
     }
+}
+
+impl NvueGnmiConfig {
+    fn validate(&self) -> Result<(), String> {
+        let mut names = HashSet::new();
+        let mut exported_metrics = HashMap::new();
+
+        for (index, subscription) in self.additional_subscriptions.iter().enumerate() {
+            if !names.insert(subscription.name.as_str()) {
+                return Err(format!(
+                    "collectors.nvue.gnmi.additional_subscriptions[{index}].name duplicates {:?}",
+                    subscription.name
+                ));
+            }
+
+            subscription.validate(index)?;
+
+            for (metric_index, metric) in subscription.metrics.iter().enumerate() {
+                let metric_type = metric.metric_type.as_str();
+                let unit = metric.output.unit();
+                let output_kind = metric.output.kind();
+                let exported_name = format!("{metric_type}_{unit}");
+
+                if let Some(previous) =
+                    exported_metrics.insert(exported_name.clone(), (metric_type, unit, output_kind))
+                    && previous != (metric_type, unit, output_kind)
+                {
+                    return Err(format!(
+                        "collectors.nvue.gnmi.additional_subscriptions[{index}].metrics[{metric_index}] renders the same metric name {exported_name:?} as another extended metric"
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// One configuration-defined gNMI STREAM subscription.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NvueGnmiSubscriptionConfig {
+    /// Stable name used to identify the subscription in telemetry and logs.
+    pub name: String,
+
+    /// gNMI target placed on the subscription prefix.
+    pub target: String,
+
+    /// Optional gNMI origin placed on the subscription prefix.
+    pub origin: String,
+
+    /// Unkeyed element names prepended to every subscription path.
+    pub prefix: Vec<String>,
+
+    /// Encoding requested from the gNMI target.
+    pub encoding: NvueGnmiEncoding,
+
+    /// Whether the target should omit the initial data snapshot.
+    pub updates_only: bool,
+
+    /// Delivery mode requested for every path in this subscription.
+    pub mode: NvueGnmiSubscriptionMode,
+
+    /// SAMPLE interval. Required only when `mode` is `sample`.
+    #[serde(with = "humantime_serde::option")]
+    pub sample_interval: Option<Duration>,
+
+    /// Suppress unchanged SAMPLE values between heartbeat updates.
+    pub suppress_redundant: bool,
+
+    /// Optional forced update interval for SAMPLE or ON_CHANGE mode.
+    #[serde(with = "humantime_serde::option")]
+    pub heartbeat_interval: Option<Duration>,
+
+    /// Request paths bundled into this subscription.
+    pub paths: Vec<Vec<String>>,
+
+    /// Exact response paths projected into metrics.
+    pub metrics: Vec<NvueGnmiMetricConfig>,
+}
+
+impl Default for NvueGnmiSubscriptionConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            target: "nvos".to_string(),
+            origin: String::new(),
+            prefix: Vec::new(),
+            encoding: NvueGnmiEncoding::default(),
+            updates_only: false,
+            mode: NvueGnmiSubscriptionMode::default(),
+            sample_interval: None,
+            suppress_redundant: false,
+            heartbeat_interval: None,
+            paths: Vec::new(),
+            metrics: Vec::new(),
+        }
+    }
+}
+
+impl NvueGnmiSubscriptionConfig {
+    fn validate(&self, index: usize) -> Result<(), String> {
+        let config_path = format!("collectors.nvue.gnmi.additional_subscriptions[{index}]");
+
+        if !is_gnmi_identifier(&self.name) {
+            return Err(format!(
+                "{config_path}.name must use lower_snake_case and start with a letter"
+            ));
+        }
+
+        if self.prefix.iter().any(|element| element.is_empty()) {
+            return Err(format!(
+                "{config_path} ({:?}).prefix elements must not be empty",
+                self.name
+            ));
+        }
+
+        if self.paths.is_empty()
+            || self
+                .paths
+                .iter()
+                .any(|path| path.is_empty() || path.iter().any(String::is_empty))
+        {
+            return Err(format!(
+                "{config_path} ({:?}).paths must contain non-empty paths and elements",
+                self.name
+            ));
+        }
+
+        if self.metrics.is_empty() {
+            return Err(format!(
+                "{config_path} ({:?}).metrics must not be empty",
+                self.name
+            ));
+        }
+
+        match self.mode {
+            NvueGnmiSubscriptionMode::TargetDefined => {
+                if self.sample_interval.is_some()
+                    || self.suppress_redundant
+                    || self.heartbeat_interval.is_some()
+                {
+                    return Err(format!(
+                        "{config_path} ({:?}) cannot set sample_interval, suppress_redundant, or heartbeat_interval in target_defined mode",
+                        self.name
+                    ));
+                }
+            }
+            NvueGnmiSubscriptionMode::OnChange => {
+                if self.sample_interval.is_some() || self.suppress_redundant {
+                    return Err(format!(
+                        "{config_path} ({:?}) cannot set sample_interval or suppress_redundant in on_change mode",
+                        self.name
+                    ));
+                }
+            }
+            NvueGnmiSubscriptionMode::Sample => {
+                if self.sample_interval.is_none() {
+                    return Err(format!(
+                        "{config_path} ({:?}).sample_interval is required in sample mode",
+                        self.name
+                    ));
+                }
+            }
+        }
+
+        for (field, interval) in [
+            ("sample_interval", self.sample_interval),
+            ("heartbeat_interval", self.heartbeat_interval),
+        ] {
+            if let Some(interval) = interval {
+                if interval.is_zero() {
+                    return Err(format!(
+                        "{config_path} ({:?}).{field} must be greater than 0",
+                        self.name
+                    ));
+                }
+
+                if interval.as_nanos() > u64::MAX as u128 {
+                    return Err(format!(
+                        "{config_path} ({:?}).{field} must fit in gNMI's u64 nanosecond field",
+                        self.name
+                    ));
+                }
+            }
+        }
+
+        let mut metric_paths = HashSet::new();
+
+        for (metric_index, metric) in self.metrics.iter().enumerate() {
+            if !metric_paths.insert(metric.path.as_slice()) {
+                return Err(format!(
+                    "{config_path} ({:?}).metrics[{metric_index}].path is duplicated",
+                    self.name
+                ));
+            }
+
+            metric.validate(&config_path, &self.name, metric_index, &self.prefix)?;
+
+            if !self
+                .paths
+                .iter()
+                .any(|request_path| metric.path.starts_with(request_path))
+            {
+                return Err(format!(
+                    "{config_path} ({:?}).metrics[{metric_index}].path must descend from one of the configured request paths",
+                    self.name
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Encoding requested for one configuration-defined subscription.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NvueGnmiEncoding {
+    /// JSON encoding.
+    #[default]
+    Json,
+
+    /// ASCII encoding.
+    Ascii,
+
+    /// RFC 7951 JSON encoding.
+    JsonIetf,
+}
+
+/// Delivery mode for a configuration-defined STREAM subscription.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NvueGnmiSubscriptionMode {
+    /// Let the target select SAMPLE or ON_CHANGE behavior.
+    #[default]
+    TargetDefined,
+
+    /// Emit an update when the target observes a value change.
+    OnChange,
+
+    /// Emit values at the configured sample interval.
+    Sample,
+}
+
+/// Metric projection for one exact response path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NvueGnmiMetricConfig {
+    /// Exact response path relative to the subscription prefix.
+    pub path: Vec<String>,
+
+    /// Lower-snake-case metric type appended to the extended collector name.
+    pub metric_type: String,
+
+    /// Response path keys copied into explicit metric labels.
+    pub labels: Vec<NvueGnmiResponseKeyLabel>,
+
+    /// Value projection applied to matching updates.
+    pub output: NvueGnmiMetricOutput,
+}
+
+impl NvueGnmiMetricConfig {
+    fn validate(
+        &self,
+        subscription_path: &str,
+        subscription_name: &str,
+        index: usize,
+        prefix: &[String],
+    ) -> Result<(), String> {
+        let config_path = format!("{subscription_path}.metrics[{index}]");
+        let context = format!("{config_path} ({subscription_name:?})");
+
+        if self.path.is_empty() || self.path.iter().any(|element| element.is_empty()) {
+            return Err(format!("{context}.path must contain non-empty elements"));
+        }
+
+        if !is_gnmi_identifier(&self.metric_type) {
+            return Err(format!(
+                "{context}.metric_type must use lower_snake_case and start with a letter"
+            ));
+        }
+
+        let mut label_names = HashSet::new();
+
+        for (index, label) in self.labels.iter().enumerate() {
+            if !is_gnmi_identifier(&label.name) {
+                return Err(format!(
+                    "{context}.labels[{index}].name must use lower_snake_case and start with a letter"
+                ));
+            }
+
+            if is_reserved_extended_metric_label(&label.name)
+                || !label_names.insert(label.name.as_str())
+            {
+                return Err(format!(
+                    "{context}.labels[{index}].name {:?} is reserved or duplicated",
+                    label.name
+                ));
+            }
+
+            if label.element.is_empty() || label.key.is_empty() {
+                return Err(format!(
+                    "{context}.labels[{index}].element and key must not be empty"
+                ));
+            }
+
+            let occurrences = prefix
+                .iter()
+                .chain(&self.path)
+                .filter(|element| element.as_str() == label.element)
+                .count();
+
+            if occurrences != 1 {
+                return Err(format!(
+                    "{context}.labels[{index}].element {:?} must occur exactly once in the combined prefix and metric path",
+                    label.element
+                ));
+            }
+        }
+
+        match &self.output {
+            NvueGnmiMetricOutput::Gauge { unit } => {
+                if !is_gnmi_identifier(unit) {
+                    return Err(format!(
+                        "{context}.output.unit must use lower_snake_case and start with a letter"
+                    ));
+                }
+            }
+            NvueGnmiMetricOutput::StateSet { states } => {
+                validate_finite_values(&context, "states", states)?;
+            }
+            NvueGnmiMetricOutput::Info { label, values } => {
+                if !is_gnmi_identifier(label)
+                    || is_reserved_extended_metric_label(label)
+                    || label_names.contains(label.as_str())
+                {
+                    return Err(format!(
+                        "{context}.output.label must be a unique lower_snake_case label"
+                    ));
+                }
+
+                validate_finite_values(&context, "values", values)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// A metric label read from a named key on one response path element.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NvueGnmiResponseKeyLabel {
+    /// Metric label name.
+    pub name: String,
+
+    /// Response path element containing the key.
+    pub element: String,
+
+    /// Key name read from the response path element.
+    pub key: String,
+}
+
+/// Supported output form for an extended gNMI metric.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NvueGnmiMetricOutput {
+    /// Numeric gauge with an operator-defined unit.
+    Gauge {
+        /// Unit appended to the exported metric name.
+        unit: String,
+    },
+
+    /// One 0 or 1 series for each declared state.
+    StateSet {
+        /// Complete finite state domain.
+        states: Vec<String>,
+    },
+
+    /// Constant 1 gauge carrying one finite information label.
+    Info {
+        /// Label that carries the matched extended value.
+        label: String,
+
+        /// Complete finite set of accepted values.
+        values: Vec<String>,
+    },
+}
+
+impl Default for NvueGnmiMetricOutput {
+    fn default() -> Self {
+        Self::Gauge {
+            unit: String::new(),
+        }
+    }
+}
+
+impl NvueGnmiMetricOutput {
+    fn kind(&self) -> std::mem::Discriminant<Self> {
+        std::mem::discriminant(self)
+    }
+
+    fn unit(&self) -> &str {
+        match self {
+            Self::Gauge { unit } => unit,
+            Self::StateSet { .. } => "state",
+            Self::Info { .. } => "info",
+        }
+    }
+}
+
+fn validate_finite_values(config_path: &str, field: &str, values: &[String]) -> Result<(), String> {
+    if values.is_empty() {
+        return Err(format!("{config_path}.output.{field} must not be empty"));
+    }
+
+    let mut unique = HashSet::new();
+
+    if values
+        .iter()
+        .any(|value| value.is_empty() || !unique.insert(value.as_str()))
+    {
+        return Err(format!(
+            "{config_path}.output.{field} must contain unique non-empty values"
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_gnmi_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+
+    chars.next().is_some_and(|first| first.is_ascii_lowercase())
+        && chars.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        })
+}
+
+fn is_reserved_extended_metric_label(value: &str) -> bool {
+    RESERVED_ENDPOINT_LABELS.contains(&value) || matches!(value, "state" | "subscription")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2217,6 +2665,12 @@ impl Config {
 
         if let Configurable::Enabled(logs) = &self.collectors.logs {
             logs.validate()?;
+        }
+
+        if let Configurable::Enabled(nvue) = &self.collectors.nvue
+            && let Configurable::Enabled(gnmi) = &nvue.gnmi
+        {
+            gnmi.validate()?;
         }
 
         if let Some(tls_config) = &self.tls.switch {
@@ -4241,6 +4695,7 @@ platform_environment_leakage_enabled = false
                 interfaces_enabled: bool,
                 platform_general_enabled: bool,
                 leak_sensors_enabled: bool,
+                additional_subscriptions: usize,
             },
         }
 
@@ -4269,6 +4724,7 @@ platform_environment_leakage_enabled = false
                         interfaces_enabled: true,
                         platform_general_enabled: true,
                         leak_sensors_enabled: false,
+                        additional_subscriptions: 0,
                     },
                 },
                 Check {
@@ -4297,6 +4753,7 @@ leak_sensors_enabled = true
                         interfaces_enabled: true,
                         platform_general_enabled: false,
                         leak_sensors_enabled: true,
+                        additional_subscriptions: 0,
                     },
                 },
                 Check {
@@ -4315,6 +4772,7 @@ system_events_subscription_enabled = false
                         interfaces_enabled: true,
                         platform_general_enabled: true,
                         leak_sensors_enabled: false,
+                        additional_subscriptions: 0,
                     },
                 },
                 Check {
@@ -4333,6 +4791,7 @@ events_enabled = false
                         interfaces_enabled: true,
                         platform_general_enabled: true,
                         leak_sensors_enabled: false,
+                        additional_subscriptions: 0,
                     },
                 },
             ],
@@ -4359,9 +4818,299 @@ events_enabled = false
                     interfaces_enabled: gnmi.paths.interfaces_enabled,
                     platform_general_enabled: gnmi.paths.platform_general_enabled,
                     leak_sensors_enabled: gnmi.paths.leak_sensors_enabled,
+                    additional_subscriptions: gnmi.additional_subscriptions.len(),
                 }
             },
         );
+    }
+
+    #[test]
+    fn nvue_gnmi_additional_subscription_parses_complete_contract() {
+        let config: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(
+                r#"
+[collectors.nvue.gnmi]
+
+[[collectors.nvue.gnmi.additional_subscriptions]]
+name = "external_metrics"
+target = "switch"
+origin = "openconfig"
+prefix = ["interfaces"]
+encoding = "json_ietf"
+updates_only = true
+mode = "sample"
+sample_interval = "10s"
+suppress_redundant = true
+heartbeat_interval = "1m"
+paths = [["interface"]]
+metrics = [
+  { path = ["interface", "state", "health"], metric_type = "interface_health", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "state_set", states = ["healthy", "attention"] } },
+  { path = ["interface", "state", "counter"], metric_type = "interface_counter", labels = [{ name = "interface_name", element = "interface", key = "name" }], output = { kind = "gauge", unit = "count" } },
+]
+"#,
+            ))
+            .extract()
+            .expect("complete additional gNMI subscription should parse");
+
+        config
+            .validate()
+            .expect("complete additional gNMI subscription should validate");
+
+        let Configurable::Enabled(nvue) = &config.collectors.nvue else {
+            panic!("NVUE collector should be enabled");
+        };
+
+        let Configurable::Enabled(gnmi) = &nvue.gnmi else {
+            panic!("NVUE gNMI collector should be enabled");
+        };
+
+        let subscription = gnmi
+            .additional_subscriptions
+            .first()
+            .expect("one additional subscription should be configured");
+
+        assert_eq!(subscription.name, "external_metrics");
+        assert_eq!(subscription.target, "switch");
+        assert_eq!(subscription.origin, "openconfig");
+        assert_eq!(subscription.prefix, ["interfaces"]);
+        assert_eq!(subscription.encoding, NvueGnmiEncoding::JsonIetf);
+        assert!(subscription.updates_only);
+        assert_eq!(subscription.paths.len(), 1);
+        assert_eq!(subscription.metrics.len(), 2);
+
+        assert_eq!(subscription.mode, NvueGnmiSubscriptionMode::Sample);
+        assert_eq!(subscription.sample_interval, Some(Duration::from_secs(10)));
+        assert!(subscription.suppress_redundant);
+
+        assert_eq!(
+            subscription.heartbeat_interval,
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn nvue_gnmi_additional_subscription_validation_cases() {
+        #[derive(Clone, Copy)]
+        enum InvalidCase {
+            DuplicateName,
+            EmptyPath,
+            EmptyMetricPath,
+            SampleWithoutInterval,
+            OnChangeWithSampleInterval,
+            ZeroHeartbeat,
+            DuplicateMetricPath,
+            MissingResponseKeyElement,
+            MetricNameCollision,
+            OutputKindCollision,
+            ReservedMetricLabel,
+            UnboundedInfoValues,
+            MetricOutsideRequestPaths,
+        }
+
+        struct Case {
+            scenario: &'static str,
+            invalid: InvalidCase,
+            expected: &'static str,
+        }
+
+        let cases = [
+            Case {
+                scenario: "duplicate subscription name",
+                invalid: InvalidCase::DuplicateName,
+                expected: ".name duplicates",
+            },
+            Case {
+                scenario: "empty path",
+                invalid: InvalidCase::EmptyPath,
+                expected: ".paths must contain non-empty paths and elements",
+            },
+            Case {
+                scenario: "empty metric path",
+                invalid: InvalidCase::EmptyMetricPath,
+                expected: ".path must contain non-empty elements",
+            },
+            Case {
+                scenario: "sample interval required",
+                invalid: InvalidCase::SampleWithoutInterval,
+                expected: ".sample_interval is required in sample mode",
+            },
+            Case {
+                scenario: "sample interval rejected for on change",
+                invalid: InvalidCase::OnChangeWithSampleInterval,
+                expected: "cannot set sample_interval or suppress_redundant",
+            },
+            Case {
+                scenario: "zero heartbeat",
+                invalid: InvalidCase::ZeroHeartbeat,
+                expected: ".heartbeat_interval must be greater than 0",
+            },
+            Case {
+                scenario: "duplicate metric path",
+                invalid: InvalidCase::DuplicateMetricPath,
+                expected: ".path is duplicated",
+            },
+            Case {
+                scenario: "response key element absent from path",
+                invalid: InvalidCase::MissingResponseKeyElement,
+                expected: "must occur exactly once",
+            },
+            Case {
+                scenario: "different metric fields render the same exported name",
+                invalid: InvalidCase::MetricNameCollision,
+                expected: "renders the same metric name",
+            },
+            Case {
+                scenario: "different output kinds render the same exported name",
+                invalid: InvalidCase::OutputKindCollision,
+                expected: "renders the same metric name",
+            },
+            Case {
+                scenario: "metric label conflicts with endpoint metadata",
+                invalid: InvalidCase::ReservedMetricLabel,
+                expected: "is reserved or duplicated",
+            },
+            Case {
+                scenario: "info values must be finite",
+                invalid: InvalidCase::UnboundedInfoValues,
+                expected: ".output.values must not be empty",
+            },
+            Case {
+                scenario: "metric path outside requested subtrees",
+                invalid: InvalidCase::MetricOutsideRequestPaths,
+                expected: ".path must descend from one of the configured request paths",
+            },
+        ];
+
+        for case in cases {
+            let metric = NvueGnmiMetricConfig {
+                path: vec![
+                    "interface".to_string(),
+                    "state".to_string(),
+                    "value".to_string(),
+                ],
+                metric_type: "configured_value".to_string(),
+                labels: vec![NvueGnmiResponseKeyLabel {
+                    name: "interface_name".to_string(),
+                    element: "interface".to_string(),
+                    key: "name".to_string(),
+                }],
+                output: NvueGnmiMetricOutput::Gauge {
+                    unit: "count".to_string(),
+                },
+            };
+
+            let subscription = NvueGnmiSubscriptionConfig {
+                name: "external_metrics".to_string(),
+                prefix: vec!["interfaces".to_string()],
+                mode: NvueGnmiSubscriptionMode::OnChange,
+                heartbeat_interval: Some(Duration::from_secs(30)),
+                paths: vec![vec!["interface".to_string()]],
+                metrics: vec![metric],
+                ..Default::default()
+            };
+
+            let mut gnmi = NvueGnmiConfig {
+                additional_subscriptions: vec![subscription],
+                ..Default::default()
+            };
+
+            match case.invalid {
+                InvalidCase::DuplicateName => {
+                    gnmi.additional_subscriptions
+                        .push(gnmi.additional_subscriptions[0].clone());
+                }
+                InvalidCase::EmptyPath => {
+                    gnmi.additional_subscriptions[0].paths[0].clear();
+                }
+                InvalidCase::EmptyMetricPath => {
+                    gnmi.additional_subscriptions[0].metrics[0].path.clear();
+                }
+                InvalidCase::SampleWithoutInterval => {
+                    gnmi.additional_subscriptions[0].mode = NvueGnmiSubscriptionMode::Sample;
+                    gnmi.additional_subscriptions[0].heartbeat_interval = None;
+                }
+                InvalidCase::OnChangeWithSampleInterval => {
+                    gnmi.additional_subscriptions[0].sample_interval =
+                        Some(Duration::from_secs(10));
+                }
+                InvalidCase::ZeroHeartbeat => {
+                    gnmi.additional_subscriptions[0].heartbeat_interval = Some(Duration::ZERO);
+                }
+                InvalidCase::DuplicateMetricPath => {
+                    let metric = gnmi.additional_subscriptions[0].metrics[0].clone();
+                    gnmi.additional_subscriptions[0].metrics.push(metric);
+                }
+                InvalidCase::MissingResponseKeyElement => {
+                    gnmi.additional_subscriptions[0].metrics[0].labels[0].element =
+                        "component".to_string();
+                }
+                InvalidCase::MetricNameCollision => {
+                    let mut metric = gnmi.additional_subscriptions[0].metrics[0].clone();
+
+                    metric.path.push("other".to_string());
+
+                    metric.metric_type = "configured".to_string();
+
+                    metric.output = NvueGnmiMetricOutput::Gauge {
+                        unit: "value_count".to_string(),
+                    };
+
+                    gnmi.additional_subscriptions[0].metrics.push(metric);
+                }
+                InvalidCase::OutputKindCollision => {
+                    gnmi.additional_subscriptions[0].metrics[0].output =
+                        NvueGnmiMetricOutput::Gauge {
+                            unit: "state".to_string(),
+                        };
+
+                    let mut metric = gnmi.additional_subscriptions[0].metrics[0].clone();
+
+                    metric.path.push("other".to_string());
+
+                    metric.output = NvueGnmiMetricOutput::StateSet {
+                        states: vec!["healthy".to_string()],
+                    };
+
+                    gnmi.additional_subscriptions[0].metrics.push(metric);
+                }
+                InvalidCase::ReservedMetricLabel => {
+                    gnmi.additional_subscriptions[0].metrics[0].labels[0].name =
+                        "endpoint_key".to_string();
+                }
+                InvalidCase::UnboundedInfoValues => {
+                    gnmi.additional_subscriptions[0].metrics[0].output =
+                        NvueGnmiMetricOutput::Info {
+                            label: "status".to_string(),
+                            values: Vec::new(),
+                        };
+                }
+                InvalidCase::MetricOutsideRequestPaths => {
+                    gnmi.additional_subscriptions[0].paths[0][0] = "component".to_string();
+                }
+            }
+
+            let error = gnmi
+                .validate()
+                .expect_err("invalid additional gNMI subscription should fail validation");
+
+            assert!(
+                error.contains(case.expected),
+                "{}: expected {error:?} to contain {:?}",
+                case.scenario,
+                case.expected
+            );
+
+            assert!(
+                error.contains(if matches!(case.invalid, InvalidCase::DuplicateName) {
+                    "additional_subscriptions[1]"
+                } else {
+                    "additional_subscriptions[0]"
+                }),
+                "{}: {error}",
+                case.scenario
+            );
+        }
     }
 
     #[test]

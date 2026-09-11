@@ -21,13 +21,15 @@ use std::sync::Arc;
 
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
+use carbide_dpf::types::DpuServiceInterfaceTemplateType;
+use carbide_machine_controller::handler::is_bf4_dmi_product;
 use carbide_network::ip::IpAddressFamily;
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::instance_type::InstanceTypeId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineIdSubtypeTrait};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::spx::SpxPartitionId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
@@ -58,7 +60,7 @@ use model::instance::config::network::{
 use model::instance::config::spx::{InstanceSpxConfig, SpxAttachmentType};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
-    HostHealthConfig, LoadSnapshotOptions, Machine, ManagedHostStateSnapshot, NotAllocatableReason,
+    HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnapshot, NotAllocatableReason,
 };
 use model::metadata::Metadata;
 use model::network_segment::NetworkSegmentType;
@@ -143,15 +145,47 @@ async fn validate_zero_dpu_auto_vpc(
     Ok(vpc)
 }
 
+/// Source of the tenant-facing VF inventory provisioned for a managed host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InstanceVfInventorySource {
+    HbnRepresentors,
+    DpfInterceptTopology,
+    Bf4AstraStatic,
+}
+
+/// Selects the VF inventory source using the same BF4 Astra distinction as DPF provisioning.
+pub(crate) fn instance_vf_inventory_source(
+    mh_snapshot: &ManagedHostStateSnapshot,
+) -> InstanceVfInventorySource {
+    if !mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
+        return InstanceVfInventorySource::HbnRepresentors;
+    }
+
+    let all_dpus_are_bf4 = !mh_snapshot.dpu_snapshots.is_empty()
+        && mh_snapshot.dpu_snapshots.iter().all(|dpu| {
+            dpu.status
+                .hardware_info
+                .as_ref()
+                .and_then(|hardware_info| hardware_info.dmi_data.as_ref())
+                .is_some_and(|dmi_data| is_bf4_dmi_product(&dmi_data.product_name))
+        });
+
+    if mh_snapshot.has_astra_nics() && all_dpus_are_bf4 {
+        InstanceVfInventorySource::Bf4AstraStatic
+    } else {
+        InstanceVfInventorySource::DpfInterceptTopology
+    }
+}
+
 /// Rejects instance VFs that are absent from the effective DPU interface inventory.
 ///
-/// A DPF-managed host uses the configured intercept topology as its authoritative inventory. DPF
-/// without a topology retains its historical admission behavior. A non-DPF host follows the HBN
-/// representors selected by `hbn_reps`, capped by the configured hardware VF population.
+/// A BF4 Astra host uses its static provisioned inventory. Other DPF-managed hosts use the
+/// configured intercept topology, while topology-free DPF retains its historical behavior.
+/// A non-DPF host follows `hbn_reps`, capped by the configured hardware VF population.
 pub(crate) fn validate_instance_vfs_against_effective_dpu_inventory(
     network: &InstanceNetworkConfig,
     config: &CarbideConfig,
-    is_dpf_managed_host: bool,
+    inventory_source: InstanceVfInventorySource,
 ) -> CarbideResult<()> {
     validate_vf_ids_against_effective_dpu_inventory(
         network
@@ -162,7 +196,7 @@ pub(crate) fn validate_instance_vfs_against_effective_dpu_inventory(
                 InterfaceFunctionId::Virtual { id } => Some(*id),
             }),
         config,
-        is_dpf_managed_host,
+        inventory_source,
     )
 }
 
@@ -182,13 +216,13 @@ pub(crate) fn requests_implicit_vf_allocation(config: &rpc::InstanceConfig) -> b
 /// Replaces the RPC converter's sequential placeholder IDs with the host's effective VF IDs.
 ///
 /// VF allocation remains independent for each device locator, matching the RPC converter's
-/// historical behavior. DPF-managed hosts without a topology retain their sequential placeholders.
+/// historical behavior. Topology-free non-Astra DPF hosts retain their sequential placeholders.
 pub(crate) fn assign_implicit_instance_vfs_from_effective_dpu_inventory(
     network: &mut InstanceNetworkConfig,
     config: &CarbideConfig,
-    is_dpf_managed_host: bool,
+    inventory_source: InstanceVfInventorySource,
 ) -> CarbideResult<()> {
-    let Some(selected_vfs) = effective_instance_vf_ids(config, is_dpf_managed_host)? else {
+    let Some(selected_vfs) = effective_instance_vf_ids(config, inventory_source)? else {
         return Ok(());
     };
     let selected_vfs = selected_vfs.into_iter().collect_vec();
@@ -208,10 +242,12 @@ pub(crate) fn assign_implicit_instance_vfs_from_effective_dpu_inventory(
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "the default device".to_string());
-            let inventory = if is_dpf_managed_host {
-                "configured DPF intercept-bridging topology"
-            } else {
-                "configured instance VF inventory"
+            let inventory = match inventory_source {
+                InstanceVfInventorySource::HbnRepresentors => "configured instance VF inventory",
+                InstanceVfInventorySource::DpfInterceptTopology => {
+                    "configured DPF intercept-bridging topology"
+                }
+                InstanceVfInventorySource::Bf4AstraStatic => "BF4 Astra static VF inventory",
             };
             return Err(ConfigValidationError::InvalidValue(format!(
                 "cannot implicitly allocate {} virtual functions for {device}; the {inventory} exposes only {}",
@@ -235,10 +271,10 @@ pub(crate) fn assign_implicit_instance_vfs_from_effective_dpu_inventory(
 fn validate_vf_ids_against_effective_dpu_inventory(
     vf_ids: impl IntoIterator<Item = u8>,
     config: &CarbideConfig,
-    is_dpf_managed_host: bool,
+    inventory_source: InstanceVfInventorySource,
 ) -> CarbideResult<()> {
-    let Some(selected_vfs) = effective_instance_vf_ids(config, is_dpf_managed_host)? else {
-        // DPF without a replacement topology retains its historical admission behavior.
+    let Some(selected_vfs) = effective_instance_vf_ids(config, inventory_source)? else {
+        // Non-Astra DPF without a replacement topology retains its historical admission behavior.
         return Ok(());
     };
 
@@ -246,14 +282,16 @@ fn validate_vf_ids_against_effective_dpu_inventory(
         .into_iter()
         .find(|vf_id| !selected_vfs.contains(vf_id))
     {
-        let message = if is_dpf_managed_host {
-            format!(
-                "virtual function VF{unselected_vf} is not selected by the configured DPF intercept-bridging topology"
-            )
-        } else {
-            format!(
+        let message = match inventory_source {
+            InstanceVfInventorySource::HbnRepresentors => format!(
                 "virtual function VF{unselected_vf} is not available in the configured instance VF inventory"
-            )
+            ),
+            InstanceVfInventorySource::DpfInterceptTopology => format!(
+                "virtual function VF{unselected_vf} is not selected by the configured DPF intercept-bridging topology"
+            ),
+            InstanceVfInventorySource::Bf4AstraStatic => format!(
+                "virtual function VF{unselected_vf} is not available in the BF4 Astra static VF inventory"
+            ),
         };
         return Err(ConfigValidationError::InvalidValue(message).into());
     }
@@ -264,13 +302,25 @@ fn validate_vf_ids_against_effective_dpu_inventory(
 /// Returns the authoritative VF inventory, or `None` for topology-free DPF compatibility mode.
 fn effective_instance_vf_ids(
     config: &CarbideConfig,
-    is_dpf_managed_host: bool,
+    inventory_source: InstanceVfInventorySource,
 ) -> CarbideResult<Option<BTreeSet<u8>>> {
-    if is_dpf_managed_host {
-        Ok(dpf_topology_vf_ids(config))
-    } else {
-        configured_instance_vf_ids(config).map(Some)
+    match inventory_source {
+        InstanceVfInventorySource::HbnRepresentors => configured_instance_vf_ids(config).map(Some),
+        InstanceVfInventorySource::DpfInterceptTopology => Ok(dpf_topology_vf_ids(config)),
+        InstanceVfInventorySource::Bf4AstraStatic => Ok(Some(bf4_astra_instance_vf_ids())),
     }
+}
+
+/// Returns the tenant VFs from the same static interface inventory provisioned for BF4 Astra.
+fn bf4_astra_instance_vf_ids() -> BTreeSet<u8> {
+    carbide_dpf::sdk::build_dpu_interfaces_vec()
+        .into_iter()
+        .filter(|interface| {
+            interface.pf_id == 0
+                && matches!(&interface.iface_type, DpuServiceInterfaceTemplateType::Vf)
+        })
+        .filter_map(|interface| u8::try_from(interface.vf_id).ok())
+        .collect()
 }
 
 /// Default instance VF count when no representor selection is configured.
@@ -395,7 +445,7 @@ pub(crate) async fn validate_os_definition_usable(
 #[derive(Debug)]
 pub(crate) struct InstanceAllocationRequest {
     /// The Machine on top of which we create an Instance
-    pub(crate) machine_id: MachineId,
+    pub(crate) machine_id: HostMachineId,
 
     /// The expected InstanceTypeId of the source
     /// machine for the instance.
@@ -462,7 +512,7 @@ impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
         Ok(InstanceAllocationRequest {
             instance_id,
             instance_type_id,
-            machine_id,
+            machine_id: machine_id.into(),
             config,
             implicit_vf_allocation,
             metadata,
@@ -1526,7 +1576,7 @@ pub(crate) async fn allocate_network(
 
 pub(crate) fn allocate_ib_port_guid(
     ib_config: &InstanceInfinibandConfig,
-    machine: &Machine,
+    machine: &model::machine::Machine<impl MachineIdSubtypeTrait>,
 ) -> CarbideResult<InstanceInfinibandConfig> {
     let mut updated_ib_config = ib_config.clone();
 
@@ -1740,7 +1790,7 @@ pub(crate) async fn load_extension_services(
 /// attachment still occupies the DPU-agent or the DPF delivery path until its
 /// cleanup finishes, so an instance may never straddle both.
 pub(crate) fn validate_instance_extension_services(
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     is_dpf_managed_host: bool,
     extension_services: &InstanceExtensionServicesConfig,
     services: &HashMap<ExtensionServiceId, ExtensionService>,
@@ -1836,7 +1886,10 @@ pub(crate) fn validate_instance_extension_services(
     Ok(())
 }
 
-fn not_allocatable_error(machine_id: MachineId, reason: NotAllocatableReason) -> CarbideError {
+fn not_allocatable_error(
+    machine_id: impl MachineIdSubtypeTrait,
+    reason: NotAllocatableReason,
+) -> CarbideError {
     match reason {
         NotAllocatableReason::InvalidState(state) => CarbideError::InvalidArgument(format!(
             "could not create instance on machine {machine_id} given machine state {state:?}"
@@ -1988,7 +2041,7 @@ pub(crate) async fn batch_allocate_instances(
     }
 
     // ==== Phase 3: Batch query machines (FOR UPDATE) ====
-    let machine_ids: Vec<_> = requests.iter().map(|r| r.machine_id).collect();
+    let machine_ids: Vec<HostMachineId> = requests.iter().map(|r| r.machine_id).collect();
 
     // Grab a row-level locks on the requested machines
     let machines = db::machine::find(
@@ -2032,20 +2085,12 @@ pub(crate) async fn batch_allocate_instances(
     let dpa_search_config = DpaSearchConfig::default();
     let snapshot_ids: Vec<carbide_uuid::machine::HostMachineId> = snapshot_map
         .values()
-        .map(|snapshot| {
-            snapshot
-                .host_snapshot
-                .host_machine_id()
-                .map_err(|error| CarbideError::internal(error.to_string()))
-        })
-        .collect::<Result<_, _>>()?;
+        .map(|snapshot| snapshot.host_snapshot.id)
+        .collect();
     let mut dpa_interfaces_by_machine =
         db::dpa_interface::find_by_machine_ids(&mut txn, &snapshot_ids, dpa_search_config).await?;
     for snapshot in snapshot_map.values_mut() {
-        let host_machine_id = snapshot
-            .host_snapshot
-            .host_machine_id()
-            .map_err(|error| CarbideError::internal(error.to_string()))?;
+        let host_machine_id = snapshot.host_snapshot.id;
         snapshot.dpa_interface_snapshots = dpa_interfaces_by_machine
             .remove(&host_machine_id)
             .unwrap_or_default();
@@ -2243,12 +2288,13 @@ pub(crate) async fn batch_allocate_instances(
                 kind: "machine",
                 id: machine_id.to_string(),
             })?;
+        let vf_inventory_source = instance_vf_inventory_source(&mh_snapshot);
 
         if request.implicit_vf_allocation {
             assign_implicit_instance_vfs_from_effective_dpu_inventory(
                 &mut request.config.network,
                 &api.runtime_config,
-                mh_snapshot.host_snapshot.config.dpf.used_for_ingestion,
+                vf_inventory_source,
             )?;
         }
 
@@ -2264,7 +2310,7 @@ pub(crate) async fn batch_allocate_instances(
         validate_instance_vfs_against_effective_dpu_inventory(
             &request.config.network,
             &api.runtime_config,
-            mh_snapshot.host_snapshot.config.dpf.used_for_ingestion,
+            vf_inventory_source,
         )?;
         validate_instance_interface_routing_profiles(
             &mut txn,
@@ -2555,7 +2601,7 @@ pub(crate) async fn batch_allocate_instances(
     db::instance::batch_update_spx_config(&mut txn, &spx_refs, false).await?;
 
     // ==== Phase 9: Load final instances ====
-    let machine_id_refs: Vec<&MachineId> = processed_requests
+    let machine_id_refs: Vec<&HostMachineId> = processed_requests
         .iter()
         .map(|(r, _)| &r.machine_id)
         .collect();
@@ -3010,34 +3056,39 @@ mod tests {
         enum InventoryMode {
             DpfTopology(&'static [u8]),
             DpfWithoutTopology,
+            Bf4Astra(&'static [u8]),
             NonDpf(&'static [u8]),
         }
 
         value_scenarios!(
             run = |(mode, requested_vfs)| {
-                let (config, is_dpf_managed_host) = match mode {
+                let (config, inventory_source) = match mode {
                     InventoryMode::DpfTopology(vf_ids) => {
                         let mut config =
                             crate::test_support::default_config::with_dpf_intercept_topology(vf_ids);
                         // The host's observed provisioning path, not the current site flag, owns
                         // admission behavior.
                         config.dpf.enabled = false;
-                        (config, true)
+                        (config, InstanceVfInventorySource::DpfInterceptTopology)
                     }
                     InventoryMode::DpfWithoutTopology => {
                         let mut config = crate::test_support::default_config::get();
                         config.vmaas_config = None;
-                        (config, true)
+                        (config, InstanceVfInventorySource::DpfInterceptTopology)
                     }
+                    InventoryMode::Bf4Astra(vf_ids) => (
+                        crate::test_support::default_config::with_dpf_intercept_topology(vf_ids),
+                        InstanceVfInventorySource::Bf4AstraStatic,
+                    ),
                     InventoryMode::NonDpf(vf_ids) => (
                         crate::test_support::default_config::with_dpf_intercept_topology(vf_ids),
-                        false,
+                        InstanceVfInventorySource::HbnRepresentors,
                     ),
                 };
                 validate_vf_ids_against_effective_dpu_inventory(
                     requested_vfs,
                     &config,
-                    is_dpf_managed_host,
+                    inventory_source,
                 )
                 .is_ok()
             };
@@ -3070,6 +3121,14 @@ mod tests {
                 (InventoryMode::DpfWithoutTopology, vec![14]) => true,
             }
 
+            "BF4 Astra ignores a conflicting intercept topology" {
+                (InventoryMode::Bf4Astra(&[14]), vec![0]) => true,
+            }
+
+            "BF4 Astra rejects a topology-only VF" {
+                (InventoryMode::Bf4Astra(&[14]), vec![14]) => false,
+            }
+
             "non-DPF host ignores the configured DPF topology" {
                 (InventoryMode::NonDpf(&[7]), vec![0]) => true,
             }
@@ -3086,7 +3145,7 @@ mod tests {
         let error = validate_vf_ids_against_effective_dpu_inventory(
             [14],
             &crate::test_support::default_config::get(),
-            false,
+            InstanceVfInventorySource::HbnRepresentors,
         )
         .expect_err("VF14 must be absent from the configured instance VF inventory");
         assert_eq!(
@@ -3125,8 +3184,12 @@ mod tests {
             .hbn_reps = Some("pf0hpf,pf0vf2,pf0vf5,pf1hpf".to_string());
         let mut network = implicit_vf_network(&[0, 0, 1]);
 
-        assign_implicit_instance_vfs_from_effective_dpu_inventory(&mut network, &config, false)
-            .unwrap();
+        assign_implicit_instance_vfs_from_effective_dpu_inventory(
+            &mut network,
+            &config,
+            InstanceVfInventorySource::HbnRepresentors,
+        )
+        .unwrap();
 
         assert_eq!(
             network
@@ -3152,9 +3215,12 @@ mod tests {
             .hbn_reps = Some("pf0hpf,pf0vf2,pf1hpf".to_string());
         let mut network = implicit_vf_network(&[0, 0]);
 
-        let error =
-            assign_implicit_instance_vfs_from_effective_dpu_inventory(&mut network, &config, false)
-                .expect_err("one selected VF cannot satisfy two implicit VF requests");
+        let error = assign_implicit_instance_vfs_from_effective_dpu_inventory(
+            &mut network,
+            &config,
+            InstanceVfInventorySource::HbnRepresentors,
+        )
+        .expect_err("one selected VF cannot satisfy two implicit VF requests");
 
         assert_eq!(
             error.to_string(),
@@ -3168,8 +3234,12 @@ mod tests {
         config.vmaas_config = None;
         let mut network = implicit_vf_network(&[0, 0]);
 
-        assign_implicit_instance_vfs_from_effective_dpu_inventory(&mut network, &config, true)
-            .unwrap();
+        assign_implicit_instance_vfs_from_effective_dpu_inventory(
+            &mut network,
+            &config,
+            InstanceVfInventorySource::DpfInterceptTopology,
+        )
+        .unwrap();
 
         assert_eq!(
             network
@@ -3181,6 +3251,31 @@ mod tests {
                 })
                 .collect_vec(),
             vec![0, 1],
+        );
+    }
+
+    #[test]
+    fn bf4_astra_implicit_vfs_ignore_intercept_topology() {
+        let config = crate::test_support::default_config::with_dpf_intercept_topology(&[14]);
+        let mut network = implicit_vf_network(&[0]);
+
+        assign_implicit_instance_vfs_from_effective_dpu_inventory(
+            &mut network,
+            &config,
+            InstanceVfInventorySource::Bf4AstraStatic,
+        )
+        .unwrap();
+
+        assert_eq!(
+            network
+                .interfaces
+                .iter()
+                .filter_map(|interface| match &interface.function_id {
+                    InterfaceFunctionId::Physical {} => None,
+                    InterfaceFunctionId::Virtual { id } => Some(*id),
+                })
+                .collect_vec(),
+            vec![0],
         );
     }
 
@@ -3277,9 +3372,10 @@ mod tests {
 
     #[test]
     fn pending_boot_configuration_has_a_safe_allocation_error() {
-        let machine_id = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
-            .parse()
-            .unwrap();
+        let machine_id: carbide_uuid::machine::StableHostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+                .parse()
+                .unwrap();
 
         assert!(matches!(
             not_allocatable_error(

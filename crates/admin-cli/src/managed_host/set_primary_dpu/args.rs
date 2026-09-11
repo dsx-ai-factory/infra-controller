@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, StableHostMachineId};
 use clap::Parser;
 use rpc::forge as forgerpc;
 
@@ -34,9 +34,9 @@ Request another reconciliation for the selected DPU:
 ")]
 pub(crate) struct Args {
     #[clap(help = "ID of the host machine")]
-    host_machine_id: MachineId,
+    host_machine_id: StableHostMachineId,
     #[clap(help = "ID of the DPU machine to make primary")]
-    dpu_machine_id: MachineId,
+    dpu_machine_id: DpuMachineId,
     #[clap(
         long,
         help = "Request a fresh machine-controller reconciliation even when this DPU is already selected. Sends only force_reconcile=true; servers without force_reconcile support ignore it, while supporting servers leave any required restart to machine-controller"

@@ -16,33 +16,25 @@
  */
 //! DHCPv6 decode and identity selection for the Kea hook.
 //!
-//! This module is intentionally not a general DHCPv6 implementation. Kea still
-//! owns the DHCP state machine and `dhcproto` decodes normal client messages;
-//! the local raw parsing is limited to the hook boundary where we must recover
-//! one-hop relay metadata, enforce relay trust rules, and select the client
-//! identity before calling the Carbide API. Kea may provide that relay metadata
-//! as a side-channel after unwrapping the packet, or leave it in the raw wire
-//! bytes, so this module handles both shapes with the same policy.
+//! Kea owns the DHCP state machine, while `carbide-dhcpv6` owns policy-neutral
+//! wire decoding. This adapter adds Kea's relay side-channel, message policy,
+//! and authoritative client-identity selection before calling the Carbide API.
+//! Kea may provide relay metadata through that side channel after unwrapping
+//! the packet, or leave it in the raw wire bytes, so both shapes are supported.
 
 use std::ffi::CString;
 use std::net::Ipv6Addr;
 
+#[cfg(test)]
+use carbide_dhcpv6::{DUID_MAX_LENGTH, DuidError};
+use carbide_dhcpv6::{
+    DecodeError as WireDecodeError, DecodedPacket as WirePacket, DuidMac, RELAY_FORWARD,
+    RELAY_REPLY, decode as decode_wire_packet, decode_client_message, extract_mac_from_duid,
+    extract_mac_from_option79,
+};
 use dhcproto::v6::{DhcpOption, Message, MessageType, OptionCode};
-use dhcproto::{Decodable, Decoder};
 use mac_address::MacAddress;
 use rpc::forge as rpc;
-
-const DHCPV6_RELAY_FORW: u8 = 12;
-const DHCPV6_RELAY_REPL: u8 = 13;
-const DUID_LLT: u16 = 1;
-const DUID_EN: u16 = 2;
-const DUID_LL: u16 = 3;
-const DUID_UUID: u16 = 4;
-const HTYPE_ETHERNET: u16 = 1;
-const ETHERNET_MAC_LEN: usize = 6;
-const DUID_EN_MIN_LEN: usize = 7;
-const DUID_MAX_LEN: usize = 128;
-const DUID_UUID_LEN: usize = 18;
 
 /// Supplemental relay metadata from Kea when it has already unwrapped the relay envelope.
 #[derive(Debug, Default, Clone)]
@@ -84,25 +76,6 @@ pub(super) enum V6DecodeError {
     UnsupportedMessage(MessageType),
 }
 
-/// Result of parsing a DUID for a link-layer identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DuidMac {
-    Mac(MacAddress),
-    NoLinkLayerMac,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DuidError {
-    Malformed,
-    UnsupportedType,
-}
-
-#[derive(Debug)]
-struct RawOption<'a> {
-    code: u16,
-    data: &'a [u8],
-}
-
 /// Decode a DHCPv6 packet without any Kea-provided relay fallback metadata.
 #[cfg(test)]
 fn decode(packet: &[u8]) -> Result<V6Discovery, V6DecodeError> {
@@ -119,8 +92,8 @@ pub(super) fn decode_with_relay_context(
     }
 
     let decoded = match packet.first().copied() {
-        Some(DHCPV6_RELAY_FORW) => decode_relay_forward(packet)?,
-        Some(DHCPV6_RELAY_REPL) => {
+        Some(RELAY_FORWARD) => decode_relay_forward(packet)?,
+        Some(RELAY_REPLY) => {
             return Err(V6DecodeError::UnsupportedMessage(MessageType::RelayRepl));
         }
         Some(_) => decode_direct(packet, relay_context)?,
@@ -128,38 +101,6 @@ pub(super) fn decode_with_relay_context(
     };
 
     select_identity(decoded)
-}
-
-/// Extract an Ethernet MAC from a DUID-LL or DUID-LLT byte string.
-fn extract_mac_from_duid(duid: &[u8]) -> Result<DuidMac, DuidError> {
-    // Kea caps DUIDs at RFC 8415's 128-byte maximum.
-    if duid.len() < 2 || duid.len() > DUID_MAX_LEN {
-        return Err(DuidError::Malformed);
-    }
-
-    let duid_type = u16::from_be_bytes([duid[0], duid[1]]);
-    match duid_type {
-        DUID_LLT => parse_link_layer_duid(&duid[2..], 4),
-        DUID_LL => parse_link_layer_duid(&duid[2..], 0),
-        DUID_EN if duid.len() >= DUID_EN_MIN_LEN => Ok(DuidMac::NoLinkLayerMac),
-        DUID_UUID if duid.len() == DUID_UUID_LEN => Ok(DuidMac::NoLinkLayerMac),
-        DUID_EN | DUID_UUID => Err(DuidError::Malformed),
-        _ => Err(DuidError::UnsupportedType),
-    }
-}
-
-/// Parse RFC 6939 option 79 and return an Ethernet MAC when it carries one.
-fn extract_mac_from_option79(payload: &[u8]) -> Option<MacAddress> {
-    if payload.len() != 2 + ETHERNET_MAC_LEN {
-        return None;
-    }
-
-    let htype = u16::from_be_bytes([payload[0], payload[1]]);
-    (htype == HTYPE_ETHERNET).then(|| {
-        MacAddress::new([
-            payload[2], payload[3], payload[4], payload[5], payload[6], payload[7],
-        ])
-    })
 }
 
 /// Return a newly allocated MAC string extracted from a DHCPv6 DUID.
@@ -203,27 +144,6 @@ pub unsafe extern "C" fn carbide_free_mac_string(mac: *mut libc::c_char) {
     }
 }
 
-/// Parse the link-layer payload portion shared by DUID-LL and DUID-LLT.
-fn parse_link_layer_duid(bytes: &[u8], payload_offset: usize) -> Result<DuidMac, DuidError> {
-    if bytes.len() < 2 + payload_offset + ETHERNET_MAC_LEN {
-        return Err(DuidError::Malformed);
-    }
-
-    let htype = u16::from_be_bytes([bytes[0], bytes[1]]);
-    if htype != HTYPE_ETHERNET {
-        return Err(DuidError::UnsupportedType);
-    }
-
-    let mac = &bytes[2 + payload_offset..];
-    if mac.len() != ETHERNET_MAC_LEN {
-        return Err(DuidError::Malformed);
-    }
-
-    Ok(DuidMac::Mac(MacAddress::new([
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-    ])))
-}
-
 #[derive(Debug)]
 struct DecodedV6 {
     message: Message,
@@ -235,7 +155,9 @@ struct DecodedV6 {
 
 /// Decode a client packet while preserving Kea-provided relay metadata.
 fn decode_direct(packet: &[u8], relay_context: &RelayContext) -> Result<DecodedV6, V6DecodeError> {
-    if relay_context.hop_count > 1 {
+    // Once Kea strips the relay envelope, a nonzero hop count cannot be proven
+    // to fit the supported one-envelope topology, so fail closed.
+    if relay_context.hop_count != 0 {
         return Err(V6DecodeError::RelayHopCountExceeded(
             relay_context.hop_count,
         ));
@@ -243,8 +165,7 @@ fn decode_direct(packet: &[u8], relay_context: &RelayContext) -> Result<DecodedV
 
     // Kea may have stripped the relay envelope already; keep its relay fields
     // only as fallback metadata and let the packet body drive message parsing.
-    let message =
-        Message::decode(&mut Decoder::new(packet)).map_err(|_| V6DecodeError::MalformedPacket)?;
+    let message = decode_client_message(packet).map_err(map_wire_error)?;
     Ok(DecodedV6 {
         message,
         relay_link: relay_context.link_address,
@@ -254,55 +175,35 @@ fn decode_direct(packet: &[u8], relay_context: &RelayContext) -> Result<DecodedV
     })
 }
 
-/// Decode one relay-forward envelope and its direct client message.
-///
-/// `dhcproto` handles the inner client message, but relay envelopes need a
-/// narrow raw-TLV pass here. In `dhcproto 0.15`, option 9 is modeled as another
-/// `RelayMessage`; for our authoritative path it normally carries a direct
-/// client message, and nested relay is intentionally rejected by policy.
+/// Decode one relay-forward envelope through the shared wire codec.
 fn decode_relay_forward(packet: &[u8]) -> Result<DecodedV6, V6DecodeError> {
-    if packet.len() < 34 {
-        return Err(V6DecodeError::MalformedPacket);
-    }
-    let hop_count = packet[1];
-    if hop_count > 1 {
-        return Err(V6DecodeError::RelayHopCountExceeded(hop_count));
-    }
-
-    let link_address = Ipv6Addr::from(
-        <[u8; 16]>::try_from(&packet[2..18]).map_err(|_| V6DecodeError::MalformedPacket)?,
-    );
-    let options = parse_raw_options(&packet[34..])?;
-    let relay_messages = options
-        .iter()
-        .filter(|option| option.code == u16::from(OptionCode::RelayMsg))
-        .map(|option| option.data)
-        .collect::<Vec<_>>();
-    // Kea keeps only one decoded Relay Message for later processing. Reject
-    // duplicates so identity selection cannot observe a different client.
-    let relay_message = match relay_messages.as_slice() {
-        [relay_message] => *relay_message,
-        _ => return Err(V6DecodeError::MalformedPacket),
-    };
-
-    // Nested relay is deliberately unsupported because segment selection would
-    // otherwise need a clear policy for which relay link-address wins.
-    if matches!(
-        relay_message.first().copied(),
-        Some(DHCPV6_RELAY_FORW) | Some(DHCPV6_RELAY_REPL)
-    ) {
-        return Err(V6DecodeError::NestedRelay);
-    }
-
-    let message = Message::decode(&mut Decoder::new(relay_message))
-        .map_err(|_| V6DecodeError::MalformedPacket)?;
+    let WirePacket { message, relay } = decode_wire_packet(packet).map_err(map_wire_error)?;
+    let relay = relay.ok_or(V6DecodeError::MalformedPacket)?;
     Ok(DecodedV6 {
         message,
-        relay_link: Some(link_address),
-        interface_id: raw_option_bytes(&options, OptionCode::InterfaceId),
-        remote_id: raw_option_bytes(&options, OptionCode::RemoteId),
-        client_link_layer: raw_option_bytes(&options, OptionCode::ClientLinklayerAddr),
+        relay_link: Some(relay.link_address),
+        interface_id: relay.interface_id,
+        remote_id: relay.remote_id,
+        client_link_layer: relay.client_link_layer,
     })
+}
+
+/// Translate policy-neutral wire failures into Kea hook outcomes.
+fn map_wire_error(error: WireDecodeError) -> V6DecodeError {
+    match error {
+        // The Kea boundary has one stable malformed-packet outcome for
+        // structural, client-decode, and missing-envelope failures.
+        WireDecodeError::MalformedPacket(_)
+        | WireDecodeError::ClientMessageDecode(_)
+        | WireDecodeError::MissingRelayMessage => V6DecodeError::MalformedPacket,
+        WireDecodeError::NestedRelay => V6DecodeError::NestedRelay,
+        WireDecodeError::RelayHopCountExceeded(hop_count) => {
+            V6DecodeError::RelayHopCountExceeded(hop_count)
+        }
+        WireDecodeError::UnexpectedRelayReply => {
+            V6DecodeError::UnsupportedMessage(MessageType::RelayRepl)
+        }
+    }
 }
 
 /// Select the MAC identity and transport fields sent to the Carbide API.
@@ -439,37 +340,6 @@ fn vendor_class(options: &dhcproto::v6::DhcpOptions) -> Option<String> {
     }
 }
 
-/// Parse raw DHCPv6 option TLVs from a relay envelope.
-fn parse_raw_options(mut bytes: &[u8]) -> Result<Vec<RawOption<'_>>, V6DecodeError> {
-    let mut options = Vec::new();
-    while !bytes.is_empty() {
-        if bytes.len() < 4 {
-            return Err(V6DecodeError::MalformedPacket);
-        }
-
-        let code = u16::from_be_bytes([bytes[0], bytes[1]]);
-        let len = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
-        bytes = &bytes[4..];
-        if bytes.len() < len {
-            return Err(V6DecodeError::MalformedPacket);
-        }
-
-        let (data, rest) = bytes.split_at(len);
-        options.push(RawOption { code, data });
-        bytes = rest;
-    }
-
-    Ok(options)
-}
-
-/// Return an owned copy of one raw relay option payload.
-fn raw_option_bytes(options: &[RawOption<'_>], code: OptionCode) -> Option<Vec<u8>> {
-    options
-        .iter()
-        .find(|option| option.code == u16::from(code))
-        .map(|option| option.data.to_vec())
-}
-
 #[cfg(test)]
 mod tests {
     use dhcproto::v6::{DhcpOption, IAAddr, IANA, IAPD, IATA, UnknownOption};
@@ -572,18 +442,28 @@ mod tests {
             DuidMac::NoLinkLayerMac
         );
         assert_eq!(
-            extract_mac_from_duid(&duid_en(DUID_MAX_LEN)).unwrap(),
+            extract_mac_from_duid(&duid_en(DUID_MAX_LENGTH)).unwrap(),
             DuidMac::NoLinkLayerMac
         );
         assert_eq!(
             extract_mac_from_duid(DUID_UUID).unwrap(),
             DuidMac::NoLinkLayerMac
         );
+        assert_eq!(
+            extract_mac_from_duid(&[0, 99, 0, 1, 2, 3]).unwrap(),
+            DuidMac::NoLinkLayerMac
+        );
+        // A valid non-Ethernet DUID-LL is still a usable DHCP identity even
+        // though this Ethernet-specific helper cannot extract its address.
+        assert_eq!(
+            extract_mac_from_duid(&[0, 3, 0, 32, 2, 0, 0, 0, 0, 1]).unwrap(),
+            DuidMac::NoLinkLayerMac
+        );
     }
 
     #[test]
     fn rejects_malformed_duids() {
-        // Truncated and unknown DUID forms cannot safely identify the client.
+        // Truncated DUID forms cannot safely identify the client.
         assert_eq!(extract_mac_from_duid(&[0]), Err(DuidError::Malformed));
         assert_eq!(
             extract_mac_from_duid(&[0, 2, 0, 0, 0, 1]),
@@ -594,23 +474,15 @@ mod tests {
             Err(DuidError::Malformed)
         );
         assert_eq!(
-            extract_mac_from_duid(&duid_en(DUID_MAX_LEN + 1)),
+            extract_mac_from_duid(&duid_en(DUID_MAX_LENGTH + 1)),
             Err(DuidError::Malformed)
-        );
-        assert_eq!(
-            extract_mac_from_duid(&[0, 99, 0, 1, 2, 3]),
-            Err(DuidError::UnsupportedType)
-        );
-        assert_eq!(
-            extract_mac_from_duid(&[0, 3, 0, 32, 2, 0, 0, 0, 0, 1]),
-            Err(DuidError::UnsupportedType)
         );
     }
 
     #[test]
     fn parses_option79_ethernet_mac() {
-        // Option 79 is decoded as Unknown by dhcproto, so we hand-parse the
-        // link-layer type and address payload here.
+        // Option 79 is decoded as Unknown by dhcproto, so the shared decoder
+        // hand-parses its link-layer type and address payload.
         assert_eq!(
             extract_mac_from_option79(OPTION79),
             Some("02:aa:bb:cc:dd:ee".parse().unwrap())
@@ -637,7 +509,7 @@ mod tests {
         // A one-hop relay supplies segment metadata and option 79; option 79
         // wins over the MAC embedded in DUID-LL/LLT.
         let inner = encode_message(client_message(MessageType::Solicit, true, DUID_LL));
-        let decoded = decode(&relay_forward(&inner, 1)).unwrap();
+        let decoded = decode(&relay_forward(&inner, 0)).unwrap();
 
         assert_eq!(decoded.selected_mac, "02:aa:bb:cc:dd:ee".parse().unwrap());
         assert_eq!(
@@ -662,7 +534,7 @@ mod tests {
             &packet,
             &RelayContext {
                 relay_count: 1,
-                hop_count: 1,
+                hop_count: 0,
                 link_address: Some("2001:db8::10".parse().unwrap()),
                 interface_id: Some(b"swp1".to_vec()),
                 remote_id: None,
@@ -676,6 +548,36 @@ mod tests {
         assert_eq!(
             message_kind_for(decoded.message_type, decoded.has_ia_na),
             Some(rpc::MessageKind::V6InfoRequest)
+        );
+    }
+
+    /// Verifies Kea's unwrapped relay representation preserves the shared
+    /// single-envelope rule that only a zero hop count can carry a client.
+    #[test]
+    fn rejects_unwrapped_packet_with_nonzero_hop_count() {
+        // Supply an ordinary client body exactly as Kea does after removing
+        // the outer Relay-Forward envelope.
+        let packet = encode_message(client_message(
+            MessageType::InformationRequest,
+            false,
+            DUID_LL,
+        ));
+
+        // A nonzero count implies another relay envelope, which this
+        // compatibility representation cannot preserve.
+        assert_eq!(
+            decode_with_relay_context(
+                &packet,
+                &RelayContext {
+                    relay_count: 1,
+                    hop_count: 1,
+                    link_address: Some("2001:db8::10".parse().unwrap()),
+                    interface_id: Some(b"swp1".to_vec()),
+                    remote_id: None,
+                    client_link_layer: None,
+                },
+            ),
+            Err(V6DecodeError::RelayHopCountExceeded(1))
         );
     }
 
@@ -713,32 +615,29 @@ mod tests {
         let inner = encode_message(client_message(MessageType::Solicit, true, DUID_UUID));
 
         assert_eq!(
-            decode(&relay_forward(&inner, 1)).unwrap().selected_mac,
+            decode(&relay_forward(&inner, 0)).unwrap().selected_mac,
             "02:aa:bb:cc:dd:ee".parse().unwrap()
         );
     }
 
     #[test]
     fn drops_malformed_duid_even_with_relay_option79() {
-        // Relay option 79 only helps valid non-MAC DUIDs; malformed or
-        // unhandled DUID forms are unsupported before MAC selection.
+        // Relay option 79 only helps valid non-MAC DUIDs; malformed DUID forms
+        // are rejected before MAC selection.
         let truncated = encode_message(client_message(
             MessageType::Solicit,
             true,
             &[0, 4, 0, 1, 2, 3],
         ));
-        let non_ethernet = encode_message(client_message(
-            MessageType::Solicit,
-            true,
-            &[0, 3, 0, 32, 2, 0, 0, 0, 0, 1],
-        ));
+        let missing_link_layer_address =
+            encode_message(client_message(MessageType::Solicit, true, &[0, 3, 0, 32]));
 
         assert_eq!(
-            decode(&relay_forward(&truncated, 1)),
+            decode(&relay_forward(&truncated, 0)),
             Err(V6DecodeError::UnsupportedDuid)
         );
         assert_eq!(
-            decode(&relay_forward(&non_ethernet, 1)),
+            decode(&relay_forward(&missing_link_layer_address, 0)),
             Err(V6DecodeError::UnsupportedDuid)
         );
     }
@@ -889,29 +788,29 @@ mod tests {
     #[test]
     fn drops_oversized_duid_en_even_with_relay_option79() {
         // Relay option 79 may supply the MAC, but the DUID still has to fit
-        // Kea and RFC 8415 length limits.
+        // Kea and RFC 9915 length limits.
         let inner = encode_message(client_message(
             MessageType::Solicit,
             true,
-            &duid_en(DUID_MAX_LEN + 1),
+            &duid_en(DUID_MAX_LENGTH + 1),
         ));
 
         assert_eq!(
-            decode(&relay_forward(&inner, 1)),
+            decode(&relay_forward(&inner, 0)),
             Err(V6DecodeError::UnsupportedDuid)
         );
     }
 
     #[test]
-    fn rejects_nested_or_multi_hop_relay() {
+    fn rejects_nested_or_nonzero_hop_relay() {
         // Multi-hop relay handling needs an explicit segment precedence rule,
         // so this milestone rejects it instead of serving silently.
         let inner = encode_message(client_message(MessageType::Solicit, true, DUID_LL));
-        let nested = relay_forward(&relay_forward(&inner, 1), 1);
+        let nested = relay_forward(&relay_forward(&inner, 0), 0);
 
         assert_eq!(
-            decode(&relay_forward(&inner, 2)),
-            Err(V6DecodeError::RelayHopCountExceeded(2))
+            decode(&relay_forward(&inner, 1)),
+            Err(V6DecodeError::RelayHopCountExceeded(1))
         );
         assert_eq!(decode(&nested), Err(V6DecodeError::NestedRelay));
     }

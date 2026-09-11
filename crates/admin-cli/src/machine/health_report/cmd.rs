@@ -193,7 +193,7 @@ pub(super) async fn handle_health_report(
 
             api_client
                 .machine_insert_health_report_override(
-                    options.machine_id,
+                    &options.machine_id,
                     report.into(),
                     options.replace,
                 )

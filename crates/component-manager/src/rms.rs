@@ -31,6 +31,7 @@ use carbide_rack::rms_node_type::{
 };
 use carbide_secrets::credentials::Credentials;
 use carbide_uuid::rack::RackProfileId;
+use db::direct_dispatch_firmware_job::FirmwareJobKind;
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use librms::{RackManagerError, RmsApi};
 use mac_address::MacAddress;
@@ -74,6 +75,20 @@ struct RmsIdentity {
     rack_profile_id: Option<RackProfileId>,
 }
 
+/// A pre-ingestion switch has no `switches` row, so its BMC MAC is the opaque
+/// RMS `node_id` (RMS treats `node_id` as a string, and the request also carries
+/// the full node descriptor and endpoints). Every switch is rack-scale, so the
+/// rack identity comes straight from the expected inventory.
+impl From<db::expected_switch::PreIngestionSwitchRmsIdentity> for RmsIdentity {
+    fn from(row: db::expected_switch::PreIngestionSwitchRmsIdentity) -> Self {
+        Self {
+            node_id: row.bmc_mac_address.to_string(),
+            rack_id: row.rack_id.to_string(),
+            rack_profile_id: row.rack_profile_id,
+        }
+    }
+}
+
 struct ResolvedRmsNode<'a> {
     identity: &'a RmsIdentity,
     node_identity: RmsNodeIdentity,
@@ -94,6 +109,34 @@ enum SwitchOrPowerShelfRole {
 enum RmsTrackedFirmwareJob {
     FirmwareObject(String),
     SwitchSystemImage(String),
+}
+
+impl RmsTrackedFirmwareJob {
+    /// The [`FirmwareJobKind`] this job persists under in
+    /// `direct_dispatch_firmware_update_jobs`, so it can be rebuilt (and its
+    /// backend re-queried) after a restart clears the in-memory job map.
+    fn kind(&self) -> FirmwareJobKind {
+        match self {
+            RmsTrackedFirmwareJob::FirmwareObject(_) => FirmwareJobKind::FirmwareObject,
+            RmsTrackedFirmwareJob::SwitchSystemImage(_) => FirmwareJobKind::SwitchSystemImage,
+        }
+    }
+
+    /// Backend job id this job tracks.
+    fn job_id(&self) -> &str {
+        match self {
+            RmsTrackedFirmwareJob::FirmwareObject(job_id)
+            | RmsTrackedFirmwareJob::SwitchSystemImage(job_id) => job_id,
+        }
+    }
+
+    /// Rebuild a tracked job from a persisted `(job_kind, job_id)` row.
+    fn from_persisted(job_kind: FirmwareJobKind, job_id: String) -> Self {
+        match job_kind {
+            FirmwareJobKind::FirmwareObject => RmsTrackedFirmwareJob::FirmwareObject(job_id),
+            FirmwareJobKind::SwitchSystemImage => RmsTrackedFirmwareJob::SwitchSystemImage(job_id),
+        }
+    }
 }
 
 // The direct RMS path matches the rack-maintenance flow and applies production
@@ -165,9 +208,9 @@ pub struct RmsBackend {
     switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
     db: PgPool,
     rack_profiles: Arc<RackProfileConfig>,
+
     /// Tracks firmware update job IDs keyed by device MAC address.
     firmware_jobs: Mutex<HashMap<MacAddress, Vec<RmsTrackedFirmwareJob>>>,
-    nvos_password_rotation_enabled: bool,
 }
 
 #[async_trait::async_trait]
@@ -516,7 +559,7 @@ impl RmsBackend {
         switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
         db: PgPool,
         rack_profiles: Arc<RackProfileConfig>,
-        nvos_password_rotation_enabled: bool,
+        _nvos_password_rotation_enabled: bool,
     ) -> Self {
         Self {
             client,
@@ -524,7 +567,6 @@ impl RmsBackend {
             db,
             rack_profiles,
             firmware_jobs: Mutex::new(HashMap::new()),
-            nvos_password_rotation_enabled,
         }
     }
 
@@ -658,6 +700,23 @@ struct ComputeTrayRmsIdentity {
     bmc_mac: MacAddress,
 }
 
+/// A row-less compute tray has no machine id; like a pre-ingestion switch its
+/// BMC MAC is the opaque RMS `node_id` (RMS treats it as a string, and the
+/// request also carries the full node descriptor and BMC endpoint). The wrapper
+/// retains the BMC MAC so callers can key results by device.
+impl From<db::expected_machine::PreIngestionComputeRmsIdentity> for ComputeTrayRmsIdentity {
+    fn from(row: db::expected_machine::PreIngestionComputeRmsIdentity) -> Self {
+        Self {
+            identity: RmsIdentity {
+                node_id: row.bmc_mac_address.to_string(),
+                rack_id: row.rack_id.to_string(),
+                rack_profile_id: row.rack_profile_id,
+            },
+            bmc_mac: row.bmc_mac_address,
+        }
+    }
+}
+
 /// Resolve compute tray BMC IP addresses to RMS identities via the api-db layer.
 async fn resolve_compute_tray_identities(
     db: &PgPool,
@@ -719,6 +778,38 @@ async fn resolve_switch_identities(
         );
     }
     Ok(map)
+}
+
+/// Resolve RMS identities for pre-ingestion (row-less) switches from the
+/// expected inventory, keyed by BMC MAC.
+///
+/// Every switch is rack-scale (RMS-managed), so its expected record is expected
+/// to declare a `rack_id`; that rack is required to build the RMS node
+/// descriptor. A record missing a `rack_id` is a misconfiguration and is
+/// omitted here, surfacing as an identity-lookup error at dispatch. The BMC MAC
+/// doubles as the RMS node id because no switch id exists yet — RMS treats
+/// `node_id` as an opaque string and the request also carries the full node
+/// descriptor and endpoints. Mirrors `resolve_pre_ingestion_compute_identities`.
+async fn resolve_pre_ingestion_switch_identities(
+    db: &PgPool,
+    macs: &[MacAddress],
+) -> Result<HashMap<MacAddress, RmsIdentity>, ComponentManagerError> {
+    if macs.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = db::expected_switch::find_rms_identities_by_bmc_macs(db, macs)
+        .await
+        .map_err(|e| {
+            ComponentManagerError::Internal(format!(
+                "failed to resolve pre-ingestion switch RMS identities: {e}"
+            ))
+        })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.bmc_mac_address, row.into()))
+        .collect())
 }
 
 fn to_rms_power_operation(action: PowerAction) -> i32 {
@@ -1957,7 +2048,7 @@ impl NvSwitchManager for RmsBackend {
     }
 
     fn supports_password_rotation(&self) -> bool {
-        self.nvos_password_rotation_enabled
+        true
     }
 
     fn supports_firmware_object_json(&self) -> bool {
@@ -1971,7 +2062,17 @@ impl NvSwitchManager for RmsBackend {
         action: PowerAction,
     ) -> Result<Vec<SwitchComponentResult>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.bmc_mac).collect();
-        let ids = resolve_switch_identities(&self.db, &macs).await?;
+        let mut ids = resolve_switch_identities(&self.db, &macs).await?;
+        // Switches with no `switches` row yet (pre-ingestion) fall back to the
+        // expected inventory keyed by BMC MAC. Every switch is rack-scale, so a
+        // declared rack_id is expected; the BMC MAC doubles as the RMS node id
+        // since no switch id exists.
+        let pre_ingestion_macs: Vec<MacAddress> = macs
+            .iter()
+            .copied()
+            .filter(|m| !ids.contains_key(m))
+            .collect();
+        ids.extend(resolve_pre_ingestion_switch_identities(&self.db, &pre_ingestion_macs).await?);
         let operation = to_rms_power_operation(action);
         let mut results = Vec::with_capacity(endpoints.len());
         let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
@@ -2046,7 +2147,16 @@ impl NvSwitchManager for RmsBackend {
         options: &FirmwareUpdateOptions,
     ) -> Result<Vec<SwitchComponentResult>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.bmc_mac).collect();
-        let ids = resolve_switch_identities(&self.db, &macs).await?;
+        let mut ids = resolve_switch_identities(&self.db, &macs).await?;
+        // Pre-ingestion (row-less) switches fall back to the expected inventory
+        // keyed by BMC MAC. Every switch is rack-scale, so a declared rack_id is
+        // expected; the BMC MAC doubles as the RMS node id.
+        let pre_ingestion_macs: Vec<MacAddress> = macs
+            .iter()
+            .copied()
+            .filter(|m| !ids.contains_key(m))
+            .collect();
+        ids.extend(resolve_pre_ingestion_switch_identities(&self.db, &pre_ingestion_macs).await?);
         let include_firmware_object = switch_update_includes_firmware_object(components);
         let include_system_image = switch_update_includes_system_image(components);
         let component_filters = switch_firmware_object_component_filters(components);
@@ -2191,6 +2301,29 @@ impl NvSwitchManager for RmsBackend {
                 }
             }
 
+            // Persist the tracked jobs keyed by BMC MAC + kind (replacing any
+            // prior set for this switch, including clearing it when empty) so
+            // status queries survive a nico-api restart, for both ingested and
+            // pre-ingestion switches.
+            //
+            // TODO: modify the behavior of the in memory map to only delete the relevant job and not clear all jobs for a given switch on every fw update.
+            // For example, if we want to just update the System Image, we shouldnt clear the firmware object job ID from the in memory table (or in the DB)
+            // Leave it as is for now.
+            let persisted_jobs: Vec<(FirmwareJobKind, String)> = tracked_jobs
+                .iter()
+                .map(|job| (job.kind(), job.job_id().to_owned()))
+                .collect();
+            if let Err(e) =
+                db::direct_dispatch_firmware_job::replace(&self.db, ep.bmc_mac, &persisted_jobs)
+                    .await
+            {
+                tracing::warn!(
+                    bmc_mac_address = %ep.bmc_mac,
+                    error = %e,
+                    "failed to persist switch firmware job IDs to database"
+                );
+            }
+
             if !tracked_jobs.is_empty() {
                 self.firmware_jobs
                     .lock()
@@ -2230,7 +2363,29 @@ impl NvSwitchManager for RmsBackend {
 
         let mut statuses = Vec::with_capacity(endpoints.len());
 
-        for (bmc_mac, jobs) in &endpoint_jobs {
+        for (bmc_mac, in_memory_jobs) in &endpoint_jobs {
+            // When the in-memory map has no jobs (e.g. after a pod restart), fall
+            // back to the DB-persisted set written by queue_firmware_updates,
+            // keyed by BMC MAC for both ingested and pre-ingestion switches.
+            let jobs: Vec<RmsTrackedFirmwareJob> = if !in_memory_jobs.is_empty() {
+                in_memory_jobs.clone()
+            } else {
+                match db::direct_dispatch_firmware_job::get_all(&self.db, *bmc_mac).await {
+                    Ok(rows) => rows
+                        .into_iter()
+                        .map(|(kind, job_id)| RmsTrackedFirmwareJob::from_persisted(kind, job_id))
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!(
+                            bmc_mac_address = %bmc_mac,
+                            error = %e,
+                            "failed to fetch persisted switch firmware job IDs from database"
+                        );
+                        Vec::new()
+                    }
+                }
+            };
+
             if jobs.is_empty() {
                 statuses.push(SwitchFirmwareUpdateStatus {
                     bmc_mac: *bmc_mac,
@@ -2243,7 +2398,7 @@ impl NvSwitchManager for RmsBackend {
 
             let mut states = Vec::with_capacity(jobs.len());
             let mut errors = Vec::new();
-            for job in jobs {
+            for job in &jobs {
                 let (state, error) = query_tracked_firmware_job_status(
                     self.client.as_ref(),
                     self.switch_system_image_client.as_deref(),
@@ -2596,13 +2751,6 @@ impl NvSwitchManager for RmsBackend {
         endpoint: &SwitchEndpoint,
         next_password: &str,
     ) -> Result<String, ComponentManagerError> {
-        if !self.supports_password_rotation() {
-            return Err(ComponentManagerError::Unsupported(
-                "RMS switch password rotation is disabled; enable it only after every RMS server has been upgraded"
-                    .to_string(),
-            ));
-        }
-
         let identities =
             resolve_switch_identities(&self.db, std::slice::from_ref(&endpoint.bmc_mac)).await?;
 
@@ -3236,23 +3384,7 @@ impl RmsBackend {
 
         Ok(rows
             .into_iter()
-            .map(|row| {
-                (
-                    row.bmc_mac_address,
-                    ComputeTrayRmsIdentity {
-                        identity: RmsIdentity {
-                            // A row-less tray has no machine id; the BMC MAC is a
-                            // stable per-device id and RMS treats node_id as an
-                            // opaque string (the request also carries the full
-                            // node descriptor and BMC endpoint).
-                            node_id: row.bmc_mac_address.to_string(),
-                            rack_id: row.rack_id.to_string(),
-                            rack_profile_id: row.rack_profile_id,
-                        },
-                        bmc_mac: row.bmc_mac_address,
-                    },
-                )
-            })
+            .map(|row| (row.bmc_mac_address, row.into()))
             .collect())
     }
 
@@ -3322,9 +3454,13 @@ impl RmsBackend {
                             ep.bmc_mac,
                             vec![RmsTrackedFirmwareJob::FirmwareObject(job_id.clone())],
                         );
-                        if let Err(e) =
-                            db::direct_dispatch_firmware_job::save(&self.db, ep.bmc_mac, job_id)
-                                .await
+                        if let Err(e) = db::direct_dispatch_firmware_job::save(
+                            &self.db,
+                            ep.bmc_mac,
+                            FirmwareJobKind::FirmwareObject,
+                            job_id,
+                        )
+                        .await
                         {
                             tracing::warn!(
                                 node_id = %identity.identity.node_id,
@@ -3580,7 +3716,13 @@ impl ComputeTrayManager for RmsBackend {
             let resolved_job_id: Option<String> = if in_memory_job.is_some() {
                 in_memory_job
             } else {
-                match db::direct_dispatch_firmware_job::get(&self.db, ep.bmc_mac).await {
+                match db::direct_dispatch_firmware_job::get(
+                    &self.db,
+                    ep.bmc_mac,
+                    FirmwareJobKind::FirmwareObject,
+                )
+                .await
+                {
                     Ok(db_job_id) => db_job_id,
                     Err(e) => {
                         tracing::warn!(

@@ -19,6 +19,7 @@
 
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::maintenance::first_maintenance_state;
+use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
 use db::{
     machine as db_machine, power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
@@ -153,7 +154,7 @@ pub(super) async fn detect_component_failure(
     )
     .await?;
 
-    let failed_machines = db_machine::find_machine_ids(
+    let failed_machines = db_machine::find_machine_ids::<MachineId>(
         txn.as_mut(),
         MachineSearchConfig {
             rack_id: Some(rack_id.clone()),
@@ -258,7 +259,7 @@ pub(super) async fn all_components_ready(
     )
     .await?;
 
-    let all_machines = db_machine::find_machine_ids(
+    let all_machines = db_machine::find_machine_ids::<MachineId>(
         txn.as_mut(),
         MachineSearchConfig {
             rack_id: Some(rack_id.clone()),
@@ -266,7 +267,7 @@ pub(super) async fn all_components_ready(
         },
     )
     .await?;
-    let ready_machines = db_machine::find_machine_ids(
+    let ready_machines = db_machine::find_machine_ids::<MachineId>(
         txn.as_mut(),
         MachineSearchConfig {
             rack_id: Some(rack_id.clone()),

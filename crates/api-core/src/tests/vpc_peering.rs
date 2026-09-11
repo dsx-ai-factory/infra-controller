@@ -176,7 +176,11 @@ async fn release_instances_from_vpcs(
         .api
         .find_machines_by_ids(
             rpc::forge::MachinesByIdsRequest {
-                machine_ids: instances.iter().filter_map(|i| i.machine_id).collect(),
+                machine_ids: instances
+                    .iter()
+                    .filter_map(|i| i.machine_id)
+                    .map(Into::into)
+                    .collect(),
                 include_history: false,
             }
             .into_request(),
@@ -508,7 +512,7 @@ async fn test_vpc_peering_network_config(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -521,20 +525,27 @@ async fn test_vpc_peering_network_config(
     Ok(())
 }
 
+/// Verifies FNN and ETV VPCs reach and fail the virtualization compatibility boundary.
 #[crate::sqlx_test]
 async fn test_vpc_peering_network_config_mixed(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = api_fixtures::create_test_env(pool).await;
+    // Enable FNN so the helper creates the required tenants and valid FNN routing state.
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
 
-    let response = create_vpc_peering(
+    let error = create_vpc_peering(
         &env,
         VpcVirtualizationType::Fnn,
         VpcVirtualizationType::EthernetVirtualizer,
     )
-    .await;
-
-    assert!(response.is_err());
+    .await
+    .expect_err("mixed virtualization types cannot be peered");
+    assert!(
+        error.to_string().contains("cannot be peered"),
+        "unexpected error: {error}"
+    );
 
     Ok(())
 }
@@ -555,7 +566,7 @@ async fn test_vpc_peering_network_config_exclusive_etv(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -588,7 +599,7 @@ async fn test_vpc_peering_deletion_upon_vpc_deletion(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -613,7 +624,7 @@ async fn test_vpc_peering_deletion_upon_vpc_deletion(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .unwrap()
@@ -685,7 +696,7 @@ async fn test_vpc_peering_network_config_ordered_peerings(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await?
         .into_inner();
@@ -782,7 +793,12 @@ async fn flat_vpc_can_peer_with_fnn_under_exclusive_policy(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Same short-circuit as the ETV case, but on the FNN side: Flat VPCs are
     // peer-policy-neutral.
-    let env = api_fixtures::create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+
+    // Register the tenant required by the FNN side of the peering.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
 
     let fnn_vpc = env
         .api

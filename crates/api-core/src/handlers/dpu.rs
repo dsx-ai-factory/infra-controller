@@ -28,7 +28,7 @@ use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
 use carbide_utils::arch::CpuArchitecture;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{DpuMachineId, MachineId};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtype};
 use db::vpc_prefix::VpcId;
 use db::{
     DatabaseError, ObjectColumnFilter, dpu_agent_upgrade_policy, network_security_group,
@@ -175,7 +175,7 @@ async fn get_managed_host_network_config_inner(
     let dpu_snapshot = match snapshot
         .dpu_snapshots
         .iter()
-        .find(|s| s.id == dpu_machine_id.into())
+        .find(|s| s.id == dpu_machine_id)
     {
         Some(dpu_snapshot) => dpu_snapshot,
         None => {
@@ -200,7 +200,7 @@ async fn get_managed_host_network_config_inner(
     let primary_dpu = db::machine_interface::find_one(&mut txn, primary_dpu_snapshot.id).await?;
     let is_primary_dpu = primary_dpu
         .attached_dpu_machine_id
-        .map(|x| dpu_snapshot.id == x.into())
+        .map(|x| x == dpu_snapshot.id)
         .unwrap_or(false);
 
     let loopback_ip = match dpu_snapshot.loopback_ip() {
@@ -863,8 +863,7 @@ pub(crate) async fn get_managed_host_network_config(
     log_request_data(&request);
 
     let request = request.into_inner();
-    let dpu_machine_id =
-        convert_and_log_machine_id::<DpuMachineId>(request.dpu_machine_id.as_ref())?;
+    let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
 
     let resp = get_managed_host_network_config_inner(api, dpu_machine_id).await?;
 
@@ -878,7 +877,7 @@ pub(crate) async fn update_agent_reported_inventory(
     log_request_data(&request);
 
     let request = request.into_inner();
-    let dpu_machine_id = convert_and_log_machine_id::<DpuMachineId>(request.machine_id.as_ref())?;
+    let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
     // For DPF-ingested DPUs the agent runs containerized and cannot enumerate
     // the DPF services directly. Read service versions from the DPF operator
@@ -895,7 +894,7 @@ pub(crate) async fn update_agent_reported_inventory(
         let machine = snapshot
             .dpu_snapshots
             .iter()
-            .find(|d| d.id == dpu_machine_id.into())
+            .find(|d| d.id == dpu_machine_id)
             .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "dpu",
                 id: dpu_machine_id.to_string(),
@@ -980,8 +979,7 @@ pub(crate) async fn record_dpu_network_status(
     log_request_data(&request);
 
     let request = request.into_inner();
-    let dpu_machine_id =
-        convert_and_log_machine_id::<DpuMachineId>(request.dpu_machine_id.as_ref())?;
+    let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
 
@@ -1135,7 +1133,7 @@ pub(crate) async fn record_dpu_network_status(
         let dpu_machine = snapshot
             .dpu_snapshots
             .iter()
-            .find(|x| x.id == dpu_machine_id.into())
+            .find(|x| x.id == dpu_machine_id)
             .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "dpu",
                 id: dpu_machine_id.to_string(),
@@ -1349,7 +1347,7 @@ fn reprovision_request_covers_all_attached_dpus(
         snapshot
             .dpu_snapshots
             .iter()
-            .all(|dpu| dpu.id == *machine_id || dpu.reprovision_requested.is_some())
+            .all(|dpu| dpu.id.as_machine_id() == machine_id || dpu.reprovision_requested.is_some())
     } else {
         snapshot.has_managed_dpus()
     }
@@ -1446,7 +1444,8 @@ fn reject_partial_dpf_deployment_migration_request_set(
         .dpu_snapshots
         .iter()
         .filter(|dpu| {
-            let request_targets_dpu = machine_id.machine_type().is_host() || dpu.id == *machine_id;
+            let request_targets_dpu =
+                machine_id.machine_type().is_host() || dpu.id.as_machine_id() == machine_id;
             if request_targets_dpu {
                 mode == rpc::dpu_reprovisioning_request::Mode::Set
             } else {
@@ -1628,8 +1627,9 @@ pub(crate) async fn trigger_dpu_reprovisioning(
 
     log_request_data(&request);
     let req = request.into_inner();
-    let machine_id = req.machine_id.as_ref().or(req.dpu_id.as_ref());
-    let machine_id = convert_and_log_machine_id::<MachineId>(machine_id)?;
+    let deprecated_dpu_id = req.dpu_id;
+    let machine_id = req.machine_id.as_ref().or(deprecated_dpu_id.as_ref());
+    let machine_id: MachineId = convert_and_log_machine_id(machine_id)?;
 
     let mode = req.mode();
     // Set and Clear must choose their complete DPU set from the same attachment
@@ -1694,9 +1694,9 @@ pub(crate) async fn trigger_dpu_reprovisioning(
             )?;
 
             let initiator = req.initiator().as_str_name();
-            if machine_id.machine_type().is_dpu() {
+            if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id.machine_id_subtype() {
                 db::machine::trigger_dpu_reprovisioning_request(
-                    &machine_id,
+                    &dpu_machine_id,
                     &mut txn,
                     initiator,
                     req.update_firmware,
@@ -1721,8 +1721,9 @@ pub(crate) async fn trigger_dpu_reprovisioning(
                 mode,
                 migration_source_is_active,
             )?;
-            if machine_id.machine_type().is_dpu() {
-                db::machine::clear_dpu_reprovisioning_request(&mut txn, &machine_id, true).await?;
+            if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id.machine_id_subtype() {
+                db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu_machine_id, true)
+                    .await?;
             } else {
                 for dpu_snapshot in &snapshot.dpu_snapshots {
                     db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu_snapshot.id, true)

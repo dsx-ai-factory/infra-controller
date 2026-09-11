@@ -10,7 +10,7 @@ firmware on compute trays
 ## SYNOPSIS
 
 **nico-admin-cli component-manager update-firmware compute-tray**
-\<**--machine-id**\|**--mac-address**\> \[**--target-version**\]
+\[**--machine-id**\] \[**--mac-address**\] \[**--target-version**\]
 \[**--sot-json-file**\] \[**--access-token**\] \[**--force-update**\]
 \[**--component**\] \[**--bypass-state-controller**\] \[**--extended**\]
 \[**--sort-by**\] \[**-h**\|**--help**\]
@@ -32,7 +32,7 @@ power shelf)
 Firmware target version for legacy direct-update paths
 
 **--sot-json-file** *\<PATH\>*  
-SOT JSON file for RMS ApplyFirmwareObjectFromJSON
+SOT JSON file for RMS ApplyFirmwareObject
 
 **--access-token** *\<ACCESS_TOKEN\>*  
 Artifact access token for RMS SOT JSON downloads; omit or pass empty for
@@ -59,7 +59,7 @@ backend
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 

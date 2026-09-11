@@ -44,7 +44,7 @@ async fn decommission_requires_redfish_bfb_install_support(pool: sqlx::PgPool) {
     let error = env
         .api
         .decommission_managed_host(Request::new(DecommissionManagedHostRequest {
-            machine_id: Some(managed_host.id.into()),
+            machine_id: Some(managed_host.id),
         }))
         .await
         .unwrap_err();
@@ -78,7 +78,7 @@ async fn decommission_requires_redfish_bfb_install_support(pool: sqlx::PgPool) {
 
     env.api
         .decommission_managed_host(Request::new(DecommissionManagedHostRequest {
-            machine_id: Some(managed_host.id.into()),
+            machine_id: Some(managed_host.id),
         }))
         .await
         .unwrap();

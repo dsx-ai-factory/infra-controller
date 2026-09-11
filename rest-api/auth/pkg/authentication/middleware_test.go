@@ -4,6 +4,7 @@
 package authentication
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -65,6 +66,13 @@ const (
 )
 
 func TestAuthProcessor(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := log.Logger
+	log.Logger = zerolog.New(&logs)
+	t.Cleanup(func() {
+		log.Logger = previousLogger
+	})
+
 	dbSession := cdbu.GetTestDBSession(t, false)
 	defer dbSession.Close()
 
@@ -101,22 +109,22 @@ func TestAuthProcessor(t *testing.T) {
 	}))
 	defer func() { testServer.Close() }()
 
-	joCfg := config2.NewJWTOriginConfig()
-	joCfg.AddConfig("ssa", "ssa.nvidia.com", testServer.URL+"/ssa", config2.TokenOriginKasSsa, false, nil, nil)
-	joCfg.AddConfig("kas", "authn.nvidia.com", testServer.URL+"/kas", config2.TokenOriginKasLegacy, false, nil, nil)
+	toCfg := config2.NewTokenOriginConfig()
+	toCfg.AddConfig("ssa", "ssa.nvidia.com", testServer.URL+"/ssa", config2.TokenOriginKasSsa, false, nil, nil)
+	toCfg.AddConfig("kas", "authn.nvidia.com", testServer.URL+"/kas", config2.TokenOriginKasLegacy, false, nil, nil)
 
 	// Initialize JWKS data for testing
-	if err := joCfg.UpdateAllJWKS(); err != nil {
+	if err := toCfg.UpdateAllJWKS(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Initialize processors for testing
 	encCfg := config.NewPayloadEncryptionConfig("test-encryption-key")
-	processors.InitializeProcessors(joCfg, dbSession, tc, encCfg, nil)
+	processors.InitializeProcessors(toCfg, dbSession, tc, encCfg, nil)
 
 	type args struct {
 		ds           *cdb.Session
-		joCfg        *config2.JWTOriginConfig
+		toCfg        *config2.TokenOriginConfig
 		tc           temporalClient.Client
 		path         string
 		pathOverride *string
@@ -125,16 +133,17 @@ func TestAuthProcessor(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		args         args
-		wantErrMsg   string
-		wantRespCode int
+		name             string
+		args             args
+		wantErrMsg       string
+		wantRespCode     int
+		excludedLogValue string
 	}{
 		{
 			name: "test auth processor error, empty org name",
 			args: args{
 				ds:    dbSession,
-				joCfg: joCfg,
+				toCfg: toCfg,
 				tc:    tc,
 				path:  "/v2/org/testorg/user/current",
 				org:   "",
@@ -146,7 +155,7 @@ func TestAuthProcessor(t *testing.T) {
 			name: "test auth processor error, no authorization header",
 			args: args{
 				ds:    dbSession,
-				joCfg: joCfg,
+				toCfg: toCfg,
 				tc:    tc,
 				path:  "/v2/org/testorg/user/current",
 				headers: map[string]string{
@@ -158,10 +167,26 @@ func TestAuthProcessor(t *testing.T) {
 			wantRespCode: http.StatusUnauthorized,
 		},
 		{
+			name: "test auth processor error, malformed authorization header",
+			args: args{
+				ds:    dbSession,
+				toCfg: toCfg,
+				tc:    tc,
+				path:  "/v2/org/testorg/user/current",
+				headers: map[string]string{
+					"Authorization": "nvapi-secret-payload",
+				},
+				org: "testorg",
+			},
+			wantErrMsg:       "Invalid Authorization header format",
+			wantRespCode:     http.StatusUnauthorized,
+			excludedLogValue: "secret-payload",
+		},
+		{
 			name: "test auth processor error, invalid authorization header",
 			args: args{
 				ds:    dbSession,
-				joCfg: joCfg,
+				toCfg: toCfg,
 				tc:    tc,
 				path:  "/v2/org/testorg/user/current",
 				headers: map[string]string{
@@ -176,6 +201,7 @@ func TestAuthProcessor(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			logs.Reset()
 			rec := httptest.NewRecorder()
 
 			req := httptest.NewRequest(http.MethodGet, tt.args.path, nil)
@@ -194,10 +220,13 @@ func TestAuthProcessor(t *testing.T) {
 				ec.SetPath(tt.args.path)
 			}
 
-			apiErr := AuthProcessor(ec, tt.args.joCfg)
+			apiErr := AuthProcessor(ec, tt.args.toCfg)
 
 			assert.Equal(t, tt.wantRespCode, apiErr.Code)
 			assert.Equal(t, tt.wantErrMsg, apiErr.Message)
+			if tt.excludedLogValue != "" {
+				assert.NotContains(t, logs.String(), tt.excludedLogValue)
+			}
 		})
 	}
 }
@@ -499,7 +528,7 @@ func TestValidateJWTTokens_WithoutExpiration(t *testing.T) {
 	}))
 	defer func() { testServer.Close() }()
 
-	cfg := config2.NewJWTOriginConfig()
+	cfg := config2.NewTokenOriginConfig()
 	cfg.AddConfig("ssa", "ssa.nvidia.com", testServer.URL+"/ssa", config2.TokenOriginKasSsa, false, nil, nil)
 	cfg.AddConfig("kas", "authn.nvidia.com", testServer.URL+"/kas", config2.TokenOriginKasLegacy, false, nil, nil)
 
@@ -687,17 +716,17 @@ func TestHandlerInterface_TokenOriginRouting(t *testing.T) {
 	}))
 	defer testServer.Close()
 
-	// Setup JWT origin config with multiple token origins
-	joCfg := config2.NewJWTOriginConfig()
-	joCfg.AddConfig("ssa", ssaIssuer, testServer.URL+"/ssa", config2.TokenOriginKasSsa, false, nil, nil)
-	joCfg.AddConfig("kas", kasIssuer, testServer.URL+"/kas", config2.TokenOriginKasLegacy, false, nil, nil)
+	// Setup token origin config with multiple token origins
+	toCfg := config2.NewTokenOriginConfig()
+	toCfg.AddConfig("ssa", ssaIssuer, testServer.URL+"/ssa", config2.TokenOriginKasSsa, false, nil, nil)
+	toCfg.AddConfig("kas", kasIssuer, testServer.URL+"/kas", config2.TokenOriginKasLegacy, false, nil, nil)
 
 	// Initialize JWKS data
-	require.NoError(t, joCfg.UpdateAllJWKS())
+	require.NoError(t, toCfg.UpdateAllJWKS())
 
 	// Initialize processors
 	encCfg := config.NewPayloadEncryptionConfig("test-encryption-key")
-	processors.InitializeProcessors(joCfg, dbSession, tc, encCfg, nil)
+	processors.InitializeProcessors(toCfg, dbSession, tc, encCfg, nil)
 
 	tests := []struct {
 		name          string
@@ -745,7 +774,7 @@ func TestHandlerInterface_TokenOriginRouting(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Verify handler exists for known origins
 			if tt.origin != "" {
-				handler := joCfg.GetProcessorByOrigin(tt.origin)
+				handler := toCfg.GetProcessorByOrigin(tt.origin)
 				assert.NotNil(t, handler, "Handler should exist for origin %s", tt.origin)
 
 				// Test handler directly
@@ -761,7 +790,7 @@ func TestHandlerInterface_TokenOriginRouting(t *testing.T) {
 				c.Set("orgName", "testorg")
 
 				logger := log.With().Str("test", tt.name).Logger()
-				_, apiErr := handler.ProcessToken(c, tt.token, joCfg.GetConfig(tt.issuer), logger)
+				_, apiErr := handler.ProcessToken(c, tt.token, toCfg.GetConfig(tt.issuer), logger)
 
 				if tt.shouldPass {
 					assert.Nil(t, apiErr, "Handler should succeed")
@@ -788,7 +817,7 @@ func TestHandlerInterface_TokenOriginRouting(t *testing.T) {
 			c.SetParamValues("testorg")
 			c.SetPath("/v2/org/testorg/user/current")
 
-			apiErr := AuthProcessor(c, joCfg)
+			apiErr := AuthProcessor(c, toCfg)
 
 			if tt.shouldPass {
 				assert.Nil(t, apiErr, "AuthProcessor should succeed")
@@ -881,8 +910,8 @@ func TestProcessorInterface_ErrorScenarios(t *testing.T) {
 			server := tt.setupServer()
 			defer server.Close()
 
-			// Setup JWT origin config
-			cfg := config2.NewJWTOriginConfig()
+			// Setup token origin config
+			cfg := config2.NewTokenOriginConfig()
 
 			// Add appropriate config based on the test case origin
 			switch tt.origin {
@@ -952,8 +981,8 @@ func TestProcessorInterface_Mapping(t *testing.T) {
 	}))
 	defer testServer.Close()
 
-	// Setup JWT origin config
-	cfg := config2.NewJWTOriginConfig()
+	// Setup token origin config
+	cfg := config2.NewTokenOriginConfig()
 	cfg.AddConfig("ssa", ssaIssuer, testServer.URL, config2.TokenOriginKasSsa, false, nil, nil)
 	cfg.AddConfig("kas", kasIssuer, testServer.URL, config2.TokenOriginKasLegacy, false, nil, nil)
 	cfg.AddConfig("keycloak", keycloakIssuer, testServer.URL, config2.TokenOriginKeycloak, true, nil, nil)

@@ -23,16 +23,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let schema = compile(&CompilerConfig {
-        proto_files: vec![PathBuf::from("../rpc/proto/scout_firmware_upgrade.proto")],
+        proto_files: vec![
+            PathBuf::from("../rpc/proto/codegen/v1/rust_type.proto"),
+            PathBuf::from("../rpc/proto/scout_firmware_upgrade.proto"),
+        ],
         include_paths: vec![PathBuf::from("../rpc/proto")],
         protoc_args: Vec::new(),
     })?;
     let codegen = schema.collect_codegen()?;
+    let rust_descriptor_set = codegen.rust_file_descriptor_set(&schema.file_descriptor_set)?;
 
     tonic_prost_build::configure()
         .out_dir(out_dir)
         .apply_codegen(&codegen)
-        .compile_fds(schema.file_descriptor_set)?;
+        .compile_fds(rust_descriptor_set)?;
 
     Ok(())
 }

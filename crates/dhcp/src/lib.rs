@@ -464,7 +464,7 @@ pub unsafe extern "C" fn carbide_set_config_metrics_endpoint(endpoint: *const c_
     }
 }
 
-/// Increments counter for total number of requests
+/// Increments the legacy DHCPv4 request counter.
 ///
 /// # Safety
 ///
@@ -474,7 +474,18 @@ pub unsafe extern "C" fn carbide_increment_total_requests() {
     metrics::increment_total_requests();
 }
 
-/// Increments counter for number of dropped or refused requests. The reason
+/// Increments the DHCPv6 request counter, labelled by the request's message
+/// type. `message_type` is the raw DHCPv6 message-type code reported by Kea.
+///
+/// # Safety
+///
+/// None
+#[unsafe(no_mangle)]
+pub extern "C" fn carbide_increment_v6_requests(message_type: u8) {
+    metrics::increment_v6_requests(metrics::V6RequestMessageType::from(message_type));
+}
+
+/// Increments the legacy DHCPv4 dropped-or-refused request counter. The reason
 /// string is mapped onto the bounded [`metrics::DropReason`] taxonomy; a
 /// string outside the taxonomy (or a null / non-UTF-8 input) is bucketed as
 /// `Unknown` so the metric's label domain stays closed.
@@ -522,7 +533,7 @@ pub extern "C" fn carbide_increment_v6_reply_sent(message_type: u8) {
     metrics::increment_v6_reply_sent(metrics::V6ReplyMessageType::from(message_type));
 }
 
-/// Increments counter for number of dropped DHCPv6 requests.
+/// Increments the DHCPv6 dropped-or-refused request counter.
 ///
 /// # Safety
 ///

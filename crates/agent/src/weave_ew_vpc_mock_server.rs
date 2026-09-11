@@ -109,6 +109,33 @@ impl NetworkIsolationService for DummyNetworkIsolationService {
         }))
     }
 
+    async fn update_virtual_network(
+        &self,
+        request: Request<proto::UpdateVirtualNetworkRequest>,
+    ) -> Result<Response<proto::UpdateVirtualNetworkResponse>, Status> {
+        let req = request.into_inner();
+        let metadata = req
+            .metadata
+            .ok_or_else(|| Status::invalid_argument("metadata is required"))?;
+        tracing::info!(virtual_network_id = ?metadata.id, "Updating virtual network");
+
+        let vn = proto::VirtualNetwork {
+            metadata: Some(metadata),
+            spec: None,
+            status: Some(proto::VirtualNetworkStatus {
+                state: Some(proto::State {
+                    phase: proto::state::Phase::Ready.into(),
+                    reason: String::new(),
+                    message: String::new(),
+                }),
+            }),
+        };
+
+        Ok(Response::new(proto::UpdateVirtualNetworkResponse {
+            virtual_network: Some(vn),
+        }))
+    }
+
     async fn list_virtual_networks(
         &self,
         request: Request<proto::ListVirtualNetworksRequest>,
@@ -223,7 +250,7 @@ impl NetworkIsolationService for DummyNetworkIsolationService {
                     pf_id: "02:aa:bb:cc:dd:ee".to_string(),
                 }),
                 attachment_vf: None,
-                attachment_ovn: None,
+                attachment_ovs: None,
             }),
             status: Some(proto::VirtualNetworkAttachmentStatus {
                 state: Some(proto::State {
@@ -239,6 +266,40 @@ impl NetworkIsolationService for DummyNetworkIsolationService {
         Ok(Response::new(proto::GetVirtualNetworkAttachmentResponse {
             virtual_network_attachment: Some(vna),
         }))
+    }
+
+    async fn update_virtual_network_attachment(
+        &self,
+        request: Request<proto::UpdateVirtualNetworkAttachmentRequest>,
+    ) -> Result<Response<proto::UpdateVirtualNetworkAttachmentResponse>, Status> {
+        let req = request.into_inner();
+        let metadata = req
+            .metadata
+            .ok_or_else(|| Status::invalid_argument("metadata is required"))?;
+        tracing::info!(
+            virtual_network_attachment_id = ?metadata.id,
+            "Updating virtual network attachment"
+        );
+
+        let vna = proto::VirtualNetworkAttachment {
+            metadata: Some(metadata),
+            spec: None,
+            status: Some(proto::VirtualNetworkAttachmentStatus {
+                state: Some(proto::State {
+                    phase: proto::state::Phase::Ready.into(),
+                    reason: String::new(),
+                    message: String::new(),
+                }),
+                host_ipv4: Some("10.0.0.1".to_string()),
+                host_ipv6: None,
+            }),
+        };
+
+        Ok(Response::new(
+            proto::UpdateVirtualNetworkAttachmentResponse {
+                virtual_network_attachment: Some(vna),
+            },
+        ))
     }
 
     async fn list_virtual_network_attachments(
@@ -264,7 +325,7 @@ impl NetworkIsolationService for DummyNetworkIsolationService {
                     pf_id: "02:aa:bb:cc:dd:ee".to_string(),
                 }),
                 attachment_vf: None,
-                attachment_ovn: None,
+                attachment_ovs: None,
             }),
             status: Some(proto::VirtualNetworkAttachmentStatus {
                 state: Some(proto::State {

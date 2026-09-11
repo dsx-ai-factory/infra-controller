@@ -31,14 +31,14 @@ progress. Read-only.
 
 ## OPTIONS
 
-**--extended**\
+**--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]\
+**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
 Sort output by specified field\
 
 \
@@ -48,10 +48,10 @@ Sort output by specified field\
 
 - state: Sort by state
 
-**-h**, **--help**\
+**-h**, **--help**  
 Print help (see a summary with -h)
 
-\<*MACHINE*\>\
+\<*MACHINE*\>  
 The machine ID for which to list boot-interface candidates
 
 ## Examples

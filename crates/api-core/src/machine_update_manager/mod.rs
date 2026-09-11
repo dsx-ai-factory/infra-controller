@@ -29,7 +29,7 @@ use std::time::Duration;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_utils::managed_loop::{self, LoopManager};
 use carbide_utils::periodic_timer::PeriodicTimer;
-use carbide_uuid::machine::{HostMachineId, MachineId};
+use carbide_uuid::machine::HostMachineId;
 use db::Transaction;
 use db::work_lock_manager::{AcquireLockError, WorkLockManagerHandle};
 use host_firmware::HostFirmwareUpdate;
@@ -163,17 +163,14 @@ impl MachineUpdateManager {
         &self,
         txn: &mut PgConnection,
     ) -> CarbideResult<HashMap<HostMachineId, ManagedHostStateSnapshot>> {
-        let machine_ids = db::machine::find_machine_ids(
+        let machine_ids = db::machine::find_machine_ids::<HostMachineId>(
             &mut *txn,
             MachineSearchConfig {
                 include_predicted_host: true,
                 ..Default::default()
             },
         )
-        .await?
-        .into_iter()
-        .filter_map(|id| HostMachineId::try_from(id).ok())
-        .collect::<Vec<_>>();
+        .await?;
 
         db::managed_host::load_by_machine_ids(
             txn,
@@ -223,7 +220,7 @@ impl MachineUpdateManager {
         }
 
         // current host machines in maintenance
-        let mut current_updating_machines = HashSet::<MachineId>::new();
+        let mut current_updating_machines = HashSet::<HostMachineId>::new();
 
         for update_module in self.update_modules.iter() {
             current_updating_machines

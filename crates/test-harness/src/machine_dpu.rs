@@ -102,7 +102,7 @@ impl TestMachinePrivate for TestDpuMachine {}
 async fn record_dpu_network_status(api: &Api, dpu_machine_id: DpuMachineId) {
     let network_config = api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(dpu_machine_id.into()),
+            dpu_machine_id: Some(dpu_machine_id),
         }))
         .await
         .expect("managed host network config should be available")
@@ -206,7 +206,7 @@ async fn record_dpu_network_status(api: &Api, dpu_machine_id: DpuMachineId) {
         .collect();
 
     api.record_dpu_network_status(tonic::Request::new(crate::rpc::forge::DpuNetworkStatus {
-        dpu_machine_id: Some(dpu_machine_id.into()),
+        dpu_machine_id: Some(dpu_machine_id),
         dpu_agent_version: Some("test-dpu-agent-version".to_string()),
         observed_at: None,
         dpu_health: Some(crate::rpc::health::HealthReport {

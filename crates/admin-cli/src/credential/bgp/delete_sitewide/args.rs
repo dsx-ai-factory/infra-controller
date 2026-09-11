@@ -27,6 +27,7 @@ impl From<Args> for forgerpc::CredentialDeletionRequest {
             credential_type: CredentialType::BgpSiteWideLeafPassword.into(),
             username: None,
             mac_address: None,
+            credential_name: None,
         }
     }
 }

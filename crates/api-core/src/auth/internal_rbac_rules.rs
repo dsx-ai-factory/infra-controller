@@ -70,10 +70,13 @@ impl InternalRBACRules {
         x.perm("FindDomain", vec![ForgeAdminCLI]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ChangeVpcRoutingProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateVpcVirtualization", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteVpc", vec![Machineatron, SiteAgent]);
         x.perm("FindVpcIds", vec![SiteAgent, ForgeAdminCLI, Machineatron]);
         x.perm("FindVpcsByIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetVpcRoutingState", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteSitePrefix", vec![ForgeAdminCLI, SiteAgent]);
@@ -1120,6 +1123,48 @@ mod rbac_rule_tests {
                     rule_name,
                     princ_b.as_identifier(),
                     princ_a.as_identifier(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vpc_allocation_operation_permissions() {
+        // Operator certificates map to ExternalUser; its group label is not
+        // compared when matching the rule.
+        for (principal, allowed) in [
+            (
+                Principal::ExternalUser(ExternalUserInfo::new(
+                    None,
+                    "nico-cli-client".to_string(),
+                    None,
+                )),
+                true,
+            ),
+            (
+                Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+                true,
+            ),
+            (
+                Principal::SpiffeServiceIdentifier("nico-dns".to_string()),
+                false,
+            ),
+            (Principal::SpiffeMachineIdentifier("dpu".to_string()), false),
+            (Principal::Anonymous, false),
+        ] {
+            for method in [
+                "ReleaseVpcInactiveVni",
+                "GetVpcRoutingState",
+                "ChangeVpcRoutingProfile",
+            ] {
+                assert_eq!(
+                    InternalRBACRules::allowed_from_static(
+                        method,
+                        std::slice::from_ref(&principal),
+                    ),
+                    allowed,
+                    "{method}: {}",
+                    principal.as_identifier(),
                 );
             }
         }

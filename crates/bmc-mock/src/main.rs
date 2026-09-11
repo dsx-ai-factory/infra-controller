@@ -32,9 +32,9 @@ use bmc_mock::mac_address_pool::{
     RangesConfig as MacAddressRangesConfig,
 };
 use bmc_mock::{
-    BmcCommand, BmcState, Callbacks, DpuMachineInfo, DpuSettings, HardwareType, HostMachineInfo,
-    ListenerOrAddress, MachineInfo, MachineRouterOptions, MockPowerState, SetSystemPowerError,
-    SystemPowerControl, VirtualMediaDeviceConfig,
+    BmcCommand, BmcState, Callbacks, DpuFirmwareVersions, DpuMachineInfo, DpuSettings,
+    HardwareType, HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions,
+    MockPowerState, SetSystemPowerError, SystemPowerControl, VirtualMediaDeviceConfig,
 };
 use command_line::{MachineRole, StateBackend};
 use mac_address::MacAddress;
@@ -223,6 +223,7 @@ struct GeneratedMockConfig {
     dpu_count: u8,
     dpu_index: usize,
     instance_index: u8,
+    dpu_firmware: DpuFirmwareVersions,
     libvirt_config: Option<bmc_mock::libvirt::Config>,
     use_channel_callbacks: bool,
 }
@@ -246,6 +247,7 @@ fn generated_mock_config(args: &command_line::Args) -> Result<GeneratedMockConfi
             dpu_count: 2,
             dpu_index: 0,
             instance_index: 0,
+            dpu_firmware: DpuFirmwareVersions::default(),
             libvirt_config: None,
             use_channel_callbacks: true,
         });
@@ -287,6 +289,12 @@ fn generated_mock_config(args: &command_line::Args) -> Result<GeneratedMockConfi
         (None, requested) => requested.unwrap_or(0),
     };
     let dpu_index = args.dpu_index.unwrap_or(0);
+    if !args.dpu_firmware.is_empty() && dpu_count == 0 {
+        return Err(
+            "DPU firmware options require at least one generated DPU; set --dpu-count to a positive value"
+                .to_string(),
+        );
+    }
     match machine_role {
         MachineRole::Host if args.dpu_index.is_some() => {
             return Err("--dpu-index is valid only with --machine-role=dpu".to_string());
@@ -325,12 +333,14 @@ fn generated_mock_config(args: &command_line::Args) -> Result<GeneratedMockConfi
         dpu_count,
         dpu_index,
         instance_index: args.instance_index,
+        dpu_firmware: args.dpu_firmware.clone().into(),
         libvirt_config,
         use_channel_callbacks: false,
     })
 }
 
 fn generated_mock(config: GeneratedMockConfig) -> (Router, BmcState) {
+    let machine_info = generated_machine_info(&config);
     let libvirt_callbacks = config
         .libvirt_config
         .map(bmc_mock::libvirt::LibvirtCallbacks::new)
@@ -343,13 +353,6 @@ fn generated_mock(config: GeneratedMockConfig) -> (Router, BmcState) {
     } else {
         Arc::new(bmc_mock::simulated::SimulatedCallbacks::new())
     };
-    let machine_info = generated_machine_info(
-        config.machine_role,
-        config.hardware_type,
-        config.dpu_count,
-        config.dpu_index,
-        config.instance_index,
-    );
     let result = if config.machine_role == MachineRole::Host
         && config.state_backend == StateBackend::Libvirt
     {
@@ -391,38 +394,45 @@ fn generated_mock(config: GeneratedMockConfig) -> (Router, BmcState) {
     result
 }
 
-fn generated_machine_info(
-    machine_role: MachineRole,
-    hardware_type: HardwareType,
-    dpu_count: u8,
-    dpu_index: usize,
-    instance_index: u8,
-) -> MachineInfo {
+fn generated_machine_info(config: &GeneratedMockConfig) -> MachineInfo {
     let mut pool = MacAddressPool::new(MacAddressConfig {
         pool: Some(
-            MacAddressPoolConfig::new(MacAddress::new([2, 0, 0, instance_index, 0, 0]), 16)
+            MacAddressPoolConfig::new(MacAddress::new([2, 0, 0, config.instance_index, 0, 0]), 16)
                 .expect("Must be constructed with these parameters"),
         ),
         ranges: Some(
-            MacAddressRangesConfig::new(MacAddress::new([6, 0, 0, instance_index, 0, 0]), 16, 8)
-                .expect("Must be constructed with these parameters"),
+            MacAddressRangesConfig::new(
+                MacAddress::new([6, 0, 0, config.instance_index, 0, 0]),
+                16,
+                8,
+            )
+            .expect("Must be constructed with these parameters"),
         ),
     });
 
     let mac_range = pool
         .allocate_range_config()
         .expect("MAC address pool should be allocated");
-    let dpus = (0..dpu_count)
-        .map(|_| DpuMachineInfo::new(hardware_type, &mut pool, DpuSettings::default()))
+    let dpus = (0..config.dpu_count)
+        .map(|_| {
+            DpuMachineInfo::new(
+                config.hardware_type,
+                &mut pool,
+                DpuSettings {
+                    firmware_versions: config.dpu_firmware.clone(),
+                    ..DpuSettings::default()
+                },
+            )
+        })
         .collect::<Vec<_>>();
-    match machine_role {
+    match config.machine_role {
         MachineRole::Host => MachineInfo::Host(HostMachineInfo::new(
-            hardware_type,
+            config.hardware_type,
             dpus,
             &mut pool,
             mac_range,
         )),
-        MachineRole::Dpu => MachineInfo::Dpu(dpus[dpu_index].clone()),
+        MachineRole::Dpu => MachineInfo::Dpu(dpus[config.dpu_index].clone()),
     }
 }
 
@@ -533,9 +543,56 @@ mod tests {
     }
 
     #[test]
+    fn rejects_dpu_firmware_overrides_without_generated_dpus() {
+        let error = config(&[
+            "bmc-mock",
+            "--machine-role",
+            "host",
+            "--state-backend",
+            "internal",
+            "--hardware-profile",
+            "dell_poweredge_r750",
+            "--dpu-bmc-firmware",
+            "bmc-version",
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "DPU firmware options require at least one generated DPU; set --dpu-count to a positive value",
+        );
+    }
+
+    #[test]
     fn host_and_dpu_endpoints_share_deterministic_dpu_identity() {
-        let host = generated_machine_info(MachineRole::Host, HardwareType::WiwynnGB200Nvl, 2, 0, 3);
-        let dpu = generated_machine_info(MachineRole::Dpu, HardwareType::WiwynnGB200Nvl, 2, 1, 3);
+        let host_config = config(&[
+            "bmc-mock",
+            "--machine-role",
+            "host",
+            "--state-backend",
+            "internal",
+            "--hardware-profile",
+            "wiwynn_gb200_nvl",
+            "--instance-index",
+            "3",
+        ])
+        .unwrap();
+        let dpu_config = config(&[
+            "bmc-mock",
+            "--machine-role",
+            "dpu",
+            "--state-backend",
+            "internal",
+            "--hardware-profile",
+            "wiwynn_gb200_nvl",
+            "--dpu-index",
+            "1",
+            "--instance-index",
+            "3",
+        ])
+        .unwrap();
+        let host = generated_machine_info(&host_config);
+        let dpu = generated_machine_info(&dpu_config);
         let MachineInfo::Host(host) = host else {
             panic!("expected host machine info");
         };
@@ -545,5 +602,98 @@ mod tests {
 
         assert_eq!(host.dpus[1].serial, dpu.serial);
         assert_eq!(host.dpus[1].bmc_mac_address, dpu.bmc_mac_address);
+    }
+
+    #[test]
+    fn configured_dpu_firmware_reaches_the_generated_host() {
+        let config = config(&[
+            "bmc-mock",
+            "--machine-role",
+            "host",
+            "--state-backend",
+            "internal",
+            "--hardware-profile",
+            "dell_poweredge_r750",
+            "--dpu-count",
+            "1",
+            "--dpu-bmc-firmware",
+            "bmc-version",
+            "--dpu-uefi-firmware",
+            "uefi-version",
+            "--dpu-bsp-firmware",
+            "bsp-version",
+            "--dpu-cec-firmware",
+            "cec-version",
+            "--dpu-nic-firmware",
+            "nic-version",
+        ])
+        .unwrap();
+        let (_, state) = generated_mock(config);
+
+        for (id, expected) in [
+            ("BMC_Firmware", "bmc-version"),
+            ("DPU_UEFI", "uefi-version"),
+            ("DPU_BSP", "bsp-version"),
+            ("Bluefield_FW_ERoT", "cec-version"),
+            ("DPU_NIC", "nic-version"),
+        ] {
+            assert_eq!(
+                state
+                    .update_service_state
+                    .find_firmware_inventory(id)
+                    .and_then(|inventory| inventory["Version"].as_str().map(str::to_owned)),
+                Some(expected.to_string()),
+                "{id}",
+            );
+        }
+    }
+
+    #[test]
+    fn configured_dpu_firmware_reaches_generated_bf4_endpoints() {
+        for (hardware_profile, machine_role) in [
+            ("dell_poweredge_r760_bf4", "host"),
+            ("dell_poweredge_r760_bf4", "dpu"),
+            ("nvidia_dgx_vr", "host"),
+            ("nvidia_dgx_vr", "dpu"),
+        ] {
+            let config = config(&[
+                "bmc-mock",
+                "--machine-role",
+                machine_role,
+                "--state-backend",
+                "internal",
+                "--hardware-profile",
+                hardware_profile,
+                "--dpu-bmc-firmware",
+                "bmc-version",
+                "--dpu-uefi-firmware",
+                "uefi-version",
+                "--dpu-bsp-firmware",
+                "bsp-version",
+                "--dpu-cec-firmware",
+                "cec-version",
+                "--dpu-nic-firmware",
+                "nic-version",
+            ])
+            .unwrap();
+            let (_, state) = generated_mock(config);
+
+            for (id, expected) in [
+                ("BlueField_FW_BMC_0", "bmc-version"),
+                ("BlueField_FW_CPU_0", "uefi-version"),
+                ("DPU_BSP", "bsp-version"),
+                ("BlueField_FW_ERoT_BMC_0", "cec-version"),
+                ("BlueField_FW_NIC_0", "nic-version"),
+            ] {
+                assert_eq!(
+                    state
+                        .update_service_state
+                        .find_firmware_inventory(id)
+                        .and_then(|inventory| inventory["Version"].as_str().map(str::to_owned)),
+                    Some(expected.to_string()),
+                    "{hardware_profile} {machine_role} {id}",
+                );
+            }
+        }
     }
 }

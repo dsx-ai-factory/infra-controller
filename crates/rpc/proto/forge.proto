@@ -4,6 +4,7 @@ package forge;
 
 import "codegen/v1/derive.proto";
 import "codegen/v1/extern_path.proto";
+import "codegen/v1/rust_type.proto";
 
 import "common.proto";
 import "dns.proto";
@@ -57,10 +58,21 @@ service Forge {
   // VPC
   rpc CreateVpc(VpcCreationRequest) returns (Vpc);
   rpc UpdateVpc(VpcUpdateRequest) returns (VpcUpdateResult);
+  // Changes an FNN VPC's named profile and active VNI while retaining the old
+  // allocation. Success means Core committed, not that the dataplane converged.
+  rpc ChangeVpcRoutingProfile(VpcChangeRoutingProfileRequest) returns (VpcRoutingState);
+  // Operator cleanup after independently verifying that no DPU or fabric route
+  // still uses the retained VNI. Core does not verify dataplane convergence.
+  rpc ReleaseVpcInactiveVni(VpcReleaseInactiveVniRequest) returns (VpcReleaseInactiveVniResult);
   rpc UpdateVpcVirtualization(VpcUpdateVirtualizationRequest) returns (VpcUpdateVirtualizationResult);
+  // Deletion does not release a retained VNI implicitly. Call
+  // ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+  // Retained or inconsistent owned allocations cause FailedPrecondition.
   rpc DeleteVpc(VpcDeletionRequest) returns (VpcDeletionResult);
   rpc FindVpcIds(VpcSearchFilter) returns (VpcIdList);
   rpc FindVpcsByIds(VpcsByIdsRequest) returns (VpcList);
+  // Reads persisted VPC routing and allocation state without changing it.
+  rpc GetVpcRoutingState(VpcRoutingStateRequest) returns (VpcRoutingState);
 
   rpc CreateSpxPartition(SpxPartitionCreationRequest) returns (SpxPartition);
   rpc DeleteSpxPartition(SpxPartitionDeletionRequest) returns (SpxPartitionDeletionResult);
@@ -269,7 +281,9 @@ service Forge {
   rpc FindSitePrefixStateHistories(SitePrefixStateHistoriesRequest) returns (StateHistories);
   rpc FindTenantOrganizationIds(TenantSearchFilter) returns (TenantOrganizationIdList);
   rpc FindTenantsByOrganizationIds(TenantByOrganizationIdsRequest) returns (TenantList);
-  rpc FindConnectedDevicesByDpuMachineIds(common.MachineIdList) returns (ConnectedDeviceList);
+  rpc FindConnectedDevicesByDpuMachineIds(common.MachineIdList) returns (ConnectedDeviceList) {
+    option (carbide.codegen.v1.method_rust_input_type) = ".common.DpuMachineIdList";
+  }
   rpc FindMachineIdsByBmcIps(BmcIpList) returns (MachineIdBmcIpPairs);
   rpc FindMacAddressByBmcIp(BmcIp) returns (MacAddressBmcIp);
   rpc FindBmcIps(FindBmcIpsRequest) returns (BmcIpList);
@@ -819,7 +833,9 @@ service Forge {
   rpc SetManagedHostQuarantineState(SetManagedHostQuarantineStateRequest) returns (SetManagedHostQuarantineStateResponse);
   rpc ClearManagedHostQuarantineState(ClearManagedHostQuarantineStateRequest) returns (ClearManagedHostQuarantineStateResponse);
 
-  rpc ResetHostReprovisioning(common.MachineId) returns (google.protobuf.Empty);
+  rpc ResetHostReprovisioning(common.MachineId) returns (google.protobuf.Empty) {
+    option (carbide.codegen.v1.method_rust_input_type) = ".common.StableHostMachineId";
+  }
   // Copy BFB to DPU's RSHIM
   rpc CopyBfbToDpuRshim(CopyBfbToDpuRshimRequest) returns (google.protobuf.Empty);
 
@@ -1051,13 +1067,16 @@ service Forge {
   // Helm/docker versions for the carbide DPF mandatory services, from both
   // the carbide config and the live DPUServiceTemplate CRs.
   rpc GetDPFServiceVersions(GetDPFServiceVersionsRequest) returns (DPFServiceVersionsResponse);
-  // Machines DPF is waiting on before a changed DPUService can roll out.
+  // Predicted or stable host machines DPF is waiting on before a changed
+  // DPUService can roll out.
   //
   // Required rather than convenient: the release RPC has no fleet-wide form, so
   // this is the only way to discover which machines to name. Split ids-then-
   // details because a fleet-wide rollout can leave every host waiting at once,
   // and the worklist must not become one unbounded response.
-  rpc FindPendingDPUServiceSyncIds(FindPendingDPUServiceSyncIdsRequest) returns (common.MachineIdList);
+  rpc FindPendingDPUServiceSyncIds(FindPendingDPUServiceSyncIdsRequest) returns (common.MachineIdList) {
+    option (carbide.codegen.v1.method_rust_output_type) = ".common.HostMachineIdList";
+  }
   rpc FindPendingDPUServiceSyncsByIds(FindPendingDPUServiceSyncsByIdsRequest) returns (ListPendingDPUServiceSyncsResponse);
   // One machine's recorded sync history, newest first. Needs no paging: the
   // database caps retained history per machine.
@@ -1441,6 +1460,8 @@ enum CredentialType {
   NmxM = 10;
   BgpSiteWideLeafPassword = 11;
   SiteWideNicLockdownIkm = 12;
+  // Named credential used to authorize firmware artifact downloads.
+  FirmwareArtifactAccessToken = 13;
 }
 
 message CredentialCreationRequest {
@@ -1452,16 +1473,29 @@ message CredentialCreationRequest {
   optional string username = 2;
   // The password of credential for HostBMC, DPUBMC, DpuUefi.
   // For UFM, the password is the token of UFM.
+  // For FirmwareArtifactAccessToken, the password is the non-empty artifact
+  // access token. Its contents are stored verbatim, including whitespace and
+  // line endings.
   string password = 3;
   // For the BMC factory default credential: "dell", "lenovo", "hpe", "supermicro", etc
   optional string vendor = 4;
   optional string mac_address = 5;
+  // Required and non-empty for FirmwareArtifactAccessToken. The server returns
+  // InvalidArgument when this field is omitted or empty. This is an opaque,
+  // non-secret lookup name. Setting the same name replaces the stored token;
+  // username, vendor, and mac_address are ignored for this credential type.
+  optional string credential_name = 6;
 }
 
 message CredentialDeletionRequest {
   CredentialType credential_type = 1;
   optional string username = 2;
   optional string mac_address = 3;
+  // Required and non-empty for FirmwareArtifactAccessToken. The server returns
+  // InvalidArgument when this field is omitted or empty. This opaque,
+  // non-secret lookup name selects the token to delete; username and
+  // mac_address are ignored for this credential type.
+  optional string credential_name = 4;
 }
 
 message CredentialCreationResult {
@@ -1853,9 +1887,8 @@ message VpcConfig {
 
 message VpcStatus {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  // The actual VNI allocated to the VPC. If a VNI had been
-  // explicitly requested, we'd expect this to match config.vni.
-  // If not explicitly requested, we'd expect config.vni to be unset.
+  // Active VNI allocated to the VPC. `config.vni` retains the optional
+  // creation-time request and can differ after a routing-profile change.
   optional uint32 vni = 1;
   // Computed from the API server's current named profile and the persisted
   // VPC overrides. This value is not persisted and may change when the API
@@ -1910,6 +1943,7 @@ message Vpc {
 
 message VpcCreationRequest {
   reserved 2;  // was: string name, replaced with metadata.name
+  // Must identify an existing tenant with a routing profile when creating an FNN VPC.
   string tenantOrganizationId = 3; // protolint:disable:this FIELD_NAMES_LOWER_SNAKE_CASE
   // this keyset will enable any key contained within it to access any instance associated with this VPC.
   optional string tenantKeysetId = 4; // protolint:disable:this FIELD_NAMES_LOWER_SNAKE_CASE
@@ -3071,7 +3105,7 @@ message InstanceAllocationRequest {
   // The Machine on top of which we create an Instance
   // If we go towards "we already have instances model", this would become more of a
   // AssignInstanceToTenant request, and the ID would be the instance_id
-  common.MachineId machine_id = 1;
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.StableHostMachineId"];
 
 
   // Desired configuration for the allocated instance
@@ -3532,7 +3566,7 @@ message InstanceInfinibandStatus {
 message DpuExtensionServiceStatus {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
-  common.MachineId dpu_machine_id = 1;
+  common.MachineId dpu_machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
   DpuExtensionServiceDeploymentStatus status = 2;
   optional string error_message = 3;
   repeated DpuExtensionServiceComponent components = 4;
@@ -3567,7 +3601,7 @@ message Instance {
   // Instance ID
   common.InstanceId id = 1;
   // The ID of the host machine which is utilized for this Instance (host_machine_id)
-  common.MachineId machine_id = 2;
+  common.MachineId machine_id = 2 [(carbide.codegen.v1.field_rust_type) = ".common.StableHostMachineId"];
   Metadata metadata = 3;
 
   // The InstanceTypeId associated with the Instance.
@@ -4188,8 +4222,8 @@ message MachineStatus {
   optional machine_discovery.DiscoveryInfo discovery_info = 2;
   google.protobuf.Timestamp last_reboot_time = 3;
   google.protobuf.Timestamp last_observation_time = 4;
-  optional common.MachineId associated_host_machine_id = 5;
-  repeated common.MachineId associated_dpu_machine_ids = 6;
+  optional common.MachineId associated_host_machine_id = 5 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
+  repeated common.MachineId associated_dpu_machine_ids = 6 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
   optional google.protobuf.Timestamp last_reboot_requested_time = 7;
   optional string last_reboot_requested_mode = 8;
   optional string dpu_agent_version = 9;
@@ -4272,7 +4306,7 @@ message Machine {
   // Other machine ids associated with this machine
   // Deprecated: use status.associated_host_machine_id
   // TODO: change to reserved once rest-api uses MachineStatus
-  optional common.MachineId associated_host_machine_id = 19 [deprecated = true];
+  optional common.MachineId associated_host_machine_id = 19 [deprecated = true, (carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   reserved 20; /* previously: optional common.MachineId associated_dpu_machine_id = 20; */
 
   // Hardware inventory (NIC firmware, etc.). Discovered at ingestion time; not operator-mutable.
@@ -4291,7 +4325,7 @@ message Machine {
   // Fields are not ordered numerically, check the whole message for max field number
   // Deprecated: use status.associated_dpu_machine_ids
   // TODO: change to reserved once rest-api uses MachineStatus
-  repeated common.MachineId associated_dpu_machine_ids = 26 [deprecated = true];
+  repeated common.MachineId associated_dpu_machine_ids = 26 [deprecated = true, (carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
 
   // For Host Machines returns the aggregate health of the host
   // For DPUs, it returns the individual DPU health
@@ -4477,7 +4511,7 @@ message PowerShelfMetadataUpdateRequest {
 }
 
 message DpuAgentInventoryReport {
-  common.MachineId machine_id = 1;
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
   MachineInventory inventory = 2;
 }
 
@@ -4593,7 +4627,7 @@ enum InterfaceType {
 message MachineInterface {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   common.MachineInterfaceId id = 1;
-  optional common.MachineId attached_dpu_machine_id = 2;
+  optional common.MachineId attached_dpu_machine_id = 2 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
   common.MachineId machine_id = 3;
   common.NetworkSegmentId segment_id = 4;
 
@@ -4909,7 +4943,7 @@ enum MachineHardwareInfoUpdateType {
 }
 
 message ManagedHostNetworkConfigRequest {
-  common.MachineId dpu_machine_id = 1;
+  common.MachineId dpu_machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
 }
 
 message ManagedHostNetworkConfigResponse {
@@ -5107,7 +5141,7 @@ enum VpcIsolationBehaviorType {
 }
 
 message GetManagedHostQuarantineStateRequest {
-  common.MachineId machine_id = 1;
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
 }
 
 message GetManagedHostQuarantineStateResponse {
@@ -5115,7 +5149,7 @@ message GetManagedHostQuarantineStateResponse {
 }
 
 message SetManagedHostQuarantineStateRequest {
-  common.MachineId machine_id = 1;
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   ManagedHostQuarantineState quarantine_state = 2;
 }
 
@@ -5124,7 +5158,7 @@ message SetManagedHostQuarantineStateResponse {
 }
 
 message ClearManagedHostQuarantineStateRequest {
-  common.MachineId machine_id = 1;
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
 }
 
 message ClearManagedHostQuarantineStateResponse {
@@ -5366,7 +5400,7 @@ message AdminForceDeleteMachineRequest {
 }
 
 message DecommissionManagedHostRequest {
-  common.MachineId machine_id = 1;
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.StableHostMachineId"];
 }
 
 message DecommissionManagedHostResponse {
@@ -5877,7 +5911,7 @@ enum InterfaceFunctionType {
 // What forge-dpu-agent reports. Will grow over time.
 message DpuNetworkStatus {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  common.MachineId dpu_machine_id = 1;
+  common.MachineId dpu_machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
   google.protobuf.Timestamp observed_at = 2;
   // Legacy mechanism to indicate DPU health.
   reserved 3; // Was NetworkHealth health = 3; - // Replaced by the `dpu_health` field
@@ -6135,7 +6169,9 @@ message UpdateTenantRequest {
 
   reserved 4;
   
-  // Updating will only be allowed if the tenant has no active VPCs
+  // Core treats omission as a replacement with no profile, not patch-preserve behavior.
+  // When FNN is enabled, omission is rejected. When FNN is disabled, omission clears any existing
+  // profile, subject to the restriction against profile changes while active FNN VPCs exist.
   optional string routing_profile_type = 5;
 }
 message UpdateTenantResponse {
@@ -6411,7 +6447,7 @@ message DpuReprovisioningListRequest {
 
 message DpuReprovisioningListResponse {
   message DpuReprovisioningListItem {
-    common.MachineId id = 1; // Dpu Machine ID
+    common.MachineId id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"]; // Dpu Machine ID
     string state = 2; // ManagedHost state
     string initiator = 3; // Who requested this reprovisioning.
     google.protobuf.Timestamp requested_at = 4; // When reprovisioning was requested.
@@ -6427,7 +6463,7 @@ message HostReprovisioningRequest {
     Set = 0;
     Clear = 1;
   }
-  common.MachineId machine_id = 1;
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.StableHostMachineId"];
   Mode mode = 2;
   UpdateInitiator initiator = 3;
 }
@@ -6485,7 +6521,7 @@ message NicLockdownCredentialRotationRequest {
     Clear = 2;
   }
   Mode mode = 1;
-  common.MachineId machine_id = 2;
+  common.MachineId machine_id = 2 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
 }
 
 message HostReprovisioningListRequest {
@@ -6493,7 +6529,7 @@ message HostReprovisioningListRequest {
 
 message HostReprovisioningListResponse {
   message HostReprovisioningListItem {
-    common.MachineId id = 1; // Machine ID
+    common.MachineId id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"]; // Machine ID
     string state = 2; // ManagedHost state
     string initiator = 3; // Who requested this reprovisioning.
     google.protobuf.Timestamp requested_at = 4; // When reprovisioning was requested.
@@ -6709,7 +6745,7 @@ message ClearHostUefiPasswordResponse {
 
 message SetDpuUefiPasswordRequest {
   // The DPU machine to set the UEFI password on.
-  common.MachineId dpu_id = 1;
+  common.MachineId dpu_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
   // UUID, IP address, hostname or MAC address resolving to the DPU machine
   // (preferred over dpu_id).
   optional string machine_query = 2;
@@ -7022,7 +7058,7 @@ message MachineRebootCompletedRequest {
 }
 
 message ScoutFirmwareUpgradeStatusRequest {
-  common.MachineId machine_id = 1;
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   bool success = 2;
   int32 exit_code = 3;
   string stdout = 4;
@@ -8282,7 +8318,7 @@ message SkuSearchFilter {
 message DpaInterface {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   common.DpaInterfaceId id = 1;
-  common.MachineId machine_id = 2;
+  common.MachineId machine_id = 2 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   string mac_addr = 3;
 
   google.protobuf.Timestamp created = 4;
@@ -8330,7 +8366,7 @@ enum DpaInterfaceType {
 }
 
 message DpaInterfaceCreationRequest {
-  common.MachineId machine_id = 1;
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   string mac_addr = 2;
   string device_type = 3;
   string pci_name = 4;
@@ -8370,7 +8406,7 @@ message SkuUpdateMetadataRequest {
 }
 
 message PowerOptionRequest {
-  repeated common.MachineId machine_id = 1;
+  repeated common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
 }
 
 enum PowerState {
@@ -8380,7 +8416,7 @@ enum PowerState {
 }
 
 message PowerOptionUpdateRequest {
-  common.MachineId machine_id = 1;
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   PowerState power_state = 2;
 }
 
@@ -8391,7 +8427,7 @@ message PowerOptions {
   google.protobuf.Timestamp desired_state_updated_at = 2;
   PowerState actual_state = 3;
   google.protobuf.Timestamp actual_state_updated_at = 4;
-  common.MachineId host_id = 5;
+  common.MachineId host_id = 5 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   string desired_power_state_version = 6;
   google.protobuf.Timestamp next_power_state_fetch_at = 7;
   int32 off_counter = 8;
@@ -9186,23 +9222,23 @@ message DisableRemediationRequest {
 /// and the api server will give you back the other one(s).
 message FindAppliedRemediationIdsRequest {
   optional common.RemediationId remediation_id = 1;
-  optional common.MachineId dpu_machine_id = 2;
+  optional common.MachineId dpu_machine_id = 2 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
 }
 message AppliedRemediationIdList {
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   repeated common.RemediationId remediation_ids = 1;
-  repeated common.MachineId dpu_machine_ids = 2;
+  repeated common.MachineId dpu_machine_ids = 2 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
 }
 message FindAppliedRemediationsRequest {
   common.RemediationId remediation_id = 1;
-  common.MachineId dpu_machine_id = 2;
+  common.MachineId dpu_machine_id = 2 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
 }
 message AppliedRemediation {
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   common.RemediationId remediation_id = 1;
-  common.MachineId dpu_machine_id = 2;
+  common.MachineId dpu_machine_id = 2 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
   int32 attempt = 3;
   bool succeeded = 4;
   google.protobuf.Timestamp applied_time = 5;
@@ -9215,7 +9251,7 @@ message AppliedRemediationList {
 }
 
 message GetNextRemediationForMachineRequest {
-  common.MachineId dpu_machine_id = 1;
+  common.MachineId dpu_machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
 }
 message GetNextRemediationForMachineResponse {
   optional common.RemediationId remediation_id = 1;
@@ -9223,7 +9259,7 @@ message GetNextRemediationForMachineResponse {
 }
 message RemediationAppliedRequest {
   common.RemediationId remediation_id = 1;
-  common.MachineId dpu_machine_id = 2;
+  common.MachineId dpu_machine_id = 2 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
   RemediationApplicationStatus status = 3;
 }
 message RemediationApplicationStatus {
@@ -9233,8 +9269,8 @@ message RemediationApplicationStatus {
 // end DPU remediation models
 
 message SetPrimaryDpuRequest {
-  common.MachineId host_machine_id = 1;
-  common.MachineId dpu_machine_id = 2;
+  common.MachineId host_machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.StableHostMachineId"];
+  common.MachineId dpu_machine_id = 2 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
   // Deprecated compatibility alias for `force_reconcile`.
   bool reboot = 3 [deprecated = true];
   // Request another controller reconciliation even when the selected DPU is
@@ -9243,7 +9279,7 @@ message SetPrimaryDpuRequest {
 }
 
 message SetPrimaryInterfaceRequest {
-  common.MachineId host_machine_id = 1;
+  common.MachineId host_machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.StableHostMachineId"];
   common.MachineInterfaceId interface_id = 2;
   // Deprecated compatibility alias for `force_reconcile`.
   bool reboot = 3 [deprecated = true];
@@ -9728,13 +9764,13 @@ message MachinePositionInfo {
 }
 
 message ModifyDPFStateRequest {
-  common.MachineId machine_id = 1;
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   bool dpf_enabled = 2;
 }
 
 message DPFStateResponse {
   message DPFState {
-    common.MachineId machine_id = 1;
+    common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
     bool enabled = 2;
     bool used_for_ingestion = 3;
   }
@@ -9742,13 +9778,13 @@ message DPFStateResponse {
 }
 
 message GetDPFStateRequest {
-  repeated common.MachineId machine_ids = 1;
+  repeated common.MachineId machine_ids = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
 }
 
 // --- DPF host snapshot ---
 
 message GetDPFHostSnapshotRequest {
-  common.MachineId host_machine_id = 1;
+  common.MachineId host_machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
 }
 
 // Returns the snapshot as a JSON string. The server-side curates the field
@@ -9793,15 +9829,16 @@ message DPFServiceVersionsResponse {
 // services under every tenant at once.
 message ReleaseDPUServiceSyncHoldRequest {
   oneof target {
-    // Host machines to release. DPU machine ids are rejected: the hold is per
-    // node, so accepting one would silently widen the request from a single DPU
-    // to every DPU on its host. Assigned hosts are declined -- name the instance
-    // instead.
-    common.MachineIdList machine_ids = 1;
+    // Predicted or stable host machines to release. DPU machine ids are
+    // rejected: the hold is per node, so accepting one would silently widen the
+    // request from a single DPU to every DPU on its host. Assigned hosts are
+    // declined -- name the instance instead.
+    common.MachineIdList machine_ids = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineIdList"];
     // Release the hosts currently holding these instances, even though they are
     // assigned. Naming an instance is the acknowledgement that its tenant will
     // be disrupted, and each consent covers only the instance named: if a host
-    // has since been reallocated, that release is declined.
+    // has since been reallocated, that release is declined. Instances resolve
+    // only to stable host machines.
     InstanceIdList instance_ids = 2;
   }
 }
@@ -9829,7 +9866,8 @@ enum DPUServiceSyncReleaseStatus {
 }
 
 message DPUServiceSyncReleaseResult {
-  common.MachineId machine_id = 1;
+  // The predicted or stable host acted on.
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   DPUServiceSyncReleaseStatus status = 2;
   // Names the DPU or instance responsible on the deferred statuses, and the
   // error on FAILED. Empty otherwise.
@@ -9846,18 +9884,21 @@ message FindPendingDPUServiceSyncIdsRequest {
 }
 
 message FindPendingDPUServiceSyncsByIdsRequest {
-  // Bounded by the server's `max_find_by_ids`, like every other by-ids call.
-  repeated common.MachineId machine_ids = 1;
+  // Predicted and stable host IDs are accepted. Bounded by the server's
+  // `max_find_by_ids`, like every other by-ids call.
+  repeated common.MachineId machine_ids = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
 }
 
 message ListDPUServiceSyncHistoryRequest {
-  common.MachineId machine_id = 1;
+  // The predicted or stable host whose history to return.
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
 }
 
 // One recorded DPU service sync. Completed entries appear only in the history
 // form.
 message PendingDPUServiceSync {
-  common.MachineId machine_id = 1;
+  // The predicted or stable host waiting for service sync.
+  common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   // First time DPF was seen waiting on this machine. Survives repeat requests,
   // so it measures the whole wait rather than the last observation.
   google.protobuf.Timestamp requested_at = 2;
@@ -9917,10 +9958,11 @@ message MacAddressList {
 
 message GetComponentInventoryRequest {
   oneof target {
-    common.MachineIdList machine_ids = 1;
+    common.MachineIdList machine_ids = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineIdList"];
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     MacAddressList compute_bmc_macs = 4;
+    MacAddressList switch_bmc_macs = 5;
   }
 }
 
@@ -9937,10 +9979,11 @@ message GetComponentInventoryResponse {
 
 message ComponentPowerControlRequest {
   oneof target {
-    common.MachineIdList machine_ids = 1;
+    common.MachineIdList machine_ids = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineIdList"];
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     MacAddressList compute_bmc_macs = 6;
+    MacAddressList switch_bmc_macs = 7;
   }
   common.SystemPowerControl action = 4;
   // When true, bypass the state controller and dispatch directly to the
@@ -10017,14 +10060,20 @@ message UpdateComputeTrayFirmwareTarget {
   // neither/both). machine_ids targets ingested trays; bmc_macs targets by BMC
   // MAC, including pre-ingestion. These are plain fields rather than a oneof so
   // field 1 stays wire-compatible with earlier releases that predate bmc_macs.
-  common.MachineIdList machine_ids = 1;
+  common.MachineIdList machine_ids = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineIdList"];
   repeated ComputeTrayComponent components = 2;
   MacAddressList bmc_macs = 3;
 }
 
 message UpdateSwitchFirmwareTarget {
+  // Exactly one of switch_ids or bmc_macs must be set (the server rejects
+  // neither/both). switch_ids targets ingested switches; bmc_macs targets by
+  // BMC MAC, including pre-ingestion. These are plain fields rather than a oneof
+  // so field 1 stays wire-compatible with earlier releases that predate
+  // bmc_macs.
   SwitchIdList switch_ids = 1;
   repeated NvSwitchComponent components = 2;
+  MacAddressList bmc_macs = 3;
 }
 
 message UpdatePowerShelfFirmwareTarget {
@@ -10067,11 +10116,12 @@ message UpdateComponentFirmwareResponse {
 
 message GetComponentFirmwareStatusRequest {
   oneof target {
-    common.MachineIdList machine_ids = 1;
+    common.MachineIdList machine_ids = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineIdList"];
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     RackIdList rack_ids = 4;
     MacAddressList compute_bmc_macs = 5;
+    MacAddressList switch_bmc_macs = 6;
   }
 }
 
@@ -10081,11 +10131,12 @@ message GetComponentFirmwareStatusResponse {
 
 message ListComponentFirmwareVersionsRequest {
   oneof target {
-    common.MachineIdList machine_ids = 1;
+    common.MachineIdList machine_ids = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineIdList"];
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     RackIdList rack_ids = 4;
     MacAddressList compute_bmc_macs = 5;
+    MacAddressList switch_bmc_macs = 6;
   }
 }
 
@@ -10759,4 +10810,127 @@ enum DpuNvConfigProfile {
   DPU_NV_CONFIG_PROFILE_UNSPECIFIED = 0;
   // Version 1 of the validated GB200/B3240 CPU as Root Complex profile.
   DPU_NV_CONFIG_PROFILE_GB200_B3240_V1 = 1;
+}
+
+// Releases the VNI retained after a routing-profile change. The active VNI and
+// VPC configuration remain unchanged. Before calling, operators must verify
+// that affected DPUs (including peers) and fabric routes no longer use the
+// inactive VNI, and prevent attachment, peering, and routing changes through
+// cleanup. Unreachable consumers require retaining the allocation unless they
+// have been isolated. Core validates ownership, not dataplane convergence.
+message VpcReleaseInactiveVniRequest {
+  // Required VPC whose inactive allocation will be released.
+  common.VpcId id = 1;
+  // Required version from the operator's original observation. Repeating that
+  // exact request cannot release a later allocation. A lost response leaves the
+  // outcome unknown: a stale-version error does not prove whether cleanup ran.
+  // Inspect current state; never substitute a fresh version in an automatic retry.
+  optional string if_version_match = 2;
+  // Required exact inactive VNI observed with this version, in 1..16777215.
+  // It must differ from the active VNI and match the VPC-owned allocation in
+  // the other pool. Cleanup fails on missing or inconsistent allocations.
+  optional uint32 expected_inactive_vni = 3;
+}
+
+message VpcReleaseInactiveVniResult {
+  // Authoritative VPC with its advanced version after cleanup committed.
+  Vpc vpc = 1;
+  // Exact inactive allocation released by this operation.
+  uint32 released_inactive_vni = 2;
+}
+
+// Selects one VPC for authoritative allocation inspection.
+message VpcRoutingStateRequest {
+  // Required VPC ID. Missing IDs fail INVALID_ARGUMENT; unknown or deleted
+  // VPCs fail NOT_FOUND.
+  common.VpcId id = 1;
+}
+
+// Persisted routing state, read together with the VPC-owned allocations.
+// Supports any virtualization type with one owned allocation matching its
+// active VNI and at most one distinct allocation in the other pool. Missing,
+// duplicate, or inconsistent ownership fails instead of reporting no retained
+// allocation. VPCs without pool ownership (including configured admin VPCs)
+// fail FAILED_PRECONDITION. Pool values that cannot be parsed as signed 32-bit
+// integers fail INTERNAL; parsed negative values fail FAILED_PRECONDITION.
+// This is not an effective routing profile or evidence of DPU/fabric convergence;
+// a site-global VNI override is not reflected here. Inspection must not silently
+// replace the version or VNI an operator approved for a mutation.
+message VpcRoutingState {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // VPC whose persisted state was read.
+  common.VpcId id = 1;
+  // VPC version observed with these allocations. Profile changes advance it;
+  // inspection does not.
+  string version = 2;
+  // Persisted profile name, omitted when none is configured on the VPC.
+  // The name is returned even if its runtime profile definition is unavailable.
+  optional string routing_profile_type = 3;
+  // Persisted active VNI, verified against exact pool ownership. Inspection
+  // accepts stored nonnegative values, including zero in non-FNN pools.
+  uint32 active_vni = 4;
+  // Omitted only when the valid active allocation is the VPC's sole allocation.
+  VpcRetainedVniAllocation retained_allocation = 5;
+}
+
+// Allocation retained by the VPC in the pool other than its active allocation.
+message VpcRetainedVniAllocation {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Exact resource-pool name: vpc-vni or external-vpc-vni.
+  string pool_name = 1;
+  // Persisted nonnegative VNI. Distinct from the active VNI; inspection does
+  // not establish whether it is valid for a routing-profile transition.
+  uint32 vni = 2;
+}
+
+// Changes a supported FNN VPC between configured profiles with opposite
+// internal settings. The destination must satisfy the persisted tenant's
+// access tier (omitted tiers retain the creation-time default of zero).
+// Reuses an existing destination allocation, otherwise claims the requested
+// VNI or automatically selects an available VNI from the destination pool.
+// The previous allocation remains reserved; ReleaseVpcInactiveVni is a
+// separate operator action.
+//
+// Requires FNN configuration, named source/destination profiles, distinct
+// nonoverlapping materialized pools, and VNIs in 1..16777215. Site-global VNIs,
+// substantive VPC/interface routing overrides, and tenant-managed SitePrefix
+// attachments are unsupported. Empty override reset objects are allowed.
+// Same-polarity changes and a destination pool already holding the active VNI
+// are rejected. Unsupported configurations and inconsistent ownership fail
+// FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; automatic allocation
+// from an exhausted pool fails RESOURCE_EXHAUSTED. Rejected requests commit
+// no changes.
+//
+// Preserves the VPC ID, prefixes, instances, addresses, NSGs, metadata, and
+// creation-time requested VNI. External routing does not supply public
+// addressing, NAT, fabric routes, or firewall changes.
+//
+// Operators must hold attachment, peering, deletion, and profile-definition
+// changes until all attached and directly peered DPUs and fabric routes have
+// been independently verified and the inactive allocation released. Core
+// does not enforce that hold or verify convergence. A later change back must
+// name the desired profile and pass current validation; retained ownership
+// does not guarantee reversal or authorize broader tenant access.
+message VpcChangeRoutingProfileRequest {
+  // Required live VPC ID. Omission fails INVALID_ARGUMENT.
+  common.VpcId id = 1;
+  // Required version from the original observation; missing/malformed values
+  // fail INVALID_ARGUMENT and stale versions fail FAILED_PRECONDITION. Keep this exact
+  // version on retries. A lost response leaves commit status unknown: inspect
+  // GetVpcRoutingState and never automatically substitute a fresh version.
+  optional string if_version_match = 2;
+  // Required nonempty configuration-defined destination name, not a closed
+  // INTERNAL/EXTERNAL enum. Omission or an empty name fails INVALID_ARGUMENT.
+  string routing_profile_type = 3;
+  // Optional exact destination VNI. Omission reuses a retained destination,
+  // otherwise allocates automatically. A retained destination must match an
+  // explicit request; a different value fails FAILED_PRECONDITION even if free.
+  // Without a retained destination, the requested value must be a free
+  // materialized destination-pool entry, regardless of its auto_assign flag.
+  // Missing or occupied entries and the active VNI fail FAILED_PRECONDITION
+  // without falling back. Zero and values above 16777215 fail INVALID_ARGUMENT.
+  // Use only when every serving Core supports this field: older Core ignores
+  // it and may choose another VNI. Verify the returned profile and active VNI;
+  // a mismatched or lost response does not undo a committed change.
+  optional uint32 vni = 4;
 }

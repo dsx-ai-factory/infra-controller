@@ -34,6 +34,7 @@ use api_test_helper::{
 };
 use bmc_mock::test_support::TEST_MAC_POOL;
 use bmc_mock::{HardwareType, ListenerOrAddress};
+use carbide_uuid::machine::StableHostMachineId;
 use eyre::ContextCompat;
 use futures::FutureExt;
 use futures::future::join_all;
@@ -538,7 +539,10 @@ async fn test_metrics_integration() -> eyre::Result<()> {
                 let vpc_id = vpc::create(&carbide_api_addrs, tenant_org_id).await?;
                 let domain_id = domain::create(&carbide_api_addrs, "tenant-1.local").await?;
                 let segment_id = subnet::create(&carbide_api_addrs, &vpc_id, &domain_id, 10, false).await?;
-                let host_machine_id = machine_handle.observed_machine_id().expect("Should have gotten a machine ID by now");
+                let host_machine_id: StableHostMachineId = machine_handle
+                    .observed_machine_id()
+                    .expect("Should have gotten a machine ID by now")
+                    .try_into()?;
 
                 // Create instance with phone_home enabled
                 let instance_id = instance::create(
@@ -668,9 +672,10 @@ async fn test_machine_a_tron_multidpu(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 if let Some(expected_selection) = expected_selection {
                     let selection: (MacAddress, BootInterfaceSelectionSource) = sqlx::query_as(
                         "SELECT desired_mac_address, selection_source
@@ -764,9 +769,10 @@ async fn test_machine_a_tron_zerodpu(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine has made it to Ready, allocating instance",
@@ -834,9 +840,10 @@ async fn test_machine_a_tron_nic_mode(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine has made it to Ready, allocating instance",
@@ -1006,9 +1013,10 @@ async fn test_machine_a_tron_dual_stack(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine is Ready, allocating dual-stack instance via ipv6 config",
@@ -1119,9 +1127,10 @@ async fn test_machine_a_tron_dual_stack_l2(
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
                     .await?;
-                let machine_id = machine_handle
+                let machine_id: StableHostMachineId = machine_handle
                     .observed_machine_id()
-                    .expect("Machine ID should be set if host is ready");
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
                 tracing::info!(
                     machine_id = %machine_id,
                     "Machine is Ready, allocating dual-stack L2 instance",

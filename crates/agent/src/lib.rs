@@ -54,7 +54,7 @@ pub mod containerd;
 mod dhcp;
 mod dhcp_server_grpc_client;
 mod ethernet_virtualization;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 pub use ethernet_virtualization::FPath;
 pub mod extension_services;
 mod fmds_client;
@@ -819,7 +819,7 @@ async fn run_lldp_sidecar_loop<Capture, CaptureFuture>(
 }
 
 struct Registration {
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
     factory_mac_address: MacAddress,
 }
 
@@ -921,7 +921,8 @@ async fn register(
     )
     .await?;
 
-    let machine_id = registration_data.machine_id;
+    let machine_id = DpuMachineId::try_from(registration_data.machine_id)
+        .context("invalid machine_id returned from DiscoverMachine")?;
     tracing::info!(%machine_id, %factory_mac_address, "Successfully discovered machine");
 
     Ok(Registration {

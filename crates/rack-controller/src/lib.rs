@@ -19,7 +19,7 @@
 
 use carbide_uuid::rack::{RackId, RackProfileId};
 use db::machine;
-use model::machine::Machine;
+use model::machine::StableHostMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::rack::Rack;
 use model::rack_type::{RackCapabilitiesSet, RackProfile};
@@ -48,7 +48,7 @@ pub mod write_ops;
 pub(crate) async fn get_machines_from_rack(
     rack: &Rack,
     txn: &mut PgConnection,
-) -> Result<Vec<Machine>, StateHandlerError> {
+) -> Result<Vec<StableHostMachine>, StateHandlerError> {
     let search_cfg = MachineSearchConfig {
         rack_id: Some(rack.id.clone()),
         ..Default::default()

@@ -19,12 +19,12 @@ List machines DPF is waiting on before a DPUService rollout
 ## OPTIONS
 
 **--machine-id** *\<MACHINE_ID\>*  
-Show this host's recorded history instead of the outstanding worklist
+Show this hosts recorded history instead of the outstanding worklist
 
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 

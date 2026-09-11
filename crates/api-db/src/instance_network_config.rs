@@ -17,23 +17,24 @@
 use std::collections::HashMap;
 
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use model::instance::config::network::{
     InstanceInterfaceConfig, InstanceNetworkConfig, InterfaceFunctionId,
 };
-use model::machine::Machine;
+use model::machine::HostMachine;
 use model::network_segment::NetworkSegmentType;
 use sqlx::PgConnection;
 
 use crate::{DatabaseError, DatabaseResult};
+
 /// Allocate IP's for this network config, filling the InstanceInterfaceConfigs with the newly
 /// allocated IP's.
 pub async fn with_allocated_ips(
     value: InstanceNetworkConfig,
     txn: &mut PgConnection,
     instance_id: InstanceId,
-    machine: &Machine,
+    machine: &HostMachine,
 ) -> DatabaseResult<InstanceNetworkConfig> {
     crate::instance_address::allocate(txn, instance_id, value, machine).await
 }
@@ -42,8 +43,8 @@ pub async fn with_allocated_ips(
 /// This allows efficient batch processing in batch_allocate_instances.
 pub async fn batch_get_inband_segments_by_machine_ids(
     txn: &mut PgConnection,
-    machine_ids: &[MachineId],
-) -> DatabaseResult<HashMap<MachineId, Vec<NetworkSegmentId>>> {
+    machine_ids: &[HostMachineId],
+) -> DatabaseResult<HashMap<HostMachineId, Vec<NetworkSegmentId>>> {
     crate::network_segment::batch_find_ids_by_machine_ids(
         txn,
         machine_ids,

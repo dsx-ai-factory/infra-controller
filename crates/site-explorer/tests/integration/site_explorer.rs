@@ -37,7 +37,7 @@ use mac_address::MacAddress;
 use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::machine::machine_search_config::MachineSearchConfig;
-use model::machine::{LoadSnapshotOptions, Machine};
+use model::machine::{AnyMachine, LoadSnapshotOptions};
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::metadata::Metadata;
 use model::site_explorer::{
@@ -2720,7 +2720,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
         1
     );
     assert_eq!(
-        <Vec<Machine> as AsRef<Vec<Machine>>>::as_ref(&machines).len(),
+        <Vec<AnyMachine> as AsRef<Vec<AnyMachine>>>::as_ref(&machines).len(),
         2
     );
 
@@ -2732,7 +2732,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
     assert_eq!(bmc_ip_addresses.len(), 2);
     for bmc_ip in bmc_ip_addresses {
         assert!(
-            <Vec<Machine> as AsRef<Vec<Machine>>>::as_ref(&machines)
+            <Vec<AnyMachine> as AsRef<Vec<AnyMachine>>>::as_ref(&machines)
                 .iter()
                 .any(|x| {
                     x.status

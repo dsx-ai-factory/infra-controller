@@ -52,7 +52,7 @@ The templates in `deploy/files/` are mounted into services and must be filled wi
 - `deploy/files/nico-api/admin_root_cert_pem` – place the PEM‑encoded root CA chain used to authenticate NICo admins (matches the CA trusted by the admin CLI). Generate this from your CA and keep private keys elsewhere.
 - `deploy/files/nico-api/nico-api-site-config.toml` – set site identifiers (`ENVIRONMENT_NAME`, `SITE_DOMAIN_NAME`), admin network pool and gateway, service VIPs (API, DHCP, DNS, PXE, SSH console, NGINX/proxy, Unbound), tenant overlay prefixes, and IPMI pools/names for controllers and managed hosts. Ensure service VIPs come from your chosen /27 (or equivalent) VIP pool and that IPMI pools each have a gateway and unique network name.
 - `deploy/files/unbound/forwarders.conf` – list upstream recursive DNS endpoints reachable from the cluster. Use IPs for resolvers allowed to recurse for your site.
-- `deploy/files/unbound/local_data.conf` – defines static DNS A records for NICo services, including all `.nico` service endpoints (API, PXE, static PXE, NTP, Unbound, otel-receiver, and SOCKS proxy) and any additional site-specific names (e.g., `api-<ENVIRONMENT_NAME>.<SITE_DOMAIN_NAME>`). Map each hostname to the corresponding service VIP you selected above. Several `.nico` hostnames are hardcoded in compiled binaries and must resolve correctly before DPU agents can start. See [`.nico` DNS Zone — Service Endpoint Reference](DNS.md) for the full list of hostnames, required ports, and which entries are hardcoded.
+- `deploy/files/unbound/local_data.conf` – defines static DNS A and AAAA records for NICo services, including the `.nico` service endpoints, the stock agent's `carbide-ntp.forge` name, and any additional site-specific names (e.g., `api-<ENVIRONMENT_NAME>.<SITE_DOMAIN_NAME>`). Map each hostname to the corresponding service VIP you selected. Add an AAAA record for the exact NTP hostname queried by the deployed agent when DHCPv6 option 56 should advertise an IPv6 NTP fallback. Several hostnames are hardcoded in compiled binaries and must resolve correctly before DPU agents can start. See [`.nico` DNS Zone — Service Endpoint Reference](DNS.md) for the full list of hostnames, required ports, and which entries are hardcoded.
 - `deploy/files/kea_config.json` – provide the Kea DHCPv4 configuration tailored to your admin/tenant networks, including option definitions, subnets, pools, and relay settings. Reference the same service IPs used elsewhere and ensure leases align with the admin network pool.
 - `deploy/files/vtysh.conf` – FRRouting vtysh shell configuration. Align hostname and service addresses here with the FRR service IPs chosen from your service VIP pool.
 
@@ -289,7 +289,8 @@ The container runs `dockurr/chrony` and reads `NTP_SERVERS` / `NTP_DIRECTIVES` f
    kubectl apply -k deploy/nico-base/ntp -n <NICO_NAMESPACE>
    ```
 
-3. Hand out the `nico-ntp` pod hostnames via DHCP option 42 or node configs.
+3. Hand out the `nico-ntp` pod addresses via DHCP option 42 for IPv4, DHCP
+   option 56 for IPv6, or node configs.
 
 ---
 

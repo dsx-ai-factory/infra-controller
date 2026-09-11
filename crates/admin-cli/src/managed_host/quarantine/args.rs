@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use clap::Parser;
 use rpc::forge as forgerpc;
 
@@ -39,7 +39,7 @@ Quarantine a host (blocks all host network traffic):
 ")]
 pub(crate) struct QuarantineOn {
     #[clap(long, required(true), help = "Managed Host ID")]
-    pub(super) host: MachineId,
+    pub(super) host: HostMachineId,
 
     #[clap(
         long,
@@ -72,7 +72,7 @@ Take a host out of quarantine:
 ")]
 pub(crate) struct QuarantineOff {
     #[clap(long, required(true), help = "Managed Host ID")]
-    pub(super) host: MachineId,
+    pub(super) host: HostMachineId,
 }
 
 impl From<QuarantineOff> for forgerpc::ClearManagedHostQuarantineStateRequest {

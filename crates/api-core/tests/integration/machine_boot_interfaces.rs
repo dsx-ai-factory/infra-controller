@@ -167,15 +167,13 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
         // the owned primary -- naming the same boot NIC, so it adds no new
         // distinct boot-MAC signal and leaves the divergence verdict to the
         // conflicting prediction.
-        let bmc_ip: std::net::IpAddr = db::machine_topology::find_machine_bmc_pairs_by_machine_id(
-            txn.as_mut(),
-            vec![host_id.into()],
-        )
-        .await?
-        .into_iter()
-        .find_map(|(_, ip)| ip)
-        .expect("the ingested host should have a BMC address")
-        .parse()?;
+        let bmc_ip: std::net::IpAddr =
+            db::machine_topology::find_machine_bmc_pairs_by_machine_id(txn.as_mut(), vec![host_id])
+                .await?
+                .into_iter()
+                .find_map(|(_, ip)| ip)
+                .expect("the ingested host should have a BMC address")
+                .parse()?;
         db::explored_endpoints::set_boot_interface(
             bmc_ip,
             &model::machine_boot_interface::MachineBootInterface {

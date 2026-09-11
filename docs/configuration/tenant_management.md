@@ -28,7 +28,7 @@ NICo's authorization model has three roles, all managed in the upstream identity
 |------|-------|-------------|
 | Provider Admin (`PROVIDER_ADMIN`) | Infrastructure provider org | Creating allocations, managing tenant accounts, managing sites and instance types |
 | Provider Viewer (`PROVIDER_VIEWER`) | Infrastructure provider org | Read-only access to provider-scoped resources |
-| Tenant Admin (`TENANT_ADMIN`) | Tenant org | Managing the tenant's instances, VPCs, subnets, SSH keys |
+| Tenant Admin (`TENANT_ADMIN`) | Tenant org | Managing the tenant's instances, VPCs, VPC Prefixes, Subnets, and SSH keys |
 
 A single user can hold roles in multiple orgs simultaneously. On dev/service-account orgs, one user typically holds both Provider Admin and Tenant Admin in the same org.
 
@@ -239,7 +239,7 @@ See the Quick Start Guide, Step 7 for nico-admin-cli access patterns. The REST A
 
 ## Assigning Resources with Allocations
 
-An allocation grants a tenant access to infrastructure at a specific site. Without at least one allocation, a tenant cannot create instances, VPCs, or subnets. Allocations are provider-side operations requiring the Provider Admin role.
+An allocation grants a tenant access to infrastructure at a specific site. Without at least one allocation, a tenant cannot create instances, VPCs, VPC Prefixes, or Subnets. Allocations are provider-side operations requiring the Provider Admin role.
 
 ### Allocation Model
 
@@ -393,7 +393,7 @@ The system validates:
 nicocli allocation delete <allocation-id>
 ```
 
-Deletion is blocked if the tenant has active instances or subnets consuming resources from the allocation. Terminate dependent resources first.
+Deletion is blocked if the tenant has active instances, VPC Prefixes, or Subnets consuming resources from the allocation. Terminate dependent resources first.
 
 ### Multiple Allocations per Tenant
 
@@ -408,13 +408,18 @@ A tenant can have multiple allocations at the same site with different resource 
 5. **Create network allocation(s)** -- One per IP block the tenant needs
 6. **Verify** -- List allocations and confirm they reach `Registered` status
 
-## Creating VPCs and Subnets
+## Creating VPCs and Tenant Networks
 
-After allocations are in place, the tenant can create VPCs and subnets within their allocated resource boundaries.
+After allocations are in place, the tenant can create VPCs and their tenant
+network resources within the allocated boundaries. The VPC's
+`networkVirtualizationType` determines the resource: `FNN` VPCs use VPC
+Prefixes, while `ETHERNET_VIRTUALIZER` VPCs use IPv4 Subnets.
 
 ### VPC Creation
 
-A VPC is the logical network container for tenant workloads. It defines the tenant boundary for networking and provides the parent context for subnets and instances.
+A VPC is the logical network container for tenant workloads. It defines the
+tenant boundary for networking and provides the parent context for VPC
+Prefixes or Subnets and instances.
 
 `nicocli vpc create --help` shows these flags:
 
@@ -423,7 +428,7 @@ A VPC is the logical network container for tenant workloads. It defines the tena
 | `--name` | yes | Unique within the tenant |
 | `--site-id` | yes | The site this VPC belongs to |
 | `--routing-profile` | no | One of `external`, `internal`, `privileged-internal` (REST API mapping); see core docs for semantics |
-| `--network-virtualization-type` | no | `FNN` (production) or `ETHERNET_VIRTUALIZER` (legacy) |
+| `--network-virtualization-type` | no | `FNN` for VPC Prefixes, `ETHERNET_VIRTUALIZER` for IPv4 Subnets, or `FLAT` for zero-DPU and NIC-mode hosts |
 | `--nv-link-logical-partition-id` | no | Attach to a specific NVLink partition (GB200) |
 | `--vni` | no | Pin a specific VXLAN Network Identifier |
 | `--description` | no | |
@@ -438,6 +443,11 @@ nicocli vpc create \
   --network-virtualization-type FNN
 ```
 
+`FNN` is the supported target for production deployments with DPUs. See
+[VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md) for the support
+boundary and [Flat VPCs for Zero-DPU and NIC-Mode Hosts](../manuals/vpc/flat_vpcs_zero_dpu.md)
+for the `FLAT` workflow.
+
 TUI flow (prompts in order):
 
 ```bash
@@ -449,6 +459,10 @@ nicocli tui
 2. **VPC name** -- unique name
 3. **Description** -- optional
 
+The specialized TUI does not prompt for `networkVirtualizationType`; it uses
+the Site default. Use the non-interactive command when the VPC type must be
+selected explicitly.
+
 Verify the VPC reaches `Ready` status:
 
 ```bash
@@ -457,22 +471,42 @@ nicocli vpc list --output table
 
 > **Routing profiles** govern which VPCs can exchange routes with which others. The REST API accepts `external`, `internal`, and `privileged-internal`; the underlying gRPC API supports any profile defined under `fnn.routing_profiles` in the API server config. For details, see [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md). For the full networking architecture (VRFs, VNI pools, BGP, deny prefixes), see [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md).
 
-### Subnet Creation
+### VPC Prefix Creation for FNN
 
-A subnet is an IP address range within a VPC, carved from an allocated IP block.
+An `FNN` VPC uses a VPC Prefix carved from a tenant IP Block. Create the VPC
+Prefix after the parent VPC reaches `Ready`:
 
-`nicocli subnet create --help` shows these flags. Note the flag name `--ipv4block-id` (no separator between `v4` and `block`) and the IPv6 counterpart:
+```bash
+nicocli vpc-prefix create \
+  --name acme-prefix-1 \
+  --vpc-id <fnn-vpc-uuid> \
+  --ip-block-id <ip-block-uuid> \
+  --prefix-length 28
+```
+
+For the supported IPv4 creation path, `--prefix-length` accepts 8 through 31
+and must be greater than the selected parent IP Block's prefix length. REST
+support for creating IPv6 FNN VPC Prefixes is tracked by
+[#5407](https://github.com/NVIDIA/infra-controller/issues/5407).
+
+### IPv4 Subnet Creation for ETHERNET_VIRTUALIZER
+
+A Subnet is an IPv4 range within an `ETHERNET_VIRTUALIZER` VPC, carved from a
+Ready tenant IPv4 IP Block at the same Site. Subnets do not support IPv6; FNN
+VPCs use VPC Prefixes instead.
+
+`nicocli subnet create --help` shows these flags. Note the flag name
+`--ipv4block-id`, with no separator between `v4` and `block`:
 
 | Flag | Required | Notes |
 |------|----------|-------|
 | `--name` | yes | |
-| `--vpc-id` | yes | Parent VPC |
-| `--prefix-length` | yes | 1-32 |
-| `--ipv4block-id` | one of v4/v6 required | IP block to carve from |
-| `--ipv6block-id` | one of v4/v6 required | IPv6 block to carve from |
+| `--vpc-id` | yes | Ready `ETHERNET_VIRTUALIZER` VPC |
+| `--prefix-length` | yes | IPv4 prefix length from 8 through 30 |
+| `--ipv4block-id` | yes | Ready tenant IPv4 IP Block at the VPC's Site |
 | `--description` | no | |
 
-Non-interactive (IPv4):
+Non-interactive:
 
 ```bash
 nicocli subnet create \
@@ -495,11 +529,11 @@ nicocli tui
 > subnet create
 ```
 
-1. **VPC** -- select the parent VPC
+1. **Ready Ethernet virtualizer VPC** -- select the parent VPC
 2. **Subnet name** -- unique name
 3. **Description** -- optional
-4. **Prefix length** -- 1-32
-5. **IPv4 Block** -- scoped to the VPC's site
+4. **IPv4 prefix length** -- 8 through 30
+5. **Tenant IPv4 Block** -- select a Ready tenant IPv4 IP Block at the VPC's Site
 
 Verify:
 
@@ -529,7 +563,8 @@ An instance in NICo is a bare-metal machine assigned to a tenant within a VPC. C
 
 `interfaces[]` and `sshKeyGroupIds[]` are array-typed and must go through `--data` / `--data-file`.
 
-Non-interactive form (with one interface and one SSH key group):
+Non-interactive form for an `FNN` VPC (with one interface and one SSH key
+group):
 
 ```bash
 nicocli instance create --data-file - <<'EOF'
@@ -559,7 +594,9 @@ nicocli tui
 2. **Machine** -- select from machines in `Ready` state at the VPC's site
 3. **Instance name** -- unique name
 4. **Operating system** -- optional
-5. **VPC prefix** -- network prefix for each interface (loops, can add more)
+5. **Network resource** -- select a VPC Prefix for `FNN` or a Subnet for
+   `ETHERNET_VIRTUALIZER` (loops, can add more). `FLAT` VPCs attach the network
+   automatically and skip this prompt.
 6. **SSH key groups** -- optional, attaches SSH keys for serial-console access
 
 For an image-based operating system, review [Image-Based Operating Systems](image-based-operating-systems.md) before making the definition available to tenants. Its disk selector applies to every eligible target and the selected whole disk is overwritten during installation.
@@ -776,7 +813,8 @@ NICo has no first-class "disable" operation. Options:
 There is no `DELETE /tenant` endpoint -- tenant records are permanent. To fully decommission:
 
 1. **Terminate all instances** -- delete every instance; each must reach `Terminated` status.
-2. **Delete all subnets** -- remove subnets from every VPC.
+2. **Delete all tenant network resources** -- remove VPC Prefixes or Subnets
+   from every VPC, according to its `networkVirtualizationType`.
 3. **Delete all VPCs** -- remove the tenant's VPCs.
 4. **Delete all allocations** -- provider admin removes compute and network allocations.
 5. **Delete the tenant account** -- provider admin severs the link.
@@ -842,16 +880,16 @@ nicocli allocation list --output table --tenant-id <tenant-uuid>
 
 All allocations should show `Registered` status.
 
-### Step 7: Create a VPC (Tenant Admin)
+### Step 7: Create an FNN VPC (Tenant Admin)
 
 ```bash
-nicocli vpc create --name <n> --site-id <site-uuid> --routing-profile internal
+nicocli vpc create --name <n> --site-id <site-uuid> --routing-profile internal --network-virtualization-type FNN
 ```
 
-### Step 8: Create a Subnet (Tenant Admin)
+### Step 8: Create a VPC Prefix (Tenant Admin)
 
 ```bash
-nicocli subnet create --name <n> --vpc-id <vpc-uuid> --ipv4block-id <ip-block-uuid> --prefix-length 28
+nicocli vpc-prefix create --name <n> --vpc-id <vpc-uuid> --ip-block-id <ip-block-uuid> --prefix-length 28
 ```
 
 ### Step 9: Launch an Instance (Tenant Admin)
@@ -874,7 +912,7 @@ nicocli instance list --output table
 nicocli instance status-history <instance-id>
 ```
 
-The instance should reach `Ready` (or `BootCompleted` if `phoneHomeEnabled: true`). Tenant stats should now show non-zero counts for `instance`, `vpc`, and `subnet`.
+The instance should reach `Ready` (or `BootCompleted` if `phoneHomeEnabled: true`). Tenant stats should now show non-zero counts for `instance` and `vpc`.
 
 ## Troubleshooting
 
@@ -952,8 +990,9 @@ Flag-first ordering -- always put flags before positional args.
 | Update constraint | `nicocli allocation constraint update --constraint-value N <alloc-id> <constraint-id>` | Provider Admin |
 | Delete allocation | `nicocli allocation delete <alloc-id>` | Provider Admin |
 | List instance types | `nicocli instance-type list` | Provider or Tenant Admin |
-| Create VPC | `nicocli vpc create --name <n> --site-id <id> --routing-profile internal` | Tenant Admin |
-| Create subnet | `nicocli subnet create --name <n> --vpc-id <id> --ipv4block-id <id> --prefix-length 28` | Tenant Admin |
+| Create FNN VPC | `nicocli vpc create --name <n> --site-id <id> --routing-profile internal --network-virtualization-type FNN` | Tenant Admin |
+| Create FNN VPC Prefix | `nicocli vpc-prefix create --name <n> --vpc-id <id> --ip-block-id <id> --prefix-length 28` | Tenant Admin |
+| Create Ethernet virtualizer IPv4 Subnet | `nicocli subnet create --name <n> --vpc-id <id> --ipv4block-id <id> --prefix-length 28` | Tenant Admin |
 | Create instance | `nicocli instance create --data-file <file>` (interfaces are array-typed) | Tenant Admin |
 | Reboot instance | `nicocli instance update --trigger-reboot=true <instance-id>` | Tenant Admin |
 | Rename instance | `nicocli instance update --name <new> <instance-id>` | Tenant Admin |

@@ -27,7 +27,7 @@ repository = "https://github.com/dsx-ai-factory/infra-controller"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.47.4" }
+libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.47.5" }
 librms = { git = "https://github.com/dsx-ai-factory/nv-rms-client.git", tag = "v0.10.1" }
 ansi-to-html = "0.2.2"
 
@@ -239,7 +239,7 @@ toml_edit = "0.25.11"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tonic-reflection = "0.14"
-tower = "0.5"
+tower = { version = "0.5", features = ["timeout"] }
 tower-http = "0.7"
 tower-layer = "0.3"
 tower-service = "0.3.2"

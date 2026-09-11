@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use clap::{Parser, ValueEnum};
 use rpc::forge::{self as forgerpc, PowerOptionUpdateRequest};
 
@@ -66,13 +66,13 @@ Allow a machine to be ingested and powered on:
 #[derive(Parser, Debug)]
 pub(crate) struct ShowPowerOptions {
     #[clap(help = "ID of the host or nothing for all")]
-    pub(super) machine: Option<MachineId>,
+    pub(super) machine: Option<HostMachineId>,
 }
 
 #[derive(Parser, Debug)]
 pub(crate) struct UpdatePowerOptions {
     #[clap(help = "ID of the host")]
-    machine: MachineId,
+    machine: HostMachineId,
     #[clap(long, short, help = "Desired Power State")]
     desired_power_state: DesiredPowerState,
 }

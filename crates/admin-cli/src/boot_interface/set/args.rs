@@ -17,7 +17,7 @@
 
 use std::str::FromStr;
 
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{MachineInterfaceId, StableHostMachineId};
 use clap::Parser;
 use mac_address::MacAddress;
 
@@ -40,7 +40,7 @@ Tip: 'boot-interface candidates <MACHINE_ID>' lists the candidate NICs with thei
 ")]
 pub(crate) struct Args {
     #[clap(help = "The managed host for which to set the boot interface")]
-    pub(super) machine: MachineId,
+    pub(super) machine: StableHostMachineId,
     #[clap(help = "The interface to boot from -- a machine-interface UUID or a MAC address")]
     pub(super) interface: InterfaceSelector,
     #[clap(

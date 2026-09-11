@@ -417,7 +417,11 @@ impl ApiEndpointSource {
 
         let mut endpoints = Vec::new();
 
-        for ids_chunk in machine_ids.machine_ids.chunks(100) {
+        // Page by id count, but keep each reply well under tonic's 4 MiB receive
+        // limit: a page of 100 machines has exceeded it in the field at about
+        // 46 KB per machine.
+        const MACHINES_PAGE_SIZE: usize = 25;
+        for ids_chunk in machine_ids.machine_ids.chunks(MACHINES_PAGE_SIZE) {
             let request = ::rpc::forge::MachinesByIdsRequest {
                 machine_ids: Vec::from(ids_chunk),
                 ..Default::default()

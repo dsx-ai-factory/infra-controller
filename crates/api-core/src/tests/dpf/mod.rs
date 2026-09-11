@@ -22,6 +22,8 @@ mod reprovisioning;
 mod stale_labels;
 mod waiting_for_ready;
 
+use carbide_dpf::DpuServiceVersion;
+use carbide_machine_controller::dpf::MockDpfOperations;
 use model::machine::ManagedHostState;
 
 use crate::tests::common::api_fixtures::TestEnv;
@@ -41,6 +43,17 @@ fn dpf_config() -> crate::cfg::file::DpfConfig {
         },
         ..Default::default()
     }
+}
+
+/// Models the successful DPF service lookup after the fixture registers a DPU CR.
+fn expect_dpf_service_inventory(mock: &mut MockDpfOperations) {
+    mock.expect_get_service_versions_for_dpu().returning(|_| {
+        Ok(vec![DpuServiceVersion {
+            name: "test-service".to_string(),
+            version: "test-version".to_string(),
+            url: "https://example.com/test-service".to_string(),
+        }])
+    });
 }
 
 // Reads the host's committed state straight from the database rather than through the RPC

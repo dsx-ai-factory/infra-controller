@@ -82,6 +82,7 @@ async fn configure_default(env: &TestEnv, credential_type: RpcCredentialType) {
             password: "configured-password".to_string(),
             vendor: None,
             mac_address: None,
+            credential_name: None,
         }))
         .await
         .unwrap();

@@ -10,7 +10,7 @@ Target compute trays
 ## SYNOPSIS
 
 **nico-admin-cli component-manager get-firmware-versions compute-tray**
-\<**--machine-id**\|**--mac-address**\> \[**--extended**\]
+\[**--machine-id**\] \[**--mac-address**\] \[**--extended**\]
 \[**--sort-by**\] \[**-h**\|**--help**\]
 
 ## DESCRIPTION
@@ -29,7 +29,7 @@ power shelf)
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 

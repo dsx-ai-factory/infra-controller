@@ -18,7 +18,7 @@
 use std::net::IpAddr;
 
 use async_trait::async_trait;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId};
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use health_report::{HealthReport, HealthReportApplyMode};
@@ -57,19 +57,19 @@ pub enum MachineWriteOp {
         time: DateTime<Utc>,
     },
     PersistMachineHealthHistory {
-        machine_id: MachineId,
+        machine_id: HostMachineId,
         health_report: HealthReport,
     },
     ResetHostReprovisioningRequest {
-        machine_id: MachineId,
+        machine_id: HostMachineId,
         clear_reset: bool,
     },
     UpdateDpuReprovisionStartTime {
-        machine_id: MachineId,
+        machine_id: DpuMachineId,
         time: DateTime<Utc>,
     },
     UpdateHostReprovisionStartTime {
-        machine_id: MachineId,
+        machine_id: HostMachineId,
         time: DateTime<Utc>,
     },
     ClearFailureDetails {
@@ -91,7 +91,7 @@ pub enum MachineWriteOp {
         value: bool,
     },
     SetCustomPxeRebootRequested {
-        machine_id: MachineId,
+        machine_id: HostMachineId,
         requested: bool,
     },
     InsertMachineHealthReport {
@@ -104,7 +104,7 @@ pub enum MachineWriteOp {
         version: ConfigVersion,
     },
     UseCustomIpxeOnNextBoot {
-        machine_id: MachineId,
+        machine_id: HostMachineId,
         boot_with_custom_ipxe: bool,
     },
 }

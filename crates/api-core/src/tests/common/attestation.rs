@@ -105,7 +105,7 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
         .api
         .trigger_machine_attestation(tonic::Request::new(
             rpc::forge::SpdmMachineAttestationTriggerRequest {
-                machine_id: Some(host.id),
+                machine_id: Some(host.id.into()),
                 redfish_timeout_secs: u32::MAX,
             },
         ))

@@ -415,6 +415,21 @@ perObjectStateMetricsServiceMonitor:
   interval: 60s
   scrapeTimeout: 25s
 
+## Route nico-api's own BMC Redfish traffic through nico-bmc-proxy,
+## including credentialed exploration of endpoints with established
+## credentials. Credential setup and rotation, BMC session minting,
+## exploration's anonymous vendor probes, and component-manager compute-tray
+## power control always talk to BMCs directly regardless of this setting.
+bmcProxy:
+  enabled: false
+  ## Proxy address as host:port. Empty derives the in-cluster address of
+  ## the nico-bmc-proxy chart's Service, which is named "nico-bmc-proxy"
+  ## regardless of release name: nico-bmc-proxy.<namespace>.svc.cluster.local:1079,
+  ## using this chart's namespace. Set explicitly when that chart uses
+  ## nameOverride, or when namespaceOverride (on either chart) puts the proxy
+  ## in a different namespace.
+  address: ""
+
 auth:
   ## Namespace component accepted in service (/<ns>/sa/) and machine
   ## (/<ns>/machine/) SPIFFE IDs. Empty = deploy namespace; forge-system for legacy.

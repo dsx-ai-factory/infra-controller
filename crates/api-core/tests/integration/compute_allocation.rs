@@ -256,7 +256,7 @@ async fn allocate_instance(
     env.api
         .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: Some(host.id.into()),
+            machine_id: Some(host.id.try_into().unwrap()),
             instance_type_id: instance_type_id.map(str::to_string),
             config: Some(rpc::forge::InstanceConfig {
                 tenant: Some(rpc::forge::TenantConfig {

@@ -64,7 +64,6 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
         .await?;
 
     assert_eq!(started_count.len(), 1);
-    assert!(!started_count.contains(&managed_host.dpu().id));
     assert!(started_count.contains(&managed_host.id));
 
     // Starting the host's DPU updates moves the progress counter. Other tests
@@ -125,8 +124,6 @@ async fn test_start_updates_with_multidpu(
         .await?;
 
     assert_eq!(dpus_started.len(), 1);
-    assert!(!dpus_started.contains(&dpu_machine_id));
-    assert!(!dpus_started.contains(&dpu_machine_id2));
     assert!(dpus_started.contains(&mh.host().id));
 
     // Check if health override is placed

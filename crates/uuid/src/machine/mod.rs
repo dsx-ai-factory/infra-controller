@@ -150,7 +150,7 @@ mod predicted_host;
 mod stable_host;
 
 pub use dpu::DpuMachineId;
-pub use host::{HostMachineId, HostMachineIdSubtype};
+pub use host::{HostMachineId, HostMachineIdSubtype, HostMachineIdSubtypeTrait};
 pub use predicted_host::PredictedHostMachineId;
 #[cfg(feature = "sqlx")]
 use sqlx::{
@@ -378,6 +378,7 @@ impl PgHasArrayType for MachineId {
     }
 }
 
+/// Common behavior for all machine IDs.
 pub trait MachineIdSubtypeTrait:
     Display
     + Copy
@@ -388,32 +389,64 @@ pub trait MachineIdSubtypeTrait:
     + PartialEq
     + Hash
     + Into<MachineId>
-    + TryFrom<MachineId, Error: Into<InvalidMachineType>>
+    + TryFrom<MachineId, Error: Into<InvalidMachineType> + std::fmt::Debug>
+    + MachineIdSubtypeSqlx
 {
+    /// Returns this machine's type.
     fn machine_type(&self) -> MachineType;
+    /// Borrows this ID as a base-level machine ID.
     fn as_machine_id(&self) -> &MachineId;
+    /// Returns this machine's concrete subtype ([`StableHostMachineId`], [`DpuMachineId`], or
+    /// [`PredictedHostMachineId`]).
     fn machine_id_subtype(&self) -> MachineIdSubtype;
 
-    fn to_machine_id(&self) -> MachineId {
-        *Self::as_machine_id(self)
-    }
-
+    /// Returns either a [`HostMachineId`] or [`DpuMachineId`] based on this machine ID's type.
     fn host_or_dpu_id(&self) -> HostOrDpuId {
         HostOrDpuId::from(self.machine_id_subtype())
     }
 
+    /// Returns true if this identifies a DPU machine.
     fn is_dpu(&self) -> bool {
         matches!(self.machine_type(), MachineType::Dpu)
     }
 }
 
+#[cfg(feature = "sqlx")]
+#[doc(hidden)]
+pub trait MachineIdSubtypeSqlx:
+    for<'q> sqlx::Encode<'q, sqlx::Postgres>
+    + sqlx::Type<sqlx::Postgres>
+    + sqlx::postgres::PgHasArrayType
+{
+}
+
+#[cfg(feature = "sqlx")]
+impl<T> MachineIdSubtypeSqlx for T where
+    T: for<'q> sqlx::Encode<'q, sqlx::Postgres>
+        + sqlx::Type<sqlx::Postgres>
+        + sqlx::postgres::PgHasArrayType
+{
+}
+
+#[cfg(not(feature = "sqlx"))]
+#[doc(hidden)]
+pub trait MachineIdSubtypeSqlx {}
+
+#[cfg(not(feature = "sqlx"))]
+impl<T> MachineIdSubtypeSqlx for T {}
+
 pub trait AsMachineId: Send + Sync {
     fn as_machine_id(&self) -> &MachineId;
+    fn to_machine_id(&self) -> MachineId;
 }
 
 impl<T: MachineIdSubtypeTrait> AsMachineId for T {
     fn as_machine_id(&self) -> &MachineId {
         <Self as MachineIdSubtypeTrait>::as_machine_id(self)
+    }
+
+    fn to_machine_id(&self) -> MachineId {
+        *<Self as MachineIdSubtypeTrait>::as_machine_id(self)
     }
 }
 

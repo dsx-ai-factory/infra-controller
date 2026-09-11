@@ -10,9 +10,9 @@ optionally its interfaces and BMC suppressions
 ## SYNOPSIS
 
 **nico-admin-cli power-shelf force-delete**
-\[**-d**\|**--delete-interfaces**\]
-\[**--delete-bmc-suppressions**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*POWER_SHELF_ID*\>
+\[**-d**\|**--delete-interfaces**\] \[**--delete-bmc-suppressions**\]
+\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+\<*POWER_SHELF_ID*\>
 
 ## DESCRIPTION
 
@@ -31,7 +31,7 @@ BMC MAC.
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 

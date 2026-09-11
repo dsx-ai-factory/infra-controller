@@ -238,7 +238,7 @@ async fn enter_requested_state(
 
     db::machine::set_machine_maintenance_requested(
         &mut txn,
-        host.host.id.into(),
+        host.host.id,
         "maintenance-test",
         operation,
     )

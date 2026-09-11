@@ -23,7 +23,7 @@ use carbide_test_harness::dns::TestDomain;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::HostMachineId;
+use carbide_uuid::machine::StableHostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
@@ -58,7 +58,7 @@ impl TestEnv {
 }
 
 struct TestManagedHost {
-    id: HostMachineId,
+    id: StableHostMachineId,
 }
 
 async fn create_test_env(pool: PgPool) -> TestEnv {
@@ -114,7 +114,9 @@ async fn create_managed_host(env: &TestEnv) -> TestManagedHost {
         .0;
     mh.host.discover_primary_iface(env.admin_segment).await;
     mh.advance_to_converged_ready().await;
-    TestManagedHost { id: mh.host.id }
+    TestManagedHost {
+        id: mh.host.id.try_into().unwrap(),
+    }
 }
 
 fn single_interface_network_config(
@@ -159,7 +161,7 @@ async fn allocate_instance(
     env.api
         .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: Some(host.id.into()),
+            machine_id: Some(host.id),
             instance_type_id: None,
             config: Some(rpc::forge::InstanceConfig {
                 tenant: Some(rpc::forge::TenantConfig {

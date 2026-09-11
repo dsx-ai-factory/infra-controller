@@ -106,10 +106,6 @@ struct RedfishSimState {
     /// (`503`), so callers' error-propagation paths can be exercised distinctly
     /// from an unauthorized rejection.
     get_accounts_error: bool,
-    /// When set, BMC event-log reads succeed with an empty log.
-    bmc_event_log_supported: bool,
-    /// When set, the next BMC event-log read fails with a transient error.
-    bmc_event_log_error_once: bool,
     /// Opt-in password-reuse policy. When on, a password *change* whose new
     /// value equals the account's current password is rejected (`400`), modeling
     /// the real BMCs that refuse a same-value change -- the exact behavior BMC
@@ -167,6 +163,30 @@ fn sim_http_error(status: http::StatusCode, url: &str, body: &str) -> RedfishErr
 pub struct CreateClientCall {
     pub host: String,
     pub vendor: Option<RedfishVendor>,
+    /// Which [`RedfishAuth`] variant the caller supplied, so tests can pin
+    /// routing decisions (e.g. established traffic authenticating by key).
+    pub auth: RedfishAuthKind,
+    /// For [`RedfishAuth::Key`], the key's string form, so tests can pin
+    /// WHICH credential the caller named, not just the auth class.
+    pub auth_key: Option<String>,
+}
+
+/// Discriminant of [`RedfishAuth`], recorded per `create_client` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedfishAuthKind {
+    Anonymous,
+    Key,
+    Direct,
+}
+
+impl From<&RedfishAuth> for RedfishAuthKind {
+    fn from(auth: &RedfishAuth) -> Self {
+        match auth {
+            RedfishAuth::Anonymous => RedfishAuthKind::Anonymous,
+            RedfishAuth::Key(_) => RedfishAuthKind::Key,
+            RedfishAuth::Direct(..) => RedfishAuthKind::Direct,
+        }
+    }
 }
 
 /// Credential and result observed when the simulator checks direct authentication.
@@ -435,16 +455,6 @@ impl RedfishSim {
     /// transport error (`503`), to exercise a caller's error-propagation path.
     pub fn set_get_accounts_error(&self, error: bool) {
         self.state.lock().unwrap().get_accounts_error = error;
-    }
-
-    /// Control whether BMC event-log reads succeed with an empty log.
-    pub fn set_bmc_event_log_supported(&self, supported: bool) {
-        self.state.lock().unwrap().bmc_event_log_supported = supported;
-    }
-
-    /// Fail the next BMC event-log read with a transient simulated error.
-    pub fn fail_next_bmc_event_log_read(&self) {
-        self.state.lock().unwrap().bmc_event_log_error_once = true;
     }
 
     /// Enable the opt-in password-reuse policy (see
@@ -1714,15 +1724,6 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<Vec<libredfish::model::sel::LogEntry>, RedfishError>>
     {
         Box::pin(async move {
-            let mut state = self.state.lock().unwrap();
-            if std::mem::take(&mut state.bmc_event_log_error_once) {
-                return Err(RedfishError::GenericError {
-                    error: "transient BMC event-log failure".to_string(),
-                });
-            }
-            if state.bmc_event_log_supported {
-                return Ok(Vec::new());
-            }
             Err(RedfishError::NotSupported(
                 "BMC Event Log not supported for tests".to_string(),
             ))
@@ -2546,6 +2547,11 @@ impl RedfishClientPool for RedfishSim {
             state.create_client_calls.push(CreateClientCall {
                 host: host.to_string(),
                 vendor,
+                auth: (&auth).into(),
+                auth_key: match &auth {
+                    RedfishAuth::Key(key) => Some(key.to_key_str().to_string()),
+                    _ => None,
+                },
             });
             if let Some(error) = state.create_client_error.clone() {
                 return Err(RedfishClientCreationError::RedfishError(

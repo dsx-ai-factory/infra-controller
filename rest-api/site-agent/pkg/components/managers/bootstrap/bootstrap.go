@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/rs/zerolog/log"
 
@@ -44,10 +43,6 @@ import (
 var (
 	// ErrInvalidBootstrapSecret invalid bootstrap secret
 	ErrInvalidBootstrapSecret = errors.New("invalid bootstrap secret")
-	// CertExpirationMetric is a prometheus metric for Site Agent Temporal
-	// certificate expiration. Registered in Init rather than here, because the
-	// namespace comes from config that is not loaded yet at package init.
-	CertExpirationMetric prometheus.Gauge
 )
 
 const (
@@ -142,14 +137,6 @@ func initK8sClient(ns string) coreV1Types.SecretInterface {
 // Init - initialize the bootstrap manager
 func (bs *BoostrapAPI) Init() {
 	ManagerAccess.Data.EB.Log.Info().Msg("Boostrap: Initializing the Site bootstrap manager")
-
-	// Registered ahead of the early returns below so every pod exposes the
-	// series, which is what a package-level promauto var used to do.
-	CertExpirationMetric = promauto.NewGauge(prometheus.GaugeOpts{
-		Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
-		Name:      "temporal_cert_expiration",
-		Help:      "The expiration date of the Temporal certificate",
-	})
 
 	// Only master pod of the statefulset should run the bootstrap
 	if !ManagerAccess.Conf.EB.IsMasterPod {
@@ -497,12 +484,11 @@ func (bs *BoostrapAPI) downloadCredentials(ctx context.Context) (*bootstraptypes
 		return nil, fmt.Errorf("failed to decode certificate PEM CACertificate %v", credsResponse.CACertificate)
 	}
 
-	cert, err := x509.ParseCertificate(block.Bytes)
+	_, err = x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		log.Error().Err(err).Msgf("Bootstrap: failed to parse certificate")
 		return nil, fmt.Errorf("failed to parse certificate %w", err)
 	}
 
-	CertExpirationMetric.Set(float64(cert.NotAfter.UTC().Unix()))
 	return credsResponse, nil
 }

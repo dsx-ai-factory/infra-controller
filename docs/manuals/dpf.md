@@ -514,7 +514,7 @@ spec:
   dpuDetector:
     disable: true
   provisioningController:
-    osInstallTimeout: "60m"
+    osInstallTimeout: "90m"
     installInterface:
       installViaRedfish:
         skipDPUNodeDiscovery: true
@@ -538,7 +538,7 @@ Field-by-field:
 | Field | Meaning |
 | --- | --- |
 | `dpuDetector.disable: true` | DPF normally polls hosts to discover new DPUs. NICo disables auto-discovery because DPUs are fed in via `DPUSet` CRs from the orchestrator. |
-| `provisioningController.osInstallTimeout: "60m"` | Total budget for the OS install flow per DPU. |
+| `provisioningController.osInstallTimeout: "90m"` | Total budget for the OS install flow per DPU. |
 | `provisioningController.installViaRedfish` | Provision DPUs by talking Redfish to the host BMC (vs. PXE-based). |
 | `skipDPUNodeDiscovery: true` | Do not auto-detect DPUs as Kubernetes nodes — DPF is told about them explicitly by NICo. |
 | `overrides.kubernetesAPIServerVIP` | Replace `REPLACE_ME` with the host-cluster API-server VIP that DPUs should reach. |

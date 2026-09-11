@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use carbide_utils::redfish::BmcAccessInfo;
-use carbide_uuid::machine::MachineIdSubtypeTrait;
+use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
 use model::machine::{Machine, ManagedHostState};
 use rpc::forge::forge_server::Forge;
 use tonic::Request;
@@ -37,7 +37,12 @@ pub(in crate::tests) struct TestMachine<ID: MachineIdSubtypeTrait> {
 
 type Txn<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 
-impl<ID: MachineIdSubtypeTrait> TestMachine<ID> {
+impl<ID> TestMachine<ID>
+where
+    ID: MachineIdSubtypeTrait,
+    ID: TryFrom<MachineId>,
+    db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
     pub(in crate::tests) fn new(id: ID, api: Arc<Api>) -> Self {
         Self { id, api }
     }
@@ -55,7 +60,7 @@ impl<ID: MachineIdSubtypeTrait> TestMachine<ID> {
             .remove(0)
     }
 
-    pub(in crate::tests) async fn next_iteration_machine(&self, env: &TestEnv) -> Machine {
+    pub(in crate::tests) async fn next_iteration_machine(&self, env: &TestEnv) -> Machine<ID> {
         env.run_machine_state_controller_iteration().await;
         let mut txn = env.pool.begin().await.unwrap();
         let dpu = self.db_machine(&mut txn).await;
@@ -63,7 +68,7 @@ impl<ID: MachineIdSubtypeTrait> TestMachine<ID> {
         dpu
     }
 
-    pub(in crate::tests) async fn db_machine(&self, txn: &mut Txn<'_>) -> Machine {
+    pub(in crate::tests) async fn db_machine(&self, txn: &mut Txn<'_>) -> Machine<ID> {
         db::machine::find_one(txn.as_mut(), &self.id, Default::default())
             .await
             .unwrap()

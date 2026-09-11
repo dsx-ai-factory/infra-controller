@@ -20,14 +20,14 @@ Credential related handling
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
 **--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field  
+Sort output by specified field\
 
-  
+\
 *Possible values:*
 
 - primary-id: Sort by the primary ID
@@ -54,6 +54,7 @@ Print help (see a summary with -h)
 | [`delete-nmx-m`](./credential-delete-nmx-m.md) | Deprecated compatibility command; NMX-M is no longer supported |
 | [`bgp`](./credential-bgp.md) | Manage leaf BGP passwords |
 | [`registry`](./credential-registry.md) | Manage container registry credentials |
+| [`firmware-access-token`](./credential-firmware-access-token.md) | Manage firmware artifact access tokens |
 | [`rotate`](./credential-rotate.md) | Stage a site-wide credential rotation (auto-generate or explicit password) |
 | [`rotation-status`](./credential-rotation-status.md) | Show convergence status of a site-wide credential rotation |
 | [`force-bmc`](./credential-force-bmc.md) | Force-converge a single BMC's credentials now (operator escape hatch) |

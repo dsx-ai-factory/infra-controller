@@ -16,7 +16,7 @@
  */
 
 //! Storage for direct-dispatch (`--bypass-state-controller`) firmware-update
-//! job IDs, keyed by device BMC MAC.
+//! job IDs, keyed by device BMC MAC and job kind.
 //!
 //! The BMC MAC is a device's stable identity across ingestion, so a single
 //! table serves both ingested devices (which have a machine/switch/power-shelf
@@ -24,6 +24,12 @@
 //! here lets `get_firmware_status` recover it after a nico-api restart clears
 //! the in-memory job map, without splitting the state across per-device-type
 //! rows.
+//!
+//! A device can have several concurrent jobs of distinct kinds (a switch tracks
+//! a firmware-object job and an NVOS system-image job independently), so rows
+//! are keyed by `(bmc_mac, job_kind)`. `job_kind` is an opaque backend-job-class
+//! label owned by the caller (the component-manager backend); this layer only
+//! stores and returns it.
 
 use std::collections::HashSet;
 
@@ -31,19 +37,67 @@ use mac_address::MacAddress;
 
 use crate::DatabaseError;
 
-/// Persist (or overwrite) the backend firmware-update job ID for `bmc_mac`.
+/// The class of backend firmware-update job stored in a row.
 ///
-/// A re-dispatch to the same device replaces the previous job, so this upserts.
+/// A device can have one in-flight job per kind (a switch tracks a
+/// firmware-object job and an NVOS system-image job independently), so the kind
+/// is part of the row's identity (`PRIMARY KEY (bmc_mac, job_kind)`) and selects
+/// which backend query recovers a job's status after a restart.
+///
+/// Stored as `text` rather than a native Postgres enum: this table is
+/// device-agnostic (reused across compute, switch, and future power-shelf
+/// backends), so the set of kinds is the union across backends and grows with a
+/// one-line change here rather than an `ALTER TYPE` migration. The database does
+/// not branch on the value, so it owns no invariant a schema enum would enforce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FirmwareJobKind {
+    /// An RMS firmware-object bundle update (compute trays and switches).
+    FirmwareObject,
+    /// An NVOS system-image update (switches).
+    SwitchSystemImage,
+}
+
+impl FirmwareJobKind {
+    /// The value persisted in the `job_kind` column. Stable: existing rows and
+    /// the backfill migration depend on these exact strings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FirmwareJobKind::FirmwareObject => "firmware_object",
+            FirmwareJobKind::SwitchSystemImage => "switch_system_image",
+        }
+    }
+
+    /// Parse a persisted `job_kind` value. Returns `None` for a kind this
+    /// release does not recognize (e.g. one written by a newer release, or by a
+    /// backend whose kinds this reader does not handle).
+    pub fn from_db_value(value: &str) -> Option<Self> {
+        match value {
+            "firmware_object" => Some(FirmwareJobKind::FirmwareObject),
+            "switch_system_image" => Some(FirmwareJobKind::SwitchSystemImage),
+            _ => None,
+        }
+    }
+}
+
+/// Persist (or overwrite) the backend firmware-update job ID for one
+/// `(bmc_mac, job_kind)`.
+///
+/// A re-dispatch of the same job kind to the same device replaces the previous
+/// job, so this upserts. Jobs of other kinds for the device are untouched; use
+/// [`replace`] to set a device's full job set atomically.
 pub async fn save(
     db: &sqlx::PgPool,
     bmc_mac: MacAddress,
+    job_kind: FirmwareJobKind,
     job_id: &str,
 ) -> Result<(), DatabaseError> {
-    let sql = "INSERT INTO direct_dispatch_firmware_update_jobs (bmc_mac, job_id) \
-               VALUES ($1, $2) \
-               ON CONFLICT (bmc_mac) DO UPDATE SET job_id = EXCLUDED.job_id, created = now()";
+    let sql = "INSERT INTO direct_dispatch_firmware_update_jobs (bmc_mac, job_kind, job_id) \
+               VALUES ($1, $2, $3) \
+               ON CONFLICT (bmc_mac, job_kind) \
+               DO UPDATE SET job_id = EXCLUDED.job_id, created = now()";
     sqlx::query(sql)
         .bind(bmc_mac)
+        .bind(job_kind.as_str())
         .bind(job_id)
         .execute(db)
         .await
@@ -51,15 +105,85 @@ pub async fn save(
     Ok(())
 }
 
-/// Fetch the persisted backend firmware-update job ID for `bmc_mac`, if any.
-pub async fn get(db: &sqlx::PgPool, bmc_mac: MacAddress) -> Result<Option<String>, DatabaseError> {
-    let sql = "SELECT job_id FROM direct_dispatch_firmware_update_jobs WHERE bmc_mac = $1";
+/// Fetch the persisted job ID for one `(bmc_mac, job_kind)`, if any.
+pub async fn get(
+    db: &sqlx::PgPool,
+    bmc_mac: MacAddress,
+    job_kind: FirmwareJobKind,
+) -> Result<Option<String>, DatabaseError> {
+    let sql = "SELECT job_id FROM direct_dispatch_firmware_update_jobs \
+               WHERE bmc_mac = $1 AND job_kind = $2";
     let row: Option<(String,)> = sqlx::query_as(sql)
         .bind(bmc_mac)
+        .bind(job_kind.as_str())
         .fetch_optional(db)
         .await
         .map_err(|e| DatabaseError::new(sql, e))?;
     Ok(row.map(|(job_id,)| job_id))
+}
+
+/// Fetch every persisted `(job_kind, job_id)` for `bmc_mac`.
+///
+/// Used by backends whose devices track multiple job kinds (e.g. a switch's
+/// firmware-object and system-image jobs) to rebuild the full set after a
+/// restart. Rows whose `job_kind` this release does not recognize are skipped,
+/// so a reader tolerates kinds written by another backend or a newer release.
+pub async fn get_all(
+    db: &sqlx::PgPool,
+    bmc_mac: MacAddress,
+) -> Result<Vec<(FirmwareJobKind, String)>, DatabaseError> {
+    let sql = "SELECT job_kind, job_id FROM direct_dispatch_firmware_update_jobs \
+               WHERE bmc_mac = $1";
+    let rows: Vec<(String, String)> = sqlx::query_as(sql)
+        .bind(bmc_mac)
+        .fetch_all(db)
+        .await
+        .map_err(|e| DatabaseError::new(sql, e))?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(kind, job_id)| FirmwareJobKind::from_db_value(&kind).map(|k| (k, job_id)))
+        .collect())
+}
+
+/// Replace a device's entire persisted job set with `jobs` (pairs of
+/// `(job_kind, job_id)`), atomically.
+///
+/// Deletes any rows for `bmc_mac` whose kind is absent from `jobs`, matching the
+/// backend's in-memory "the latest update owns the whole set" semantics. An
+/// empty `jobs` clears all rows for the device.
+pub async fn replace(
+    db: &sqlx::PgPool,
+    bmc_mac: MacAddress,
+    jobs: &[(FirmwareJobKind, String)],
+) -> Result<(), DatabaseError> {
+    let mut txn = db
+        .begin()
+        .await
+        .map_err(|e| DatabaseError::new("direct_dispatch_firmware_job::replace: begin", e))?;
+
+    let delete_sql = "DELETE FROM direct_dispatch_firmware_update_jobs WHERE bmc_mac = $1";
+    sqlx::query(delete_sql)
+        .bind(bmc_mac)
+        .execute(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::new(delete_sql, e))?;
+
+    let insert_sql = "INSERT INTO direct_dispatch_firmware_update_jobs (bmc_mac, job_kind, job_id) \
+                      VALUES ($1, $2, $3)";
+    for (job_kind, job_id) in jobs {
+        sqlx::query(insert_sql)
+            .bind(bmc_mac)
+            .bind(job_kind.as_str())
+            .bind(job_id)
+            .execute(&mut *txn)
+            .await
+            .map_err(|e| DatabaseError::new(insert_sql, e))?;
+    }
+
+    txn.commit()
+        .await
+        .map_err(|e| DatabaseError::new("direct_dispatch_firmware_job::replace: commit", e))?;
+    Ok(())
 }
 
 /// Return the subset of `bmc_macs` that have a persisted firmware-update job.
@@ -89,7 +213,10 @@ mod tests {
 
     use mac_address::MacAddress;
 
-    use super::{find_macs_with_job, get, save};
+    use super::{FirmwareJobKind, find_macs_with_job, get, get_all, replace, save};
+
+    const FW_OBJECT: FirmwareJobKind = FirmwareJobKind::FirmwareObject;
+    const SYS_IMAGE: FirmwareJobKind = FirmwareJobKind::SwitchSystemImage;
 
     fn mac(last: u8) -> MacAddress {
         MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, last])
@@ -97,23 +224,60 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn save_then_get_round_trips_and_upserts(pool: sqlx::PgPool) {
-        // Absent MAC has no job.
-        assert_eq!(get(&pool, mac(1)).await.unwrap(), None);
+        // Absent (MAC, kind) has no job.
+        assert_eq!(get(&pool, mac(1), FW_OBJECT).await.unwrap(), None);
 
         // First dispatch persists the job.
-        save(&pool, mac(1), "job-a").await.unwrap();
-        assert_eq!(get(&pool, mac(1)).await.unwrap(), Some("job-a".to_string()));
+        save(&pool, mac(1), FW_OBJECT, "job-a").await.unwrap();
+        assert_eq!(
+            get(&pool, mac(1), FW_OBJECT).await.unwrap(),
+            Some("job-a".to_string())
+        );
 
-        // Re-dispatch to the same MAC replaces the job rather than erroring or
-        // duplicating (ON CONFLICT (bmc_mac) DO UPDATE).
-        save(&pool, mac(1), "job-b").await.unwrap();
-        assert_eq!(get(&pool, mac(1)).await.unwrap(), Some("job-b".to_string()));
+        // Re-dispatch of the same kind replaces the job rather than erroring or
+        // duplicating (ON CONFLICT (bmc_mac, job_kind) DO UPDATE).
+        save(&pool, mac(1), FW_OBJECT, "job-b").await.unwrap();
+        assert_eq!(
+            get(&pool, mac(1), FW_OBJECT).await.unwrap(),
+            Some("job-b".to_string())
+        );
+    }
+
+    #[crate::sqlx_test]
+    async fn distinct_kinds_coexist_and_replace_sets_full_set(pool: sqlx::PgPool) {
+        // Two kinds for one device coexist under the composite key.
+        save(&pool, mac(1), FW_OBJECT, "job-fw").await.unwrap();
+        save(&pool, mac(1), SYS_IMAGE, "job-img").await.unwrap();
+        let mut all = get_all(&pool, mac(1)).await.unwrap();
+        all.sort();
+        assert_eq!(
+            all,
+            vec![
+                (FW_OBJECT, "job-fw".to_string()),
+                (SYS_IMAGE, "job-img".to_string()),
+            ]
+        );
+
+        // replace() installs the whole set: a kind absent from the new set is
+        // dropped, and a present kind is overwritten.
+        replace(&pool, mac(1), &[(SYS_IMAGE, "job-img2".to_string())])
+            .await
+            .unwrap();
+        assert_eq!(
+            get_all(&pool, mac(1)).await.unwrap(),
+            vec![(SYS_IMAGE, "job-img2".to_string())]
+        );
+        assert_eq!(get(&pool, mac(1), FW_OBJECT).await.unwrap(), None);
+
+        // An empty set clears the device.
+        replace(&pool, mac(1), &[]).await.unwrap();
+        assert!(get_all(&pool, mac(1)).await.unwrap().is_empty());
     }
 
     #[crate::sqlx_test]
     async fn find_macs_with_job_returns_only_present_macs(pool: sqlx::PgPool) {
-        save(&pool, mac(1), "job-1").await.unwrap();
-        save(&pool, mac(3), "job-3").await.unwrap();
+        save(&pool, mac(1), FW_OBJECT, "job-1").await.unwrap();
+        save(&pool, mac(3), FW_OBJECT, "job-3").await.unwrap();
 
         // mac(2) was never dispatched, so it is excluded from the result.
         let found = find_macs_with_job(&pool, &[mac(1), mac(2), mac(3)])
@@ -124,21 +288,27 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn find_macs_with_job_short_circuits_on_empty_input(pool: sqlx::PgPool) {
-        save(&pool, mac(1), "job-1").await.unwrap();
+        save(&pool, mac(1), FW_OBJECT, "job-1").await.unwrap();
 
         let found = find_macs_with_job(&pool, &[]).await.unwrap();
         assert!(found.is_empty());
     }
 
-    // The backfill migration has no Rust counterpart, so exercise the real SQL
-    // file (via `include_str!`, so the test cannot drift from what ships)
-    // against a database seeded at the predecessor schema. The `sqlx_test`
-    // harness applies every migration first on an empty database, where the
-    // backfill is a no-op; re-applying it here after seeding proves the
-    // row-migration behavior, and the `ON CONFLICT DO NOTHING` in the file makes
-    // the second application safe.
+    // The table's create, backfill, and job_kind migrations have no Rust
+    // counterpart, so exercise the real SQL files (via `include_str!`, so the
+    // test cannot drift from what ships). The `sqlx_test` harness has already
+    // advanced this table to the final `(bmc_mac, job_kind)` key, so the test
+    // resets it to the create-migration schema and replays the three migrations
+    // in production order: `create` -> `backfill` (which upserts on the
+    // `bmc_mac`-only key that predates job_kind) -> `job_kind` (which widens the
+    // key and defaults every backfilled row to firmware_object).
+    const CREATE_MIGRATION: &str =
+        include_str!("../migrations/20260904214512_direct_dispatch_firmware_update_jobs.sql");
     const BACKFILL_MIGRATION: &str = include_str!(
         "../migrations/20260904214537_backfill_direct_dispatch_firmware_update_jobs.sql"
+    );
+    const JOB_KIND_MIGRATION: &str = include_str!(
+        "../migrations/20260908162734_direct_dispatch_firmware_update_jobs_job_kind.sql"
     );
 
     const SEGMENT_ID: &str = "20000000-0000-0000-0000-000000000001";
@@ -226,9 +396,9 @@ mod tests {
         .unwrap();
     }
 
-    async fn backfilled_jobs(pool: &sqlx::PgPool) -> Vec<(String, String)> {
+    async fn backfilled_jobs(pool: &sqlx::PgPool) -> Vec<(String, String, String)> {
         sqlx::query_as(
-            "SELECT bmc_mac::text, job_id FROM direct_dispatch_firmware_update_jobs \
+            "SELECT bmc_mac::text, job_kind, job_id FROM direct_dispatch_firmware_update_jobs \
              ORDER BY bmc_mac::text",
         )
         .fetch_all(pool)
@@ -239,6 +409,19 @@ mod tests {
     #[crate::sqlx_test]
     async fn backfill_migrates_legacy_job_ids_keyed_by_bmc_mac(pool: sqlx::PgPool) {
         seed_segment(&pool).await;
+
+        // The harness has already migrated this table to the (bmc_mac, job_kind)
+        // key; rebuild it at the create-migration schema so the backfill (which
+        // upserts on the bmc_mac-only key that predates job_kind) runs exactly as
+        // it did in the release that shipped it.
+        sqlx::raw_sql("DROP TABLE direct_dispatch_firmware_update_jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(CREATE_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // Ingested tray with a job, resolved via its machine's BMC interface.
         seed_machine(&pool, "m-ingested", Some("job-ingested")).await;
@@ -261,29 +444,48 @@ mod tests {
         seed_machine(&pool, "m-nojob", None).await;
         seed_bmc_interface(&pool, "02:00:00:00:00:40", Some("m-nojob")).await;
 
+        // The backfill upserts against the bmc_mac-keyed predecessor table.
         sqlx::raw_sql(BACKFILL_MIGRATION)
             .execute(&pool)
             .await
             .unwrap();
 
+        // Re-applying the backfill is idempotent (no duplicate-key error, no
+        // change), matching how the harness runs it a second time. This must
+        // happen before the key is widened, since the backfill's ON CONFLICT
+        // targets the bmc_mac-only key.
+        sqlx::raw_sql(BACKFILL_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Widen the key to (bmc_mac, job_kind); every backfilled row takes the
+        // firmware_object default.
+        sqlx::raw_sql(JOB_KIND_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Every legacy job survives the full sequence as a firmware-object job.
         assert_eq!(
             backfilled_jobs(&pool).await,
             vec![
-                ("02:00:00:00:00:10".to_string(), "job-ingested".to_string()),
-                ("02:00:00:00:00:20".to_string(), "job-preingest".to_string()),
+                (
+                    "02:00:00:00:00:10".to_string(),
+                    "firmware_object".to_string(),
+                    "job-ingested".to_string()
+                ),
+                (
+                    "02:00:00:00:00:20".to_string(),
+                    "firmware_object".to_string(),
+                    "job-preingest".to_string()
+                ),
                 (
                     "02:00:00:00:00:30".to_string(),
+                    "firmware_object".to_string(),
                     "job-both-machine".to_string()
                 ),
             ]
         );
-
-        // Re-applying the backfill is idempotent (no duplicate-key error, no
-        // change), matching how the harness runs it a second time.
-        sqlx::raw_sql(BACKFILL_MIGRATION)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert_eq!(backfilled_jobs(&pool).await.len(), 3);
     }
 }

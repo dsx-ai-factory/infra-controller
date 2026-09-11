@@ -20,7 +20,7 @@ DPU specific handling
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -47,6 +47,7 @@ Print help (see a summary with -h)
 | [`status`](./dpu-status.md) | View DPU Status |
 | [`network`](./dpu-network.md) | Networking information |
 | [`health-report`](./dpu-health-report.md) | Manage DPU health report sources |
+| [`set-uefi-password`](./dpu-set-uefi-password.md) | Set DPU UEFI password directly on the device (via Redfish) |
 
 ---
 

@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use carbide_machine_controller::handler::MachineStateHandlerBuilder;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
-use carbide_uuid::machine::{DpuMachineId, MachineIdSubtypeTrait};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use chrono::Utc;
 use common::api_fixtures::{
     create_managed_host_multi_dpu, create_managed_host_with_hardware_info_template,
@@ -130,11 +130,15 @@ fn has_dpu_reprovision_state(
     }
 }
 
-async fn assert_dpu_reprovision_host_boot_repair(
+async fn assert_dpu_reprovision_host_boot_repair<ID>(
     env: &TestEnv,
-    machine: &TestMachine<impl MachineIdSubtypeTrait>,
+    machine: &TestMachine<ID>,
     expected_states: Vec<ManagedHostState>,
-) -> Machine {
+) -> Machine<ID>
+where
+    ID: MachineIdSubtypeTrait,
+    db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
     env.redfish_sim.set_lockdown(EnabledDisabled::Enabled);
     env.redfish_sim.set_is_bios_setup(true);
     env.redfish_sim.set_is_boot_order_setup(false);
@@ -1142,7 +1146,7 @@ async fn test_dpu_for_set_but_clear_failed(pool: sqlx::PgPool) {
         .into_inner();
 
     assert_eq!(res.dpus.len(), 1);
-    assert_eq!(res.dpus[0].id, Some(mh.dpu().id.into()));
+    assert_eq!(res.dpus[0].id, Some(mh.dpu().id));
 
     db::machine::update_dpu_reprovision_start_time(&mh.dpu().id, &mut txn)
         .await
@@ -2097,7 +2101,7 @@ async fn test_instance_reprov_restart_failed_impl(pool: sqlx::PgPool) {
                     source: model::machine::FailureSource::Scout,
                     failed_at
                 },
-                machine_id: dpu.id
+                machine_id: dpu.id.into()
             }
         }
     );

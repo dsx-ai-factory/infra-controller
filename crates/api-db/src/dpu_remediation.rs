@@ -17,7 +17,7 @@
 use std::ops::DerefMut;
 
 use carbide_uuid::dpu_remediations::RemediationId;
-use carbide_uuid::machine::{DpuMachineId, MachineId};
+use carbide_uuid::machine::DpuMachineId;
 use model::dpu_remediation::{
     AppliedRemediation, ApproveRemediation, DisableRemediation, EnableRemediation,
     NewAppliedRemediation, NewRemediation, Remediation, RemediationApplicationStatus,
@@ -114,7 +114,7 @@ pub async fn find_remediations_by<'a, C: ColumnInfo<'a, TableType = Remediation>
 
 pub async fn find_next_remediation_for_machine(
     txn: &mut sqlx::Transaction<'_, Postgres>,
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
 ) -> Result<Option<Remediation>, DatabaseError> {
     for remediation in find_remediations_by(txn, ObjectColumnFilter::List(EnabledColumn, &[true]))
         .await?
@@ -140,7 +140,7 @@ pub async fn find_next_remediation_for_machine(
 
 pub async fn remediation_applied(
     txn: &mut sqlx::Transaction<'_, Postgres>,
-    machine_id: MachineId,
+    machine_id: DpuMachineId,
     remediation_id: RemediationId,
     status: RemediationApplicationStatus,
 ) -> Result<(), DatabaseError> {
@@ -264,7 +264,7 @@ pub async fn find_applied_remediations_by<'a, C: ColumnInfo<'a, TableType = Appl
 pub async fn find_remediations_by_remediation_id_and_machine(
     txn: &mut sqlx::Transaction<'_, Postgres>,
     remediation_id: RemediationId,
-    machine_id: &MachineId,
+    machine_id: &DpuMachineId,
 ) -> Result<Vec<AppliedRemediation>, DatabaseError> {
     let query = "SELECT * FROM applied_dpu_remediations WHERE id=$1 AND dpu_machine_id=$2 ORDER BY attempt DESC";
     sqlx::query_as(query)

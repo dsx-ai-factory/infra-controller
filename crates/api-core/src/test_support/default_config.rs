@@ -200,6 +200,7 @@ pub fn get() -> CarbideConfig {
         dpu_ipmi_reboot_attempts: Some(0),
         bmc_session_lockout_threshold: default_bmc_session_lockout_threshold(),
         bmc_max_sessions_per_caller: crate::cfg::file::default_bmc_max_sessions_per_caller(),
+        bmc_proxy: None,
         allow_bmc_basic_auth_fallback: false,
         allow_insecure_discovery: true,
         scout_boot_interface_correction_enabled: false,
@@ -338,7 +339,7 @@ pub fn get() -> CarbideConfig {
             bridging: None,
         }),
         mlxconfig_profiles: None,
-        rack_management_enabled: false,
+        deprecated_rack_management_enabled: None,
         rms: RmsConfig::default(),
         rack_profiles: Default::default(),
         spdm_state_controller: SpdmStateControllerConfig {

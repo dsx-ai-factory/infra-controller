@@ -18,7 +18,7 @@
 use std::time::SystemTime;
 
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, HostMachineId, StableHostMachineId};
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
 use model::instance::config::network::DeviceLocator;
@@ -48,7 +48,7 @@ async fn update_network_status_observation(
     instance_id: &InstanceId,
     good_network_security_group_id: &str,
     security_version: &str,
-    dpu_machine_id: &MachineId,
+    dpu_machine_id: &DpuMachineId,
     source: rpc::forge::NetworkSecurityGroupSource,
     internal_uuid: &rpc::Uuid,
 ) {
@@ -93,6 +93,12 @@ async fn update_network_status_observation(
         }))
         .await
         .unwrap();
+}
+
+fn stable_host_id(host_id: HostMachineId) -> StableHostMachineId {
+    host_id
+        .try_into()
+        .expect("site-explorer fixture should produce a stable host ID")
 }
 
 #[crate::sqlx_test]
@@ -1077,7 +1083,7 @@ async fn test_vpc_network_security_group_propagation_includes_addressless_interf
     let managed_host = site_explorer::new_host(&env, ManagedHostConfig::default()).await?;
     env.api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: Some(managed_host.host_snapshot.id),
+            machine_id: Some(stable_host_id(managed_host.host_snapshot.id)),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),
@@ -1268,7 +1274,7 @@ async fn test_network_security_group_propagation_impl(
     let _ = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh.host_snapshot.id.into(),
+            machine_id: Some(stable_host_id(mh.host_snapshot.id)),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),
@@ -1505,7 +1511,7 @@ async fn test_network_security_group_propagation_impl(
     let _ = env
         .api
         .allocate_instance(tonic::Request::new(rpc::forge::InstanceAllocationRequest {
-            machine_id: mh2.host_snapshot.id.into(),
+            machine_id: Some(stable_host_id(mh2.host_snapshot.id)),
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),

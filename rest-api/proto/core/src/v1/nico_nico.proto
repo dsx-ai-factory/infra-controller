@@ -50,10 +50,21 @@ service Forge {
   // VPC
   rpc CreateVpc(VpcCreationRequest) returns (Vpc);
   rpc UpdateVpc(VpcUpdateRequest) returns (VpcUpdateResult);
+  // Changes an FNN VPC's named profile and active VNI while retaining the old
+  // allocation. Success means Core committed, not that the dataplane converged.
+  rpc ChangeVpcRoutingProfile(VpcChangeRoutingProfileRequest) returns (VpcRoutingState);
+  // Operator cleanup after independently verifying that no DPU or fabric route
+  // still uses the retained VNI. Core does not verify dataplane convergence.
+  rpc ReleaseVpcInactiveVni(VpcReleaseInactiveVniRequest) returns (VpcReleaseInactiveVniResult);
   rpc UpdateVpcVirtualization(VpcUpdateVirtualizationRequest) returns (VpcUpdateVirtualizationResult);
+  // Deletion does not release a retained VNI implicitly. Call
+  // ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
+  // Retained or inconsistent owned allocations cause FailedPrecondition.
   rpc DeleteVpc(VpcDeletionRequest) returns (VpcDeletionResult);
   rpc FindVpcIds(VpcSearchFilter) returns (VpcIdList);
   rpc FindVpcsByIds(VpcsByIdsRequest) returns (VpcList);
+  // Reads persisted VPC routing and allocation state without changing it.
+  rpc GetVpcRoutingState(VpcRoutingStateRequest) returns (VpcRoutingState);
 
   rpc CreateSpxPartition(SpxPartitionCreationRequest) returns (SpxPartition);
   rpc DeleteSpxPartition(SpxPartitionDeletionRequest) returns (SpxPartitionDeletionResult);
@@ -1044,7 +1055,8 @@ service Forge {
   // Helm/docker versions for the nico DPF mandatory services, from both
   // the nico config and the live DPUServiceTemplate CRs.
   rpc GetDPFServiceVersions(GetDPFServiceVersionsRequest) returns (DPFServiceVersionsResponse);
-  // Machines DPF is waiting on before a changed DPUService can roll out.
+  // Predicted or stable host machines DPF is waiting on before a changed
+  // DPUService can roll out.
   //
   // Required rather than convenient: the release RPC has no fleet-wide form, so
   // this is the only way to discover which machines to name. Split ids-then-
@@ -1414,6 +1426,8 @@ enum CredentialType {
   NmxM = 10;
   BgpSiteWideLeafPassword = 11;
   SiteWideNicLockdownIkm = 12;
+  // Named credential used to authorize firmware artifact downloads.
+  FirmwareArtifactAccessToken = 13;
 }
 
 message CredentialCreationRequest {
@@ -1425,16 +1439,29 @@ message CredentialCreationRequest {
   optional string username = 2;
   // The password of credential for HostBMC, DPUBMC, DpuUefi.
   // For UFM, the password is the token of UFM.
+  // For FirmwareArtifactAccessToken, the password is the non-empty artifact
+  // access token. Its contents are stored verbatim, including whitespace and
+  // line endings.
   string password = 3;
   // For the BMC factory default credential: "dell", "lenovo", "hpe", "supermicro", etc
   optional string vendor = 4;
   optional string mac_address = 5;
+  // Required and non-empty for FirmwareArtifactAccessToken. The server returns
+  // InvalidArgument when this field is omitted or empty. This is an opaque,
+  // non-secret lookup name. Setting the same name replaces the stored token;
+  // username, vendor, and mac_address are ignored for this credential type.
+  optional string credential_name = 6;
 }
 
 message CredentialDeletionRequest {
   CredentialType credential_type = 1;
   optional string username = 2;
   optional string mac_address = 3;
+  // Required and non-empty for FirmwareArtifactAccessToken. The server returns
+  // InvalidArgument when this field is omitted or empty. This opaque,
+  // non-secret lookup name selects the token to delete; username and
+  // mac_address are ignored for this credential type.
+  optional string credential_name = 4;
 }
 
 message CredentialCreationResult {
@@ -1783,9 +1810,8 @@ message VpcConfig {
 }
 
 message VpcStatus {
-  // The actual VNI allocated to the VPC. If a VNI had been
-  // explicitly requested, we'd expect this to match config.vni.
-  // If not explicitly requested, we'd expect config.vni to be unset.
+  // Active VNI allocated to the VPC. `config.vni` retains the optional
+  // creation-time request and can differ after a routing-profile change.
   optional uint32 vni = 1;
   // Computed from the API server's current named profile and the persisted
   // VPC overrides. This value is not persisted and may change when the API
@@ -1839,6 +1865,7 @@ message Vpc {
 
 message VpcCreationRequest {
   string name = 2; // Removed in v0.9.x and above, retained here for backwards compatibility
+  // Must identify an existing tenant with a routing profile when creating an FNN VPC.
   string tenantOrganizationId = 3; // protolint:disable:this FIELD_NAMES_LOWER_SNAKE_CASE
   // this keyset will enable any key contained within it to access any instance associated with this VPC.
   optional string tenantKeysetId = 4; // protolint:disable:this FIELD_NAMES_LOWER_SNAKE_CASE
@@ -5924,7 +5951,9 @@ message UpdateTenantRequest {
 
   reserved 4;
 
-  // Updating will only be allowed if the tenant has no active VPCs
+  // Core treats omission as a replacement with no profile, not patch-preserve behavior.
+  // When FNN is enabled, omission is rejected. When FNN is disabled, omission clears any existing
+  // profile, subject to the restriction against profile changes while active FNN VPCs exist.
   optional string routing_profile_type = 5;
 }
 message UpdateTenantResponse {
@@ -9409,15 +9438,16 @@ message DPFServiceVersionsResponse {
 // services under every tenant at once.
 message ReleaseDPUServiceSyncHoldRequest {
   oneof target {
-    // Host machines to release. DPU machine ids are rejected: the hold is per
-    // node, so accepting one would silently widen the request from a single DPU
-    // to every DPU on its host. Assigned hosts are declined -- name the instance
-    // instead.
+    // Predicted or stable host machines to release. DPU machine ids are
+    // rejected: the hold is per node, so accepting one would silently widen the
+    // request from a single DPU to every DPU on its host. Assigned hosts are
+    // declined -- name the instance instead.
     common.MachineIdList machine_ids = 1;
     // Release the hosts currently holding these instances, even though they are
     // assigned. Naming an instance is the acknowledgement that its tenant will
     // be disrupted, and each consent covers only the instance named: if a host
-    // has since been reallocated, that release is declined.
+    // has since been reallocated, that release is declined. Instances resolve
+    // only to stable host machines.
     InstanceIdList instance_ids = 2;
   }
 }
@@ -9445,6 +9475,7 @@ enum DPUServiceSyncReleaseStatus {
 }
 
 message DPUServiceSyncReleaseResult {
+  // The predicted or stable host acted on.
   common.MachineId machine_id = 1;
   DPUServiceSyncReleaseStatus status = 2;
   // Names the DPU or instance responsible on the deferred statuses, and the
@@ -9462,17 +9493,20 @@ message FindPendingDPUServiceSyncIdsRequest {
 }
 
 message FindPendingDPUServiceSyncsByIdsRequest {
-  // Bounded by the server's `max_find_by_ids`, like every other by-ids call.
+  // Predicted and stable host IDs are accepted. Bounded by the server's
+  // `max_find_by_ids`, like every other by-ids call.
   repeated common.MachineId machine_ids = 1;
 }
 
 message ListDPUServiceSyncHistoryRequest {
+  // The predicted or stable host whose history to return.
   common.MachineId machine_id = 1;
 }
 
 // One recorded DPU service sync. Completed entries appear only in the history
 // form.
 message PendingDPUServiceSync {
+  // The predicted or stable host waiting for service sync.
   common.MachineId machine_id = 1;
   // First time DPF was seen waiting on this machine. Survives repeat requests,
   // so it measures the whole wait rather than the last observation.
@@ -9537,6 +9571,7 @@ message GetComponentInventoryRequest {
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     MacAddressList compute_bmc_macs = 4;
+    MacAddressList switch_bmc_macs = 5;
   }
 }
 
@@ -9557,6 +9592,7 @@ message ComponentPowerControlRequest {
     SwitchIdList switch_ids = 2;
     PowerShelfIdList power_shelf_ids = 3;
     MacAddressList compute_bmc_macs = 6;
+    MacAddressList switch_bmc_macs = 7;
   }
   common.SystemPowerControl action = 4;
   // When true, bypass the state controller and dispatch directly to the
@@ -9639,8 +9675,14 @@ message UpdateComputeTrayFirmwareTarget {
 }
 
 message UpdateSwitchFirmwareTarget {
+  // Exactly one of switch_ids or bmc_macs must be set (the server rejects
+  // neither/both). switch_ids targets ingested switches; bmc_macs targets by
+  // BMC MAC, including pre-ingestion. These are plain fields rather than a oneof
+  // so field 1 stays wire-compatible with earlier releases that predate
+  // bmc_macs.
   SwitchIdList switch_ids = 1;
   repeated NvSwitchComponent components = 2;
+  MacAddressList bmc_macs = 3;
 }
 
 message UpdatePowerShelfFirmwareTarget {
@@ -9688,6 +9730,7 @@ message GetComponentFirmwareStatusRequest {
     PowerShelfIdList power_shelf_ids = 3;
     RackIdList rack_ids = 4;
     MacAddressList compute_bmc_macs = 5;
+    MacAddressList switch_bmc_macs = 6;
   }
 }
 
@@ -9702,6 +9745,7 @@ message ListComponentFirmwareVersionsRequest {
     PowerShelfIdList power_shelf_ids = 3;
     RackIdList rack_ids = 4;
     MacAddressList compute_bmc_macs = 5;
+    MacAddressList switch_bmc_macs = 6;
   }
 }
 
@@ -10346,4 +10390,125 @@ enum DpuNvConfigProfile {
   DPU_NV_CONFIG_PROFILE_UNSPECIFIED = 0;
   // Version 1 of the validated GB200/B3240 CPU as Root Complex profile.
   DPU_NV_CONFIG_PROFILE_GB200_B3240_V1 = 1;
+}
+
+// Releases the VNI retained after a routing-profile change. The active VNI and
+// VPC configuration remain unchanged. Before calling, operators must verify
+// that affected DPUs (including peers) and fabric routes no longer use the
+// inactive VNI, and prevent attachment, peering, and routing changes through
+// cleanup. Unreachable consumers require retaining the allocation unless they
+// have been isolated. Core validates ownership, not dataplane convergence.
+message VpcReleaseInactiveVniRequest {
+  // Required VPC whose inactive allocation will be released.
+  common.VpcId id = 1;
+  // Required version from the operator's original observation. Repeating that
+  // exact request cannot release a later allocation. A lost response leaves the
+  // outcome unknown: a stale-version error does not prove whether cleanup ran.
+  // Inspect current state; never substitute a fresh version in an automatic retry.
+  optional string if_version_match = 2;
+  // Required exact inactive VNI observed with this version, in 1..16777215.
+  // It must differ from the active VNI and match the VPC-owned allocation in
+  // the other pool. Cleanup fails on missing or inconsistent allocations.
+  optional uint32 expected_inactive_vni = 3;
+}
+
+message VpcReleaseInactiveVniResult {
+  // Authoritative VPC with its advanced version after cleanup committed.
+  Vpc vpc = 1;
+  // Exact inactive allocation released by this operation.
+  uint32 released_inactive_vni = 2;
+}
+
+// Selects one VPC for authoritative allocation inspection.
+message VpcRoutingStateRequest {
+  // Required VPC ID. Missing IDs fail INVALID_ARGUMENT; unknown or deleted
+  // VPCs fail NOT_FOUND.
+  common.VpcId id = 1;
+}
+
+// Persisted routing state, read together with the VPC-owned allocations.
+// Supports any virtualization type with one owned allocation matching its
+// active VNI and at most one distinct allocation in the other pool. Missing,
+// duplicate, or inconsistent ownership fails instead of reporting no retained
+// allocation. VPCs without pool ownership (including configured admin VPCs)
+// fail FAILED_PRECONDITION. Pool values that cannot be parsed as signed 32-bit
+// integers fail INTERNAL; parsed negative values fail FAILED_PRECONDITION.
+// This is not an effective routing profile or evidence of DPU/fabric convergence;
+// a site-global VNI override is not reflected here. Inspection must not silently
+// replace the version or VNI an operator approved for a mutation.
+message VpcRoutingState {
+  // VPC whose persisted state was read.
+  common.VpcId id = 1;
+  // VPC version observed with these allocations. Profile changes advance it;
+  // inspection does not.
+  string version = 2;
+  // Persisted profile name, omitted when none is configured on the VPC.
+  // The name is returned even if its runtime profile definition is unavailable.
+  optional string routing_profile_type = 3;
+  // Persisted active VNI, verified against exact pool ownership. Inspection
+  // accepts stored nonnegative values, including zero in non-FNN pools.
+  uint32 active_vni = 4;
+  // Omitted only when the valid active allocation is the VPC's sole allocation.
+  VpcRetainedVniAllocation retained_allocation = 5;
+}
+
+// Allocation retained by the VPC in the pool other than its active allocation.
+message VpcRetainedVniAllocation {
+  // Exact resource-pool name: vpc-vni or external-vpc-vni.
+  string pool_name = 1;
+  // Persisted nonnegative VNI. Distinct from the active VNI; inspection does
+  // not establish whether it is valid for a routing-profile transition.
+  uint32 vni = 2;
+}
+
+// Changes a supported FNN VPC between configured profiles with opposite
+// internal settings. The destination must satisfy the persisted tenant's
+// access tier (omitted tiers retain the creation-time default of zero).
+// Reuses an existing destination allocation, otherwise claims the requested
+// VNI or automatically selects an available VNI from the destination pool.
+// The previous allocation remains reserved; ReleaseVpcInactiveVni is a
+// separate operator action.
+//
+// Requires FNN configuration, named source/destination profiles, distinct
+// nonoverlapping materialized pools, and VNIs in 1..16777215. Site-global VNIs,
+// substantive VPC/interface routing overrides, and tenant-managed SitePrefix
+// attachments are unsupported. Empty override reset objects are allowed.
+// Same-polarity changes and a destination pool already holding the active VNI
+// are rejected. Unsupported configurations and inconsistent ownership fail
+// FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; automatic allocation
+// from an exhausted pool fails RESOURCE_EXHAUSTED. Rejected requests commit
+// no changes.
+//
+// Preserves the VPC ID, prefixes, instances, addresses, NSGs, metadata, and
+// creation-time requested VNI. External routing does not supply public
+// addressing, NAT, fabric routes, or firewall changes.
+//
+// Operators must hold attachment, peering, deletion, and profile-definition
+// changes until all attached and directly peered DPUs and fabric routes have
+// been independently verified and the inactive allocation released. Core
+// does not enforce that hold or verify convergence. A later change back must
+// name the desired profile and pass current validation; retained ownership
+// does not guarantee reversal or authorize broader tenant access.
+message VpcChangeRoutingProfileRequest {
+  // Required live VPC ID. Omission fails INVALID_ARGUMENT.
+  common.VpcId id = 1;
+  // Required version from the original observation; missing/malformed values
+  // fail INVALID_ARGUMENT and stale versions fail FAILED_PRECONDITION. Keep this exact
+  // version on retries. A lost response leaves commit status unknown: inspect
+  // GetVpcRoutingState and never automatically substitute a fresh version.
+  optional string if_version_match = 2;
+  // Required nonempty configuration-defined destination name, not a closed
+  // INTERNAL/EXTERNAL enum. Omission or an empty name fails INVALID_ARGUMENT.
+  string routing_profile_type = 3;
+  // Optional exact destination VNI. Omission reuses a retained destination,
+  // otherwise allocates automatically. A retained destination must match an
+  // explicit request; a different value fails FAILED_PRECONDITION even if free.
+  // Without a retained destination, the requested value must be a free
+  // materialized destination-pool entry, regardless of its auto_assign flag.
+  // Missing or occupied entries and the active VNI fail FAILED_PRECONDITION
+  // without falling back. Zero and values above 16777215 fail INVALID_ARGUMENT.
+  // Use only when every serving Core supports this field: older Core ignores
+  // it and may choose another VNI. Verify the returned profile and active VNI;
+  // a mismatched or lost response does not undo a committed change.
+  optional uint32 vni = 4;
 }

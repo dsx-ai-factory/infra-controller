@@ -123,7 +123,7 @@ def helm_chart(
         namespace,
         values,
         resource_deps=[],
-        image_dep='',
+        image_deps=[],
         image_keys=[],
         port_forwards=[],
         links=[],
@@ -140,7 +140,7 @@ def helm_chart(
         namespace=namespace,
         deps=[chart, values_file],
         resource_deps=resource_deps,
-        image_deps=[image_dep] if image_dep else [],
+        image_deps=image_deps,
         image_keys=image_keys,
         labels=['application'],
         pod_readiness='wait' if wait else 'ignore',
@@ -841,6 +841,14 @@ docker_build(
     dockerfile=os.path.join(devspace_dir, 'Dockerfile.machine-a-tron'),
     ignore=['dev/deployment/tilt'],
 )
+docker_build(
+    'mat-k8s-controller',
+    os.path.join(repo_root, 'dev/k8s/machine-a-tron-controller'),
+    dockerfile=os.path.join(
+        repo_root,
+        'dev/k8s/machine-a-tron-controller/Dockerfile',
+    ),
+)
 
 rest_image(
     'nico-rest-api',
@@ -936,7 +944,7 @@ helm_chart(
     namespace=core_namespace,
     values=nico_api_values,
     resource_deps=nico_api_dependencies,
-    image_dep='nico-api',
+    image_deps=['nico-api'],
     image_keys=[('global.image.repository', 'global.image.tag')],
     port_forwards=[port_forward(1079, 1079)],
     links=[link('https://localhost:1079/admin/', 'NICo Web UI')],
@@ -948,7 +956,7 @@ helm_chart(
     namespace=core_namespace,
     values=component_values(core_global, all_values['nico-bmc-proxy']),
     resource_deps=['nico-api'],
-    image_dep='nico-bmc-proxy',
+    image_deps=['nico-bmc-proxy'],
     image_keys=[('image.repository', 'image.tag')],
     manual=True,
 )
@@ -958,7 +966,7 @@ helm_chart(
     namespace=core_namespace,
     values=component_values(core_global, nico_dhcp_values),
     resource_deps=['nico-api'],
-    image_dep='nico-dhcp',
+    image_deps=['nico-dhcp'],
     image_keys=[('global.image.repository', 'global.image.tag')],
     manual=True,
 )
@@ -1056,8 +1064,14 @@ helm_chart(
         'nico-dhcp-machine-a-tron',
         'nico-machine-a-tron-dhcp-relay',
     ],
-    image_dep='machine-a-tron',
-    image_keys=[('image.repository', 'image.tag')],
+    image_deps=['machine-a-tron', 'mat-k8s-controller'],
+    image_keys=[
+        ('image.repository', 'image.tag'),
+        (
+            'mat-k8s-controller.image.repository',
+            'mat-k8s-controller.image.tag',
+        ),
+    ],
     port_forwards=[port_forward(1266, 1266)],
     links=[link('https://localhost:1266/', 'Machine-A-Tron UI')],
     manual=True,
@@ -1074,7 +1088,7 @@ helm_chart(
         'nico-api',
         'nico-machine-a-tron-ssh',
     ],
-    image_dep='nico-api',
+    image_deps=['nico-api'],
     image_keys=[('global.image.repository', 'global.image.tag')],
     port_forwards=[
         port_forward(3222, 22),
@@ -1123,7 +1137,7 @@ helm_chart(
     namespace=rest_namespace,
     values=component_values(rest_global, rest_values['certManager']),
     resource_deps=['nico-local-config'],
-    image_dep='localhost/nico-rest-cert-manager',
+    image_deps=['localhost/nico-rest-cert-manager'],
     image_keys=rest_image_keys,
     manual=True,
 )
@@ -1133,7 +1147,7 @@ helm_chart(
     namespace=rest_namespace,
     values=component_values(rest_global, rest_values['siteManager']),
     resource_deps=['nico-rest-cert-manager'],
-    image_dep='localhost/nico-rest-site-manager',
+    image_deps=['localhost/nico-rest-site-manager'],
     image_keys=rest_image_keys,
     manual=True,
 )
@@ -1149,7 +1163,7 @@ helm_chart(
         'rest-certificate-ready',
         'temporal-namespaces',
     ],
-    image_dep='localhost/nico-rest-api',
+    image_deps=['localhost/nico-rest-api'],
     image_keys=rest_image_keys,
     port_forwards=[port_forward(18388, 8388)],
     manual=True,
@@ -1164,7 +1178,7 @@ helm_chart(
         'rest-certificate-ready',
         'temporal-namespaces',
     ],
-    image_dep='localhost/nico-rest-workflow',
+    image_deps=['localhost/nico-rest-workflow'],
     image_keys=rest_image_keys,
     manual=True,
 )
@@ -1179,7 +1193,7 @@ helm_chart(
         'nico-rest-site-manager',
         'nico-rest-workflow',
     ],
-    image_dep='localhost/nico-rest-site-agent',
+    image_deps=['localhost/nico-rest-site-agent'],
     image_keys=rest_image_keys,
     manual=True,
     wait=False,
@@ -1190,7 +1204,7 @@ helm_chart(
     namespace=rest_namespace,
     values=component_values(rest_global, rest_values['mcp']),
     resource_deps=['nico-rest-api'],
-    image_dep='localhost/nico-mcp',
+    image_deps=['localhost/nico-mcp'],
     image_keys=rest_image_keys,
     port_forwards=[port_forward(18080, 8080)],
     manual=True,

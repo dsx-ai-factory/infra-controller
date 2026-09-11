@@ -50,6 +50,7 @@ impl From<Args> for forgerpc::CredentialDeletionRequest {
             credential_type: CredentialType::from(args.kind).into(),
             username: None,
             mac_address: args.mac_address.map(|mac| mac.to_string()),
+            credential_name: None,
         }
     }
 }

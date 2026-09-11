@@ -17,6 +17,7 @@
 use ::rpc::forge as rpc;
 use carbide_redfish::libredfish::CredentialOpError;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
+use carbide_uuid::machine::MachineId;
 use db::WithTransaction;
 use futures_util::FutureExt;
 use model::machine::LoadSnapshotOptions;
@@ -457,7 +458,7 @@ pub(crate) async fn set_dpu_uefi_password(
 
     let request = request.into_inner();
 
-    let machine_id = if let Some(query) = request.machine_query {
+    let machine_id: MachineId = if let Some(query) = request.machine_query {
         match db::machine::find_by_query(&mut txn, &query).await? {
             Some(machine) => {
                 log_machine_id(&machine.id);
@@ -502,7 +503,7 @@ pub(crate) async fn set_dpu_uefi_password(
     let dpu = snapshot
         .dpu_snapshots
         .iter()
-        .find(|d| d.id == machine_id)
+        .find(|d| d.id.as_machine_id() == &machine_id)
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "dpu",
             id: machine_id.to_string(),

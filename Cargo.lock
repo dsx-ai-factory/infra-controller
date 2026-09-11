@@ -1629,6 +1629,7 @@ dependencies = [
  "carbide-secrets",
  "carbide-sqlx-testing",
  "carbide-test-support",
+ "carbide-uuid",
  "chrono",
  "libredfish",
  "mac_address",
@@ -1645,6 +1646,7 @@ version = "0.0.0"
 dependencies = [
  "carbide-dhcp",
  "carbide-dhcp-common",
+ "carbide-dhcpv6",
  "carbide-instrument",
  "carbide-rpc",
  "carbide-test-support",
@@ -1688,6 +1690,7 @@ name = "carbide-dhcp-server"
 version = "0.1.0"
 dependencies = [
  "carbide-dhcp-common",
+ "carbide-dhcpv6",
  "carbide-instrument",
  "carbide-rpc",
  "carbide-rpc-utils",
@@ -1698,7 +1701,11 @@ dependencies = [
  "clap",
  "dhcproto",
  "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ipnetwork",
+ "libc",
  "logfmt",
  "lru",
  "metrics-endpoint",
@@ -1718,6 +1725,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-dhcpv6"
+version = "0.1.0"
+dependencies = [
+ "carbide-test-support",
+ "dhcproto",
+ "mac_address",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "carbide-dns"
 version = "0.0.1"
 dependencies = [
@@ -1732,6 +1749,7 @@ dependencies = [
  "eyre",
  "hickory-resolver",
  "hickory-server",
+ "logfmt",
  "lru",
  "metrics-endpoint",
  "opentelemetry 0.32.0",
@@ -1820,6 +1838,7 @@ dependencies = [
  "carbide-uuid",
  "clap",
  "dashmap",
+ "derive_builder",
  "eyre",
  "futures",
  "hex",
@@ -2909,11 +2928,13 @@ dependencies = [
  "libredfish",
  "mac_address",
  "nv-redfish",
+ "rcgen",
  "reqwest 0.13.4",
  "rustls",
  "serde",
  "serde_json",
  "state-controller",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3280,6 +3301,7 @@ name = "carbide-ssh-console-mock-api-server"
 version = "0.0.1"
 dependencies = [
  "carbide-api-test-helper",
+ "carbide-proto-compiler",
  "carbide-rpc",
  "carbide-uuid",
  "carbide-version",
@@ -6751,7 +6773,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.4#5b3bfb1cfe06c4a36fc93d0cf1b4c0ab9288c633"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.5#569bc602d2aa03b3f2ea4c9e006d593a05c7b1dc"
 dependencies = [
  "chrono",
  "clap",
@@ -7398,16 +7420,21 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "color-eyre",
+ "config-version",
  "csv",
  "eyre",
  "futures",
  "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ipnet",
  "libredfish",
  "librms",
  "mac_address",
  "pandoc",
  "prettytable-rs",
+ "prost",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -11789,16 +11816,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-serde"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
-dependencies = [
- "serde",
- "tracing-core",
-]
-
-[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11808,8 +11825,6 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
- "serde",
- "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
@@ -11817,7 +11832,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
- "tracing-serde",
 ]
 
 [[package]]

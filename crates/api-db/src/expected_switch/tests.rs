@@ -19,6 +19,7 @@ use std::collections::HashMap;
 
 use model::expected_switch::ExpectedSwitch;
 use model::metadata::Metadata;
+use model::rack::RackConfig;
 
 use super::*;
 use crate as db;
@@ -296,4 +297,103 @@ async fn test_delete(pool: sqlx::PgPool) -> () {
         async |txn, mac| db::expected_switch::find_by_bmc_mac_address(txn, mac).await,
     )
     .await;
+}
+
+/// Every switch is rack-scale, so the pre-ingestion RMS identity resolver
+/// requires a declared `rack_id` and takes its rack profile from the live
+/// `racks` row when present, otherwise the `expected_racks` declaration.
+/// A switch missing a `rack_id` is a misconfiguration and is omitted.
+#[crate::sqlx_test]
+async fn test_find_rms_identities_by_bmc_macs(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+
+    let bmc_expected_only = "02:00:00:00:0d:01";
+    let bmc_live_rack = "02:00:00:00:0d:02";
+    let bmc_no_rack = "02:00:00:00:0d:03";
+
+    let rack_expected: RackId = "rack-expected-only".parse().unwrap();
+    let rack_live: RackId = "rack-live".parse().unwrap();
+    let profile_expected = RackProfileId::new("NVL72-EXPECTED");
+    let profile_live = RackProfileId::new("NVL72-LIVE");
+
+    // Both racks are declared in expected_racks; only rack_live also has a
+    // live racks row (with a different profile) to prove COALESCE precedence.
+    sqlx::query("INSERT INTO expected_racks (rack_id, rack_profile_id) VALUES ($1, $2), ($3, $4)")
+        .bind(rack_expected.to_string())
+        .bind(profile_expected.to_string())
+        .bind(rack_live.to_string())
+        .bind("NVL72-EXPECTED-IGNORED")
+        .execute(txn.as_mut())
+        .await?;
+
+    crate::rack::create(
+        txn.as_mut(),
+        &rack_live,
+        Some(&profile_live),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO expected_switches
+             (serial_number, bmc_mac_address, bmc_username, bmc_password, rack_id)
+         VALUES ('SW-EXP', $1::macaddr, 'admin', 'pw', $2),
+                ('SW-LIVE', $3::macaddr, 'admin', 'pw', $4),
+                ('SW-NORACK', $5::macaddr, 'admin', 'pw', NULL)",
+    )
+    .bind(bmc_expected_only)
+    .bind(rack_expected.to_string())
+    .bind(bmc_live_rack)
+    .bind(rack_live.to_string())
+    .bind(bmc_no_rack)
+    .execute(txn.as_mut())
+    .await?;
+
+    let identities = find_rms_identities_by_bmc_macs(
+        txn.as_mut(),
+        &[
+            bmc_expected_only.parse()?,
+            bmc_live_rack.parse()?,
+            bmc_no_rack.parse()?,
+        ],
+    )
+    .await?;
+
+    let by_mac: HashMap<_, _> = identities
+        .iter()
+        .map(|id| (id.bmc_mac_address, id))
+        .collect();
+
+    assert_eq!(by_mac.len(), 2, "the no-rack switch must be omitted");
+
+    let expected_only = by_mac
+        .get(&bmc_expected_only.parse()?)
+        .expect("expected-only switch resolves");
+    assert_eq!(expected_only.rack_id, rack_expected);
+    assert_eq!(
+        expected_only.rack_profile_id.as_ref(),
+        Some(&profile_expected),
+        "rack profile falls back to expected_racks when no live rack exists"
+    );
+
+    let live = by_mac
+        .get(&bmc_live_rack.parse()?)
+        .expect("live-rack switch resolves");
+    assert_eq!(live.rack_id, rack_live);
+    assert_eq!(
+        live.rack_profile_id.as_ref(),
+        Some(&profile_live),
+        "a live racks row takes precedence over the expected_racks declaration"
+    );
+
+    assert!(
+        !by_mac.contains_key(&bmc_no_rack.parse()?),
+        "a switch without a rack_id cannot resolve an RMS identity"
+    );
+
+    txn.rollback().await?;
+    Ok(())
 }

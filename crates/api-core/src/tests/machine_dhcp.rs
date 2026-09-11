@@ -19,7 +19,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use std::str::FromStr;
 
 use carbide_network::ip::IpAddressFamily;
-use carbide_uuid::machine::MachineInterfaceId;
+use carbide_uuid::machine::{AsMachineId, MachineIdSubtypeTrait, MachineInterfaceId};
 use carbide_uuid::network::NetworkSegmentId;
 use common::api_fixtures::network_segment::{
     FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY,
@@ -512,9 +512,7 @@ async fn test_multiple_machines_dhcp_with_api(
 async fn test_machine_dhcp_declared_admin_nic_allocates_from_relay_admin_segment(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut config = get_config();
-    config.rack_management_enabled = true;
-    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let env = create_test_env(pool).await;
 
     // Create a second admin segment so the relay determines which admin segment is used.
     let second_admin_segment = create_network_segment(
@@ -586,9 +584,7 @@ async fn test_machine_dhcp_declared_admin_nic_allocates_from_relay_admin_segment
 async fn test_machine_dhcp_declared_segment_type_allocates_from_relay_admin_segment(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut config = get_config();
-    config.rack_management_enabled = true;
-    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let env = create_test_env(pool).await;
 
     // A second admin segment, so the relay -- not the declaration -- decides
     // which admin segment is used once selection is narrowed to Admin.
@@ -703,13 +699,16 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         }))
         .await?;
 
+    let expected_machine = db::expected_machine::find_by_bmc_mac_address(&pool, expected_bmc_mac)
+        .await?
+        .expect("expected machine should exist");
+
     // The machine-wide primary declaration belongs only to the Host role.
     // DPU OS and BMC interfaces still derive their primary settings from their
     // roles when the same ExpectedMachine declares a primary Host interface.
     struct Case {
         name: &'static str,
         mac_address: MacAddress,
-        role: ExpectedInterfaceRole,
         policy: ExpectedInterfaceIpAllocation,
         interface_type: InterfaceType,
         primary: bool,
@@ -718,7 +717,6 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
     for Case {
         name,
         mac_address,
-        role,
         policy,
         interface_type,
         primary,
@@ -726,7 +724,6 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         Case {
             name: "Host dynamic",
             mac_address: host_mac,
-            role: ExpectedInterfaceRole::Host,
             policy: ExpectedInterfaceIpAllocation::Dynamic,
             interface_type: InterfaceType::Data,
             primary: true,
@@ -734,7 +731,6 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         Case {
             name: "DPU OS dynamic",
             mac_address: dpu_os_mac,
-            role: ExpectedInterfaceRole::DpuOs,
             policy: ExpectedInterfaceIpAllocation::Dynamic,
             interface_type: InterfaceType::Data,
             primary: true,
@@ -742,7 +738,6 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         Case {
             name: "DPU BMC retained",
             mac_address: dpu_bmc_mac,
-            role: ExpectedInterfaceRole::DpuBmc,
             policy: ExpectedInterfaceIpAllocation::Retained,
             interface_type: InterfaceType::Bmc,
             primary: false,
@@ -750,7 +745,6 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         Case {
             name: "Host BMC retained",
             mac_address: expected_bmc_mac,
-            role: ExpectedInterfaceRole::HostBmc,
             policy: ExpectedInterfaceIpAllocation::Retained,
             interface_type: InterfaceType::Bmc,
             primary: false,
@@ -783,15 +777,16 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
             "case: {name}",
         );
 
+        let expected_interface = expected_machine
+            .data
+            .interfaces
+            .iter()
+            .find(|interface| interface.mac_address == mac_address)
+            .expect("the stored declaration should contain this interface");
         carbide_site_explorer::try_apply_expected_interface(
             &pool,
-            &ExpectedInterface {
-                mac_address,
-                role,
-                ip_allocation: Some(policy),
-                network_segment_type: Some(NetworkSegmentType::Underlay),
-                ..Default::default()
-            },
+            &expected_machine,
+            expected_interface,
             None,
         )
         .await;
@@ -949,7 +944,7 @@ async fn test_machine_dhcp_with_api_for_instance_physical_virtual(
     let response = env
         .api
         .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(mh.dpu().id.into()),
+            dpu_machine_id: Some(mh.dpu().id),
         }))
         .await
         .unwrap()
@@ -3404,10 +3399,14 @@ async fn test_discover_dhcp_dangling_address_is_not_found(
 /// Resolve a machine_interface + its segment gateway for the given host, so
 /// the test can drive a DHCP request with the same relay the real host would
 /// see in production.
-async fn host_interface_and_gateway(
+async fn host_interface_and_gateway<ID>(
     env: &TestEnv,
-    host_machine_id: carbide_uuid::machine::HostMachineId,
-) -> Result<(MacAddress, IpAddr), Box<dyn std::error::Error>> {
+    host_machine_id: ID,
+) -> Result<(MacAddress, IpAddr), Box<dyn std::error::Error>>
+where
+    ID: MachineIdSubtypeTrait,
+    db::DatabaseError: From<<ID as TryFrom<carbide_uuid::machine::MachineId>>::Error>,
+{
     let mut txn = env.pool.begin().await?;
     let interfaces_by_machine =
         db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_machine_id]).await?;
@@ -3434,11 +3433,11 @@ async fn host_interface_and_gateway(
 /// `instances.machine_id`, so a minimal INSERT is enough.
 async fn attach_bare_instance(
     env: &TestEnv,
-    machine_id: carbide_uuid::machine::HostMachineId,
+    machine_id: impl MachineIdSubtypeTrait,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = env.pool.begin().await?;
     sqlx::query("INSERT INTO instances (machine_id) VALUES ($1)")
-        .bind(machine_id)
+        .bind(machine_id.to_machine_id())
         .execute(txn.as_mut())
         .await?;
     txn.commit().await?;

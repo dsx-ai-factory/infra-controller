@@ -47,6 +47,7 @@ rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 
 [build-dependencies]
+carbide-proto-compiler = { path = "../proto-compiler" }
 carbide-version = { path = "../version" }
 tonic-prost-build = "0.14"
 

@@ -60,7 +60,7 @@ async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::R
     // allocate: should fail
     let req = rpcf::InstanceAllocationRequest {
         instance_id: None,
-        machine_id: Some(mh.host().id.into()),
+        machine_id: Some(mh.host().id),
         instance_type_id: None,
         config: Some(instance_config.clone()),
         metadata: Some(rpcf::Metadata {
@@ -127,7 +127,7 @@ async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::R
     // allocate: should succeed
     let req = rpcf::InstanceAllocationRequest {
         instance_id: None,
-        machine_id: Some(mh.host().id.into()),
+        machine_id: Some(mh.host().id),
         instance_type_id: None,
         config: Some(instance_config),
         metadata: Some(rpc::Metadata {

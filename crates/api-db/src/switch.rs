@@ -824,6 +824,70 @@ pub async fn find_switch_endpoints_by_ids(
         .map_err(|err| DatabaseError::new("switch::find_switch_endpoints_by_ids", err))
 }
 
+/// Endpoint info for a pre-ingestion switch, resolved by BMC MAC without a
+/// `switches` row.
+///
+/// Same shape as [`SwitchEndpointRow`] minus `switch_id`, which does not exist
+/// before ingestion. NVOS fields stay nullable for the same reasons.
+#[derive(Debug, sqlx::FromRow)]
+pub struct PreIngestionSwitchEndpointRow {
+    pub bmc_mac: MacAddress,
+    pub bmc_ip: IpAddr,
+    pub nvos_mac: Option<MacAddress>,
+    pub nvos_ip: Option<IpAddr>,
+    /// `machine_interfaces.hostname` plus domain for the NVOS interface (TLS SNI).
+    pub nvos_hostname: Option<String>,
+}
+
+/// Resolve BMC MACs to full endpoint info (BMC + NVOS MAC/IP) for switches that
+/// may not be ingested yet.
+///
+/// Identical joins to [`find_switch_endpoints_by_ids`] but anchored on
+/// `expected_switches.bmc_mac_address` instead of a `switches` row, so it works
+/// before ingestion creates the switch. `DISTINCT ON (es.bmc_mac_address)`
+/// collapses duplicate address rows; NVOS LEFT JOINs keep switches without NVOS
+/// info (caller reports those as unresolved).
+pub async fn find_switch_endpoints_by_bmc_macs(
+    db: impl crate::db_read::DbReader<'_>,
+    bmc_macs: &[MacAddress],
+) -> DatabaseResult<Vec<PreIngestionSwitchEndpointRow>> {
+    let sql = r#"
+        SELECT DISTINCT ON (es.bmc_mac_address)
+            es.bmc_mac_address   AS bmc_mac,
+            bmc_mia.address      AS bmc_ip,
+            nvos_mi.mac_address  AS nvos_mac,
+            nvos_mia.address     AS nvos_ip,
+            CASE
+                WHEN nvos_d.name IS NOT NULL AND nvos_d.name <> '' THEN
+                    nvos_mi.hostname || '.' || nvos_d.name
+                ELSE nvos_mi.hostname
+            END                  AS nvos_hostname
+        FROM expected_switches es
+        JOIN machine_interfaces bmc_mi
+            ON bmc_mi.mac_address = es.bmc_mac_address
+        JOIN machine_interface_addresses bmc_mia
+            ON bmc_mia.interface_id = bmc_mi.id
+        JOIN network_segments bmc_ns
+            ON bmc_ns.id = bmc_mi.segment_id
+        LEFT JOIN machine_interfaces nvos_mi
+            ON es.nvos_mac_addresses IS NOT NULL
+           AND nvos_mi.mac_address = ANY(es.nvos_mac_addresses)
+        LEFT JOIN machine_interface_addresses nvos_mia
+            ON nvos_mia.interface_id = nvos_mi.id
+        LEFT JOIN domains nvos_d
+            ON nvos_d.id = nvos_mi.domain_id
+        WHERE es.bmc_mac_address = ANY($1)
+          AND bmc_ns.network_segment_type = 'underlay'
+        ORDER BY es.bmc_mac_address
+    "#;
+
+    sqlx::query_as(sql)
+        .bind(bmc_macs)
+        .fetch_all(db)
+        .await
+        .map_err(|err| DatabaseError::new("switch::find_switch_endpoints_by_bmc_macs", err))
+}
+
 /// Resolve one ready Fabric Manager control-plane switch endpoint per rack.
 ///
 /// When several switches in a rack match, the primary switch is preferred.
@@ -1427,6 +1491,135 @@ mod tests {
             clear_bmc_credential_rotation_requested(txn.as_mut(), ghost).await,
             Err(DatabaseError::NotFoundError { kind: "switch", .. })
         ));
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// The pre-ingestion endpoint resolver is anchored on
+    /// `expected_switches.bmc_mac_address` (no `switches` row): it resolves the
+    /// BMC IP from an underlay-segment BMC interface, joins the NVOS MAC/IP by
+    /// `nvos_mac_addresses` membership, and builds the NVOS hostname from the
+    /// interface hostname plus its domain. A BMC interface on a non-underlay
+    /// segment must not resolve.
+    #[crate::sqlx_test]
+    async fn test_find_switch_endpoints_by_bmc_macs_resolves_bmc_and_nvos(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+
+        let bmc_mac_a = "02:00:00:00:0c:01";
+        let nvos_mac_a = "02:00:00:00:0c:02";
+        let bmc_ip_a: IpAddr = "10.40.50.1".parse()?;
+        let nvos_ip_a: IpAddr = "10.40.50.2".parse()?;
+        // SW-B's BMC lands on a tenant (non-underlay) segment, so it must be
+        // excluded even though its expected record and interface exist.
+        let bmc_mac_b = "02:00:00:00:0c:11";
+
+        sqlx::query(
+            "INSERT INTO expected_switches
+                 (serial_number, bmc_mac_address, bmc_username, bmc_password, nvos_mac_addresses)
+             VALUES ('SW-A', $1::macaddr, 'admin', 'pw', ARRAY[$2]::macaddr[]),
+                    ('SW-B', $3::macaddr, 'admin', 'pw', NULL)",
+        )
+        .bind(bmc_mac_a)
+        .bind(nvos_mac_a)
+        .bind(bmc_mac_b)
+        .execute(txn.as_mut())
+        .await?;
+
+        let underlay_segment: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version, network_segment_type)
+             VALUES ('sw-underlay', 'V1-T0', 'underlay') RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await?;
+        let tenant_segment: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version, network_segment_type)
+             VALUES ('sw-tenant', 'V1-T0', 'tenant') RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await?;
+
+        let domain_id: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO domains (name) VALUES ('example.com') RETURNING id")
+                .fetch_one(txn.as_mut())
+                .await?;
+
+        // SW-A: BMC on underlay, NVOS with a domain for the SNI hostname.
+        let bmc_iface_a: MachineInterfaceId = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces
+                 (segment_id, mac_address, primary_interface, hostname, interface_type)
+             VALUES ($1, $2::macaddr, false, 'bmc-a', 'Bmc') RETURNING id",
+        )
+        .bind(underlay_segment)
+        .bind(bmc_mac_a)
+        .fetch_one(txn.as_mut())
+        .await?;
+        crate::machine_interface_address::insert(
+            txn.as_mut(),
+            bmc_iface_a,
+            bmc_ip_a,
+            AllocationType::Dhcp,
+        )
+        .await?;
+
+        let nvos_iface_a: MachineInterfaceId = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces
+                 (segment_id, mac_address, primary_interface, hostname, interface_type, domain_id)
+             VALUES ($1, $2::macaddr, false, 'nvos-a', 'Data', $3) RETURNING id",
+        )
+        .bind(underlay_segment)
+        .bind(nvos_mac_a)
+        .bind(domain_id)
+        .fetch_one(txn.as_mut())
+        .await?;
+        crate::machine_interface_address::insert(
+            txn.as_mut(),
+            nvos_iface_a,
+            nvos_ip_a,
+            AllocationType::Dhcp,
+        )
+        .await?;
+
+        // SW-B: BMC on a tenant segment (must be excluded by the underlay filter).
+        let bmc_iface_b: MachineInterfaceId = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces
+                 (segment_id, mac_address, primary_interface, hostname, interface_type)
+             VALUES ($1, $2::macaddr, false, 'bmc-b', 'Bmc') RETURNING id",
+        )
+        .bind(tenant_segment)
+        .bind(bmc_mac_b)
+        .fetch_one(txn.as_mut())
+        .await?;
+        crate::machine_interface_address::insert(
+            txn.as_mut(),
+            bmc_iface_b,
+            "10.40.50.11".parse::<IpAddr>()?,
+            AllocationType::Dhcp,
+        )
+        .await?;
+
+        let endpoints = find_switch_endpoints_by_bmc_macs(
+            txn.as_mut(),
+            &[bmc_mac_a.parse()?, bmc_mac_b.parse()?],
+        )
+        .await?;
+
+        assert_eq!(
+            endpoints.len(),
+            1,
+            "only the underlay-BMC switch should resolve"
+        );
+        let endpoint = &endpoints[0];
+        assert_eq!(endpoint.bmc_mac, bmc_mac_a.parse()?);
+        assert_eq!(endpoint.bmc_ip, bmc_ip_a);
+        assert_eq!(endpoint.nvos_mac, Some(nvos_mac_a.parse()?));
+        assert_eq!(endpoint.nvos_ip, Some(nvos_ip_a));
+        assert_eq!(
+            endpoint.nvos_hostname.as_deref(),
+            Some("nvos-a.example.com")
+        );
 
         txn.rollback().await?;
         Ok(())

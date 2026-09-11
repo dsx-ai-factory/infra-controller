@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use opentelemetry::metrics::Meter;
 
 pub(super) struct MachineUpdateManagerMetrics {
@@ -115,7 +115,7 @@ pub(crate) struct FirmwareUpdateProgress {
     /// The host being reprovisioned (Host), the host whose DPUs update
     /// (DpuNic), or the machine holding the device (SuperNic).
     #[context]
-    pub(crate) machine_id: MachineId,
+    pub(crate) machine_id: HostMachineId,
     /// What the site knows beyond the machine id: the DPU list with firmware
     /// versions for DpuNic, the device identity and observed/expected
     /// versions for SuperNic. For Host it is empty on automatic starts and
@@ -170,6 +170,7 @@ mod tests {
     use std::str::FromStr as _;
 
     use carbide_instrument::testing::{CapturedLog, MetricsCapture, capture_logs};
+    use carbide_uuid::machine::StableHostMachineId;
 
     use super::*;
 
@@ -180,8 +181,8 @@ mod tests {
             .map(|(_, value)| value.as_str())
     }
 
-    fn machine_id() -> MachineId {
-        MachineId::from_str("fm100hseddco33hvlofuqvg543p6p9aj60g76q5cq491g9m9tgtf2dk0530")
+    fn machine_id() -> StableHostMachineId {
+        StableHostMachineId::from_str("fm100hseddco33hvlofuqvg543p6p9aj60g76q5cq491g9m9tgtf2dk0530")
             .expect("valid machine id")
     }
 
@@ -195,7 +196,7 @@ mod tests {
             carbide_instrument::emit(FirmwareUpdateProgress {
                 target: FirmwareUpdateTarget::SuperNic,
                 phase: FirmwareUpdatePhase::Started,
-                machine_id: machine_id(),
+                machine_id: machine_id().into(),
                 detail: "pci_name=0000:cc:00.0 observed_fw_version=Some(\"28.39.1000\") \
                          expected_fw_version=28.39.1002"
                     .to_string(),
@@ -234,7 +235,7 @@ mod tests {
                 carbide_instrument::emit(FirmwareUpdateProgress {
                     target: FirmwareUpdateTarget::Host,
                     phase,
-                    machine_id: machine_id(),
+                    machine_id: machine_id().into(),
                     detail: String::new(),
                 });
             }
@@ -262,7 +263,7 @@ mod tests {
             carbide_instrument::emit(FirmwareUpdateFailed {
                 target: FirmwareUpdateTarget::DpuNic,
                 cause: FirmwareUpdateFailureCause::NoUpdateMatch,
-                machine_id: machine_id(),
+                machine_id: machine_id().into(),
                 unmatched_dpu_machine_id:
                     "fm100ptrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0".to_string(),
                 firmware_version: String::new(),
@@ -270,7 +271,7 @@ mod tests {
             carbide_instrument::emit(FirmwareUpdateFailed {
                 target: FirmwareUpdateTarget::DpuNic,
                 cause: FirmwareUpdateFailureCause::WrongVersionAfterUpdate,
-                machine_id: machine_id(),
+                machine_id: machine_id().into(),
                 unmatched_dpu_machine_id: String::new(),
                 firmware_version: "11.10.1000".to_string(),
             });

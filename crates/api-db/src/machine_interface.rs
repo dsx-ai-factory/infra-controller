@@ -21,7 +21,7 @@ use std::net::IpAddr;
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::domain::DomainId;
-use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait, MachineInterfaceId};
+use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId};
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::switch::SwitchId;
@@ -480,11 +480,10 @@ where
         txn,
         ObjectColumnFilter::List(
             MachineIdColumn,
-            machine_ids
+            &machine_ids
                 .iter()
-                .map(MachineIdSubtypeTrait::to_machine_id)
-                .collect::<Vec<_>>()
-                .as_slice(),
+                .map(|id| id.to_machine_id())
+                .collect::<Vec<_>>(),
         ),
     )
     .await?

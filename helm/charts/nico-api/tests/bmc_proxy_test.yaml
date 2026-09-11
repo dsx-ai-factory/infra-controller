@@ -1,0 +1,39 @@
+suite: BMC proxy routing config
+templates:
+  - configmap.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: omits the section by default so all BMC traffic stays direct
+    documentIndex: 0
+    asserts:
+      - notMatchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[bmc_proxy\]'
+
+  - it: derives the in-cluster proxy service address when enabled
+    documentIndex: 0
+    set:
+      bmcProxy:
+        enabled: true
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[bmc_proxy\]'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: 'address = "nico-bmc-proxy\.nico-system\.svc\.cluster\.local:1079"'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: 'client_cert = "/var/run/secrets/spiffe\.io/tls\.crt"'
+
+  - it: honors an explicit proxy address
+    documentIndex: 0
+    set:
+      bmcProxy:
+        enabled: true
+        address: "bmc-proxy.example:2079"
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: 'address = "bmc-proxy\.example:2079"'

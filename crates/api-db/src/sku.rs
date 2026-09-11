@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
 use chrono::Utc;
 use futures_util::stream::StreamExt;
 use itertools::Itertools;
@@ -502,7 +502,7 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
 }
 
 pub fn generate_base_sku_from_hardware(
-    machine: &Machine,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
     schema_version: u32,
     hardware_info: &HardwareInfo,
 ) -> Sku {

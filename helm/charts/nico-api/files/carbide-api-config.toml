@@ -40,6 +40,23 @@ hardware_health_reports = "MonitorOnly"
 enabled = true
 create_machines = true
 
+{{- if .Values.bmcProxy.enabled }}
+
+[bmc_proxy]
+# Ordinary BMC Redfish traffic -- including established-endpoint
+# credentialed exploration -- goes through nico-bmc-proxy; credential
+# setup, session minting, password rotation, exploration's anonymous
+# vendor probes, and component-manager compute-tray power control stay
+# direct.
+enabled = true
+address = "{{ .Values.bmcProxy.address | default (printf "nico-bmc-proxy.%s.svc.cluster.local:1079" (include "nico-api.namespace" .)) }}"
+# Client identity presented to the proxy's mTLS listener; the defaults are the
+# SPIFFE workload paths this pod already mounts.
+client_cert = "/var/run/secrets/spiffe.io/tls.crt"
+client_key = "/var/run/secrets/spiffe.io/tls.key"
+root_ca = "/var/run/secrets/spiffe.io/ca.crt"
+{{- end }}
+
 [node_auth]
 # Node (Scout / DPU-agent) authentication to the API.
 # See docs/design/machine-identity/node-auth-jwt.md.

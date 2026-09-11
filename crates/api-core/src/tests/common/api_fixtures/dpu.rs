@@ -19,7 +19,7 @@
 
 use std::net::IpAddr;
 
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, MachineInterfaceId};
 use model::hardware_info::HardwareInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::test_support::{DpuConfig, ManagedHostConfig};
@@ -29,7 +29,8 @@ use sqlx::PgConnection;
 use tonic::Request;
 
 use super::site_explorer;
-use crate::tests::common::api_fixtures::{FIXTURE_DHCP_RELAY_ADDRESS, TestEnv, TestManagedHost};
+use crate::tests::common::api_fixtures::test_managed_host::TestPredictedManagedHost;
+use crate::tests::common::api_fixtures::{FIXTURE_DHCP_RELAY_ADDRESS, TestEnv};
 use crate::tests::common::rpc_builder::DhcpDiscovery;
 
 /// The version identifier that is used by dpu-agent in unit-tests
@@ -46,7 +47,7 @@ pub(in crate::tests) const TEST_DOCA_TELEMETRY_VERSION: &str = "1.14.2-doca2.2.0
 pub(in crate::tests) async fn create_dpu_machine(
     env: &TestEnv,
     host_config: &ManagedHostConfig,
-) -> carbide_uuid::machine::DpuMachineId {
+) -> DpuMachineId {
     site_explorer::new_dpu(env, host_config.clone())
         .await
         .unwrap()
@@ -55,13 +56,13 @@ pub(in crate::tests) async fn create_dpu_machine(
 pub(in crate::tests) async fn create_dpu_machine_in_waiting_for_network_install(
     env: &TestEnv,
     host_config: &ManagedHostConfig,
-) -> TestManagedHost {
+) -> TestPredictedManagedHost {
     site_explorer::new_dpu_in_network_install(env, host_config.clone())
         .await
         .unwrap()
 }
 
-pub(in crate::tests) async fn create_machine_inventory(env: &TestEnv, machine_id: MachineId) {
+pub(in crate::tests) async fn create_machine_inventory(env: &TestEnv, machine_id: DpuMachineId) {
     tracing::debug!(
         machine_id = %machine_id,
         "Creating machine inventory",
@@ -136,7 +137,7 @@ pub(in crate::tests) async fn dpu_discover_machine(
 // Convenience method for the tests to get a machine's loopback IP
 pub(in crate::tests) async fn loopback_ip(
     txn: &mut PgConnection,
-    dpu_machine_id: &MachineId,
+    dpu_machine_id: &DpuMachineId,
 ) -> IpAddr {
     let dpu = db::machine::find_one(txn, dpu_machine_id, MachineSearchConfig::default())
         .await

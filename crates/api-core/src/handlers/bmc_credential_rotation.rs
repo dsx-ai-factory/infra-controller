@@ -47,7 +47,7 @@ pub(crate) async fn trigger_bmc_credential_rotation(
     match mode {
         Mode::Set => match target {
             DeviceId::Machine(id) => {
-                db::machine::set_bmc_credential_rotation_requested(&mut txn, id).await?;
+                db::machine::set_bmc_credential_rotation_requested(&mut txn, &id).await?;
             }
             DeviceId::Switch(id) => {
                 db::switch::set_bmc_credential_rotation_requested(&mut txn, id).await?;
@@ -58,7 +58,7 @@ pub(crate) async fn trigger_bmc_credential_rotation(
         },
         Mode::Clear => match target {
             DeviceId::Machine(id) => {
-                db::machine::clear_bmc_credential_rotation_requested(&mut txn, id).await?;
+                db::machine::clear_bmc_credential_rotation_requested(&mut txn, &id).await?;
             }
             DeviceId::Switch(id) => {
                 db::switch::clear_bmc_credential_rotation_requested(&mut txn, id).await?;

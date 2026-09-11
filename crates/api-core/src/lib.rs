@@ -47,6 +47,7 @@ mod admission;
 mod api;
 mod attestation;
 mod auth;
+mod bmc_proxy;
 #[doc(hidden)]
 pub mod bootstrap;
 pub mod cfg;

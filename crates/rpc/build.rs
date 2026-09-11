@@ -21,6 +21,7 @@ use carbide_proto_compiler::{CompilerConfig, TonicBuilderCodegenExt, compile};
 use tonic_client_wrapper::codegen;
 
 const PROTO_FILES: &[&str] = &[
+    "proto/codegen/v1/machine_id_types.proto",
     "proto/common.proto",
     "proto/scout_firmware_upgrade.proto",
     "proto/forge.proto",
@@ -71,6 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&reflection, &schema.raw_descriptor_set)?;
 
     let codegen = schema.collect_codegen()?;
+    let rust_descriptor_set = codegen.rust_file_descriptor_set(&schema.file_descriptor_set)?;
 
     let derive_prost_builder =
         "#[cfg_attr(feature = \"test-support\", derive(carbide_prost_builder::Builder))]";
@@ -226,7 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         extern_paths: codegen.extern_paths(),
     };
     let client_wrapper_generator =
-        codegen::CodeGenerator::new(client_wrapper_config, &schema.file_descriptor_set)?;
+        codegen::CodeGenerator::new(client_wrapper_config, &rust_descriptor_set)?;
 
     client_wrapper_generator.write_rpc_client_wrapper(out_dir.join("forge_api_client.rs"))?;
     client_wrapper_generator
@@ -241,14 +243,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generated_types_path_within_crate: "protos".to_string(),
     };
     let nmx_c_client_wrapper =
-        codegen::CodeGenerator::new(nmx_c_client_wrapper_config, &schema.file_descriptor_set)?;
+        codegen::CodeGenerator::new(nmx_c_client_wrapper_config, &rust_descriptor_set)?;
     nmx_c_client_wrapper.write_rpc_client_wrapper(out_dir.join("nmx_c_client.rs"))?;
     nmx_c_client_wrapper.write_rpc_convenience_converters(out_dir.join("nmx_c_converters.rs"))?;
 
     // Both wrapper generators are done borrowing the descriptor set. Transfer
     // ownership to tonic/prost last; compile_fds renders Rust without invoking
     // protoc again.
-    prost_builder.compile_fds(schema.file_descriptor_set)?;
+    prost_builder.compile_fds(rust_descriptor_set)?;
 
     Ok(())
 }

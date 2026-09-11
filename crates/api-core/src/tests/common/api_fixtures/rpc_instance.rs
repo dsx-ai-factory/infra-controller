@@ -16,7 +16,7 @@
  */
 
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::StableHostMachineId;
 use config_version::ConfigVersion;
 
 // Represents Instance returned via RPC call.
@@ -33,7 +33,7 @@ impl RpcInstance {
         self.0.id.unwrap()
     }
 
-    pub(in crate::tests) fn machine_id(&self) -> MachineId {
+    pub(in crate::tests) fn machine_id(&self) -> StableHostMachineId {
         self.0.machine_id.unwrap()
     }
 

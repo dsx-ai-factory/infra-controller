@@ -16,6 +16,7 @@
  */
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use ::rpc::forge::instance_interface_config::NetworkDetails;
 use ::rpc::forge::{
@@ -36,7 +37,7 @@ use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::dpu_remediations::RemediationId;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId};
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::nvlink::{NvLinkLogicalPartitionId, NvLinkPartitionId};
@@ -50,6 +51,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 use mac_address::MacAddress;
 
 use crate::IntoOnlyOne;
+use crate::admission_retry::retry_on_admission_exhaustion;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::expected_machines::common::{ExpectedMachineJson, HostDpuPolicy};
 use crate::instance::AllocateInstance;
@@ -189,6 +191,14 @@ fn legacy_bmc_patch_fields(
 // Benchmarks showed 4 had better overall performance while still overlapping page fetch latency.
 const PAGED_LIST_FETCH_CONCURRENCY: usize = 4;
 
+/// Attempt cap for retrying a single `RESOURCE_EXHAUSTED`-rejected call inside
+/// [`ApiClient::get_all_instances`]'s paged fetch (the id listing and each id
+/// chunk fetch individually), mirroring the per-instance/preflight caps used
+/// elsewhere in this crate.
+const MAX_PAGED_FETCH_ATTEMPTS: usize = 8;
+/// Cumulative backoff cap for one such retried call.
+const MAX_PAGED_FETCH_BACKOFF: Duration = Duration::from_secs(120);
+
 // Note: You do *not* need to add every gRPC method to this wrapper. Callers can use `.0` to get
 // access to the underlying ForgeApiClient, if they want to simply call the gRPC methods themselves.
 // Add methods here if there's some value to it, like constructing rpc request objects from simpler
@@ -205,13 +215,17 @@ impl ApiClient {
     /// source `version` already exposes. A zero/unset cap means the server
     /// enforces no limit, so we fall back to `page_size` -- `chunks(0)` panics.
     pub(crate) async fn effective_chunk_size(&self, page_size: usize) -> CarbideCliResult<usize> {
-        let cap = self
-            .0
-            .version(true)
-            .await?
-            .runtime_config
-            .unwrap_or_default()
-            .max_find_by_ids as usize;
+        // Every `*_by_ids` paged fetch calls this first to size its chunks, so a
+        // `RESOURCE_EXHAUSTED` rejection here needs the same retry protection as the
+        // paged fetches themselves -- otherwise it's a single unretried call sitting
+        // in front of code that's supposed to be retry-safe end-to-end.
+        let version = retry_on_admission_exhaustion(
+            MAX_PAGED_FETCH_ATTEMPTS,
+            MAX_PAGED_FETCH_BACKOFF,
+            || async { self.0.version(true).await.map_err(CarbideCliError::from) },
+        )
+        .await?;
+        let cap = version.runtime_config.unwrap_or_default().max_find_by_ids as usize;
         Ok(cap_chunk_size(page_size, cap))
     }
 
@@ -368,6 +382,17 @@ impl ApiClient {
             ))
     }
 
+    /// Resolves the full instance list matching a filter, via one id-listing
+    /// RPC followed by concurrently-chunked `find_instances_by_ids` fetches.
+    ///
+    /// Each of those calls is retried individually on `RESOURCE_EXHAUSTED`
+    /// (see [`retry_on_admission_exhaustion`]), rather than the whole method
+    /// being wrapped by a caller-side retry. A rejection while fetching, say,
+    /// the last of 20 chunks would otherwise burn the whole outer retry
+    /// budget re-fetching all 20 chunks from scratch, discarding the 19 that
+    /// already succeeded -- found via PR review at large-batch (`--label-key`)
+    /// scale, where a late chunk landing in a saturated admission window was
+    /// common.
     pub(crate) async fn get_all_instances(
         &self,
         tenant_org_id: Option<String>,
@@ -395,7 +420,22 @@ impl ApiClient {
                 .instance_ids
                 .chunks(self.effective_chunk_size(page_size).await?),
         )
-        .map(|ids| self.0.find_instances_by_ids(ids.to_vec()))
+        .map(|ids| {
+            let ids = ids.to_vec();
+            retry_on_admission_exhaustion(
+                MAX_PAGED_FETCH_ATTEMPTS,
+                MAX_PAGED_FETCH_BACKOFF,
+                move || {
+                    let ids = ids.clone();
+                    async move {
+                        self.0
+                            .find_instances_by_ids(ids)
+                            .await
+                            .map_err(CarbideCliError::from)
+                    }
+                },
+            )
+        })
         .buffered(PAGED_LIST_FETCH_CONCURRENCY)
         .try_for_each(|list| {
             all_list.instances.extend(list.instances);
@@ -436,7 +476,16 @@ impl ApiClient {
                 })
             },
         };
-        Ok(self.0.find_instance_ids(request).await?)
+        retry_on_admission_exhaustion(MAX_PAGED_FETCH_ATTEMPTS, MAX_PAGED_FETCH_BACKOFF, || {
+            let request = request.clone();
+            async move {
+                self.0
+                    .find_instance_ids(request)
+                    .await
+                    .map_err(CarbideCliError::from)
+            }
+        })
+        .await
     }
 
     pub(crate) async fn get_all_racks(&self, page_size: usize) -> CarbideCliResult<rpc::RackList> {
@@ -786,12 +835,12 @@ impl ApiClient {
 
     pub(crate) async fn machine_insert_health_report_override(
         &self,
-        id: MachineId,
+        id: &MachineId,
         report: ::rpc::health::HealthReport,
         replace: bool,
     ) -> CarbideCliResult<()> {
         let request = ::rpc::forge::InsertMachineHealthReportRequest {
-            machine_id: Some(id),
+            machine_id: Some(*id),
             health_report_entry: Some(rpc::HealthReportEntry {
                 report: Some(report),
                 mode: if replace {
@@ -994,10 +1043,10 @@ impl ApiClient {
 
     pub(crate) async fn get_machines_by_ids(
         &self,
-        machine_ids: &[MachineId],
+        machine_ids: &[impl MachineIdSubtypeTrait],
     ) -> CarbideCliResult<rpc::MachineList> {
         let request = ::rpc::forge::MachinesByIdsRequest {
-            machine_ids: Vec::from(machine_ids),
+            machine_ids: machine_ids.iter().copied().map(Into::into).collect(),
             ..Default::default()
         };
         Ok(self.0.find_machines_by_ids(request).await?)
@@ -2102,7 +2151,11 @@ impl ApiClient {
 
         let instance_request = rpc::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: machine.id,
+            machine_id: machine
+                .id
+                .map(carbide_uuid::machine::StableHostMachineId::try_from)
+                .transpose()
+                .map_err(|error| CarbideCliError::GenericError(error.to_string()))?,
 
             instance_type_id: allocate_instance.instance_type_id.clone(),
             config: Some(instance_config),
@@ -2638,7 +2691,7 @@ impl ApiClient {
 
     pub(crate) async fn get_power_options(
         &self,
-        machine_id: Vec<MachineId>,
+        machine_id: Vec<carbide_uuid::machine::HostMachineId>,
     ) -> CarbideCliResult<Vec<rpc::PowerOptions>> {
         let all_options = self
             .0
@@ -2897,7 +2950,7 @@ impl ApiClient {
 
     pub(crate) async fn modify_dpf_state(
         &self,
-        machine_id: MachineId,
+        machine_id: HostMachineId,
         state: bool,
     ) -> CarbideCliResult<()> {
         let request = ModifyDpfStateRequest {
@@ -2910,7 +2963,7 @@ impl ApiClient {
 
     pub(crate) async fn get_dpf_state(
         &self,
-        machine_ids: Vec<MachineId>,
+        machine_ids: Vec<HostMachineId>,
         page_size: usize,
     ) -> CarbideCliResult<Vec<rpc::dpf_state_response::DpfState>> {
         let mut all_dpf_states = Vec::with_capacity(machine_ids.len());
@@ -2928,7 +2981,7 @@ impl ApiClient {
 
     pub(crate) async fn get_dpf_host_snapshot(
         &self,
-        host_machine_id: MachineId,
+        host_machine_id: HostMachineId,
     ) -> CarbideCliResult<String> {
         let request = GetDpfHostSnapshotRequest {
             host_machine_id: Some(host_machine_id),
@@ -2969,7 +3022,7 @@ impl ApiClient {
     /// needs no paging.
     pub(crate) async fn list_dpu_service_sync_history(
         &self,
-        machine_id: MachineId,
+        machine_id: carbide_uuid::machine::HostMachineId,
     ) -> CarbideCliResult<Vec<PendingDpuServiceSync>> {
         let response = self
             .0
