@@ -51,7 +51,7 @@ async fn serve() -> String {
 
 async fn serve_with(nodes: Vec<SimNode>) -> String {
     let mock = Arc::new(RmsMock::new(
-        Arc::new(StaticInventory(nodes.into())),
+        Arc::new(StaticInventory::new(nodes.into())),
         RmsMockConfig::default(),
     ));
     let router = rms_mock::router(mock);

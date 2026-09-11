@@ -63,7 +63,14 @@ impl RmsMock {
 
 /// An inventory fixed at construction, for tests and for hosts with nothing to
 /// report.
-pub struct StaticInventory(pub std::sync::Arc<[SimNode]>);
+pub struct StaticInventory(std::sync::Arc<[SimNode]>);
+
+impl StaticInventory {
+    /// Wraps a fixed set of nodes; the snapshot is shared, never rebuilt.
+    pub fn new(nodes: std::sync::Arc<[SimNode]>) -> Self {
+        Self(nodes)
+    }
+}
 
 impl RmsInventory for StaticInventory {
     fn nodes(&self) -> std::sync::Arc<[SimNode]> {
