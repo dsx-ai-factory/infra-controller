@@ -435,10 +435,25 @@ echo "=========================================="
 echo ""
 echo "--- Test 25: PKI API Issues Certificate ---"
 echo "Checks: POST to /v1/pki/cloud-cert returns a certificate and private key"
-echo "        This is the API that services call to get their certs"
-ISSUE_RESP=$(curl -sk -X POST https://localhost:18000/v1/pki/cloud-cert \
+echo "        Authenticate as the deployed Site Manager service account"
+SITE_MANAGER_SA=$(kubectl -n "$NAMESPACE" get pods -l app=nico-rest-site-manager \
+    -o jsonpath='{.items[0].spec.serviceAccountName}')
+if [[ -z "$SITE_MANAGER_SA" ]]; then
+    fail "Cannot determine the Site Manager service account"
+    exit 1
+fi
+if ! ISSUE_TOKEN=$(kubectl -n "$NAMESPACE" create token "$SITE_MANAGER_SA" \
+    --audience=nico-rest-cert-manager --duration=10m); then
+    fail "Cannot request the Site Manager token (requires create on serviceaccounts/token)"
+    exit 1
+fi
+# Feed the header through stdin so the token is not exposed in curl's arguments.
+ISSUE_RESP=$(printf 'Authorization: Bearer %s\n' "$ISSUE_TOKEN" | \
+    curl -skf -X POST https://localhost:18000/v1/pki/cloud-cert \
+    -H @- \
     -H "Content-Type: application/json" \
     -d '{"name":"test-service","app":"e2e-test","ttl":24}' 2>/dev/null || echo "")
+unset ISSUE_TOKEN
 if echo "$ISSUE_RESP" | jq -e '.certificate' > /dev/null 2>&1; then
     ISSUED_CERT=$(echo "$ISSUE_RESP" | jq -r '.certificate')
     ISSUED_KEY=$(echo "$ISSUE_RESP" | jq -r '.key')
