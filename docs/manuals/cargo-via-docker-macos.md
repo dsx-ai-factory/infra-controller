@@ -12,7 +12,7 @@ This guide describes what is in place for running Cargo (build, test, check) via
 | **Makefile task: `build-cargo-docker-image-minimal`** | `Makefile.toml` | Build the minimal image (Rust + protoc only). Quick (~2–5 min). Required once for workspace builds (e.g. `nico-rpc` needs `protoc`). |
 | **Makefile task: `cargo-docker`** | `Makefile.toml` | Run Cargo inside the repo’s full build container (`nico-build-x86_64`). Requires building that image first. |
 | **Makefile task: `build-cargo-docker-image`** | `Makefile.toml` | Build the full Linux build image from `dev/docker/Dockerfile.build-container-x86_64`. Slow on Apple Silicon (45+ min). |
-| **This guide** | `docs/development/cargo-via-docker-macos.md` | How to use the above and when to choose which option. |
+| **This guide** | `docs/manuals/cargo-via-docker-macos.md` | How to use the above and when to choose which option. |
 | **Minimal Dockerfile** | `dev/docker/Dockerfile.cargo-docker-minimal` | Rust 1.97 + `protobuf-compiler` + `libprotobuf-dev` (well-known types). Used for `nico-build-minimal`. |
 | **Full build Dockerfile** | `dev/docker/Dockerfile.build-container-x86_64` | Defines the full build image (Rust 1.97, PostgreSQL, protobuf, TSS, etc.). |
 
