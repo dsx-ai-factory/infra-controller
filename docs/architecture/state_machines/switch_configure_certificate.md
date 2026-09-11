@@ -87,8 +87,13 @@ for both switch state-controller and direct RPC operations. A non-empty list
 replaces the default. Omission or an empty list uses all four values below.
 
 `[rack_state_controller].nmx_cluster_switch_mtls_services` is deprecated. The
-field is accepted and ignored because rack maintenance does not configure
-switch certificates.
+field remains accepted and ignored. Rack `ConfigureNmxCluster` maintenance
+uses the fixed `nvue_api` binding because RMS V2 reuses the active NVUE
+certificate material for NMX-C, and passes `domain_name = None`.
+
+The complete rack skip, retry, restart, polling, success, and error transition
+contract is defined under
+[ConfigureNmxCluster sub-states](rackstatemachine.md#configurenmxcluster-sub-states).
 
 | Service value | RMS service description |
 |---------------|-------------------------|
@@ -112,25 +117,29 @@ underlying service. The target switch build must support each selected binding.
 | RMS job status is `Failed` | Transition to `Error` with the job error message. |
 | Component manager not configured while polling | Transition to `Error` (no job ID to resume). |
 
-Rack NMX cluster maintenance is documented in
-[Rack State Machine](rackstatemachine.md).
-
 ## Component Manager API
 
-CM exposes two methods used by the switch configuration handler:
+CM exposes single-switch submission for the switch handler, batch submission
+for rack maintenance, and a shared status method:
 
 | Method | Input | Output |
 |--------|-------|--------|
 | `configure_switch_certificate` | `SwitchEndpoint`, `domain_name: Option<&str>`, `services: Option<&[i32]>` | `job_id: String` |
+| `batch_configure_switch_certificate` | `&[SwitchCertificateEndpoint]`, `domain_name: Option<&str>`, `services: Option<&[i32]>` | parent `job_id: String` |
 | `get_configure_switch_certificate_job_status` | `job_id: &str` | `ConfigureSwitchCertificateJobStatus { state, error }` |
 
-`SwitchEndpoint` is built from:
+The single-switch `SwitchEndpoint` is built from:
 
 - Switch BMC MAC and BMC IP (required)
 - Associated NVOS machine interface MAC and IP (both required; matches power-control validation in `maintenance.rs`)
 - NVOS admin credentials from the credential vault (`SwitchNvosAdmin`); endpoint
   resolution failures during `Start` transition to `Error` (they do not return
   `StateHandlerError`).
+
+The rack-batch `SwitchCertificateEndpoint` contains the switch BMC MAC as a
+persisted identity key plus the NVOS MAC, IP, hostname, and admin credentials.
+Certificate preparation does not require BMC IP, credentials, or connectivity.
+The subsequent V2 phase keeps its existing full-endpoint requirements.
 
 ### Backend matrix
 
@@ -139,6 +148,9 @@ CM exposes two methods used by the switch configuration handler:
 | **RMS** (`RmsBackend`) | Resolve RMS node identity from DB; call RMS `configure_switch_certificate`. | Poll RMS job status and map RMS states to `ConfigureSwitchCertificateState`. |
 | **Mock** | Returns a mock job ID. | Returns configured mock status. |
 | **NSM** | `InvalidArgument` (not supported). | `InvalidArgument` (not supported). |
+
+Rack-wide batch submission is implemented by the RMS backend. Other backends
+return `Unsupported` through the default implementation.
 
 ## RMS integration
 

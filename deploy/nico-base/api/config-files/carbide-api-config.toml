@@ -122,7 +122,7 @@ test_selection_mode = "EnableAll"
 #   controller operations and direct ComponentConfigureSwitchCertificate RPC
 #   calls. It defaults to all four SwitchMtlsService values.
 # - [rack_state_controller].nmx_cluster_switch_mtls_services is accepted and
-#   ignored. Rack maintenance does not configure switch certificates.
+#   ignored. Rack ConfigureNmxCluster uses the fixed nvue_api binding.
 # A non-empty switch_mtls_services list replaces its default. An omitted or
 # empty list uses the default.
 # Service selection does not enable the underlying service. See

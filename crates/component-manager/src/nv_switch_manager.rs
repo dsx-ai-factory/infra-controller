@@ -76,6 +76,47 @@ pub struct SwitchEndpoint {
     pub nvos_host_name: Option<String>,
 }
 
+/// NVOS endpoint used to install and bind switch certificate material.
+///
+/// # Examples
+///
+/// ```
+/// use std::net::{IpAddr, Ipv4Addr};
+///
+/// use carbide_secrets::credentials::Credentials;
+/// use component_manager::nv_switch_manager::SwitchCertificateEndpoint;
+/// use mac_address::MacAddress;
+///
+/// let endpoint = SwitchCertificateEndpoint {
+///     bmc_mac: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+///     nvos_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+///     nvos_mac: MacAddress::new([0x02, 0, 0, 0, 0, 2]),
+///     nvos_credentials: Credentials::new("admin", "password"),
+///     nvos_host_name: Some("switch.example.com".to_string()),
+/// };
+/// assert_eq!(
+///     endpoint.nvos_host_name.as_deref(),
+///     Some("switch.example.com")
+/// );
+/// ```
+#[derive(Debug, Clone)]
+pub struct SwitchCertificateEndpoint {
+    /// BMC MAC used only to resolve the switch's persisted RMS identity.
+    pub bmc_mac: MacAddress,
+
+    /// NVOS address used by RMS to install certificate material.
+    pub nvos_ip: IpAddr,
+
+    /// NVOS interface identity included in the RMS node description.
+    pub nvos_mac: MacAddress,
+
+    /// NVOS credentials used by RMS for certificate installation.
+    pub nvos_credentials: Credentials,
+
+    /// Fully qualified NVOS hostname used for TLS SNI when available.
+    pub nvos_host_name: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SwitchComponentResult {
     pub bmc_mac: MacAddress,
@@ -280,6 +321,46 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
         services: Option<&[i32]>,
     ) -> Result<String, ComponentManagerError>;
 
+    /// Submits asynchronous certificate configuration for all `endpoints`.
+    ///
+    /// `endpoints` must be non-empty. A successful submission returns before
+    /// certificate configuration completes and provides a non-empty, opaque
+    /// parent job ID. Callers must pass that ID to
+    /// [`Self::get_configure_switch_certificate_job_status`] until the batch
+    /// reaches a terminal state. A present `domain_name` is passed to the
+    /// backend unchanged; `None` omits the domain. `services` contains backend
+    /// service identifiers, including duplicates, in slice order. `None` and an
+    /// empty slice request no explicit service bindings.
+    ///
+    /// A submission error does not establish that automatic resubmission is
+    /// safe unless it is [`ComponentManagerError::RejectedBeforeDispatch`] or
+    /// [`ComponentManagerError::Unsupported`]. Dispatch failures, failed
+    /// aggregate responses, and responses without a durable job ID return
+    /// [`ComponentManagerError::OperationOutcomeUnknown`]. A failed aggregate
+    /// can include a parent job ID covering only the accepted targets, so its
+    /// diagnostic retains that ID without reporting complete-batch acceptance.
+    /// Callers must not resubmit after an unknown outcome until reconciliation
+    /// establishes that retry is safe. The default implementation returns
+    /// [`ComponentManagerError::Unsupported`].
+    async fn batch_configure_switch_certificate(
+        &self,
+        _endpoints: &[SwitchCertificateEndpoint],
+        _domain_name: Option<&str>,
+        _services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(
+            "rack-wide switch certificate configuration is not supported by this backend"
+                .to_string(),
+        ))
+    }
+
+    /// Returns the aggregate state of a submitted certificate batch.
+    ///
+    /// [`ConfigureSwitchCertificateState::Started`] and
+    /// [`ConfigureSwitchCertificateState::InProgress`] are non-terminal.
+    /// [`ConfigureSwitchCertificateState::Completed`] and
+    /// [`ConfigureSwitchCertificateState::Failed`] are terminal. Observation
+    /// errors do not establish that resubmitting the certificate batch is safe.
     async fn get_configure_switch_certificate_job_status(
         &self,
         job_id: &str,

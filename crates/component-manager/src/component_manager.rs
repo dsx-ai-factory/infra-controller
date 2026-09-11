@@ -25,8 +25,8 @@ use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
     Backend as NvSwitchBackend, ConfigureSwitchCertificateJobStatus, NvSwitchManager,
     ScaleUpFabricManagerJobStatus, ScaleUpFabricServiceStatuses, ScaleUpFabricStatus,
-    SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFactoryResetState,
-    SwitchPasswordRotationState,
+    SwitchCertificateEndpoint, SwitchEndpoint, SwitchFactoryResetJobStatus,
+    SwitchFactoryResetState, SwitchPasswordRotationState,
 };
 use crate::power_shelf_manager::{Backend as PowerShelfBackend, PowerShelfManager};
 use crate::rms::{RmsSwitchSystemImageStatusApi, validate_rms_backend_rack_profiles};
@@ -459,6 +459,29 @@ impl ComponentManager {
             .await
     }
 
+    /// Delegates asynchronous certificate configuration for all switches to
+    /// [`NvSwitchManager::batch_configure_switch_certificate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected backend's error unchanged.
+    pub async fn batch_configure_switch_certificate(
+        &self,
+        endpoints: &[SwitchCertificateEndpoint],
+        domain_name: Option<&str>,
+        services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        self.nv_switch
+            .batch_configure_switch_certificate(endpoints, domain_name, services)
+            .await
+    }
+
+    /// Delegates certificate batch status reads to
+    /// [`NvSwitchManager::get_configure_switch_certificate_job_status`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected backend's error unchanged.
     pub async fn get_configure_switch_certificate_job_status(
         &self,
         job_id: &str,
