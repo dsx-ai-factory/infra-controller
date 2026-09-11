@@ -14,6 +14,52 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! Mock BMCs with hardware-specific Redfish inventories and stateful management operations.
+//!
+//! # Architecture and extension rules
+//!
+//! Select the hardware representation and its capabilities when constructing the BMC:
+//!
+//! ```text
+//! HardwareType / MachineInfo
+//!     -> hw::<platform> profile
+//!     -> redfish resource/service configs
+//!     -> resource/service state
+//!     -> Redfish request handlers
+//! ```
+//!
+//! `machine_info` selects profiles and supplies machine identity and caller-provided settings.
+//! `hw` owns the platform's inventory, resource IDs, initial values, and choice of supported
+//! protocol behavior. `redfish` owns resource schemas, builders, HTTP handling, and the state
+//! transitions of the configured features. `mock_machine_router` assembles configs, state,
+//! callbacks, and routes before serving requests. See `hw/mod.rs` and `redfish/mod.rs` for
+//! the corresponding extension templates.
+//!
+//! Hardware code uses Redfish configs and builders. Keep new Redfish code independent of
+//! hardware profile types: handlers must not inspect `HardwareType`, recognize platforms
+//! from model strings or resource IDs, or construct hardware profiles during a request.
+//! A new platform should reuse existing protocol implementations through configuration.
+//!
+//! State may contain platform-specific or OEM features. Select and fully initialize those
+//! features before serving requests, using an explicit config, capability, or OEM state
+//! variant. During requests, dispatch on that configured behavior. Runtime operations may
+//! change values and perform configured transitions; they must not infer missing platform
+//! capabilities or lazily install them. Simulator integration may supply runtime values
+//! through explicit APIs with documented support and lifecycle semantics.
+//!
+//! Distinguish feature support from its mutable value. Use an optional feature config/state
+//! for optional support, and make advertised links and endpoint availability follow the same
+//! source of truth. A disabled feature value is different from an unsupported feature.
+//! Constructors must return ready-to-use state without a separate platform-specific fix-up.
+//!
+//! Keep external machine effects behind callbacks and explicit events. Protocol handlers
+//! should not acquire dependencies on machine-a-tron or a particular simulation backend.
+//!
+//! These rules govern additions and changes even where existing code has exceptions.
+//! Do not copy an exception as an extension template; keep unrelated architectural cleanup
+//! in a separate refactor.
+
 use std::borrow::Cow;
 use std::fmt;
 use std::time::Duration;

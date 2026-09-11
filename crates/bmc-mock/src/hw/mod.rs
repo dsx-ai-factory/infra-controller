@@ -15,8 +15,54 @@
  * limitations under the License.
  */
 
-//! Submodules of this module defines support of specific hardware
-//! (i.e. how this hardware is represented via Redfish).
+//! Hardware profiles describing how specific devices are represented through Redfish.
+//!
+//! # Responsibilities
+//!
+//! A profile receives machine identity and settings and returns fully populated Redfish
+//! configs. It owns the platform's resource IDs, manufacturers, models, part numbers,
+//! firmware inventory, device counts, topology, and links between devices. It also chooses
+//! supported collections, actions, protocol modes, OEM extensions, and their initial values.
+//! Keep platform-specific URI choices and payload values here; use Redfish resource helpers
+//! and builders to express their wire representation.
+//!
+//! `machine_info` selects a profile and supplies its inputs. Keep the platform representation
+//! in this module rather than growing protocol or platform-payload logic in that dispatcher.
+//! Shared hardware components and families belong here too: reuse helpers such as `nic`,
+//! `openbmc`, and `nvidia_gbx00` when their modeled behavior matches the platform.
+//!
+//! Profiles configure protocol behavior before the BMC starts serving requests. They do not
+//! implement HTTP handlers or select behavior in response to a request. If a feature needs
+//! mutable state, provide its config or select its OEM state variant during construction;
+//! subsequent mutations belong to the owning Redfish/OEM state implementation.
+//!
+//! # Adding or extending a platform
+//!
+//! 1. Describe the modeled hardware in `hw/<platform>.rs`, with fields for the identity,
+//!    component descriptions, and settings needed to construct its representation.
+//! 2. Implement the relevant `manager_config`, `system_config`, `chassis_config`, and
+//!    `update_service_config` methods, following the config-building shape in `generic_ami`.
+//!    Return complete configs using Redfish builders. Configure capabilities explicitly;
+//!    use behavior modes for protocol differences instead of requiring a vendor check in
+//!    a generic handler.
+//! 3. Register the profile here and wire its selection and input construction through
+//!    `HardwareType` and `machine_info`. A platform using existing protocol features should
+//!    not require platform branches in `redfish`.
+//! 4. For an optional collection, preserve the distinction between unsupported (`None`),
+//!    supported but empty (`Some(vec![])`), and populated. Use the same capability to drive
+//!    parent links and endpoint availability; do not introduce redundant availability flags.
+//! 5. If the protocol lacks the required feature, add a configurable implementation in
+//!    `redfish` or `redfish/oem/<vendor>`, then enable it explicitly in the profile.
+//! 6. Check the observable contract at the narrowest useful layer: inventory identity and
+//!    links, supported versus unsupported resources, and any distinct state transition.
+//!
+//! Preserve quirks of the modeled hardware, including omissions and unusual spelling.
+//! Document the scrape or compatibility constraint that justifies them, and identify
+//! synthetic fixture values as such. Do not generalize one platform's quirk to every device
+//! from that vendor or alter shared defaults merely to accommodate one profile.
+//!
+//! Existing departures from these boundaries are not templates for new code. Keep their
+//! cleanup separate from a platform addition. See `redfish/mod.rs` for protocol-side rules.
 
 /// Description of NIC card.
 pub(super) mod nic;
