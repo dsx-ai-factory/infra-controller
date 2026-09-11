@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -24,10 +24,10 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
 use bmc_mock::injection::{InjectionStore, Rule, RuleId};
-use bmc_mock::{HardwareType, RackPlacement};
+use bmc_mock::{HardwareType, RackPlacement, TrayPlacement};
 use carbide_uuid::rack::RackId;
 use chrono::{SecondsFormat, Utc};
-use rms_sim::{RmsInventory, SimNode, SimNodeKind};
+use rms_mock::{RmsInventory, SimNode, SimNodeKind};
 use tower::Service;
 use ufm_mock::{
     EpochId, Generation, InventoryId, InventoryMachine as UfmInventoryMachine, InventoryPort,
@@ -76,7 +76,7 @@ struct InventoryVersion {
     snapshot: Vec<InventoryMachine>,
 }
 
-/// The fleet as last reported to the RMS simulator, and the fingerprint it
+/// The fleet as last reported to the RMS mock, and the fingerprint it
 /// was built from.
 ///
 /// Same idea as `InventoryVersion`: rebuild only when the result would
@@ -190,7 +190,7 @@ impl ControlState {
     }
 }
 
-/// Report simulated hardware to the hosted RMS simulator.
+/// Report simulated hardware to the hosted RMS mock.
 ///
 /// Placement comes from the same `RackPlacement` the device's Redfish chassis
 /// is built from, so RMS and Redfish cannot disagree about where a node sits.
@@ -229,51 +229,53 @@ impl RmsInventory for ControlState {
                 })
                 .unzip();
             cached.addresses = addresses;
-            cached.nodes = nodes.into();
+            cached.nodes = nodes.into_iter().flatten().collect();
         }
         Arc::clone(&cached.nodes)
     }
 }
 
 impl ControlState {
+    /// The RMS view of one device, or `None` for a device RMS does not
+    /// address.
     fn sim_node(
         handle: &DeviceHandle,
         bmc_ip: Option<Ipv4Addr>,
         host_ip: Option<Ipv4Addr>,
-    ) -> SimNode {
-        let info = handle.host_info();
-        let placement = info.rack_placement;
+    ) -> Option<SimNode> {
         let kind = match handle.kind() {
+            DeviceKind::Machine => SimNodeKind::Compute,
             DeviceKind::Switch => SimNodeKind::Switch,
             DeviceKind::PowerShelf => SimNodeKind::PowerShelf,
-            // A DPU is never a top-level simulator, so anything else here is
-            // a compute tray.
-            _ => SimNodeKind::Compute,
+            // A DPU is reached through the host that carries it; RMS never
+            // addresses one on its own.
+            DeviceKind::Dpu => return None,
         };
-        let (slot_number, tray_index) = match kind {
-            SimNodeKind::Compute => (
-                placement.and_then(RackPlacement::chassis_physical_slot_number),
-                placement.and_then(RackPlacement::compute_tray_index),
+        let info = handle.host_info();
+        let (slot_number, tray_index) = match info.rack_placement.and_then(RackPlacement::tray) {
+            Some(TrayPlacement::Compute {
+                tray_index,
+                chassis_physical_slot_number,
+            }) => (
+                Some(chassis_physical_slot_number),
+                Some(u32::from(tray_index)),
             ),
-            SimNodeKind::Switch => (
-                placement.and_then(RackPlacement::switch_slot_number),
-                placement.and_then(RackPlacement::switch_tray_index),
-            ),
-            SimNodeKind::PowerShelf => (None, None),
+            Some(TrayPlacement::Switch {
+                tray_index,
+                slot_number,
+            }) => (Some(slot_number), Some(u32::from(tray_index))),
+            None => (None, None),
         };
-        SimNode {
+        Some(SimNode {
             kind: Some(kind),
-            bmc_mac: rms_sim::normalize_mac(&info.bmc_mac_address.to_string()),
-            bmc_ip: bmc_ip.map(|ip| ip.to_string()),
-            host_mac: info
-                .nvos_mac_addresses
-                .first()
-                .and_then(|mac| rms_sim::normalize_mac(&mac.to_string())),
-            host_ip: host_ip.map(|ip| ip.to_string()),
+            bmc_mac: Some(info.bmc_mac_address),
+            bmc_ip: bmc_ip.map(IpAddr::V4),
+            host_mac: info.nvos_mac_addresses.first().copied(),
+            host_ip: host_ip.map(IpAddr::V4),
             rack_id: None,
             slot_number,
-            tray_index: tray_index.map(u32::from),
-        }
+            tray_index,
+        })
     }
 }
 
@@ -419,7 +421,7 @@ async fn call_inner_router(router: &mut Router, request: Request<Body>) -> Respo
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
     use axum::Router;
@@ -428,7 +430,8 @@ mod tests {
     use axum::routing::get;
     use bmc_mock::{HardwareType, RackInfo, RackType};
     use carbide_uuid::rack::{RackId, RackProfileId};
-    use rms_sim::RmsInventory;
+    use mac_address::MacAddress;
+    use rms_mock::RmsInventory;
     use tower::ServiceExt;
     use uuid::Uuid;
 
@@ -525,13 +528,16 @@ mod tests {
         let second = state.nodes();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].bmc_mac.as_deref(), Some("020000000002"));
+        assert_eq!(
+            first[0].bmc_mac,
+            Some(MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]))
+        );
         assert_eq!(first[0].bmc_ip, None);
 
         handle.set_control_test_bmc_ip(Some(Ipv4Addr::new(10, 0, 0, 7)));
         let third = state.nodes();
         assert!(!Arc::ptr_eq(&second, &third));
-        assert_eq!(third[0].bmc_ip.as_deref(), Some("10.0.0.7"));
+        assert_eq!(third[0].bmc_ip, Some(IpAddr::from([10, 0, 0, 7])));
         assert!(Arc::ptr_eq(&third, &state.nodes()));
     }
 

@@ -25,7 +25,7 @@
 
 use librms::protos::rack_manager::rack_manager_server::RackManager;
 
-use crate::{RmsSimulator, rms};
+use crate::{RmsMock, rms};
 
 /// Builds the whole `RackManager` impl.
 ///
@@ -41,11 +41,11 @@ macro_rules! rack_manager_impl {
         unimplemented { $($method:ident($req:ident) -> $res:ident,)* }
     ) => {
         #[tonic::async_trait]
-        impl RackManager for RmsSimulator {
+        impl RackManager for RmsMock {
             $($implemented)*
 
             $(
-                /// Out of scope for the simulator.
+                /// Out of scope for the mock.
                 ///
                 /// `UNIMPLEMENTED` is what the issue specifies for these, and
                 /// also what a real RMS returns for an RPC it does not serve,
@@ -55,7 +55,7 @@ macro_rules! rack_manager_impl {
                     _request: tonic::Request<rms::$req>,
                 ) -> std::result::Result<tonic::Response<rms::$res>, tonic::Status> {
                     Err(tonic::Status::unimplemented(concat!(
-                        "the machine-a-tron RMS simulator does not implement ",
+                        "the machine-a-tron RMS mock does not implement ",
                         stringify!($method),
                     )))
                 }
@@ -100,9 +100,9 @@ rack_manager_impl! {
             let node_device_details: Vec<rms::NodeDeviceInfo> = refs
                 .iter()
                 .filter_map(|r| {
-                    let node = r.node.as_ref()?;
+                    let node = r.node?;
                     Some(rms::NodeDeviceInfo {
-                        node_id: r.node_id.clone(),
+                        node_id: r.node_id.to_string(),
                         // machine-a-tron serials are hex MAC strings, so there
                         // is no meaningful integer to report here.
                         chassis_sn: None,
@@ -114,7 +114,7 @@ rack_manager_impl! {
             let unmatched: Vec<&str> = refs
                 .iter()
                 .filter(|r| !r.matched())
-                .map(|r| r.node_id.as_str())
+                .map(|r| r.node_id)
                 .collect();
 
             let total = refs.len() as u32;

@@ -17,20 +17,20 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Simulator configuration. Every field has a default so that a host can mount
-/// the simulator without any configuration at all.
+/// Mock configuration. Every field has a default so that a host can mount
+/// the mock without any configuration at all.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct RmsSimConfig {
+pub struct RmsMockConfig {
     /// Reported by `GetVersion`. `librms` issues `GetVersion` as its
     /// connection liveness probe, so this is the first call any client makes.
     pub version_string: String,
 }
 
-impl Default for RmsSimConfig {
+impl Default for RmsMockConfig {
     fn default() -> Self {
         Self {
-            version_string: concat!("machine-a-tron-rms-sim/", env!("CARGO_PKG_VERSION"))
+            version_string: concat!("machine-a-tron-rms-mock/", env!("CARGO_PKG_VERSION"))
                 .to_string(),
         }
     }

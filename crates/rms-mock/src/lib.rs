@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! A runtime RMS gRPC simulator.
+//! A runtime RMS gRPC mock.
 //!
 //! The RMS API is served by an external service that drives real rack
 //! hardware. Simulated hardware has no such service, so rack workflows that
@@ -24,7 +24,7 @@
 //! `librms`, so a normally configured NICo process can talk to it over the
 //! wire without knowing it is not the real thing.
 //!
-//! The simulator is deliberately independent of machine-a-tron: it owns
+//! The mock is deliberately independent of machine-a-tron: it owns
 //! protocol behaviour only, and reads hardware state through a trait its host
 //! implements. That boundary is what lets a future multi-pod gateway supply a
 //! fan-out inventory instead of a local one.
@@ -36,8 +36,8 @@ mod router;
 mod service_v1;
 mod service_v2;
 
-pub use config::RmsSimConfig;
-pub use inventory::{RmsInventory, SimNode, SimNodeKind, normalize_mac};
+pub use config::RmsMockConfig;
+pub use inventory::{RmsInventory, SimNode, SimNodeKind};
 /// The V1 protobuf module. Aliased because both service impls refer to it
 /// constantly, and because `rack_manager_v2` defines same-named messages that
 /// must not be confused with these.
@@ -48,15 +48,15 @@ pub use router::router;
 
 /// A simulated RMS instance.
 ///
-/// One simulator serves both `RackManager` and `RackManagerV2`; the two are
+/// One mock serves both `RackManager` and `RackManagerV2`; the two are
 /// separate gRPC services with separate wire paths, so both must be mounted.
-pub struct RmsSimulator {
+pub struct RmsMock {
     inventory: std::sync::Arc<dyn RmsInventory>,
-    config: RmsSimConfig,
+    config: RmsMockConfig,
 }
 
-impl RmsSimulator {
-    pub fn new(inventory: std::sync::Arc<dyn RmsInventory>, config: RmsSimConfig) -> Self {
+impl RmsMock {
+    pub fn new(inventory: std::sync::Arc<dyn RmsInventory>, config: RmsMockConfig) -> Self {
         Self { inventory, config }
     }
 }

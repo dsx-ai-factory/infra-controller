@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! Hosting for the RMS simulator on machine-a-tron's own listener.
+//! Hosting for the RMS mock on machine-a-tron's own listener.
 //!
 //! RMS is reached on the same HTTPS listener that serves the simulated BMCs,
 //! rather than on a port of its own, so that it inherits that listener's TLS
@@ -26,28 +26,28 @@ use std::sync::Arc;
 
 use axum::Router;
 use machine_a_tron::ControlState;
-use rms_sim::{RmsSimConfig, RmsSimulator};
+use rms_mock::{RmsMock, RmsMockConfig};
 
-pub(super) struct HostedRmsSim {
-    simulator: Arc<RmsSimulator>,
+pub(super) struct HostedRmsMock {
+    mock: Arc<RmsMock>,
 }
 
-impl HostedRmsSim {
-    /// Build the simulator.
+impl HostedRmsMock {
+    /// Build the mock.
     ///
     /// There is no enable flag and no failure path: the services are always
     /// mounted, and a NICo that is not configured to use RMS simply never
     /// calls them.
-    pub(super) fn start(config: RmsSimConfig, control_state: &ControlState) -> Self {
-        tracing::info!("Mounting the RMS simulator on the bmc-mock listener");
-        // The control state is the simulator's window onto the simulated
+    pub(super) fn start(config: RmsMockConfig, control_state: &ControlState) -> Self {
+        tracing::info!("Mounting the RMS mock on the bmc-mock listener");
+        // The control state is the mock's window onto the simulated
         // hardware; RMS keeps no inventory of its own.
         Self {
-            simulator: Arc::new(RmsSimulator::new(Arc::new(control_state.clone()), config)),
+            mock: Arc::new(RmsMock::new(Arc::new(control_state.clone()), config)),
         }
     }
 
     pub(super) fn router(&self) -> Router {
-        rms_sim::router(self.simulator.clone())
+        rms_mock::router(self.mock.clone())
     }
 }

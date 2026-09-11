@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! Mounting the simulator's gRPC services onto an `axum` router.
+//! Mounting the mock's gRPC services onto an `axum` router.
 
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ use librms::protos::rack_manager::rack_manager_server::RackManagerServer;
 use librms::protos::rack_manager_v2::rack_manager_v2_server::RackManagerV2Server;
 use tonic::server::NamedService;
 
-use crate::RmsSimulator;
+use crate::RmsMock;
 
 /// Build a router serving both RMS services.
 ///
@@ -36,17 +36,17 @@ use crate::RmsSimulator;
 /// Route paths are derived from each service's generated `NamedService::NAME`
 /// so that a `librms` bump which renames a service is a compile-time change
 /// here rather than a silent 404 at runtime.
-pub fn router(simulator: Arc<RmsSimulator>) -> Router {
+pub fn router(mock: Arc<RmsMock>) -> Router {
     let v1_path = format!(
         "/{}/{{*rpc}}",
-        <RackManagerServer<RmsSimulator> as NamedService>::NAME
+        <RackManagerServer<RmsMock> as NamedService>::NAME
     );
     let v2_path = format!(
         "/{}/{{*rpc}}",
-        <RackManagerV2Server<RmsSimulator> as NamedService>::NAME
+        <RackManagerV2Server<RmsMock> as NamedService>::NAME
     );
 
     Router::new()
-        .route_service(&v1_path, RackManagerServer::from_arc(simulator.clone()))
-        .route_service(&v2_path, RackManagerV2Server::from_arc(simulator))
+        .route_service(&v1_path, RackManagerServer::from_arc(mock.clone()))
+        .route_service(&v2_path, RackManagerV2Server::from_arc(mock))
 }

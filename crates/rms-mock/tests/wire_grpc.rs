@@ -17,24 +17,26 @@
 
 //! Wire-level tests.
 //!
-//! These drive the simulator through a real gRPC client over a real socket,
+//! These drive the mock through a real gRPC client over a real socket,
 //! rather than calling the trait methods directly, because the thing most
 //! likely to break is the transport: codec, HTTP/2 framing, and the router
 //! paths the services are mounted on. A test that called the impl directly
 //! would pass even if nothing were reachable.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use librms::protos::rack_manager::rack_manager_client::RackManagerClient;
 use librms::protos::rack_manager_v2::rack_manager_v2_client::RackManagerV2Client;
-use rms_sim::{RmsSimConfig, RmsSimulator, SimNode, SimNodeKind, StaticInventory};
+use mac_address::MacAddress;
+use rms_mock::{RmsMock, RmsMockConfig, SimNode, SimNodeKind, StaticInventory};
 
 /// A compute tray in slot 12 of rack-001, the third tray in its rack.
 fn a_tray() -> SimNode {
     SimNode {
         kind: Some(SimNodeKind::Compute),
-        bmc_mac: Some("0200abcd1234".to_string()),
-        bmc_ip: Some("10.233.16.20".to_string()),
+        bmc_mac: Some(MacAddress::new([0x02, 0x00, 0xab, 0xcd, 0x12, 0x34])),
+        bmc_ip: Some(IpAddr::from([10, 233, 16, 20])),
         rack_id: Some("rack-001".to_string()),
         slot_number: Some(12),
         tray_index: Some(2),
@@ -42,17 +44,17 @@ fn a_tray() -> SimNode {
     }
 }
 
-/// Serve the simulator on an ephemeral port and return its base URL.
+/// Serve the mock on an ephemeral port and return its base URL.
 async fn serve() -> String {
     serve_with(Vec::new()).await
 }
 
 async fn serve_with(nodes: Vec<SimNode>) -> String {
-    let simulator = Arc::new(RmsSimulator::new(
+    let mock = Arc::new(RmsMock::new(
         Arc::new(StaticInventory(nodes.into())),
-        RmsSimConfig::default(),
+        RmsMockConfig::default(),
     ));
-    let router = rms_sim::router(simulator);
+    let router = rms_mock::router(mock);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -77,8 +79,8 @@ async fn get_version_answers_an_unmodified_client() {
         response
             .into_inner()
             .version
-            .starts_with("machine-a-tron-rms-sim/"),
-        "version should identify the simulator"
+            .starts_with("machine-a-tron-rms-mock/"),
+        "version should identify the mock"
     );
 }
 
@@ -99,7 +101,7 @@ async fn out_of_scope_methods_report_unimplemented() {
 async fn both_services_are_mounted() {
     // A missing V2 registration would surface as a router 404, which tonic
     // reports as `Unimplemented` too -- so assert on the message, which only
-    // the simulator's own handler produces.
+    // the mock's own handler produces.
     let url = serve().await;
     let mut client = RackManagerV2Client::connect(url).await.unwrap();
 
@@ -112,8 +114,8 @@ async fn both_services_are_mounted() {
 
     assert_eq!(status.code(), tonic::Code::Unimplemented);
     assert!(
-        status.message().contains("machine-a-tron RMS simulator"),
-        "expected the simulator's own handler to answer, not a router 404; got: {}",
+        status.message().contains("machine-a-tron RMS mock"),
+        "expected the mock's own handler to answer, not a router 404; got: {}",
         status.message()
     );
 }
@@ -124,7 +126,7 @@ fn node_info(node_id: &str, mac: &str) -> librms::protos::rack_manager::NodeInfo
     librms::protos::rack_manager::NodeInfo {
         node_id: node_id.to_string(),
         rack_id: "rack-001".to_string(),
-        // Left unset: the simulator matches on address, not on declared type.
+        // Left unset: the mock matches on address, not on declared type.
         r#type: None,
         bmc_endpoint: Some(librms::protos::rack_manager::Endpoint {
             interface: Some(librms::protos::rack_manager::NetworkInterface {

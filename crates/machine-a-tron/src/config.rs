@@ -31,7 +31,7 @@ use clap::Parser;
 use duration_str::deserialize_duration;
 use eyre::Context;
 use mac_address::MacAddress;
-use rms_sim::RmsSimConfig;
+use rms_mock::RmsMockConfig;
 use rpc::forge::DesiredFirmwareVersionEntry;
 use rpc::forge_tls_client::ForgeClientConfig;
 use rpc::protos::forge_api_client::ForgeApiClient;
@@ -579,11 +579,11 @@ pub struct MachineATronConfig {
     #[serde(default)]
     pub ufm_mock: Option<UfmMockConfig>,
 
-    /// The hosted RMS simulator. Unlike the UFM mock this has no `enabled`
+    /// The hosted RMS mock. Unlike the UFM mock this has no `enabled`
     /// flag: the services are always mounted, and NICo reaches them only when
     /// it is configured with an `rms.api_url` pointing here.
     #[serde(default)]
-    pub rms_sim: RmsSimConfig,
+    pub rms_mock: RmsMockConfig,
 }
 
 impl MachineATronConfig {

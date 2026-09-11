@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 [package]
-name = "carbide-rms-sim"
+name = "carbide-rms-mock"
 version = "0.0.1"
 edition.workspace = true
 license.workspace = true
@@ -23,11 +23,12 @@ authors.workspace = true
 repository.workspace = true
 
 [lib]
-name = "rms_sim"
+name = "rms_mock"
 
 [dependencies]
 axum = { workspace = true }
 librms = { workspace = true }
+mac_address = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }

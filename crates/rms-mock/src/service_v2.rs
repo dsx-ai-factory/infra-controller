@@ -23,10 +23,10 @@
 
 use librms::protos::rack_manager_v2::rack_manager_v2_server::RackManagerV2;
 
-use crate::{RmsSimulator, rms_v2};
+use crate::{RmsMock, rms_v2};
 
 #[tonic::async_trait]
-impl RackManagerV2 for RmsSimulator {
+impl RackManagerV2 for RmsMock {
     async fn configure_scale_up_fabric_manager(
         &self,
         _request: tonic::Request<rms_v2::ConfigureScaleUpFabricManagerRequest>,
@@ -35,7 +35,7 @@ impl RackManagerV2 for RmsSimulator {
         tonic::Status,
     > {
         Err(tonic::Status::unimplemented(
-            "the machine-a-tron RMS simulator does not yet implement configure_scale_up_fabric_manager",
+            "the machine-a-tron RMS mock does not yet implement configure_scale_up_fabric_manager",
         ))
     }
 }
