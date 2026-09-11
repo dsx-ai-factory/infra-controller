@@ -96,11 +96,12 @@ func newBootstrapConfig(dir string) error {
 	if bCfg.CACert == "" || bCfg.CredsURL == "" || bCfg.OTP == "" || bCfg.UUID == "" {
 		return ErrInvalidBootstrapSecret
 	}
-	// The OTP stays out of this line. It is a live credential from the moment the
-	// secret is read until the handshake consumes it, and every Site Agent start
-	// reaches this point whether or not the handshake follows.
+	// The OTP is named to report that it was read, with no value of any kind. It
+	// is a live credential from the moment the secret is read until the handshake
+	// consumes it, and every Site Agent start reaches this point whether or not a
+	// handshake follows.
 	log.Info().Msgf("Bootstrap: Read Site: %v, OTP, credentials URL: %v, CA certificate: %v",
-		bCfg.UUID, bCfg.CredsURL, cutils.RedactSecret(bCfg.CACert))
+		bCfg.UUID, bCfg.CredsURL, cutils.RedactSecret(bCfg.CACert, cutils.CertLogPrefixLen))
 
 	return nil
 }
@@ -256,7 +257,7 @@ func (bs *BoostrapAPI) GetState() []string {
 	strs = append(strs, fmt.Sprintln("Creds Download Attempted: ", bt.State.DownloadAttempted.Load()))
 	strs = append(strs, fmt.Sprintln("Creds Download Succeeded: ", bt.State.DownloadSucceeded.Load()))
 	strs = append(strs, fmt.Sprintln("URL: ", bt.Config.CredsURL))
-	strs = append(strs, fmt.Sprintln("OTP: ", cutils.RedactSecret(bt.Config.OTP)))
+	strs = append(strs, fmt.Sprintln("OTP: ", cutils.RedactSecret(bt.Config.OTP, cutils.SecretLogPrefixLen)))
 	strs = append(strs, fmt.Sprintln("UUID: ", bt.Config.UUID))
 
 	return strs
@@ -310,7 +311,7 @@ func (bs *BoostrapAPI) DownloadAndStoreCreds(otpOverride []byte) error {
 		// A stale OTP is the usual cause, so the prefix identifies which one the
 		// Site sent.
 		log.Error().Err(err).Msgf("Bootstrap: Download Credentials failed for Site %v from %v with OTP %v",
-			bCfg.UUID, bCfg.CredsURL, cutils.RedactSecret(bCfg.OTP))
+			bCfg.UUID, bCfg.CredsURL, cutils.RedactSecret(bCfg.OTP, cutils.SecretLogPrefixLen))
 		return err
 	}
 	err = bs.storeCredentials(ctx, credsResponse)
@@ -489,7 +490,7 @@ func (bs *BoostrapAPI) downloadCredentials(ctx context.Context) (*bootstraptypes
 	if block == nil {
 		log.Error().Msgf("Bootstrap: failed to decode certificate PEM")
 		return nil, fmt.Errorf("failed to decode certificate PEM CACertificate %v",
-			cutils.RedactSecret(credsResponse.CACertificate))
+			cutils.RedactSecret(credsResponse.CACertificate, cutils.CertLogPrefixLen))
 	}
 
 	_, err = x509.ParseCertificate(block.Bytes)

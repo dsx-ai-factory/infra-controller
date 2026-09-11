@@ -40,7 +40,8 @@ func (h *credsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// This line and the rejections below report the OTP that arrived rather
 		// than the request, which carries it in full and stays usable until a
 		// handshake consumes it.
-		log.Errorf("Site Creds Req: site %s, OTP %s  %v", req.SiteUUID, cutils.RedactSecret(req.OTP), err)
+		log.Errorf("Site Creds Req: site %s, OTP %s  %v", req.SiteUUID,
+			cutils.RedactSecret(req.OTP, cutils.SecretLogPrefixLen), err)
 		var errStr string
 		if k8serr.IsNotFound(err) {
 			errStr = fmt.Sprintf("site %s not found", req.SiteUUID)
@@ -52,13 +53,15 @@ func (h *credsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if siteObj.Status.BootstrapState != crdsv1.SiteAwaitHandshake {
-		log.Infof("Creds request with used OTP: site %s, OTP %s", req.SiteUUID, cutils.RedactSecret(req.OTP))
+		log.Infof("Creds request with used OTP: site %s, OTP %s", req.SiteUUID,
+			cutils.RedactSecret(req.OTP, cutils.SecretLogPrefixLen))
 		http.Error(w, "OTP already used", http.StatusInternalServerError)
 		return
 	}
 
 	if req.OTP != siteObj.Status.OTP.Passcode {
-		log.Infof("Bad OTP received: site %s, OTP %s", req.SiteUUID, cutils.RedactSecret(req.OTP))
+		log.Infof("Bad OTP received: site %s, OTP %s", req.SiteUUID,
+			cutils.RedactSecret(req.OTP, cutils.SecretLogPrefixLen))
 		http.Error(w, "Bad OTP", http.StatusInternalServerError)
 		return
 	}
@@ -71,7 +74,8 @@ func (h *credsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if time.Now().After(*expiry) {
-		log.Infof("Expired OTP received: site %s, OTP %s", req.SiteUUID, cutils.RedactSecret(req.OTP))
+		log.Infof("Expired OTP received: site %s, OTP %s", req.SiteUUID,
+			cutils.RedactSecret(req.OTP, cutils.SecretLogPrefixLen))
 		http.Error(w, "OTP expired", http.StatusInternalServerError)
 		return
 	}

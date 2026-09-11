@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -30,8 +31,11 @@ func TestNewBootstrapConfig(t *testing.T) {
 	const (
 		siteID   = "d2f4b0c6-6f1e-4a0e-9f5a-0b6a6f4c1e77"
 		credsURL = "https://sitemgr.nico-system.svc/v1/sitecreds"
-		caCert   = "-----BEGIN CERTIFICATE-----\nc2l0ZS1jYQ==\n-----END CERTIFICATE-----"
 	)
+	// A real Site Manager CA runs past a thousand characters, so the body has to
+	// outrun the logged prefix for the assertions below to mean anything.
+	caCert := "-----BEGIN CERTIFICATE-----\n" + strings.Repeat("c2l0ZS1jYQ", 100) +
+		"\n-----END CERTIFICATE-----"
 
 	dir := t.TempDir()
 	for name, contents := range map[string]string{

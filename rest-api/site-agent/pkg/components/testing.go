@@ -360,8 +360,8 @@ func simulateMountedSecretFile(t *testing.T, secretFilePath string) error {
 
 	log.Info().Msg("Successfully read bootstrap secret from file:")
 	log.Info().Msgf("UUID: %v", bCfg.UUID)
-	log.Info().Msgf("OTP: %v", cutils.RedactSecret(bCfg.OTP))
-	log.Info().Msgf("CACert: %v", cutils.RedactSecret(bCfg.CACert))
+	log.Info().Msgf("OTP: %v", cutils.RedactSecret(bCfg.OTP, cutils.SecretLogPrefixLen))
+	log.Info().Msgf("CACert: %v", cutils.RedactSecret(bCfg.CACert, cutils.CertLogPrefixLen))
 	log.Info().Msgf("CredsURL: %v", bCfg.CredsURL)
 
 	err = os.WriteFile(filepath.Join(secretDir, bootstraptypes.TagUUID), []byte(bCfg.UUID), 0644)

@@ -36,7 +36,7 @@ func (o *OTPHandler) ReceiveAndSaveOTP(ctx context.Context, base64EncodedEncrypt
 	// Base64 decode the OTP
 	encryptedOtpBytes, err := base64.StdEncoding.DecodeString(base64EncodedEncryptedOtp)
 	if err != nil {
-		logger.Error().Err(err).Str("OTP", cutils.RedactSecret(base64EncodedEncryptedOtp)).
+		logger.Error().Err(err).Str("OTP", cutils.RedactSecret(base64EncodedEncryptedOtp, cutils.SecretLogPrefixLen)).
 			Msg("Failed to decode Base64 OTP")
 		return temporal.NewNonRetryableApplicationError(err.Error(), "ErrBase64DecodeOTP", err)
 	}
