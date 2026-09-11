@@ -36,7 +36,7 @@ func (rw *sentryWrapRW) WriteHeader(statusCode int) {
 			url = rw.r.URL.String()
 		}
 		logrus.Errorf("Sentry reporting error %d for %s", statusCode, url)
-		sentry.CaptureException(fmt.Errorf("Error %d for %s", statusCode, url))
+		sentry.CaptureException(fmt.Errorf("error %d for %s", statusCode, url))
 	}
 
 	rw.w.WriteHeader(statusCode)

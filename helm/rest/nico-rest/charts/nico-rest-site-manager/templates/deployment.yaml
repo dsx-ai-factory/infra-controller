@@ -46,6 +46,7 @@ spec:
                 - ALL
           args:
             - --listen-port={{ .Values.args.listenPort }}
+            - --creds-manager-server-name={{ .Values.args.credsManagerServerName }}
             - --creds-manager-url={{ .Values.args.credsManagerUrl }}
             - --tls-cert-path={{ .Values.args.tlsCertPath }}
             - --tls-key-path={{ .Values.args.tlsKeyPath }}
@@ -57,6 +58,12 @@ spec:
             - containerPort: {{ .Values.service.port }}
               name: https
           volumeMounts:
+            - name: creds-manager-token
+              mountPath: /var/run/secrets/nico-rest-cert-manager
+              readOnly: true
+            - name: creds-manager-ca
+              mountPath: /etc/pki/creds-manager
+              readOnly: true
             - name: tls-certs
               mountPath: /etc/tls
               readOnly: true
@@ -79,6 +86,19 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 15
       volumes:
+        - name: creds-manager-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: nico-rest-cert-manager
+                  expirationSeconds: 3600
+        - name: creds-manager-ca
+          secret:
+            secretName: {{ .Values.credsManagerCASecret }}
+            items:
+              - key: tls.crt
+                path: ca.crt
         - name: tls-certs
           secret:
             secretName: {{ .Values.certificate.secretName }}
