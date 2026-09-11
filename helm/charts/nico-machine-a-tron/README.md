@@ -264,6 +264,7 @@ pods:
         dpuPerHostCount: 2
         oobDhcpRelayAddress: "10.96.64.1"
         adminDhcpRelayAddress: "192.168.176.1"
+        dpfEnabled: true  # optional; set false for non-DPF sites
 ```
 
 ### IPMI/SOL Simulation

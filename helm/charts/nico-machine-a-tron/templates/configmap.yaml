@@ -224,6 +224,7 @@ data:
     {{- end }}
     admin_dhcp_relay_address = {{ $section.adminDhcpRelayAddress | default "192.168.176.1" | quote }}
     dpus_in_nic_mode = {{ $section.dpusInNicMode | default $defaults.dpusInNicMode | default false }}
+    dpf_enabled = {{ if hasKey $section "dpfEnabled" }}{{ $section.dpfEnabled }}{{ else if hasKey $defaults "dpfEnabled" }}{{ $defaults.dpfEnabled }}{{ else }}true{{ end }}
     {{- $hostFw := ternary $section.hostFirmwareVersions (default $defaults.hostFirmwareVersions $section.hostFirmwareVersions) (hasKey $section "hostFirmwareVersions") }}
     {{- with $hostFw }}
 
