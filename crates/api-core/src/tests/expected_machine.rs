@@ -2630,7 +2630,6 @@ async fn test_legacy_bmc_update_preserves_interface_behavior_and_restores_naming
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     let bmc_mac: MacAddress = "5A:5B:5C:5D:5E:61".parse()?;
-    let initial_ip: std::net::IpAddr = "192.0.2.210".parse()?;
     let configured_ip: std::net::IpAddr = "192.0.2.211".parse()?;
 
     env.api
@@ -2644,13 +2643,20 @@ async fn test_legacy_bmc_update_preserves_interface_behavior_and_restores_naming
         .await?;
 
     let mut txn = env.pool.begin().await?;
-    db::machine_interface::preallocate_bmc_machine_interface(&mut txn, bmc_mac, initial_ip, None)
-        .await?;
-    let interface = db::machine_interface::find_by_mac_address(txn.as_mut(), bmc_mac)
-        .await?
-        .pop()
-        .expect("BMC preallocation should create an interface");
-    db::machine_interface_address::delete(&mut txn, &interface.id).await?;
+    let interface = db::machine_interface::find_or_create_observed_machine_interface(
+        &mut txn,
+        None,
+        bmc_mac,
+        &[common::api_fixtures::network_segment::FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY.ip()],
+        Some(model::expected_machine::ExpectedInterface {
+            mac_address: bmc_mac,
+            role: ExpectedInterfaceRole::HostBmc,
+            ..Default::default()
+        }),
+        None,
+        None,
+    )
+    .await?;
     db::machine_interface::sync_hostname_after_address_change(&mut txn, interface.id).await?;
     let addressless = db::machine_interface::find_one(txn.as_mut(), interface.id).await?;
     assert_eq!(
@@ -2898,13 +2904,12 @@ async fn test_add_with_host_nic_fixed_ip_creates_interface(
     Ok(())
 }
 
-/// `expected_machine_with_retained_dhcp` captures a `Retained` declaration
-/// while its address is still `Dhcp`.
-async fn expected_machine_with_retained_dhcp(
+/// Capture a Fixed declaration before Site Explorer creates its interface.
+async fn expected_machine_with_pending_fixed_interface(
     env: &common::api_fixtures::TestEnv,
     suffix: u8,
     role: ExpectedInterfaceRole,
-) -> Result<(ExpectedMachine, rpc::forge::DhcpRecord), Box<dyn std::error::Error>> {
+) -> Result<ExpectedMachine, Box<dyn std::error::Error>> {
     let id = Uuid::new_v4();
     let bmc_mac_address: MacAddress = format!("7A:7B:7C:7D:83:{suffix:02X}").parse()?;
     let mac_address = if role.is_host_bmc() {
@@ -2912,6 +2917,7 @@ async fn expected_machine_with_retained_dhcp(
     } else {
         format!("7A:7B:7C:7D:83:{:02X}", suffix + 1).parse()?
     };
+    let fixed_ip = format!("192.0.2.{suffix}").parse()?;
     let expected_machine = ExpectedMachine {
         id: Some(id),
         bmc_mac_address,
@@ -2920,14 +2926,16 @@ async fn expected_machine_with_retained_dhcp(
             bmc_password: "PASS".into(),
             serial_number: format!("EM-ALLOCATION-{suffix:02X}"),
             bmc_ip_allocation: if role.is_host_bmc() {
-                BmcIpAllocationType::Retained
+                BmcIpAllocationType::Fixed
             } else {
                 BmcIpAllocationType::Dynamic
             },
+            bmc_ip_address: role.is_host_bmc().then_some(fixed_ip),
             interfaces: vec![model::expected_machine::ExpectedInterface {
                 mac_address,
                 role,
-                ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
+                ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
+                fixed_ip: Some(fixed_ip),
                 ..Default::default()
             }],
             ..Default::default()
@@ -2936,25 +2944,17 @@ async fn expected_machine_with_retained_dhcp(
     env.api
         .add_expected_machine(tonic::Request::new(expected_machine.into()))
         .await?;
-    let record = env
-        .api
-        .discover_dhcp(
-            common::rpc_builder::DhcpDiscovery::builder(
-                mac_address,
-                common::api_fixtures::network_segment::FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY
-                    .ip(),
-            )
-            .tonic_request(),
-        )
-        .await?
-        .into_inner();
-
     let captured = db::expected_machine::find_all(&env.pool)
         .await?
         .into_iter()
         .find(|machine| machine.id == Some(id))
         .expect("the bulk snapshot should include the expected machine");
-    Ok((captured, record))
+    assert!(
+        db::machine_interface::find_by_mac_address(&env.pool, mac_address)
+            .await?
+            .is_empty(),
+    );
+    Ok(captured)
 }
 
 #[crate::sqlx_test]
@@ -3020,7 +3020,7 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
             change: Change::ReuseMachineId,
         },
     ] {
-        let (captured, record) = expected_machine_with_retained_dhcp(&env, suffix, role).await?;
+        let captured = expected_machine_with_pending_fixed_interface(&env, suffix, role).await?;
         let declaration = if role.is_host_bmc() {
             captured.effective_host_bmc()
         } else {
@@ -3051,6 +3051,7 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
                         .expect("the update should contain the expected interface");
                     interface.ip_allocation =
                         Some(rpc::forge::ExpectedInterfaceIpAllocation::Dynamic as i32);
+                    interface.fixed_ip = None;
                 } else {
                     update.host_nics.retain(|interface| {
                         interface.mac_address != declaration.mac_address.to_string()
@@ -3090,10 +3091,10 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
             }
             Change::CompatibilityBmcDynamic => {
                 // Older writers can change only the compatibility column;
-                // the unchanged nested entry must not authorize retention.
+                // the unchanged nested entry must not authorize preallocation.
                 assert!(captured.data.interfaces.contains(&declaration));
                 sqlx::query(
-                    "UPDATE expected_machines SET bmc_ip_allocation = 'dynamic' WHERE id = $1",
+                    "UPDATE expected_machines SET bmc_ip_allocation = 'dynamic', bmc_ip_address = NULL WHERE id = $1",
                 )
                 .bind(id)
                 .execute(&env.pool)
@@ -3109,25 +3110,11 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
         )
         .await;
 
-        let mut txn = env.pool.begin().await?;
-        let addresses = db::machine_interface_address::find_for_interface(
-            &mut txn,
-            record
-                .machine_interface_id
-                .expect("DHCP should identify the interface"),
-        )
-        .await?;
-        txn.rollback().await?;
-        assert_eq!(addresses.len(), 1, "case: {case}");
-        assert_eq!(
-            addresses[0].address.to_string(),
-            record.address,
-            "case: {case}"
-        );
-        assert_eq!(
-            addresses[0].allocation_type,
-            model::allocation_type::AllocationType::Dhcp,
-            "case: {case}"
+        assert!(
+            db::machine_interface::find_by_mac_address(&env.pool, declaration.mac_address)
+                .await?
+                .is_empty(),
+            "case: {case}",
         );
     }
     Ok(())
@@ -3160,8 +3147,12 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
             replace_all: true,
         },
     ] {
-        let (captured, record) =
-            expected_machine_with_retained_dhcp(&env, suffix, ExpectedInterfaceRole::Host).await?;
+        let captured = expected_machine_with_pending_fixed_interface(
+            &env,
+            suffix,
+            ExpectedInterfaceRole::Host,
+        )
+        .await?;
         let declaration = captured
             .data
             .interfaces
@@ -3172,9 +3163,10 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
         let id = captured
             .id
             .expect("the stored expected machine should have an ID");
-        let interface_id = record
-            .machine_interface_id
-            .expect("DHCP should identify the interface");
+        let mac_address = declaration.mac_address;
+        let fixed_ip = declaration
+            .fixed_ip
+            .expect("the declaration has a fixed IP");
 
         // Stop application at the actual address write, after it has checked
         // the ExpectedMachine. The configuration lock must still be held.
@@ -3182,12 +3174,9 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
             .await?;
-        sqlx::query(
-            "SELECT address FROM machine_interface_addresses WHERE interface_id = $1 FOR UPDATE",
-        )
-        .bind(interface_id)
-        .fetch_one(&mut *blocker)
-        .await?;
+        sqlx::query("LOCK TABLE machine_interface_addresses IN SHARE MODE")
+            .execute(&mut *blocker)
+            .await?;
         let mut tasks = tokio::task::JoinSet::new();
         let apply_pool = env.pool.clone();
         let apply_machine = captured.clone();
@@ -3201,17 +3190,21 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
             .await;
             Ok::<(), tonic::Status>(())
         });
-        let applying_pid =
-            wait_for_blocked_query(&env.pool, blocker_pid, "UPDATE machine_interface_addresses")
-                .await;
+        let applying_pid = wait_for_blocked_query(
+            &env.pool,
+            blocker_pid,
+            "INSERT INTO machine_interface_addresses",
+        )
+        .await;
 
         let mut update: rpc::forge::ExpectedMachine = captured.into();
         let interface = update
             .host_nics
             .iter_mut()
-            .find(|interface| interface.mac_address == record.mac_address)
+            .find(|interface| interface.mac_address == mac_address.to_string())
             .expect("the update should contain the host interface");
         interface.ip_allocation = Some(rpc::forge::ExpectedInterfaceIpAllocation::Dynamic as i32);
+        interface.fixed_ip = None;
         let api = env.api.clone();
         tasks.spawn(async move {
             if replace_all {
@@ -3234,18 +3227,18 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
         }
 
         let mut txn = env.pool.begin().await?;
+        let interface = db::machine_interface::find_by_mac_address(&mut *txn, mac_address)
+            .await?
+            .pop()
+            .expect("the initial Fixed allocation should create its interface");
         let addresses =
-            db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+            db::machine_interface_address::find_for_interface(&mut txn, interface.id).await?;
         let updated = db::expected_machine::find_by_id(&mut *txn, id)
             .await?
             .expect("the updated expected machine should exist");
         txn.rollback().await?;
         assert_eq!(addresses.len(), 1, "case: {case}");
-        assert_eq!(
-            addresses[0].address.to_string(),
-            record.address,
-            "case: {case}"
-        );
+        assert_eq!(addresses[0].address, fixed_ip, "case: {case}");
         assert_eq!(
             addresses[0].allocation_type,
             model::allocation_type::AllocationType::Static,
@@ -3431,18 +3424,41 @@ async fn test_dhcp_discover_preallocates_host_nic_fixed_ip_for_unknown_mac(
     );
     txn.commit().await?;
 
+    // Fixed preallocation needs an exclusive segment lock. Two requests that
+    // first acquire shared locks would deadlock when both try to upgrade.
+    let mut gate = env.pool.begin().await?;
+    db::machine_interface::lock_network_segments_exclusive(
+        &mut gate,
+        std::slice::from_ref(&env.admin_segment()),
+    )
+    .await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+
     let nic_mac_str = nic_mac.to_string();
-    let response = env
-        .api
-        .discover_dhcp(
-            common::rpc_builder::DhcpDiscovery::builder(
-                &nic_mac_str,
-                common::api_fixtures::FIXTURE_DHCP_RELAY_ADDRESS,
-            )
-            .tonic_request(),
+    let discovery = env.api.discover_dhcp(
+        common::rpc_builder::DhcpDiscovery::builder(
+            &nic_mac_str,
+            common::api_fixtures::FIXTURE_DHCP_RELAY_ADDRESS,
         )
-        .await?
-        .into_inner();
+        .tonic_request(),
+    );
+    tokio::pin!(discovery);
+    let discovery_pid = tokio::select! {
+        result = &mut discovery => panic!("discovery bypassed the segment lock: {result:?}"),
+        blocked = wait_for_blocked_query(&env.pool, gate_pid, "pg_advisory_xact_lock") => blocked,
+    };
+    let lock_mode: String = sqlx::query_scalar(
+        "SELECT mode FROM pg_locks WHERE pid = $1 AND locktype = 'advisory' AND NOT granted",
+    )
+    .bind(discovery_pid)
+    .fetch_one(&env.pool)
+    .await?;
+    gate.rollback().await?;
+    assert_eq!(lock_mode, "ExclusiveLock");
+
+    let response = discovery.await?.into_inner();
 
     assert_eq!(
         response.address, fixed_ip,

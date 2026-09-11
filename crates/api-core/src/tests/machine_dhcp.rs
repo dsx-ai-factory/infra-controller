@@ -810,9 +810,13 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         assert_eq!(interface.interface_type, interface_type, "case: {name}");
         assert_eq!(interface.primary_interface, primary, "case: {name}");
         assert_eq!(before.len(), 1, "case: {name}");
+        let expected_allocation = if policy == ExpectedInterfaceIpAllocation::Retained {
+            AllocationType::Static
+        } else {
+            AllocationType::Dhcp
+        };
         assert_eq!(
-            before[0].allocation_type,
-            AllocationType::Dhcp,
+            before[0].allocation_type, expected_allocation,
             "case: {name}",
         );
 
@@ -834,11 +838,6 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         let after =
             db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
         txn.rollback().await?;
-        let expected_allocation = if policy == ExpectedInterfaceIpAllocation::Retained {
-            AllocationType::Static
-        } else {
-            AllocationType::Dhcp
-        };
         assert_eq!(after.len(), 1, "case: {name}");
         assert_eq!(
             after[0].allocation_type, expected_allocation,
@@ -1353,7 +1352,21 @@ async fn test_dhcp_v6_solicit_merges_with_ipv4_interface(
     assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
     assert!(addresses[0].address.is_ipv4());
 
-    // Request DHCPv6 later for the same MAC; it should add only the v6 family.
+    // A later declaration applies to IPv6's first allocation, not to the
+    // existing IPv4 address.
+    env.api
+        .add_expected_machine(tonic::Request::new(rpc::forge::ExpectedMachine {
+            bmc_mac_address: "02:00:00:00:01:01".into(),
+            chassis_serial_number: "FIRST-IPV6-RETAINED".into(),
+            host_nics: vec![rpc::forge::ExpectedInterface {
+                mac_address: mac.to_string(),
+                ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .await?;
+
     let v6_response = env
         .api
         .discover_dhcp(dhcpv6_discovery(
@@ -1376,7 +1389,7 @@ async fn test_dhcp_v6_solicit_merges_with_ipv4_interface(
         address.allocation_type == AllocationType::Dhcp && address.address.is_ipv4()
     }));
     assert!(addresses.iter().any(|address| {
-        address.allocation_type == AllocationType::Dhcp && address.address.is_ipv6()
+        address.allocation_type == AllocationType::Static && address.address.is_ipv6()
     }));
 
     Ok(())
@@ -1579,6 +1592,10 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_returns_options_only(
     let env = create_test_env(pool.clone()).await;
     let mac = MacAddress::from_str("02:00:00:00:00:0d").unwrap();
 
+    let mut txn = pool.begin().await?;
+    db::retained_boot_interface::upsert(&mut txn, mac, "NIC.Integrated.1-1-1").await?;
+    txn.commit().await?;
+
     // Seed a single IPv6 prefix that enables v6 but is not SLAAC-eligible.
     add_ipv6_prefix(&pool, env.admin_segment(), "2001:db8:f::/80", None).await?;
     enable_slaac_eui64_inference(&pool, env.admin_segment()).await?;
@@ -1603,6 +1620,15 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_returns_options_only(
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(response.machine_interface_id, Some(interfaces[0].id));
+    assert_eq!(
+        interfaces[0].boot_interface_id.as_deref(),
+        Some("NIC.Integrated.1-1-1")
+    );
+    assert!(
+        db::retained_boot_interface::find_by_mac(&mut txn, mac, None)
+            .await?
+            .is_none()
+    );
     let addresses =
         db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
     assert!(addresses.is_empty());
@@ -3384,6 +3410,7 @@ async fn test_dhcp_v6_info_request_promotes_predicted_interface(
         ..ManagedHostConfig::default()
     };
     let mac = *mock_host.non_dpu_macs.first().unwrap();
+    let bmc_mac = mock_host.bmc_mac_address;
 
     // Zero-DPU ingestion creates machine identity plus a predicted interface,
     // but intentionally does not create the runtime machine_interfaces row yet.
@@ -3442,6 +3469,107 @@ async fn test_dhcp_v6_info_request_promotes_predicted_interface(
         db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
     assert!(addresses.is_empty());
     txn.rollback().await?;
+
+    // Options-only association does not freeze configuration. Start with a
+    // Fixed address outside the configured prefix, then correct it after DHCP
+    // rejects the first allocation.
+    let mut expected = rpc::forge::ExpectedMachine {
+        bmc_mac_address: bmc_mac.to_string(),
+        chassis_serial_number: "FIRST-FAMILY-CONFIGURATION".into(),
+        host_nics: vec![rpc::forge::ExpectedInterface {
+            mac_address: mac.to_string(),
+            ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Fixed as i32),
+            fixed_ip: Some("2001:db8:bad::55".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    env.api
+        .replace_all_expected_machines(tonic::Request::new(rpc::forge::ExpectedMachineList {
+            expected_machines: vec![expected.clone()],
+        }))
+        .await?;
+    let status = env
+        .api
+        .discover_dhcp(dhcpv6_discovery(
+            mac,
+            "2001:db8:b::1",
+            RPC_MESSAGE_KIND_V6_SOLICIT,
+        ))
+        .await
+        .expect_err("the configured Fixed address is outside every managed prefix");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status
+            .message()
+            .contains("not within a configured network segment")
+    );
+    let mut txn = pool.begin().await?;
+    assert!(
+        db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        db::machine_interface::can_apply_expected_allocation(
+            &mut txn,
+            interfaces[0].id,
+            IpAddressFamily::Ipv6,
+        )
+        .await?
+    );
+    txn.rollback().await?;
+
+    expected.host_nics[0].fixed_ip = Some("2001:db8:b::55".into());
+    env.api
+        .replace_all_expected_machines(tonic::Request::new(rpc::forge::ExpectedMachineList {
+            expected_machines: vec![expected],
+        }))
+        .await?;
+
+    let fixed = env
+        .api
+        .discover_dhcp(dhcpv6_discovery(
+            mac,
+            "2001:db8:b::1",
+            RPC_MESSAGE_KIND_V6_SOLICIT,
+        ))
+        .await?
+        .into_inner();
+    assert_eq!(fixed.address, "2001:db8:b::55");
+    assert_eq!(fixed.machine_interface_id, response.machine_interface_id);
+
+    // Fixed IPv6 does not imply either a reservation or retention for IPv4.
+    // The associated interface must also preserve shared IPv4 allocation.
+    let mut shared_allocation = pool.begin().await?;
+    db::machine_interface::lock_network_segments_shared(
+        &mut shared_allocation,
+        std::slice::from_ref(&host_inband_segment_id),
+    )
+    .await?;
+    let ipv4 = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        env.api.discover_dhcp(
+            DhcpDiscovery::builder(mac, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip())
+                .tonic_request(),
+        ),
+    )
+    .await??
+    .into_inner();
+    shared_allocation.rollback().await?;
+    assert_eq!(ipv4.machine_interface_id, fixed.machine_interface_id);
+    let (_, addresses) = interface_addresses_for_mac(&pool, mac).await?;
+    assert!(addresses.iter().any(|address| {
+        address.address
+            == fixed
+                .address
+                .parse::<IpAddr>()
+                .expect("Fixed IPv6 is valid")
+            && address.allocation_type == AllocationType::Static
+    }));
+    assert!(addresses.iter().any(|address| {
+        address.address.is_ipv4() && address.allocation_type == AllocationType::Dhcp
+    }));
 
     Ok(())
 }
@@ -3615,6 +3743,7 @@ async fn test_dhcp_v6_solicit_promotes_predicted_interface_by_link_address(
         ..ManagedHostConfig::default()
     };
     let mac = *mock_host.non_dpu_macs.first().unwrap();
+    let bmc_mac = mock_host.bmc_mac_address;
 
     // Ingest a zero-DPU host so the DHCP request must consume a prediction.
     let _mock = site_explorer::ingest_zero_dpu_host_awaiting_first_lease(&env, mock_host).await?;
@@ -3640,6 +3769,21 @@ async fn test_dhcp_v6_solicit_promotes_predicted_interface_by_link_address(
         txn.rollback().await?;
         (predicted.machine_id, host_inband_segment.id)
     };
+
+    env.api
+        .replace_all_expected_machines(tonic::Request::new(rpc::forge::ExpectedMachineList {
+            expected_machines: vec![rpc::forge::ExpectedMachine {
+                bmc_mac_address: bmc_mac.to_string(),
+                chassis_serial_number: "FIRST-FAMILY-CONFIGURATION".into(),
+                host_nics: vec![rpc::forge::ExpectedInterface {
+                    mac_address: mac.to_string(),
+                    ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }))
+        .await?;
 
     // Make the predicted segment dual-stack and identify it by DHCPv6 link-address.
     add_ipv6_prefix(
@@ -3667,7 +3811,7 @@ async fn test_dhcp_v6_solicit_promotes_predicted_interface_by_link_address(
     let addresses =
         db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
     assert_eq!(addresses.len(), 1);
-    assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
     assert_eq!(addresses[0].address, response_address);
     txn.rollback().await?;
 

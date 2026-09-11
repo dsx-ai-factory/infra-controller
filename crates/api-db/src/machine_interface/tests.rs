@@ -880,96 +880,100 @@ async fn test_preallocate_machine_interface_promotes_interface_type(
     Ok(())
 }
 
-/// A retained Host BMC promotes its DHCP address to `Static`, remains
-/// idempotent, and then survives the DHCP-scoped expiry delete path.
 #[crate::sqlx_test]
-async fn test_retained_host_bmc_address_pins_dhcp_and_survives_expiry(
+async fn test_retained_host_bmc_is_static_at_first_allocation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use model::allocation_type::AllocationType;
-
-    create_static_assignments_segment(&pool).await?;
-    let mac: MacAddress = "7A:7B:7C:7D:7E:37".parse().unwrap();
-    let ip: std::net::IpAddr = "192.0.2.250".parse().unwrap();
-
-    // Create a BMC interface (preallocate lands a Static address), then swap that
-    // address for a Dhcp one so we have a BMC interface holding a DHCP lease --
-    // the state a BMC reaches when it auto-allocates over DHCP.
-    let mut txn = db::Transaction::begin(&pool).await?;
-    preallocate_bmc_machine_interface(txn.as_pgconn(), mac, ip, None).await?;
-    let interfaces = find_by_mac_address(&mut txn, mac).await?;
-    let interface_id = interfaces[0].id;
-    assert_eq!(
-        interfaces[0].interface_type,
-        InterfaceType::Bmc,
-        "preallocated interface should be the BMC type"
-    );
-    crate::machine_interface_address::delete(txn.as_pgconn(), &interface_id).await?;
-    crate::machine_interface_address::insert(
-        txn.as_pgconn(),
-        interface_id,
-        ip,
-        AllocationType::Dhcp,
+    let segment_id = create_managed_segment(
+        &pool,
+        "retained-first-allocation",
+        "192.0.2.0/24",
+        NetworkSegmentType::Underlay,
+        AllocationStrategy::Dynamic,
     )
     .await?;
-    txn.commit().await?;
-
-    let expected_interface = ExpectedInterface {
-        mac_address: mac,
+    let mac_address: MacAddress = "7A:7B:7C:7D:7E:37".parse()?;
+    let expected = ExpectedInterface {
+        mac_address,
         role: ExpectedInterfaceRole::HostBmc,
-        ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
         ..Default::default()
     };
 
-    // Retain: the DHCP address is promoted to Static.
     let mut txn = db::Transaction::begin(&pool).await?;
-    retain_expected_machine_interface_address(txn.as_pgconn(), &expected_interface).await?;
-    let addrs =
-        crate::machine_interface_address::find_for_interface(txn.as_pgconn(), interface_id).await?;
+    lock_network_segments_shared(&mut txn, &[segment_id]).await?;
+    let interface = find_or_create_machine_interface_for_family(
+        &mut txn,
+        None,
+        mac_address,
+        &["192.0.2.1".parse()?],
+        FindOrCreateMachineInterfaceOptions {
+            expected_interface: Some(expected),
+            is_primary: None,
+            retained_window: None,
+        },
+        IpAddressFamily::Ipv4,
+        &[segment_id],
+    )
+    .await?;
+    let addresses =
+        crate::machine_interface_address::find_for_interface(&mut txn, interface.id).await?;
+    assert_eq!(interface.segment_id, segment_id);
+    assert_eq!(interface.interface_type, InterfaceType::Bmc);
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
     txn.commit().await?;
-    assert_eq!(addrs.len(), 1, "retain must not duplicate the address row");
-    assert_eq!(
-        addrs[0].allocation_type,
-        AllocationType::Static,
-        "retain should promote the DHCP address to Static"
-    );
+    Ok(())
+}
 
-    // Idempotent: a second retain is a no-op (the row is already Static).
+#[crate::sqlx_test]
+async fn expected_fixed_preserves_existing_and_removed_family_but_applies_role(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_managed_segment(
+        &pool,
+        "fixed-initial-only",
+        "192.0.2.0/24",
+        NetworkSegmentType::Underlay,
+        AllocationStrategy::Dynamic,
+    )
+    .await?;
+    let mac_address: MacAddress = "7A:7B:7C:7D:7E:38".parse()?;
     let mut txn = db::Transaction::begin(&pool).await?;
-    retain_expected_machine_interface_address(txn.as_pgconn(), &expected_interface).await?;
-    let addrs =
-        crate::machine_interface_address::find_for_interface(txn.as_pgconn(), interface_id).await?;
-    txn.commit().await?;
-    assert_eq!(addrs.len(), 1, "second retain must remain a single row");
-    assert_eq!(
-        addrs[0].allocation_type,
-        AllocationType::Static,
-        "second retain should leave the address Static"
-    );
+    let interface = validate_existing_mac_and_create(
+        &mut txn,
+        mac_address,
+        &["192.0.2.1".parse()?],
+        None,
+        None,
+    )
+    .await?;
+    let expected = ExpectedInterface {
+        mac_address,
+        role: ExpectedInterfaceRole::DpuBmc,
+        ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
+        fixed_ip: Some("192.0.2.100".parse()?),
+        ..Default::default()
+    };
+    preallocate_expected_machine_interface(&mut txn, &expected, None).await?;
+    let preserved = find_one(&mut txn, interface.id).await?;
+    assert_eq!(preserved.addresses, interface.addresses);
+    assert_eq!(preserved.interface_type, InterfaceType::Bmc);
+    assert!(!preserved.primary_interface);
+    let addresses =
+        crate::machine_interface_address::find_for_interface(&mut txn, interface.id).await?;
+    assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
 
-    // The promoted Static address survives the DHCP-scoped expiry delete path:
-    // delete_by_address(.., Dhcp) finds nothing to delete and the row remains.
-    let mut txn = db::Transaction::begin(&pool).await?;
-    let deleted = crate::machine_interface_address::delete_by_address(
-        txn.as_pgconn(),
-        ip,
+    crate::machine_interface_address::delete_by_interface_family(
+        &mut txn,
+        interface.id,
+        IpAddressFamily::Ipv4,
         AllocationType::Dhcp,
     )
     .await?;
-    let addrs =
-        crate::machine_interface_address::find_for_interface(txn.as_pgconn(), interface_id).await?;
+    preallocate_expected_machine_interface(&mut txn, &expected, None).await?;
+    assert!(find_one(&mut txn, interface.id).await?.addresses.is_empty());
+    assert!(can_apply_expected_allocation(&mut txn, interface.id, IpAddressFamily::Ipv6).await?);
     txn.commit().await?;
-    assert!(
-        deleted.is_empty(),
-        "DHCP-scoped expiry delete should not match a Static address"
-    );
-    assert_eq!(
-        addrs.len(),
-        1,
-        "the retained Static address should survive DHCP lease expiry"
-    );
-    assert_eq!(addrs[0].allocation_type, AllocationType::Static);
-
     Ok(())
 }
 
@@ -1382,249 +1386,6 @@ async fn test_explicit_policy_opts_existing_host_interface_into_segment_guard(
     );
     txn.rollback().await?;
 
-    Ok(())
-}
-
-#[crate::sqlx_test]
-async fn test_expected_interface_retained_policy_pins_all_dhcp_address_families(
-    pool: sqlx::PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    create_static_assignments_segment(&pool).await?;
-    create_managed_segment(
-        &pool,
-        "retained-wrong-interface-type",
-        "203.0.113.0/24",
-        NetworkSegmentType::Underlay,
-        AllocationStrategy::Dynamic,
-    )
-    .await?;
-    create_managed_segment(
-        &pool,
-        "retained-wrong-segment-type",
-        "198.51.100.0/24",
-        NetworkSegmentType::Admin,
-        AllocationStrategy::Dynamic,
-    )
-    .await?;
-    let mac_address: MacAddress = "7A:7B:7C:7D:7E:71".parse()?;
-    let wrong_segment_mac: MacAddress = "7A:7B:7C:7D:7E:72".parse()?;
-    let addresses = ["192.0.2.71".parse()?, "2001:db8::71".parse()?];
-    let bmc_address = "203.0.113.71".parse()?;
-    let wrong_segment_address = "198.51.100.72".parse()?;
-
-    let mut txn = db::Transaction::begin(&pool).await?;
-    preallocate_machine_interface(txn.as_pgconn(), mac_address, addresses[0], None).await?;
-    let interface_id = find_by_mac_address(txn.as_pgconn(), mac_address)
-        .await?
-        .pop()
-        .expect("preallocation should create an interface")
-        .id;
-    crate::machine_interface_address::delete(txn.as_pgconn(), &interface_id).await?;
-    for address in addresses {
-        crate::machine_interface_address::insert(
-            txn.as_pgconn(),
-            interface_id,
-            address,
-            AllocationType::Dhcp,
-        )
-        .await?;
-    }
-
-    let bmc_segment =
-        crate::network_segment::for_prefix_containing_address(txn.as_pgconn(), bmc_address)
-            .await?
-            .expect("BMC test address should belong to the managed segment");
-    let bmc_interface = create_with_type(
-        txn.as_pgconn(),
-        &[bmc_segment],
-        &mac_address,
-        false,
-        AddressSelectionStrategy::StaticAddress(bmc_address),
-        InterfaceType::Bmc,
-        None,
-    )
-    .await?;
-    crate::machine_interface_address::delete(txn.as_pgconn(), &bmc_interface.id).await?;
-    crate::machine_interface_address::insert(
-        txn.as_pgconn(),
-        bmc_interface.id,
-        bmc_address,
-        AllocationType::Dhcp,
-    )
-    .await?;
-
-    preallocate_machine_interface(
-        txn.as_pgconn(),
-        wrong_segment_mac,
-        wrong_segment_address,
-        None,
-    )
-    .await?;
-    let wrong_segment_interface_id = find_by_mac_address(txn.as_pgconn(), wrong_segment_mac)
-        .await?
-        .pop()
-        .expect("wrong-segment preallocation should create an interface")
-        .id;
-    crate::machine_interface_address::delete(txn.as_pgconn(), &wrong_segment_interface_id).await?;
-    crate::machine_interface_address::insert(
-        txn.as_pgconn(),
-        wrong_segment_interface_id,
-        wrong_segment_address,
-        AllocationType::Dhcp,
-    )
-    .await?;
-
-    let expected_interface = ExpectedInterface {
-        mac_address,
-        role: ExpectedInterfaceRole::DpuOs,
-        ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
-        ..Default::default()
-    };
-    retain_expected_machine_interface_address(txn.as_pgconn(), &expected_interface).await?;
-    retain_expected_machine_interface_address(txn.as_pgconn(), &expected_interface).await?;
-    let retained =
-        crate::machine_interface_address::find_for_interface(txn.as_pgconn(), interface_id).await?;
-    let bmc_addresses =
-        crate::machine_interface_address::find_for_interface(txn.as_pgconn(), bmc_interface.id)
-            .await?;
-
-    let wrong_segment_expected_interface = ExpectedInterface {
-        mac_address: wrong_segment_mac,
-        role: ExpectedInterfaceRole::DpuOs,
-        ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
-        network_segment_type: Some(NetworkSegmentType::Underlay),
-        ..Default::default()
-    };
-    let error = retain_expected_machine_interface_address(
-        txn.as_pgconn(),
-        &wrong_segment_expected_interface,
-    )
-    .await
-    .expect_err("the typed segment guard should reject a DHCP address on another segment type");
-    assert!(matches!(error, DatabaseError::FailedPrecondition(_)));
-    let wrong_segment_addresses = crate::machine_interface_address::find_for_interface(
-        txn.as_pgconn(),
-        wrong_segment_interface_id,
-    )
-    .await?;
-    txn.commit().await?;
-
-    assert_eq!(retained.len(), 2);
-    assert!(
-        retained
-            .iter()
-            .all(|address| address.allocation_type == AllocationType::Static),
-    );
-    assert_eq!(bmc_addresses.len(), 1);
-    assert_eq!(bmc_addresses[0].allocation_type, AllocationType::Dhcp);
-    assert_eq!(wrong_segment_addresses.len(), 1);
-    assert_eq!(
-        wrong_segment_addresses[0].allocation_type,
-        AllocationType::Dhcp,
-    );
-
-    Ok(())
-}
-
-#[crate::sqlx_test]
-async fn retention_preserves_static_assignment_after_waiting(
-    pool: sqlx::PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let segment_id = create_managed_segment(
-        &pool,
-        "retention-after-static-assignment",
-        "2001:db8:5398::/64",
-        NetworkSegmentType::HostInband,
-        AllocationStrategy::Dynamic,
-    )
-    .await?;
-    let mac: MacAddress = "7A:7B:7C:7D:7E:57".parse()?;
-    let mut setup = pool.begin().await?;
-    let interface_id: MachineInterfaceId = sqlx::query_scalar(
-        "INSERT INTO machine_interfaces
-            (segment_id, mac_address, interface_type, primary_interface, hostname)
-         VALUES ($1, $2, $3, false, 'retention-after-static-assignment') RETURNING id",
-    )
-    .bind(segment_id)
-    .bind(mac)
-    .bind(InterfaceType::Data)
-    .fetch_one(&mut *setup)
-    .await?;
-    db::machine_interface_address::insert(
-        &mut setup,
-        interface_id,
-        "2001:db8:5398::30".parse()?,
-        AllocationType::Dhcp,
-    )
-    .await?;
-    setup.commit().await?;
-
-    let expected_interface = ExpectedInterface {
-        mac_address: mac,
-        role: ExpectedInterfaceRole::Host,
-        ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
-        ..Default::default()
-    };
-    let static_address: IpAddr = "2001:db8:5398::31".parse()?;
-    let mut holder = pool.begin().await?;
-    sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
-        .bind(interface_id)
-        .fetch_one(&mut *holder)
-        .await?;
-    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *holder)
-        .await?;
-    let mut waiter = pool.begin().await?;
-    let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *waiter)
-        .await?;
-
-    let retain_address = async {
-        retain_expected_machine_interface_address(&mut waiter, &expected_interface).await?;
-        waiter.commit().await?;
-        Ok::<(), Box<dyn std::error::Error>>(())
-    };
-    let assign_address = async {
-        loop {
-            let blocked: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                    SELECT 1 FROM pg_stat_activity
-                    WHERE pid = $2
-                      AND $1 = ANY(pg_blocking_pids(pid))
-                      AND query ILIKE '%FROM machine_interfaces%FOR UPDATE%'
-                )",
-            )
-            .bind(holder_pid)
-            .bind(waiter_pid)
-            .fetch_one(&pool)
-            .await?;
-            if blocked {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let result =
-            db::machine_interface_address::assign_static(&mut holder, interface_id, static_address)
-                .await?;
-        holder.commit().await?;
-        Ok::<_, Box<dyn std::error::Error>>(result)
-    };
-    let (retention, assignment) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        tokio::join!(retain_address, assign_address)
-    })
-    .await?;
-    retention?;
-    assert_eq!(
-        assignment?,
-        model::allocation_type::AssignStaticResult::ReplacedDhcp,
-    );
-
-    let mut connection = pool.acquire().await?;
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut connection, interface_id).await?;
-    assert_eq!(addresses.len(), 1);
-    assert_eq!(addresses[0].address, static_address);
-    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
     Ok(())
 }
 
