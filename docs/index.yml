@@ -296,6 +296,8 @@ navigation:
                   path: playbooks/stuck_objects/instance_and_fabric_issues.md
                 - page: Lenovo SR675 V3 Stuck Polling BIOS Setup
                   path: playbooks/stuck_objects/lenovo_sr675_v3_polling_bios_setup.md
+                - page: Machine Stuck in DPUInitializing/Init During Ingestion
+                  path: playbooks/stuck_objects/dpu_initializing_init.md
                 - page: Managed Host Stuck in UEFI Setup
                   path: playbooks/stuck_objects/host_initializing_uefi_setup.md
                 - page: Network Connectivity Issues
