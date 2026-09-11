@@ -393,6 +393,10 @@ func (sxasd SpectrumXAttachmentSQLDAO) CreateMultiple(ctx context.Context, tx *d
 	ids := make([]uuid.UUID, 0, len(inputs))
 
 	for _, input := range inputs {
+		if !SpectrumXAttachmentStatusMap[input.Status] {
+			return nil, fmt.Errorf("invalid SpectrumXAttachment Status: %q", input.Status)
+		}
+
 		id := uuid.New()
 		if input.SpectrumXAttachmentID != nil {
 			id = *input.SpectrumXAttachmentID
@@ -493,6 +497,9 @@ func (sxasd SpectrumXAttachmentSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "ip_address", *input.IPAddress)
 	}
 	if input.Status != nil {
+		if !SpectrumXAttachmentStatusMap[*input.Status] {
+			return nil, fmt.Errorf("invalid SpectrumXAttachment Status: %q", *input.Status)
+		}
 		sxa.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
 		sxasd.tracerSpan.SetAttribute(SpectrumXAttachmentDAOSpan, "status", *input.Status)
