@@ -646,7 +646,6 @@ func NewAPIMachine(dbm *cdbm.Machine, dbmcs []cdbm.MachineCapability, dbmis []cd
 
 	// Only Provider Admin can see the metadata
 	if dbm.Metadata != nil && includeMetadata && isProviderOrPrivilegedTenant {
-
 		apim.Metadata = &APIMachineMetadata{}
 
 		// Get the Machine json body
