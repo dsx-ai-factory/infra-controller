@@ -339,6 +339,13 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
         entities: &mut Vec<DiscoveredEntity<B>>,
         sensor_ids: &mut HashSet<String>,
     ) {
+        // LiteOn reports capacity only as the non-standard string
+        // `CapacityWatts`, which the generic `PowerSupply` schema drops, so the
+        // OEM schema is fetched alongside. nv-redfish returns `Ok(None)` for any
+        // other manufacturer without a request. On a LiteOn chassis this
+        // re-fetches `PowerSubsystem`, the collection, and each supply; the
+        // accessor takes no pre-fetched resources, so the duplicate is accepted
+        // at discovery cadence rather than worked around here.
         let liteon_links = self
             .record_failure(
                 chassis.oem_liteon_power_supply_links().await,
@@ -389,7 +396,7 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 sensor_ids.insert(sensor.odata_id().to_string());
             }
             let entity_id = entity.odata_id().to_string();
-            let liteon_capacity_watts = if entity.raw().power_capacity_watts.flatten().is_some() {
+            let oem_capacity_watts = if entity.raw().power_capacity_watts.flatten().is_some() {
                 None
             } else {
                 liteon_by_id
@@ -401,9 +408,12 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                             .and_then(Option::as_deref)
                     })
                     .and_then(|raw| {
-                        let parsed = parse_liteon_capacity_watts(raw);
+                        let parsed = parse_oem_capacity_watts(raw);
                         if parsed.is_none() {
-                            tracing::warn!(
+                            // A fixed firmware value, repeated every cycle;
+                            // the metric is simply absent, so this is not a
+                            // warning.
+                            tracing::debug!(
                                 capacity_watts = raw,
                                 power_supply = %entity.odata_id(),
                                 bmc_address = ?self.endpoint.addr,
@@ -418,7 +428,7 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 entity,
                 chassis: chassis.clone(),
                 sensors,
-                liteon_capacity_watts,
+                oem_capacity_watts,
             });
         }
     }
@@ -495,11 +505,16 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
     }
 }
 
-fn parse_liteon_capacity_watts(raw: &str) -> Option<f64> {
+/// Parses the LiteOn `CapacityWatts` string into watts.
+///
+/// Accepts a finite, positive number with surrounding whitespace. Zero is
+/// treated as a placeholder rather than a capacity, so the metric is omitted
+/// instead of publishing a present supply with no capacity.
+fn parse_oem_capacity_watts(raw: &str) -> Option<f64> {
     raw.trim()
         .parse::<f64>()
         .ok()
-        .filter(|value| value.is_finite() && *value >= 0.0)
+        .filter(|value| value.is_finite() && *value > 0.0)
 }
 
 /// Whether a processor is a GPU, per the Redfish `ProcessorType` enumeration.
@@ -628,6 +643,62 @@ pub(in crate::collectors) fn gpu_identity_from_chassis<B: Bmc>(
 }
 
 #[cfg(test)]
+mod oem_capacity_tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::parse_oem_capacity_watts;
+
+    #[test]
+    fn parse_oem_capacity_watts_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "integer string",
+                    input: "5500",
+                    expect: Some(5500.0),
+                },
+                Check {
+                    scenario: "surrounding whitespace is trimmed",
+                    input: " 5500 ",
+                    expect: Some(5500.0),
+                },
+                Check {
+                    scenario: "fractional string",
+                    input: "5500.5",
+                    expect: Some(5500.5),
+                },
+                Check {
+                    scenario: "unit suffix is not a number",
+                    input: "5500W",
+                    expect: None,
+                },
+                Check {
+                    scenario: "empty string",
+                    input: "",
+                    expect: None,
+                },
+                Check {
+                    scenario: "zero is a placeholder",
+                    input: "0",
+                    expect: None,
+                },
+                Check {
+                    scenario: "negative",
+                    input: "-1",
+                    expect: None,
+                },
+                Check {
+                    scenario: "not finite",
+                    input: "inf",
+                    expect: None,
+                },
+            ],
+            parse_oem_capacity_watts,
+        );
+    }
+}
+
+#[cfg(test)]
 mod gpu_chassis_naming_tests {
     use super::id_names_gpu_module;
 
@@ -660,12 +731,99 @@ mod gpu_chassis_naming_tests {
 #[cfg(test)]
 mod bmc_mock_integration_tests {
     use std::collections::{BTreeMap, HashSet};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use bmc_mock::test_support::{TestBmc, TestBmcHandle, nvidia_dgx_h100_bmc, wiwynn_gb200_bmc};
+    use arc_swap::ArcSwapOption;
+    use bmc_mock::injection::{Action, Rule, RuleId, Selector};
+    use bmc_mock::test_support::{
+        TestBmc, TestBmcHandle, liteon_powershelf_bmc, nvidia_dgx_h100_bmc, wiwynn_gb200_bmc,
+    };
     use nv_redfish::Resource as _;
+    use serde_json::json;
 
-    use super::{gpu_identity_from_chassis, gpu_identity_from_processor, is_gpu_processor};
-    use crate::collectors::inventory::GpuIdentity;
+    use super::{
+        EntityDiscoveryCollector, gpu_identity_from_chassis, gpu_identity_from_processor,
+        is_gpu_processor,
+    };
+    use crate::collectors::inventory::{DiscoveredEntity, GpuIdentity};
+    use crate::endpoint::test_support::{mac, test_endpoint};
+
+    /// Runs power supply discovery on the LiteOn shelf fixture and returns the
+    /// OEM capacity resolved for each supply, keyed by supply id.
+    async fn liteon_oem_capacities(h: &TestBmcHandle) -> (BTreeMap<String, Option<f64>>, usize) {
+        let chassis = h
+            .service_root
+            .chassis()
+            .await
+            .expect("chassis collection")
+            .expect("chassis collection is present")
+            .members()
+            .await
+            .expect("chassis members")
+            .into_iter()
+            .next()
+            .expect("fixture has one chassis");
+        let collector = EntityDiscoveryCollector::<TestBmc> {
+            endpoint: Arc::new(test_endpoint(mac("00:11:22:33:44:55"))),
+            bmc: h.bmc.clone(),
+            shared: Arc::new(ArcSwapOption::empty()),
+            request_concurrency: 2,
+            collect_shelf_power: true,
+            gpu_identity: false,
+            generation: 0,
+        };
+        let fetch_failures = AtomicUsize::new(0);
+        let mut entities = Vec::new();
+        let mut sensor_ids = HashSet::new();
+        collector
+            .discover_power_supplies(
+                &Arc::new(chassis),
+                &fetch_failures,
+                &mut entities,
+                &mut sensor_ids,
+            )
+            .await;
+
+        let capacities = entities
+            .iter()
+            .filter_map(|entity| match entity {
+                DiscoveredEntity::PowerSupply {
+                    entity,
+                    oem_capacity_watts,
+                    ..
+                } => Some((entity.id().to_string(), *oem_capacity_watts)),
+                _ => None,
+            })
+            .collect();
+        (capacities, fetch_failures.load(Ordering::Relaxed))
+    }
+
+    /// The LiteOn fixture carries `CapacityWatts` as a string on every supply and
+    /// no standard `PowerCapacityWatts`, so this is the only test that proves the
+    /// OEM fetch, the id pairing, and the parse work together. Supply 5 is
+    /// patched to a non-numeric value to prove a bad value drops only its own
+    /// capacity and counts as no fetch failure.
+    #[tokio::test]
+    async fn liteon_supplies_resolve_capacity_from_oem_schema() {
+        let h = liteon_powershelf_bmc().await;
+        h.state.injection.upsert(Rule {
+            id: RuleId::from("liteon-bad-capacity"),
+            selector: Selector::OdataId(
+                "/redfish/v1/Chassis/powershelf/PowerSubsystem/PowerSupplies/5".to_string(),
+            ),
+            action: Action::JsonMerge(json!({ "CapacityWatts": "n/a" })),
+            remaining: None,
+        });
+
+        let (capacities, fetch_failures) = liteon_oem_capacities(&h).await;
+
+        let expected: BTreeMap<String, Option<f64>> = (0..=5)
+            .map(|idx| (idx.to_string(), (idx != 5).then_some(5500.0)))
+            .collect();
+        assert_eq!(capacities, expected);
+        assert_eq!(fetch_failures, 0);
+    }
 
     /// Resolve a GPU identity for every processor the mock BMC exposes, keyed by
     /// processor id, and return the `@odata.id`s of the GPUs among them. Mirrors

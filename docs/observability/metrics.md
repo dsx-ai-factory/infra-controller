@@ -128,6 +128,7 @@ endpoint labels shared by all telemetry: `endpoint_key` always, plus `serial_num
 
 | Series | Unit | Labels | Source |
 |---|---|---|---|
+| `powersupply_capacity` | watts | | `PowerSupply.PowerCapacityWatts`, else the LiteOn OEM `CapacityWatts` string |
 | `powersupply_status` | state | `powersupply_state`, `powersupply_health` | `PowerSupply.Status` |
 | `chassis_max_power` | watts | | `Chassis.MaxPowerWatts` |
 | `chassis_status` | state | `chassis_state`, `chassis_health`, `chassis_power_state` | `Chassis.Status`, `Chassis.PowerState` |
@@ -137,8 +138,12 @@ endpoint labels shared by all telemetry: `endpoint_key` always, plus `serial_num
 
 Absent Redfish fields are omitted rather than defaulted: a status gauge is emitted when
 any of its source fields is present, and each label appears only when its own field does.
-`powersupply_status` is emitted for every endpoint that exposes power supplies; the
-chassis and manager series are emitted for power-shelf endpoints only. A vendor value
+`powersupply_capacity` and `powersupply_status` are emitted for every endpoint that exposes
+power supplies; the chassis and manager series are emitted for power-shelf endpoints only.
+LiteOn PF-1333-7R firmware r1.3.8 omits `PowerCapacityWatts` and reports the capacity as the
+string `CapacityWatts` in its OEM schema; the collector uses that string only when the
+standard field is absent, and omits the series when the string is not a finite positive
+number. A vendor value
 outside the Redfish enum is rendered as `unsupported_value`; for example, LiteOn
 PF-1333-7R firmware r1.3.8 reports `Status.State` as `Standby`, which is not a Redfish
 `State` member.

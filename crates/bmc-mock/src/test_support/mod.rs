@@ -68,6 +68,9 @@ lazy_static::lazy_static! {
 #[derive(Clone)]
 pub struct TestBmcHandle {
     pub service_root: Arc<nv_redfish::ServiceRoot<TestBmc>>,
+    /// The client behind `service_root`, for collectors that take the BMC
+    /// directly rather than a service root.
+    pub bmc: Arc<TestBmc>,
     pub state: BmcState,
 }
 
@@ -82,7 +85,11 @@ async fn test_bmc((router, state): (axum::Router, BmcState)) -> TestBmcHandle {
         CacheSettings::with_capacity(32),
     ));
     TestBmcHandle {
-        service_root: nv_redfish::ServiceRoot::new(bmc).await.unwrap().into(),
+        service_root: nv_redfish::ServiceRoot::new(bmc.clone())
+            .await
+            .unwrap()
+            .into(),
+        bmc,
         state,
     }
 }

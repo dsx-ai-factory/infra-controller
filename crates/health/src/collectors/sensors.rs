@@ -1224,10 +1224,7 @@ mod tests {
                     selector: Selector::OdataId(
                         "/redfish/v1/Chassis/*/PowerSubsystem/PowerSupplies/*".to_string(),
                     ),
-                    action: Action::JsonMerge(json!({
-                        "Model": "PSU-3KW",
-                        "PowerCapacityWatts": 3000.0
-                    })),
+                    action: Action::JsonMerge(json!({ "Model": "PSU-3KW" })),
                     remaining: None,
                 });
                 let chassis = first_chassis(&handle).await;
@@ -1246,7 +1243,7 @@ mod tests {
                         entity: power_supply,
                         chassis,
                         sensors: Vec::new(),
-                        liteon_capacity_watts: None,
+                        oem_capacity_watts: Some(5500.0),
                     }],
                 );
             }
@@ -1354,7 +1351,7 @@ mod tests {
                                 "hw",
                                 "powersupply_capacity",
                                 "watts",
-                                3000.0,
+                                5500.0,
                                 &[
                                     ("powersupply_id", "0"),
                                     ("chassis_id", "powershelf"),

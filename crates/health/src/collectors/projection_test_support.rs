@@ -650,6 +650,11 @@ pub(in crate::collectors) enum TestEntity {
     SparseDrive,
     PowerSupply,
     SparsePowerSupply,
+    /// `PS0` with both the standard capacity and an OEM value; the standard
+    /// field wins.
+    PowerSupplyWithOemCapacity,
+    /// `PS-sparse`, which has no standard capacity, with an OEM value.
+    OemCapacityPowerSupply,
     Chassis,
     /// `CH0` discovered on a power-shelf endpoint, with its power subsystem.
     ShelfChassis,
@@ -879,13 +884,25 @@ impl ProjectionFixture {
                 entity: self.power_supply("PS0"),
                 chassis: self.chassis("CH0"),
                 sensors: Vec::new(),
-                liteon_capacity_watts: None,
+                oem_capacity_watts: None,
             },
             TestEntity::SparsePowerSupply => DiscoveredEntity::PowerSupply {
                 entity: self.power_supply("PS-sparse"),
                 chassis: self.chassis("CH0"),
                 sensors: Vec::new(),
-                liteon_capacity_watts: None,
+                oem_capacity_watts: None,
+            },
+            TestEntity::PowerSupplyWithOemCapacity => DiscoveredEntity::PowerSupply {
+                entity: self.power_supply("PS0"),
+                chassis: self.chassis("CH0"),
+                sensors: Vec::new(),
+                oem_capacity_watts: Some(5500.0),
+            },
+            TestEntity::OemCapacityPowerSupply => DiscoveredEntity::PowerSupply {
+                entity: self.power_supply("PS-sparse"),
+                chassis: self.chassis("CH0"),
+                sensors: Vec::new(),
+                oem_capacity_watts: Some(5500.0),
             },
             TestEntity::Chassis => DiscoveredEntity::Chassis {
                 entity: self.chassis("CH0"),

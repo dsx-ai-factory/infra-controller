@@ -187,9 +187,10 @@ pub(crate) enum DiscoveredEntity<B: Bmc> {
         entity: Arc<PowerSupply<B>>,
         chassis: Arc<Chassis<B>>,
         sensors: Vec<SensorLink<B>>,
-        /// Parsed LiteOn OEM capacity used only when standard
-        /// `PowerCapacityWatts` is absent.
-        liteon_capacity_watts: Option<f64>,
+        /// Capacity parsed from a vendor OEM schema, used only when the
+        /// standard `PowerCapacityWatts` is absent. LiteOn is the only source
+        /// today; see `discover_power_supplies`.
+        oem_capacity_watts: Option<f64>,
     },
     Chassis {
         entity: Arc<Chassis<B>>,
@@ -387,16 +388,12 @@ impl<B: Bmc> DiscoveredEntity<B> {
                 .unwrap_or_default(),
             DiscoveredEntity::PowerSupply {
                 entity,
-                liteon_capacity_watts,
+                oem_capacity_watts,
                 ..
             } => {
                 let raw = entity.raw();
                 let mut metrics = Vec::with_capacity(2);
-                if let Some(value) = raw
-                    .power_capacity_watts
-                    .flatten()
-                    .or(*liteon_capacity_watts)
-                {
+                if let Some(value) = raw.power_capacity_watts.flatten().or(*oem_capacity_watts) {
                     metrics.push(DerivedMetric {
                         metric_type: "powersupply_capacity",
                         unit: "watts",
@@ -769,6 +766,63 @@ mod tests {
                         key: "/redfish/v1/Chassis/CH0/PowerSubsystem/PowerSupplies/PS-sparse"
                             .to_string(),
                         derived_metrics: vec![],
+                    },
+                },
+                Check {
+                    scenario: "standard capacity wins over the OEM value",
+                    input: fixture.entity(TestEntity::PowerSupplyWithOemCapacity).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "powersupply",
+                        physical_context: "power_supply",
+                        base_attributes: vec![
+                            ("powersupply_id".to_string(), "PS0".to_string()),
+                            ("chassis_id".to_string(), "CH0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![(
+                            "model".to_string(),
+                            "PSU-3KW".to_string(),
+                        )],
+                        key: "/redfish/v1/Chassis/CH0/PowerSubsystem/PowerSupplies/PS0".to_string(),
+                        derived_metrics: vec![
+                            ObservedDerivedMetric {
+                                metric_type: "powersupply_capacity",
+                                unit: "watts",
+                                value: 3000.0,
+                                labels: vec![],
+                            },
+                            ObservedDerivedMetric {
+                                metric_type: "powersupply_status",
+                                unit: "state",
+                                value: 1.0,
+                                labels: vec![
+                                    label("powersupply_state", "enabled"),
+                                    label("powersupply_health", "warning"),
+                                ],
+                            },
+                        ],
+                    },
+                },
+                Check {
+                    scenario: "OEM capacity fills in when the standard field is absent",
+                    input: fixture.entity(TestEntity::OemCapacityPowerSupply).await,
+                    expect: ObservedEntity {
+                        sensor_ids: vec![],
+                        entity_type: "powersupply",
+                        physical_context: "power_supply",
+                        base_attributes: vec![
+                            ("powersupply_id".to_string(), "PS-sparse".to_string()),
+                            ("chassis_id".to_string(), "CH0".to_string()),
+                        ],
+                        entity_specific_attributes: vec![],
+                        key: "/redfish/v1/Chassis/CH0/PowerSubsystem/PowerSupplies/PS-sparse"
+                            .to_string(),
+                        derived_metrics: vec![ObservedDerivedMetric {
+                            metric_type: "powersupply_capacity",
+                            unit: "watts",
+                            value: 5500.0,
+                            labels: vec![],
+                        }],
                     },
                 },
                 Check {

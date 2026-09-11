@@ -85,6 +85,12 @@ impl PowerSupplyBuilder {
         self.apply_patch(json!({"PowerState": v}))
     }
 
+    /// LiteOn reports capacity as the non-standard string `CapacityWatts`
+    /// and omits `PowerCapacityWatts`. Mirrors PF-1333-7R firmware r1.3.8.
+    pub(crate) fn oem_liteon_capacity_watts(self, v: &str) -> Self {
+        self.apply_patch(json!({"CapacityWatts": v}))
+    }
+
     /// Delta Energy Systems reports per-PSU power state under
     /// `Oem.deltaenergysystems.Power` (not the standard `PowerState` field),
     /// alongside a `FanSpeedTarget`. Mirrors the shape served by real Delta
