@@ -282,7 +282,7 @@ mod tests {
                 "cli-config-error: ForgeTlsClientError::Configuration",
                 tonic::Status::unavailable(
                     "configuration error: could not read root CA cert at /bad/path: \
-                     No such file or directory",
+                     no such file or directory",
                 ),
                 "cli-config-error",
             ),
