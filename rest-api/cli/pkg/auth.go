@@ -246,7 +246,9 @@ func LoginWithOIDCConfig(cfg *ConfigFile, configPath string) (string, error) {
 	}
 	if tokenResp == nil {
 		if err != nil {
-			return "", fmt.Errorf("OIDC login failed: %w", err)
+			// Nothing is defaulted on this path, every value came from config, so the
+			// hint carries only the endpoint that was contacted.
+			return "", fmt.Errorf("OIDC login failed: %w%s", err, loginFailureHint(oidc.TokenURL, nil))
 		}
 		return "", fmt.Errorf("OIDC login requires auth.oidc.refresh_token, client credentials, or username/password in config")
 	}
@@ -376,14 +378,64 @@ func extractNGCToken(body []byte) string {
 	return resp.AccessToken
 }
 
+// resolveOIDCRealm returns the Keycloak realm used to build the token endpoint from
+// --keycloak-url, and whether it came from the flag's built-in default rather than from
+// the command line or config. An explicit flag wins over config, matching client-id.
+func resolveOIDCRealm(c *cli.Context, cfg *ConfigFile) (realm string, fromDefault bool) {
+	if cliFlagExplicitlySet(c, "keycloak-realm") {
+		return c.String("keycloak-realm"), false
+	}
+	if cfg.Auth.OIDC != nil && cfg.Auth.OIDC.Realm != "" {
+		return cfg.Auth.OIDC.Realm, false
+	}
+	return c.String("keycloak-realm"), true
+}
+
+// resolveOIDCClientID returns the OAuth client ID, and whether it came from the flag's
+// built-in default rather than from the command line or config.
+func resolveOIDCClientID(c *cli.Context, cfg *ConfigFile) (clientID string, fromDefault bool) {
+	if cliFlagExplicitlySet(c, "client-id") {
+		return c.String("client-id"), false
+	}
+	if cfg.Auth.OIDC != nil && cfg.Auth.OIDC.ClientID != "" {
+		return cfg.Auth.OIDC.ClientID, false
+	}
+	return c.String("client-id"), true
+}
+
+// loginFailureHint names the token endpoint that was actually contacted, plus any values
+// that came from a built-in default. A realm or client that does not exist in the target
+// Keycloak fails with a 404 or invalid_client that identifies neither, so without this
+// the built-in defaults are invisible in the error.
+func loginFailureHint(tokenURL string, defaulted []string) string {
+	hint := "\n  token endpoint: " + tokenURL
+	if len(defaulted) > 0 {
+		hint += "\n  using built-in default " + strings.Join(defaulted, " and ")
+		hint += "\n  pass the flag explicitly, or set auth.oidc in " + ConfigPath()
+	}
+	return hint
+}
+
 func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
 	tokenURL := c.String("token-url")
 	if tokenURL == "" && cfg.Auth.OIDC != nil {
 		tokenURL = cfg.Auth.OIDC.TokenURL
 	}
+
+	// Values that fell back to a built-in default, recorded so a failed login can name
+	// them. Only populated where the value was actually used: a realm supplied through
+	// --token-url never goes through resolveOIDCRealm.
+	var defaulted []string
+	var resolvedRealm string
+
 	if tokenURL == "" {
-		if keycloakURL := c.String("keycloak-url"); keycloakURL != "" {
-			realm := c.String("keycloak-realm")
+		keycloakURL := c.String("keycloak-url")
+		if keycloakURL != "" {
+			realm, realmFromDefault := resolveOIDCRealm(c, cfg)
+			if realmFromDefault {
+				defaulted = append(defaulted, "--keycloak-realm="+realm)
+			}
+			resolvedRealm = realm
 			tokenURL = fmt.Sprintf("%s/realms/%s/protocol/openid-connect/token",
 				strings.TrimRight(keycloakURL, "/"), realm)
 		}
@@ -392,9 +444,9 @@ func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
 		return fmt.Errorf("--token-url or --keycloak-url is required (or set auth.oidc.token_url in config)")
 	}
 
-	clientID := c.String("client-id")
-	if cfg.Auth.OIDC != nil && cfg.Auth.OIDC.ClientID != "" && !cliFlagExplicitlySet(c, "client-id") {
-		clientID = cfg.Auth.OIDC.ClientID
+	clientID, clientIDFromDefault := resolveOIDCClientID(c, cfg)
+	if clientIDFromDefault {
+		defaulted = append(defaulted, "--client-id="+clientID)
 	}
 
 	clientSecret := c.String("client-secret")
@@ -443,7 +495,7 @@ func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
 		tokenResp, err = passwordGrant(tokenURL, clientID, clientSecret, username, password)
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("%w%s", err, loginFailureHint(tokenURL, defaulted))
 	}
 
 	if cfg.Auth.OIDC == nil {
@@ -455,6 +507,11 @@ func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
 	cfg.Auth.OIDC.TokenURL = tokenURL
 	cfg.Auth.OIDC.ClientID = clientID
 	cfg.Auth.OIDC.ClientSecret = clientSecret
+	// Only persist a realm that was used to build tokenURL; a realm is meaningless
+	// against a token endpoint supplied directly.
+	if resolvedRealm != "" {
+		cfg.Auth.OIDC.Realm = resolvedRealm
+	}
 
 	if err := SaveConfig(cfg); err != nil {
 		return fmt.Errorf("saving config: %w", err)

@@ -105,7 +105,7 @@ tags:
 
       Deprecation history:
 
-      - `capabilities.targetedInstanceCreation` was deprecated in favor of `tenantAccount.siteCapabilities` and will be removed on October 1st, 2026 0:00 UTC. The value returned on GET `/tenant/current` is computed from Ready Tenant Account configuration; embedded `TenantSummary.capabilities` in nested resources always reports `false`.
+      - `capabilities.targetedInstanceCreation` was deprecated in favor of `tenantAccount.siteCapabilities` and will be removed on October 1st, 2026 0:00 UTC. The value returned on GET `/tenant/current` is computed from Ready Tenant Account configuration; embedded `TenantSummary.capabilities` in nested resources always omits the property, so it serializes as `{}`.
   - name: Tenant Account
     description: |-
       Tenant Account connects a Tenant with an Infrastructure Provider. It represents/contains any information pertaining to their relationship.

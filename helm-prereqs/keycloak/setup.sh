@@ -82,7 +82,11 @@ else
 fi
 export KEYCLOAK_DB_PASSWORD_SECRET_NAME KEYCLOAK_DB_PASSWORD_SECRET_KEY
 
-echo "  Deploying Keycloak (quay.io/keycloak/keycloak:24.0)..."
+# deployment.yaml is the only place the image is pinned. Read the tag back from it so a
+# bump there cannot leave this message reporting a version we are not deploying, which
+# is the version an operator quotes when debugging.
+_KC_IMAGE="$(awk '$1 == "image:" { print $2; exit }' "${SCRIPT_DIR}/deployment.yaml")"
+echo "  Deploying Keycloak (${_KC_IMAGE:-image pinned in deployment.yaml})..."
 kubectl apply -n "${NS}" \
     -f "${SCRIPT_DIR}/realm-configmap.yaml" \
     -f "${SCRIPT_DIR}/service.yaml"
