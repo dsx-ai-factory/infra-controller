@@ -23,7 +23,7 @@ use forge_tls::client_config::get_root_ca_path;
 use futures::future::try_join_all;
 use machine_a_tron::{
     BmcMockRegistry, DeviceHandle, DhcpClient, MachineATron, MachineATronConfig,
-    MachineATronContext, UdpDhcpService, api_throttler,
+    MachineATronContext, UdpDhcpService, api_throttler, spawn_desired_firmware_refresher,
 };
 use rpc::forge_api_client::FailOverOn;
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, RetryConfig};
@@ -94,6 +94,10 @@ pub async fn run_local(
         dhcp_client,
         mac_address_pool,
     });
+
+    // Same refresher as production main.rs, so integration suites exercise
+    // live target changes; detached - it ends with the test process.
+    spawn_desired_firmware_refresher(app_context.clone());
 
     let mat = MachineATron::new(app_context.clone());
     let simulators = mat.make_devices(false).await?;

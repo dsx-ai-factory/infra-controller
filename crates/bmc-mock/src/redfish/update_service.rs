@@ -306,15 +306,37 @@ impl UpdateServiceState {
 
     /// Re-stage one component's upgrade target on a live mock. Only the
     /// pending target changes - active inventory and staged uploads are left
-    /// alone. `Some(v)` stages `v` unless the active version already equals it
-    /// (no re-queueing completed upgrades); `None` clears the target.
+    /// alone. `Some(v)` stages `v` unless the component is already at (or an
+    /// in-flight upload is already bringing it to) that version; `None` clears
+    /// the target. The decision runs under the same tasks -> staged ->
+    /// inventory -> pending lock order as `apply_staged_firmware`, so a
+    /// concurrent apply either completes before or after the whole retarget.
     pub fn retarget_pending_upgrade(&self, component_id: &str, desired: Option<&str>) {
-        let active_version = self
-            .find_firmware_inventory(component_id)
-            .and_then(|v| v["Version"].as_str().map(str::to_owned));
+        let tasks = self.tasks.read().unwrap();
+        let staged = self.staged_firmware.read().unwrap();
+        let inventory = self.firmware_inventory.read().unwrap();
         let mut pending = self.pending_upgrades.write().unwrap();
+        // The version this component ends up at once any staged or in-flight
+        // upload applies: comparing against it (rather than the active
+        // inventory alone) keeps a rollback target pending when an upload of
+        // another version is still going to land.
+        let effective_version = staged
+            .get(component_id)
+            .cloned()
+            .or_else(|| {
+                tasks
+                    .values()
+                    .filter(|t| t.component_id == component_id && !t.target_version.is_empty())
+                    .map(|t| t.target_version.clone())
+                    .next()
+            })
+            .or_else(|| {
+                inventory
+                    .get(component_id)
+                    .and_then(|sw| sw.to_json()["Version"].as_str().map(str::to_owned))
+            });
         match desired {
-            Some(version) if active_version.as_deref() != Some(version) => {
+            Some(version) if effective_version.as_deref() != Some(version) => {
                 pending.insert(component_id.to_string(), version.to_string());
             }
             _ => {
@@ -725,6 +747,30 @@ mod tests {
         // None withdraws a target.
         state.retarget_pending_upgrade("UEFI", None);
         assert!(pending_pairs(&state).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retarget_to_active_keeps_target_while_upload_in_flight() {
+        // Rollback race: active A, an upload of B in flight, desired flips
+        // back to A. The pending A entry must survive - once B applies, the
+        // next upload pass needs it to stage the rollback.
+        let state = make_state(&[("BMC_Firmware", "A")], &[("BMC_Firmware", "B")]);
+        state.record_upload("BMC_Firmware", "B".to_string());
+        state.retarget_pending_upgrade("BMC_Firmware", Some("A"));
+        assert_eq!(
+            pending_pairs(&state),
+            vec![("BMC_Firmware".to_string(), "A".to_string())]
+        );
+        // B still applies, then A remains the pending rollback target.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        state.apply_staged_firmware();
+        let active = state.find_firmware_inventory("BMC_Firmware").unwrap();
+        assert_eq!(active["Version"], "B");
+        assert_eq!(
+            pending_pairs(&state),
+            vec![("BMC_Firmware".to_string(), "A".to_string())]
+        );
     }
 
     #[tokio::test(start_paused = true)]

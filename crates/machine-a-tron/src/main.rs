@@ -152,42 +152,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         mac_address_pool: Mutex::new(mac_address_pool).into(),
     });
 
-    // Re-fetch desired firmware versions on the API refresh cadence so target
-    // changes reach live machines without a restart (#4688); machines pick the
-    // change up on their own tick. Empty responses and fetch errors keep the
-    // last known targets, leaving flows without desired versions unaffected.
-    {
-        let app_context = app_context.clone();
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(app_context.app_config.api_refresh_interval);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            interval.tick().await; // the startup fetch above already populated the context
-            loop {
-                interval.tick().await;
-                match app_context.forge_api_client.get_desired_firmware_versions().await {
-                    Ok(response) => {
-                        if response.entries.is_empty() {
-                            continue;
-                        }
-                        let mut current =
-                            app_context.desired_firmware_versions.write().unwrap();
-                        if *current != response.entries {
-                            tracing::info!(
-                                desired_firmware_versions = ?response.entries,
-                                "Desired firmware versions changed",
-                            );
-                            *current = response.entries;
-                        }
-                    }
-                    Err(error) => tracing::warn!(
-                        %error,
-                        "Failed to refresh desired firmware versions; keeping last known",
-                    ),
-                }
-            }
-        });
-    }
+    // Refreshes desired firmware targets for live machines (#4688); aborted
+    // at shutdown so it cannot outlive the simulators it feeds.
+    let firmware_refresher = machine_a_tron::spawn_desired_firmware_refresher(app_context.clone());
 
     let info = app_context.forge_api_client.version(false).await?;
     tracing::info!(
@@ -268,6 +235,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mat_result = mat.run(simulators, stop_rx).await;
 
+    firmware_refresher.abort();
     if let Some(hosted_ufm) = hosted_ufm {
         hosted_ufm.shutdown().await?;
     }
