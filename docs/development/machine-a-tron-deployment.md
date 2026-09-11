@@ -223,8 +223,8 @@ Copy `helm-prereqs/values/machine-a-tron.yaml` and fill in the site-specific val
 | Field | Description |
 |-------|-------------|
 | `image.tag` | Tag produced by [building the container image](#building-the-container-image) (e.g. `8c35783af-amd64`) |
-| `machines.dell-hosts.bmcDhcpRelayAddress` | Gateway of the BMC (OOB) network from nico-core site config; relay for BMC DHCP |
-| `machines.dell-hosts.underlayDhcpRelayAddress` | Gateway of the underlay segment that serves DPU OOB and switch NVOS DHCP (the previous names `oobDhcpRelayAddress` and `adminDhcpRelayAddress` remain accepted as deprecated aliases) |
+| `machines.dell-hosts.bmcDhcpRelayAddress` | Gateway of the BMC (OOB) network from nico-core site config; relay for BMC DHCP (previously `oobDhcpRelayAddress`, still accepted) |
+| `machines.dell-hosts.underlayDhcpRelayAddress` | Gateway of the underlay segment that serves DPU OOB and switch NVOS DHCP (previously `adminDhcpRelayAddress`, still accepted) |
 | `machines.dell-hosts.hostCount` | Must not exceed available OOB DHCP addresses (`hostCount + hostCount×dpuPerHostCount`) |
 
 ### SPIFFE URI override
