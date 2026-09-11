@@ -556,7 +556,9 @@ type ForgeClient interface {
 	Version(ctx context.Context, in *VersionRequest, opts ...grpc.CallOption) (*BuildInfo, error)
 	// What version is the RMS backend running?
 	// Returns Unavailable if RMS is not configured on this nico-api instance.
-	// Returns Unimplemented on older nico-api servers that predate this RPC.
+	// Returns PermissionDenied on older nico-api servers that predate this RPC:
+	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
+	// dispatch, so Unimplemented is never reached on those servers.
 	GetRmsVersion(ctx context.Context, in *GetRmsVersionRequest, opts ...grpc.CallOption) (*GetRmsVersionResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(ctx context.Context, in *StreamConsoleLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConsoleLogLine], error)
@@ -6797,7 +6799,9 @@ type ForgeServer interface {
 	Version(context.Context, *VersionRequest) (*BuildInfo, error)
 	// What version is the RMS backend running?
 	// Returns Unavailable if RMS is not configured on this nico-api instance.
-	// Returns Unimplemented on older nico-api servers that predate this RPC.
+	// Returns PermissionDenied on older nico-api servers that predate this RPC:
+	// the RBAC middleware rejects unknown RPC names with HTTP 403 before gRPC
+	// dispatch, so Unimplemented is never reached on those servers.
 	GetRmsVersion(context.Context, *GetRmsVersionRequest) (*GetRmsVersionResponse, error)
 	// Stream recent and live machine console output.
 	StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error
