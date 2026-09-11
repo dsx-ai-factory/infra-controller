@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -267,7 +268,7 @@ func TestServiceBuilder_BuildService_DPU(t *testing.T) {
 	assert.Equal(t, "parent-host-uuid", svc.Labels[LabelParentMatID])
 }
 
-func TestServiceBuilder_BuildService_BMCIPAsClusterIP(t *testing.T) {
+func TestServiceBuilder_BuildService_BMCIPAsExternalIP(t *testing.T) {
 	builder := &ServiceBuilder{
 		Namespace: "test-ns",
 		BaseSelector: map[string]string{
@@ -290,8 +291,11 @@ func TestServiceBuilder_BuildService_BMCIPAsClusterIP(t *testing.T) {
 
 	svc := builder.BuildService(machine, MachineTypeHost, "", "")
 
-	// Check BMC IP is used directly as ClusterIP
-	assert.Equal(t, "10.100.0.20", svc.Spec.ClusterIP)
+	// BMC IP is published as externalIP; clusterIP is left to the apiserver
+	assert.Equal(t, corev1.ServiceTypeClusterIP, svc.Spec.Type)
+	assert.Equal(t, []string{"10.100.0.20"}, svc.Spec.ExternalIPs)
+	assert.Empty(t, svc.Spec.ClusterIP)
+	assert.Empty(t, svc.Spec.ClusterIPs)
 }
 
 func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
@@ -368,8 +372,6 @@ func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 			var got []string
 			for _, svc := range services {
 				got = append(got, svc.Labels[LabelMachineType]+"/"+svc.Labels[LabelMatID])
-				assert.Equal(t, svc.Annotations[AnnotationBMCIP], svc.Spec.ClusterIP,
-					"%s: ClusterIP must be the reported BMC IP", svc.Name)
 				if svc.Labels[LabelMachineType] == MachineTypeDPU {
 					assert.Equal(t, "host-1", svc.Labels[LabelParentMatID],
 						"%s: DPU Service must link its parent host", svc.Name)
@@ -382,12 +384,14 @@ func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 
 func TestComputeServiceDiff(t *testing.T) {
 	tests := []struct {
-		name            string
-		desired         []*corev1.Service
-		existing        []*corev1.Service
-		wantCreateCount int
-		wantUpdateCount int
-		wantDeleteCount int
+		name              string
+		desired           []*corev1.Service
+		existing          []*corev1.Service
+		wantCreateCount   int
+		wantUpdateCount   int
+		wantDeleteCount   int
+		wantRecreateCount int
+		wantErrorCount    int
 	}{
 		{
 			name:            "empty to empty",
@@ -602,17 +606,117 @@ func TestComputeServiceDiff(t *testing.T) {
 			},
 			wantDeleteCount: 0, // should not delete services we don't manage
 		},
+		{
+			name: "no update when externalIP matches and clusterIP is apiserver-allocated",
+			desired: []*corev1.Service{
+				makeTestServiceWithBMCIP("svc-1", "mat-id-1", "10.100.0.20"),
+			},
+			existing: []*corev1.Service{
+				withAllocatedClusterIP(makeTestServiceWithBMCIP("svc-1", "mat-id-1", "10.100.0.20"), "10.96.0.10"),
+			},
+		},
+		{
+			// The Service was created before MAT reported a lease, so its
+			// clusterIP is apiserver-allocated and stays
+			name: "first lease updates externalIPs in place",
+			desired: []*corev1.Service{
+				makeTestServiceWithBMCIP("svc-1", "mat-id-1", "10.100.0.20"),
+			},
+			existing: []*corev1.Service{
+				withAllocatedClusterIP(makeTestService("svc-1", "mat-id-1"), "10.96.0.10"),
+			},
+			wantUpdateCount: 1,
+		},
+		{
+			name: "legacy service with changed lease is recreated",
+			desired: []*corev1.Service{
+				makeTestServiceWithBMCIP("svc-1", "mat-id-1", "10.100.0.21"),
+			},
+			existing: []*corev1.Service{
+				makeLegacyClusterIPService("svc-1", "mat-id-1", "10.100.0.20"),
+			},
+			wantRecreateCount: 1,
+		},
+		{
+			// Legacy Service that lost its lease before the upgrade and got
+			// the same address back: healed by the collision check
+			name: "unannotated service holding its own BMC IP as clusterIP is recreated",
+			desired: []*corev1.Service{
+				makeTestServiceWithBMCIP("svc-1", "mat-id-1", "10.100.0.20"),
+			},
+			existing: []*corev1.Service{
+				withAllocatedClusterIP(makeTestService("svc-1", "mat-id-1"), "10.100.0.20"),
+			},
+			wantRecreateCount: 1,
+		},
+		{
+			// Without the annotation a stale BMC address is indistinguishable
+			// from an allocated clusterIP and is kept until it is leased again
+			name: "unannotated service with a stale BMC IP as clusterIP is updated in place",
+			desired: []*corev1.Service{
+				makeTestServiceWithBMCIP("svc-1", "mat-id-1", "10.100.0.21"),
+			},
+			existing: []*corev1.Service{
+				withAllocatedClusterIP(makeTestService("svc-1", "mat-id-1"), "10.100.0.20"),
+			},
+			wantUpdateCount: 1,
+		},
+		{
+			name: "service without BMC IP keeps its allocated clusterIP",
+			desired: []*corev1.Service{
+				makeTestService("svc-1", "mat-id-1"),
+			},
+			existing: []*corev1.Service{
+				withAllocatedClusterIP(makeTestService("svc-1", "mat-id-1"), "10.96.0.10"),
+			},
+		},
+		{
+			// kube-proxy would merge both Services on that address, so only the
+			// first by name is published, whatever order MAT reports them in, and
+			// the other is withdrawn even though it exists
+			name: "duplicate BMC IP across desired services keeps the first by name and withdraws the other",
+			desired: []*corev1.Service{
+				makeTestServiceWithBMCIP("svc-2", "mat-id-2", "10.100.0.20"),
+				makeTestServiceWithBMCIP("svc-1", "mat-id-1", "10.100.0.20"),
+			},
+			existing: []*corev1.Service{
+				withAllocatedClusterIP(makeTestServiceWithBMCIP("svc-1", "mat-id-1", "10.100.0.20"), "10.96.0.10"),
+				withAllocatedClusterIP(makeTestService("svc-2", "mat-id-2"), "10.96.0.11"),
+			},
+			wantDeleteCount: 1,
+			wantErrorCount:  1,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			diff := ComputeServiceDiff(tt.desired, tt.existing)
+			diff := computeServiceDiff(tt.desired, tt.existing, zerolog.Nop())
 
 			assert.Len(t, diff.Create, tt.wantCreateCount)
 			assert.Len(t, diff.Update, tt.wantUpdateCount)
 			assert.Len(t, diff.Delete, tt.wantDeleteCount)
+			assert.Len(t, diff.Recreate, tt.wantRecreateCount)
+			assert.Len(t, diff.Errors, tt.wantErrorCount)
 		})
 	}
+}
+
+func TestComputeServiceDiff_LeaseChangeUpdatesExternalIPsInPlace(t *testing.T) {
+	desired := makeTestServiceWithBMCIP("svc-1", "mat-id-1", "10.100.0.21")
+	existing := withAllocatedClusterIP(makeTestServiceWithBMCIP("svc-1", "mat-id-1", "10.100.0.20"), "10.96.0.10")
+	existing.ResourceVersion = "42"
+
+	diff := computeServiceDiff([]*corev1.Service{desired}, []*corev1.Service{existing}, zerolog.Nop())
+
+	require.Len(t, diff.Update, 1)
+	assert.Empty(t, diff.Recreate)
+	updated := diff.Update[0]
+	assert.Equal(t, []string{"10.100.0.21"}, updated.Spec.ExternalIPs)
+	assert.Equal(t, "10.100.0.21", updated.Annotations[AnnotationBMCIP])
+	// The apiserver-allocated clusterIP is carried over untouched
+	assert.Equal(t, "10.96.0.10", updated.Spec.ClusterIP)
+	assert.Equal(t, []string{"10.96.0.10"}, updated.Spec.ClusterIPs)
+	assert.Equal(t, "42", updated.ResourceVersion)
 }
 
 func TestComputeServiceDiff_PreservesForeignMetadataOnUpdate(t *testing.T) {
@@ -622,12 +726,48 @@ func TestComputeServiceDiff_PreservesForeignMetadataOnUpdate(t *testing.T) {
 	existing.Labels["external.example.com/owner"] = "operator"
 	existing.Annotations["external.example.com/note"] = "keep"
 
-	diff := ComputeServiceDiff([]*corev1.Service{desired}, []*corev1.Service{existing})
+	diff := computeServiceDiff([]*corev1.Service{desired}, []*corev1.Service{existing}, zerolog.Nop())
 
 	require.Len(t, diff.Update, 1)
 	assert.Equal(t, "operator", diff.Update[0].Labels["external.example.com/owner"])
 	assert.Equal(t, "keep", diff.Update[0].Annotations["external.example.com/note"])
 	assert.Equal(t, "9999", diff.Update[0].Spec.Ports[0].TargetPort.String())
+}
+
+func TestComputeServiceDiff_PreservesForeignMetadataOnRecreate(t *testing.T) {
+	tests := []struct {
+		name      string
+		desiredIP string
+		existing  *corev1.Service
+	}{
+		{
+			// Lease changed, so the legacy clusterIP is not a published BMC IP
+			name:      "legacy with changed lease",
+			desiredIP: "10.100.0.21",
+			existing:  makeLegacyClusterIPService("svc-1", "mat-id-1", "10.100.0.20"),
+		},
+		{
+			name:      "clusterIP collides with published BMC IP",
+			desiredIP: "10.100.0.20",
+			existing:  withAllocatedClusterIP(makeTestServiceWithBMCIP("svc-1", "mat-id-1", "10.100.0.20"), "10.100.0.20"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			desired := makeTestServiceWithBMCIP("svc-1", "mat-id-1", tt.desiredIP)
+			tt.existing.Labels["external.example.com/owner"] = "operator"
+			tt.existing.Annotations["external.example.com/note"] = "keep"
+
+			diff := computeServiceDiff([]*corev1.Service{desired}, []*corev1.Service{tt.existing}, zerolog.Nop())
+
+			require.Len(t, diff.Recreate, 1)
+			assert.Empty(t, diff.Update)
+			assert.Equal(t, "operator", diff.Recreate[0].Labels["external.example.com/owner"])
+			assert.Equal(t, "keep", diff.Recreate[0].Annotations["external.example.com/note"])
+			assert.Equal(t, tt.desiredIP, diff.Recreate[0].Annotations[AnnotationBMCIP])
+		})
+	}
 }
 
 func TestReconcileLogic(t *testing.T) {
@@ -692,7 +832,7 @@ func runTestReconcile(ctx context.Context, builder *ServiceBuilder, k8s *trackin
 	selector := LabelManagedBy + "=" + LabelManagedByValue
 	existing, _ := k8s.List(ctx, builder.Namespace, selector)
 
-	diff := ComputeServiceDiff(desired, existing)
+	diff := computeServiceDiff(desired, existing, zerolog.Nop())
 
 	for _, svc := range diff.Create {
 		if err := k8s.Create(ctx, svc); err != nil {
@@ -719,6 +859,29 @@ func runTestReconcile(ctx context.Context, builder *ServiceBuilder, k8s *trackin
 	}
 
 	return result
+}
+
+// makeTestServiceWithBMCIP creates a test service publishing ip as externalIP.
+func makeTestServiceWithBMCIP(name, matID, ip string) *corev1.Service {
+	svc := makeTestService(name, matID)
+	svc.Annotations[AnnotationBMCIP] = ip
+	svc.Spec.ExternalIPs = []string{ip}
+	return svc
+}
+
+// makeLegacyClusterIPService creates a test service as built by controller
+// versions that set the BMC IP as clusterIP.
+func makeLegacyClusterIPService(name, matID, ip string) *corev1.Service {
+	svc := makeTestService(name, matID)
+	svc.Annotations[AnnotationBMCIP] = ip
+	return withAllocatedClusterIP(svc, ip)
+}
+
+// withAllocatedClusterIP mimics the apiserver filling in the clusterIP.
+func withAllocatedClusterIP(svc *corev1.Service, ip string) *corev1.Service {
+	svc.Spec.ClusterIP = ip
+	svc.Spec.ClusterIPs = []string{ip}
+	return svc
 }
 
 // makeTestService creates a test service with standard labels.
@@ -753,12 +916,16 @@ func makeTestService(name, matID string) *corev1.Service {
 // Mock implementations
 
 type trackingK8sClient struct {
+	mu        sync.Mutex
 	services  map[string]*corev1.Service
 	createErr error
 	deleteErr error
+	allocated int
 }
 
 func (m *trackingK8sClient) List(ctx context.Context, namespace string, labelSelector string) ([]*corev1.Service, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	result := make([]*corev1.Service, 0)
 	for _, svc := range m.services {
 		if svc.Labels[LabelManagedBy] == LabelManagedByValue {
@@ -772,11 +939,27 @@ func (m *trackingK8sClient) Create(ctx context.Context, svc *corev1.Service) err
 	if m.createErr != nil {
 		return m.createErr
 	}
-	m.services[svc.Name] = svc.DeepCopy()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	stored := svc.DeepCopy()
+	// Mimic the apiserver allocating a clusterIP when none is requested
+	if stored.Spec.ClusterIP == "" {
+		m.allocated++
+		stored.Spec.ClusterIP = fmt.Sprintf("10.96.0.%d", m.allocated)
+		stored.Spec.ClusterIPs = []string{stored.Spec.ClusterIP}
+	}
+	m.services[svc.Name] = stored
 	return nil
 }
 
 func (m *trackingK8sClient) Update(ctx context.Context, svc *corev1.Service) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// clusterIP is immutable; the mock also rejects an empty value so tests
+	// prove the controller carries the allocation over
+	if existing, ok := m.services[svc.Name]; ok && svc.Spec.ClusterIP != existing.Spec.ClusterIP {
+		return fmt.Errorf("spec.clusterIPs: Invalid value: %q: field is immutable", svc.Spec.ClusterIP)
+	}
 	m.services[svc.Name] = svc.DeepCopy()
 	return nil
 }
@@ -785,6 +968,8 @@ func (m *trackingK8sClient) Delete(ctx context.Context, namespace, name string) 
 	if m.deleteErr != nil {
 		return m.deleteErr
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	delete(m.services, name)
 	return nil
 }
@@ -1008,6 +1193,107 @@ func TestReconciler_OwnerReferences(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconciler_MigratesLegacyClusterIPService(t *testing.T) {
+	builder := &ServiceBuilder{
+		Namespace:    "test-ns",
+		BaseSelector: map[string]string{"app": "machine-a-tron"},
+	}
+	statusFor := func(ip string) *matclient.MachinesStatusResponse {
+		return &matclient.MachinesStatusResponse{
+			Machines: []matclient.MachineStatus{{
+				MatID:      "host-1234",
+				APIState:   "Ready",
+				PowerState: "On",
+				BMC:        matclient.BMCStatus{IP: ptr(ip), Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8443}},
+			}},
+		}
+	}
+
+	// Seed a Service as built by a previous controller version: BMC IP as clusterIP
+	legacy := builder.BuildService(&statusFor("10.100.0.20").Machines[0], MachineTypeHost, "", "")
+	legacy.Spec.ExternalIPs = nil
+	withAllocatedClusterIP(legacy, "10.100.0.20")
+	k8sClient := &trackingK8sClient{services: map[string]*corev1.Service{legacy.Name: legacy}}
+
+	fetcher := &mockStatusFetcher{status: statusFor("10.100.0.20")}
+	discovery := &mockDiscovery{instances: []DiscoveredInstance{{URL: "https://mat.ns.svc:8443", ServiceName: "mat-bmc-mock"}}}
+	reconciler := NewReconciler(discovery, builder, k8sClient, nil, nil, zerolog.Nop())
+	reconciler.statusFetcher = func(string) (StatusFetcher, error) { return fetcher, nil }
+
+	// First pass: legacy Service is deleted and recreated with the BMC IP as externalIP
+	result := reconciler.Reconcile(context.Background())
+	require.Empty(t, result.Errors)
+	assert.Equal(t, 1, result.Recreated)
+	assert.Equal(t, 0, result.Created)
+	assert.Equal(t, 0, result.Updated)
+	svc := k8sClient.services[legacy.Name]
+	require.NotNil(t, svc)
+	assert.Equal(t, []string{"10.100.0.20"}, svc.Spec.ExternalIPs)
+	assert.NotEmpty(t, svc.Spec.ClusterIP)
+	assert.NotEqual(t, "10.100.0.20", svc.Spec.ClusterIP)
+	allocated := svc.Spec.ClusterIP
+
+	// Second pass with the same lease: converged, nothing to do
+	result = reconciler.Reconcile(context.Background())
+	require.Empty(t, result.Errors)
+	assert.Equal(t, 0, result.Created+result.Updated+result.Deleted+result.Recreated)
+
+	// Lease change: externalIPs updated in place, allocated clusterIP untouched
+	fetcher.status = statusFor("10.100.0.21")
+	result = reconciler.Reconcile(context.Background())
+	require.Empty(t, result.Errors)
+	assert.Equal(t, 1, result.Updated)
+	assert.Equal(t, 0, result.Recreated)
+	svc = k8sClient.services[legacy.Name]
+	assert.Equal(t, []string{"10.100.0.21"}, svc.Spec.ExternalIPs)
+	assert.Equal(t, "10.100.0.21", svc.Annotations[AnnotationBMCIP])
+	assert.Equal(t, allocated, svc.Spec.ClusterIP)
+}
+
+func TestReconciler_RecreatesServiceHoldingAnotherBMCIPAsClusterIP(t *testing.T) {
+	builder := &ServiceBuilder{
+		Namespace:    "test-ns",
+		BaseSelector: map[string]string{"app": "machine-a-tron"},
+	}
+	machine := func(matID, ip string) matclient.MachineStatus {
+		return matclient.MachineStatus{
+			MatID:      matID,
+			APIState:   "Ready",
+			PowerState: "On",
+			BMC:        matclient.BMCStatus{IP: ptr(ip), Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8443}},
+		}
+	}
+	status := &matclient.MachinesStatusResponse{Machines: []matclient.MachineStatus{
+		machine("host-x", "10.100.0.10"),
+		machine("host-y", "10.100.0.20"),
+	}}
+
+	// Seed X with Y's BMC IP as its apiserver-allocated clusterIP; both externalIPs are correct
+	x := withAllocatedClusterIP(builder.BuildService(&status.Machines[0], MachineTypeHost, "", ""), "10.100.0.20")
+	y := withAllocatedClusterIP(builder.BuildService(&status.Machines[1], MachineTypeHost, "", ""), "10.96.0.99")
+	k8sClient := &trackingK8sClient{services: map[string]*corev1.Service{x.Name: x, y.Name: y}}
+
+	discovery := &mockDiscovery{instances: []DiscoveredInstance{{URL: "https://mat.ns.svc:8443", ServiceName: "mat-bmc-mock"}}}
+	reconciler := NewReconciler(discovery, builder, k8sClient, nil, nil, zerolog.Nop())
+	reconciler.statusFetcher = func(string) (StatusFetcher, error) { return &mockStatusFetcher{status: status}, nil }
+
+	result := reconciler.Reconcile(context.Background())
+	require.Empty(t, result.Errors)
+	assert.Equal(t, 1, result.Recreated)
+	assert.Equal(t, 0, result.Created+result.Updated+result.Deleted)
+	healed := k8sClient.services[x.Name]
+	require.NotNil(t, healed)
+	assert.Equal(t, []string{"10.100.0.10"}, healed.Spec.ExternalIPs)
+	assert.NotEmpty(t, healed.Spec.ClusterIP)
+	assert.NotEqual(t, "10.100.0.20", healed.Spec.ClusterIP)
+	assert.Equal(t, "10.96.0.99", k8sClient.services[y.Name].Spec.ClusterIP)
+
+	// Converged
+	result = reconciler.Reconcile(context.Background())
+	require.Empty(t, result.Errors)
+	assert.Equal(t, 0, result.Created+result.Updated+result.Deleted+result.Recreated)
 }
 
 // trackingStatusFetcher implements StatusFetcher and tracks calls for testing.

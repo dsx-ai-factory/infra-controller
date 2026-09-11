@@ -116,15 +116,15 @@ settings.
 ## Machine-a-tron BMC routing
 
 Tilt runs machine-a-tron in controller mode. `mat-k8s-controller` polls the
-machine-a-tron status endpoint and creates one Kubernetes ClusterIP Service per
-simulated BMC, using the BMC address assigned by NICo as the Service IP. NICo
-therefore connects directly to each simulated BMC instead of routing every
+machine-a-tron status endpoint and creates one Kubernetes Service per simulated
+BMC, publishing the BMC address assigned by NICo as the Service's `externalIPs`.
+NICo therefore connects directly to each simulated BMC instead of routing every
 Redfish request through the shared machine-a-tron proxy.
 
-The Tilt BMC underlay is `10.96.64.0/18`, which lies within Kind's default
-`10.96.0.0/16` ServiceCIDR. Kubernetes rejects an explicit ClusterIP outside
-the cluster ServiceCIDR, so keep this range aligned with the Kind network
-configuration if the ServiceCIDR changes.
+The Tilt BMC underlay is `10.200.0.0/18`. BMC addresses are Service externalIPs,
+which the apiserver neither allocates nor validates and kube-proxy binds on
+every node, so this range must stay outside Kind's default `10.96.0.0/16`
+ServiceCIDR and `10.244.0.0/16` pod CIDR.
 
 ## Image builds
 
