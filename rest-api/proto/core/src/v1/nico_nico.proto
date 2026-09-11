@@ -927,6 +927,7 @@ service Forge {
   rpc DeleteAttestationProfile(DeleteAttestationProfileRequest) returns (DeleteAttestationProfileResponse);
   rpc GetAttestationProfile(GetAttestationProfileRequest) returns (AttestationProfile);
   rpc ListAttestationProfiles(google.protobuf.Empty) returns (ListAttestationProfilesResponse);
+  rpc GetAttestationCoverage(google.protobuf.Empty) returns (GetAttestationCoverageResponse);
   // SPDM attestation APIs end
 
   // SPIFFE Machine Identity APIs
@@ -1288,6 +1289,50 @@ message GetAttestationProfileRequest {
 
 message ListAttestationProfilesResponse {
   repeated AttestationProfile profiles = 1;
+}
+
+// Which profile would supply the policy for a hardware class, or why none
+// would. Reported by the server so a caller does not restate the resolution
+// rule, which is the same one scheduling applies to a single machine.
+enum AttestationCoverage {
+  // Unset sentinel. The server always reports a real value, so this only
+  // appears to a client newer than the server it is talking to.
+  ATTESTATION_COVERAGE_UNSPECIFIED = 0;
+  // A profile keyed to this class supplies the policy.
+  ATTESTATION_COVERAGE_OWN_PROFILE = 1;
+  // The reserved "any" profile supplies it, rather than one written for this
+  // hardware.
+  ATTESTATION_COVERAGE_ANY_FALLBACK = 2;
+  // Neither this class nor "any" has a profile.
+  ATTESTATION_COVERAGE_NO_PROFILE = 3;
+  // Exploration recognised none of this hardware, and no "any" profile is
+  // stored.
+  ATTESTATION_COVERAGE_CLASS_UNRECOGNIZED = 4;
+  // No exploration has recorded a class. "any" is not consulted, so nothing
+  // covers these endpoints until they are explored again.
+  ATTESTATION_COVERAGE_CLASS_NOT_RECORDED = 5;
+}
+
+message AttestationCoverageEntry {
+  // The class recorded on these endpoints, empty for the endpoints carrying
+  // none.
+  string hardware_class = 1;
+  // How many explored endpoints carry it.
+  int32 endpoints = 2;
+  AttestationCoverage coverage = 3;
+  // The mode of the profile that would apply, absent when none would.
+  optional AttesterSelectionMode mode = 4;
+}
+
+message GetAttestationCoverageResponse {
+  // One entry per class recorded across explored endpoints, ordered by class,
+  // with the endpoints carrying no class last.
+  repeated AttestationCoverageEntry entries = 1;
+  // The mode of the reserved "any" profile, absent when none is stored. Kept
+  // apart from the entries because "any" is never a recorded class, and the
+  // site's posture for everything unprofiled should be visible rather than
+  // inferred from which classes are missing.
+  optional AttesterSelectionMode any_profile_mode = 2;
 }
 
 // Machine Identity - JWT-SVID token signing

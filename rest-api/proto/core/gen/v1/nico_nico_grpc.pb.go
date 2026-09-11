@@ -458,6 +458,7 @@ const (
 	Forge_DeleteAttestationProfile_FullMethodName                           = "/forge.Forge/DeleteAttestationProfile"
 	Forge_GetAttestationProfile_FullMethodName                              = "/forge.Forge/GetAttestationProfile"
 	Forge_ListAttestationProfiles_FullMethodName                            = "/forge.Forge/ListAttestationProfiles"
+	Forge_GetAttestationCoverage_FullMethodName                             = "/forge.Forge/GetAttestationCoverage"
 	Forge_SignMachineIdentity_FullMethodName                                = "/forge.Forge/SignMachineIdentity"
 	Forge_GetTenantIdentityConfiguration_FullMethodName                     = "/forge.Forge/GetTenantIdentityConfiguration"
 	Forge_SetTenantIdentityConfiguration_FullMethodName                     = "/forge.Forge/SetTenantIdentityConfiguration"
@@ -1275,6 +1276,7 @@ type ForgeClient interface {
 	DeleteAttestationProfile(ctx context.Context, in *DeleteAttestationProfileRequest, opts ...grpc.CallOption) (*DeleteAttestationProfileResponse, error)
 	GetAttestationProfile(ctx context.Context, in *GetAttestationProfileRequest, opts ...grpc.CallOption) (*AttestationProfile, error)
 	ListAttestationProfiles(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListAttestationProfilesResponse, error)
+	GetAttestationCoverage(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*GetAttestationCoverageResponse, error)
 	// SPIFFE Machine Identity APIs
 	// Signs a JWT-SVID token for machine identity
 	SignMachineIdentity(ctx context.Context, in *MachineIdentityRequest, opts ...grpc.CallOption) (*MachineIdentityResponse, error)
@@ -5803,6 +5805,16 @@ func (c *forgeClient) ListAttestationProfiles(ctx context.Context, in *emptypb.E
 	return out, nil
 }
 
+func (c *forgeClient) GetAttestationCoverage(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*GetAttestationCoverageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetAttestationCoverageResponse)
+	err := c.cc.Invoke(ctx, Forge_GetAttestationCoverage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) SignMachineIdentity(ctx context.Context, in *MachineIdentityRequest, opts ...grpc.CallOption) (*MachineIdentityResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MachineIdentityResponse)
@@ -7188,6 +7200,7 @@ type ForgeServer interface {
 	DeleteAttestationProfile(context.Context, *DeleteAttestationProfileRequest) (*DeleteAttestationProfileResponse, error)
 	GetAttestationProfile(context.Context, *GetAttestationProfileRequest) (*AttestationProfile, error)
 	ListAttestationProfiles(context.Context, *emptypb.Empty) (*ListAttestationProfilesResponse, error)
+	GetAttestationCoverage(context.Context, *emptypb.Empty) (*GetAttestationCoverageResponse, error)
 	// SPIFFE Machine Identity APIs
 	// Signs a JWT-SVID token for machine identity
 	SignMachineIdentity(context.Context, *MachineIdentityRequest) (*MachineIdentityResponse, error)
@@ -8662,6 +8675,9 @@ func (UnimplementedForgeServer) GetAttestationProfile(context.Context, *GetAttes
 }
 func (UnimplementedForgeServer) ListAttestationProfiles(context.Context, *emptypb.Empty) (*ListAttestationProfilesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListAttestationProfiles not implemented")
+}
+func (UnimplementedForgeServer) GetAttestationCoverage(context.Context, *emptypb.Empty) (*GetAttestationCoverageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAttestationCoverage not implemented")
 }
 func (UnimplementedForgeServer) SignMachineIdentity(context.Context, *MachineIdentityRequest) (*MachineIdentityResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SignMachineIdentity not implemented")
@@ -16702,6 +16718,24 @@ func _Forge_ListAttestationProfiles_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_GetAttestationCoverage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetAttestationCoverage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetAttestationCoverage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetAttestationCoverage(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_SignMachineIdentity_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MachineIdentityRequest)
 	if err := dec(in); err != nil {
@@ -19571,6 +19605,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListAttestationProfiles",
 			Handler:    _Forge_ListAttestationProfiles_Handler,
+		},
+		{
+			MethodName: "GetAttestationCoverage",
+			Handler:    _Forge_GetAttestationCoverage_Handler,
 		},
 		{
 			MethodName: "SignMachineIdentity",
