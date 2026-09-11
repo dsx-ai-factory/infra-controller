@@ -63,12 +63,9 @@ Boot and DPU configuration is **declarative**: you describe the host in the Expe
 
 So a standard DPU host is handled entirely by defaults. A host without DPU hardware must instead use `dpu_policy: ignore` and declare a primary HostInband NIC as described in [3.2](#32-zero-dpu-host-no-dpu-hardware). The knobs below exist for the hosts that *don't* fit the standard-DPU mold.
 
-`rack_management_enabled` is a separate deployment-mode setting, not another
-DPU policy, and it does not override this resolution. Rack-manager deployments
-that operate DPUs as NICs must also set the site-wide `dpu_policy` (or each
-host's policy) to `nic`. If rack management is enabled while both policy
-levels remain unset, the effective policy is still `manage` and the Admin-network
-default above still applies.
+Rack management does not override this resolution. Rack-manager deployments
+that operate DPUs as NICs must set the site-wide `dpu_policy` (or each host's
+policy) to `nic`.
 
 ### `dpu_policy`
 

@@ -1752,7 +1752,7 @@ not returned as a conflict against the proposed replacement operation. </p></td>
 
 
         <h3 id="v1.ComponentOperationStatus">ComponentOperationStatus</h3>
-        <p>ComponentOperationStatus is Flow's view of a component's operability. The</p><p>inventory loop computes it on every sync from core's controller_state.</p>
+        <p>ComponentOperationStatus is Flow's view of a component's operability.</p>
 
 
           <table class="field-table">
@@ -1772,7 +1772,7 @@ not returned as a conflict against the proposed replacement operation. </p></td>
                   <td>reason</td>
                   <td><a href="#string">string</a></td>
                   <td></td>
-                  <td><p>Human-readable detail (typically the raw core state string). </p></td>
+                  <td><p>Human-readable source status detail. </p></td>
                 </tr>
 
                 <tr>
@@ -6710,6 +6710,13 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td><p> </p></td>
                 </tr>
 
+                <tr>
+                  <td>operation_status</td>
+                  <td><a href="#v1.Phase">Phase</a></td>
+                  <td></td>
+                  <td><p>Operability phase aggregated from component phases. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -8749,7 +8756,7 @@ exists, this includes every materialized phase.</p></td>
         </table>
 
         <h3 id="v1.Phase">Phase</h3>
-        <p>Phase is the coarse lifecycle bucket a component is in, derived from</p><p>core's per-component state machine. Shared across compute, nvswitch,</p><p>and power shelf.</p>
+        <p>Phase is Flow's coarse operability bucket.</p>
         <table class="enum-table">
           <thead>
             <tr><td>Name</td><td>Number</td><td>Description</td></tr>

@@ -734,39 +734,13 @@ pub struct CarbideConfig {
     )]
     pub mlxconfig_profiles: Option<HashMap<String, MlxConfigProfile>>,
 
-    /// The intent of this config option is to use the NICo site controller as a standalone
-    /// (disconnected / air-gapped) infrastructure manager for racks of GB200/GB300/VR144.
-    /// Only set this if using NICo site controller with Rack Manager to manage GB200/300/VR144.
-    /// It will change site controller behavior significantly in the following ways, etc.:
-    /// 1. skip DPU management and use DPUs as NICs (set the site-wide `[site_explorer] dpu_policy = "nic"`, or per-host `ExpectedMachine.dpu_policy`)
-    ///    a. no dpu bfb upgrade and host power cycle
-    ///    b. no firmware upgrade and host power cycle
-    ///    c. no hbn deployment (no ecmp, etc)
-    ///    d. no dpu agent deployment
-    ///    e. no restricted mode configuration
-    ///    f. no tenant overlay network via L2 vxlan/evpn or L3 vni (fnn)
-    /// 2. support any other nic interface on the compute nodes including the onboard 3p nic
-    /// 3. require expected machines table rows to have other/all mac addresses for each machine
-    /// 4. restrict dhcp service to only provide ip address to known mac addresses
-    ///    a. for additional mac addresses, use HostInband network segment when dpu is in nic mode
-    /// 5. disable compute host individual firmware upgrades
-    ///    a. only rack level firmware upgrades are allowed
-    /// 6. enable nvlink switch and power shelf discovery and ingestion
-    ///    a. site explorer changes to explore switch and power shelf bmc
-    ///    b. state machine for ingestion workflow
-    ///    c. nvlink switch nvos deployment/upgrade via onie
-    ///    d. nvlink switch default configuration and machine validation
-    /// 7. enable rack state machine and calls to rack manager
-    ///    a. depend on rack manager for firmware upgrades of the rack
-    ///    b. depend on rack manager for all power sequencing of the rack and components
-    ///    c. override/suspend component level state machine state transitions as needed
-    /// 8. enable nvlink control plane integration with nmx-c
-    ///    a. export nmx-c apis via site controller
-    ///    b. hardware health daemon polling of switch telemetry and collection into site controller
-    ///    prometheus instance
-    /// 9. enable domain power service integration
-    #[serde(default)]
-    pub rack_management_enabled: bool,
+    /// Deprecated compatibility key. This setting no longer affects runtime
+    /// behavior now that expected-machine DHCP lookup is unconditional. It
+    /// remains accepted so strict unknown-field validation does not block
+    /// upgrades from configurations that still contain the key.
+    #[doc(hidden)]
+    #[serde(default, rename = "rack_management_enabled", skip_serializing)]
+    pub deprecated_rack_management_enabled: Option<bool>,
 
     /// Rack Manager Service configuration for rack-level firmware upgrades,
     /// power sequencing, and mTLS connectivity.

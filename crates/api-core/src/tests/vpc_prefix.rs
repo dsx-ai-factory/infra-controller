@@ -23,6 +23,9 @@ use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use config_version::ConfigVersion;
 use ipnetwork::IpNetwork;
+use model::instance::config::network::{
+    InstanceInterfaceRoutingProfile, InstanceNetworkConfig, InstanceNetworkConfigUpdate,
+};
 use model::metadata::Metadata as ModelMetadata;
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
@@ -42,7 +45,9 @@ use rpc::forge::{
 use sqlx::{PgPool, PgTransaction};
 use tonic::Request;
 
-use crate::cfg::file::{FnnConfig, FnnRoutingProfileConfig, VpcIsolationBehaviorType};
+use crate::cfg::file::{
+    FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry, VpcIsolationBehaviorType,
+};
 use crate::network_segment::allocate::PrefixAllocator;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common::api_fixtures::instance::{
@@ -328,6 +333,187 @@ fn unattached_host_inband_segment_request(
         segment_type: rpc::forge::NetworkSegmentType::HostInband as i32,
         infer_slaac_eui64_addresses: false,
     }
+}
+
+#[crate::sqlx_test]
+async fn change_vpc_routing_profile_preserves_workload_and_checks_interface_overrides(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    struct InterfaceCase {
+        scenario: &'static str,
+        network: InstanceNetworkConfig,
+        pending: Option<InstanceNetworkConfigUpdate>,
+    }
+
+    let mut config = api_fixtures::get_config();
+    config.default_tenant_routing_profile_type = "INTERNAL".to_string();
+    let mut overrides = TestEnvOverrides::with_config(config).with_fnn_config(None);
+    overrides
+        .fnn_config
+        .as_mut()
+        .expect("FNN config")
+        .routing_profiles
+        .get_mut("INTERNAL")
+        .expect("internal profile")
+        .allowed_anycast_prefixes = Some(vec![PrefixFilterPolicyEntry {
+        prefix: "198.51.100.0/24".parse()?,
+    }]);
+    let env = create_test_env_with_overrides(pool, overrides).await;
+    let tenant = create_fixture_tenant(&env, "routing-profile-workload").await?;
+    let vpc_id = create_fnn_vpc_for_tenant(
+        &env,
+        &tenant.organization_id,
+        "routing-profile workload",
+        Some("INTERNAL"),
+    )
+    .await;
+    let prefix = create_vpc_prefix(&env, vpc_id, REFERENCED_VPC_PREFIX).await;
+    let prefix_id = prefix.id.expect("VPC prefix ID");
+    drive_vpc_prefix_to_ready(&env, prefix_id).await;
+    let managed_host = create_managed_host(&env).await;
+    let (instance, _) = managed_host
+        .instance_builer(&env)
+        .tenant_org(&tenant.organization_id)
+        .network(single_interface_network_config_with_vpc_prefix(prefix_id))
+        .build_and_return()
+        .await;
+    let original = db::instance::find_by_id(&env.pool, instance.id)
+        .await?
+        .expect("instance");
+    let original_network = original.config.network;
+    let mut overridden_network = original_network.clone();
+    overridden_network.interfaces[0].routing_profile = Some(InstanceInterfaceRoutingProfile {
+        allowed_anycast_prefixes: vec!["198.51.100.0/24".parse()?],
+    });
+    let before = env
+        .api
+        .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+            id: Some(vpc_id),
+        }))
+        .await?
+        .into_inner();
+    let change = rpc::forge::VpcChangeRoutingProfileRequest {
+        id: Some(vpc_id),
+        if_version_match: Some(before.version.clone()),
+        routing_profile_type: "EXTERNAL".to_string(),
+        vni: None,
+    };
+    for case in [
+        InterfaceCase {
+            scenario: "current interface",
+            network: overridden_network.clone(),
+            pending: None,
+        },
+        InterfaceCase {
+            scenario: "pending old interface",
+            network: original_network.clone(),
+            pending: Some(InstanceNetworkConfigUpdate {
+                old_config: overridden_network.clone(),
+                new_config: original_network.clone(),
+            }),
+        },
+        InterfaceCase {
+            scenario: "pending new interface",
+            network: original_network.clone(),
+            pending: Some(InstanceNetworkConfigUpdate {
+                old_config: original_network.clone(),
+                new_config: overridden_network,
+            }),
+        },
+    ] {
+        let scenario = case.scenario;
+        // A persisted update retains old and new interface configurations;
+        // either can still require the current profile's anycast policy.
+        sqlx::query("UPDATE instances SET network_config = $1, update_network_config_request = $2 WHERE id = $3")
+            .bind(sqlx::types::Json(case.network))
+            .bind(case.pending.map(sqlx::types::Json))
+            .bind(instance.id)
+            .execute(&env.pool).await?;
+        let error = env
+            .api
+            .change_vpc_routing_profile(Request::new(change.clone()))
+            .await
+            .expect_err(scenario);
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+        assert!(
+            error.message().contains("interface routing override"),
+            "{scenario}: {error}"
+        );
+        assert_eq!(
+            env.api
+                .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+                    id: Some(vpc_id),
+                }))
+                .await?
+                .into_inner(),
+            before,
+            "{scenario}"
+        );
+    }
+    sqlx::query("UPDATE instances SET network_config = $1, update_network_config_request = NULL WHERE id = $2")
+        .bind(sqlx::types::Json(original_network)).bind(instance.id)
+        .execute(&env.pool).await?;
+    let instance_before = instance.rpc_instance().await;
+    let prefix_before = find_vpc_prefix(&env, prefix_id).await;
+    let result = env
+        .api
+        .change_vpc_routing_profile(Request::new(change))
+        .await?
+        .into_inner();
+    assert_eq!(result.routing_profile_type.as_deref(), Some("EXTERNAL"));
+    assert_ne!(result.active_vni, before.active_vni);
+    assert_eq!(instance.rpc_instance().await, instance_before);
+    assert_eq!(find_vpc_prefix(&env, prefix_id).await, prefix_before);
+
+    let tenant_site_prefix = seed_tenant_managed_site_prefix(
+        &env,
+        &tenant.organization_id,
+        "10.97.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    env.api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            VpcPrefixId::new(),
+            vpc_id,
+            Some(tenant_site_prefix),
+            "10.97.1.0/24",
+        )))
+        .await?;
+    let before_reverse = env
+        .api
+        .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+            id: Some(vpc_id),
+        }))
+        .await?
+        .into_inner();
+    let error = env
+        .api
+        .change_vpc_routing_profile(Request::new(rpc::forge::VpcChangeRoutingProfileRequest {
+            id: Some(vpc_id),
+            if_version_match: Some(before_reverse.version.clone()),
+            routing_profile_type: "INTERNAL".to_string(),
+            vni: None,
+        }))
+        .await
+        .expect_err("new tenant-managed prefix prevents reversal");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        error
+            .message()
+            .contains("tenant-managed SitePrefix attachments"),
+        "{error}"
+    );
+    assert_eq!(
+        env.api
+            .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+                id: Some(vpc_id),
+            }))
+            .await?
+            .into_inner(),
+        before_reverse
+    );
+    Ok(())
 }
 
 /// Test-specific function that checks an eligible pair reaches the existing database exclusion.

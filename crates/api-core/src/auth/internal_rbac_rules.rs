@@ -72,6 +72,7 @@ impl InternalRBACRules {
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ChangeVpcRoutingProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateVpcVirtualization", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteVpc", vec![Machineatron, SiteAgent]);
         x.perm("FindVpcIds", vec![SiteAgent, ForgeAdminCLI, Machineatron]);
@@ -1152,7 +1153,11 @@ mod rbac_rule_tests {
             (Principal::SpiffeMachineIdentifier("dpu".to_string()), false),
             (Principal::Anonymous, false),
         ] {
-            for method in ["ReleaseVpcInactiveVni", "GetVpcRoutingState"] {
+            for method in [
+                "ReleaseVpcInactiveVni",
+                "GetVpcRoutingState",
+                "ChangeVpcRoutingProfile",
+            ] {
                 assert_eq!(
                     InternalRBACRules::allowed_from_static(
                         method,

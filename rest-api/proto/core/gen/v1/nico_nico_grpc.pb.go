@@ -35,6 +35,7 @@ const (
 	Forge_FindDomainLegacy_FullMethodName                                   = "/forge.Forge/FindDomainLegacy"
 	Forge_CreateVpc_FullMethodName                                          = "/forge.Forge/CreateVpc"
 	Forge_UpdateVpc_FullMethodName                                          = "/forge.Forge/UpdateVpc"
+	Forge_ChangeVpcRoutingProfile_FullMethodName                            = "/forge.Forge/ChangeVpcRoutingProfile"
 	Forge_ReleaseVpcInactiveVni_FullMethodName                              = "/forge.Forge/ReleaseVpcInactiveVni"
 	Forge_UpdateVpcVirtualization_FullMethodName                            = "/forge.Forge/UpdateVpcVirtualization"
 	Forge_DeleteVpc_FullMethodName                                          = "/forge.Forge/DeleteVpc"
@@ -544,6 +545,9 @@ type ForgeClient interface {
 	// VPC
 	CreateVpc(ctx context.Context, in *VpcCreationRequest, opts ...grpc.CallOption) (*Vpc, error)
 	UpdateVpc(ctx context.Context, in *VpcUpdateRequest, opts ...grpc.CallOption) (*VpcUpdateResult, error)
+	// Changes an FNN VPC's named profile and active VNI while retaining the old
+	// allocation. Success means Core committed, not that the dataplane converged.
+	ChangeVpcRoutingProfile(ctx context.Context, in *VpcChangeRoutingProfileRequest, opts ...grpc.CallOption) (*VpcRoutingState, error)
 	// Operator cleanup after independently verifying that no DPU or fabric route
 	// still uses the retained VNI. Core does not verify dataplane convergence.
 	ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error)
@@ -1561,6 +1565,16 @@ func (c *forgeClient) UpdateVpc(ctx context.Context, in *VpcUpdateRequest, opts 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VpcUpdateResult)
 	err := c.cc.Invoke(ctx, Forge_UpdateVpc_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ChangeVpcRoutingProfile(ctx context.Context, in *VpcChangeRoutingProfileRequest, opts ...grpc.CallOption) (*VpcRoutingState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VpcRoutingState)
+	err := c.cc.Invoke(ctx, Forge_ChangeVpcRoutingProfile_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6409,6 +6423,9 @@ type ForgeServer interface {
 	// VPC
 	CreateVpc(context.Context, *VpcCreationRequest) (*Vpc, error)
 	UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error)
+	// Changes an FNN VPC's named profile and active VNI while retaining the old
+	// allocation. Success means Core committed, not that the dataplane converged.
+	ChangeVpcRoutingProfile(context.Context, *VpcChangeRoutingProfileRequest) (*VpcRoutingState, error)
 	// Operator cleanup after independently verifying that no DPU or fabric route
 	// still uses the retained VNI. Core does not verify dataplane convergence.
 	ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error)
@@ -7333,6 +7350,9 @@ func (UnimplementedForgeServer) CreateVpc(context.Context, *VpcCreationRequest) 
 }
 func (UnimplementedForgeServer) UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateVpc not implemented")
+}
+func (UnimplementedForgeServer) ChangeVpcRoutingProfile(context.Context, *VpcChangeRoutingProfileRequest) (*VpcRoutingState, error) {
+	return nil, status.Error(codes.Unimplemented, "method ChangeVpcRoutingProfile not implemented")
 }
 func (UnimplementedForgeServer) ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReleaseVpcInactiveVni not implemented")
@@ -9002,6 +9022,24 @@ func _Forge_UpdateVpc_Handler(srv interface{}, ctx context.Context, dec func(int
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).UpdateVpc(ctx, req.(*VpcUpdateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ChangeVpcRoutingProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VpcChangeRoutingProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ChangeVpcRoutingProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ChangeVpcRoutingProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ChangeVpcRoutingProfile(ctx, req.(*VpcChangeRoutingProfileRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -17703,6 +17741,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateVpc",
 			Handler:    _Forge_UpdateVpc_Handler,
+		},
+		{
+			MethodName: "ChangeVpcRoutingProfile",
+			Handler:    _Forge_ChangeVpcRoutingProfile_Handler,
 		},
 		{
 			MethodName: "ReleaseVpcInactiveVni",

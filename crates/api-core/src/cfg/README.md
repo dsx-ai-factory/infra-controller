@@ -13,9 +13,14 @@ the invalid key's full section path and source. Names inside intentionally
 dynamic maps, such as pool names and rack-profile IDs, remain user-defined;
 fields within each map value must still match the documented schema.
 
-The removed `force_dpu_nic_mode` key is explicitly recognized at the top level
-and under `[site_explorer]`, ignored, and reported as a deprecation warning.
-Use `site_explorer.dpu_policy` instead.
+The removed `force_dpu_nic_mode` and `rack_management_enabled` keys are
+explicitly recognized, ignored, and reported as deprecation warnings. Use
+`site_explorer.dpu_policy` instead of `force_dpu_nic_mode`.
+`rack_management_enabled` lost its last runtime consumer when
+[PR #1583](https://github.com/NVIDIA/infra-controller/pull/1583) made Expected
+Machine lookup during DHCP discovery unconditional. Remove both deprecated keys
+from site configuration; compatibility parsing does not restore their former
+behavior.
 
 ---
 
@@ -111,7 +116,6 @@ Use `site_explorer.dpu_policy` instead.
 | `auto_machine_repair_plugin` | `AutoMachineRepairPluginConfig` | *(default)* | `machines` | Auto-repair configuration for failed machines. |
 | `vmaas_config` | `Option<VmaasConfig>` | — | `integrations` | VMaaS configuration for VM system integration (see [VmaasConfig](#vmaasconfig)). |
 | `mlxconfig_profiles` | `Option<HashMap<String, MlxConfigProfile>>` | — | `machines` | Named Mellanox NIC register configuration profiles for superNIC firmware flashing. TOML key: `mlx-config-profiles`. |
-| `rack_management_enabled` | `bool` | `false` | `hardware` | Standalone infrastructure manager mode for GB200/GB300/VR144. See doc comment for full behavioral changes. |
 | `rms` | `RmsConfig` | *(see below)* | `hardware` | Rack Manager Service configuration for API connectivity and mTLS (see [RmsConfig](#rmsconfig)). |
 | `rack_profiles` | `RackProfileConfig` | *(default)* | `hardware` | Rack profile definitions referenced by expected racks. |
 | `spdm` | `SpdmConfig` | *(see below)* | `security` | SPDM hardware attestation (see [SpdmConfig](#spdmconfig)). |

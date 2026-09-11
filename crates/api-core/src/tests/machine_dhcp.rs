@@ -512,9 +512,7 @@ async fn test_multiple_machines_dhcp_with_api(
 async fn test_machine_dhcp_declared_admin_nic_allocates_from_relay_admin_segment(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut config = get_config();
-    config.rack_management_enabled = true;
-    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let env = create_test_env(pool).await;
 
     // Create a second admin segment so the relay determines which admin segment is used.
     let second_admin_segment = create_network_segment(
@@ -586,9 +584,7 @@ async fn test_machine_dhcp_declared_admin_nic_allocates_from_relay_admin_segment
 async fn test_machine_dhcp_declared_segment_type_allocates_from_relay_admin_segment(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut config = get_config();
-    config.rack_management_enabled = true;
-    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let env = create_test_env(pool).await;
 
     // A second admin segment, so the relay -- not the declaration -- decides
     // which admin segment is used once selection is narrowed to Admin.

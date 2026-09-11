@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -31,6 +32,36 @@ type failGetMachinesClient struct {
 // while its embedded mock client continues to serve the other sync RPCs.
 func (c *failGetMachinesClient) GetMachines(_ context.Context) ([]nicoapi.MachineDetail, error) {
 	return nil, errors.New("boom")
+}
+
+type actualInventoryTestClient struct {
+	nicoapi.Client
+	machines           []nicoapi.MachineDetail
+	switches           []nicoapi.ObservedControllerDevice
+	powerShelves       []nicoapi.ObservedControllerDevice
+	machineErr         error
+	switchErr          error
+	powerShelfErr      error
+	machinePositionErr error
+}
+
+func (c *actualInventoryTestClient) GetMachines(_ context.Context) ([]nicoapi.MachineDetail, error) {
+	return c.machines, c.machineErr
+}
+
+func (c *actualInventoryTestClient) GetSwitches(_ context.Context) ([]nicoapi.ObservedControllerDevice, error) {
+	return c.switches, c.switchErr
+}
+
+func (c *actualInventoryTestClient) GetPowerShelves(_ context.Context) ([]nicoapi.ObservedControllerDevice, error) {
+	return c.powerShelves, c.powerShelfErr
+}
+
+func (c *actualInventoryTestClient) GetMachinePositionInfo(
+	_ context.Context,
+	_ []string,
+) ([]nicoapi.MachinePosition, error) {
+	return nil, c.machinePositionErr
 }
 
 func TestFilterHostMachineDetails(t *testing.T) {
@@ -235,6 +266,134 @@ func TestRunInventoryOne(t *testing.T) {
 		require.NotNil(t, drifts[0].ExternalID)
 		assert.Equal(t, externalID, *drifts[0].ExternalID)
 	})
+
+	for _, failedType := range []devicetypes.ComponentType{
+		devicetypes.ComponentTypeCompute,
+		devicetypes.ComponentTypeNVSwitch,
+		devicetypes.ComponentTypePowerShelf,
+	} {
+		failedType := failedType
+		t.Run("type failure preserves only "+devicetypes.ComponentTypeToString(failedType), func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			seedInventoryDrifts(t, ctx, pool, "old")
+
+			client := newActualInventoryTestClient("first")
+			switch failedType {
+			case devicetypes.ComponentTypeCompute:
+				client.machineErr = errors.New("compute unavailable")
+			case devicetypes.ComponentTypeNVSwitch:
+				client.switchErr = errors.New("switch unavailable")
+			case devicetypes.ComponentTypePowerShelf:
+				client.powerShelfErr = errors.New("power shelf unavailable")
+			}
+
+			runInventoryOne(ctx, pool, client, false)
+
+			expected := map[string]string{
+				"Compute":    "compute-first",
+				"NVSwitch":   "switch-first",
+				"PowerShelf": "powershelf-first",
+			}
+			expected[devicetypes.ComponentTypeToString(failedType)] = "old-" + devicetypes.ComponentTypeToString(failedType)
+			assertInventoryDrifts(t, ctx, pool, expected)
+
+			client = newActualInventoryTestClient("recovery")
+			runInventoryOne(ctx, pool, client, false)
+			assertInventoryDrifts(t, ctx, pool, map[string]string{
+				"Compute":    "compute-recovery",
+				"NVSwitch":   "switch-recovery",
+				"PowerShelf": "powershelf-recovery",
+			})
+		})
+	}
+
+	t.Run("persistence failure does not block later component types", func(t *testing.T) {
+		ctx, pool := mirrorTestPool(t)
+		seedInventoryDrifts(t, ctx, pool, "old")
+		_, err := pool.DB.ExecContext(ctx, `
+			CREATE FUNCTION fail_nvswitch_drift_delete() RETURNS trigger AS $$
+			BEGIN
+				RAISE EXCEPTION 'injected NVSwitch persistence failure';
+			END;
+			$$ LANGUAGE plpgsql;
+			CREATE TRIGGER fail_nvswitch_drift_delete
+			BEFORE DELETE ON component_drift
+			FOR EACH ROW WHEN (OLD.component_type = 'NVSwitch')
+			EXECUTE FUNCTION fail_nvswitch_drift_delete();
+		`)
+		require.NoError(t, err)
+
+		runInventoryOne(ctx, pool, newActualInventoryTestClient("first"), false)
+		assertInventoryDrifts(t, ctx, pool, map[string]string{
+			"Compute":    "compute-first",
+			"NVSwitch":   "old-NVSwitch",
+			"PowerShelf": "powershelf-first",
+		})
+
+		_, err = pool.DB.ExecContext(ctx, `
+			DROP TRIGGER fail_nvswitch_drift_delete ON component_drift;
+			DROP FUNCTION fail_nvswitch_drift_delete();
+		`)
+		require.NoError(t, err)
+		runInventoryOne(ctx, pool, newActualInventoryTestClient("recovery"), false)
+		assertInventoryDrifts(t, ctx, pool, map[string]string{
+			"Compute":    "compute-recovery",
+			"NVSwitch":   "switch-recovery",
+			"PowerShelf": "powershelf-recovery",
+		})
+	})
+}
+
+func newActualInventoryTestClient(suffix string) *actualInventoryTestClient {
+	return &actualInventoryTestClient{
+		Client: nicoapi.NewMockClient(),
+		machines: []nicoapi.MachineDetail{{
+			MachineID:   "compute-" + suffix,
+			MachineType: corev1.MachineType_HOST.String(),
+		}},
+		switches: []nicoapi.ObservedControllerDevice{{
+			ID:     "switch-" + suffix,
+			BmcMac: "aa:bb:cc:dd:ee:01",
+		}},
+		powerShelves: []nicoapi.ObservedControllerDevice{{
+			ID:     "powershelf-" + suffix,
+			BmcMac: "aa:bb:cc:dd:ee:02",
+		}},
+	}
+}
+
+func seedInventoryDrifts(t *testing.T, ctx context.Context, pool *cdb.Session, suffix string) {
+	t.Helper()
+	drifts := make([]model.ComponentDrift, 0, 3)
+	for _, componentType := range []devicetypes.ComponentType{
+		devicetypes.ComponentTypeCompute,
+		devicetypes.ComponentTypeNVSwitch,
+		devicetypes.ComponentTypePowerShelf,
+	} {
+		typeName := devicetypes.ComponentTypeToString(componentType)
+		externalID := suffix + "-" + typeName
+		drifts = append(drifts, model.ComponentDrift{
+			ExternalID:    &externalID,
+			ComponentType: &typeName,
+			DriftType:     model.DriftTypeMissingInExpected,
+			Diffs:         []model.FieldDiff{},
+			CheckedAt:     time.Now(),
+		})
+	}
+	_, err := pool.DB.NewInsert().Model(&drifts).Exec(ctx)
+	require.NoError(t, err)
+}
+
+func assertInventoryDrifts(t *testing.T, ctx context.Context, pool *cdb.Session, expected map[string]string) {
+	t.Helper()
+	drifts, err := model.GetAllDrifts(ctx, pool.DB)
+	require.NoError(t, err)
+	require.Len(t, drifts, len(expected))
+	for _, drift := range drifts {
+		require.NotNil(t, drift.ComponentType)
+		require.NotNil(t, drift.ExternalID)
+		assert.Equal(t, expected[*drift.ComponentType], *drift.ExternalID)
+	}
 }
 
 func TestCompareMachineFieldsForDrift_NoMismatch(t *testing.T) {

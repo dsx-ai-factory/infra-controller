@@ -11479,6 +11479,7 @@ paths:
                       model: PowerEdge R750
                       serialNumber: SN-RACK-001
                       description: Primary compute rack
+                      operationStatus: Ready
                       nvLinkDomainIds:
                         - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                       taskStats:
@@ -11566,6 +11567,7 @@ paths:
                     model: PowerEdge R750
                     serialNumber: SN-RACK-001
                     description: Primary compute rack
+                    operationStatus: Ready
                     nvLinkDomainIds:
                       - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                     taskStats:
@@ -20791,7 +20793,7 @@ components:
           type:
             - string
             - 'null'
-          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$'
+          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\s]+))$'
           not:
             type: string
             pattern: '^/dev/disk/by-id/.*-part[0-9]+$'
@@ -20800,7 +20802,7 @@ components:
             - /dev/disk/by-id/nvme-Dell_BOSS-N1_VNOWW12345V0123451UT
           description: >-
             Whole-disk target that will be overwritten with the image. Accepts
-            `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or
+            `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, `/dev/vd<letters>`, or
             `/dev/disk/by-id/<identifier>`. `smallest` selects the smallest enumerated
             whole disk, preferring one with an EFI partition to break a size tie.
             Partition aliases ending in `-part<digits>` are rejected.
@@ -21170,7 +21172,7 @@ components:
           type:
             - string
             - 'null'
-          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$'
+          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\s]+))$'
           not:
             type: string
             pattern: '^/dev/disk/by-id/.*-part[0-9]+$'
@@ -21180,7 +21182,7 @@ components:
           description: >-
             Optional whole-disk target that will be overwritten with the image.
             Accepts `smallest`, `/dev/nvme<controller>n<namespace>`,
-            `/dev/sd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest`
+            `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest`
             selects the smallest enumerated whole disk, preferring one with an EFI
             partition to break a size tie. Partition aliases ending in
             `-part<digits>` are rejected. When omitted, null, or empty on creation,
@@ -21292,7 +21294,7 @@ components:
           type:
             - string
             - 'null'
-          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/\s]+))$'
+          pattern: '^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\s]+))$'
           not:
             type: string
             pattern: '^/dev/disk/by-id/.*-part[0-9]+$'
@@ -21302,7 +21304,7 @@ components:
           description: >-
             Optional whole-disk target that will be overwritten with the image.
             Accepts `smallest`, `/dev/nvme<controller>n<namespace>`,
-            `/dev/sd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest`
+            `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest`
             selects the smallest enumerated whole disk, preferring one with an EFI
             partition to break a size tie. Partition aliases ending in
             `-part<digits>` are rejected. Omitting this field or sending null preserves
@@ -23348,6 +23350,7 @@ components:
       description: Rack represents a physical rack in the datacenter
       required:
         - nvLinkDomainIds
+        - operationStatus
         - taskStats
       examples:
         - id: rack-01
@@ -23356,6 +23359,7 @@ components:
           model: PowerEdge R750
           serialNumber: SN-RACK-001
           description: Primary compute rack
+          operationStatus: Ready
           nvLinkDomainIds:
             - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
           taskStats:
@@ -23400,6 +23404,17 @@ components:
         description:
           type: string
           description: Description of the Rack
+        operationStatus:
+          type: string
+          enum:
+            - Unknown
+            - Initializing
+            - Ready
+            - InUse
+            - Error
+            - Deleting
+          description: >-
+            Operability phase aggregated from tray operationStatus values.
         nvLinkDomainIds:
           type: array
           description: IDs of the NVLink Domains containing this Rack. Empty when the Rack is not assigned to an NVLink Domain.

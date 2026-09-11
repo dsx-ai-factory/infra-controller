@@ -263,11 +263,14 @@ func RackFrom(r *pb.Rack) *rack.Rack {
 		components = append(components, *converted)
 	}
 	result := &rack.Rack{
-		Info:       DeviceInfoFrom(r.GetInfo()),
-		ExternalID: r.GetExternalId(),
-		Loc:        LocationFrom(r.GetLocation()),
-		Components: components,
+		Info:            DeviceInfoFrom(r.GetInfo()),
+		ExternalID:      r.GetExternalId(),
+		Loc:             LocationFrom(r.GetLocation()),
+		Components:      components,
+		OperationStatus: types.PhaseUnknown,
 	}
+	// OperationStatus is deliberately ignored on input. Flow derives this
+	// read-only field from persisted component statuses for Rack responses.
 	result.NVLDomainID = domainID
 	return result
 }
@@ -729,10 +732,11 @@ func RackTo(r *rack.Rack) *pb.Rack {
 	}
 
 	result := &pb.Rack{
-		Info:       DeviceInfoTo(&r.Info),
-		ExternalId: r.ExternalID,
-		Location:   LocationTo(&r.Loc),
-		Components: components,
+		Info:            DeviceInfoTo(&r.Info),
+		ExternalId:      r.ExternalID,
+		Location:        LocationTo(&r.Loc),
+		Components:      components,
+		OperationStatus: PhaseTo(r.OperationStatus),
 	}
 	if r.NVLDomainID != uuid.Nil {
 		result.NvlDomainIds = UUIDsTo([]uuid.UUID{r.NVLDomainID})
