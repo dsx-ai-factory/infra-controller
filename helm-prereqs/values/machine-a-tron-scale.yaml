@@ -2,22 +2,22 @@
 # machine-a-tron-scale.yaml — LARGE-SCALE site values (Controller Mode)
 #
 # For scale testing NICo ingestion with hundreds to thousands of simulated
-# hosts. The mat-k8s-controller dynamically creates ClusterIP Services for
-# each BMC.
+# hosts. The mat-k8s-controller dynamically creates a Service for each BMC.
 #
 # How this differs from Override Mode (values/machine-a-tron.yaml):
-#   - mat-k8s-controller.enabled: true — controller creates one Service per
-#     BMC with ClusterIP = BMC IP assigned by NICo DHCP.
-#   - site_explorer.bmc_proxy MUST BE UNSET in nico-core — site-explorer dials
-#     each BMC's ClusterIP directly.
+#   - mat-k8s-controller.enabled: true - controller creates one Service per
+#     BMC with the BMC IP assigned by NICo DHCP published as externalIP.
+#   - site_explorer.bmc_proxy MUST BE UNSET in nico-core - site-explorer dials
+#     each BMC IP directly.
 #   - Requires NICo siteConfig:
 #       allow_insecure_discovery = true
 #       [networks.MAT-BMC-SERVICES]
 #       type = "underlay"
-#       prefix = "10.96.64.0/18"
-#       gateway = "10.96.64.1"
+#       prefix = "10.200.0.0/18"
+#       gateway = "10.200.0.1"
 #       mtu = 1500
-#   - bmcDhcpRelayAddress must be within Kubernetes ServiceCIDR
+#   - The BMC network must lie outside the Kubernetes ServiceCIDR and pod CIDR
+#     (BMC IPs are Service externalIPs, bound by kube-proxy on every node)
 # =============================================================================
 
 image:
@@ -47,7 +47,7 @@ hwMacAddressRanges:
   enabled: true
   basePrefix: "02:01"
 
-# Controller mode - dynamically creates Services with BMC IP as ClusterIP
+# Controller mode - dynamically creates Services with the BMC IP as externalIP
 mat-k8s-controller:
   enabled: true
   # The subchart defaults to a bare local image name with no registry or pull
@@ -128,7 +128,7 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        bmcDhcpRelayAddress: "10.96.64.1"  # Must be within K8s ServiceCIDR
+        bmcDhcpRelayAddress: "10.200.0.1"  # simulated-oob gateway (SCALE_OOB_GW), outside the ServiceCIDR
         underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
         dpusInNicMode: false
 

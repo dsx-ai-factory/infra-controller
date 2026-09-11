@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -186,9 +187,13 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 		}
 	}
 
-	// Set ClusterIP to BMC IP for direct addressing
+	// Publish the BMC IP as an externalIP and leave clusterIP for the apiserver
+	// to allocate. externalIPs are not drawn from the ServiceCIDR, so with the
+	// BMC network outside the ServiceCIDR a BMC lease cannot collide with a
+	// dynamically allocated clusterIP, and they are mutable, so a lease change
+	// is an in-place update.
 	if machine.BMC.IP != nil {
-		svc.Spec.ClusterIP = *machine.BMC.IP
+		svc.Spec.ExternalIPs = []string{*machine.BMC.IP}
 	}
 
 	return svc
@@ -200,9 +205,8 @@ func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatu
 	var services []*corev1.Service
 
 	for _, machine := range status.Machines {
-		// Build service for the host only after DHCP has assigned its BMC IP.
-		// BuildService sets spec.clusterIP from the BMC IP, so a Service built
-		// without one would be given an arbitrary ClusterIP by the API server.
+		// Build service for the host only after DHCP has assigned its BMC IP,
+		// so every Service publishes a BMC address in spec.externalIPs.
 		if machine.BMC.IP != nil && *machine.BMC.IP != "" {
 			services = append(services, b.BuildService(&machine, MachineTypeHost, "", podName))
 		}
@@ -222,12 +226,12 @@ func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatu
 type ServiceDiff struct {
 	Create   []*corev1.Service
 	Update   []*corev1.Service
-	Recreate []*corev1.Service // Services that need delete+create due to immutable field changes
+	Recreate []*corev1.Service // Services that need delete+create because the immutable clusterIP must change
 	Delete   []string
 }
 
-// ComputeServiceDiff calculates the differences between desired and existing services.
-func ComputeServiceDiff(desired []*corev1.Service, existing []*corev1.Service) ServiceDiff {
+// computeServiceDiff calculates the differences between desired and existing services.
+func computeServiceDiff(desired []*corev1.Service, existing []*corev1.Service, logger zerolog.Logger) ServiceDiff {
 	diff := ServiceDiff{}
 
 	existingMap := make(map[string]*corev1.Service)
@@ -245,26 +249,48 @@ func ComputeServiceDiff(desired []*corev1.Service, existing []*corev1.Service) S
 		deduped = append(deduped, svc)
 	}
 
+	// Every BMC IP published this cycle. While the BMC network overlaps the
+	// ServiceCIDR, the apiserver can allocate a BMC IP as the clusterIP of
+	// another managed Service, and kube-proxy would then merge both Services
+	// on that address.
+	bmcIPs := make(map[string]struct{})
+	for _, svc := range deduped {
+		for _, ip := range svc.Spec.ExternalIPs {
+			bmcIPs[ip] = struct{}{}
+		}
+	}
+
 	// Find services to create or update
 	for _, svc := range deduped {
 		existingSvc, exists := existingMap[svc.Name]
 		if !exists {
 			diff.Create = append(diff.Create, svc)
+		} else if _, collides := bmcIPs[existingSvc.Spec.ClusterIP]; collides {
+			// clusterIP is immutable, so the Service is deleted and recreated
+			// with an apiserver-allocated clusterIP. Also covers Services from
+			// a previous controller version that set the BMC IP as clusterIP.
+			logger.Warn().
+				Str("service", svc.Name).
+				Str("cluster_ip", existingSvc.Spec.ClusterIP).
+				Msg("clusterIP is a published BMC IP, recreating service")
+			preserveForeignMetadata(svc, existingSvc)
+			diff.Recreate = append(diff.Recreate, svc)
+		} else if isLegacyClusterIPService(existingSvc) {
+			// Created by a previous controller version that set the BMC IP
+			// as clusterIP. clusterIP is immutable, so the Service is deleted
+			// and recreated once with the BMC IP in externalIPs and an
+			// apiserver-allocated clusterIP.
+			preserveForeignMetadata(svc, existingSvc)
+			diff.Recreate = append(diff.Recreate, svc)
 		} else if needsUpdate(svc, existingSvc) {
+			// Carry over the apiserver-allocated clusterIP: it is immutable
+			// and the desired object never sets it. A changed BMC lease
+			// only touches externalIPs, which are mutable.
 			svc.ResourceVersion = existingSvc.ResourceVersion
-			// Check if ClusterIP is changing (immutable field)
-			if svc.Spec.ClusterIP != "" && existingSvc.Spec.ClusterIP != "" &&
-				svc.Spec.ClusterIP != existingSvc.Spec.ClusterIP {
-				// ClusterIP changed - need to delete and recreate
-				diff.Recreate = append(diff.Recreate, svc)
-			} else {
-				// Preserve existing ClusterIP if not explicitly set
-				if svc.Spec.ClusterIP == "" {
-					svc.Spec.ClusterIP = existingSvc.Spec.ClusterIP
-				}
-				preserveForeignMetadata(svc, existingSvc)
-				diff.Update = append(diff.Update, svc)
-			}
+			svc.Spec.ClusterIP = existingSvc.Spec.ClusterIP
+			svc.Spec.ClusterIPs = existingSvc.Spec.ClusterIPs
+			preserveForeignMetadata(svc, existingSvc)
+			diff.Update = append(diff.Update, svc)
 		}
 	}
 
@@ -338,9 +364,9 @@ func needsUpdate(desired, existing *corev1.Service) bool {
 		}
 	}
 
-	// Check ClusterIP change
-	if desired.Spec.ClusterIP != "" && existing.Spec.ClusterIP != "" &&
-		desired.Spec.ClusterIP != existing.Spec.ClusterIP {
+	// Check the published BMC IP. clusterIP is not compared: the desired
+	// object leaves it empty for the apiserver to allocate.
+	if !slices.Equal(desired.Spec.ExternalIPs, existing.Spec.ExternalIPs) {
 		return true
 	}
 
@@ -362,6 +388,19 @@ func needsUpdate(desired, existing *corev1.Service) bool {
 	}
 
 	return false
+}
+
+// isLegacyClusterIPService reports whether existing was created by a previous
+// controller version, which set spec.clusterIP to the BMC IP instead of
+// publishing it in spec.externalIPs. Those versions wrote the mat-bmc-ip
+// annotation alongside, so the clusterIP is compared against it. A Service
+// without the annotation is left alone; if its clusterIP is a stale BMC
+// address, the collision check recreates it once that address is leased again.
+func isLegacyClusterIPService(existing *corev1.Service) bool {
+	if len(existing.Spec.ExternalIPs) != 0 || existing.Spec.ClusterIP == "" {
+		return false
+	}
+	return existing.Annotations[AnnotationBMCIP] == existing.Spec.ClusterIP
 }
 
 func preserveForeignMetadata(desired, existing *corev1.Service) {
@@ -613,7 +652,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) ReconcileResult {
 	}
 
 	// Compute and apply diff
-	diff := ComputeServiceDiff(allDesired, existing)
+	diff := computeServiceDiff(allDesired, existing, r.logger)
 
 	r.logger.Info().
 		Int("create", len(diff.Create)).
@@ -634,7 +673,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) ReconcileResult {
 		result.Deleted = deleted
 	}
 
-	// Process recreates (delete then create for immutable field changes like ClusterIP)
+	// Process recreates (delete then create for Services whose immutable clusterIP must change)
 	// Skip recreates if any fetch failed to prevent spurious Service removal
 	if !fetchFailed && len(diff.Recreate) > 0 {
 		recreated := r.processRecreatesConcurrently(ctx, diff.Recreate, &result)
