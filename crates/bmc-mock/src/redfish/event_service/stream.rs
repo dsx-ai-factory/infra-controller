@@ -187,6 +187,7 @@ mod tests {
             matches!(state.subscribe(Some(&id)), Err(EventServiceError::Invalid(_)));
             "unavailable or noncanonical replay cursors" {
                 format!("{}:0", state.stats().generation) => true,
+                format!("{}:{}", state.stats().generation, u64::MAX) => true,
                 "nonsense".into() => true,
                 format!("{}:999", state.stats().generation) => true,
                 format!("{}:02", state.stats().generation) => true,

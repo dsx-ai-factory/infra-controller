@@ -77,6 +77,7 @@ pub async fn redfish_error_envelope(request: Request, next: Next) -> Response {
         HeaderValue::from_static("application/json"),
     );
     parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.remove(header::CONTENT_ENCODING);
     Response::from_parts(parts, redfish_error(status, &message).into_body())
 }
 

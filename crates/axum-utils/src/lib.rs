@@ -28,7 +28,13 @@ pub fn is_json_response(response: &axum::response::Response) -> bool {
     };
     let Ok(s) = value.to_str() else { return false };
     let mime = s.split(';').next().unwrap_or(s).trim();
-    mime.eq_ignore_ascii_case("application/json") || mime.to_ascii_lowercase().ends_with("+json")
+    let Some((kind, subtype)) = mime.split_once('/') else {
+        return false;
+    };
+    if kind.is_empty() || subtype.is_empty() {
+        return false;
+    }
+    mime.eq_ignore_ascii_case("application/json") || subtype.to_ascii_lowercase().ends_with("+json")
 }
 
 #[cfg(test)]
@@ -58,6 +64,8 @@ mod tests {
                 Some("text/json") => false,
                 Some("application/octet-stream") => false,
                 Some("application/json-garbage") => false,
+                Some("bogus+json") => false,
+                Some("/+json") => false,
             }
         );
     }

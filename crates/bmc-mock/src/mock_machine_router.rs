@@ -44,6 +44,9 @@ pub enum EventServiceOverride {
 
 #[derive(Debug, Default)]
 pub struct MachineRouterOptions {
+    /// EventService selection. `Profile` (the default) serves the hardware
+    /// profile's configuration, `Disabled` omits the service and its routes,
+    /// and `Limits` replaces the profile's limits when the profile enables it.
     pub event_service: EventServiceOverride,
     pub virtual_media_devices: Option<Vec<VirtualMediaDeviceConfig>>,
     /// Enables the BMC self-reset simulation: after `Manager.Reset` the

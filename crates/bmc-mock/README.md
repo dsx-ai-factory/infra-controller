@@ -180,14 +180,16 @@ The mock also publishes its own lifecycle events, so an SSE consumer sees the
 same traffic a real BMC produces: an accepted `ComputerSystem.Reset`, the
 embedder's power-on and boot-completed notifications, and an IPMI chassis
 reset. Each event carries a DMTF `ResourceEvent` message identifier, a
-severity, and an `OriginOfCondition`. A `Manager.Reset` or IPMI cold reset is
-logged but not announced, because the reset closes every stream first. Profiles with a system `LogService`
+severity, and an `OriginOfCondition`. A `Manager.Reset` or the `/ipmi` mock
+action `bmc_cold_reset` is logged but not announced, because the reset closes
+every stream first. Profiles with a system `LogService`
 (Dell R750, BlueField-3, BlueField-4) also append a matching `LogEntry` and
 point the origin at it; other profiles point at the system resource.
 
 A standalone reset is instantaneous unless `--bmc-reset-duration SECONDS` is
 given: with it the mock answers 503 to every request for that long after
-`Manager.Reset` or an IPMI cold reset, then recovers on the next request, as
+`Manager.Reset` or the `/ipmi` mock action `bmc_cold_reset`, then recovers on
+the next request, as
 embedded deployments already do from their platform timings. Either way the
 reset closes streams, clears replay history, and starts a new generation.
 
@@ -206,9 +208,6 @@ Reopen with `Last-Event-ID: <received ID>` to resume after a retained event;
 omit the header for live-only delivery. The ID of the frame just before the
 oldest retained one still resumes losslessly; unknown or older IDs return 400. The mock does not automatically create polled log
 entries from events.
-
-See the [SSE implementation contract](SSE-PLAN.md) for the Rust API, resource
-limits, reset behavior, ephemeral subscriptions, raw fault scripts, and tests.
 
 ## Log services
 

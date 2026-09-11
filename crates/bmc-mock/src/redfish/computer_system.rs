@@ -1137,6 +1137,9 @@ fn entry_paging(query: Option<&str>) -> Result<(usize, Option<usize>), String> {
         };
         if key == "$skip" {
             skip = parsed;
+        } else if parsed == 0 {
+            // A zero-member page makes no progress, so its continuation would point at itself.
+            return Err("$top must be a positive integer".to_owned());
         } else {
             top = Some(parsed);
         }
@@ -1674,17 +1677,19 @@ mod tests {
             format!("{entries_path}?$skip=7")
         );
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("{entries_path}?$skip=many"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        for query in ["$skip=many", "$top=0"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{entries_path}?{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        }
     }
 
     #[tokio::test]

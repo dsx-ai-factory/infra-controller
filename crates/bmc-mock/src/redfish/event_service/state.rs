@@ -427,10 +427,9 @@ impl EventServiceState {
                     .and_then(|suffix| suffix.strip_prefix(':'))
                     .and_then(|seq| seq.parse::<u64>().ok())
                     .filter(|seq| id == format!("{}:{seq}", inner.generation))
-                    .filter(|seq| {
-                        inner.frames.front().is_some_and(|f| seq + 1 >= f.seq)
-                            && *seq < inner.next_seq
-                    })
+                    // Bound first: once `seq < next_seq`, `seq + 1` cannot overflow.
+                    .filter(|seq| *seq < inner.next_seq)
+                    .filter(|seq| inner.frames.front().is_some_and(|f| seq + 1 >= f.seq))
                     .ok_or_else(|| {
                         EventServiceError::Invalid(
                             "Last-Event-ID is not in retained history".into(),

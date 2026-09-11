@@ -178,7 +178,7 @@ pub(super) struct Args {
         long,
         value_name = "SECONDS",
         conflicts_with_all = ["targz", "ip_router"],
-        help = "Keep the generated BMC offline, answering 503, for this many seconds after Manager.Reset or an IPMI cold reset; omitted or 0 makes a reset instantaneous"
+        help = "Keep the generated BMC offline, answering 503, for this many seconds after Manager.Reset or the /ipmi mock action bmc_cold_reset; omitted or 0 makes a reset instantaneous"
     )]
     pub(super) bmc_reset_duration: Option<u64>,
 
