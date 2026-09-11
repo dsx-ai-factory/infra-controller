@@ -23,6 +23,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -33,21 +34,19 @@ import (
 
 // GetRackHandler is the API Handler for getting a Rack by ID
 type GetRackHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetRackHandler initializes and returns a new handler for getting a Rack
 func NewGetRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetRackHandler {
 	return GetRackHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -65,7 +64,7 @@ func NewGetRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Client
 // @Success 200 {object} model.APIRack
 // @Router /v2/org/{org}/nico/rack/{id} [get]
 func (grh GetRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "Get", c, grh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -114,7 +113,7 @@ func (grh GetRackHandler) Handle(c echo.Context) error {
 
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
-	grh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Validate the site
 	site, err := common.GetSiteFromIDString(ctx, nil, apiRequest.SiteID, grh.dbSession)
@@ -185,21 +184,19 @@ func (grh GetRackHandler) Handle(c echo.Context) error {
 
 // GetAllRackHandler is the API Handler for getting all Racks
 type GetAllRackHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllRackHandler initializes and returns a new handler for getting all Racks
 func NewGetAllRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllRackHandler {
 	return GetAllRackHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -221,7 +218,7 @@ func NewGetAllRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cli
 // @Success 200 {array} model.APIRack
 // @Router /v2/org/{org}/nico/rack [get]
 func (garh GetAllRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "GetAll", c, garh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -380,21 +377,19 @@ func (garh GetAllRackHandler) Handle(c echo.Context) error {
 
 // ValidateRackHandler is the API Handler for validating a Rack's components
 type ValidateRackHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewValidateRackHandler initializes and returns a new handler for validating a Rack
 func NewValidateRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) ValidateRackHandler {
 	return ValidateRackHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -411,7 +406,7 @@ func NewValidateRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.C
 // @Success 200 {object} model.APIRackValidationResult
 // @Router /v2/org/{org}/nico/rack/{id}/validation [get]
 func (vrh ValidateRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "Validate", c, vrh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "Validate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -449,7 +444,7 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
-	vrh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Get site ID from query param (required)
 	siteStrID := c.QueryParam("siteId")
@@ -532,21 +527,19 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 // ValidateRacksHandler is the API Handler for validating Racks with optional filters.
 // If no filter is specified, validates all racks in the Site.
 type ValidateRacksHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewValidateRacksHandler initializes and returns a new handler for validating Racks
 func NewValidateRacksHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) ValidateRacksHandler {
 	return ValidateRacksHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -564,7 +557,7 @@ func NewValidateRacksHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.
 // @Success 200 {object} model.APIRackValidationResult
 // @Router /v2/org/{org}/nico/rack/validation [get]
 func (vrsh ValidateRacksHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "ValidateRacks", c, vrsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "ValidateRacks", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -676,21 +669,19 @@ func (vrsh ValidateRacksHandler) Handle(c echo.Context) error {
 
 // UpdateRackPowerStateHandler is the API Handler for power controlling a single Rack by ID
 type UpdateRackPowerStateHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateRackPowerStateHandler initializes and returns a new handler for power controlling a Rack
 func NewUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateRackPowerStateHandler {
 	return UpdateRackPowerStateHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -707,7 +698,7 @@ func NewUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 // @Success 200 {object} model.APIUpdatePowerStateResponse
 // @Router /v2/org/{org}/nico/rack/{id}/power [patch]
 func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "PowerControl", c, pcrh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "PowerControl", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -745,7 +736,7 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
-	pcrh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Parse and validate request body
 	apiRequest := model.APIUpdatePowerStateRequest{}
@@ -810,21 +801,19 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 
 // BatchUpdateRackPowerStateHandler is the API Handler for power controlling Racks with optional filters
 type BatchUpdateRackPowerStateHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBatchUpdateRackPowerStateHandler initializes and returns a new handler for batch power controlling Racks
 func NewBatchUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BatchUpdateRackPowerStateHandler {
 	return BatchUpdateRackPowerStateHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -840,7 +829,7 @@ func NewBatchUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Clie
 // @Success 200 {object} model.APIUpdatePowerStateResponse
 // @Router /v2/org/{org}/nico/rack/power [patch]
 func (pcrbh BatchUpdateRackPowerStateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "PowerControlBatch", c, pcrbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "PowerControlBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -928,21 +917,19 @@ func (pcrbh BatchUpdateRackPowerStateHandler) Handle(c echo.Context) error {
 
 // UpdateRackFirmwareHandler is the API Handler for upgrading firmware on a single Rack by ID
 type UpdateRackFirmwareHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateRackFirmwareHandler initializes and returns a new handler for firmware upgrading a Rack
 func NewUpdateRackFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateRackFirmwareHandler {
 	return UpdateRackFirmwareHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -959,7 +946,7 @@ func NewUpdateRackFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/rack/{id}/firmware [patch]
 func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "FirmwareUpdate", c, furh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "FirmwareUpdate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -997,7 +984,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
-	furh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Parse and validate request body
 	apiRequest := model.APIUpdateFirmwareRequest{}
@@ -1061,21 +1048,19 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 
 // BatchUpdateRackFirmwareHandler is the API Handler for firmware upgrading Racks with optional filters
 type BatchUpdateRackFirmwareHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBatchUpdateRackFirmwareHandler initializes and returns a new handler for batch firmware upgrading Racks
 func NewBatchUpdateRackFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BatchUpdateRackFirmwareHandler {
 	return BatchUpdateRackFirmwareHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1091,7 +1076,7 @@ func NewBatchUpdateRackFirmwareHandler(dbSession *cdb.Session, tc tClient.Client
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/rack/firmware [patch]
 func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "FirmwareUpdateBatch", c, furbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "FirmwareUpdateBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1180,21 +1165,19 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 
 // BringUpRackHandler is the API Handler for bringing up a single Rack by ID
 type BringUpRackHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBringUpRackHandler initializes and returns a new handler for bringing up a Rack
 func NewBringUpRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BringUpRackHandler {
 	return BringUpRackHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1211,7 +1194,7 @@ func NewBringUpRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cl
 // @Success 200 {object} model.APIBringUpRackResponse
 // @Router /v2/org/{org}/nico/rack/{id}/bringup [post]
 func (burh BringUpRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "BringUp", c, burh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "BringUp", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1249,7 +1232,7 @@ func (burh BringUpRackHandler) Handle(c echo.Context) error {
 
 	// Get rack ID from URL param
 	rackStrID := c.Param("id")
-	burh.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Parse and validate request body
 	apiRequest := model.APIBringUpRackRequest{}
@@ -1318,21 +1301,19 @@ func (burh BringUpRackHandler) Handle(c echo.Context) error {
 
 // BatchBringUpRackHandler is the API Handler for bringing up Racks with optional filters
 type BatchBringUpRackHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewBatchBringUpRackHandler initializes and returns a new handler for batch bringing up Racks
 func NewBatchBringUpRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) BatchBringUpRackHandler {
 	return BatchBringUpRackHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1348,7 +1329,7 @@ func NewBatchBringUpRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *
 // @Success 200 {object} model.APIBringUpRackResponse
 // @Router /v2/org/{org}/nico/rack/bringup [post]
 func (bbuh BatchBringUpRackHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "BringUpBatch", c, bbuh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Rack", "BringUpBatch", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

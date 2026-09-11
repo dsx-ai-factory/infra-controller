@@ -27,8 +27,15 @@ import (
 	echo "github.com/labstack/echo/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 // Test_ProxyTimeoutsFitWriteTimeout guards the ceiling that the gRPC proxy
@@ -87,6 +94,71 @@ func Test_InitAPIServer(t *testing.T) {
 	}
 }
 
+// Test_InitAPIServerTracingMiddleware proves the startup gate the tracing
+// bootstrap promises: the OpenTelemetry Echo middleware is installed exactly
+// when transport instrumentation is on, and a routed request then records a
+// server span against the global tracer provider that the rest of the request
+// nests under.
+func Test_InitAPIServerTracingMiddleware(t *testing.T) {
+	tests := []struct {
+		descr          string
+		propagators    string
+		wantServerSpan bool
+	}{
+		{descr: "transport enabled installs the middleware", wantServerSpan: true},
+		{descr: "propagation disabled skips the middleware", propagators: "none"},
+	}
+
+	cfg := common.GetTestConfig()
+	dbSession := cdbu.GetTestDBSession(t, true)
+	defer dbSession.Close()
+	tcfg, _ := cfg.GetTemporalConfig()
+
+	for _, tc := range tests {
+		t.Run(tc.descr, func(t *testing.T) {
+			previousProvider := otel.GetTracerProvider()
+			previousPropagator := otel.GetTextMapPropagator()
+			t.Cleanup(func() {
+				otel.SetTracerProvider(previousProvider)
+				otel.SetTextMapPropagator(previousPropagator)
+			})
+			exporter := tracetest.NewInMemoryExporter()
+			otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter)))
+
+			// Export stays disabled so the provider above remains global; the
+			// bootstrap still decides transport instrumentation from the
+			// propagator configuration.
+			t.Setenv("OTEL_PROPAGATORS", tc.propagators)
+			shutdown, err := cotel.Bootstrap(context.Background(), false, "")
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, shutdown(context.Background())) })
+
+			srv := InitAPIServer(cfg, dbSession, &tmocks.Client{}, &tmocks.NamespaceClient{}, sc.NewClientPool(tcfg), nil)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/%s/org/test-org/%s/metadata", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), nil)
+			srv.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+			spans := exporter.GetSpans()
+			var serverSpans tracetest.SpanStubs
+			for _, span := range spans {
+				if span.SpanKind == trace.SpanKindServer {
+					serverSpans = append(serverSpans, span)
+				}
+			}
+			if !tc.wantServerSpan {
+				assert.Empty(t, serverSpans, "no middleware means no server span")
+				return
+			}
+			require.Len(t, serverSpans, 1, "the middleware records one server span per request")
+			for _, span := range spans {
+				assert.Equal(t, serverSpans[0].SpanContext.TraceID(), span.SpanContext.TraceID(),
+					"spans started during the request must join the server span's trace")
+			}
+		})
+	}
+}
+
 func Test_InitTemporalClients(t *testing.T) {
 	keyPath, certPath := config.SetupTestCerts(t)
 	defer os.Remove(keyPath)
@@ -118,7 +190,7 @@ func Test_InitTemporalClients(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			InitTemporalClients(tt.args.tConfig, true)
+			InitTemporalClients(tt.args.tConfig)
 		})
 	}
 }

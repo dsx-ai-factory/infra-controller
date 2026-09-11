@@ -31,7 +31,9 @@ import (
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -1820,7 +1822,13 @@ func NICoTest(secs int) {
 		panic(err)
 	}
 
-	s := grpc.NewServer()
+	var serverOpts []grpc.ServerOption
+	if cotel.TransportEnabled() {
+		// Create server spans and continue traces from otelgrpc-instrumented
+		// clients, matching the real core/flow/nvswitch gRPC servers.
+		serverOpts = append(serverOpts, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	}
+	s := grpc.NewServer(serverOpts...)
 	reflection.Register(s)
 
 	nicoServer := &NICoServerImpl{

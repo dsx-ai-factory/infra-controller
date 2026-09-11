@@ -11,6 +11,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 // Logger returns a middleware that logs HTTP requests
@@ -48,7 +50,11 @@ func Logger() echo.MiddlewareFunc {
 				level = zerolog.WarnLevel
 			}
 
-			log.WithLevel(level).
+			// Correlate the access log with the request trace (no-op fields
+			// when tracing is disabled)
+			reqLogger := cotel.LoggerWithTrace(req.Context(), log.Logger)
+
+			reqLogger.WithLevel(level).
 				Str("Method", c.Request().Method).
 				Str("ID", id).
 				Str("Path", c.Request().URL.Path).

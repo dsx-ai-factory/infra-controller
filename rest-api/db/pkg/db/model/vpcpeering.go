@@ -232,10 +232,12 @@ func (vpsd VpcPeeringSQLDAO) Create(
 	ctx context.Context,
 	tx *db.Tx,
 	input VpcPeeringCreateInput,
-) (*VpcPeering, error) {
+) (_ *VpcPeering, retErr error) {
 	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.Create")
 	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
+		defer func() {
+			vpDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	vpc1ID, vpc2ID := input.Vpc1ID, input.Vpc2ID
@@ -282,10 +284,12 @@ func (vpsd VpcPeeringSQLDAO) GetAll(
 	filter VpcPeeringFilterInput,
 	page paginator.PageInput,
 	includeRelations []string,
-) ([]VpcPeering, int, error) {
+) (_ []VpcPeering, _ int, retErr error) {
 	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.GetAll")
 	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
+		defer func() {
+			vpDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	vps := []VpcPeering{}
@@ -397,10 +401,12 @@ func (vpsd VpcPeeringSQLDAO) GetByID(
 	tx *db.Tx,
 	id uuid.UUID,
 	includeRelations []string,
-) (*VpcPeering, error) {
+) (_ *VpcPeering, retErr error) {
 	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.GetByID")
 	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
+		defer func() {
+			vpDAOSpan.EndWith(retErr)
+		}()
 
 		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", id)
 	}
@@ -429,7 +435,7 @@ func (vpsd VpcPeeringSQLDAO) UpdateStatusByID(
 	tx *db.Tx,
 	id uuid.UUID,
 	newStatus string,
-) error {
+) (retErr error) {
 	// Disallow undefined VPC peering status
 	if !VpcPeeringStatusMap[newStatus] {
 		return db.ErrInvalidValue
@@ -437,7 +443,9 @@ func (vpsd VpcPeeringSQLDAO) UpdateStatusByID(
 
 	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.UpdateStatusByID")
 	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
+		defer func() {
+			vpDAOSpan.EndWith(retErr)
+		}()
 		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "id", id)
 		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "status", newStatus)
 	}
@@ -487,10 +495,12 @@ func (vpsd VpcPeeringSQLDAO) Delete(
 	ctx context.Context,
 	tx *db.Tx,
 	id uuid.UUID,
-) error {
+) (retErr error) {
 	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.Delete")
 	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
+		defer func() {
+			vpDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	vp := &VpcPeering{
@@ -506,10 +516,12 @@ func (vpsd VpcPeeringSQLDAO) DeleteByVpcID(
 	ctx context.Context,
 	tx *db.Tx,
 	vpcID uuid.UUID,
-) error {
+) (retErr error) {
 	ctx, vpDAOSpan := vpsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcPeeringDAO.DeleteByVpcID")
 	if vpDAOSpan != nil {
-		defer vpDAOSpan.End()
+		defer func() {
+			vpDAOSpan.EndWith(retErr)
+		}()
 		vpsd.tracerSpan.SetAttribute(vpDAOSpan, "vpcID", vpcID)
 	}
 

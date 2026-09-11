@@ -25,19 +25,17 @@ import (
 
 // CreateInfrastructureProviderHandler is the API Handler for creating new Infrastructure Provider
 type CreateInfrastructureProviderHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewCreateInfrastructureProviderHandler initializes and returns a new handler for creating Infrastructure Provider
 func NewCreateInfrastructureProviderHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) CreateInfrastructureProviderHandler {
 	return CreateInfrastructureProviderHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -53,7 +51,7 @@ func NewCreateInfrastructureProviderHandler(dbSession *cdb.Session, tc temporalC
 // @Success 201 {object} model.APIInfrastructureProvider
 // @Router /v2/org/{org}/nico/infrastructure-provider [post]
 func (ciph CreateInfrastructureProviderHandler) Handle(c echo.Context) error {
-	org, dbUser, _, logger, handlerSpan := common.SetupHandler("InfrastructureProvider", "Create", c, ciph.tracerSpan)
+	org, dbUser, _, logger, handlerSpan := common.SetupHandler("InfrastructureProvider", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -86,19 +84,17 @@ func (ciph CreateInfrastructureProviderHandler) Handle(c echo.Context) error {
 
 // GetCurrentInfrastructureProviderHandler is the API Handler for retrieving Infrastructure Provider associated with the org
 type GetCurrentInfrastructureProviderHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetCurrentInfrastructureProviderHandler initializes and returns a new handler to retrieve Infrastructure Provider associate with the org
 func NewGetCurrentInfrastructureProviderHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetCurrentInfrastructureProviderHandler {
 	return GetCurrentInfrastructureProviderHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -113,7 +109,7 @@ func NewGetCurrentInfrastructureProviderHandler(dbSession *cdb.Session, tc tempo
 // @Success 200 {object} model.APIInfrastructureProvider
 // @Router /v2/org/{org}/nico/infrastructure-provider/current [get]
 func (gciph GetCurrentInfrastructureProviderHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfrastructureProvider", "GetCurrent", c, gciph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfrastructureProvider", "GetCurrent", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -190,19 +186,17 @@ func (gciph GetCurrentInfrastructureProviderHandler) Handle(c echo.Context) erro
 
 // GetCurrentInfrastructureProviderStatsHandler is the API Handler for retrieving InfrastructureProvider stats associated with the org
 type GetCurrentInfrastructureProviderStatsHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetCurrentInfrastructureProviderStatsHandler initializes and returns a new handler to retrieve InfrastructureProvider stats associate with the org
 func NewGetCurrentInfrastructureProviderStatsHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetCurrentInfrastructureProviderStatsHandler {
 	return GetCurrentInfrastructureProviderStatsHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -217,7 +211,7 @@ func NewGetCurrentInfrastructureProviderStatsHandler(dbSession *cdb.Session, tc 
 // @Success 200 {object} model.APIInfrastructureProviderStats
 // @Router /v2/org/{org}/nico/infrastructure-provider/current/stats [get]
 func (gcipsh GetCurrentInfrastructureProviderStatsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfrastructureProvider", "GetCurrentStats", c, gcipsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfrastructureProvider", "GetCurrentStats", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -294,19 +288,17 @@ func (gcipsh GetCurrentInfrastructureProviderStatsHandler) Handle(c echo.Context
 
 // UpdateCurrentInfrastructureProviderHandler is the API Handler for updating the current Infrastructure Provider
 type UpdateCurrentInfrastructureProviderHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateCurrentInfrastructureProviderHandler initializes and returns a new handler for updating the current Infrastructure Provider
 func NewUpdateCurrentInfrastructureProviderHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateCurrentInfrastructureProviderHandler {
 	return UpdateCurrentInfrastructureProviderHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -322,7 +314,7 @@ func NewUpdateCurrentInfrastructureProviderHandler(dbSession *cdb.Session, tc te
 // @Success 200 {object} model.APIInfrastructureProvider
 // @Router /v2/org/{org}/nico/infrastructure-provider/current [patch]
 func (uciph UpdateCurrentInfrastructureProviderHandler) Handle(c echo.Context) error {
-	org, dbUser, _, logger, handlerSpan := common.SetupHandler("InfrastructureProvider", "UpdateCurrent", c, uciph.tracerSpan)
+	org, dbUser, _, logger, handlerSpan := common.SetupHandler("InfrastructureProvider", "UpdateCurrent", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

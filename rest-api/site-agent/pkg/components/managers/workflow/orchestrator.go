@@ -21,6 +21,7 @@ import (
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	swu "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
 )
@@ -73,14 +74,19 @@ func workflowOrchestrator() error {
 	var clientInterceptors []interceptor.ClientInterceptor
 	var workerInterceptors []interceptor.WorkerInterceptor
 
-	// otelErr, not err: `var err error` is declared further down.
-	otelInterceptor, otelErr := opentelemetry.NewTracingInterceptor(
-		opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
-	if otelErr != nil {
-		return fmt.Errorf("creating Temporal tracing interceptor: %w", otelErr)
+	if cotel.TransportEnabled() {
+		// otelErr, not err: `var err error` is declared further down.
+		otelInterceptor, otelErr := opentelemetry.NewTracingInterceptor(
+			opentelemetry.TracerOptions{
+				TextMapPropagator: otel.GetTextMapPropagator(),
+				DisableBaggage:    true,
+			})
+		if otelErr != nil {
+			return fmt.Errorf("creating Temporal tracing interceptor: %w", otelErr)
+		}
+		clientInterceptors = append(clientInterceptors, otelInterceptor)
+		workerInterceptors = append(workerInterceptors, otelInterceptor)
 	}
-	clientInterceptors = append(clientInterceptors, otelInterceptor)
-	workerInterceptors = append(workerInterceptors, otelInterceptor)
 
 	// Create logger for temporal using
 	// zero logger

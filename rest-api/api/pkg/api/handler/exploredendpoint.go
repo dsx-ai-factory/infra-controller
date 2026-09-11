@@ -28,19 +28,17 @@ const (
 
 // GetAllExploredEndpointHandler lists explored endpoints for a Site via Core.
 type GetAllExploredEndpointHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllExploredEndpointHandler returns a handler for listing explored endpoints.
 func NewGetAllExploredEndpointHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) GetAllExploredEndpointHandler {
 	return GetAllExploredEndpointHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -59,7 +57,7 @@ func NewGetAllExploredEndpointHandler(dbSession *cdb.Session, scp *sc.ClientPool
 // @Success 200 {array} model.APIExploredEndpoint
 // @Router /v2/org/{org}/nico/site-explorer/endpoint [get]
 func (h GetAllExploredEndpointHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExploredEndpoint", "GetAll", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExploredEndpoint", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

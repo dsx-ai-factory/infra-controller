@@ -248,11 +248,13 @@ type IPBlockSQLDAO struct {
 // The returned IPBlock will not have any related structs (Site/InfrastructureProvider/Tenant) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ipbsd IPBlockSQLDAO) Create(ctx context.Context, tx *db.Tx, input IPBlockCreateInput) (*IPBlock, error) {
+func (ipbsd IPBlockSQLDAO) Create(ctx context.Context, tx *db.Tx, input IPBlockCreateInput) (_ *IPBlock, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.Create")
 	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
+		defer func() {
+			ipblockDAOSpan.EndWith(retErr)
+		}()
 
 		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "name", input.Name)
 	}
@@ -296,11 +298,13 @@ func (ipbsd IPBlockSQLDAO) Create(ctx context.Context, tx *db.Tx, input IPBlockC
 // GetByID returns a IPBlock by ID
 // includeRelation can be a subset of "Site", "InfrastructureProvider", "Tenant"
 // returns db.ErrDoesNotExist error if the record is not found
-func (ipbsd IPBlockSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*IPBlock, error) {
+func (ipbsd IPBlockSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *IPBlock, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.GetByID")
 	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
+		defer func() {
+			ipblockDAOSpan.EndWith(retErr)
+		}()
 
 		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "id", id.String())
 	}
@@ -325,10 +329,12 @@ func (ipbsd IPBlockSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID,
 }
 
 // GetOne returns the IPBlock with the given ID when it also matches the filter.
-func (ipbsd IPBlockSQLDAO) GetOne(ctx context.Context, tx *db.Tx, id uuid.UUID, filter IPBlockFilterInput, includeRelations []string) (*IPBlock, error) {
+func (ipbsd IPBlockSQLDAO) GetOne(ctx context.Context, tx *db.Tx, id uuid.UUID, filter IPBlockFilterInput, includeRelations []string) (_ *IPBlock, retErr error) {
 	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.GetOne")
 	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
+		defer func() {
+			ipblockDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	filter.IPBlockIDs = []uuid.UUID{id}
@@ -357,11 +363,13 @@ func (ipbsd IPBlockSQLDAO) GetOne(ctx context.Context, tx *db.Tx, id uuid.UUID, 
 // GetCountByStatus returns count of IPBlocks for given status
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned map is 0
-func (ipbsd IPBlockSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, filter IPBlockFilterInput) (map[string]int, error) {
+func (ipbsd IPBlockSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, filter IPBlockFilterInput) (_ map[string]int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.GetCountByStatus")
 	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
+		defer func() {
+			ipblockDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	ipb := &IPBlock{}
@@ -482,11 +490,13 @@ func (ipbsd IPBlockSQLDAO) setQueryWithFilter(query *bun.SelectQuery, filter IPB
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in IPBlockOrderByDefault in ascending order
-func (ipbsd IPBlockSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IPBlockFilterInput, page paginator.PageInput, includeRelations []string) ([]IPBlock, int, error) {
+func (ipbsd IPBlockSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IPBlockFilterInput, page paginator.PageInput, includeRelations []string) (_ []IPBlock, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.GetAll")
 	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
+		defer func() {
+			ipblockDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	ipbs := []IPBlock{}
@@ -527,11 +537,13 @@ func (ipbsd IPBlockSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IPBlock
 // For setting to null values, use: ClearFromParams
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (ipbsd IPBlockSQLDAO) Update(ctx context.Context, tx *db.Tx, input IPBlockUpdateInput) (*IPBlock, error) {
+func (ipbsd IPBlockSQLDAO) Update(ctx context.Context, tx *db.Tx, input IPBlockUpdateInput) (_ *IPBlock, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.Update")
 	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
+		defer func() {
+			ipblockDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	ipb := &IPBlock{
@@ -627,11 +639,13 @@ func (ipbsd IPBlockSQLDAO) Update(ctx context.Context, tx *db.Tx, input IPBlockU
 // parameters displayName, description, siteID when true, the are set to null in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (ipbsd IPBlockSQLDAO) Clear(ctx context.Context, tx *db.Tx, input IPBlockClearInput) (*IPBlock, error) {
+func (ipbsd IPBlockSQLDAO) Clear(ctx context.Context, tx *db.Tx, input IPBlockClearInput) (_ *IPBlock, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.ClearFromParams")
 	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
+		defer func() {
+			ipblockDAOSpan.EndWith(retErr)
+		}()
 
 		ipbsd.tracerSpan.SetAttribute(ipblockDAOSpan, "id", input.IPBlockID)
 	}
@@ -670,11 +684,13 @@ func (ipbsd IPBlockSQLDAO) Clear(ctx context.Context, tx *db.Tx, input IPBlockCl
 // Delete deletes an IPBlock by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (ipbsd IPBlockSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ipbsd IPBlockSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipblockDAOSpan := ipbsd.tracerSpan.CreateChildInCurrentContext(ctx, "IPBlockDAO.Delete")
 	if ipblockDAOSpan != nil {
-		defer ipblockDAOSpan.End()
+		defer func() {
+			ipblockDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	ipb := &IPBlock{

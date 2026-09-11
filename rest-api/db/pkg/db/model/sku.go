@@ -247,11 +247,13 @@ type SkuSQLDAO struct {
 
 // Create creates a new SKU from the given parameters
 // SKU comes from NICo, so SkuID is required
-func (ssd SkuSQLDAO) Create(ctx context.Context, tx *db.Tx, input SkuCreateInput) (*SKU, error) {
+func (ssd SkuSQLDAO) Create(ctx context.Context, tx *db.Tx, input SkuCreateInput) (_ *SKU, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Create")
 	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
+		defer func() {
+			skuDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	sk := &SKU{
@@ -277,11 +279,13 @@ func (ssd SkuSQLDAO) Create(ctx context.Context, tx *db.Tx, input SkuCreateInput
 
 // Get returns a SKU by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string) (*SKU, error) {
+func (ssd SkuSQLDAO) Get(ctx context.Context, tx *db.Tx, id string) (_ *SKU, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Get")
 	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
+		defer func() {
+			skuDAOSpan.EndWith(retErr)
+		}()
 		ssd.tracerSpan.SetAttribute(skuDAOSpan, "id", id)
 	}
 
@@ -334,11 +338,13 @@ func (ssd SkuSQLDAO) setQueryWithFilter(filter SkuFilterInput, query *bun.Select
 // GetAll returns all SKUs with optional filters
 // If orderBy is nil, then records are ordered by column specified
 // in SkuOrderByDefault in ascending order
-func (ssd SkuSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInput, page paginator.PageInput) ([]SKU, int, error) {
+func (ssd SkuSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInput, page paginator.PageInput) (_ []SKU, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.GetAll")
 	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
+		defer func() {
+			skuDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	skus := []SKU{}
@@ -369,11 +375,13 @@ func (ssd SkuSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SkuFilterInpu
 }
 
 // Update updates specified fields of an existing SKU
-func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (*SKU, error) {
+func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput) (_ *SKU, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Update")
 	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
+		defer func() {
+			skuDAOSpan.EndWith(retErr)
+		}()
 		ssd.tracerSpan.SetAttribute(skuDAOSpan, "id", input.SkuID)
 	}
 
@@ -425,11 +433,13 @@ func (ssd SkuSQLDAO) Update(ctx context.Context, tx *db.Tx, input SkuUpdateInput
 }
 
 // Delete deletes a SKU by ID
-func (ssd SkuSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string) error {
+func (ssd SkuSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, skuDAOSpan := ssd.tracerSpan.CreateChildInCurrentContext(ctx, "SkuDAO.Delete")
 	if skuDAOSpan != nil {
-		defer skuDAOSpan.End()
+		defer func() {
+			skuDAOSpan.EndWith(retErr)
+		}()
 		ssd.tracerSpan.SetAttribute(skuDAOSpan, "id", id)
 	}
 

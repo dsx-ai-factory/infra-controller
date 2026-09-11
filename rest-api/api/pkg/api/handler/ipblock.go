@@ -29,6 +29,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 )
@@ -37,19 +38,17 @@ import (
 
 // CreateIPBlockHandler is the API Handler for creating new IPBlock
 type CreateIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewCreateIPBlockHandler initializes and returns a new handler for creating IPBlock
 func NewCreateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) CreateIPBlockHandler {
 	return CreateIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -65,7 +64,7 @@ func NewCreateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Success 201 {object} model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock [post]
 func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Create", c, cipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -241,19 +240,17 @@ func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
 
 // GetAllIPBlockHandler is the API Handler for getting all IPBlocks
 type GetAllIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllIPBlockHandler initializes and returns a new handler for getting all IPBlocks
 func NewGetAllIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllIPBlockHandler {
 	return GetAllIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -278,7 +275,7 @@ func NewGetAllIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Success 200 {object} []model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock [get]
 func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "GetAll", c, gaipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -353,7 +350,7 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gaipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
@@ -361,7 +358,7 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 
 	statusQuery := c.QueryParam("status")
 	if statusQuery != "" {
-		gaipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.IPBlockStatusMap[statusQuery]
 		if !ok {
 			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
@@ -493,19 +490,17 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 
 // GetAllDerivedIPBlockHandler is the API Handler for getting details of derived IPBlocks from a parent IPBlock
 type GetAllDerivedIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllDerivedIPBlockHandler initializes and returns a new handler for getting derived IPBlocks
 func NewGetAllDerivedIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllDerivedIPBlockHandler {
 	return GetAllDerivedIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -524,7 +519,7 @@ func NewGetAllDerivedIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Cl
 // @Success 200 {object} model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock/{id}/derived [get]
 func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "GetAllDerived", c, gadipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "GetAllDerived", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -583,7 +578,7 @@ func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
 	// Get ipBlock ID from URL param
 	ipbStrID := c.Param("id")
 
-	gadipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID))
 
 	ipbID, err := uuid.Parse(ipbStrID)
 	if err != nil {
@@ -594,7 +589,7 @@ func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gadipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
@@ -602,7 +597,7 @@ func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
 
 	statusQuery := c.QueryParam("status")
 	if statusQuery != "" {
-		gadipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.IPBlockStatusMap[statusQuery]
 		if !ok {
 			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
@@ -712,19 +707,17 @@ func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
 
 // GetIPBlockHandler is the API Handler for retrieving IPBlock
 type GetIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetIPBlockHandler initializes and returns a new handler to retrieve IPBlock
 func NewGetIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetIPBlockHandler {
 	return GetIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -744,7 +737,7 @@ func NewGetIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg 
 // @Success 200 {object} model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock/{id} [get]
 func (gipbh GetIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Get", c, gipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -763,7 +756,7 @@ func (gipbh GetIPBlockHandler) Handle(c echo.Context) error {
 	// Get ipBlock ID from URL param
 	ipbStrID := c.Param("id")
 
-	gipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID))
 
 	ipbID, err := uuid.Parse(ipbStrID)
 	if err != nil {
@@ -847,19 +840,17 @@ func (gipbh GetIPBlockHandler) Handle(c echo.Context) error {
 
 // UpdateIPBlockHandler is the API Handler for updating a IPBlock
 type UpdateIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateIPBlockHandler initializes and returns a new handler for updating IPBlock
 func NewUpdateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateIPBlockHandler {
 	return UpdateIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -876,7 +867,7 @@ func NewUpdateIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Success 200 {object} model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock/{id} [patch]
 func (uipbh UpdateIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Update", c, uipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -905,7 +896,7 @@ func (uipbh UpdateIPBlockHandler) Handle(c echo.Context) error {
 	// Get ipBlock ID from URL param
 	ipbStrID := c.Param("id")
 
-	uipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID))
 
 	ipbID, err := uuid.Parse(ipbStrID)
 	if err != nil {
@@ -1022,19 +1013,17 @@ func (uipbh UpdateIPBlockHandler) Handle(c echo.Context) error {
 
 // DeleteIPBlockHandler is the API Handler for deleting a IPBlock
 type DeleteIPBlockHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewDeleteIPBlockHandler initializes and returns a new handler for deleting IPBlock
 func NewDeleteIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) DeleteIPBlockHandler {
 	return DeleteIPBlockHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1050,7 +1039,7 @@ func NewDeleteIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Success 202
 // @Router /v2/org/{org}/nico/ipblock/{id} [delete]
 func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Delete", c, dipbh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IPBlock", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1079,7 +1068,7 @@ func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
 	// Get ipBlock ID from URL param
 	ipbStrID := c.Param("id")
 
-	dipbh.tracerSpan.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("ipblock_id", ipbStrID))
 
 	ipbID, err := uuid.Parse(ipbStrID)
 	if err != nil {

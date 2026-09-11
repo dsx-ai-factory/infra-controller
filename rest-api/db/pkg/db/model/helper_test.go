@@ -18,7 +18,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -408,9 +407,8 @@ func testGenerateMacAddress(t *testing.T) string {
 	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x\n", buf[0], buf[1], buf[2], buf[3], buf[4], buf[5])
 }
 
-// testCommonTraceProviderSetup creates a test provider and spanner
+// testCommonTraceProviderSetup creates a test provider and span context.
 func testCommonTraceProviderSetup(t *testing.T, ctx context.Context) (trace.Tracer, trace.SpanContext, context.Context) {
-	// OTEL spanner configuration
 	provider := trace.NewNoopTracerProvider()
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID: trace.TraceID{0x01},
@@ -419,9 +417,7 @@ func testCommonTraceProviderSetup(t *testing.T, ctx context.Context) (trace.Trac
 
 	ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
 
-	tracer := provider.Tracer(stracer.TracerName)
-	tracer.Start(ctx, "Test-DB-Spanner")
-	ctx = context.WithValue(ctx, stracer.TracerKey, tracer)
+	tracer := provider.Tracer("test-db-model")
 
 	return tracer, sc, ctx
 }

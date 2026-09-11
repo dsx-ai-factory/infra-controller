@@ -169,11 +169,13 @@ type AllocationConstraintSQLDAO struct {
 // The returned AllocationConstraint will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), this call must happen within a transaction.
 func (acd AllocationConstraintSQLDAO) Create(
-	ctx context.Context, tx *db.Tx, input AllocationConstraintCreateInput) (*AllocationConstraint, error) {
+	ctx context.Context, tx *db.Tx, input AllocationConstraintCreateInput) (_ *AllocationConstraint, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.Create")
 	if aDAOSpan != nil {
-		defer aDAOSpan.End()
+		defer func() {
+			aDAOSpan.EndWith(retErr)
+		}()
 
 		acd.tracerSpan.SetAttribute(aDAOSpan, "allocation_id", input.AllocationID.String())
 	}
@@ -210,11 +212,13 @@ func (acd AllocationConstraintSQLDAO) Create(
 // GetByID returns a AllocationConstraint by ID
 // returns db.ErrDoesNotExist error if the record is not found
 func (acd AllocationConstraintSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID,
-	includeRelations []string) (*AllocationConstraint, error) {
+	includeRelations []string) (_ *AllocationConstraint, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.GetByID")
 	if aDAOSpan != nil {
-		defer aDAOSpan.End()
+		defer func() {
+			aDAOSpan.EndWith(retErr)
+		}()
 
 		acd.tracerSpan.SetAttribute(aDAOSpan, "id", id.String())
 	}
@@ -243,12 +247,14 @@ func (acd AllocationConstraintSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id
 // If records not found, then error is nil, but length of returned slice is 0.
 // If orderBy is nil, then records are ordered by column specified in AllocationConstraintOrderByDefault in ascending order.
 func (acd AllocationConstraintSQLDAO) GetAll(ctx context.Context, tx *db.Tx,
-	filter AllocationConstraintFilterInput, page paginator.PageInput, includeRelations []string) ([]AllocationConstraint, int, error) {
+	filter AllocationConstraintFilterInput, page paginator.PageInput, includeRelations []string) (_ []AllocationConstraint, _ int, retErr error) {
 	acs := []AllocationConstraint{}
 	// Create a child span and set the attributes for current request
 	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.GetAll")
 	if aDAOSpan != nil {
-		defer aDAOSpan.End()
+		defer func() {
+			aDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	query := db.GetIDB(tx, acd.dbSession).NewSelect().Model(&acs)
@@ -326,11 +332,13 @@ func (acd AllocationConstraintSQLDAO) GetAll(ctx context.Context, tx *db.Tx,
 // Update updates specified fields of an existing AllocationConstraint.
 // The updated fields are assumed to be set to non-null values.
 // Since there are 2 operations (UPDATE, SELECT), this call must happen within a transaction.
-func (acd AllocationConstraintSQLDAO) Update(ctx context.Context, tx *db.Tx, input AllocationConstraintUpdateInput) (*AllocationConstraint, error) {
+func (acd AllocationConstraintSQLDAO) Update(ctx context.Context, tx *db.Tx, input AllocationConstraintUpdateInput) (_ *AllocationConstraint, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.Update")
 	if aDAOSpan != nil {
-		defer aDAOSpan.End()
+		defer func() {
+			aDAOSpan.EndWith(retErr)
+		}()
 
 		acd.tracerSpan.SetAttribute(aDAOSpan, "id", input.AllocationConstraintID.String())
 	}
@@ -415,11 +423,13 @@ func (acd AllocationConstraintSQLDAO) Update(ctx context.Context, tx *db.Tx, inp
 
 // Clear sets parameters of an existing AllocationConstraint to null values in db.
 // Since there are 2 operations (UPDATE, SELECT), this must be within a transaction.
-func (acd AllocationConstraintSQLDAO) Clear(ctx context.Context, tx *db.Tx, input AllocationConstraintClearInput) (*AllocationConstraint, error) {
+func (acd AllocationConstraintSQLDAO) Clear(ctx context.Context, tx *db.Tx, input AllocationConstraintClearInput) (_ *AllocationConstraint, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.Clear")
 	if aDAOSpan != nil {
-		defer aDAOSpan.End()
+		defer func() {
+			aDAOSpan.EndWith(retErr)
+		}()
 
 		acd.tracerSpan.SetAttribute(aDAOSpan, "id", input.AllocationConstraintID.String())
 	}
@@ -453,11 +463,13 @@ func (acd AllocationConstraintSQLDAO) Clear(ctx context.Context, tx *db.Tx, inpu
 // DeleteByID deletes an AllocationConstraint by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (acd AllocationConstraintSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (acd AllocationConstraintSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, aDAOSpan := acd.tracerSpan.CreateChildInCurrentContext(ctx, "AllocationConstraintDAO.DeleteByID")
 	if aDAOSpan != nil {
-		defer aDAOSpan.End()
+		defer func() {
+			aDAOSpan.EndWith(retErr)
+		}()
 
 		acd.tracerSpan.SetAttribute(aDAOSpan, "id", id.String())
 	}

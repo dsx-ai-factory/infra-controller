@@ -81,8 +81,11 @@ config:
     enabled: true
     port: 9360
   tracing:
-    # Gates the otelecho middleware and the Temporal client interceptor.
+    # -- Export spans over OTLP. Export also needs an OTEL_EXPORTER_OTLP_*
+    # endpoint in extraEnv; W3C trace-context propagation and the HTTP,
+    # Temporal, and gRPC instrumentation stay active regardless of this flag.
     enabled: true
+    # -- service.name fallback, used when OTEL_SERVICE_NAME is not set.
     serviceName: nico-rest-api
   powerProvisioning:
     dps:

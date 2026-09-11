@@ -21,19 +21,17 @@ import (
 
 // SiteExplorerEndpointActionHandler triggers clear-error or re-explore actions for explored endpoints.
 type SiteExplorerEndpointActionHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewSiteExplorerEndpointActionHandler returns a handler for site-explorer endpoint actions.
 func NewSiteExplorerEndpointActionHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) SiteExplorerEndpointActionHandler {
 	return SiteExplorerEndpointActionHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -49,7 +47,7 @@ func NewSiteExplorerEndpointActionHandler(dbSession *cdb.Session, scp *sc.Client
 // @Success 200 {object} model.APISiteExplorerEndpointAction
 // @Router /v2/org/{org}/nico/site-explorer/endpoint/action [post]
 func (h SiteExplorerEndpointActionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SiteExplorerEndpointAction", "Create", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SiteExplorerEndpointAction", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

@@ -469,11 +469,13 @@ type InstanceSQLDAO struct {
 // The returned Instance will not have any related structs (InfrastructureProvider/Site etc) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (isd InstanceSQLDAO) Create(ctx context.Context, tx *db.Tx, input InstanceCreateInput) (*Instance, error) {
+func (isd InstanceSQLDAO) Create(ctx context.Context, tx *db.Tx, input InstanceCreateInput) (_ *Instance, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := isd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceDAO.Create")
 	if instanceDAOSpan != nil {
-		defer instanceDAOSpan.End()
+		defer func() {
+			instanceDAOSpan.EndWith(retErr)
+		}()
 		isd.tracerSpan.SetAttribute(instanceDAOSpan, "name", input.Name)
 	}
 
@@ -489,12 +491,14 @@ func (isd InstanceSQLDAO) Create(ctx context.Context, tx *db.Tx, input InstanceC
 // "Site", "InstanceType", "Vpc", "Machine", "OperatingSystem", "NetworkSecurityGroup"
 // Allocation relations are intentionally omitted because direct instance-allocation linkage was removed.
 // returns db.ErrDoesNotExist error if the record is not found
-func (isd InstanceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Instance, error) {
+func (isd InstanceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Instance, retErr error) {
 	i := &Instance{}
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := isd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceDAO.GetByID")
 	if instanceDAOSpan != nil {
-		defer instanceDAOSpan.End()
+		defer func() {
+			instanceDAOSpan.EndWith(retErr)
+		}()
 		isd.tracerSpan.SetAttribute(instanceDAOSpan, "id", id.String())
 	}
 
@@ -518,12 +522,14 @@ func (isd InstanceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, 
 // GetCountByStatus returns count of Instances for given status
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil and all counts are zero
-func (isd InstanceSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, tenantID *uuid.UUID, siteID *uuid.UUID) (InstanceCountByStatus, error) {
+func (isd InstanceSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, tenantID *uuid.UUID, siteID *uuid.UUID) (_ InstanceCountByStatus, retErr error) {
 	i := &Instance{}
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := isd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceDAO.GetCountByStatus")
 	if instanceDAOSpan != nil {
-		defer instanceDAOSpan.End()
+		defer func() {
+			instanceDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	var statusQueryResults []instanceStatusCountQueryResult
@@ -693,11 +699,13 @@ func (isd InstanceSQLDAO) setQueryWithFilter(filter InstanceFilterInput, query *
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if page.OrderBy is nil, then records are ordered by column specified in InstanceOrderByDefault in ascending order
-func (isd InstanceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InstanceFilterInput, page paginator.PageInput, includeRelations []string) ([]Instance, int, error) {
+func (isd InstanceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InstanceFilterInput, page paginator.PageInput, includeRelations []string) (_ []Instance, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := isd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceDAO.GetAll")
 	if instanceDAOSpan != nil {
-		defer instanceDAOSpan.End()
+		defer func() {
+			instanceDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	var instances []Instance
@@ -759,7 +767,9 @@ func (isd InstanceSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter Instan
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := isd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceDAO.GetCount")
 	if instanceDAOSpan != nil {
-		defer instanceDAOSpan.End()
+		defer func() {
+			instanceDAOSpan.EndWith(err)
+		}()
 	}
 
 	query := db.GetIDB(tx, isd.dbSession).NewSelect().Model((*Instance)(nil))
@@ -776,12 +786,16 @@ func (isd InstanceSQLDAO) GetCount(ctx context.Context, tx *db.Tx, filter Instan
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (isd InstanceSQLDAO) Update(ctx context.Context, tx *db.Tx, input InstanceUpdateInput) (*Instance, error) {
+func (isd InstanceSQLDAO) Update(ctx context.Context, tx *db.Tx, input InstanceUpdateInput) (_ *Instance, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := isd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceDAO.Update")
 	if instanceDAOSpan != nil {
-		defer instanceDAOSpan.End()
-		// Detailed per-field tracing is recorded in the UpdateMultiple child span.
+		defer func() {
+			instanceDAOSpan.EndWith(
+				// Detailed per-field tracing is recorded in the UpdateMultiple child span.
+				retErr)
+		}()
+
 	}
 
 	results, err := isd.UpdateMultiple(ctx, tx, InstanceUpdateMultipleInput{
@@ -798,11 +812,13 @@ func (isd InstanceSQLDAO) Update(ctx context.Context, tx *db.Tx, input InstanceU
 // parameters when true, the are set to null in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (isd InstanceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceClearInput) (*Instance, error) {
+func (isd InstanceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceClearInput) (_ *Instance, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := isd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceDAO.Clear")
 	if instanceDAOSpan != nil {
-		defer instanceDAOSpan.End()
+		defer func() {
+			instanceDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	i := &Instance{
@@ -879,11 +895,13 @@ func (isd InstanceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceCl
 // Delete deletes an Instance by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (isd InstanceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (isd InstanceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := isd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceDAO.Delete")
 	if instanceDAOSpan != nil {
-		defer instanceDAOSpan.End()
+		defer func() {
+			instanceDAOSpan.EndWith(retErr)
+		}()
 
 		isd.tracerSpan.SetAttribute(instanceDAOSpan, "id", id.String())
 	}
@@ -904,7 +922,7 @@ func (isd InstanceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) e
 // The returned Instances will not have any related structs filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (isd InstanceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []InstanceCreateInput) ([]Instance, error) {
+func (isd InstanceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []InstanceCreateInput) (_ []Instance, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
@@ -912,7 +930,9 @@ func (isd InstanceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs 
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := isd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceDAO.CreateMultiple")
 	if instanceDAOSpan != nil {
-		defer instanceDAOSpan.End()
+		defer func() {
+			instanceDAOSpan.EndWith(retErr)
+		}()
 		isd.tracerSpan.SetAttribute(instanceDAOSpan, "batch_size", len(inputs))
 	}
 
@@ -998,7 +1018,7 @@ func (isd InstanceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs 
 //
 // Since there are two operations (UPDATE, SELECT), this call must
 // happen within a transaction.
-func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input InstanceUpdateMultipleInput) ([]Instance, error) {
+func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input InstanceUpdateMultipleInput) (_ []Instance, retErr error) {
 	if len(input.InstanceIDs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(input.InstanceIDs), db.MaxBatchItems)
 	}
@@ -1006,7 +1026,9 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 	// Create a child span and set the attributes for current request
 	ctx, instanceDAOSpan := isd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceDAO.UpdateMultiple")
 	if instanceDAOSpan != nil {
-		defer instanceDAOSpan.End()
+		defer func() {
+			instanceDAOSpan.EndWith(retErr)
+		}()
 		isd.tracerSpan.SetAttribute(instanceDAOSpan, "batch_size", len(input.InstanceIDs))
 	}
 

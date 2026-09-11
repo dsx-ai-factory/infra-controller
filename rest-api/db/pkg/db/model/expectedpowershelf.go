@@ -287,11 +287,13 @@ type ExpectedPowerShelfSQLDAO struct {
 // The returned ExpectedPowerShelf will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (epsd ExpectedPowerShelfSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfCreateInput) (*ExpectedPowerShelf, error) {
+func (epsd ExpectedPowerShelfSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfCreateInput) (_ *ExpectedPowerShelf, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.Create")
 	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
+		defer func() {
+			expectedPowerShelfDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	eps := ExpectedPowerShelf{
@@ -334,11 +336,13 @@ func (epsd ExpectedPowerShelfSQLDAO) Create(ctx context.Context, tx *db.Tx, inpu
 
 // Get returns an ExpectedPowerShelf by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (epsd ExpectedPowerShelfSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedPowerShelf, error) {
+func (epsd ExpectedPowerShelfSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, includeRelations []string, forUpdate bool) (_ *ExpectedPowerShelf, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.Get")
 	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
+		defer func() {
+			expectedPowerShelfDAOSpan.EndWith(retErr)
+		}()
 
 		epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "id", expectedPowerShelfID.String())
 	}
@@ -420,11 +424,13 @@ func (epsd ExpectedPowerShelfSQLDAO) setQueryWithFilter(filter ExpectedPowerShel
 // Errors are returned only when there is a db related error
 // If records not found, then error is nil, but length of returned slice is 0
 // If orderBy is nil, then records are ordered by column specified in ExpectedPowerShelfOrderByDefault in ascending order
-func (epsd ExpectedPowerShelfSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedPowerShelf, int, error) {
+func (epsd ExpectedPowerShelfSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput, page paginator.PageInput, includeRelations []string) (_ []ExpectedPowerShelf, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.GetAll")
 	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
+		defer func() {
+			expectedPowerShelfDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	var expectedPowerShelves []ExpectedPowerShelf
@@ -468,11 +474,13 @@ func (epsd ExpectedPowerShelfSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filt
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (epsd ExpectedPowerShelfSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfUpdateInput) (*ExpectedPowerShelf, error) {
+func (epsd ExpectedPowerShelfSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfUpdateInput) (_ *ExpectedPowerShelf, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.Update")
 	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
+		defer func() {
+			expectedPowerShelfDAOSpan.EndWith(retErr)
+		}()
 
 		epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "id", input.ExpectedPowerShelfID.String())
 	}
@@ -565,11 +573,13 @@ func (epsd ExpectedPowerShelfSQLDAO) Update(ctx context.Context, tx *db.Tx, inpu
 }
 
 // Clear sets parameters of an existing ExpectedPowerShelf to null values in db
-func (epsd ExpectedPowerShelfSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfClearInput) (*ExpectedPowerShelf, error) {
+func (epsd ExpectedPowerShelfSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfClearInput) (_ *ExpectedPowerShelf, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.Clear")
 	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
+		defer func() {
+			expectedPowerShelfDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	eps := &ExpectedPowerShelf{
@@ -636,11 +646,13 @@ func (epsd ExpectedPowerShelfSQLDAO) Clear(ctx context.Context, tx *db.Tx, input
 
 // Delete deletes an ExpectedPowerShelf by ID
 // Error is returned only if there is a db error
-func (epsd ExpectedPowerShelfSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID) error {
+func (epsd ExpectedPowerShelfSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.Delete")
 	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
+		defer func() {
+			expectedPowerShelfDAOSpan.EndWith(retErr)
+		}()
 
 		epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "id", expectedPowerShelfID.String())
 	}

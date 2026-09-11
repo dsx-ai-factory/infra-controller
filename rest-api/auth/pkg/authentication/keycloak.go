@@ -6,11 +6,13 @@ package authentication
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/Nerzal/gocloak/v13"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
@@ -30,9 +32,12 @@ type KeycloakAuthService struct {
 
 // NewKeycloakAuthService creates a new Keycloak authentication service
 func NewKeycloakAuthService(keycloakConfig *config.KeycloakConfig) *KeycloakAuthService {
+	client := gocloak.NewClient(keycloakConfig.BaseURL)
+	// Trace outbound Keycloak HTTP calls (no-op when tracing is disabled)
+	client.RestyClient().SetTransport(otelhttp.NewTransport(http.DefaultTransport))
 	return &KeycloakAuthService{
 		config: keycloakConfig,
-		client: gocloak.NewClient(keycloakConfig.BaseURL),
+		client: client,
 	}
 }
 

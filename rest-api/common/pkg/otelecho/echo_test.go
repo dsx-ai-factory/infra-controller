@@ -4,19 +4,14 @@
 package otelecho
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/labstack/echo/v4"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	b3prop "go.opentelemetry.io/contrib/propagators/b3"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -137,71 +132,6 @@ func TestSkipper(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Result().StatusCode, "should call the 'ping' handler")
 }
 
-// TestTraceIDHeader verifies that the custom X-Ngc-Trace-Id header is set when trace ID is available
-func TestTraceIDHeader(t *testing.T) {
-	provider := trace.NewNoopTracerProvider()
-	otel.SetTextMapPropagator(propagation.TraceContext{})
-
-	r := httptest.NewRequest("GET", "/test", nil)
-	w := httptest.NewRecorder()
-
-	// Create a parent trace context to ensure we have a trace ID
-	ctx := context.Background()
-	sc := trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID: trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10},
-		SpanID:  trace.SpanID{0x01},
-	})
-	ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
-	ctx, _ = provider.Tracer(TracerName).Start(ctx, "parent")
-	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(r.Header))
-
-	router := echo.New()
-	router.Use(Middleware("test-service", WithTracerProvider(provider)))
-	router.GET("/test", func(c echo.Context) error {
-		return c.NoContent(200)
-	})
-
-	router.ServeHTTP(w, r)
-
-	response := w.Result()
-	assert.Equal(t, http.StatusOK, response.StatusCode)
-
-	// Verify X-Ngc-Trace-Id header is set
-	traceIDHeader := response.Header.Get(TraceHdr)
-	assert.NotEmpty(t, traceIDHeader, "X-Ngc-Trace-Id header should be set")
-
-	// Verify it's a valid trace ID format (non-empty string)
-	assert.Greater(t, len(traceIDHeader), 0, "Trace ID should not be empty")
-
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
-}
-
-// TestTracerInContext verifies that the tracer is stored in context for use by util/tracer.go
-func TestTracerInContext(t *testing.T) {
-	provider := trace.NewNoopTracerProvider()
-
-	r := httptest.NewRequest("GET", "/test", nil)
-	w := httptest.NewRecorder()
-
-	var tracerInContext trace.Tracer
-	router := echo.New()
-	router.Use(Middleware("test-service", WithTracerProvider(provider)))
-	router.GET("/test", func(c echo.Context) error {
-		ctx := c.Request().Context()
-		// Check if tracer is stored in context (this is what util/tracer.go uses)
-		if t, ok := ctx.Value(TracerKey).(trace.Tracer); ok {
-			tracerInContext = t
-		}
-		return c.NoContent(200)
-	})
-
-	router.ServeHTTP(w, r)
-
-	response := w.Result()
-	assert.Equal(t, http.StatusOK, response.StatusCode)
-	assert.NotNil(t, tracerInContext, "Tracer should be stored in context")
-}
-
 // TestTraceIDInheritance verifies that trace IDs are properly inherited from parent spans
 func TestTraceIDInheritance(t *testing.T) {
 	provider := trace.NewNoopTracerProvider()
@@ -237,10 +167,6 @@ func TestTraceIDInheritance(t *testing.T) {
 
 	// Verify trace ID is inherited from parent
 	assert.Equal(t, parentTraceID, receivedTraceID, "Trace ID should be inherited from parent")
-
-	// Verify header contains the same trace ID
-	traceIDHeader := response.Header.Get(TraceHdr)
-	assert.NotEmpty(t, traceIDHeader, "X-Ngc-Trace-Id header should be set")
 }
 
 // TestWrapperPreservesUpstreamBehavior verifies that all upstream behavior is preserved
@@ -286,59 +212,4 @@ func TestWrapperPreservesUpstreamBehavior(t *testing.T) {
 	assert.True(t, spanContext.HasSpanID(), "Span should have span ID")
 
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
-}
-
-// TestTraceIDLoggedAsStructuredField verifies the trace ID is emitted as a
-// queryable `trace_id` log field rather than interpolated into the message text,
-// so logs can be correlated to traces.
-func TestTraceIDLoggedAsStructuredField(t *testing.T) {
-	provider := trace.NewNoopTracerProvider()
-	otel.SetTextMapPropagator(propagation.TraceContext{})
-	defer otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
-
-	// Redirect the global zerolog logger to a buffer for the duration of the test.
-	var buf bytes.Buffer
-	origLogger := log.Logger
-	log.Logger = zerolog.New(&buf)
-	defer func() { log.Logger = origLogger }()
-
-	r := httptest.NewRequest("GET", "/test", nil)
-	w := httptest.NewRecorder()
-
-	// Inject a parent trace context so the span carries a known trace ID.
-	ctx := context.Background()
-	sc := trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID: trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10},
-		SpanID:  trace.SpanID{0x01},
-	})
-	ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
-	ctx, _ = provider.Tracer(TracerName).Start(ctx, "parent")
-	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(r.Header))
-
-	router := echo.New()
-	router.Use(Middleware("test-service", WithTracerProvider(provider)))
-	router.GET("/test", func(c echo.Context) error {
-		return c.NoContent(200)
-	})
-
-	router.ServeHTTP(w, r)
-
-	expectedTraceID := w.Result().Header.Get(TraceHdr)
-	assert.NotEmpty(t, expectedTraceID, "X-Ngc-Trace-Id header should be set")
-
-	// The "span traceid" line must carry trace_id as a structured field equal to
-	// the header value -- not embedded in the message string.
-	var found bool
-	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
-		if len(line) == 0 {
-			continue
-		}
-		var entry map[string]any
-		require.NoError(t, json.Unmarshal(line, &entry))
-		if entry["message"] == "span traceid" {
-			found = true
-			assert.Equal(t, expectedTraceID, entry["trace_id"], "trace ID should be a structured log field")
-		}
-	}
-	assert.True(t, found, "expected a 'span traceid' log line; got: %s", buf.String())
 }

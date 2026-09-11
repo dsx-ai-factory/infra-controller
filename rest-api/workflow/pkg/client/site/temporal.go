@@ -6,7 +6,6 @@ package site
 import (
 	"os"
 
-	"fmt"
 	"sync"
 
 	"github.com/google/uuid"
@@ -16,13 +15,10 @@ import (
 	zlogadapter "logur.dev/adapter/zerolog"
 	"logur.dev/logur"
 
-	"go.opentelemetry.io/otel"
 	tsdkClient "go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/contrib/opentelemetry"
-	tsdkConverter "go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/interceptor"
 
 	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 )
 
 // ClientPool contains Temporal clients for different site agents
@@ -48,33 +44,14 @@ func (cp *ClientPool) GetClientByID(siteID uuid.UUID) (tsdkClient.Client, error)
 
 	tLogger := logur.LoggerToKV(zlogadapter.New(zerolog.New(os.Stderr)))
 
-	// Every SiteTaskQueue workflow leaves through this client.
-	var tInterceptors []interceptor.ClientInterceptor
-	otelInterceptor, oerr := opentelemetry.NewTracingInterceptor(
-		opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
-	if oerr != nil {
-		return nil, fmt.Errorf("creating Temporal tracing interceptor: %w", oerr)
+	tOptions, err := ctemporal.ClientOptions(cp.tcfg.GetHostPort(), siteID.String(), cp.tcfg.ClientTLSCfg, tLogger)
+	if err != nil {
+		log.Panic().Err(err).Str("Temporal Namespace", siteID.String()).
+			Msg("failed to build Temporal client options for site")
+		return nil, err
 	}
-	tInterceptors = append(tInterceptors, otelInterceptor)
 
-	tc, err := tsdkClient.NewLazyClient(tsdkClient.Options{
-		HostPort:  fmt.Sprintf("%v:%v", cp.tcfg.Host, cp.tcfg.Port),
-		Namespace: siteID.String(),
-		ConnectionOptions: tsdkClient.ConnectionOptions{
-			TLS: cp.tcfg.ClientTLSCfg,
-		},
-		DataConverter: tsdkConverter.NewCompositeDataConverter(
-			tsdkConverter.NewNilPayloadConverter(),
-			tsdkConverter.NewByteSlicePayloadConverter(),
-			tsdkConverter.NewProtoJSONPayloadConverterWithOptions(tsdkConverter.ProtoJSONPayloadConverterOptions{
-				AllowUnknownFields: true,
-			}),
-			tsdkConverter.NewProtoPayloadConverter(),
-			tsdkConverter.NewJSONPayloadConverter(),
-		),
-		Logger:       tLogger,
-		Interceptors: tInterceptors,
-	})
+	tc, err := tsdkClient.NewLazyClient(tOptions)
 
 	if err != nil {
 		log.Panic().Err(err).Str("Temporal Namespace", siteID.String()).

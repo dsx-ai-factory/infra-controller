@@ -29,6 +29,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	csm "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sitemgr"
 
@@ -51,21 +52,19 @@ const (
 
 // CreateSiteHandler is the API Handler for creating new Tenant
 type CreateSiteHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	tnc        tClient.NamespaceClient
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	tnc       tClient.NamespaceClient
+	cfg       *config.Config
 }
 
 // NewCreateSiteHandler initializes and returns a new handler for creating Tenant
 func NewCreateSiteHandler(dbSession *cdb.Session, tc tClient.Client, tnc tClient.NamespaceClient, cfg *config.Config) CreateSiteHandler {
 	return CreateSiteHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		tnc:        tnc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		tnc:       tnc,
+		cfg:       cfg,
 	}
 }
 
@@ -81,7 +80,7 @@ func NewCreateSiteHandler(dbSession *cdb.Session, tc tClient.Client, tnc tClient
 // @Success 201 {object} model.APISite
 // @Router /v2/org/{org}/nico/site [post]
 func (csh CreateSiteHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Create", c, csh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -288,19 +287,17 @@ func (csh CreateSiteHandler) Handle(c echo.Context) error {
 
 // UpdateSiteHandler is the API Handler for updating a Site
 type UpdateSiteHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateSiteHandler initializes and returns a new handler for updating Site
 func NewUpdateSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config.Config) UpdateSiteHandler {
 	return UpdateSiteHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -317,7 +314,7 @@ func NewUpdateSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config
 // @Success 200 {object} model.APISite
 // @Router /v2/org/{org}/nico/site/{id} [patch]
 func (ush UpdateSiteHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Update", c, ush.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -333,7 +330,7 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 	// Get application instance ID from URL param
 	siteStrID := c.Param("id")
 
-	ush.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", siteStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", siteStrID))
 
 	siteID, err := uuid.Parse(siteStrID)
 	if err != nil {
@@ -558,19 +555,17 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 
 // GetSiteHandler is the API Handler for getting a Site
 type GetSiteHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	cfg       *config.Config
 }
 
 // NewGetSiteHandler initializes and returns a new handler for getting Site
 func NewGetSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config.Config) GetSiteHandler {
 	return GetSiteHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -587,7 +582,7 @@ func NewGetSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config.Co
 // @Success 200 {object} model.APISite
 // @Router /v2/org/{org}/nico/site/{id} [get]
 func (gsh GetSiteHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Get", c, gsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -611,7 +606,7 @@ func (gsh GetSiteHandler) Handle(c echo.Context) error {
 	// Get Site ID from URL param
 	stStrID := c.Param("id")
 
-	gsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", stStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", stStrID))
 
 	stID, err := uuid.Parse(stStrID)
 	if err != nil {
@@ -685,19 +680,17 @@ func (gsh GetSiteHandler) Handle(c echo.Context) error {
 
 // GetAllSiteHandler is the API Handler for retrieving all Sites
 type GetAllSiteHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllSiteHandler initializes and returns a new handler for retrieving all Sites
 func NewGetAllSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config.Config) GetAllSiteHandler {
 	return GetAllSiteHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -719,7 +712,7 @@ func NewGetAllSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config
 // @Success 200 {array} []model.APISite
 // @Router /v2/org/{org}/nico/site [get]
 func (gash GetAllSiteHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "GetAll", c, gash.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -759,13 +752,13 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gash.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 		filter.SearchQuery = searchQuery
 	}
 
 	// Get status from query param
 	if statusQuery := qParams["status"]; len(statusQuery) > 0 {
-		gash.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", statusQuery))
 		for _, status := range statusQuery {
 			_, ok := cdbm.SiteStatusMap[status]
 			if !ok {
@@ -958,19 +951,17 @@ func (gash GetAllSiteHandler) Handle(c echo.Context) error {
 
 // DeleteSiteHandler is the API Handler for deleting a Site
 type DeleteSiteHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	cfg       *config.Config
 }
 
 // NewDeleteSiteHandler initializes and returns a new handler for deleting Site
 func NewDeleteSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config.Config) DeleteSiteHandler {
 	return DeleteSiteHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -987,7 +978,7 @@ func NewDeleteSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config
 // @Success 204
 // @Router /v2/org/{org}/nico/site/{id} [delete]
 func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Delete", c, dsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1016,7 +1007,7 @@ func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
 	// Get Site ID from URL param
 	stStrID := c.Param("id")
 
-	dsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", stStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", stStrID))
 
 	stID, err := uuid.Parse(stStrID)
 	if err != nil {
@@ -1125,15 +1116,13 @@ func (dsh DeleteSiteHandler) Handle(c echo.Context) error {
 
 // GetSiteStatusDetailsHandler is the API Handler for getting Site StatusDetail records
 type GetSiteStatusDetailsHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetSiteStatusDetailsHandler initializes and returns a new handler to retrieve Site StatusDetail records
 func NewGetSiteStatusDetailsHandler(dbSession *cdb.Session) GetSiteStatusDetailsHandler {
 	return GetSiteStatusDetailsHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
@@ -1149,7 +1138,7 @@ func NewGetSiteStatusDetailsHandler(dbSession *cdb.Session) GetSiteStatusDetails
 // @Success 200 {object} []model.APIStatusDetail
 // @Router /v2/org/{org}/nico/Site/{id}/status-history [get]
 func (gssdh GetSiteStatusDetailsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Get", c, gssdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Site", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1164,7 +1153,7 @@ func (gssdh GetSiteStatusDetailsHandler) Handle(c echo.Context) error {
 
 	// Get Site ID from URL param
 	stStrID := c.Param("id")
-	gssdh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", stStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("site_id", stStrID))
 	stID, err := uuid.Parse(stStrID)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Site ID in URL", nil)

@@ -43,8 +43,7 @@ func TestNewGetUserHandler(t *testing.T) {
 				dbSession: dbSession,
 			},
 			want: GetUserHandler{
-				dbSession:  dbSession,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
 			},
 		},
 	}

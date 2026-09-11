@@ -14,7 +14,10 @@ import (
 	"strings"
 	"sync"
 
+	redisotel "github.com/redis/go-redis/extra/redisotel/v9"
 	redigo "github.com/redis/go-redis/v9"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 // RedisConfig holds connection parameters for a Redis-backed IPAM storage.
@@ -58,6 +61,12 @@ func newRedisFromConfig(ctx context.Context, cfg RedisConfig) (*redis, error) {
 		TLSConfig: cfg.TLSConfig,
 	}
 	rdb := redigo.NewClient(opts)
+
+	if cotel.Enabled() {
+		if terr := redisotel.InstrumentTracing(rdb); terr != nil {
+			return nil, fmt.Errorf("failed to instrument redis tracing: %w", terr)
+		}
+	}
 
 	r := &redis{
 		rdb:        rdb,

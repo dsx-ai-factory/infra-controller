@@ -23,9 +23,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	semconv "go.opentelemetry.io/otel/semconv/v1.11.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -529,12 +526,6 @@ func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 				log.WithField("status_code", w.statusCode).Debugf("Handler finished")
 				if count != nil {
 					count.WithLabelValues(r.URL.Path, r.Method, fmt.Sprintf("%d", w.statusCode)).Inc()
-				}
-				// TODO(mcamp) this is a hack to get lightstep to recognize the span
-				// as an error. Either lightstep launcher or otelmux (probably the latter) should give us
-				// a hook to set this attribute. Until then we'll just set it here.
-				if v, _ := semconv.SpanStatusFromHTTPStatusCode(w.statusCode); v == codes.Error {
-					trace.SpanFromContext(r.Context()).SetAttributes(attribute.Bool("error", true))
 				}
 				// Return the writer back to the pool
 				putRRW(w)

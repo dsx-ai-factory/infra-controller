@@ -9,6 +9,9 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 
 	log "github.com/sirupsen/logrus"
 
@@ -112,6 +115,21 @@ func init() {
 
 func doServe() {
 	ctx := context.Background()
+
+	// Initialize tracing so the otelgrpc server handler emits real spans;
+	// enabled purely by OTEL_* env vars
+	otelShutdown, otelErr := cotel.Bootstrap(ctx, cotel.ExporterConfigured(), "nico-powershelf-manager")
+	if otelErr != nil {
+		log.Printf("failed to initialize tracing: %v", otelErr)
+	} else {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := otelShutdown(shutdownCtx); err != nil {
+				log.Printf("failed to shut down tracing: %v", err)
+			}
+		}()
+	}
 	service, err := svc.New(
 		ctx,
 		svc.Config{

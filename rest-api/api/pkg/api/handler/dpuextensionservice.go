@@ -22,6 +22,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -35,21 +36,19 @@ import (
 
 // CreateDpuExtensionServiceHandler is the API Handler for creating new DPU Extension Service
 type CreateDpuExtensionServiceHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateDpuExtensionServiceHandler initializes and returns a new handler for creating DPU Extension Service
 func NewCreateDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) CreateDpuExtensionServiceHandler {
 	return CreateDpuExtensionServiceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -65,7 +64,7 @@ func NewCreateDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Clie
 // @Success 201 {object} model.APIDpuExtensionService
 // @Router /v2/org/{org}/nico/dpu-extension-service [post]
 func (cdesh CreateDpuExtensionServiceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Create", "DpuExtensionService", c, cdesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Create", "DpuExtensionService", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -103,7 +102,7 @@ func (cdesh CreateDpuExtensionServiceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
 	}
 
-	cdesh.tracerSpan.SetAttribute(handlerSpan, attribute.String("name", apiRequest.Name), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("name", apiRequest.Name))
 
 	// Validate request attributes
 	verr := apiRequest.Validate()
@@ -344,19 +343,17 @@ func (cdesh CreateDpuExtensionServiceHandler) Handle(c echo.Context) error {
 
 // GetAllDpuExtensionServiceHandler is the API Handler for getting all DPU Extension Services
 type GetAllDpuExtensionServiceHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllDpuExtensionServiceHandler initializes and returns a new handler for getting all DPU Extension Services
 func NewGetAllDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetAllDpuExtensionServiceHandler {
 	return GetAllDpuExtensionServiceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -378,7 +375,7 @@ func NewGetAllDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Clie
 // @Success 200 {array} model.APIDpuExtensionService
 // @Router /v2/org/{org}/nico/dpu-extension-service [get]
 func (gadesh GetAllDpuExtensionServiceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetAll", "DpuExtensionService", c, gadesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetAll", "DpuExtensionService", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -445,7 +442,7 @@ func (gadesh GetAllDpuExtensionServiceHandler) Handle(c echo.Context) error {
 		}
 
 		filterInput.SiteIDs = []uuid.UUID{site.ID}
-		gadesh.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", siteIDStr), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("site_id", siteIDStr))
 	}
 
 	// Get status from query param
@@ -457,14 +454,14 @@ func (gadesh GetAllDpuExtensionServiceHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		filterInput.Statuses = []string{statusQuery}
-		gadesh.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 	}
 
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
 		filterInput.SearchQuery = searchQuery
-		gadesh.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get and validate includeRelation params
@@ -554,19 +551,17 @@ func (gadesh GetAllDpuExtensionServiceHandler) Handle(c echo.Context) error {
 
 // GetDpuExtensionServiceHandler is the API Handler for retrieving a DPU Extension Service
 type GetDpuExtensionServiceHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetDpuExtensionServiceHandler initializes and returns a new handler to retrieve DPU Extension Service
 func NewGetDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetDpuExtensionServiceHandler {
 	return GetDpuExtensionServiceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -583,7 +578,7 @@ func NewGetDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Client,
 // @Success 200 {object} model.APIDpuExtensionService
 // @Router /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} [get]
 func (gdesh GetDpuExtensionServiceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Get", "DpuExtensionService", c, gdesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Get", "DpuExtensionService", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -620,7 +615,7 @@ func (gdesh GetDpuExtensionServiceHandler) Handle(c echo.Context) error {
 
 	logger = logger.With().Str("DPU Extension Service ID", dpuExtensionServiceID.String()).Logger()
 
-	gdesh.tracerSpan.SetAttribute(handlerSpan, attribute.String("dpu_extension_service_id", dpuExtensionServiceID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("dpu_extension_service_id", dpuExtensionServiceID.String()))
 
 	// Get and validate includeRelation params
 	qParams := c.QueryParams()
@@ -666,21 +661,19 @@ func (gdesh GetDpuExtensionServiceHandler) Handle(c echo.Context) error {
 
 // UpdateDpuExtensionServiceHandler is the API Handler for updating a DPU Extension Service
 type UpdateDpuExtensionServiceHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
+	scp       *sc.ClientPool
 }
 
 // NewUpdateDpuExtensionServiceHandler initializes and returns a new handler for updating DPU Extension Service
 func NewUpdateDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateDpuExtensionServiceHandler {
 	return UpdateDpuExtensionServiceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -697,7 +690,7 @@ func NewUpdateDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Clie
 // @Success 200 {object} model.APIDpuExtensionService
 // @Router /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} [patch]
 func (udesh UpdateDpuExtensionServiceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Update", "DpuExtensionService", c, udesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Update", "DpuExtensionService", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -733,7 +726,7 @@ func (udesh UpdateDpuExtensionServiceHandler) Handle(c echo.Context) error {
 	}
 	logger = logger.With().Str("DPU Extension Service ID", dpuExtensionServiceID.String()).Logger()
 
-	udesh.tracerSpan.SetAttribute(handlerSpan, attribute.String("dpu_extension_service_id", dpuExtensionServiceID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("dpu_extension_service_id", dpuExtensionServiceID.String()))
 
 	// Validate request
 	// Bind request data to API model
@@ -973,21 +966,19 @@ func (udesh UpdateDpuExtensionServiceHandler) Handle(c echo.Context) error {
 
 // DeleteDpuExtensionServiceHandler is the API Handler for deleting a DPU Extension Service
 type DeleteDpuExtensionServiceHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteDpuExtensionServiceHandler initializes and returns a new handler for deleting DPU Extension Service
 func NewDeleteDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteDpuExtensionServiceHandler {
 	return DeleteDpuExtensionServiceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1004,7 +995,7 @@ func NewDeleteDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Clie
 // @Success 204 "Kubernetes Pod service deleted"
 // @Router /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} [delete]
 func (ddesh DeleteDpuExtensionServiceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Delete", "DpuExtensionService", c, ddesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Delete", "DpuExtensionService", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1040,7 +1031,7 @@ func (ddesh DeleteDpuExtensionServiceHandler) Handle(c echo.Context) error {
 	}
 	logger = logger.With().Str("DPU Extension Service ID", dpuExtensionServiceID.String()).Logger()
 
-	ddesh.tracerSpan.SetAttribute(handlerSpan, attribute.String("dpu_extension_service_id", dpuExtensionServiceID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("dpu_extension_service_id", dpuExtensionServiceID.String()))
 
 	// Get DPU Extension Service from DB by ID
 	desDAO := cdbm.NewDpuExtensionServiceDAO(ddesh.dbSession)
@@ -1191,21 +1182,19 @@ func (ddesh DeleteDpuExtensionServiceHandler) Handle(c echo.Context) error {
 
 // GetDpuExtensionServiceVersionHandler is the API Handler for retrieving a DPU Extension Service version
 type GetDpuExtensionServiceVersionHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetDpuExtensionServiceVersionHandler initializes and returns a new handler for retrieving DPU Extension Service version
 func NewGetDpuExtensionServiceVersionHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetDpuExtensionServiceVersionHandler {
 	return GetDpuExtensionServiceVersionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1222,7 +1211,7 @@ func NewGetDpuExtensionServiceVersionHandler(dbSession *cdb.Session, tc tclient.
 // @Success 200 {object} model.APIDpuExtensionServiceVersionInfo
 // @Router /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId}/version/{versionId} [get]
 func (gdesvh GetDpuExtensionServiceVersionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetVersion", "DpuExtensionService", c, gdesvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetVersion", "DpuExtensionService", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1265,8 +1254,8 @@ func (gdesvh GetDpuExtensionServiceVersionHandler) Handle(c echo.Context) error 
 		Str("Version ID", versionID).
 		Logger()
 
-	gdesvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("dpu_extension_service_id", dpuExtensionServiceID.String()), logger)
-	gdesvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("version_id", versionID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("dpu_extension_service_id", dpuExtensionServiceID.String()))
+	cotel.SetAttribute(handlerSpan, attribute.String("version_id", versionID))
 
 	// Get DPU Extension Service from DB by ID
 	desDAO := cdbm.NewDpuExtensionServiceDAO(gdesvh.dbSession)
@@ -1355,21 +1344,19 @@ func (gdesvh GetDpuExtensionServiceVersionHandler) Handle(c echo.Context) error 
 
 // DeleteDpuExtensionServiceVersionHandler is the API Handler for deleting a DPU Extension Service version
 type DeleteDpuExtensionServiceVersionHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteDpuExtensionServiceVersionHandler initializes and returns a new handler for deleting DPU Extension Service version
 func NewDeleteDpuExtensionServiceVersionHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteDpuExtensionServiceVersionHandler {
 	return DeleteDpuExtensionServiceVersionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1386,7 +1373,7 @@ func NewDeleteDpuExtensionServiceVersionHandler(dbSession *cdb.Session, tc tclie
 // @Success 202 "Accepted"
 // @Router /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId}/version/{versionId} [delete]
 func (ddesvh DeleteDpuExtensionServiceVersionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("DeleteVersion", "DpuExtensionService", c, ddesvh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("DeleteVersion", "DpuExtensionService", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1429,8 +1416,8 @@ func (ddesvh DeleteDpuExtensionServiceVersionHandler) Handle(c echo.Context) err
 		Str("Version ID", versionID).
 		Logger()
 
-	ddesvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("dpu_extension_service_id", dpuExtensionServiceID.String()), logger)
-	ddesvh.tracerSpan.SetAttribute(handlerSpan, attribute.String("version_id", versionID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("dpu_extension_service_id", dpuExtensionServiceID.String()))
+	cotel.SetAttribute(handlerSpan, attribute.String("version_id", versionID))
 
 	// Get DPU Extension Service from DB by ID
 	desDAO := cdbm.NewDpuExtensionServiceDAO(ddesvh.dbSession)

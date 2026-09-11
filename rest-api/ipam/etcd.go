@@ -16,6 +16,10 @@ import (
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"google.golang.org/grpc"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 type etcd struct {
@@ -38,6 +42,11 @@ func newEtcd(ctx context.Context, ip, port string, cert, key []byte, insecureski
 		Endpoints:   []string{fmt.Sprintf("%s:%s", ip, port)},
 		DialTimeout: 5 * time.Second,
 		Context:     context.Background(),
+	}
+
+	if cotel.Enabled() {
+		etcdConfig.DialOptions = append(etcdConfig.DialOptions,
+			grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
 	}
 
 	if cert != nil && key != nil {

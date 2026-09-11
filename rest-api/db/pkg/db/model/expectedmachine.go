@@ -368,11 +368,13 @@ type ExpectedMachineSQLDAO struct {
 // The returned ExpectedMachine will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (emsd ExpectedMachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedMachineCreateInput) (*ExpectedMachine, error) {
+func (emsd ExpectedMachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedMachineCreateInput) (_ *ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.Create")
 	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
+		defer func() {
+			expectedMachineDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	results, err := emsd.CreateMultiple(ctx, tx, []ExpectedMachineCreateInput{input})
@@ -386,11 +388,13 @@ func (emsd ExpectedMachineSQLDAO) Create(ctx context.Context, tx *db.Tx, input E
 // The returned ExpectedMachines will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineCreateInput) ([]ExpectedMachine, error) {
+func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineCreateInput) (_ []ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.CreateMultiple")
 	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
+		defer func() {
+			expectedMachineDAOSpan.EndWith(retErr)
+		}()
 		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "batch_size", len(inputs))
 	}
 
@@ -468,11 +472,13 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 
 // Get returns an ExpectedMachine by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (emsd ExpectedMachineSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedMachine, error) {
+func (emsd ExpectedMachineSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID, includeRelations []string, forUpdate bool) (_ *ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.Get")
 	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
+		defer func() {
+			expectedMachineDAOSpan.EndWith(retErr)
+		}()
 
 		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "id", expectedMachineID.String())
 	}
@@ -504,7 +510,7 @@ func (emsd ExpectedMachineSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedMa
 // transaction completes. Batch writers call this before any row-specific
 // writes so later operations cannot acquire overlapping row sets in a
 // conflicting order.
-func (emsd ExpectedMachineSQLDAO) LockForUpdate(ctx context.Context, tx *db.Tx, expectedMachineIDs []uuid.UUID) error {
+func (emsd ExpectedMachineSQLDAO) LockForUpdate(ctx context.Context, tx *db.Tx, expectedMachineIDs []uuid.UUID) (retErr error) {
 	if tx == nil {
 		return errors.New("transaction is required to lock ExpectedMachine rows")
 	}
@@ -514,7 +520,9 @@ func (emsd ExpectedMachineSQLDAO) LockForUpdate(ctx context.Context, tx *db.Tx, 
 
 	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.LockForUpdate")
 	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
+		defer func() {
+			expectedMachineDAOSpan.EndWith(retErr)
+		}()
 		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "batch_size", len(expectedMachineIDs))
 	}
 
@@ -627,11 +635,13 @@ func (emsd ExpectedMachineSQLDAO) setQueryWithFilter(filter ExpectedMachineFilte
 // Errors are returned only when there is a db related error
 // If records not found, then error is nil, but length of returned slice is 0
 // If orderBy is nil, then records are ordered by column specified in ExpectedMachineOrderByDefault in ascending order
-func (emsd ExpectedMachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedMachine, int, error) {
+func (emsd ExpectedMachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput, includeRelations []string) (_ []ExpectedMachine, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.GetAll")
 	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
+		defer func() {
+			expectedMachineDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	var expectedMachines []ExpectedMachine
@@ -758,12 +768,16 @@ func (emsd ExpectedMachineSQLDAO) GetDistinctLabelValues(ctx context.Context, tx
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (emsd ExpectedMachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedMachineUpdateInput) (*ExpectedMachine, error) {
+func (emsd ExpectedMachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedMachineUpdateInput) (_ *ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.Update")
 	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
-		// Detailed per-field tracing is recorded in the UpdateMultiple child span.
+		defer func() {
+			expectedMachineDAOSpan.EndWith(
+				// Detailed per-field tracing is recorded in the UpdateMultiple child span.
+				retErr)
+		}()
+
 	}
 
 	results, err := emsd.UpdateMultiple(ctx, tx, []ExpectedMachineUpdateInput{input})
@@ -780,11 +794,13 @@ func (emsd ExpectedMachineSQLDAO) Update(ctx context.Context, tx *db.Tx, input E
 // The updated fields are assumed to be set to non-null values.
 // Since the updates are followed by a SELECT, this library call must happen
 // within a transaction.
-func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineUpdateInput) ([]ExpectedMachine, error) {
+func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedMachineUpdateInput) (_ []ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.UpdateMultiple")
 	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
+		defer func() {
+			expectedMachineDAOSpan.EndWith(retErr)
+		}()
 		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "batch_size", len(inputs))
 	}
 
@@ -977,11 +993,13 @@ func (emsd ExpectedMachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx,
 }
 
 // Clear sets parameters of an existing ExpectedMachine to null values in db
-func (emsd ExpectedMachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (*ExpectedMachine, error) {
+func (emsd ExpectedMachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (_ *ExpectedMachine, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.Clear")
 	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
+		defer func() {
+			expectedMachineDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	em := &ExpectedMachine{
@@ -1060,11 +1078,13 @@ func (emsd ExpectedMachineSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Ex
 
 // Delete deletes an ExpectedMachine by ID
 // Error is returned only if there is a db error
-func (emsd ExpectedMachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID) error {
+func (emsd ExpectedMachineSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.Delete")
 	if expectedMachineDAOSpan != nil {
-		defer expectedMachineDAOSpan.End()
+		defer func() {
+			expectedMachineDAOSpan.EndWith(retErr)
+		}()
 
 		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "id", expectedMachineID.String())
 	}

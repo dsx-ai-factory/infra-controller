@@ -16,18 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	csmtypes "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/types"
 	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -38,11 +26,24 @@ import (
 	"github.com/uptrace/bun/extra/bundebug"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	csmtypes "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/types"
+
 	tOperatorv1 "go.temporal.io/api/operatorservice/v1"
 	tosv1mock "go.temporal.io/api/operatorservicemock/v1"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+
+	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 )
 
 func testUpdateSite(t *testing.T, dbSession *cdb.Session, site *cdbm.Site) *cdbm.Site {
@@ -2407,10 +2408,9 @@ func TestGetAllSiteHandler_NullConfig(t *testing.T) {
 	createCtx.SetRequest(createReq.WithContext(context.WithValue(ctx, otelecho.TracerKey, tracer)))
 
 	csh := CreateSiteHandler{
-		dbSession:  dbSession,
-		tc:         &tmocks.Client{},
-		cfg:        cfg,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        &tmocks.Client{},
+		cfg:       cfg,
 	}
 	err = csh.Handle(createCtx)
 	require.NoError(t, err)
@@ -2739,11 +2739,10 @@ func TestNewCreateSiteHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: CreateSiteHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				tnc:        tnc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				tnc:       tnc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -2781,10 +2780,9 @@ func TestNewUpdateSiteHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: UpdateSiteHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -2822,10 +2820,9 @@ func TestNewGetSiteHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetSiteHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -2863,10 +2860,9 @@ func TestNewGetAllSiteHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetAllSiteHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -2904,10 +2900,9 @@ func TestNewDeleteSiteHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: DeleteSiteHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}

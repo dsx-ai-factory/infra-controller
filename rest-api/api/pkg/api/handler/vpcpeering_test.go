@@ -13,15 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +20,15 @@ import (
 	"github.com/stretchr/testify/require"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 )
 
 func TestNewGetVpcPeeringHandler(t *testing.T) {
@@ -42,7 +42,6 @@ func TestNewGetVpcPeeringHandler(t *testing.T) {
 	assert.Equal(t, dbSession, got.dbSession)
 	assert.Equal(t, tc, got.tc)
 	assert.Equal(t, cfg, got.cfg)
-	assert.NotNil(t, got.tracerSpan)
 }
 
 func TestNewDeleteVpcPeeringHandler(t *testing.T) {
@@ -59,7 +58,6 @@ func TestNewDeleteVpcPeeringHandler(t *testing.T) {
 	assert.Equal(t, tc, got.tc)
 	assert.Equal(t, scp, got.scp)
 	assert.Equal(t, cfg, got.cfg)
-	assert.NotNil(t, got.tracerSpan)
 }
 
 func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
@@ -359,11 +357,10 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cvph := CreateVpcPeeringHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        common.GetTestConfig(),
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       common.GetTestConfig(),
 			}
 
 			e := echo.New()
@@ -734,10 +731,9 @@ func TestGetAllVpcPeeringHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gavph := GetAllVpcPeeringHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				cfg:       cfg,
 			}
 
 			e := echo.New()
@@ -1094,10 +1090,9 @@ func TestGetVpcPeeringHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gvph := GetVpcPeeringHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				cfg:       cfg,
 			}
 
 			e := echo.New()
@@ -1339,11 +1334,10 @@ func TestDeleteVpcPeeringHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dvph := DeleteVpcPeeringHandler{
-				dbSession:  dbSession,
-				tc:         mockTC,
-				scp:        mockSCP,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        mockTC,
+				scp:       mockSCP,
+				cfg:       cfg,
 			}
 
 			e := echo.New()

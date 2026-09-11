@@ -195,11 +195,13 @@ type ExpectedRackSQLDAO struct {
 // The returned ExpectedRack will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (erd ExpectedRackSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedRackCreateInput) (*ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedRackCreateInput) (_ *ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.Create")
 	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
+		defer func() {
+			expectedRackDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	results, err := erd.CreateMultiple(ctx, tx, []ExpectedRackCreateInput{input})
@@ -213,11 +215,13 @@ func (erd ExpectedRackSQLDAO) Create(ctx context.Context, tx *db.Tx, input Expec
 // The returned ExpectedRacks will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (erd ExpectedRackSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackCreateInput) ([]ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackCreateInput) (_ []ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.CreateMultiple")
 	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
+		defer func() {
+			expectedRackDAOSpan.EndWith(retErr)
+		}()
 		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "batch_size", len(inputs))
 	}
 
@@ -285,11 +289,13 @@ func (erd ExpectedRackSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inp
 
 // Get returns an ExpectedRack by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (erd ExpectedRackSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedRackID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedRackID uuid.UUID, includeRelations []string, forUpdate bool) (_ *ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.Get")
 	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
+		defer func() {
+			expectedRackDAOSpan.EndWith(retErr)
+		}()
 
 		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "id", expectedRackID.String())
 	}
@@ -372,11 +378,13 @@ func (erd ExpectedRackSQLDAO) setQueryWithFilter(filter ExpectedRackFilterInput,
 // Errors are returned only when there is a db related error
 // If records not found, then error is nil, but length of returned slice is 0
 // If orderBy is nil, then records are ordered by column specified in ExpectedRackOrderByDefault in ascending order
-func (erd ExpectedRackSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedRack, int, error) {
+func (erd ExpectedRackSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput, page paginator.PageInput, includeRelations []string) (_ []ExpectedRack, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.GetAll")
 	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
+		defer func() {
+			expectedRackDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	var expectedRacks []ExpectedRack
@@ -422,12 +430,16 @@ func (erd ExpectedRackSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Expe
 // The updated fields are assumed to be set to non-null values
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (erd ExpectedRackSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedRackUpdateInput) (*ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedRackUpdateInput) (_ *ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.Update")
 	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
-		// Detailed per-field tracing is recorded in the UpdateMultiple child span.
+		defer func() {
+			expectedRackDAOSpan.EndWith(
+				// Detailed per-field tracing is recorded in the UpdateMultiple child span.
+				retErr)
+		}()
+
 	}
 
 	results, err := erd.UpdateMultiple(ctx, tx, []ExpectedRackUpdateInput{input})
@@ -441,11 +453,13 @@ func (erd ExpectedRackSQLDAO) Update(ctx context.Context, tx *db.Tx, input Expec
 // All inputs should update the same set of fields for optimal performance.
 // Since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (erd ExpectedRackSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackUpdateInput) ([]ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackUpdateInput) (_ []ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.UpdateMultiple")
 	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
+		defer func() {
+			expectedRackDAOSpan.EndWith(retErr)
+		}()
 		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "batch_size", len(inputs))
 	}
 
@@ -538,11 +552,13 @@ func (erd ExpectedRackSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inp
 
 // Delete deletes an ExpectedRack by ID
 // Error is returned only if there is a db error
-func (erd ExpectedRackSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedRackID uuid.UUID) error {
+func (erd ExpectedRackSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedRackID uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.Delete")
 	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
+		defer func() {
+			expectedRackDAOSpan.EndWith(retErr)
+		}()
 
 		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "id", expectedRackID.String())
 	}
@@ -563,11 +579,13 @@ func (erd ExpectedRackSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedRac
 // scoped by site). Callers must supply at least one filter; an empty filter
 // is rejected with db.ErrInvalidParams to prevent wiping the entire table.
 // Error is returned only if there is a db error or no filter was supplied.
-func (erd ExpectedRackSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput) error {
+func (erd ExpectedRackSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.DeleteAll")
 	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
+		defer func() {
+			expectedRackDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	query := db.GetIDB(tx, erd.dbSession).NewDelete().Model((*ExpectedRack)(nil))
@@ -618,11 +636,13 @@ func (erd ExpectedRackSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter E
 
 // ReplaceAll deletes all ExpectedRacks matching the given filter and replaces them with the provided inputs.
 // Both operations occur in the same transaction so callers must provide a transaction.
-func (erd ExpectedRackSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput, inputs []ExpectedRackCreateInput) ([]ExpectedRack, error) {
+func (erd ExpectedRackSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedRackFilterInput, inputs []ExpectedRackCreateInput) (_ []ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedRackDAOSpan := erd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedRackDAO.ReplaceAll")
 	if expectedRackDAOSpan != nil {
-		defer expectedRackDAOSpan.End()
+		defer func() {
+			expectedRackDAOSpan.EndWith(retErr)
+		}()
 		erd.tracerSpan.SetAttribute(expectedRackDAOSpan, "batch_size", len(inputs))
 	}
 

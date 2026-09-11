@@ -88,11 +88,13 @@ type InfrastructureProviderSQLDAO struct {
 }
 
 // GetByID returns the InfrastructureProvider with the given ID
-func (ipsd InfrastructureProviderSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*InfrastructureProvider, error) {
+func (ipsd InfrastructureProviderSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *InfrastructureProvider, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipDAOSpan := ipsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfrastructureProviderDAO.GetByID")
 	if ipDAOSpan != nil {
-		defer ipDAOSpan.End()
+		defer func() {
+			ipDAOSpan.EndWith(retErr)
+		}()
 
 		ipsd.tracerSpan.SetAttribute(ipDAOSpan, "id", id.String())
 	}
@@ -118,11 +120,13 @@ func (ipsd InfrastructureProviderSQLDAO) GetByID(ctx context.Context, tx *db.Tx,
 }
 
 // GetAllByOrg returns the InfrastructureProviders with the given org
-func (ipsd InfrastructureProviderSQLDAO) GetAllByOrg(ctx context.Context, tx *db.Tx, org string, includeRelations []string) ([]InfrastructureProvider, error) {
+func (ipsd InfrastructureProviderSQLDAO) GetAllByOrg(ctx context.Context, tx *db.Tx, org string, includeRelations []string) (_ []InfrastructureProvider, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipDAOSpan := ipsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfrastructureProviderDAO.GetAllByOrg")
 	if ipDAOSpan != nil {
-		defer ipDAOSpan.End()
+		defer func() {
+			ipDAOSpan.EndWith(retErr)
+		}()
 		ipsd.tracerSpan.SetAttribute(ipDAOSpan, "org", org)
 	}
 
@@ -144,11 +148,13 @@ func (ipsd InfrastructureProviderSQLDAO) GetAllByOrg(ctx context.Context, tx *db
 }
 
 // Create creates a new InfrastructureProvider from the given parameters
-func (ipsd InfrastructureProviderSQLDAO) Create(ctx context.Context, tx *db.Tx, input InfrastructureProviderCreateInput) (*InfrastructureProvider, error) {
+func (ipsd InfrastructureProviderSQLDAO) Create(ctx context.Context, tx *db.Tx, input InfrastructureProviderCreateInput) (_ *InfrastructureProvider, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipDAOSpan := ipsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfrastructureProviderSQLDAO.Create")
 	if ipDAOSpan != nil {
-		defer ipDAOSpan.End()
+		defer func() {
+			ipDAOSpan.EndWith(retErr)
+		}()
 		ipsd.tracerSpan.SetAttribute(ipDAOSpan, "name", input.Name)
 	}
 
@@ -175,11 +181,13 @@ func (ipsd InfrastructureProviderSQLDAO) Create(ctx context.Context, tx *db.Tx, 
 }
 
 // Update updates the InfrastructureProvider with the given parameters
-func (ipsd InfrastructureProviderSQLDAO) Update(ctx context.Context, tx *db.Tx, input InfrastructureProviderUpdateInput) (*InfrastructureProvider, error) {
+func (ipsd InfrastructureProviderSQLDAO) Update(ctx context.Context, tx *db.Tx, input InfrastructureProviderUpdateInput) (_ *InfrastructureProvider, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipDAOSpan := ipsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfrastructureProviderSQLDAO.Update")
 	if ipDAOSpan != nil {
-		defer ipDAOSpan.End()
+		defer func() {
+			ipDAOSpan.EndWith(retErr)
+		}()
 		ipsd.tracerSpan.SetAttribute(ipDAOSpan, "id", input.InfrastructureProviderID.String())
 	}
 
@@ -225,11 +233,13 @@ func (ipsd InfrastructureProviderSQLDAO) Update(ctx context.Context, tx *db.Tx, 
 }
 
 // Delete deletes the InfrastructureProvider with the given ID
-func (ipsd InfrastructureProviderSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ipsd InfrastructureProviderSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, ipDAOSpan := ipsd.tracerSpan.CreateChildInCurrentContext(ctx, "InfrastructureProviderSQLDAO.Delete")
 	if ipDAOSpan != nil {
-		defer ipDAOSpan.End()
+		defer func() {
+			ipDAOSpan.EndWith(retErr)
+		}()
 
 		ipsd.tracerSpan.SetAttribute(ipDAOSpan, "id", id.String())
 	}

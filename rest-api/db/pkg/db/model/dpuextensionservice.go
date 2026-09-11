@@ -321,11 +321,13 @@ type DpuExtensionServiceSQLDAO struct {
 }
 
 // Create creates a new DpuExtensionService
-func (dessd DpuExtensionServiceSQLDAO) Create(ctx context.Context, tx *db.Tx, input DpuExtensionServiceCreateInput) (*DpuExtensionService, error) {
+func (dessd DpuExtensionServiceSQLDAO) Create(ctx context.Context, tx *db.Tx, input DpuExtensionServiceCreateInput) (_ *DpuExtensionService, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.Create")
 	if desDAOSpan != nil {
-		defer desDAOSpan.End()
+		defer func() {
+			desDAOSpan.EndWith(retErr)
+		}()
 
 		dessd.tracerSpan.SetAttribute(desDAOSpan, "name", input.Name)
 	}
@@ -366,11 +368,13 @@ func (dessd DpuExtensionServiceSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 
 // GetByID returns a DpuExtensionService by ID and SiteID
 // returns db.ErrDoesNotExist error if the record is not found
-func (dessd DpuExtensionServiceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*DpuExtensionService, error) {
+func (dessd DpuExtensionServiceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *DpuExtensionService, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.GetByID")
 	if desDAOSpan != nil {
-		defer desDAOSpan.End()
+		defer func() {
+			desDAOSpan.EndWith(retErr)
+		}()
 
 		dessd.tracerSpan.SetAttribute(desDAOSpan, "id", id.String())
 	}
@@ -398,11 +402,13 @@ func (dessd DpuExtensionServiceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, i
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if page.OrderBy is nil, then records are ordered by column specified in DpuExtensionServiceOrderByDefault in ascending order
-func (dessd DpuExtensionServiceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DpuExtensionServiceFilterInput, page paginator.PageInput, includeRelations []string) ([]DpuExtensionService, int, error) {
+func (dessd DpuExtensionServiceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DpuExtensionServiceFilterInput, page paginator.PageInput, includeRelations []string) (_ []DpuExtensionService, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.GetAll")
 	if desDAOSpan != nil {
-		defer desDAOSpan.End()
+		defer func() {
+			desDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	dess := []DpuExtensionService{}
@@ -504,11 +510,13 @@ func (dessd DpuExtensionServiceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 
 // Update updates specified fields of an existing DpuExtensionService
 // The updated fields are assumed to be set to non-null values
-func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, input DpuExtensionServiceUpdateInput) (*DpuExtensionService, error) {
+func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, input DpuExtensionServiceUpdateInput) (_ *DpuExtensionService, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.Update")
 	if desDAOSpan != nil {
-		defer desDAOSpan.End()
+		defer func() {
+			desDAOSpan.EndWith(retErr)
+		}()
 
 		dessd.tracerSpan.SetAttribute(desDAOSpan, "id", input.DpuExtensionServiceID.String())
 	}
@@ -590,11 +598,13 @@ func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 }
 
 // Clear clears the specified fields of a DpuExtensionService object
-func (dessd DpuExtensionServiceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input DpuExtensionServiceClearInput) (*DpuExtensionService, error) {
+func (dessd DpuExtensionServiceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input DpuExtensionServiceClearInput) (_ *DpuExtensionService, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.Clear")
 	if desDAOSpan != nil {
-		defer desDAOSpan.End()
+		defer func() {
+			desDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	des := &DpuExtensionService{
@@ -638,11 +648,13 @@ func (dessd DpuExtensionServiceSQLDAO) Clear(ctx context.Context, tx *db.Tx, inp
 // Delete deletes a DpuExtensionService by ID
 // error is returned only if there is a db error
 // if the object being deleted doesn't exist, error is not returned
-func (dessd DpuExtensionServiceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (dessd DpuExtensionServiceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, desDAOSpan := dessd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDAO.Delete")
 	if desDAOSpan != nil {
-		defer desDAOSpan.End()
+		defer func() {
+			desDAOSpan.EndWith(retErr)
+		}()
 
 		dessd.tracerSpan.SetAttribute(desDAOSpan, "id", id.String())
 	}

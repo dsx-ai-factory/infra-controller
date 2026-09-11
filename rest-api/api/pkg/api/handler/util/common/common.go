@@ -21,13 +21,13 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
 	"github.com/google/uuid"
@@ -1333,10 +1333,10 @@ func GRPCStatusMessage(err error) string {
 }
 
 // GetUserAndEnrichLogger retrieves the user from the echo context and enriches the logger
-// and tracer span with user ID information (StarfleetID or AuxiliaryID).
+// and the handler span with user ID information (StarfleetID or AuxiliaryID).
 // This eliminates the repetitive if-else block for user ID logging across handlers.
-// The tracerSpan and handlerSpan parameters are optional and can be nil if tracing is not needed.
-func GetUserAndEnrichLogger(c echo.Context, logger zerolog.Logger, tracerSpan *cutil.TracerSpan, handlerSpan trace.Span) (*cdbm.User, zerolog.Logger, error) {
+// The handlerSpan parameter is optional and can be nil if tracing is not needed.
+func GetUserAndEnrichLogger(c echo.Context, logger zerolog.Logger, handlerSpan oteltrace.Span) (*cdbm.User, zerolog.Logger, error) {
 	// Get user
 	dbUser, ok := c.Get("user").(*cdbm.User)
 	if !ok || dbUser == nil {
@@ -1347,14 +1347,10 @@ func GetUserAndEnrichLogger(c echo.Context, logger zerolog.Logger, tracerSpan *c
 	// Enrich logger and tracer span with user ID
 	if dbUser.StarfleetID != nil {
 		logger = logger.With().Str("Starfleet ID", *dbUser.StarfleetID).Logger()
-		if tracerSpan != nil && handlerSpan != nil {
-			tracerSpan.SetAttribute(handlerSpan, attribute.String("starfleet_id", *dbUser.StarfleetID), logger)
-		}
+		cotel.SetAttribute(handlerSpan, attribute.String("starfleet_id", *dbUser.StarfleetID))
 	} else if dbUser.AuxiliaryID != nil {
 		logger = logger.With().Str("Auxiliary ID", *dbUser.AuxiliaryID).Logger()
-		if tracerSpan != nil && handlerSpan != nil {
-			tracerSpan.SetAttribute(handlerSpan, attribute.String("auxiliary_id", *dbUser.AuxiliaryID), logger)
-		}
+		cotel.SetAttribute(handlerSpan, attribute.String("auxiliary_id", *dbUser.AuxiliaryID))
 	}
 
 	logger.Info().Msg("retrieved user from request context")
@@ -1838,7 +1834,7 @@ func IsProviderOrTenant(ctx context.Context, logger zerolog.Logger, dbSession *c
 // SetupHandler sets up common tasks for handlers not requiring error handling.
 // WARNING: caller MUST defer handlerSpan.End() if handlerSpan is not nil!!!
 // This function can be used across handlers to reduce duplication of initialization logic.
-func SetupHandler(modelName, handlerName string, c echo.Context, s *cutil.TracerSpan) (org string, user *cdbm.User, ctx context.Context, logger zerolog.Logger, hs oteltrace.Span) {
+func SetupHandler(modelName, handlerName string, c echo.Context) (org string, user *cdbm.User, ctx context.Context, logger zerolog.Logger, hs oteltrace.Span) {
 	// Get org
 	org = strings.ToLower(c.Param("orgName"))
 
@@ -1850,15 +1846,10 @@ func SetupHandler(modelName, handlerName string, c echo.Context, s *cutil.Tracer
 	logger.Info().Msg("started API handler")
 
 	// Create a child span and set the attributes for current request
-	newctx, hs := s.CreateChildInContext(ctx, handlerName+modelName+"Handler", logger)
-	if hs != nil {
-		// NOTE: caller MUST defer handlerSpan.End()
-		// Set newly created span context as a current context
-		ctx = newctx
-		s.SetAttribute(hs, attribute.String("org", org), logger)
-	}
+	ctx, hs = cotel.StartSpan(ctx, handlerName+modelName+"Handler")
+	cotel.SetAttribute(hs, attribute.String("org", org))
 
-	user, enrichedLogger, _ := GetUserAndEnrichLogger(c, logger, s, hs)
+	user, enrichedLogger, _ := GetUserAndEnrichLogger(c, logger, hs)
 	if user != nil {
 		logger = enrichedLogger
 	}

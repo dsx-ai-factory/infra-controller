@@ -5,17 +5,24 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
 	tClient "go.temporal.io/sdk/client"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	capis "github.com/NVIDIA/infra-controller/rest-api/api/internal/server"
@@ -25,8 +32,6 @@ import (
 
 	// Imports for API doc generation
 	_ "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/tracing"
 )
 
 const (
@@ -35,7 +40,10 @@ const (
 	// ZerologLevelFieldName specifies the field name for log level
 	ZerologLevelFieldName = "type"
 
-	// serverShutdownTimeout bounds the drain of in-flight requests on SIGTERM.
+	apiListenAddress = ":8388"
+	// serverShutdownTimeout bounds the drain of in-flight requests on SIGTERM
+	// and, separately, the final trace export flush that follows it. Handler
+	// waits such as the Temporal proxy timeout ladders must complete inside it.
 	serverShutdownTimeout = 30 * time.Second
 )
 
@@ -53,49 +61,81 @@ const (
 // @in header
 // @name Authorization
 func main() {
-	// First: interceptors and handlers below capture the global propagator.
-	tracing.InstallPropagator()
-	// No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set. Called explicitly below
-	// rather than deferred: log.Fatal exits without running defers.
-	shutdownTracing := tracing.InstallExporter("nico-rest-api")
 	// Initialize logger
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	zerolog.LevelFieldName = ZerologLevelFieldName
 	zerolog.MessageFieldName = ZerologMessageFieldName
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx); err != nil {
+		log.Error().Err(err).Msg("API server stopped with an error")
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context) error {
 	cfg := config.NewConfig()
 	defer cfg.Close()
 
+	// Initialize tracing before DB, Temporal, and Echo so their
+	// instrumentation picks up the global tracer provider
+	otelShutdown, err := cotel.Bootstrap(ctx, cfg.GetTracingEnabled(), cfg.GetTracingServiceName())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to initialize tracing")
+	}
+
+	return runWithTracingShutdown(func() error {
+		return runAPI(ctx, cfg)
+	}, otelShutdown)
+}
+
+func runWithTracingShutdown(runAPI func() error, shutdown func(context.Context) error) (retErr error) {
+	defer func() {
+		// Use a fresh bounded context so cancellation does not skip the final
+		// exporter flush after the HTTP servers and dependencies have drained.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+		defer cancel()
+
+		shutdownErr := shutdown(shutdownCtx)
+		if shutdownErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("failed to shut down tracing: %w", shutdownErr))
+		}
+	}()
+
+	return runAPI()
+}
+
+func runAPI(ctx context.Context, cfg *config.Config) error {
 	dbConfig := cfg.GetDBConfig()
 
 	// Initialize DB connection
-	dbSession, err := cdb.NewSession(context.Background(), dbConfig.Host, dbConfig.Port, dbConfig.Name, dbConfig.User, dbConfig.Password, "")
+	dbSession, err := cdb.NewSession(ctx, dbConfig.Host, dbConfig.Port, dbConfig.Name, dbConfig.User, dbConfig.Password, "")
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to initialize DB session")
-	} else {
-		defer dbSession.Close()
+		return fmt.Errorf("failed to initialize DB session: %w", err)
 	}
+	defer dbSession.Close()
 
 	// Initialize Temporal client and namespace client
 	// Client objects are expensive so they are only initialized once
 	tcfg, err := cfg.GetTemporalConfig()
 
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to get Temporal config")
+		return fmt.Errorf("failed to get Temporal config: %w", err)
 	}
 
-	tc, tnc, err := capis.InitTemporalClients(tcfg, cfg.GetTracingEnabled())
+	tc, tnc, err := capis.InitTemporalClients(tcfg)
 
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to create Temporal clients")
-	} else {
-		defer tc.Close()
-		defer tnc.Close()
+		return fmt.Errorf("failed to create Temporal clients: %w", err)
 	}
+	defer tc.Close()
+	defer tnc.Close()
 
-	_, err = tc.CheckHealth(context.Background(), &tClient.CheckHealthRequest{})
+	_, err = tc.CheckHealth(ctx, &tClient.CheckHealthRequest{})
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to check Temporal health")
+		return fmt.Errorf("failed to check Temporal health: %w", err)
 	}
 
 	scp := sc.NewClientPool(tcfg)
@@ -104,7 +144,7 @@ func main() {
 	if cfg.GetDPSEnabled() {
 		dps, err := dpsclient.NewClient(cfg.GetDPSConfig())
 		if err != nil {
-			log.Panic().Err(err).Msg("failed to initialize DPS client")
+			return fmt.Errorf("failed to initialize DPS client: %w", err)
 		}
 		defer dps.Close()
 		powerProvisioner = dps
@@ -112,42 +152,112 @@ func main() {
 
 	// Initialize API Echo instance
 	e := capis.InitAPIServer(cfg, dbSession, tc, tnc, scp, powerProvisioner)
+	e.Server.Addr = apiListenAddress
+	servers := []*echo.Echo{e}
 
 	mconfig := cfg.GetMetricsConfig()
 	if mconfig.Enabled {
 		// Initialize Prometheus Echo instance
 		ep := capis.InitMetricsServer(e, mconfig.Namespace)
+		ep.Server.Addr = mconfig.GetListenAddr()
+		servers = append(servers, ep)
+	}
 
-		// Start Prometheus server
-		log.Info().Msg("starting Metrics server")
+	return serveEchoServers(ctx, servers)
+}
+
+func serveEchoServers(ctx context.Context, servers []*echo.Echo) error {
+	return serveEchoServersWithListenerFactory(ctx, servers, net.Listen)
+}
+
+func serveEchoServersWithListenerFactory(
+	ctx context.Context,
+	servers []*echo.Echo,
+	listen func(network, address string) (net.Listener, error),
+) error {
+	if len(servers) == 0 || ctx.Err() != nil {
+		return nil
+	}
+
+	listeners := make([]net.Listener, 0, len(servers))
+	for _, server := range servers {
+		listener, err := listen("tcp", server.Server.Addr)
+		if err != nil {
+			for _, opened := range listeners {
+				_ = opened.Close()
+			}
+			return fmt.Errorf("failed to listen for HTTP server on %s: %w", server.Server.Addr, err)
+		}
+		listeners = append(listeners, listener)
+	}
+	for i, server := range servers {
+		server.Listener = listeners[i]
+	}
+	defer func() {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+	}()
+
+	results := make(chan error, len(servers))
+	stopping := make(chan struct{})
+	for _, server := range servers {
+		log.Info().Str("listenAddress", server.Listener.Addr().String()).Msg("starting HTTP server")
 		go func() {
-			ep.Logger.Fatal(ep.Start(mconfig.GetListenAddr()))
+			err := server.Start(server.Server.Addr)
+			if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+				err = nil
+			}
+			select {
+			case <-stopping:
+			default:
+				if err == nil {
+					err = errors.New("server stopped unexpectedly")
+				}
+			}
+			if err != nil {
+				err = fmt.Errorf("HTTP server on %s: %w", server.Server.Addr, err)
+			}
+			results <- err
 		}()
 	}
 
-	// Start main server
-	log.Info().Msg("starting API server")
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- e.Start(":8388")
-	}()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
+	completed := 0
+	var runErr error
 	select {
-	case err := <-errCh:
-		shutdownTracing()
-		log.Fatal().Err(err).Msg("API server stopped")
-	case sig := <-sigCh:
-		log.Info().Stringer("signal", sig).Msg("shutting down API server")
-		ctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
-		defer cancel()
-		if err := e.Shutdown(ctx); err != nil {
-			log.Error().Err(err).Msg("API server graceful shutdown failed")
-		}
-		// After the drain, so spans recorded by in-flight requests are exported.
-		shutdownTracing()
+	case <-ctx.Done():
+	case runErr = <-results:
+		completed++
 	}
+	close(stopping)
+	// Close listeners explicitly before Shutdown. This also covers the narrow
+	// startup window where a listener is bound but Serve has not entered yet.
+	for _, listener := range listeners {
+		_ = listener.Close()
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+	defer cancel()
+	shutdownResults := make(chan error, len(servers))
+	for _, server := range servers {
+		go func() {
+			shutdownErr := server.Shutdown(shutdownCtx)
+			if shutdownErr != nil {
+				shutdownErr = fmt.Errorf("failed to shut down HTTP server on %s: %w", server.Server.Addr, shutdownErr)
+				closeErr := server.Close()
+				if closeErr != nil {
+					shutdownErr = errors.Join(shutdownErr, fmt.Errorf("failed to close HTTP server on %s: %w", server.Server.Addr, closeErr))
+				}
+			}
+			shutdownResults <- shutdownErr
+		}()
+	}
+	for range servers {
+		runErr = errors.Join(runErr, <-shutdownResults)
+	}
+
+	for ; completed < len(servers); completed++ {
+		runErr = errors.Join(runErr, <-results)
+	}
+	return runErr
 }

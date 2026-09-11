@@ -13,6 +13,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // DefaultJWKSTimeout is the default timeout for JWKS fetch operations
@@ -30,7 +31,10 @@ func NewJWKSFromURL(url string, timeout time.Duration) (*JWKS, error) {
 		timeout = DefaultJWKSTimeout
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
+	// Deliberately detached from any request context: this is a throttled,
+	// shared-cache refresh whose outcome serves all requests, so it must not
+	// be cancelled by (or traced under) whichever request triggered it.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

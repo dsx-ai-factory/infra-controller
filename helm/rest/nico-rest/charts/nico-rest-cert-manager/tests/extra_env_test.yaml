@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: cert-manager extra container environment
+templates:
+  - deployment.yaml
+set:
+  global.image.repository: example.test
+  global.image.tag: latest
+  global.image.pullPolicy: IfNotPresent
+  global.imagePullSecrets:
+    - name: pull-secret
+tests:
+  - it: renders no env block by default
+    asserts:
+      - isNull:
+          path: spec.template.spec.containers[0].env
+
+  - it: renders extraEnv entries for the OTLP exporter
+    set:
+      extraEnv:
+        OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability.svc.cluster.local:4317
+        OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_ENDPOINT
+            value: http://otel-collector.observability.svc.cluster.local:4317
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_PROTOCOL
+            value: grpc

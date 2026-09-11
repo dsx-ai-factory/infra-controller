@@ -4,7 +4,6 @@
 package processors
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -126,7 +125,10 @@ func (h *CustomProcessor) ProcessToken(c echo.Context, tokenStr string, jwksConf
 	email := GetEmail(claims)
 
 	userDAO := cdbm.NewUserDAO(h.dbSession)
-	dbUser, _, err := userDAO.GetOrCreate(context.Background(), nil, cdbm.UserGetOrCreateInput{
+	// Use the request context so auth DB work joins the request trace and obeys cancellation.
+	ctx := c.Request().Context()
+
+	dbUser, _, err := userDAO.GetOrCreate(ctx, nil, cdbm.UserGetOrCreateInput{
 		AuxiliaryID: &auxID,
 	})
 	if err != nil {
@@ -141,7 +143,7 @@ func (h *CustomProcessor) ProcessToken(c echo.Context, tokenStr string, jwksConf
 	}
 
 	if updatedUser != nil {
-		dbUser, err = userDAO.Update(context.Background(), nil, cdbm.UserUpdateInput{
+		dbUser, err = userDAO.Update(ctx, nil, cdbm.UserUpdateInput{
 			UserID:    dbUser.ID,
 			Email:     &email,
 			FirstName: &firstName,

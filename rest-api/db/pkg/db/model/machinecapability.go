@@ -582,11 +582,13 @@ type MachineCapabilitySQLDAO struct {
 // this library call happens within a transaction
 func (mcd MachineCapabilitySQLDAO) Create(
 	ctx context.Context, tx *db.Tx,
-	input MachineCapabilityCreateInput) (*MachineCapability, error) {
+	input MachineCapabilityCreateInput) (_ *MachineCapability, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.Create")
 	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
+		defer func() {
+			MachineCapabilityDAOSpan.EndWith(retErr)
+		}()
 
 		mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "name", input.Name)
 	}
@@ -636,11 +638,13 @@ func (mcd MachineCapabilitySQLDAO) Create(
 
 // GetByID returns a MachineCapability by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (mcd MachineCapabilitySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*MachineCapability, error) {
+func (mcd MachineCapabilitySQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *MachineCapability, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.GetByID")
 	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
+		defer func() {
+			MachineCapabilityDAOSpan.EndWith(retErr)
+		}()
 
 		mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "id", id.String())
 	}
@@ -679,11 +683,13 @@ func (mcd MachineCapabilitySQLDAO) GetAll(
 	deviceType *string,
 	inactiveDevices []int,
 	includeRelations []string,
-	offset *int, limit *int, orderBy *paginator.OrderBy) ([]MachineCapability, int, error) {
+	offset *int, limit *int, orderBy *paginator.OrderBy) (_ []MachineCapability, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.GetAll")
 	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
+		defer func() {
+			MachineCapabilityDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	mcs := []MachineCapability{}
@@ -804,11 +810,13 @@ type GPUSiteStat struct {
 // GetGPUStatsBySite aggregates GPU capabilities in the database, grouped by site
 // and GPU name, instead of loading every machine and capability row into the
 // application. It mirrors the aggregation approach of MachineSQLDAO.GetCountByStatus.
-func (mcd MachineCapabilitySQLDAO) GetGPUStatsBySite(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, siteID *uuid.UUID) ([]GPUSiteStat, error) {
+func (mcd MachineCapabilitySQLDAO) GetGPUStatsBySite(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, siteID *uuid.UUID) (_ []GPUSiteStat, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.GetGPUStatsBySite")
 	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
+		defer func() {
+			MachineCapabilityDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	stats := []GPUSiteStat{}
@@ -859,11 +867,13 @@ func (mcd MachineCapabilitySQLDAO) GetAllDistinct(
 	count *int,
 	deviceType *string,
 	inactiveDevices []int,
-	offset *int, limit *int, orderBy *paginator.OrderBy) ([]MachineCapability, int, error) {
+	offset *int, limit *int, orderBy *paginator.OrderBy) (_ []MachineCapability, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.GetAllDistinct")
 	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
+		defer func() {
+			MachineCapabilityDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	mcs := []MachineCapability{}
@@ -963,11 +973,13 @@ func (mcd MachineCapabilitySQLDAO) GetAllDistinct(
 // this library call happens within a transaction
 func (mcd MachineCapabilitySQLDAO) Update(
 	ctx context.Context, tx *db.Tx,
-	input MachineCapabilityUpdateInput) (*MachineCapability, error) {
+	input MachineCapabilityUpdateInput) (_ *MachineCapability, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.Update")
 	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
+		defer func() {
+			MachineCapabilityDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	m := &MachineCapability{
@@ -1127,11 +1139,13 @@ func (mcd MachineCapabilitySQLDAO) Update(
 func (mcd MachineCapabilitySQLDAO) ClearFromParams(
 	ctx context.Context, tx *db.Tx,
 	id uuid.UUID,
-	machineID, instanceTypeID, frequency, capacity, vendor, info bool) (*MachineCapability, error) {
+	machineID, instanceTypeID, frequency, capacity, vendor, info bool) (_ *MachineCapability, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.ClearFromParams")
 	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
+		defer func() {
+			MachineCapabilityDAOSpan.EndWith(retErr)
+		}()
 
 		mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "id", id.String())
 	}
@@ -1189,11 +1203,13 @@ func (mcd MachineCapabilitySQLDAO) ClearFromParams(
 // DeleteByID deletes an MachineCapability by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (mcd MachineCapabilitySQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) error {
+func (mcd MachineCapabilitySQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, MachineCapabilityDAOSpan := mcd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineCapabilityDAO.DeleteByID")
 	if MachineCapabilityDAOSpan != nil {
-		defer MachineCapabilityDAOSpan.End()
+		defer func() {
+			MachineCapabilityDAOSpan.EndWith(retErr)
+		}()
 
 		mcd.tracerSpan.SetAttribute(MachineCapabilityDAOSpan, "id", id.String())
 	}

@@ -11,39 +11,39 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"go.opentelemetry.io/otel/attribute"
+	tclient "go.temporal.io/sdk/client"
+
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
-	"go.opentelemetry.io/otel/attribute"
-	tclient "go.temporal.io/sdk/client"
 )
 
 // ~~~~~ GetAll Handler ~~~~~ //
 
 // GetAllSkuHandler is the API Handler for getting all SKUs
 type GetAllSkuHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllSkuHandler initializes and returns a new handler for getting all SKUs
 func NewGetAllSkuHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetAllSkuHandler {
 	return GetAllSkuHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -62,7 +62,7 @@ func NewGetAllSkuHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.
 // @Success 200 {object} []model.APISku
 // @Router /v2/org/{org}/nico/sku [get]
 func (gash GetAllSkuHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetAll", "SKU", c, gash.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetAll", "SKU", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -180,19 +180,17 @@ func (gash GetAllSkuHandler) Handle(c echo.Context) error {
 
 // GetSkuHandler is the API Handler for retrieving SKU
 type GetSkuHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetSkuHandler initializes and returns a new handler to retrieve SKU
 func NewGetSkuHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetSkuHandler {
 	return GetSkuHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -208,7 +206,7 @@ func NewGetSkuHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Con
 // @Success 200 {object} model.APISku
 // @Router /v2/org/{org}/nico/sku/{id} [get]
 func (gsh GetSkuHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Get", "SKU", c, gsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Get", "SKU", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -229,7 +227,7 @@ func (gsh GetSkuHandler) Handle(c echo.Context) error {
 
 	logger = logger.With().Str("SKU ID", skuID).Logger()
 
-	gsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sku_id", skuID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sku_id", skuID))
 
 	// Get SKU from DB by ID
 	skuDAO := cdbm.NewSkuDAO(gsh.dbSession)
@@ -284,17 +282,15 @@ func (gsh GetSkuHandler) Handle(c echo.Context) error {
 
 // CreateSkuHandler creates one SKU on a Site's Core service.
 type CreateSkuHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateSkuHandler initializes and returns a new CreateSkuHandler.
 func NewCreateSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateSkuHandler {
 	return CreateSkuHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -310,7 +306,7 @@ func NewCreateSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateSkuHa
 // @Success 201 {object} model.APISku
 // @Router /v2/org/{org}/nico/sku [post]
 func (csh CreateSkuHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Create", c, csh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -431,17 +427,15 @@ func (csh CreateSkuHandler) Handle(c echo.Context) error {
 
 // UpdateSkuHandler partially updates one SKU on a Site's Core service.
 type UpdateSkuHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewUpdateSkuHandler returns a new UpdateSkuHandler.
 func NewUpdateSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) UpdateSkuHandler {
 	return UpdateSkuHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -458,7 +452,7 @@ func NewUpdateSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) UpdateSkuHa
 // @Success 200 {object} model.APISku
 // @Router /v2/org/{org}/nico/sku/{id} [patch]
 func (ush UpdateSkuHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Update", c, ush.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -467,7 +461,7 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 	if skuID == "" {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "SKU ID must be specified", nil)
 	}
-	ush.tracerSpan.SetAttribute(handlerSpan, attribute.String("sku_id", skuID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sku_id", skuID))
 
 	apiReq := model.APISkuUpdateRequest{}
 	err := c.Bind(&apiReq)
@@ -611,17 +605,15 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 
 // DeleteSkuHandler deletes one unused SKU from a Site's Core service.
 type DeleteSkuHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDeleteSkuHandler returns a new DeleteSkuHandler.
 func NewDeleteSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteSkuHandler {
 	return DeleteSkuHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -636,7 +628,7 @@ func NewDeleteSkuHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteSkuHa
 // @Success 204
 // @Router /v2/org/{org}/nico/sku/{id} [delete]
 func (dsh DeleteSkuHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Delete", c, dsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("SKU", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -646,7 +638,7 @@ func (dsh DeleteSkuHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "SKU ID must be specified", nil)
 	}
 
-	dsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("sku_id", skuID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("sku_id", skuID))
 
 	skuDAO := cdbm.NewSkuDAO(dsh.dbSession)
 	savedSKU, err := skuDAO.Get(ctx, nil, skuID)

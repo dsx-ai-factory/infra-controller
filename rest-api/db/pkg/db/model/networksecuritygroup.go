@@ -393,11 +393,13 @@ type NetworkSecurityGroupSQLDAO struct {
 // The returned NetworkSecurityGroup will not have any related structs (InfrastructureProvider/Site) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (sgsd NetworkSecurityGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupCreateInput) (*NetworkSecurityGroup, error) {
+func (sgsd NetworkSecurityGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupCreateInput) (_ *NetworkSecurityGroup, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, networkSecurityGroupDAOSpan := sgsd.tracerSpan.CreateChildInCurrentContext(ctx, "NetworkSecurityGroupDAO.Create")
 	if networkSecurityGroupDAOSpan != nil {
-		defer networkSecurityGroupDAOSpan.End()
+		defer func() {
+			networkSecurityGroupDAOSpan.EndWith(retErr)
+		}()
 
 		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "name", input.Name)
 	}
@@ -450,11 +452,13 @@ func (sgsd NetworkSecurityGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 
 // GetByID returns a NetworkSecurityGroup by ID
 // Returns db.ErrDoesNotExist error if the record is not found
-func (sgsd NetworkSecurityGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, includeRelations []string) (*NetworkSecurityGroup, error) {
+func (sgsd NetworkSecurityGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, includeRelations []string) (_ *NetworkSecurityGroup, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, networkSecurityGroupDAOSpan := sgsd.tracerSpan.CreateChildInCurrentContext(ctx, "NetworkSecurityGroupDAO.GetByID")
 	if networkSecurityGroupDAOSpan != nil {
-		defer networkSecurityGroupDAOSpan.End()
+		defer func() {
+			networkSecurityGroupDAOSpan.EndWith(retErr)
+		}()
 
 		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "id", id)
 	}
@@ -482,11 +486,13 @@ func (sgsd NetworkSecurityGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, i
 // If no records found, then error is nil, but length of returned slice is 0
 // If orderBy is nil, then records are ordered by column specified
 // in NetworkSecurityGroupOrderByDefault in ascending order
-func (sgsd NetworkSecurityGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NetworkSecurityGroupFilterInput, page paginator.PageInput, includeRelations []string) ([]NetworkSecurityGroup, int, error) {
+func (sgsd NetworkSecurityGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NetworkSecurityGroupFilterInput, page paginator.PageInput, includeRelations []string) (_ []NetworkSecurityGroup, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, networkSecurityGroupDAOSpan := sgsd.tracerSpan.CreateChildInCurrentContext(ctx, "NetworkSecurityGroupDAO.GetAll")
 	if networkSecurityGroupDAOSpan != nil {
-		defer networkSecurityGroupDAOSpan.End()
+		defer func() {
+			networkSecurityGroupDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	sgs := []NetworkSecurityGroup{}
@@ -567,11 +573,13 @@ func (sgsd NetworkSecurityGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 // For setting to null values, use: Clear
 // Since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction.
-func (sgsd NetworkSecurityGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupUpdateInput) (*NetworkSecurityGroup, error) {
+func (sgsd NetworkSecurityGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupUpdateInput) (_ *NetworkSecurityGroup, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, networkSecurityGroupDAOSpan := sgsd.tracerSpan.CreateChildInCurrentContext(ctx, "NetworkSecurityGroupDAO.Update")
 	if networkSecurityGroupDAOSpan != nil {
-		defer networkSecurityGroupDAOSpan.End()
+		defer func() {
+			networkSecurityGroupDAOSpan.EndWith(retErr)
+		}()
 
 		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "id", input.NetworkSecurityGroupID)
 	}
@@ -649,11 +657,13 @@ func (sgsd NetworkSecurityGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 // Delete deletes an NetworkSecurityGroup
 // If the object being deleted doesnt exist,
 // error is not returned (idempotent delete)
-func (sgsd NetworkSecurityGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupDeleteInput) error {
+func (sgsd NetworkSecurityGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, input NetworkSecurityGroupDeleteInput) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, networkSecurityGroupDAOSpan := sgsd.tracerSpan.CreateChildInCurrentContext(ctx, "NetworkSecurityGroupDAO.DeleteByID")
 	if networkSecurityGroupDAOSpan != nil {
-		defer networkSecurityGroupDAOSpan.End()
+		defer func() {
+			networkSecurityGroupDAOSpan.EndWith(retErr)
+		}()
 
 		sgsd.tracerSpan.SetAttribute(networkSecurityGroupDAOSpan, "id", input.NetworkSecurityGroupID)
 	}

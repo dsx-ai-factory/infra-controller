@@ -154,11 +154,13 @@ type SSHKeyGroupSQLDAO struct {
 }
 
 // Create creates a new SSHKeyGroup from the given parameters
-func (skgsd SSHKeyGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input SSHKeyGroupCreateInput) (*SSHKeyGroup, error) {
+func (skgsd SSHKeyGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input SSHKeyGroupCreateInput) (_ *SSHKeyGroup, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, SSHKeyGroupDAOSpan := skgsd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupDAO.Create")
 	if SSHKeyGroupDAOSpan != nil {
-		defer SSHKeyGroupDAOSpan.End()
+		defer func() {
+			SSHKeyGroupDAOSpan.EndWith(retErr)
+		}()
 
 		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "name", input.Name)
 	}
@@ -194,11 +196,13 @@ func (skgsd SSHKeyGroupSQLDAO) Create(ctx context.Context, tx *db.Tx, input SSHK
 
 // GetByID returns a SSHKeyGroup by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (skgsd SSHKeyGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*SSHKeyGroup, error) {
+func (skgsd SSHKeyGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *SSHKeyGroup, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, SSHKeyGroupDAOSpan := skgsd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupDAO.GetByID")
 	if SSHKeyGroupDAOSpan != nil {
-		defer SSHKeyGroupDAOSpan.End()
+		defer func() {
+			SSHKeyGroupDAOSpan.EndWith(retErr)
+		}()
 
 		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "id", id.String())
 	}
@@ -226,11 +230,13 @@ func (skgsd SSHKeyGroupSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.U
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in SSHKeyGroupOrderByDefault in ascending order
-func (skgsd SSHKeyGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyGroupFilterInput, page paginator.PageInput, includeRelations []string) ([]SSHKeyGroup, int, error) {
+func (skgsd SSHKeyGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyGroupFilterInput, page paginator.PageInput, includeRelations []string) (_ []SSHKeyGroup, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, SSHKeyGroupDAOSpan := skgsd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupDAO.GetAll")
 	if SSHKeyGroupDAOSpan != nil {
-		defer SSHKeyGroupDAOSpan.End()
+		defer func() {
+			SSHKeyGroupDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	skgs := []SSHKeyGroup{}
@@ -372,11 +378,13 @@ func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx 
 
 // Update updates specified fields of an existing SSHKeyGroup
 // The updated fields are assumed to be set to non-null values
-func (skgsd SSHKeyGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyGroupUpdateInput) (*SSHKeyGroup, error) {
+func (skgsd SSHKeyGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHKeyGroupUpdateInput) (_ *SSHKeyGroup, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, SSHKeyGroupDAOSpan := skgsd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupDAO.Update")
 	if SSHKeyGroupDAOSpan != nil {
-		defer SSHKeyGroupDAOSpan.End()
+		defer func() {
+			SSHKeyGroupDAOSpan.EndWith(retErr)
+		}()
 
 		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "id", input.SSHKeyGroupID.String())
 	}
@@ -438,11 +446,13 @@ func (skgsd SSHKeyGroupSQLDAO) Update(ctx context.Context, tx *db.Tx, input SSHK
 // Delete deletes an SSHKeyGroup by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (skgsd SSHKeyGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (skgsd SSHKeyGroupSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, SSHKeyGroupDAOSpan := skgsd.tracerSpan.CreateChildInCurrentContext(ctx, "SSHKeyGroupSQLDAO.Delete")
 	if SSHKeyGroupDAOSpan != nil {
-		defer SSHKeyGroupDAOSpan.End()
+		defer func() {
+			SSHKeyGroupDAOSpan.EndWith(retErr)
+		}()
 
 		skgsd.tracerSpan.SetAttribute(SSHKeyGroupDAOSpan, "id", id.String())
 	}

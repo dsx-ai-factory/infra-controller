@@ -4,17 +4,18 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	components "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	"github.com/rs/zerolog/log"
-
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/tracing"
 )
 
 // InitElektra initializes the Elektra site agent framework
@@ -44,10 +45,21 @@ func InitElektra() {
 }
 
 func main() {
-	// First: interceptors and handlers below capture the global propagator.
-	tracing.InstallPropagator()
-	// No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
-	defer tracing.InstallExporter("site-agent")()
+	// Initialize tracing before the managers so Temporal/gRPC instrumentation
+	// picks up the global tracer provider; enabled purely by OTEL_* env vars
+	otelShutdown, err := cotel.Bootstrap(context.Background(), cotel.ExporterConfigured(), "nico-rest-site-agent")
+	if err != nil {
+		log.Error().Err(err).Msg("Elektra: failed to initialize tracing")
+	} else {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := otelShutdown(shutdownCtx); err != nil {
+				log.Error().Err(err).Msg("Elektra: failed to shut down tracing")
+			}
+		}()
+	}
+
 	InitElektra()
 	// sleep
 	// Wait forever

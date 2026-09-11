@@ -289,11 +289,13 @@ type InstanceTypeSQLDAO struct {
 // The returned InstanceType will not have any related structs (InfrastructureProvider/Site) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (itsd InstanceTypeSQLDAO) Create(ctx context.Context, tx *db.Tx, input InstanceTypeCreateInput) (*InstanceType, error) {
+func (itsd InstanceTypeSQLDAO) Create(ctx context.Context, tx *db.Tx, input InstanceTypeCreateInput) (_ *InstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.Create")
 	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
+		defer func() {
+			instanceTypeDAOSpan.EndWith(retErr)
+		}()
 		itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "name", input.Name)
 	}
 
@@ -336,11 +338,13 @@ func (itsd InstanceTypeSQLDAO) Create(ctx context.Context, tx *db.Tx, input Inst
 
 // GetByID returns a InstanceType by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (itsd InstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*InstanceType, error) {
+func (itsd InstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *InstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.GetByID")
 	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
+		defer func() {
+			instanceTypeDAOSpan.EndWith(retErr)
+		}()
 
 		itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "id", id.String())
 	}
@@ -369,11 +373,13 @@ func (itsd InstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.U
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in InstanceTypeOrderByDefault in ascending order
-func (itsd InstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InstanceTypeFilterInput, includeRelations []string, offset *int, limit *int, orderBy *paginator.OrderBy) ([]InstanceType, int, error) {
+func (itsd InstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InstanceTypeFilterInput, includeRelations []string, offset *int, limit *int, orderBy *paginator.OrderBy) (_ []InstanceType, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.GetAll")
 	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
+		defer func() {
+			instanceTypeDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	its := []InstanceType{}
@@ -512,11 +518,13 @@ func (itsd InstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Ins
 // For setting to null values, use: ClearFromParams
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (itsd InstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, input InstanceTypeUpdateInput) (*InstanceType, error) {
+func (itsd InstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, input InstanceTypeUpdateInput) (_ *InstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.UpdateFromParams")
 	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
+		defer func() {
+			instanceTypeDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	it := &InstanceType{
@@ -623,11 +631,13 @@ func (itsd InstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, input Inst
 // parameters displayName, description, siteID when true, the are set to null in db
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this must be within a transaction
-func (itsd InstanceTypeSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceTypeClearInput) (*InstanceType, error) {
+func (itsd InstanceTypeSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceTypeClearInput) (_ *InstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.Clear")
 	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
+		defer func() {
+			instanceTypeDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	it := &InstanceType{
@@ -673,11 +683,13 @@ func (itsd InstanceTypeSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Insta
 // DeleteByID deletes an InstanceType by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (itsd InstanceTypeSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (itsd InstanceTypeSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, instanceTypeDAOSpan := itsd.tracerSpan.CreateChildInCurrentContext(ctx, "InstanceTypeDAO.DeleteByID")
 	if instanceTypeDAOSpan != nil {
-		defer instanceTypeDAOSpan.End()
+		defer func() {
+			instanceTypeDAOSpan.EndWith(retErr)
+		}()
 
 		itsd.tracerSpan.SetAttribute(instanceTypeDAOSpan, "id", id.String())
 	}

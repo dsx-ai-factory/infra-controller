@@ -24,6 +24,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
 	bootstraptypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
@@ -35,9 +36,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 )
 
 var (
@@ -95,7 +94,10 @@ func newBootstrapConfig(dir string) error {
 	if bCfg.CACert == "" || bCfg.CredsURL == "" || bCfg.OTP == "" || bCfg.UUID == "" {
 		return ErrInvalidBootstrapSecret
 	}
-	log.Info().Msgf("Bootstrap: Read %v %v %v %v", bCfg.UUID, bCfg.OTP, bCfg.CredsURL, bCfg.CACert)
+	log.Info().
+		Str("site_id", bCfg.UUID).
+		Str("credentials_url", bCfg.CredsURL).
+		Msg("Bootstrap: configuration loaded")
 
 	return nil
 }
@@ -251,7 +253,7 @@ func (bs *BoostrapAPI) GetState() []string {
 	strs = append(strs, fmt.Sprintln("Creds Download Attempted: ", bt.State.DownloadAttempted.Load()))
 	strs = append(strs, fmt.Sprintln("Creds Download Succeeded: ", bt.State.DownloadSucceeded.Load()))
 	strs = append(strs, fmt.Sprintln("URL: ", bt.Config.CredsURL))
-	strs = append(strs, fmt.Sprintln("OTP: ", bt.Config.OTP))
+	strs = append(strs, "OTP: [REDACTED]\n")
 	strs = append(strs, fmt.Sprintln("UUID: ", bt.Config.UUID))
 
 	return strs
@@ -295,23 +297,23 @@ func (bs *BoostrapAPI) DownloadAndStoreCreds(otpOverride []byte) error {
 	bw.DownloadAttempted.Inc()
 
 	ctx := context.Background()
-	ctx, span := otel.Tracer("elektra-site-agent").Start(ctx, "Bootstrap")
+	ctx, span := cotel.StartSpan(ctx, "Bootstrap")
 	defer span.End()
 
 	// Proceed to download credentials with the updated OTP
 	credsResponse, err := bs.downloadCredentials(ctx)
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
+		cotel.RecordError(span, err)
 		log.Info().Msgf("Bootstrap: Download Credentials Response %v", err.Error())
 		return err
 	}
 	err = bs.storeCredentials(ctx, credsResponse)
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
+		cotel.RecordError(span, err)
 		log.Info().Msgf("Bootstrap: Store Credentials %v", err.Error())
 		return err
 	}
-	span.SetStatus(codes.Ok, "Bootstrap: DownloadSucceeded")
+	cotel.RecordSuccess(span)
 
 	// Keep track of credential download success
 	bw.DownloadSucceeded.Inc()
@@ -360,7 +362,7 @@ func saveToFile(credsResponse *bootstraptypes.SiteCredsResponse) error {
 
 // StoreCredentials for updating secrets
 func (bs *BoostrapAPI) storeCredentials(ctx context.Context, credsResponse *bootstraptypes.SiteCredsResponse) error {
-	ctx, span := otel.Tracer("elektra-site-agent").Start(ctx, "Bootstrap-store")
+	ctx, span := cotel.StartSpan(ctx, "Bootstrap-store")
 	defer span.End()
 	if credsResponse == nil {
 		return fmt.Errorf("Bootstrap: credsResponse is nil")
@@ -419,9 +421,9 @@ func (bs *BoostrapAPI) downloadCredentials(ctx context.Context) (*bootstraptypes
 		log.Error().Msgf("Bootstrap: req %v", err.Error())
 		return nil, err
 	}
-	log.Info().Msgf("Bootstrap: body %v", string(m))
-	ctx, span := otel.Tracer("elektra-site-agent").Start(ctx, "Bootstrap-client")
-	span.SetAttributes(attribute.String("url", bCfg.CredsURL))
+	log.Info().Str("site_id", bCfg.UUID).Msg("Bootstrap: requesting credentials")
+	ctx, span := cotel.StartSpan(ctx, "Bootstrap-client")
+	cotel.SetAttribute(span, attribute.String("url", bCfg.CredsURL))
 	defer span.End()
 
 	u, err := url.Parse(bCfg.CredsURL)
@@ -429,7 +431,7 @@ func (bs *BoostrapAPI) downloadCredentials(ctx context.Context) (*bootstraptypes
 		log.Error().Msgf("Bootstrap: url parse %v", err.Error())
 		return nil, err
 	}
-	log.Info().Msgf("Bootstrap: hostname %v, %v", string(u.Hostname()), bCfg.CredsURL)
+	log.Info().Str("hostname", u.Hostname()).Msg("Bootstrap: credentials endpoint parsed")
 
 	caCertPool := x509.NewCertPool()
 	caCertPool.AppendCertsFromPEM([]byte(bCfg.CACert))
@@ -481,7 +483,7 @@ func (bs *BoostrapAPI) downloadCredentials(ctx context.Context) (*bootstraptypes
 	block, _ := pem.Decode([]byte(credsResponse.CACertificate))
 	if block == nil {
 		log.Error().Msgf("Bootstrap: failed to decode certificate PEM")
-		return nil, fmt.Errorf("failed to decode certificate PEM CACertificate %v", credsResponse.CACertificate)
+		return nil, errors.New("failed to decode CA certificate PEM")
 	}
 
 	_, err = x509.ParseCertificate(block.Bytes)

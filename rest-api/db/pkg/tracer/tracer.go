@@ -5,24 +5,15 @@ package tracer
 
 import (
 	"context"
-	"reflect"
 
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
-const (
-	// TracerKey is a key for current tracer
-	TracerKey = "otel-go-contrib-tracer-labstack-echo"
-
-	// TracerName is name of the tracer
-	TracerName = "go.opentelemetry.io/contrib/instrumentation/github.com/labstack/echo/otelecho"
-
-	// TraceHdr is header name for ngc trace id
-	TraceHdr = "X-Ngc-Trace-Id"
-)
-
-// CurrentContextSpan is a thin wrapper around current context otel span
+// CurrentContextSpan adapts the shared OTel span API to the existing DAO
+// method signatures.
 type CurrentContextSpan struct {
 	Span oteltrace.Span
 }
@@ -32,24 +23,18 @@ func (c *CurrentContextSpan) End() {
 	c.Span.End()
 }
 
-// TracerSpan holds span information
+// EndWith records err on the span (when non-nil) and ends it. Intended for
+// named-return defers: defer func() { daoSpan.EndWith(retErr) }().
+func (c *CurrentContextSpan) EndWith(err error) {
+	cotel.EndSpan(c.Span, err)
+}
+
+// TracerSpan adapts shared span operations to existing DAO fields.
 type TracerSpan struct {
 }
 
 func NewTracerSpan() *TracerSpan {
 	return &TracerSpan{}
-}
-
-// LoadFromContext validate and get the spanner from current context
-func (c *TracerSpan) LoadFromContext(ctx context.Context) (*CurrentContextSpan, bool) {
-	// Assert we don't have a span on the context.
-	span := oteltrace.SpanFromContext(ctx)
-	if span.SpanContext().IsValid() {
-		return &CurrentContextSpan{
-			Span: span,
-		}, true
-	}
-	return nil, false
 }
 
 // SetAttribute set key value attribute to current span
@@ -63,18 +48,20 @@ func (c *TracerSpan) SetAttribute(cspan *CurrentContextSpan, key string, value i
 	}
 
 	svalue, ok := value.(string)
-	if ok && cspan.Span.SpanContext().IsValid() {
-		cspan.Span.SetAttributes(attribute.String(key, svalue))
+	if ok {
+		cotel.SetAttribute(cspan.Span, attribute.String(key, svalue))
 	}
 
 	return cspan
 }
 
-// CreateChildInCurrentContext create a child span from specified span name and context
+// CreateChildInCurrentContext create a child span from specified span name and
+// context. The span comes from the global TracerProvider with its parent taken
+// from ctx, so DAO spans nest correctly on any code path (HTTP, Temporal
+// workers, gRPC) — not only under the echo middleware.
 func (c *TracerSpan) CreateChildInCurrentContext(ctx context.Context, spanName string) (context.Context, *CurrentContextSpan) {
 	// Check if given context is empty
-	var emptyCtx context.Context
-	if reflect.DeepEqual(ctx, emptyCtx) {
+	if ctx == nil {
 		return ctx, nil
 	}
 
@@ -82,14 +69,8 @@ func (c *TracerSpan) CreateChildInCurrentContext(ctx context.Context, spanName s
 		return ctx, nil
 	}
 
-	// get root tracer from context
-	tracer, ok := ctx.Value(TracerKey).(oteltrace.Tracer)
-	if !ok {
-		return ctx, nil
-	}
-
 	// create a child span in current context
-	newctx, span := tracer.Start(ctx, spanName)
+	newctx, span := cotel.StartSpan(ctx, spanName)
 	return newctx, &CurrentContextSpan{
 		Span: span,
 	}

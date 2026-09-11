@@ -130,10 +130,12 @@ type IpxeTemplateSQLDAO struct {
 }
 
 // Create inserts a new IpxeTemplate from the given parameters
-func (itd IpxeTemplateSQLDAO) Create(ctx context.Context, tx *db.Tx, input IpxeTemplateCreateInput) (*IpxeTemplate, error) {
+func (itd IpxeTemplateSQLDAO) Create(ctx context.Context, tx *db.Tx, input IpxeTemplateCreateInput) (_ *IpxeTemplate, retErr error) {
 	ctx, span := itd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateDAO.Create")
 	if span != nil {
-		defer span.End()
+		defer func() {
+			span.EndWith(retErr)
+		}()
 	}
 
 	it := &IpxeTemplate{
@@ -156,10 +158,12 @@ func (itd IpxeTemplateSQLDAO) Create(ctx context.Context, tx *db.Tx, input IpxeT
 
 // Get returns an IpxeTemplate by ID
 // Returns db.ErrDoesNotExist if the record is not found
-func (itd IpxeTemplateSQLDAO) Get(ctx context.Context, tx *db.Tx, id uuid.UUID) (*IpxeTemplate, error) {
+func (itd IpxeTemplateSQLDAO) Get(ctx context.Context, tx *db.Tx, id uuid.UUID) (_ *IpxeTemplate, retErr error) {
 	ctx, span := itd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateDAO.Get")
 	if span != nil {
-		defer span.End()
+		defer func() {
+			span.EndWith(retErr)
+		}()
 		itd.tracerSpan.SetAttribute(span, "id", id)
 	}
 
@@ -197,10 +201,12 @@ func (itd IpxeTemplateSQLDAO) setQueryWithFilter(filter IpxeTemplateFilterInput,
 
 // GetAll returns all IpxeTemplates with optional filters
 // If orderBy is nil, records are ordered by IpxeTemplateOrderByDefault in ascending order
-func (itd IpxeTemplateSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IpxeTemplateFilterInput, page paginator.PageInput) ([]IpxeTemplate, int, error) {
+func (itd IpxeTemplateSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter IpxeTemplateFilterInput, page paginator.PageInput) (_ []IpxeTemplate, _ int, retErr error) {
 	ctx, span := itd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateDAO.GetAll")
 	if span != nil {
-		defer span.End()
+		defer func() {
+			span.EndWith(retErr)
+		}()
 	}
 
 	templates := []IpxeTemplate{}
@@ -238,10 +244,12 @@ func (itd IpxeTemplateSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Ipxe
 }
 
 // Update updates the specified (non-nil) fields of an existing IpxeTemplate.
-func (itd IpxeTemplateSQLDAO) Update(ctx context.Context, tx *db.Tx, input IpxeTemplateUpdateInput) (*IpxeTemplate, error) {
+func (itd IpxeTemplateSQLDAO) Update(ctx context.Context, tx *db.Tx, input IpxeTemplateUpdateInput) (_ *IpxeTemplate, retErr error) {
 	ctx, span := itd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateDAO.Update")
 	if span != nil {
-		defer span.End()
+		defer func() {
+			span.EndWith(retErr)
+		}()
 		itd.tracerSpan.SetAttribute(span, "id", input.IpxeTemplateID)
 	}
 
@@ -284,10 +292,12 @@ func (itd IpxeTemplateSQLDAO) Update(ctx context.Context, tx *db.Tx, input IpxeT
 }
 
 // Delete removes an IpxeTemplate by ID
-func (itd IpxeTemplateSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (itd IpxeTemplateSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	ctx, span := itd.tracerSpan.CreateChildInCurrentContext(ctx, "IpxeTemplateDAO.Delete")
 	if span != nil {
-		defer span.End()
+		defer func() {
+			span.EndWith(retErr)
+		}()
 		itd.tracerSpan.SetAttribute(span, "id", id)
 	}
 

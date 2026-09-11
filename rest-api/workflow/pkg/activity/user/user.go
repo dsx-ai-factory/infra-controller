@@ -95,7 +95,7 @@ func (mu ManageUser) GetUserDataFromNgc(ctx context.Context, userID uuid.UUID, e
 
 	// Get user
 	uDAO := cdbm.NewUserDAO(mu.dbSession)
-	dbUser, err := uDAO.Get(context.Background(), nil, userID, nil)
+	dbUser, err := uDAO.Get(ctx, nil, userID, nil)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to refresh user data from NGC, could not retrieve user from DB using ID")
 		return nil, err
@@ -180,7 +180,7 @@ func (mu ManageUser) UpdateUserInDB(ctx context.Context, userID uuid.UUID, ngcUs
 
 	userDAO := cdbm.NewUserDAO(mu.dbSession)
 
-	_, err := userDAO.Update(context.Background(), nil, cdbm.UserUpdateInput{
+	_, err := userDAO.Update(ctx, nil, cdbm.UserUpdateInput{
 		UserID:    userID,
 		Email:     &email,
 		FirstName: firstName,
@@ -248,7 +248,7 @@ func (mu ManageUser) CreateOrUpdateUserInDBWithAuxiliaryID(ctx context.Context, 
 		StarfleetIDs: []string{ngcUser.StarfleetID},
 	}
 	var err error
-	starfleetIDUsers, _, err = userDAO.GetAll(context.Background(), nil, starfleetIDFilter, paginator.PageInput{Limit: cloudutils.GetPtr(paginator.TotalLimit)}, nil)
+	starfleetIDUsers, _, err = userDAO.GetAll(ctx, nil, starfleetIDFilter, paginator.PageInput{Limit: cloudutils.GetPtr(paginator.TotalLimit)}, nil)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get users by StarfleetID from DB")
 		return err
@@ -258,7 +258,7 @@ func (mu ManageUser) CreateOrUpdateUserInDBWithAuxiliaryID(ctx context.Context, 
 	auxiliaryIdFilter := cdbm.UserFilterInput{
 		AuxiliaryIDs: []string{ngcUser.ClientID},
 	}
-	auxiliaryIDUsers, _, err = userDAO.GetAll(context.Background(), nil, auxiliaryIdFilter, paginator.PageInput{Limit: cloudutils.GetPtr(paginator.TotalLimit)}, nil)
+	auxiliaryIDUsers, _, err = userDAO.GetAll(ctx, nil, auxiliaryIdFilter, paginator.PageInput{Limit: cloudutils.GetPtr(paginator.TotalLimit)}, nil)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get users by AuxiliaryID from DB")
 		return err
@@ -293,7 +293,7 @@ func (mu ManageUser) CreateOrUpdateUserInDBWithAuxiliaryID(ctx context.Context, 
 
 	if existingUser != nil {
 		// User found, update with latest data including AuxiliaryID and OrgData
-		_, err := userDAO.Update(context.Background(), nil, cdbm.UserUpdateInput{
+		_, err := userDAO.Update(ctx, nil, cdbm.UserUpdateInput{
 			UserID:      existingUser.ID,
 			AuxiliaryID: &ngcUser.ClientID,
 			StarfleetID: &ngcUser.StarfleetID,
@@ -316,7 +316,7 @@ func (mu ManageUser) CreateOrUpdateUserInDBWithAuxiliaryID(ctx context.Context, 
 			OrgData:     orgData,
 		}
 
-		_, err := userDAO.Create(context.Background(), nil, createInput)
+		_, err := userDAO.Create(ctx, nil, createInput)
 		if err != nil {
 			var pErr *pgconn.PgError
 			isUniqueViolation := errors.As(err, &pErr) && pErr.Code == pgerrcode.UniqueViolation
@@ -329,12 +329,12 @@ func (mu ManageUser) CreateOrUpdateUserInDBWithAuxiliaryID(ctx context.Context, 
 			// We check above that ngcUser.StarfleetID is not empty
 			retryFilter.StarfleetIDs = []string{ngcUser.StarfleetID}
 
-			users, uCount, err := userDAO.GetAll(context.Background(), nil, retryFilter, paginator.PageInput{Limit: cloudutils.GetPtr(paginator.TotalLimit)}, nil)
+			users, uCount, err := userDAO.GetAll(ctx, nil, retryFilter, paginator.PageInput{Limit: cloudutils.GetPtr(paginator.TotalLimit)}, nil)
 			if err != nil {
 				return err
 			}
 			if uCount == 1 {
-				_, err := userDAO.Update(context.Background(), nil, cdbm.UserUpdateInput{
+				_, err := userDAO.Update(ctx, nil, cdbm.UserUpdateInput{
 					UserID:      users[0].ID,
 					AuxiliaryID: &ngcUser.ClientID,
 					StarfleetID: &ngcUser.StarfleetID,

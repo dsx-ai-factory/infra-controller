@@ -7,6 +7,8 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 const (
@@ -76,6 +78,10 @@ func NewAPIErrorResponse(c echo.Context, code int, message string, data error) e
 	apiNameIfc := c.Get(APINameContextKey)
 	apiName, _ := apiNameIfc.(string)
 
+	// This is the single choke point for error responses, whether sent by
+	// handlers directly or via DefaultHTTPErrorHandler.
+	cotel.RecordHTTPError(c.Request().Context(), code)
+
 	return c.JSON(code, APIError{
 		Code:    code,
 		Source:  apiName,
@@ -134,7 +140,7 @@ func DefaultHTTPErrorHandler(err error, c echo.Context) {
 		message = APIErrorInternalServer
 	}
 
-	// Send response
+	// Send response (span error recording happens inside NewAPIErrorResponse)
 	if c.Request().Method == http.MethodHead { // Issue #608
 		err = c.NoContent(code)
 	} else {

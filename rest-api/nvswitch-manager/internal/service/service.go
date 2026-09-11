@@ -11,6 +11,8 @@ import (
 	"os"
 	"time"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+
 	log "github.com/sirupsen/logrus"
 	"github.com/uptrace/bun"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -23,6 +25,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/firmwaremanager"
 	"github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/nvswitchmanager"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
@@ -126,12 +129,17 @@ func (s *Service) Start(ctx context.Context) error {
 		return err
 	}
 
-	s.grpcServer = grpc.NewServer(
+	grpcServerOptions := []grpc.ServerOption{
 		certOpt,
 		grpc.ChainUnaryInterceptor(
 			loggingUnaryInterceptor(),
 		),
-	)
+	}
+	if cotel.TransportEnabled() {
+		// Create server spans and continue traces from instrumented clients
+		grpcServerOptions = append(grpcServerOptions, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	}
+	s.grpcServer = grpc.NewServer(grpcServerOptions...)
 
 	log.Info("gRPC server starting with request/response logging enabled")
 

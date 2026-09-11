@@ -26,6 +26,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -39,21 +40,19 @@ import (
 
 // CreateInfiniBandPartitionHandler is the API Handler for creating new InfiniBandPartition
 type CreateInfiniBandPartitionHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateInfiniBandPartitionHandler initializes and returns a new handler for creating InfiniBandPartition
 func NewCreateInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateInfiniBandPartitionHandler {
 	return CreateInfiniBandPartitionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -69,7 +68,7 @@ func NewCreateInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 201 {object} model.APIInfiniBandPartition
 // @Router /v2/org/{org}/nico/infiniband-partition [post]
 func (cibph CreateInfiniBandPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandPartition", "Create", c, cibph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandPartition", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -312,19 +311,17 @@ func (cibph CreateInfiniBandPartitionHandler) Handle(c echo.Context) error {
 
 // GetAllInfiniBandPartitionHandler is the API Handler for getting all InfiniBandPartitions
 type GetAllInfiniBandPartitionHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllInfiniBandPartitionHandler initializes and returns a new handler for getting all InfiniBandPartitions
 func NewGetAllInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllInfiniBandPartitionHandler {
 	return GetAllInfiniBandPartitionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -346,7 +343,7 @@ func NewGetAllInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 200 {object} []model.APIInfiniBandPartition
 // @Router /v2/org/{org}/nico/infiniband-partition [get]
 func (gaibph GetAllInfiniBandPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandPartition", "GetAll", c, gaibph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandPartition", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -432,7 +429,7 @@ func (gaibph GetAllInfiniBandPartitionHandler) Handle(c echo.Context) error {
 	// Get query text for full text search from query param
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gaibph.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
@@ -440,7 +437,7 @@ func (gaibph GetAllInfiniBandPartitionHandler) Handle(c echo.Context) error {
 
 	statusQuery := c.QueryParam("status")
 	if statusQuery != "" {
-		gaibph.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.InfiniBandPartitionStatusMap[cdbm.InfiniBandPartitionStatus(statusQuery)]
 		if !ok {
 			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
@@ -516,19 +513,17 @@ func (gaibph GetAllInfiniBandPartitionHandler) Handle(c echo.Context) error {
 
 // GetInfiniBandPartitionHandler is the API Handler for retrieving InfiniBandPartition
 type GetInfiniBandPartitionHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetInfiniBandPartitionHandler initializes and returns a new handler to retrieve InfiniBandPartition
 func NewGetInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetInfiniBandPartitionHandler {
 	return GetInfiniBandPartitionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -545,7 +540,7 @@ func NewGetInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClient.
 // @Success 200 {object} model.APIInfiniBandPartition
 // @Router /v2/org/{org}/nico/infiniband-partition/{id} [get]
 func (gibph GetInfiniBandPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandPartition", "Get", c, gibph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandPartition", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -582,7 +577,7 @@ func (gibph GetInfiniBandPartitionHandler) Handle(c echo.Context) error {
 	// Get IB Partition ID from URL
 	ibpStrID := c.Param("id")
 
-	gibph.tracerSpan.SetAttribute(handlerSpan, attribute.String("infiniband_partition_id", ibpStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("infiniband_partition_id", ibpStrID))
 
 	ibpID, err := uuid.Parse(ibpStrID)
 	if err != nil {
@@ -636,21 +631,19 @@ func (gibph GetInfiniBandPartitionHandler) Handle(c echo.Context) error {
 
 // UpdateInfiniBandPartitionHandler is the API Handler for updating a InfiniBandPartition
 type UpdateInfiniBandPartitionHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateInfiniBandPartitionHandler initializes and returns a new handler for updating InfiniBandPartition
 func NewUpdateInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateInfiniBandPartitionHandler {
 	return UpdateInfiniBandPartitionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -667,7 +660,7 @@ func NewUpdateInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 200 {object} model.APIInfiniBandPartition
 // @Router /v2/org/{org}/nico/infiniband-partition/{id} [patch]
 func (uibph UpdateInfiniBandPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandPartition", "Update", c, uibph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandPartition", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -696,7 +689,7 @@ func (uibph UpdateInfiniBandPartitionHandler) Handle(c echo.Context) error {
 	// Get IB Partition ID from URL
 	ibpStrID := c.Param("id")
 
-	uibph.tracerSpan.SetAttribute(handlerSpan, attribute.String("infiniband_partition_id", ibpStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("infiniband_partition_id", ibpStrID))
 
 	ibpID, err := uuid.Parse(ibpStrID)
 	if err != nil {
@@ -897,21 +890,19 @@ func (uibph UpdateInfiniBandPartitionHandler) Handle(c echo.Context) error {
 
 // DeleteInfiniBandPartitionHandler is the API Handler for deleting a InfiniBandPartition
 type DeleteInfiniBandPartitionHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteInfiniBandPartitionHandler initializes and returns a new handler for deleting InfiniBandPartition
 func NewDeleteInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteInfiniBandPartitionHandler {
 	return DeleteInfiniBandPartitionHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -927,7 +918,7 @@ func NewDeleteInfiniBandPartitionHandler(dbSession *cdb.Session, tc temporalClie
 // @Success 202
 // @Router /v2/org/{org}/nico/infiniband-partition/{id} [delete]
 func (dibph DeleteInfiniBandPartitionHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandPartition", "Delete", c, dibph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InfiniBandPartition", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -956,7 +947,7 @@ func (dibph DeleteInfiniBandPartitionHandler) Handle(c echo.Context) error {
 	// Get InfiniBand Partition ID from URL param
 	ibpStrID := c.Param("id")
 
-	dibph.tracerSpan.SetAttribute(handlerSpan, attribute.String("infiniband_partition_id", ibpStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("infiniband_partition_id", ibpStrID))
 
 	ibpID, err := uuid.Parse(ibpStrID)
 	if err != nil {

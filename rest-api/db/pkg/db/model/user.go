@@ -228,11 +228,13 @@ type UserSQLDAO struct {
 }
 
 // Get returns a user by ID
-func (usd UserSQLDAO) Get(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*User, error) {
+func (usd UserSQLDAO) Get(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *User, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, userDAOSpan := usd.tracerSpan.CreateChildInCurrentContext(ctx, "UserDAO.GetByID")
 	if userDAOSpan != nil {
-		defer userDAOSpan.End()
+		defer func() {
+			userDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	u := &User{}
@@ -283,11 +285,13 @@ func (usd UserSQLDAO) setQueryWithFilter(filter UserFilterInput, query *bun.Sele
 
 // GetAll returns all Users for given params
 // if orderBy is nil, then records are ordered by column specified in UserOrderByDefault in ascending order
-func (usd UserSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter UserFilterInput, page paginator.PageInput, includeRelations []string) ([]User, int, error) {
+func (usd UserSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter UserFilterInput, page paginator.PageInput, includeRelations []string) (_ []User, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, daoSpan := usd.tracerSpan.CreateChildInCurrentContext(ctx, "UserDAO.GetAll")
 	if daoSpan != nil {
-		defer daoSpan.End()
+		defer func() {
+			daoSpan.EndWith(retErr)
+		}()
 	}
 
 	var users []User
@@ -327,7 +331,7 @@ func (usd UserSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter UserFilterIn
 }
 
 // Create creates a new user from the given input
-func (usd UserSQLDAO) Create(ctx context.Context, tx *db.Tx, input UserCreateInput) (*User, error) {
+func (usd UserSQLDAO) Create(ctx context.Context, tx *db.Tx, input UserCreateInput) (_ *User, retErr error) {
 	// Check and reject empty string IDs
 	if input.AuxiliaryID != nil && strings.TrimSpace(*input.AuxiliaryID) == "" {
 		return nil, errors.Wrap(db.ErrInvalidValue, "AuxiliaryID cannot be empty or whitespace-only string")
@@ -340,7 +344,9 @@ func (usd UserSQLDAO) Create(ctx context.Context, tx *db.Tx, input UserCreateInp
 	// Create a child span and set the attributes for current request
 	ctx, userDAOSpan := usd.tracerSpan.CreateChildInCurrentContext(ctx, "UserDAO.Create")
 	if userDAOSpan != nil {
-		defer userDAOSpan.End()
+		defer func() {
+			userDAOSpan.EndWith(retErr)
+		}()
 
 		if input.StarfleetID != nil {
 			usd.tracerSpan.SetAttribute(userDAOSpan, "starfleet_id", *input.StarfleetID)
@@ -379,7 +385,7 @@ func (usd UserSQLDAO) Create(ctx context.Context, tx *db.Tx, input UserCreateInp
 }
 
 // Update updates a user from the given input
-func (usd UserSQLDAO) Update(ctx context.Context, tx *db.Tx, input UserUpdateInput) (*User, error) {
+func (usd UserSQLDAO) Update(ctx context.Context, tx *db.Tx, input UserUpdateInput) (_ *User, retErr error) {
 	// Check and reject empty string IDs
 	if input.AuxiliaryID != nil && strings.TrimSpace(*input.AuxiliaryID) == "" {
 		return nil, errors.Wrap(db.ErrInvalidValue, "AuxiliaryID cannot be empty or whitespace-only string")
@@ -392,7 +398,9 @@ func (usd UserSQLDAO) Update(ctx context.Context, tx *db.Tx, input UserUpdateInp
 	// Create a child span and set the attributes for current request
 	ctx, userDAOSpan := usd.tracerSpan.CreateChildInCurrentContext(ctx, "UserDAO.Update")
 	if userDAOSpan != nil {
-		defer userDAOSpan.End()
+		defer func() {
+			userDAOSpan.EndWith(retErr)
+		}()
 
 		usd.tracerSpan.SetAttribute(userDAOSpan, "user_id", input.UserID.String())
 	}
@@ -453,7 +461,7 @@ func (usd UserSQLDAO) Update(ctx context.Context, tx *db.Tx, input UserUpdateInp
 // GetOrCreate returns a user by AuxiliaryID and/or StarfleetID, or creates a new one if it doesn't exist
 // The database unique constraints prevent race conditions during concurrent user creation.
 // Returns db.ErrInvalidParams if neither ID is provided
-func (usd UserSQLDAO) GetOrCreate(ctx context.Context, tx *db.Tx, input UserGetOrCreateInput) (*User, bool, error) {
+func (usd UserSQLDAO) GetOrCreate(ctx context.Context, tx *db.Tx, input UserGetOrCreateInput) (_ *User, _ bool, retErr error) {
 	// Check and reject empty string IDs
 	if input.AuxiliaryID != nil && strings.TrimSpace(*input.AuxiliaryID) == "" {
 		return nil, false, errors.Wrap(db.ErrInvalidValue, "AuxiliaryID cannot be empty or whitespace-only string")
@@ -474,7 +482,9 @@ func (usd UserSQLDAO) GetOrCreate(ctx context.Context, tx *db.Tx, input UserGetO
 	// Create a child span and set the attributes for current request
 	ctx, userDAOSpan := usd.tracerSpan.CreateChildInCurrentContext(ctx, "UserDAO.GetOrCreate")
 	if userDAOSpan != nil {
-		defer userDAOSpan.End()
+		defer func() {
+			userDAOSpan.EndWith(retErr)
+		}()
 
 		if hasAuxiliaryID {
 			usd.tracerSpan.SetAttribute(userDAOSpan, "auxiliary_id", *input.AuxiliaryID)

@@ -11,7 +11,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	otrace "go.opentelemetry.io/otel/trace"
@@ -119,8 +118,6 @@ func TestMachineInstanceTypeSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -191,8 +188,6 @@ func TestMachineInstanceTypeSQLDAO_GetByID(t *testing.T) {
 
 			span := otrace.SpanFromContext(ctx)
 			assert.True(t, span.SpanContext().IsValid())
-			_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-			assert.True(t, ok)
 		}
 
 	}
@@ -210,8 +205,6 @@ func TestMachineInstanceTypeSQLDAO_GetByID(t *testing.T) {
 
 			span := otrace.SpanFromContext(ctx)
 			assert.True(t, span.SpanContext().IsValid())
-			_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-			assert.True(t, ok)
 		}
 	}
 
@@ -223,8 +216,6 @@ func TestMachineInstanceTypeSQLDAO_GetByID(t *testing.T) {
 
 		span := otrace.SpanFromContext(ctx)
 		assert.True(t, span.SpanContext().IsValid())
-		_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-		assert.True(t, ok)
 	}
 }
 
@@ -256,8 +247,6 @@ func TestMachineInstanceTypeSQLDAO_GetAll(t *testing.T) {
 
 		span := otrace.SpanFromContext(ctx)
 		assert.True(t, span.SpanContext().IsValid())
-		_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-		assert.True(t, ok)
 	}
 
 	// Verify GetAll by Machine ID
@@ -278,8 +267,6 @@ func TestMachineInstanceTypeSQLDAO_GetAll(t *testing.T) {
 
 		span := otrace.SpanFromContext(ctx)
 		assert.True(t, span.SpanContext().IsValid())
-		_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-		assert.True(t, ok)
 	}
 
 	// Verify GetAll, no filters
@@ -345,8 +332,6 @@ func TestMachineInstanceTypeSQLDAO_Update(t *testing.T) {
 
 		span := otrace.SpanFromContext(ctx)
 		assert.True(t, span.SpanContext().IsValid())
-		_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-		assert.True(t, ok)
 	}
 
 	// 1st machine id [0-num] set to machine id 2
@@ -366,8 +351,6 @@ func TestMachineInstanceTypeSQLDAO_Update(t *testing.T) {
 
 		span := otrace.SpanFromContext(ctx)
 		assert.True(t, span.SpanContext().IsValid())
-		_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-		assert.True(t, ok)
 	}
 
 	// Set both machine id and instance type [0-num] to original
@@ -456,8 +439,6 @@ func TestMachineInstanceTypeSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -540,8 +521,6 @@ func TestMachineInstanceTypeSQLDAO_DeleteAllByInstanceTypeID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

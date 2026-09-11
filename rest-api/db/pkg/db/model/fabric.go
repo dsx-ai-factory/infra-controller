@@ -146,11 +146,13 @@ type FabricSQLDAO struct {
 }
 
 // Create creates a new Fabric from the given input
-func (fbsd FabricSQLDAO) Create(ctx context.Context, tx *db.Tx, input FabricCreateInput) (*Fabric, error) {
+func (fbsd FabricSQLDAO) Create(ctx context.Context, tx *db.Tx, input FabricCreateInput) (_ *Fabric, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, FabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricDAO.Create")
 	if FabricDAOSpan != nil {
-		defer FabricDAOSpan.End()
+		defer func() {
+			FabricDAOSpan.EndWith(retErr)
+		}()
 
 		fbsd.tracerSpan.SetAttribute(FabricDAOSpan, "id", input.FabricID)
 	}
@@ -178,11 +180,13 @@ func (fbsd FabricSQLDAO) Create(ctx context.Context, tx *db.Tx, input FabricCrea
 
 // GetByID returns a Fabric by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (fbsd FabricSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, siteID uuid.UUID, includeRelations []string) (*Fabric, error) {
+func (fbsd FabricSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id string, siteID uuid.UUID, includeRelations []string) (_ *Fabric, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, FabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricDAO.GetByID")
 	if FabricDAOSpan != nil {
-		defer FabricDAOSpan.End()
+		defer func() {
+			FabricDAOSpan.EndWith(retErr)
+		}()
 
 		fbsd.tracerSpan.SetAttribute(FabricDAOSpan, "id", id)
 	}
@@ -265,11 +269,13 @@ func (fbsd FabricSQLDAO) setQueryWithFilter(filter FabricFilterInput, query *bun
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in FabricOrderByDefault in ascending order
-func (fbsd FabricSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter FabricFilterInput, page paginator.PageInput, includeRelations []string) ([]Fabric, int, error) {
+func (fbsd FabricSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter FabricFilterInput, page paginator.PageInput, includeRelations []string) (_ []Fabric, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, fabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricDAO.GetAll")
 	if fabricDAOSpan != nil {
-		defer fabricDAOSpan.End()
+		defer func() {
+			fabricDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	fbs := []Fabric{}
@@ -310,11 +316,13 @@ func (fbsd FabricSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter FabricFil
 // Update updates specified fields of an existing Fabric.
 // The updated fields are assumed to be set to non-null values.
 // Since there are 2 operations (UPDATE, SELECT), this call must happen within a transaction.
-func (fbsd FabricSQLDAO) Update(ctx context.Context, tx *db.Tx, input FabricUpdateInput) (*Fabric, error) {
+func (fbsd FabricSQLDAO) Update(ctx context.Context, tx *db.Tx, input FabricUpdateInput) (_ *Fabric, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, fabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricDAO.Update")
 	if fabricDAOSpan != nil {
-		defer fabricDAOSpan.End()
+		defer func() {
+			fabricDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	fb := &Fabric{
@@ -364,11 +372,13 @@ func (fbsd FabricSQLDAO) Update(ctx context.Context, tx *db.Tx, input FabricUpda
 // Delete soft-deletes a Fabric by ID and SiteID.
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (fbsd FabricSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string, siteID uuid.UUID) error {
+func (fbsd FabricSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string, siteID uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, FabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricDAO.Delete")
 	if FabricDAOSpan != nil {
-		defer FabricDAOSpan.End()
+		defer func() {
+			FabricDAOSpan.EndWith(retErr)
+		}()
 
 		fbsd.tracerSpan.SetAttribute(FabricDAOSpan, "id", id)
 	}
@@ -388,11 +398,13 @@ func (fbsd FabricSQLDAO) Delete(ctx context.Context, tx *db.Tx, id string, siteI
 // DeleteAll deletes an Fabric by ID or Site ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (fbsd FabricSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, ids []string, siteID *uuid.UUID) error {
+func (fbsd FabricSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, ids []string, siteID *uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, FabricDAOSpan := fbsd.tracerSpan.CreateChildInCurrentContext(ctx, "FabricSQLDAO.DeleteAll")
 	if FabricDAOSpan != nil {
-		defer FabricDAOSpan.End()
+		defer func() {
+			FabricDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	fb := &Fabric{}

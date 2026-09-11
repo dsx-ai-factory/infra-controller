@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.temporal.io/sdk/worker"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/authz"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/config"
@@ -187,6 +188,21 @@ func doServe() {
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	} else {
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	}
+
+	// Initialize tracing so the otelgrpc server handler emits real spans;
+	// enabled purely by OTEL_* env vars
+	otelShutdown, otelErr := cotel.Bootstrap(context.Background(), cotel.ExporterConfigured(), "nico-flow")
+	if otelErr != nil {
+		log.Error().Err(otelErr).Msg("failed to initialize tracing")
+	} else {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := otelShutdown(shutdownCtx); err != nil {
+				log.Error().Err(err).Msg("failed to shut down tracing")
+			}
+		}()
 	}
 
 	if os.Getenv(svc.EnvVarName) == "" {

@@ -23,6 +23,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -36,21 +37,19 @@ import (
 
 // CreateVpcPeeringHandler is the API Handler for creating new VPC Peering
 type CreateVpcPeeringHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateVpcPeeringHandler initializes and returns a new handler for creating VPC Peering
 func NewCreateVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, sc *sc.ClientPool, cfg *config.Config) CreateVpcPeeringHandler {
 	return CreateVpcPeeringHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        sc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       sc,
+		cfg:       cfg,
 	}
 }
 
@@ -66,7 +65,7 @@ func NewCreateVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, sc *s
 // @Success 201 {object} model.APIVpcPeering
 // @Router /v2/org/{org}/nico/vpc-peering [post]
 func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Create", "VpcPeering", c, cvph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Create", "VpcPeering", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -406,19 +405,17 @@ func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
 
 // GetAllVpcPeeringHandler is the API Handler for getting all VPC Peerings
 type GetAllVpcPeeringHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllVpcPeeringHandler initializes and returns a new handler for getting all VPC Peerings
 func NewGetAllVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetAllVpcPeeringHandler {
 	return GetAllVpcPeeringHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -442,7 +439,7 @@ func NewGetAllVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, cfg *
 // @Success 200 {array} model.APIVpcPeering
 // @Router /v2/org/{org}/nico/vpc-peering [get]
 func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetAll", "VpcPeering", c, gavph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetAll", "VpcPeering", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -511,7 +508,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 		}
 
 		filterInput.SiteIDs = []uuid.UUID{site.ID}
-		gavph.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", siteIDStr), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("site_id", siteIDStr))
 	}
 
 	// Get isMultiTenant from query param if specified
@@ -534,7 +531,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 	// Get status from query param
 	qStatuses := qParams["status"]
 	if len(qStatuses) > 0 {
-		gavph.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", qStatuses), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", qStatuses))
 		for _, status := range qStatuses {
 			if !cdbm.VpcPeeringStatusMap[status] {
 				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
@@ -547,7 +544,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 	// Get vpcId from query param
 	vpcIDStrs := qParams["vpcId"]
 	if len(vpcIDStrs) > 0 {
-		gavph.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("vpcId", vpcIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("vpcId", vpcIDStrs))
 		vpcIDs := make([]uuid.UUID, 0, len(vpcIDStrs))
 		for _, vpcIDStr := range vpcIDStrs {
 			vpcID, err := uuid.Parse(vpcIDStr)
@@ -585,7 +582,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 	// Get peerTenantId from query param
 	peerTenantIDStrs := qParams["peerTenantId"]
 	if len(peerTenantIDStrs) > 0 {
-		gavph.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("peerTenantId", peerTenantIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("peerTenantId", peerTenantIDStrs))
 		peerTenantIDs := make([]uuid.UUID, 0, len(peerTenantIDStrs))
 		for _, peerTenantIDStr := range peerTenantIDStrs {
 			peerTenantID, err := uuid.Parse(peerTenantIDStr)
@@ -716,19 +713,17 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 
 // GetVpcPeeringHandler is the API Handler for getting a VPC Peering
 type GetVpcPeeringHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetVpcPeeringHandler initializes and returns a new handler to retrieve VPC Peering
 func NewGetVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetVpcPeeringHandler {
 	return GetVpcPeeringHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -745,7 +740,7 @@ func NewGetVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, cfg *con
 // @Success 200 {object} model.APIVpcPeering
 // @Router /v2/org/{org}/nico/vpc-peering/{id} [get]
 func (gvph GetVpcPeeringHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Get", "VpcPeering", c, gvph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Get", "VpcPeering", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -764,7 +759,7 @@ func (gvph GetVpcPeeringHandler) Handle(c echo.Context) error {
 
 	peeringID := c.Param("id")
 	logger = logger.With().Str("Peering ID", peeringID).Logger()
-	gvph.tracerSpan.SetAttribute(handlerSpan, attribute.String("peering_id", peeringID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("peering_id", peeringID))
 
 	// Parse and validate peering ID
 	peeringUUID, err := uuid.Parse(peeringID)
@@ -870,21 +865,19 @@ func (gvph GetVpcPeeringHandler) Handle(c echo.Context) error {
 
 // DeleteVpcPeeringHandler is the API Handler for deleting a VPC Peering
 type DeleteVpcPeeringHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteVpcPeeringHandler initializes and returns a new handler for deleting VPC Peering
 func NewDeleteVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, sc *sc.ClientPool, cfg *config.Config) DeleteVpcPeeringHandler {
 	return DeleteVpcPeeringHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        sc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       sc,
+		cfg:       cfg,
 	}
 }
 
@@ -900,7 +893,7 @@ func NewDeleteVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, sc *s
 // @Success 204 "No Content"
 // @Router /v2/org/{org}/nico/vpc-peering/{id} [delete]
 func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Delete", "VpcPeering", c, dvph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Delete", "VpcPeering", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -924,7 +917,7 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 	}
 	logger = logger.With().Str("VPC Peering ID", vpcPeeringID.String()).Logger()
 
-	dvph.tracerSpan.SetAttribute(handlerSpan, attribute.String("vpc_peering_id", vpcPeeringID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("vpc_peering_id", vpcPeeringID.String()))
 
 	// Get VPC Peering from DB by ID
 	vpcPeeringDAO := cdbm.NewVpcPeeringDAO(dvph.dbSession)

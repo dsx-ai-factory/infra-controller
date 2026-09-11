@@ -16,17 +16,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	mapset "github.com/deckarep/golang-set/v2"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
@@ -34,6 +23,19 @@ import (
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	tclient "go.temporal.io/sdk/client"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 )
 
 // ValidateProviderOrTenantSiteAccess validates if the provider or tenant has access to the site
@@ -59,19 +61,17 @@ func ValidateProviderOrTenantSiteAccess(ctx context.Context, logger zerolog.Logg
 
 // CreateExpectedMachineHandler is the API Handler for creating new ExpectedMachine
 type CreateExpectedMachineHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateExpectedMachineHandler initializes and returns a new handler for creating ExpectedMachine
 func NewCreateExpectedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) CreateExpectedMachineHandler {
 	return CreateExpectedMachineHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -87,7 +87,7 @@ func NewCreateExpectedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool,
 // @Success 201 {object} model.APIExpectedMachine
 // @Router /v2/org/{org}/nico/expected-machine [post]
 func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Create", c, cemh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -255,17 +255,15 @@ func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
 
 // GetAllExpectedMachineHandler is the API Handler for getting all ExpectedMachines
 type GetAllExpectedMachineHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetAllExpectedMachineHandler initializes and returns a new handler for getting all ExpectedMachines
 func NewGetAllExpectedMachineHandler(dbSession *cdb.Session, cfg *config.Config) GetAllExpectedMachineHandler {
 	return GetAllExpectedMachineHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -285,7 +283,7 @@ func NewGetAllExpectedMachineHandler(dbSession *cdb.Session, cfg *config.Config)
 // @Success 200 {object} []model.APIExpectedMachine
 // @Router /v2/org/{org}/nico/expected-machine [get]
 func (gaemh GetAllExpectedMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "GetAll", c, gaemh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -445,17 +443,15 @@ func (gaemh GetAllExpectedMachineHandler) Handle(c echo.Context) error {
 
 // GetExpectedMachineHandler is the API Handler for retrieving ExpectedMachine
 type GetExpectedMachineHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetExpectedMachineHandler initializes and returns a new handler to retrieve ExpectedMachine
 func NewGetExpectedMachineHandler(dbSession *cdb.Session, cfg *config.Config) GetExpectedMachineHandler {
 	return GetExpectedMachineHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -472,7 +468,7 @@ func NewGetExpectedMachineHandler(dbSession *cdb.Session, cfg *config.Config) Ge
 // @Success 200 {object} model.APIExpectedMachine
 // @Router /v2/org/{org}/nico/expected-machine/{id} [get]
 func (gemh GetExpectedMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Get", c, gemh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -491,7 +487,7 @@ func (gemh GetExpectedMachineHandler) Handle(c echo.Context) error {
 
 	logger = logger.With().Str("ExpectedMachineID", expectedMachineID.String()).Logger()
 
-	gemh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_machine_id", expectedMachineID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_machine_id", expectedMachineID.String()))
 
 	// Get and validate includeRelation params
 	qParams := c.QueryParams()
@@ -550,10 +546,9 @@ func (gemh GetExpectedMachineHandler) Handle(c echo.Context) error {
 
 // UpdateExpectedMachineHandler is the API Handler for updating a ExpectedMachine
 type UpdateExpectedMachineHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // bmcMacUnchanged accepts an omitted MAC or another spelling of the stored MAC.
@@ -577,10 +572,9 @@ func bmcMacImmutableValidationError() validation.Errors {
 // NewUpdateExpectedMachineHandler initializes and returns a new handler for updating ExpectedMachine
 func NewUpdateExpectedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) UpdateExpectedMachineHandler {
 	return UpdateExpectedMachineHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -597,7 +591,7 @@ func NewUpdateExpectedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool,
 // @Success 200 {object} model.APIExpectedMachine
 // @Router /v2/org/{org}/nico/expected-machine/{id} [patch]
 func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Update", c, uemh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -615,7 +609,7 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 	}
 	logger = logger.With().Str("ExpectedMachineID", expectedMachineID.String()).Logger()
 
-	uemh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_machine_id", expectedMachineID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_machine_id", expectedMachineID.String()))
 
 	// Validate request
 	// Bind request data to API model
@@ -783,19 +777,17 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 
 // DeleteExpectedMachineHandler is the API Handler for deleting a ExpectedMachine
 type DeleteExpectedMachineHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteExpectedMachineHandler initializes and returns a new handler for deleting ExpectedMachine
 func NewDeleteExpectedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteExpectedMachineHandler {
 	return DeleteExpectedMachineHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -811,7 +803,7 @@ func NewDeleteExpectedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool,
 // @Success 204
 // @Router /v2/org/{org}/nico/expected-machine/{id} [delete]
 func (demh DeleteExpectedMachineHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Delete", c, demh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -828,7 +820,7 @@ func (demh DeleteExpectedMachineHandler) Handle(c echo.Context) error {
 	}
 	logger = logger.With().Str("ExpectedMachineID", expectedMachineID.String()).Logger()
 
-	demh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_machine_id", expectedMachineID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_machine_id", expectedMachineID.String()))
 
 	// Get ExpectedMachine from DB by ID
 	emDAO := cdbm.NewExpectedMachineDAO(demh.dbSession)
@@ -906,19 +898,17 @@ func (demh DeleteExpectedMachineHandler) Handle(c echo.Context) error {
 
 // CreateExpectedMachinesHandler is the API Handler for creating multiple ExpectedMachines
 type CreateExpectedMachinesHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateExpectedMachinesHandler initializes and returns a new handler for creating multiple ExpectedMachines
 func NewCreateExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) CreateExpectedMachinesHandler {
 	return CreateExpectedMachinesHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -934,7 +924,7 @@ func NewCreateExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool
 // @Success 201 {object} model.APIExpectedMachineBatchResponse
 // @Router /v2/org/{org}/nico/expected-machine/batch [post]
 func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "CreateMultiple", c, cemh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "CreateMultiple", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1243,19 +1233,17 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 
 // UpdateExpectedMachinesHandler is the API Handler for batch updating ExpectedMachines
 type UpdateExpectedMachinesHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateExpectedMachinesHandler initializes and returns a new handler for batch updating ExpectedMachines
 func NewUpdateExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) UpdateExpectedMachinesHandler {
 	return UpdateExpectedMachinesHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1317,7 +1305,7 @@ func expectedMachineUpdateFields(req model.APIExpectedMachineUpdateRequest) expe
 // @Success 200 {object} model.APIExpectedMachineBatchResponse
 // @Router /v2/org/{org}/nico/expected-machine/batch [patch]
 func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "UpdateMultiple", c, uemh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "UpdateMultiple", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

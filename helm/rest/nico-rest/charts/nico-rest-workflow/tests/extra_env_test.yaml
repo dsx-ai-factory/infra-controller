@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: workflow worker extra container environment
+templates:
+  - deployment-cloud-worker.yaml
+  - deployment-site-worker.yaml
+set:
+  global.image.repository: example.test
+  global.image.tag: latest
+  global.image.pullPolicy: IfNotPresent
+tests:
+  - it: renders shared extraEnv on both workers
+    set:
+      extraEnv:
+        OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability.svc.cluster.local:4317
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_ENDPOINT
+            value: http://otel-collector.observability.svc.cluster.local:4317
+
+  - it: lets the cloud worker override a shared variable without touching the site worker
+    set:
+      extraEnv:
+        OTEL_SERVICE_NAME: nico-rest-workflow
+      cloudWorker.extraEnv:
+        OTEL_SERVICE_NAME: nico-rest-cloud-worker
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_SERVICE_NAME
+            value: nico-rest-cloud-worker
+        template: deployment-cloud-worker.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_SERVICE_NAME
+            value: nico-rest-workflow
+        template: deployment-site-worker.yaml
+
+  - it: renders site-worker-only variables on the site worker alone
+    set:
+      siteWorker.extraEnv:
+        OTEL_SERVICE_NAME: nico-rest-site-worker
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_SERVICE_NAME
+            value: nico-rest-site-worker
+        template: deployment-site-worker.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_SERVICE_NAME
+            value: nico-rest-site-worker
+        template: deployment-cloud-worker.yaml
+
+  - it: rejects overriding a chart-managed variable per worker
+    set:
+      cloudWorker.extraEnv:
+        TEMPORAL_QUEUE: other
+    asserts:
+      - failedTemplate:
+          errorMessage: extraEnv must not override chart-managed variable TEMPORAL_QUEUE
+        template: deployment-cloud-worker.yaml

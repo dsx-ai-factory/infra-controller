@@ -131,11 +131,13 @@ type MachineInstanceTypeSQLDAO struct {
 // The returned MachineInstanceType will not have any related structs (InstanceTypeID) filled in
 // since there are 2 operations (INSERT, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (mitsd MachineInstanceTypeSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineInstanceTypeCreateInput) (*MachineInstanceType, error) {
+func (mitsd MachineInstanceTypeSQLDAO) Create(ctx context.Context, tx *db.Tx, input MachineInstanceTypeCreateInput) (_ *MachineInstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeSQLDAO.Create")
 	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
+		defer func() {
+			machineInstanceTypeDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	mi := &MachineInstanceType{
@@ -159,11 +161,13 @@ func (mitsd MachineInstanceTypeSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 
 // GetByID returns a MachineInstanceType by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (mitsd MachineInstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*MachineInstanceType, error) {
+func (mitsd MachineInstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *MachineInstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeDAO.GetByID")
 	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
+		defer func() {
+			machineInstanceTypeDAOSpan.EndWith(retErr)
+		}()
 
 		mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "id", id.String())
 	}
@@ -191,11 +195,13 @@ func (mitsd MachineInstanceTypeSQLDAO) GetByID(ctx context.Context, tx *db.Tx, i
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in MachineInstanceTypeOrderByDefault in ascending order
-func (mitsd MachineInstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineInstanceTypeFilterInput, page paginator.PageInput, includeRelations []string) ([]MachineInstanceType, int, error) {
+func (mitsd MachineInstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter MachineInstanceTypeFilterInput, page paginator.PageInput, includeRelations []string) (_ []MachineInstanceType, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeSQLDAO.GetAll")
 	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
+		defer func() {
+			machineInstanceTypeDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	mits := []MachineInstanceType{}
@@ -243,11 +249,13 @@ func (mitsd MachineInstanceTypeSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 // The updated fields are assumed to be set to non-null values
 // since there are 2 operations (UPDATE, SELECT), in this, it is required that
 // this library call happens within a transaction
-func (mitsd MachineInstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, input MachineInstanceTypeUpdateInput) (*MachineInstanceType, error) {
+func (mitsd MachineInstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, input MachineInstanceTypeUpdateInput) (_ *MachineInstanceType, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeSQLDAO.Update")
 	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
+		defer func() {
+			machineInstanceTypeDAOSpan.EndWith(retErr)
+		}()
 		mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "id", input.MachineInstanceTypeID.String())
 	}
 
@@ -288,11 +296,13 @@ func (mitsd MachineInstanceTypeSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 // Delete deletes an MachineInstanceType by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned (idempotent delete)
-func (mitsd MachineInstanceTypeSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) error {
+func (mitsd MachineInstanceTypeSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID, purge bool) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeSQLDAO.Delete")
 	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
+		defer func() {
+			machineInstanceTypeDAOSpan.EndWith(retErr)
+		}()
 
 		mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "id", id.String())
 	}
@@ -317,11 +327,13 @@ func (mitsd MachineInstanceTypeSQLDAO) Delete(ctx context.Context, tx *db.Tx, id
 
 // DeleteAllByInstanceTypeID deletes all MachineInstanceTypes for a given InstanceType
 // error is returned only if there is a db error
-func (mitsd MachineInstanceTypeSQLDAO) DeleteAllByInstanceTypeID(ctx context.Context, tx *db.Tx, instanceTypeID uuid.UUID, purge bool) error {
+func (mitsd MachineInstanceTypeSQLDAO) DeleteAllByInstanceTypeID(ctx context.Context, tx *db.Tx, instanceTypeID uuid.UUID, purge bool) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, machineInstanceTypeDAOSpan := mitsd.tracerSpan.CreateChildInCurrentContext(ctx, "MachineInstanceTypeDAO.DeleteAllByInstanceTypeID")
 	if machineInstanceTypeDAOSpan != nil {
-		defer machineInstanceTypeDAOSpan.End()
+		defer func() {
+			machineInstanceTypeDAOSpan.EndWith(retErr)
+		}()
 
 		mitsd.tracerSpan.SetAttribute(machineInstanceTypeDAOSpan, "instance_type_id", instanceTypeID.String())
 	}

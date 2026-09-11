@@ -10,41 +10,41 @@ import (
 	"math"
 	"net/http"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"go.opentelemetry.io/otel/attribute"
+	tclient "go.temporal.io/sdk/client"
+
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
-	validation "github.com/go-ozzo/ozzo-validation/v4"
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
-	"go.opentelemetry.io/otel/attribute"
-	tclient "go.temporal.io/sdk/client"
 )
 
 // ~~~~~ Create Handler ~~~~~ //
 
 // CreateExpectedSwitchHandler is the API Handler for creating new ExpectedSwitch
 type CreateExpectedSwitchHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateExpectedSwitchHandler initializes and returns a new handler for creating ExpectedSwitch
 func NewCreateExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) CreateExpectedSwitchHandler {
 	return CreateExpectedSwitchHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -60,7 +60,7 @@ func NewCreateExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, 
 // @Success 201 {object} model.APIExpectedSwitch
 // @Router /v2/org/{org}/nico/expected-switch [post]
 func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Create", c, cesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -234,17 +234,15 @@ func (cesh CreateExpectedSwitchHandler) Handle(c echo.Context) error {
 
 // GetAllExpectedSwitchHandler is the API Handler for getting all ExpectedSwitches
 type GetAllExpectedSwitchHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetAllExpectedSwitchHandler initializes and returns a new handler for getting all ExpectedSwitches
 func NewGetAllExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) GetAllExpectedSwitchHandler {
 	return GetAllExpectedSwitchHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -264,7 +262,7 @@ func NewGetAllExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) 
 // @Success 200 {object} []model.APIExpectedSwitch
 // @Router /v2/org/{org}/nico/expected-switch [get]
 func (gaesh GetAllExpectedSwitchHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "GetAll", c, gaesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -401,17 +399,15 @@ func (gaesh GetAllExpectedSwitchHandler) Handle(c echo.Context) error {
 
 // GetExpectedSwitchHandler is the API Handler for retrieving ExpectedSwitch
 type GetExpectedSwitchHandler struct {
-	dbSession  *cdb.Session
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	cfg       *config.Config
 }
 
 // NewGetExpectedSwitchHandler initializes and returns a new handler to retrieve ExpectedSwitch
 func NewGetExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) GetExpectedSwitchHandler {
 	return GetExpectedSwitchHandler{
-		dbSession:  dbSession,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		cfg:       cfg,
 	}
 }
 
@@ -428,7 +424,7 @@ func NewGetExpectedSwitchHandler(dbSession *cdb.Session, cfg *config.Config) Get
 // @Success 200 {object} model.APIExpectedSwitch
 // @Router /v2/org/{org}/nico/expected-switch/{id} [get]
 func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Get", c, gesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -447,7 +443,7 @@ func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
 
 	logger = logger.With().Str("ExpectedSwitchID", expectedSwitchID.String()).Logger()
 
-	gesh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()))
 
 	// Get and validate includeRelation params
 	qParams := c.QueryParams()
@@ -506,19 +502,17 @@ func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
 
 // UpdateExpectedSwitchHandler is the API Handler for updating a ExpectedSwitch
 type UpdateExpectedSwitchHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateExpectedSwitchHandler initializes and returns a new handler for updating ExpectedSwitch
 func NewUpdateExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) UpdateExpectedSwitchHandler {
 	return UpdateExpectedSwitchHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -535,7 +529,7 @@ func NewUpdateExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, 
 // @Success 200 {object} model.APIExpectedSwitch
 // @Router /v2/org/{org}/nico/expected-switch/{id} [patch]
 func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Update", c, uesh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -553,7 +547,7 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 	}
 	logger = logger.With().Str("ExpectedSwitchID", expectedSwitchID.String()).Logger()
 
-	uesh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()))
 
 	// Validate request
 	// Bind request data to API model
@@ -711,19 +705,17 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 
 // DeleteExpectedSwitchHandler is the API Handler for deleting a ExpectedSwitch
 type DeleteExpectedSwitchHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteExpectedSwitchHandler initializes and returns a new handler for deleting ExpectedSwitch
 func NewDeleteExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteExpectedSwitchHandler {
 	return DeleteExpectedSwitchHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -739,7 +731,7 @@ func NewDeleteExpectedSwitchHandler(dbSession *cdb.Session, scp *sc.ClientPool, 
 // @Success 204
 // @Router /v2/org/{org}/nico/expected-switch/{id} [delete]
 func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Delete", c, desh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedSwitch", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -756,7 +748,7 @@ func (desh DeleteExpectedSwitchHandler) Handle(c echo.Context) error {
 	}
 	logger = logger.With().Str("ExpectedSwitchID", expectedSwitchID.String()).Logger()
 
-	desh.tracerSpan.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_switch_id", expectedSwitchID.String()))
 
 	// Get ExpectedSwitch from DB by ID
 	esDAO := cdbm.NewExpectedSwitchDAO(desh.dbSession)

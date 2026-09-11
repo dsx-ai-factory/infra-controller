@@ -642,11 +642,13 @@ type VpcSQLDAO struct {
 }
 
 // GetByID returns a Vpc by ID
-func (vsd VpcSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Vpc, error) {
+func (vsd VpcSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.GetByID")
 	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
+		defer func() {
+			vpcDAOSpan.EndWith(retErr)
+		}()
 
 		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", id.String())
 	}
@@ -673,11 +675,13 @@ func (vsd VpcSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, inclu
 // GetCountByStatus returns count of VPCs for given status
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned map is 0
-func (vsd VpcSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, tenantID *uuid.UUID, siteID *uuid.UUID) (map[string]int, error) {
+func (vsd VpcSQLDAO) GetCountByStatus(ctx context.Context, tx *db.Tx, infrastructureProviderID *uuid.UUID, tenantID *uuid.UUID, siteID *uuid.UUID) (_ map[string]int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.GetCountByStatus")
 	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
+		defer func() {
+			vpcDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	v := &Vpc{}
@@ -845,11 +849,13 @@ func (vsd VpcSQLDAO) setQueryWithFilter(filter VpcFilterInput, query *bun.Select
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in VpcOrderByDefault in ascending order
-func (vsd VpcSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcFilterInput, page paginator.PageInput, includeRelations []string) ([]Vpc, int, error) {
+func (vsd VpcSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcFilterInput, page paginator.PageInput, includeRelations []string) (_ []Vpc, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.GetAll")
 	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
+		defer func() {
+			vpcDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	vpcs := []Vpc{}
@@ -887,11 +893,13 @@ func (vsd VpcSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter VpcFilterInpu
 }
 
 // Create a new Vpc from the given parameters
-func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput) (*Vpc, error) {
+func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.Create")
 	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
+		defer func() {
+			vpcDAOSpan.EndWith(retErr)
+		}()
 
 		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "name", input.Name)
 	}
@@ -941,11 +949,13 @@ func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput
 }
 
 // Update updates an existing Vpc from the given parameters
-func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput) (*Vpc, error) {
+func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.Update")
 	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
+		defer func() {
+			vpcDAOSpan.EndWith(retErr)
+		}()
 
 		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", input.VpcID.String())
 	}
@@ -1079,11 +1089,13 @@ func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput
 }
 
 // Clear clears VPC attributes based on provided arguments
-func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) (*Vpc, error) {
+func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) (_ *Vpc, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.ClearFromParams")
 	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
+		defer func() {
+			vpcDAOSpan.EndWith(retErr)
+		}()
 
 		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", input.VpcID.String())
 	}
@@ -1172,11 +1184,13 @@ func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) 
 }
 
 // DeleteByID deletes a Vpc by ID
-func (vsd VpcSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (vsd VpcSQLDAO) DeleteByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, vpcDAOSpan := vsd.tracerSpan.CreateChildInCurrentContext(ctx, "VpcDAO.DeleteByID")
 	if vpcDAOSpan != nil {
-		defer vpcDAOSpan.End()
+		defer func() {
+			vpcDAOSpan.EndWith(retErr)
+		}()
 
 		vsd.tracerSpan.SetAttribute(vpcDAOSpan, "id", id.String())
 	}

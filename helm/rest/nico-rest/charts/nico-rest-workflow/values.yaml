@@ -11,6 +11,10 @@ image:
 
 cloudWorker:
   replicaCount: 1
+  # -- Extra environment for the cloud worker only, merged over extraEnv with
+  # these keys winning. Use it for OTEL_SERVICE_NAME when the cloud worker
+  # needs its own service identity.
+  extraEnv: {}
   resources:
     requests:
       memory: "128Mi"
@@ -21,6 +25,10 @@ cloudWorker:
 
 siteWorker:
   replicaCount: 1
+  # -- Extra environment for the site worker only, merged over extraEnv with
+  # these keys winning. Use it for OTEL_SERVICE_NAME when the site worker
+  # needs its own service identity.
+  extraEnv: {}
   ## The site worker's footprint scales with the size of the site it is
   ## reconciling, which the original 128Mi/512Mi did not account for -- it was
   ## sized before large-fleet testing. On a 4,500-host site the steady state is
@@ -82,8 +90,16 @@ config:
     enabled: true
     port: 9360
   tracing:
+    # -- Export spans over OTLP. Export also needs an OTEL_EXPORTER_OTLP_*
+    # endpoint in extraEnv; W3C trace-context propagation and the Temporal
+    # and gRPC instrumentation stay active regardless of this flag.
     enabled: true
+    # -- service.name fallback for both workers, used when OTEL_SERVICE_NAME
+    # is not set. Set OTEL_SERVICE_NAME in cloudWorker.extraEnv or
+    # siteWorker.extraEnv to give one worker a more specific identity.
     serviceName: nico-rest-workflow
 
-# -- Extra container environment, name->value. Mainly for OTEL_* variables.
+# -- Extra container environment shared by both workers, name->value. Mainly
+# for OTEL_* variables; cloudWorker.extraEnv and siteWorker.extraEnv override
+# it per worker.
 extraEnv: {}

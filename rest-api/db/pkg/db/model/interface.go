@@ -284,11 +284,13 @@ type InterfaceSQLDAO struct {
 }
 
 // Create creates a new Interface from the given parameters
-func (ifcd InterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input InterfaceCreateInput) (*Interface, error) {
+func (ifcd InterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input InterfaceCreateInput) (_ *Interface, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.Create")
 	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
+		defer func() {
+			interfaceDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	results, err := ifcd.CreateMultiple(ctx, tx, []InterfaceCreateInput{input})
@@ -300,11 +302,13 @@ func (ifcd InterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input Interfa
 
 // GetByID returns a Interface by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (ifcd InterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Interface, error) {
+func (ifcd InterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Interface, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.GetByID")
 	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
+		defer func() {
+			interfaceDAOSpan.EndWith(retErr)
+		}()
 
 		ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "id", id.String())
 	}
@@ -412,11 +416,13 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in InterfaceOrderByDefault in ascending order
-func (ifcd InterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InterfaceFilterInput, page paginator.PageInput, includeRelations []string) ([]Interface, int, error) {
+func (ifcd InterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InterfaceFilterInput, page paginator.PageInput, includeRelations []string) (_ []Interface, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.GetAll")
 	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
+		defer func() {
+			interfaceDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	iss := []Interface{}
@@ -452,11 +458,13 @@ func (ifcd InterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Interf
 
 // Update updates specified fields of an existing Interface
 // The updated fields are assumed to be set to non-null values
-func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input InterfaceUpdateInput) (*Interface, error) {
+func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input InterfaceUpdateInput) (_ *Interface, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.Update")
 	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
+		defer func() {
+			interfaceDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	is := &Interface{
@@ -603,11 +611,13 @@ func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input Interfa
 // Delete deletes an Interface by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (ifcd InterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ifcd InterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.DeleteByID")
 	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
+		defer func() {
+			interfaceDAOSpan.EndWith(retErr)
+		}()
 
 		ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "id", id.String())
 	}
@@ -627,10 +637,12 @@ func (ifcd InterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID)
 // DeleteAllByInstanceIDs soft-deletes every Interface whose instance id is in
 // the provided list.
 // error is returned only if there is a db error
-func (ifcd InterfaceSQLDAO) DeleteAllByInstanceIDs(ctx context.Context, tx *db.Tx, instanceIDs []uuid.UUID) error {
+func (ifcd InterfaceSQLDAO) DeleteAllByInstanceIDs(ctx context.Context, tx *db.Tx, instanceIDs []uuid.UUID) (retErr error) {
 	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.DeleteAllByInstanceIDs")
 	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
+		defer func() {
+			interfaceDAOSpan.EndWith(retErr)
+		}()
 
 		ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "instance_id_count", len(instanceIDs))
 	}
@@ -659,7 +671,7 @@ func (ifcd InterfaceSQLDAO) DeleteAllByInstanceIDs(ctx context.Context, tx *db.T
 }
 
 // CreateMultiple creates multiple Interfaces from the given parameters
-func (ifcd InterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []InterfaceCreateInput) ([]Interface, error) {
+func (ifcd InterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []InterfaceCreateInput) (_ []Interface, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
@@ -667,7 +679,9 @@ func (ifcd InterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, input
 	// Create a child span and set the attributes for current request
 	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.CreateMultiple")
 	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
+		defer func() {
+			interfaceDAOSpan.EndWith(retErr)
+		}()
 		ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "batch_size", len(inputs))
 	}
 
@@ -739,11 +753,13 @@ func NewInterfaceDAO(dbSession *db.Session) InterfaceDAO {
 // Clear sets parameters of an existing Interface to null values in db.
 // Since there are 2 operations (UPDATE, SELECT), this must be within
 // a transaction.
-func (ifcd InterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InterfaceClearInput) (*Interface, error) {
+func (ifcd InterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InterfaceClearInput) (_ *Interface, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.Clear")
 	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
+		defer func() {
+			interfaceDAOSpan.EndWith(retErr)
+		}()
 		ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "id", input.InterfaceID.String())
 	}
 

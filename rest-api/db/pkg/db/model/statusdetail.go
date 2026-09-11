@@ -96,11 +96,13 @@ type StatusDetailSQLDAO struct {
 }
 
 // GetByID returns a StatusDetail by ID
-func (sdd StatusDetailSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (*StatusDetail, error) {
+func (sdd StatusDetailSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID) (_ *StatusDetail, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.GetByID")
 	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
+		defer func() {
+			sdDAOSpan.EndWith(retErr)
+		}()
 
 		sdd.tracerSpan.SetAttribute(sdDAOSpan, "id", id.String())
 	}
@@ -119,11 +121,13 @@ func (sdd StatusDetailSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UU
 }
 
 // GetAll returns status details for the given set of entity IDs
-func (sdd StatusDetailSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter StatusDetailFilterInput, page paginator.PageInput) ([]StatusDetail, int, error) {
+func (sdd StatusDetailSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter StatusDetailFilterInput, page paginator.PageInput) (_ []StatusDetail, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.GetAll")
 	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
+		defer func() {
+			sdDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	sds := []StatusDetail{}
@@ -157,11 +161,13 @@ func (sdd StatusDetailSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Stat
 }
 
 // Create creates a new StatusDetail from the given parameters
-func (sdd StatusDetailSQLDAO) Create(ctx context.Context, tx *db.Tx, input StatusDetailCreateInput) (*StatusDetail, error) {
+func (sdd StatusDetailSQLDAO) Create(ctx context.Context, tx *db.Tx, input StatusDetailCreateInput) (_ *StatusDetail, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.Create")
 	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
+		defer func() {
+			sdDAOSpan.EndWith(retErr)
+		}()
 		sdd.tracerSpan.SetAttribute(sdDAOSpan, "entityID", input.EntityID)
 
 	}
@@ -183,11 +189,13 @@ func (sdd StatusDetailSQLDAO) Create(ctx context.Context, tx *db.Tx, input Statu
 }
 
 // Update updates the given StatusDetail with the given parameters
-func (sdd StatusDetailSQLDAO) Update(ctx context.Context, tx *db.Tx, input StatusDetailUpdateInput) (*StatusDetail, error) {
+func (sdd StatusDetailSQLDAO) Update(ctx context.Context, tx *db.Tx, input StatusDetailUpdateInput) (_ *StatusDetail, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.Update")
 	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
+		defer func() {
+			sdDAOSpan.EndWith(retErr)
+		}()
 
 		sdd.tracerSpan.SetAttribute(sdDAOSpan, "id", input.StatusDetailID.String())
 	}
@@ -251,11 +259,13 @@ func (sdd StatusDetailSQLDAO) Update(ctx context.Context, tx *db.Tx, input Statu
 }
 
 // GetRecentByEntityIDs returns most recent status records for specified entity IDs
-func (sdd StatusDetailSQLDAO) GetRecentByEntityIDs(ctx context.Context, tx *db.Tx, entityIDs []string, recentCount int) ([]StatusDetail, error) {
+func (sdd StatusDetailSQLDAO) GetRecentByEntityIDs(ctx context.Context, tx *db.Tx, entityIDs []string, recentCount int) (_ []StatusDetail, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.GetRecentByEntityIDs")
 	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
+		defer func() {
+			sdDAOSpan.EndWith(retErr)
+		}()
 
 	}
 
@@ -278,7 +288,7 @@ func (sdd StatusDetailSQLDAO) GetRecentByEntityIDs(ctx context.Context, tx *db.T
 }
 
 // CreateMultiple creates multiple StatusDetails from the given parameters
-func (sdd StatusDetailSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []StatusDetailCreateInput) ([]StatusDetail, error) {
+func (sdd StatusDetailSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []StatusDetailCreateInput) (_ []StatusDetail, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
@@ -286,7 +296,9 @@ func (sdd StatusDetailSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inp
 	// Create a child span and set the attributes for current request
 	ctx, sdDAOSpan := sdd.tracerSpan.CreateChildInCurrentContext(ctx, "StatusDetailDAO.CreateMultiple")
 	if sdDAOSpan != nil {
-		defer sdDAOSpan.End()
+		defer func() {
+			sdDAOSpan.EndWith(retErr)
+		}()
 		sdd.tracerSpan.SetAttribute(sdDAOSpan, "batch_size", len(inputs))
 	}
 

@@ -10,10 +10,11 @@ import (
 	"fmt"
 	"net/http"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
+
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 
 	"go.opentelemetry.io/otel/attribute"
 	temporalClient "go.temporal.io/sdk/client"
@@ -26,6 +27,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
@@ -34,19 +36,17 @@ import (
 
 // CreateTenantAccountHandler is the API Handler for creating new TenantAccount
 type CreateTenantAccountHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewCreateTenantAccountHandler initializes and returns a new handler for creating TenantAccount
 func NewCreateTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) CreateTenantAccountHandler {
 	return CreateTenantAccountHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -62,7 +62,7 @@ func NewCreateTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Cli
 // @Success 201 {object} model.APITenantAccount
 // @Router /v2/org/{org}/nico/tenant/account [post]
 func (ctah CreateTenantAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Create", c, ctah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -226,19 +226,17 @@ func (ctah CreateTenantAccountHandler) Handle(c echo.Context) error {
 
 // GetAllTenantAccountHandler is the API Handler for getting all TenantAccounts
 type GetAllTenantAccountHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllTenantAccountHandler initializes and returns a new handler for getting all TenantAccounts
 func NewGetAllTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllTenantAccountHandler {
 	return GetAllTenantAccountHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -261,7 +259,7 @@ func NewGetAllTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Cli
 // @Success 200 {object} []model.APITenantAccount
 // @Router /v2/org/{org}/nico/tenant/account [get]
 func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "GetAll", c, gatah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -297,7 +295,7 @@ func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
 
 	statusQuery := c.QueryParam("status")
 	if statusQuery != "" {
-		gatah.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, sok := cdbm.TenantAccountStatusMap[statusQuery]
 		if !sok {
 			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
@@ -308,7 +306,7 @@ func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
 
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gatah.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Optional Provider-side tenantId narrowing filter. The Tenant branch
@@ -316,7 +314,7 @@ func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
 	var filterTenantIDs []uuid.UUID
 	tenantIdQuery := c.QueryParam("tenantId")
 	if tenantIdQuery != "" {
-		gatah.tracerSpan.SetAttribute(handlerSpan, attribute.String("tenantId", tenantIdQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("tenantId", tenantIdQuery))
 		id, serr := uuid.Parse(tenantIdQuery)
 		if serr != nil {
 			logger.Warn().Err(serr).Msg("error parsing tenantId in query into uuid")
@@ -496,19 +494,17 @@ func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
 
 // GetTenantAccountHandler is the API Handler for retrieving TenantAccount
 type GetTenantAccountHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetTenantAccountHandler initializes and returns a new handler to retrieve TenantAccount
 func NewGetTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetTenantAccountHandler {
 	return GetTenantAccountHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -527,7 +523,7 @@ func NewGetTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Success 200 {object} model.APITenantAccount
 // @Router /v2/org/{org}/nico/tenant/account/{id} [get]
 func (gtah GetTenantAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Get", c, gtah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -538,7 +534,7 @@ func (gtah GetTenantAccountHandler) Handle(c echo.Context) error {
 	// Get tenant account ID from URL param
 	taStrID := c.Param("id")
 
-	gtah.tracerSpan.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID))
 
 	taID, err := uuid.Parse(taStrID)
 	if err != nil {
@@ -622,19 +618,17 @@ func (gtah GetTenantAccountHandler) Handle(c echo.Context) error {
 
 // UpdateTenantAccountHandler is the API Handler for updating a TenantAccount
 type UpdateTenantAccountHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateTenantAccountHandler initializes and returns a new handler for updating Tenant
 func NewUpdateTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateTenantAccountHandler {
 	return UpdateTenantAccountHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -651,7 +645,7 @@ func NewUpdateTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Cli
 // @Success 200 {object} model.APITenantAccount
 // @Router /v2/org/{org}/nico/tenant/account/{id} [patch]
 func (utah UpdateTenantAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Update", c, utah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -680,7 +674,7 @@ func (utah UpdateTenantAccountHandler) Handle(c echo.Context) error {
 	// Get tenant account ID from URL param
 	taStrID := c.Param("id")
 
-	utah.tracerSpan.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID))
 
 	taID, err := uuid.Parse(taStrID)
 	if err != nil {
@@ -1050,19 +1044,17 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 
 // DeleteTenantAccountHandler is the API Handler for deleting a TenantAccount
 type DeleteTenantAccountHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewDeleteTenantAccountHandler initializes and returns a new handler for deleting Tenant
 func NewDeleteTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) DeleteTenantAccountHandler {
 	return DeleteTenantAccountHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1078,7 +1070,7 @@ func NewDeleteTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Cli
 // @Success 202
 // @Router /v2/org/{org}/nico/tenant/account/{id} [delete]
 func (dtah DeleteTenantAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Delete", c, dtah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1107,7 +1099,7 @@ func (dtah DeleteTenantAccountHandler) Handle(c echo.Context) error {
 	// Get tenant account ID from URL param
 	taStrID := c.Param("id")
 
-	dtah.tracerSpan.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID))
 
 	taID, err := uuid.Parse(taStrID)
 	if err != nil {

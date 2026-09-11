@@ -13,53 +13,50 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
-// TestFullIntegration tests the complete integration - verifies that
-// the wrapper correctly stores the tracer in context so that util/tracer.go
-// can use it to create child spans (simulating what util/tracer.go does)
+// TestFullIntegration verifies the complete flow with a real SDK provider: the
+// middleware extracts the parent trace from headers, and child spans created via
+// the shared global-provider helper parent to the server span.
 func TestFullIntegration(t *testing.T) {
-	provider := trace.NewNoopTracerProvider()
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	prevTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	defer otel.SetTracerProvider(prevTP)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
+	defer otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
 
 	r := httptest.NewRequest("GET", "/test", nil)
 	w := httptest.NewRecorder()
 
 	// Create a parent trace context
 	ctx := context.Background()
+	parentTraceID := trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10}
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID: trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10},
-		SpanID:  trace.SpanID{0x01},
+		TraceID:    parentTraceID,
+		SpanID:     trace.SpanID{0x01},
+		TraceFlags: trace.FlagsSampled,
 	})
 	ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
-	ctx, _ = provider.Tracer(TracerName).Start(ctx, "parent")
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(r.Header))
 
-	var tracerFound bool
-	var headerSet bool
-	var childSpanCreated bool
+	var serverSpanID trace.SpanID
 
 	router := echo.New()
-	router.Use(Middleware("test-service", WithTracerProvider(provider)))
+	router.Use(Middleware("test-service", WithTracerProvider(tp)))
 	router.GET("/test", func(c echo.Context) error {
-		// Verify tracer is in context (this is what util/tracer.go needs)
-		ctx := c.Request().Context()
-		tracer, ok := ctx.Value(TracerKey).(trace.Tracer)
-		if ok && tracer != nil {
-			tracerFound = true
+		reqCtx := c.Request().Context()
+		serverSpanID = trace.SpanFromContext(reqCtx).SpanContext().SpanID()
 
-			// Simulate what util/tracer.go CreateChildInContext does
-			childCtx, childSpan := tracer.Start(ctx, "child-span")
-			if childCtx != nil && childSpan != nil {
-				childSpanCreated = true
-			}
-		}
-
-		// Verify header was set
-		if c.Response().Header().Get(TraceHdr) != "" {
-			headerSet = true
-		}
+		// Simulate application code creating a child operation span.
+		_, childSpan := cotel.StartSpan(reqCtx, "child-span")
+		childSpan.End()
 
 		return c.NoContent(200)
 	})
@@ -68,11 +65,17 @@ func TestFullIntegration(t *testing.T) {
 
 	response := w.Result()
 	assert.Equal(t, http.StatusOK, response.StatusCode)
-	assert.True(t, tracerFound, "Tracer should be found in context for util/tracer.go")
-	assert.True(t, headerSet, "X-Ngc-Trace-Id header should be set")
-	assert.True(t, childSpanCreated, "Child span should be creatable using tracer from context")
 
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
+	// The recorded child span must parent to the server span in the same trace
+	var childFound bool
+	for _, span := range recorder.Ended() {
+		if span.Name() == "child-span" {
+			childFound = true
+			assert.Equal(t, parentTraceID, span.SpanContext().TraceID(), "child joins the propagated trace")
+			assert.Equal(t, serverSpanID, span.Parent().SpanID(), "child parents to the server span")
+		}
+	}
+	assert.True(t, childFound, "child span should be recorded")
 }
 
 // TestOriginalBehaviorMatch verifies that the wrapper behaves exactly like the original
@@ -85,7 +88,6 @@ func TestOriginalBehaviorMatch(t *testing.T) {
 		name            string
 		setupRequest    func() *http.Request
 		expectedTraceID string
-		expectHeader    bool
 	}{
 		{
 			name: "with parent trace",
@@ -102,7 +104,6 @@ func TestOriginalBehaviorMatch(t *testing.T) {
 				return r
 			},
 			expectedTraceID: "aabbccdd000000000000000000000000",
-			expectHeader:    true,
 		},
 		{
 			name: "without parent trace",
@@ -110,7 +111,6 @@ func TestOriginalBehaviorMatch(t *testing.T) {
 				return httptest.NewRequest("GET", "/test", nil)
 			},
 			expectedTraceID: "00000000000000000000000000000000", // Empty trace ID when no parent
-			expectHeader:    true,
 		},
 	}
 
@@ -125,18 +125,12 @@ func TestOriginalBehaviorMatch(t *testing.T) {
 			router.GET("/test", func(c echo.Context) error {
 				span := trace.SpanFromContext(c.Request().Context())
 				receivedTraceID = span.SpanContext().TraceID().String()
-				headerValue := c.Response().Header().Get(TraceHdr)
-				assert.Equal(t, receivedTraceID, headerValue, "Header should match trace ID")
 				return c.NoContent(200)
 			})
 
 			router.ServeHTTP(w, r)
 			assert.Equal(t, http.StatusOK, w.Result().StatusCode)
 			assert.Equal(t, tt.expectedTraceID, receivedTraceID, "Trace ID should match expected")
-			if tt.expectHeader {
-				headerValue := w.Result().Header.Get(TraceHdr)
-				assert.NotEmpty(t, headerValue, "Header should be set")
-			}
 		})
 	}
 

@@ -333,11 +333,13 @@ type NVLinkLogicalPartitionSQLDAO struct {
 }
 
 // GetByID returns a NVLinkLogicalPartition by ID
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*NVLinkLogicalPartition, error) {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *NVLinkLogicalPartition, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.GetByID")
 	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
+		defer func() {
+			NVLinkLogicalPartitionDAOSpan.EndWith(retErr)
+		}()
 
 		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "id", id.String())
 	}
@@ -365,11 +367,13 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetByID(ctx context.Context, tx *db.
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in NVLinkLogicalPartitionOrderByDefault in ascending order
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NVLinkLogicalPartitionFilterInput, page paginator.PageInput, includeRelations []string) ([]NVLinkLogicalPartition, int, error) {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NVLinkLogicalPartitionFilterInput, page paginator.PageInput, includeRelations []string) (_ []NVLinkLogicalPartition, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.GetAll")
 	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
+		defer func() {
+			NVLinkLogicalPartitionDAOSpan.EndWith(retErr)
+		}()
 	}
 
 	nvllps := []NVLinkLogicalPartition{}
@@ -434,11 +438,13 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetAll(ctx context.Context, tx *db.T
 }
 
 // Create creates a new NVLinkLogicalPartition from the given parameters
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionCreateInput) (*NVLinkLogicalPartition, error) {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionCreateInput) (_ *NVLinkLogicalPartition, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.Create")
 	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
+		defer func() {
+			NVLinkLogicalPartitionDAOSpan.EndWith(retErr)
+		}()
 
 		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "name", input.Name)
 	}
@@ -479,11 +485,13 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Create(ctx context.Context, tx *db.T
 }
 
 // Update updates an existing NVLinkLogicalPartition from the given parameters
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionUpdateInput) (*NVLinkLogicalPartition, error) {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) Update(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionUpdateInput) (_ *NVLinkLogicalPartition, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.Update")
 	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
+		defer func() {
+			NVLinkLogicalPartitionDAOSpan.EndWith(retErr)
+		}()
 
 		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "id", input.NVLinkLogicalPartitionID)
 	}
@@ -541,11 +549,13 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Update(ctx context.Context, tx *db.T
 }
 
 // Clear clears NVLinkLogicalPartition attributes based on provided arguments
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionClearInput) (*NVLinkLogicalPartition, error) {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx, input NVLinkLogicalPartitionClearInput) (_ *NVLinkLogicalPartition, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.Clear")
 	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
+		defer func() {
+			NVLinkLogicalPartitionDAOSpan.EndWith(retErr)
+		}()
 
 		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "id", input.NVLinkLogicalPartitionID)
 	}
@@ -579,11 +589,13 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx
 }
 
 // Delete deletes a NVLinkLogicalPartition by ID
-func (nvllpsd NVLinkLogicalPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (nvllpsd NVLinkLogicalPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, NVLinkLogicalPartitionDAOSpan := nvllpsd.tracerSpan.CreateChildInCurrentContext(ctx, "NVLinkLogicalPartitionDAO.Delete")
 	if NVLinkLogicalPartitionDAOSpan != nil {
-		defer NVLinkLogicalPartitionDAOSpan.End()
+		defer func() {
+			NVLinkLogicalPartitionDAOSpan.EndWith(retErr)
+		}()
 
 		nvllpsd.tracerSpan.SetAttribute(NVLinkLogicalPartitionDAOSpan, "id", id.String())
 	}

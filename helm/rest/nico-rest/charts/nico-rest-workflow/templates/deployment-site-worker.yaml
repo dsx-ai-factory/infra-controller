@@ -48,7 +48,7 @@ spec:
               value: /app/config.yaml
             - name: TEMPORAL_NAMESPACE
               value: site
-            {{- range $k, $v := .Values.extraEnv }}
+            {{- range $k, $v := merge (dict) .Values.siteWorker.extraEnv .Values.extraEnv }}
             {{- if has $k (list "CONFIG_FILE_PATH" "TEMPORAL_NAMESPACE" "TEMPORAL_QUEUE") }}
             {{- fail (printf "extraEnv must not override chart-managed variable %s" $k) }}
             {{- end }}

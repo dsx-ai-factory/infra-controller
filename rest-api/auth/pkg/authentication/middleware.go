@@ -4,11 +4,13 @@
 package authentication
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
 	commonConfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -29,14 +31,34 @@ func Auth(dbSession *cdb.Session, tc temporalClient.Client, toCfg *config.TokenO
 
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
+			// Span authentication and place it on the request so DB/HTTP calls
+			// made while validating the token join the inbound trace.
+			originalRequest := c.Request()
+			ctx, span := cotel.StartSpan(originalRequest.Context(), "AuthMiddleware")
+			c.SetRequest(originalRequest.WithContext(ctx))
+
 			apiErr := AuthProcessor(c, toCfg)
 			if apiErr != nil {
+				c.SetRequest(originalRequest)
+				cotel.EndSpan(span, fmt.Errorf("auth failed: %d %s", apiErr.Code, apiErr.Message))
 				return util.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 			}
+
+			// Restore the inbound server-span context so handler spans are
+			// siblings of the completed auth span, retaining only the bounded
+			// authorization decision required by handlers.
+			restoreAuthenticatedRequest(c, originalRequest)
+			span.End()
 
 			return next(c)
 		}
 	}
+}
+
+func restoreAuthenticatedRequest(c echo.Context, originalRequest *http.Request) {
+	isServiceAccount := config.GetIsServiceAccountFromContext(c)
+	c.SetRequest(originalRequest)
+	config.SetIsServiceAccountInContext(c, isServiceAccount)
 }
 
 // AuthProcessor validates auth header forwarded by NGC KAS and gets or creates/updates user record
