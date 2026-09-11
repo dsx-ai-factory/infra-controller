@@ -35,7 +35,8 @@ three fields.
 | `rms-unreachable` | nico-api reached but cannot contact the RMS backend. |
 | `cli-config-error` | Local CLI configuration problem (e.g. missing CA file) prevented connecting to nico-api. |
 | `auth-failed` | A certificate was rejected on the CLI→nico-api or nico-api→RMS path. |
-| `auth-or-version-mismatch` | Permission denied — either a missing role or an older nico-api that rejects the RPC via RBAC before dispatch. |
+| `auth-or-version-mismatch` | Permission denied — either a missing role or an older nico-api whose RBAC rules reject `GetRmsVersion` before dispatch. |
+| `api-version-mismatch` | `Unimplemented` — the nico-api server predates this RPC and has no RBAC layer to intercept it. |
 | `timeout` | Connection attempt exceeded the deadline. |
 | `error` | Unexpected error; see the `message` field for the gRPC code and detail. |
 

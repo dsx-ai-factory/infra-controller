@@ -45,6 +45,13 @@ impl Report {
     }
 }
 
+/// Prefix added by `get_rms_version` to every forwarded RMS error message.
+///
+/// Using a structural prefix rather than substring heuristics lets
+/// [`classify`] unambiguously tell apart "RMS said connection refused" from
+/// "the CLI's transport layer said connection refused."
+const RMS_PREFIX: &str = "rms: ";
+
 /// Translate a gRPC [`tonic::Status`] into a user-readable [`Report`].
 ///
 /// The mapping tries to distinguish the three failure legs the operator cares
@@ -56,8 +63,10 @@ impl Report {
 ///   `UNAVAILABLE`; those are identified by their message prefix.
 /// - **nico-api → RMS (not configured)**: The handler returns a specific
 ///   `UNAVAILABLE` message when no RMS endpoint is configured.
-/// - **nico-api → RMS (mTLS rejected)**: `UNAUTHENTICATED` from the server
-///   usually means a cert was presented but rejected.
+/// - **nico-api → RMS (connection/TLS failure)**: The handler prefixes every
+///   forwarded RMS error with [`RMS_PREFIX`] so the CLI can route it to
+///   `rms-unreachable` without substring-matching on transport words that
+///   also appear in CLI-side errors.
 ///
 /// `PermissionDenied` is inherently ambiguous: the server's RBAC middleware
 /// rejects calls that have no matching rule with HTTP 403 (which tonic maps to
@@ -74,6 +83,16 @@ fn classify(s: tonic::Status) -> Report {
                 Report {
                     status: "not-configured",
                     message: NOT_CFG.to_owned(),
+                    version: None,
+                }
+            } else if let Some(rms_detail) = msg.strip_prefix(RMS_PREFIX) {
+                // Error forwarded from the RMS backend by our handler.
+                // Always an nico-api → RMS failure regardless of what the
+                // underlying transport message says (e.g. "connection refused"
+                // here means RMS is down, not that nico-api is unreachable).
+                Report {
+                    status: "rms-unreachable",
+                    message: format!("nico-api cannot reach the rms backend: {rms_detail}"),
                     version: None,
                 }
             } else if msg.is_empty()
@@ -110,8 +129,7 @@ fn classify(s: tonic::Status) -> Report {
                     version: None,
                 }
             } else {
-                // UNAVAILABLE with a server-generated message means nico-api
-                // reached RMS but the RMS connection failed.
+                // Catch-all: server-generated UNAVAILABLE without an rms: prefix.
                 Report {
                     status: "rms-unreachable",
                     message: format!("nico-api cannot reach the rms backend: {msg}"),
@@ -148,6 +166,17 @@ fn classify(s: tonic::Status) -> Report {
         tonic::Code::DeadlineExceeded => Report {
             status: "timeout",
             message: "the connection attempt timed out before rms responded".to_owned(),
+            version: None,
+        },
+
+        // Defensive: Unimplemented is not normally reachable on servers with
+        // RBAC (which rejects unknown RPCs via HTTP 403 → PermissionDenied
+        // before gRPC dispatch), but may surface on deployments without RBAC.
+        tonic::Code::Unimplemented => Report {
+            status: "api-version-mismatch",
+            message: "the targeted nico-api server does not implement GetRmsVersion \
+                — it may predate this rpc"
+                .to_owned(),
             version: None,
         },
 
@@ -198,4 +227,103 @@ pub(super) async fn probe(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Each case drives classify() with a tonic::Status and asserts the
+    // resulting status token.  The message field is not checked here because
+    // it is human-readable prose whose wording may evolve; the token is the
+    // machine-readable contract that operators and scripts depend on.
+    #[test]
+    fn classify_status_tokens() {
+        let cases: &[(&str, tonic::Status, &str)] = &[
+            // ── nico-api not configured ──────────────────────────────────
+            (
+                "not-configured: handler sentinel message",
+                tonic::Status::unavailable("rms is not configured on this API server"),
+                "not-configured",
+            ),
+            // ── RMS-side failures (prefixed by handler with "rms: ") ─────
+            (
+                "rms-unreachable: TlsError forwarded as Unavailable",
+                tonic::Status::unavailable("rms: tls error: certificate verify failed"),
+                "rms-unreachable",
+            ),
+            (
+                "rms-unreachable: RMS returns connection refused (not api-unreachable)",
+                tonic::Status::unavailable("rms: connection refused"),
+                "rms-unreachable",
+            ),
+            (
+                "rms-unreachable: RMS returns transport error",
+                tonic::Status::unavailable("rms: transport error"),
+                "rms-unreachable",
+            ),
+            // ── CLI → nico-api failures ──────────────────────────────────
+            (
+                "api-unreachable: empty tonic transport message",
+                tonic::Status::unavailable(""),
+                "api-unreachable",
+            ),
+            (
+                "api-unreachable: plain connection refused (no rms: prefix)",
+                tonic::Status::unavailable("connection refused"),
+                "api-unreachable",
+            ),
+            (
+                "api-unreachable: ForgeTlsClientError::Connection",
+                tonic::Status::unavailable("ConnectError error: tcp connect error"),
+                "api-unreachable",
+            ),
+            (
+                "cli-config-error: ForgeTlsClientError::Configuration",
+                tonic::Status::unavailable(
+                    "configuration error: could not read root CA cert at /bad/path: \
+                     No such file or directory",
+                ),
+                "cli-config-error",
+            ),
+            // ── auth / permission ────────────────────────────────────────
+            (
+                "auth-failed: Unauthenticated (cert rejected)",
+                tonic::Status::unauthenticated("certificate verify failed"),
+                "auth-failed",
+            ),
+            (
+                "auth-or-version-mismatch: PermissionDenied (RBAC or role)",
+                tonic::Status::permission_denied("no rule permits these principals"),
+                "auth-or-version-mismatch",
+            ),
+            // ── version skew ─────────────────────────────────────────────
+            (
+                "api-version-mismatch: Unimplemented (non-RBAC old server)",
+                tonic::Status::unimplemented("GetRmsVersion"),
+                "api-version-mismatch",
+            ),
+            // ── timeout ──────────────────────────────────────────────────
+            (
+                "timeout: DeadlineExceeded",
+                tonic::Status::deadline_exceeded("rms get_version timed out after 30 seconds"),
+                "timeout",
+            ),
+            // ── generic error ────────────────────────────────────────────
+            (
+                "error: unexpected Internal code",
+                tonic::Status::internal("some unexpected server error"),
+                "error",
+            ),
+        ];
+
+        for (name, status, want_token) in cases {
+            let report = classify(status.clone());
+            assert_eq!(
+                report.status, *want_token,
+                "classify({name:?}): got status {:?}, want {want_token:?}",
+                report.status
+            );
+        }
+    }
 }
