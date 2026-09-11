@@ -38,10 +38,10 @@ use model::expected_machine::ExpectedMachineData;
 use model::expected_rack::ExpectedRack;
 use model::rack::{
     ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
-    FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosUpdateJob,
-    NvosPasswordUpdateState, NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackConfig,
-    RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState,
-    RackState, RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
+    FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
+    NvosPasswordUpdateState, NvosUpdateJob, NvosUpdateState, NvosUpdateSwitchStatus, Rack,
+    RackConfig, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState,
+    RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
 };
 use model::rack_type::{
     RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -452,6 +452,20 @@ async fn create_ready_rack_with_switch(
     env: &TestEnv,
     pool: &sqlx::PgPool,
 ) -> Result<(RackId, SwitchId), Box<dyn std::error::Error>> {
+    let (rack_id, mut switch_ids) = create_ready_rack_with_switches(env, pool, 1).await?;
+
+    let switch_id = switch_ids
+        .pop()
+        .ok_or_else(|| eyre::eyre!("expected one switch fixture"))?;
+
+    Ok((rack_id, switch_id))
+}
+
+async fn create_ready_rack_with_switches(
+    env: &TestEnv,
+    pool: &sqlx::PgPool,
+    count: usize,
+) -> Result<(RackId, Vec<SwitchId>), Box<dyn std::error::Error>> {
     let rack_id = new_rack_id();
     let mut txn = pool.acquire().await?;
     db_rack::create(
@@ -464,7 +478,7 @@ async fn create_ready_rack_with_switch(
     .await?;
     drop(txn);
 
-    let switch_id = attach_switch_with_nvos_credentials(env, &rack_id).await?;
+    let switch_ids = attach_switches_with_nvos_credentials(env, &rack_id, count).await?;
 
     let mut txn = pool.begin().await?;
     let rack = get_db_rack(txn.as_mut(), &rack_id).await;
@@ -478,7 +492,7 @@ async fn create_ready_rack_with_switch(
     .await?;
     txn.commit().await?;
 
-    Ok((rack_id, switch_id))
+    Ok((rack_id, switch_ids))
 }
 
 async fn create_expected_rack(pool: &sqlx::PgPool, rack_id: &RackId, rack_profile_id: &str) {
@@ -3150,14 +3164,14 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
 
     let firmware_job = FirmwareUpgradeJob {
         job_id: Some("rack-firmware-job".to_string()),
-        status: Some("in_progress".to_string()),
+        status: Some(FirmwareProgressState::InProgress),
         started_at: Some(started_at),
         batch_job_ids: vec!["rack-firmware-job".to_string()],
         switches: vec![FirmwareUpgradeDeviceStatus {
             node_id: switch_id.to_string(),
             mac: "00:11:22:33:44:55".to_string(),
             bmc_ip: "192.0.2.10".to_string(),
-            status: "in_progress".to_string(),
+            status: FirmwareProgressState::InProgress,
             job_id: Some(job_id.to_string()),
             parent_job_id: Some("rack-firmware-job".to_string()),
             error_message: None,
@@ -3236,9 +3250,8 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
     assert_eq!(
         rack.firmware_upgrade_job
             .expect("completed firmware job should remain persisted")
-            .status
-            .as_deref(),
-        Some("completed")
+            .status,
+        Some(FirmwareProgressState::Completed)
     );
 
     let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
@@ -4133,6 +4146,116 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         switch_status.status,
         SwitchNvosUpdateState::Completed
     ));
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_password_recovery(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_rack_profiles()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (rack_id, switch_ids) = create_ready_rack_with_switches(&env, &pool, 2).await?;
+    let mut switches = Vec::with_capacity(switch_ids.len());
+
+    for (index, switch_id) in switch_ids.iter().enumerate() {
+        let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), switch_id)
+            .await?
+            .expect("switch should exist");
+
+        switches.push(NvosUpdateSwitchStatus {
+            node_id: switch_id.to_string(),
+            mac: switch
+                .bmc_mac_address
+                .expect("switch should have a BMC MAC address")
+                .to_string(),
+            nvos_ip: format!("192.0.2.{}", index + 20),
+            status: if index == 0 { "failed" } else { "in_progress" }.to_string(),
+            job_id: Some(format!("nvos-job-{index}")),
+            error_message: (index == 0).then(|| "image installation failed".to_string()),
+            ..Default::default()
+        });
+    }
+
+    let config = RackConfig {
+        maintenance_requested: Some(MaintenanceScope::default()),
+        ..Default::default()
+    };
+
+    let job = NvosUpdateJob {
+        switches,
+        ..Default::default()
+    };
+
+    let mut txn = pool.begin().await?;
+    db_rack::update(txn.as_mut(), &rack_id, &config).await?;
+    db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
+
+    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+        txn.as_mut(),
+        &rack_id,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::NVOSUpdate {
+                nvos_update: NvosUpdateState::WaitForComplete,
+            },
+        },
+    )
+    .await?;
+
+    txn.commit().await?;
+
+    env.rms_sim
+        .set_switch_system_image_job_status(rms::GetSwitchSystemImageJobStatusResponse {
+            status: rms::ReturnCode::Success as i32,
+            job_id: "nvos-job-1".to_string(),
+            state: "in_progress".to_string(),
+            node_id: switch_ids[1].to_string(),
+            ..Default::default()
+        })
+        .await;
+
+    env.run_rack_controller_iteration().await;
+
+    env.rms_sim
+        .set_switch_system_image_job_status(rms::GetSwitchSystemImageJobStatusResponse {
+            status: rms::ReturnCode::Success as i32,
+            job_id: "nvos-job-1".to_string(),
+            state: "completed".to_string(),
+            node_id: switch_ids[1].to_string(),
+            ..Default::default()
+        })
+        .await;
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::NVOSUpdate {
+                nvos_update: NvosUpdateState::WaitForComplete,
+            },
+        }
+    ));
+
+    assert!(
+        rack.nvos_update_job
+            .expect("NVOS update job should remain persisted during password recovery")
+            .all_switches()
+            .all(|switch| matches!(
+                switch.password_update,
+                NvosPasswordUpdateState::InProgress { .. }
+            ))
+    );
 
     Ok(())
 }

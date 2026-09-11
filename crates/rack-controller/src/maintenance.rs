@@ -2578,31 +2578,30 @@ pub async fn handle_maintenance(
                                     StateHandlerError::GenericError(eyre::eyre!(error))
                                 })?;
 
-                        match config_json {
-                            Some(config_json) => config_json,
-                            None => {
-                                let switch_waiting_for_nvos = {
-                                    let mut conn = ctx.services.db_pool.acquire().await?;
-                                    scoped_switch_waiting_for_nvos(conn.as_mut(), id, scope).await?
-                                };
+                        let Some(config_json) = config_json else {
+                            let switch_waiting_for_nvos = {
+                                let mut conn = ctx.services.db_pool.acquire().await?;
+                                scoped_switch_waiting_for_nvos(conn.as_mut(), id, scope).await?
+                            };
 
-                                if switch_waiting_for_nvos {
-                                    return transition_to_rack_error(
-                                        id,
-                                        state,
-                                        "rack profile firmware object is unavailable while a selected switch is waiting for NVOS update",
-                                        ctx,
-                                    )
-                                    .await;
-                                }
-
-                                return Ok(skip_nvos_update_outcome(
+                            if switch_waiting_for_nvos {
+                                return transition_to_rack_error(
                                     id,
-                                    "firmware object JSON source is not configured for rack maintenance",
-                                    scope,
-                                ));
+                                    state,
+                                    "rack profile firmware object is unavailable while a selected switch is waiting for NVOS update",
+                                    ctx,
+                                )
+                                .await;
                             }
-                        }
+
+                            return Ok(skip_nvos_update_outcome(
+                                id,
+                                "firmware object JSON source is not configured for rack maintenance",
+                                scope,
+                            ));
+                        };
+
+                        config_json
                     }
                 };
 
@@ -3028,7 +3027,7 @@ pub async fn handle_maintenance(
                     .with_txn(txn));
                 }
 
-                if failed > 0 {
+                if images_terminal && failed > 0 {
                     db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
                     state.nvos_update_job = Some(job);
                     if state.config.maintenance_requested.is_some() {
