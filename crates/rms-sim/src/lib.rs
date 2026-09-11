@@ -63,10 +63,10 @@ impl RmsSimulator {
 
 /// An inventory fixed at construction, for tests and for hosts with nothing to
 /// report.
-pub struct StaticInventory(pub Vec<SimNode>);
+pub struct StaticInventory(pub std::sync::Arc<[SimNode]>);
 
 impl RmsInventory for StaticInventory {
-    fn nodes(&self) -> Vec<SimNode> {
-        self.0.clone()
+    fn nodes(&self) -> std::sync::Arc<[SimNode]> {
+        std::sync::Arc::clone(&self.0)
     }
 }

@@ -249,6 +249,16 @@ impl DeviceHandle {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_control_test_bmc_ip(&self, ip: Option<Ipv4Addr>) {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.set_control_test_bmc_ip(ip),
+            DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => {
+                unreachable!("control-test BMC addresses are only set on machines")
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn for_control_test_in_section(machine_config_section: &str) -> Self {
         Self::machine(MachineHandle::for_control_test_in_section(
             Vec::new(),

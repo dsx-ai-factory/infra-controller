@@ -49,7 +49,7 @@ async fn serve() -> String {
 
 async fn serve_with(nodes: Vec<SimNode>) -> String {
     let simulator = Arc::new(RmsSimulator::new(
-        Arc::new(StaticInventory(nodes)),
+        Arc::new(StaticInventory(nodes.into())),
         RmsSimConfig::default(),
     ));
     let router = rms_sim::router(simulator);

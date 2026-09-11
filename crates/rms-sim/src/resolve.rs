@@ -80,7 +80,14 @@ fn match_node(inventory: &[SimNode], requested: &rms::NodeInfo) -> Option<SimNod
         .as_ref()
         .and_then(|e| e.interface.as_ref());
 
-    if let Some(mac) = requested_mac(bmc)
+    // Validated before anything is compared. An interface whose MAC is not
+    // one names no node, and such a node is not matched on its address
+    // either: the caller learns about the bad identifier from the batch
+    // failure instead of getting a placement for whatever shares the address.
+    let bmc_mac = requested_mac(bmc)?;
+    let host_mac = requested_mac(host)?;
+
+    if let Some(mac) = bmc_mac
         && let Some(found) = inventory
             .iter()
             .find(|n| n.bmc_mac.as_deref() == Some(&*mac))
@@ -88,7 +95,7 @@ fn match_node(inventory: &[SimNode], requested: &rms::NodeInfo) -> Option<SimNod
         return Some(found.clone());
     }
 
-    if let Some(mac) = requested_mac(host)
+    if let Some(mac) = host_mac
         && let Some(found) = inventory
             .iter()
             .find(|n| n.host_mac.as_deref() == Some(&*mac))
@@ -111,11 +118,13 @@ fn match_node(inventory: &[SimNode], requested: &rms::NodeInfo) -> Option<SimNod
     None
 }
 
-/// The normalised MAC of a requested interface, if it names one.
-fn requested_mac(interface: Option<&rms::NetworkInterface>) -> Option<String> {
-    interface
-        .map(|i| normalize_mac(&i.mac_address))
-        .filter(|m| !m.is_empty())
+/// The normalised MAC of a requested interface: `Some(None)` when it names
+/// none, `None` when what it names is not a MAC.
+fn requested_mac(interface: Option<&rms::NetworkInterface>) -> Option<Option<String>> {
+    match interface.map(|i| i.mac_address.as_str()) {
+        None | Some("") => Some(None),
+        Some(mac) => normalize_mac(mac).map(Some),
+    }
 }
 
 /// The address of a requested interface, if it names one.
@@ -210,5 +219,16 @@ mod tests {
         let unknown = request(endpoint("02:00:00:00:00:99", "10.9.9.9"), None);
         assert!(match_node(&inv, &unknown).is_none());
         assert!(match_node(&inv, &request(None, None)).is_none());
+    }
+
+    #[test]
+    fn a_malformed_mac_matches_nothing_even_when_the_address_would() {
+        let inv = inventory();
+        // Stripped of its punctuation this would be node 1's BMC MAC, and the
+        // address is node 1's too.
+        let bmc = request(endpoint("02:00:AA:AA:AA:AA!", "10.0.0.1"), None);
+        assert!(match_node(&inv, &bmc).is_none());
+        let host = request(None, endpoint("0200bbbbbbbb0", "10.0.1.1"));
+        assert!(match_node(&inv, &host).is_none());
     }
 }

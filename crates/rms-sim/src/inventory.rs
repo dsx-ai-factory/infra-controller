@@ -22,14 +22,19 @@
 //! device. A multi-pod gateway can implement this trait by fanning out across
 //! several machine-a-tron pods without the simulator knowing.
 
+use std::sync::Arc;
+
 /// Hardware state, as seen by the simulator's host.
 pub trait RmsInventory: Send + Sync + 'static {
     /// Every device the host currently simulates.
     ///
-    /// Returning an owned snapshot rather than a borrow keeps the host free to
-    /// hold its devices behind whatever lock it likes without that lock being
-    /// held across the `.await` of an RPC.
-    fn nodes(&self) -> Vec<SimNode>;
+    /// The snapshot is shared rather than owned so that a host can hand the
+    /// same one to every request until its hardware changes: a client that
+    /// enriches a fleet one request per device would otherwise have the fleet
+    /// rebuilt once per device. A snapshot rather than a borrow also keeps the
+    /// host free to hold its devices behind whatever lock it likes without
+    /// that lock being held across the `.await` of an RPC.
+    fn nodes(&self) -> Arc<[SimNode]>;
 }
 
 /// What a device is. RMS treats the three kinds differently, and some
@@ -69,12 +74,22 @@ pub struct SimNode {
 /// Normalise a MAC for comparison: lower-case, separators removed.
 ///
 /// RMS clients send MACs in whatever form their own inventory holds, so
-/// matching on the raw string loses nodes for purely cosmetic reasons.
-pub fn normalize_mac(mac: &str) -> String {
-    mac.chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+/// matching on the raw string loses nodes for purely cosmetic reasons. Only
+/// the spellings a MAC actually has are accepted: twelve hex digits bare, or
+/// as six octets separated consistently by colons or by dashes. Anything else
+/// is `None` rather than being stripped down to something that could match a
+/// node by accident.
+pub fn normalize_mac(mac: &str) -> Option<String> {
+    let octets: Vec<&str> = match mac.len() {
+        12 if mac.is_ascii() => (0..12).step_by(2).map(|i| &mac[i..i + 2]).collect(),
+        17 if mac.is_ascii() && matches!(&mac[2..3], ":" | "-") => mac.split(&mac[2..3]).collect(),
+        _ => return None,
+    };
+    let well_formed = octets.len() == 6
+        && octets
+            .iter()
+            .all(|octet| octet.len() == 2 && octet.bytes().all(|b| b.is_ascii_hexdigit()));
+    well_formed.then(|| octets.concat().to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -83,8 +98,41 @@ mod tests {
 
     #[test]
     fn mac_normalisation_ignores_separators_and_case() {
-        assert_eq!(normalize_mac("02:00:AB:cd:12:34"), "0200abcd1234");
-        assert_eq!(normalize_mac("02-00-ab-CD-12-34"), "0200abcd1234");
-        assert_eq!(normalize_mac("0200abcd1234"), "0200abcd1234");
+        for spelling in ["02:00:AB:cd:12:34", "02-00-ab-CD-12-34", "0200abcd1234"] {
+            assert_eq!(
+                normalize_mac(spelling).as_deref(),
+                Some("0200abcd1234"),
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn anything_that_is_not_a_mac_is_rejected() {
+        let near_misses = [
+            ("02:00:AB:CD:12:34!", "trailing punctuation"),
+            ("0200abcd1234!", "trailing punctuation, bare"),
+            ("02:00:AB:CD:12:34:", "trailing separator"),
+            (":02:00:AB:CD:12:34", "leading separator"),
+            (" 0200abcd1234", "leading whitespace"),
+            ("02:00:AB:CD:12", "too short"),
+            ("02:00:AB:CD:12:3", "one digit short"),
+            ("0200abcd123", "one digit short, bare"),
+            ("02:00:AB:CD:12:34:56", "too long"),
+            ("0200abcd123456", "too long, bare"),
+            ("02:00-AB:CD:12:34", "mixed separators"),
+            ("02-00:AB-CD-12-34", "mixed separators, dash first"),
+            ("02.00.AB.CD.12.34", "unsupported separator"),
+            ("0200.abcd.1234", "dotted"),
+            ("02:00:AB:CD:12:3G", "non-hex digit"),
+            ("0200abcd12g4", "non-hex digit, bare"),
+            ("02:00:AB:CD:12:\u{e9}", "non-ascii, separated"),
+            ("0200abcd1\u{e9}4", "non-ascii straddling an octet, bare"),
+            ("020:0AB:CD:12:34", "octets of the wrong width"),
+            ("", "empty"),
+        ];
+        for (input, why) in near_misses {
+            assert_eq!(normalize_mac(input), None, "{why}: {input:?}");
+        }
     }
 }

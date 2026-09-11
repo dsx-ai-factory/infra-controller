@@ -608,6 +608,12 @@ impl MachineHandle {
         self
     }
 
+    /// Stand in for the DHCP lease the actor would otherwise record.
+    #[cfg(test)]
+    pub(crate) fn set_control_test_bmc_ip(&self, ip: Option<Ipv4Addr>) {
+        self.0.live_state.write().unwrap().bmc_ip = ip;
+    }
+
     pub(super) fn mat_id(&self) -> Uuid {
         self.0.mat_id
     }

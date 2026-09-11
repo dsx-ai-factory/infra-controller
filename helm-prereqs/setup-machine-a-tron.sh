@@ -88,12 +88,18 @@
 #    leases, force-delete machine records via the admin CLI or reprovision —
 #    do NOT hand-delete interface/dhcp rows.
 #
-#  * RMS simulator endpoint (Phase 5, --rms-sim): machine-a-tron mounts an RMS
-#    gRPC simulator on its bmc-mock listener (crates/rms-sim), same port and
-#    certificate as Redfish. NICo calls it only when its [rms] api_url points
-#    there, so the flag appends a managed [rms] block to the nico-core site
-#    config and restarts nico-api; a later run WITHOUT the flag removes the
-#    block again. Site config merges over the global config per key, so only
+#  * RMS simulator endpoint (Phases 5 and 10, --rms-sim): machine-a-tron
+#    mounts an RMS gRPC simulator on its bmc-mock listener (crates/rms-sim),
+#    same port and certificate as Redfish. NICo calls it only when its [rms]
+#    api_url points there, so the flag appends a managed [rms] block to the
+#    nico-core site config and restarts nico-api - in Phase 10, after the
+#    deploy has rolled out and the pods behind the Service have logged the
+#    mount. A deploy that does not roll out, or an image that does not mount
+#    the simulator, stops the run there with the site config untouched, so
+#    nico-api is never pointed at an endpoint nothing answers. Phase 5 only
+#    rehearses the patch to catch a site config that cannot take the block
+#    before anything is deployed; a run WITHOUT the flag removes the block in
+#    Phase 5. Site config merges over the global config per key, so only
 #    api_url changes - enforce_tls and the certificate paths keep the chart
 #    defaults, which verify the pod certificate because it is issued by the
 #    same ClusterIssuer as nico-api's. The cross-namespace FQDN is required
@@ -121,7 +127,10 @@
 #    The name is read back from `helm template` over the same values the
 #    deploy uses, so a nameOverride is honoured and a values file the chart
 #    rejects is caught before anything is changed, and Phase 9 checks the
-#    Service exists after the install and stops if it does not.
+#    Service exists after the install and stops if it does not. The Service
+#    port (service.bmcMock.port, 1266 in the chart) is read from the same
+#    render, so a values file that changes it changes bmc_proxy and the RMS
+#    URL with it.
 #
 # ---------------------------------------------------------------------------
 # Tool requirements: kubectl, helm, jq
@@ -239,9 +248,11 @@ PULL_SECRET_NAME="${PULL_SECRET_NAME:-machine-a-tron-pull}"
 RELEASE="nico-machine-a-tron"
 # The chart names the Service <chart name>-<pod key>-bmc-mock and the pod key
 # must be the pod that hosts the fleet ("bmc-mock Service name" in the header).
-# Phase 0 resolves it from the rendered chart; BMC_MOCK_SVC overrides it.
+# Phase 0 resolves it from the rendered chart; BMC_MOCK_SVC overrides it. The
+# Service port comes from the same render; the chart default below is used
+# only when the render shows none.
 BMC_MOCK_SVC_OVERRIDE="${BMC_MOCK_SVC:-}"
-BMC_MOCK_PORT="1266"
+BMC_MOCK_PORT_DEFAULT="1266"
 NICO_DB="nico_system_nico"
 
 # --- deployment mode ---------------------------------------------------------
@@ -404,18 +415,13 @@ copy_secret() {
         | jq 'del(.metadata.namespace,.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.ownerReferences,.metadata.annotations,.metadata.managedFields)' \
         | kubectl apply -n "$MAT_NAMESPACE" -f - >/dev/null
 }
-# The bmc-mock Service the deploy will create for the pod that hosts the fleet
-# ("bmc-mock Service name" in the header). The chart is rendered over the same
-# values Phase 9 installs: VALUES_FILE plus, unless MAT_MULTIPOD=1, a stub for
-# the pods.default injection (the Service name depends only on the pod key, so
-# one host is enough to make that pod render). Prints the name; prints nothing
-# when no Service qualifies; fails when the chart does not render.
-resolve_bmc_mock_svc() {
-    if [[ -n "$BMC_MOCK_SVC_OVERRIDE" ]]; then
-        echo "$BMC_MOCK_SVC_OVERRIDE"
-        return 0
-    fi
-    local stub rendered services
+# The bmc-mock Services the deploy will create, as the chart renders them over
+# the same values Phase 9 installs: VALUES_FILE plus, unless MAT_MULTIPOD=1, a
+# stub for the pods.default injection (the Service name and port depend only
+# on the pod key and the values, so one host is enough to make that pod
+# render). Prints the rendered YAML; fails when the chart does not render.
+render_bmc_mock_services() {
+    local stub rendered
     stub="$(mktemp)"
     if [[ "${MAT_MULTIPOD:-0}" != "1" ]]; then
         printf 'pods:\n  default:\n    machines:\n      dell-hosts:\n        hostCount: 1\n' > "$stub"
@@ -429,6 +435,18 @@ resolve_bmc_mock_svc() {
         return 1
     }
     rm -f "$stub"
+    printf '%s\n' "$rendered"
+}
+# The bmc-mock Service the deploy will create for the pod that hosts the fleet
+# ("bmc-mock Service name" in the header). Prints the name; prints nothing
+# when no Service qualifies; fails when the chart does not render.
+resolve_bmc_mock_svc() {
+    if [[ -n "$BMC_MOCK_SVC_OVERRIDE" ]]; then
+        echo "$BMC_MOCK_SVC_OVERRIDE"
+        return 0
+    fi
+    local rendered services
+    rendered="$(render_bmc_mock_services)" || return 1
     services="$(printf '%s\n' "$rendered" | awk '$1 == "name:" && $2 ~ /-bmc-mock$/ { print $2 }' | sort -u)"
     if [[ "${MAT_MULTIPOD:-0}" != "1" ]]; then
         # Phase 9 injects the fleet into pods.default; a pod the values file
@@ -438,6 +456,24 @@ resolve_bmc_mock_svc() {
         # The values file owns the pods map. One pod is the RMS endpoint and
         # the proxy target: the first in sorted order.
         printf '%s\n' "$services" | head -1
+    fi
+}
+# The port the bmc-mock Services listen on (service.bmcMock.port), read from
+# the same render as the Service name so a values file that overrides it is
+# honoured wherever the script names <service>:<port>. Every pod's Service
+# carries the same value, so the first redfish port rendered is the one. Prints
+# the chart default when the render shows none; fails when the chart does not
+# render.
+resolve_bmc_mock_port() {
+    local rendered port
+    rendered="$(render_bmc_mock_services)" || return 1
+    port="$(printf '%s\n' "$rendered" | awk '
+        $1 == "-" && $2 == "port:" { port = $3; next }
+        $1 == "name:" && $2 == "redfish" && port != "" { print port; exit }')"
+    if [[ "$port" =~ ^[0-9]+$ ]]; then
+        echo "$port"
+    else
+        echo "$BMC_MOCK_PORT_DEFAULT"
     fi
 }
 # Add or remove the managed [rms] block in the nico-api site config ConfigMap
@@ -532,6 +568,60 @@ json.dump(cm, open(path, "w"))
 print("changed" if changed else "nochange")
 PYRMS
 }
+# Add or remove the managed [rms] block on the live nico-api site config and
+# restart nico-api when it changed. $1 is "true" (add) or "false" (remove); a
+# $2 of "check" rehearses the patch on the working copy and applies nothing,
+# so a site config that cannot take the block is reported before the deploy.
+# A result that could not be applied stops the run.
+apply_rms_endpoint() {
+    local enable="$1" mode="${2:-apply}" result
+    # CM_JSON is the script's working copy of the ConfigMap (cleaned up on exit).
+    [[ -n "$CM_JSON" ]] || CM_JSON="$(mktemp)"
+    kubectl get cm nico-api-site-config-files -n "$NICO_SYSTEM_NS" -o json > "$CM_JSON" 2>/dev/null \
+        || die "nico-api-site-config-files configmap not found"
+    result="$(patch_rms_endpoint "$CM_JSON" "$enable" "$RMS_SIM_URL")"
+    case "$result" in
+        changed|nochange) ;;
+        conflict)
+            die "the nico-core site config already declares its own rms table; set api_url = \"${RMS_SIM_URL}\" there by hand (crates/rms-sim/README.md), or remove the table and re-run" ;;
+        invalid*)
+            die "the patched nico-core site config does not parse as TOML, nothing was applied (${result}); fix the site config by hand and re-run" ;;
+        *)
+            die "unexpected result from the [rms] site-config patch: ${result}" ;;
+    esac
+    if [[ "$mode" == "check" ]]; then
+        if [[ "$result" == "changed" ]]; then
+            info "nico-core site config can take the [rms] block; api_url -> ${RMS_SIM_URL} once Phase 10 has verified the simulator"
+        else
+            ok "nico-core [rms] already points at the RMS simulator"
+        fi
+        return 0
+    fi
+    if [[ "$result" == "changed" ]]; then
+        kubectl apply -f "$CM_JSON" >/dev/null
+        if $enable; then
+            info "[rms] api_url -> ${RMS_SIM_URL}; restarting nico-api"
+        else
+            info "removed the managed [rms] simulator endpoint; restarting nico-api"
+        fi
+        kubectl rollout restart deployment/nico-api -n "$NICO_SYSTEM_NS" >/dev/null
+        if ! kubectl rollout status deployment/nico-api -n "$NICO_SYSTEM_NS" --timeout=180s >/dev/null; then
+            # With the flag, a nico-api that has not come back on the new
+            # config is the failure the run exists to rule out.
+            if $enable; then
+                die "nico-api did not roll out within 180s after the [rms] change (kubectl -n ${NICO_SYSTEM_NS} rollout status deploy/nico-api); fix it and re-run with --rms-sim"
+            fi
+            warn "nico-api rollout did not complete in time; continuing"
+        fi
+        if $enable; then
+            ok "nico-core [rms] api_url = ${RMS_SIM_URL} (RMS simulator)"
+        else
+            ok "nico-core [rms] back to the site's own endpoint"
+        fi
+    elif $enable; then
+        ok "nico-core [rms] already points at the RMS simulator"
+    fi
+}
 
 # =============================================================================
 # Phase 0 — preflight
@@ -546,12 +636,14 @@ BMC_MOCK_SVC="$(resolve_bmc_mock_svc)" \
     || die "could not resolve the bmc-mock Service; set BMC_MOCK_SVC to the Service of the pod that hosts the fleet"
 [[ -n "$BMC_MOCK_SVC" ]] \
     || die "the chart renders no bmc-mock Service for the pod that will host the fleet - values file ${VALUES_FILE}, MAT_MULTIPOD=${MAT_MULTIPOD:-0}; set BMC_MOCK_SVC"
+BMC_MOCK_PORT="$(resolve_bmc_mock_port)" \
+    || die "could not resolve the bmc-mock Service port (service.bmcMock.port) from the rendered chart"
 # site-explorer runs in nico-system, so it CANNOT resolve the bare service name
 # (which resolves against its own namespace). bmc_proxy and the RMS simulator
 # URL MUST use the cross-namespace FQDN of the bmc-mock service in the
 # machine-a-tron namespace.
 BMC_MOCK_FQDN="${BMC_MOCK_SVC}.${MAT_NAMESPACE}.svc.cluster.local"
-ok "bmc-mock Service: ${BMC_MOCK_SVC}"
+ok "bmc-mock Service: ${BMC_MOCK_SVC}, port ${BMC_MOCK_PORT}"
 kubectl get deploy nico-api -n "$NICO_SYSTEM_NS" >/dev/null 2>&1 || die "nico-api not found in $NICO_SYSTEM_NS — deploy NICo Core (setup.sh) first"
 [[ -n "$(_pg_primary)" ]] || die "no Postgres primary in $POSTGRES_NS"
 kubectl get pod vault-0 -n "$VAULT_NS" >/dev/null 2>&1 || die "vault-0 not found in $VAULT_NS"
@@ -1337,51 +1429,27 @@ fi
 # The simulator is always mounted on the bmc-mock listener; this only decides
 # whether nico-core calls it. The [rms] table is appended as a sentinel block
 # so a run WITHOUT the flag removes it and the site returns to its previous
-# RMS endpoint. A site config with its own [rms] table is never rewritten: a
-# duplicate table is a TOML parse error, and the operator's api_url could not
-# be restored afterwards. Only api_url is written; enforce_tls and the cert
-# paths keep the nico-api chart defaults, which verify the pod certificate
-# because it is issued by the same ClusterIssuer as nico-api's own.
+# RMS endpoint. With the flag the block is written in Phase 10, once the
+# deploy has rolled out and the simulator has logged its mount, so a failed
+# deploy never leaves nico-api pointed at an endpoint nothing answers; here
+# the patch is only rehearsed on a working copy, so a site config that cannot
+# take the block stops the run before anything is deployed. A site config with
+# its own [rms] table is never rewritten: a duplicate table is a TOML parse
+# error, and the operator's api_url could not be restored afterwards. Only
+# api_url is written; enforce_tls and the cert paths keep the nico-api chart
+# defaults, which verify the pod certificate because it is issued by the same
+# ClusterIssuer as nico-api's own.
 RMS_SIM_URL="https://${BMC_MOCK_FQDN}:${BMC_MOCK_PORT}"
-if $SKIP_NICO_CORE_CONFIG; then
+if ! $SKIP_NICO_CORE_CONFIG; then
     if $RMS_SIM; then
-        warn "--skip-nico-core-config set; point [rms] api_url at ${RMS_SIM_URL} manually"
-    fi
-else
-    [[ -n "$CM_JSON" ]] || CM_JSON="$(mktemp)"
-    kubectl get cm nico-api-site-config-files -n "$NICO_SYSTEM_NS" -o json > "$CM_JSON" 2>/dev/null \
-        || die "nico-api-site-config-files configmap not found"
-    _PATCH_RESULT="$(patch_rms_endpoint "$CM_JSON" "$RMS_SIM" "$RMS_SIM_URL")"
-    if [[ "$_PATCH_RESULT" == "conflict" ]]; then
-        die "the nico-core site config already declares its own rms table; set api_url = \"${RMS_SIM_URL}\" there by hand (crates/rms-sim/README.md), or remove the table and re-run"
-    elif [[ "$_PATCH_RESULT" == "changed" ]]; then
-        kubectl apply -f "$CM_JSON" >/dev/null
-        if $RMS_SIM; then
-            info "[rms] api_url -> ${RMS_SIM_URL}; restarting nico-api"
-        else
-            info "removed the managed [rms] simulator endpoint; restarting nico-api"
-        fi
-        kubectl rollout restart deployment/nico-api -n "$NICO_SYSTEM_NS" >/dev/null
-        kubectl rollout status deployment/nico-api -n "$NICO_SYSTEM_NS" --timeout=180s >/dev/null \
-            || warn "nico-api rollout did not complete in time; continuing"
-        if $RMS_SIM; then
-            ok "nico-core [rms] api_url = ${RMS_SIM_URL} (RMS simulator)"
-        else
-            ok "nico-core [rms] back to the site's own endpoint"
-        fi
-    elif [[ "$_PATCH_RESULT" == "nochange" ]]; then
-        if $RMS_SIM; then
-            ok "nico-core [rms] already points at the RMS simulator"
-        fi
-    elif [[ "$_PATCH_RESULT" == invalid* ]]; then
-        die "the patched nico-core site config does not parse as TOML, nothing was applied (${_PATCH_RESULT}); fix the site config by hand and re-run"
+        apply_rms_endpoint true check
     else
-        die "unexpected result from the [rms] site-config patch: ${_PATCH_RESULT}"
+        apply_rms_endpoint false
     fi
-    if $RMS_SIM && [[ "${MAT_MULTIPOD:-0}" == "1" ]]; then
-        warn "MAT_MULTIPOD=1: the simulator answers only for the devices hosted by the ${BMC_MOCK_SVC} pod;"
-        warn "  racks on other pods are not reachable through RMS (BMC_MOCK_SVC selects the pod)"
-    fi
+fi
+if $RMS_SIM && [[ "${MAT_MULTIPOD:-0}" == "1" ]]; then
+    warn "MAT_MULTIPOD=1: the simulator answers only for the devices hosted by the ${BMC_MOCK_SVC} pod;"
+    warn "  racks on other pods are not reachable through RMS (BMC_MOCK_SVC selects the pod)"
 fi
 
 # =============================================================================
@@ -1749,8 +1817,13 @@ confirm "Deploy ${RELEASE} to ${MAT_NAMESPACE}?" || die "aborted before deploy"
 helm upgrade --install "$RELEASE" "$CHART_DIR" -n "$MAT_NAMESPACE" --create-namespace \
     --qps "${HELM_QPS:-15}" --burst-limit "${HELM_BURST:-30}" \
     -f "$VALUES_FILE" -f "$MERGED_VALUES"
-kubectl rollout status deployment/"$RELEASE" -n "$MAT_NAMESPACE" --timeout=180s \
-    || warn "deployment rollout did not complete in time"
+if ! kubectl rollout status deployment/"$RELEASE" -n "$MAT_NAMESPACE" --timeout=180s; then
+    # With --rms-sim nothing may point nico-core at a deploy that is not up.
+    if $RMS_SIM; then
+        die "deployment ${RELEASE} did not roll out within 180s; nico-core [rms] is unchanged - fix the deploy (kubectl -n ${MAT_NAMESPACE} describe deploy/${RELEASE}) and re-run with --rms-sim"
+    fi
+    warn "deployment rollout did not complete in time"
+fi
 # bmc_proxy and [rms] api_url name this Service (Phase 0 read it back from the
 # rendered chart); the live cluster is the check that the deploy created it.
 if ! kubectl get svc "$BMC_MOCK_SVC" -n "$MAT_NAMESPACE" >/dev/null 2>&1; then
@@ -1767,10 +1840,12 @@ info "waiting for cert to be issued from the current CA..."
 kubectl wait --for=condition=Ready certificate/"${RELEASE}-certificate" -n "$MAT_NAMESPACE" --timeout=120s >/dev/null 2>&1 \
     && ok "client certificate Ready" || warn "certificate not Ready yet — check cert-manager"
 
-# --- RMS simulator: confirm the image actually mounts it (--rms-sim) ---------
+# --- RMS simulator: confirm the image mounts it, then point nico-core at it --
 # machine-a-tron logs one line when the simulator is mounted. Without it the
 # image predates crates/rms-sim and every RMS call nico-core makes to the
-# bmc-mock listener fails, so say so now rather than at the first rack operation.
+# bmc-mock listener fails, so the run stops here with the site config untouched
+# rather than at the first rack operation. The managed [rms] block (rehearsed
+# in Phase 5) is written only once the line has been seen.
 if $RMS_SIM; then
     # The pods behind the Service NICo is pointed at, whatever the chart name
     # or pod key: the Service's own selector names them. Read the logs into a
@@ -1778,15 +1853,25 @@ if $RMS_SIM; then
     # turn kubectl's SIGPIPE into a false negative.
     _MAT_SELECTOR="$(kubectl get svc "$BMC_MOCK_SVC" -n "$MAT_NAMESPACE" -o json 2>/dev/null \
         | jq -r '.spec.selector | to_entries | map("\(.key)=\(.value)") | join(",")' 2>/dev/null || true)"
-    _MAT_LOGS=""
-    if [[ -n "$_MAT_SELECTOR" ]]; then
+    [[ -n "$_MAT_SELECTOR" ]] \
+        || die "Service ${BMC_MOCK_SVC} has no selector, so the pods behind the RMS endpoint cannot be found; nico-core [rms] is unchanged"
+    info "waiting for the RMS simulator mount on the pods behind ${BMC_MOCK_SVC} (up to 120s)..."
+    _end=$((SECONDS+120)); _RMS_MOUNTED=false
+    while (( SECONDS < _end )); do
         _MAT_LOGS="$(kubectl logs -n "$MAT_NAMESPACE" -l "$_MAT_SELECTOR" --tail=-1 2>/dev/null || true)"
-    fi
-    if [[ "$_MAT_LOGS" == *"Mounting the RMS simulator"* ]]; then
-        ok "RMS simulator mounted on the bmc-mock listener; nico-core [rms] api_url = ${RMS_SIM_URL}"
+        if [[ "$_MAT_LOGS" == *"Mounting the RMS simulator"* ]]; then
+            _RMS_MOUNTED=true
+            break
+        fi
+        sleep 5
+    done
+    $_RMS_MOUNTED \
+        || die "machine-a-tron has not logged the RMS simulator mount within 120s: the image ${MAT_IMAGE_REPO}:${MAT_IMAGE_TAG} may predate crates/rms-sim, or the pod did not start (kubectl logs -n ${MAT_NAMESPACE} -l '${_MAT_SELECTOR}'); nico-core [rms] is unchanged"
+    ok "RMS simulator mounted on the bmc-mock listener"
+    if $SKIP_NICO_CORE_CONFIG; then
+        warn "--skip-nico-core-config set; point [rms] api_url at ${RMS_SIM_URL} manually"
     else
-        warn "machine-a-tron has not logged the RMS simulator mount - the image may predate it,"
-        warn "  or the pod is still starting. nico-core [rms] api_url points at ${RMS_SIM_URL}."
+        apply_rms_endpoint true
     fi
 fi
 

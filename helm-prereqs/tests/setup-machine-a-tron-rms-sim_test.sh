@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Unit-style checks for the two helpers setup-machine-a-tron.sh uses to point
-# nico-core at machine-a-tron: resolve_bmc_mock_svc (which bmc-mock Service
-# bmc_proxy and --rms-sim name) and patch_rms_endpoint (the managed [rms]
-# block in the nico-api site config). Both are extracted from the script and
-# run against a fake helm and fixture ConfigMaps; no cluster is needed.
+# Unit-style checks for the helpers setup-machine-a-tron.sh uses to point
+# nico-core at machine-a-tron: resolve_bmc_mock_svc and resolve_bmc_mock_port
+# (which bmc-mock Service and port bmc_proxy and --rms-sim name) and
+# patch_rms_endpoint (the managed [rms] block in the nico-api site config).
+# They are extracted from the script and run against a fake helm and fixture
+# ConfigMaps; no cluster is needed. A last check pins the phase order: with
+# --rms-sim the block is written only after the deploy has been verified.
 
 set -euo pipefail
 
@@ -33,11 +35,14 @@ extract() {
     [[ -n "${body}" ]] || fail "could not extract $1 from setup-machine-a-tron.sh"
     eval "${body}"
 }
+extract render_bmc_mock_services
 extract resolve_bmc_mock_svc
+extract resolve_bmc_mock_port
 extract patch_rms_endpoint
 
 # --- resolve_bmc_mock_svc -----------------------------------------------------
-# A helm that renders the Services named in FAKE_HELM_SERVICES and records the
+# A helm that renders the Services named in FAKE_HELM_SERVICES, each with the
+# chart's redfish port entry (FAKE_HELM_PORT, default 1266), and records the
 # values files it was given, so the test can see the pods.default stub.
 mkdir -p "${TEST_TMP_DIR}/bin"
 cat > "${TEST_TMP_DIR}/bin/helm" <<'FAKE_HELM'
@@ -56,7 +61,7 @@ if [[ "${FAKE_HELM_FAIL:-0}" == "1" ]]; then
     exit 1
 fi
 for svc in ${FAKE_HELM_SERVICES:-}; do
-    printf -- '---\napiVersion: v1\nkind: Service\nmetadata:\n  name: %s\n  namespace: nico-mat\nspec:\n  ports:\n    - name: https\n      port: 1266\n' "${svc}"
+    printf -- '---\napiVersion: v1\nkind: Service\nmetadata:\n  name: %s\n  namespace: nico-mat\nspec:\n  ports:\n    - port: %s\n      name: redfish\n      targetPort: redfish\n      protocol: TCP\n' "${svc}" "${FAKE_HELM_PORT:-1266}"
 done
 FAKE_HELM
 chmod +x "${TEST_TMP_DIR}/bin/helm"
@@ -67,6 +72,7 @@ CHART_DIR="${TEST_TMP_DIR}/chart"
 MAT_NAMESPACE="nico-mat"
 VALUES_FILE="${TEST_TMP_DIR}/values.yaml"
 BMC_MOCK_SVC_OVERRIDE=""
+BMC_MOCK_PORT_DEFAULT="1266"
 mkdir -p "${CHART_DIR}"
 echo 'pods: {}' > "${VALUES_FILE}"
 unset MAT_MULTIPOD
@@ -107,6 +113,32 @@ fi
 [[ "${out}" == *"mat-k8s-controller.enabled"* ]] || fail "helm's error must be reported, got '${out}'"
 
 echo "resolve_bmc_mock_svc: ok"
+
+# --- resolve_bmc_mock_port ----------------------------------------------------
+# The port is whatever the chart renders for the redfish port, so a values
+# file that overrides service.bmcMock.port is honoured.
+got="$(FAKE_HELM_SERVICES="nico-machine-a-tron-default-bmc-mock" resolve_bmc_mock_port)"
+[[ "${got}" == "1266" ]] || fail "port: chart default expected, got '${got}'"
+got="$(FAKE_HELM_SERVICES="nico-machine-a-tron-default-bmc-mock" FAKE_HELM_PORT=8443 resolve_bmc_mock_port)"
+[[ "${got}" == "8443" ]] || fail "port: values override not honoured, got '${got}'"
+
+# A render with no Service in it falls back to the chart default rather than
+# leaving the URL without a port.
+got="$(FAKE_HELM_SERVICES="" resolve_bmc_mock_port)"
+[[ "${got}" == "1266" ]] || fail "port: fallback expected, got '${got}'"
+
+# The port is a chart value, not a pod choice, so BMC_MOCK_SVC does not
+# short-circuit it: the values file still decides.
+got="$(BMC_MOCK_SVC_OVERRIDE="custom-bmc-mock" FAKE_HELM_SERVICES="x-default-bmc-mock" FAKE_HELM_PORT=9443 resolve_bmc_mock_port)"
+[[ "${got}" == "9443" ]] || fail "port: override must not bypass the render, got '${got}'"
+
+# A chart the values file cannot render fails here too.
+if out="$(FAKE_HELM_FAIL=1 resolve_bmc_mock_port 2>&1)"; then
+    fail "port: a failed render must fail the resolution"
+fi
+[[ "${out}" == *"mat-k8s-controller.enabled"* ]] || fail "port: helm's error must be reported, got '${out}'"
+
+echo "resolve_bmc_mock_port: ok"
 
 # --- patch_rms_endpoint -------------------------------------------------------
 URL="https://nico-machine-a-tron-default-bmc-mock.nico-mat.svc.cluster.local:1266"
@@ -207,4 +239,32 @@ if python3 -c 'import tomllib' 2>/dev/null; then
 fi
 
 echo "patch_rms_endpoint: ok"
+
+# --- phase order --------------------------------------------------------------
+# With --rms-sim the [rms] block must be written only after the deploy and the
+# mount check, so a deploy that fails never leaves nico-api pointed at an
+# endpoint nothing answers; the removal path (no flag) stays ahead of the
+# deploy so a run without the flag restores the site whatever happens later.
+# First line of the script holding the fixed string $1 ($2 "-x": whole line).
+line_of() {
+    local n
+    n="$(grep -nF ${2:-} -- "$1" "${SETUP_SH}" | head -1 | cut -d: -f1)"
+    [[ -n "${n}" ]] || fail "order: '$1' not found in setup-machine-a-tron.sh"
+    echo "${n}"
+}
+rehearse="$(line_of 'apply_rms_endpoint true check')"
+remove="$(line_of 'apply_rms_endpoint false')"
+deploy="$(line_of 'helm upgrade --install "$RELEASE" "$CHART_DIR"')"
+mount_check="$(line_of '"$_MAT_LOGS" == *"Mounting the RMS simulator"*')"
+activate="$(line_of '        apply_rms_endpoint true' -x)"
+(( rehearse < deploy )) || fail "order: the [rms] rehearsal must precede the deploy"
+(( remove < deploy )) || fail "order: the [rms] removal must precede the deploy"
+(( deploy < mount_check )) || fail "order: the mount check must follow the deploy"
+(( mount_check < activate )) || fail "order: the [rms] block must be written after the mount check"
+# The mount check is fatal: the line after the mount flag test is a die.
+mount_gate="$(line_of '$_RMS_MOUNTED \')"
+sed -n "$(( mount_gate + 1 ))p" "${SETUP_SH}" | grep -q '|| die' \
+    || fail "order: a missing mount must be fatal under --rms-sim"
+
+echo "phase order: ok"
 echo "setup-machine-a-tron RMS simulator helper tests passed"
