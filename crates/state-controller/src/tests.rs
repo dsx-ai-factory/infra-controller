@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use carbide_utils::test_support::test_meter::TestMeter;
 use config_version::{ConfigVersion, Versioned};
-use db::DatabaseError;
-use futures::StreamExt;
+use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
+use futures::{FutureExt, StreamExt};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use serde::{self, Deserialize, Serialize};
@@ -33,8 +33,10 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::CheckApplied;
 use crate::config::IterationConfig;
 use crate::controller::{self, Enqueuer, QueuedObject, StateController};
+use crate::db_write_batch::WriteOpFn;
 use crate::io::StateControllerIO;
 use crate::metrics::NoopMetricsEmitter;
 use crate::state_change_emitter::{StateChangeEmitterBuilder, StateChangeEvent, StateChangeHook};
@@ -153,7 +155,9 @@ async fn test_delete_outdated_iterations(pool: sqlx::PgPool) -> eyre::Result<()>
 }
 
 #[derive(Debug, Default)]
-struct TestStateControllerIO {}
+struct TestStateControllerIO {
+    history_writes: AtomicUsize,
+}
 
 #[derive(Debug, Clone)]
 struct TestObject {
@@ -341,6 +345,7 @@ impl StateControllerIO for TestStateControllerIO {
         _new_version: ConfigVersion,
         _new_state: &Self::ControllerState,
     ) -> Result<(), DatabaseError> {
+        self.history_writes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1557,17 +1562,25 @@ async fn test_per_object_state_metrics_cleared_on_deletion(pool: sqlx::PgPool) -
     Ok(())
 }
 
-/// Simulates a concurrent writer: on its first invocation it bumps the
-/// object's controller-state version out from under the processor and then
-/// returns a transition, which must lose the optimistic version check.
-#[derive(Debug, Clone)]
-struct TestLockLossStateHandler {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InvalidationStage {
+    Handler,
+    DeferredWrite,
+    FinalStateWrite,
+}
+
+#[derive(Debug)]
+struct TestInvalidationStateHandler {
     pool: sqlx::PgPool,
-    calls: Arc<AtomicUsize>,
+    stage: InvalidationStage,
+    persisted_state: Versioned<TestObjectControllerState>,
+    persisted_outcome: PersistentStateHandlerOutcome,
+    calls: AtomicUsize,
+    batch_writes: Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait]
-impl StateHandler for TestLockLossStateHandler {
+impl StateHandler for TestInvalidationStateHandler {
     type State = TestObject;
     type ControllerState = TestObjectControllerState;
     type ObjectId = String;
@@ -1578,43 +1591,180 @@ impl StateHandler for TestLockLossStateHandler {
         object_id: &String,
         state: &mut TestObject,
         _controller_state: &Self::ControllerState,
-        _ctx: &mut StateHandlerContext<Self::ContextObjects>,
+        ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<Self::ControllerState>, StateHandlerError> {
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            sqlx::query("UPDATE test_objects SET controller_state_version=$1 WHERE id=$2")
-                .bind(state.controller_state.version.increment())
-                .bind(object_id)
-                .execute(&self.pool)
-                .await
-                .unwrap();
-            Ok(StateHandlerOutcome::transition(
+        if self.calls.fetch_add(1, Ordering::SeqCst) != 0 {
+            assert_eq!(state.controller_state.value, self.persisted_state.value);
+            assert_eq!(state.controller_state.version, self.persisted_state.version);
+            return Ok(StateHandlerOutcome::transition(
                 TestObjectControllerState::B,
-            ))
-        } else {
-            Ok(StateHandlerOutcome::do_nothing())
+            ));
         }
+
+        // Keep the object's version current in the handler and batch cases.
+        // Otherwise the final version check could reject the transition too,
+        // letting the test pass even if we ignored the earlier rejection.
+        if self.stage == InvalidationStage::FinalStateWrite {
+            sqlx::query(
+                "UPDATE test_objects SET controller_state=$1, controller_state_version=$2,
+                    controller_state_outcome=$3 WHERE id=$4",
+            )
+            .bind(sqlx::types::Json(&self.persisted_state.value))
+            .bind(self.persisted_state.version)
+            .bind(sqlx::types::Json(&self.persisted_outcome))
+            .bind(object_id)
+            .execute(&self.pool)
+            .await?;
+        }
+
+        let mut txn = self.pool.begin().await?;
+        sqlx::query("INSERT INTO test_iteration_writes VALUES ('handler')")
+            .execute(&mut *txn)
+            .await?;
+
+        let batch_writes = self.batch_writes.clone();
+        let stage = self.stage;
+        let write: WriteOpFn = Box::new(move |txn| {
+            async move {
+                sqlx::query("INSERT INTO test_iteration_writes VALUES ('batch')")
+                    .execute(&mut **txn)
+                    .await?;
+                batch_writes.fetch_add(1, Ordering::SeqCst);
+                if stage == InvalidationStage::DeferredWrite {
+                    ConditionalWrite::<(), _>::NotApplied(ControllerStateNotCurrent)
+                        .check_applied()?;
+                }
+                Ok(())
+            }
+            .boxed()
+        });
+        ctx.pending_db_writes.push(write);
+
+        if self.stage == InvalidationStage::Handler {
+            ConditionalWrite::<(), _>::NotApplied(ControllerStateNotCurrent).check_applied()?;
+        }
+        Ok(StateHandlerOutcome::transition(TestObjectControllerState::B).with_txn(txn))
     }
+}
+
+#[carbide_macros::sqlx_test]
+async fn test_handler_invalidation_rolls_back_and_requeues(pool: sqlx::PgPool) -> eyre::Result<()> {
+    check_invalidated_iteration(pool, InvalidationStage::Handler).await
+}
+
+#[carbide_macros::sqlx_test]
+async fn test_deferred_write_invalidation_rolls_back_and_requeues(
+    pool: sqlx::PgPool,
+) -> eyre::Result<()> {
+    check_invalidated_iteration(pool, InvalidationStage::DeferredWrite).await
 }
 
 #[carbide_macros::sqlx_test]
 async fn test_lock_loss_requeues_without_publishing_the_transition(
     pool: sqlx::PgPool,
 ) -> eyre::Result<()> {
-    let (mut controller, prometheus_registry, _join_set) =
-        per_object_test_controller::<TestStateControllerIO>(
-            &pool,
-            Arc::new(TestLockLossStateHandler {
-                pool: pool.clone(),
-                calls: Default::default(),
-            }),
-        )
+    check_invalidated_iteration(pool, InvalidationStage::FinalStateWrite).await
+}
+
+async fn check_invalidated_iteration(
+    pool: sqlx::PgPool,
+    stage: InvalidationStage,
+) -> eyre::Result<()> {
+    create_test_state_controller_tables(&pool).await;
+    sqlx::query("CREATE TABLE test_iteration_writes (name TEXT NOT NULL)")
+        .execute(&pool)
         .await?;
+    let mut join_set = JoinSet::new();
+    let work_lock_manager_handle =
+        db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+
+    let io = Arc::new(TestStateControllerIO::default());
+    let mut txn = pool.begin().await?;
+    let object = create_test_object("test-obj-1".to_string(), &mut txn).await;
+    let prior_outcome = PersistentStateHandlerOutcome::Wait {
+        reason: "previous iteration".to_string(),
+        source_ref: None,
+    };
+    io.persist_outcome(&mut txn, &object.id, prior_outcome.clone())
+        .await?;
+    txn.commit().await?;
+
+    let (persisted_state, persisted_outcome, expected_batch_writes) = match stage {
+        InvalidationStage::Handler => (object.controller_state.clone(), prior_outcome, 0),
+        InvalidationStage::DeferredWrite => (object.controller_state.clone(), prior_outcome, 1),
+        InvalidationStage::FinalStateWrite => (
+            Versioned::new(
+                TestObjectControllerState::C,
+                object.controller_state.version.increment(),
+            ),
+            PersistentStateHandlerOutcome::Wait {
+                reason: "concurrent iteration".to_string(),
+                source_ref: None,
+            },
+            1,
+        ),
+    };
+    let handler = Arc::new(TestInvalidationStateHandler {
+        pool: pool.clone(),
+        stage,
+        persisted_state,
+        persisted_outcome,
+        calls: AtomicUsize::new(0),
+        batch_writes: Arc::new(AtomicUsize::new(0)),
+    });
+    let (hook, mut events) = ChannelHook::new();
+    let meter = TestMeter::default();
+    let prometheus_registry = prometheus::Registry::new();
+    let mut controller = StateController::<TestStateControllerIO>::builder()
+        .database(pool.clone(), work_lock_manager_handle)
+        .processor_id(uuid::Uuid::new_v4().to_string())
+        .services(Arc::new(()))
+        .io(io.clone())
+        .state_handler(handler.clone())
+        .meter("test_objects", meter.meter())
+        .state_change_emitter(
+            StateChangeEmitterBuilder::default()
+                .hook(Box::new(hook))
+                .build(),
+        )
+        .per_object_state_metrics(Some(per_object_state_recorder(&prometheus_registry)))
+        .build_for_manual_iterations(CancellationToken::new())?;
 
     controller.run_single_iteration().await;
 
-    // The transition lost the version check: the state this iteration
-    // observed is provably outdated, so nothing may be published (existing
-    // series would only be kept alive, and here there are none)...
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        handler.batch_writes.load(Ordering::SeqCst),
+        expected_batch_writes,
+    );
+    let writes: Vec<String> = sqlx::query_scalar("SELECT name FROM test_iteration_writes")
+        .fetch_all(&pool)
+        .await?;
+    assert!(
+        writes.is_empty(),
+        "invalidated writes were committed: {writes:?}",
+    );
+
+    let persisted_query = "SELECT controller_state, controller_state_version,
+        controller_state_outcome FROM test_objects WHERE id=$1";
+    let (state, version, outcome): (
+        sqlx::types::Json<TestObjectControllerState>,
+        ConfigVersion,
+        sqlx::types::Json<PersistentStateHandlerOutcome>,
+    ) = sqlx::query_as(persisted_query)
+        .bind(&object.id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(state.0, handler.persisted_state.value);
+    assert_eq!(version, handler.persisted_state.version);
+    assert_eq!(outcome.0, handler.persisted_outcome);
+    assert_eq!(io.history_writes.load(Ordering::SeqCst), 0);
+    assert!(events.try_recv().is_err());
+    assert!(
+        meter
+            .parsed_metrics("test_objects_state_entered_total")
+            .is_empty(),
+    );
     assert!(
         parsed_prometheus_metrics(
             &prometheus_registry,
@@ -1622,24 +1772,57 @@ async fn test_lock_loss_requeues_without_publishing_the_transition(
         )
         .is_empty()
     );
+    assert_eq!(
+        meter.formatted_metric("test_objects_object_tasks_errored_total"),
+        None,
+    );
+    let errors = meter.parsed_metrics("test_objects_with_state_handling_errors_per_state");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].1, "0");
 
-    // ...but the object must be requeued to promptly re-read the state the
-    // concurrent writer committed.
     let mut txn = pool.begin().await?;
     let queued = controller::db::fetch_queued_objects(
         &mut txn,
         TestStateControllerIO::DB_QUEUED_OBJECTS_TABLE_NAME,
     )
-    .await
-    .unwrap();
+    .await?;
     txn.commit().await?;
     assert_eq!(
         queued,
         vec![QueuedObject {
-            object_id: "test-obj-1".to_string(),
+            object_id: object.id.clone(),
             processed_by: None,
         }]
     );
+
+    // The next pass must reload the persisted state before it can transition.
+    controller.run_single_iteration().await;
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 2);
+    let (state, new_version, outcome): (
+        sqlx::types::Json<TestObjectControllerState>,
+        ConfigVersion,
+        sqlx::types::Json<PersistentStateHandlerOutcome>,
+    ) = sqlx::query_as(persisted_query)
+        .bind(&object.id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(state.0, TestObjectControllerState::B);
+    assert_eq!(new_version.version_nr(), version.version_nr() + 1);
+    assert!(matches!(
+        outcome.0,
+        PersistentStateHandlerOutcome::Transition {
+            source_ref: Some(_)
+        },
+    ));
+    assert_eq!(io.history_writes.load(Ordering::SeqCst), 1);
+    events.try_recv()?;
+    assert!(events.try_recv().is_err());
+    let entered = parsed_prometheus_metrics(
+        &prometheus_registry,
+        "carbide_object_state_entered_timestamp_seconds",
+    );
+    assert_eq!(entered.len(), 1);
+    assert!(entered[0].0.contains(r#"state="b""#));
 
     Ok(())
 }

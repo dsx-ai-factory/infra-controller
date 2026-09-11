@@ -32,6 +32,7 @@ use sqlx::PgConnection;
 
 use super::DatabaseError;
 use crate::db_read::DbReader;
+use crate::{ConditionalWrite, ControllerStateNotCurrent};
 
 pub async fn persist(
     value: NewDpaInterface,
@@ -448,18 +449,19 @@ pub async fn all_dpa_states_in_sync(
     Ok(true)
 }
 
-/// Updates the dpa interface state that is owned by the state controller
-/// under the premise that the current controller state version didn't change.
+/// `try_update_controller_state` updates the DPA controller state when its
+/// version matches `expected_version`, replacing that version with `new_version`.
 ///
-/// Returns `true` if the state could be updated, and `false` if the object
-/// either doesn't exist anymore or is at a different version.
+/// Returns `NotApplied(ControllerStateNotCurrent)` if the row is missing or its
+/// version differs. `new_version` must advance `expected_version`; the caller must
+/// commit any surrounding transaction. Database failures are returned as errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     id: DpaInterfaceId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &DpaInterfaceControllerState,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     let query = "UPDATE dpa_interfaces SET controller_state_version=$1, controller_state=$2::json where id=$3::uuid AND controller_state_version=$4 returning id";
     let result = sqlx::query_as::<_, DpaInterfaceId>(query)
         .bind(new_version)
@@ -470,7 +472,10 @@ pub async fn try_update_controller_state(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.is_some())
+    Ok(match result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 pub async fn update_controller_state_outcome(

@@ -24,6 +24,7 @@ pub mod bmc_redfish_session;
 pub mod bmc_suppression;
 pub mod carbide_version;
 pub mod compute_allocation;
+mod conditional_write;
 pub mod credential_rotation;
 pub mod db_read;
 pub mod desired_firmware;
@@ -106,6 +107,8 @@ pub mod vpc_dpu_loopback;
 pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
+
+pub use conditional_write::{ConditionalWrite, ControllerStateNotCurrent};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

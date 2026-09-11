@@ -121,7 +121,7 @@ async fn dpa_scout_request_returns_typed_mlx_action(
         .pop()
         .expect("created dpa interface");
     let mut txn = env.db_txn().await;
-    db::dpa_interface::try_update_controller_state(
+    let applied = db::dpa_interface::try_update_controller_state(
         &mut txn,
         dpa.id,
         dpa.controller_state.version,
@@ -129,6 +129,7 @@ async fn dpa_scout_request_returns_typed_mlx_action(
         &model::dpa_interface::DpaInterfaceControllerState::ApplyFirmware,
     )
     .await?;
+    assert_eq!(applied, db::ConditionalWrite::Applied(()));
     txn.commit().await.unwrap();
 
     let action = env
