@@ -120,6 +120,7 @@ API GET /v2/org/{org}/nico/machine-capability removed the enum value `STATUS_ASC
 API GET /v2/org/{org}/nico/machine-capability removed the enum value `STATUS_DESC` from the `query` request parameter `orderBy`
 API GET /v2/org/{org}/nico/machine-capability removed the enum value `UPDATED_ASC` from the `query` request parameter `orderBy`
 API GET /v2/org/{org}/nico/machine-capability removed the enum value `UPDATED_DESC` from the `query` request parameter `orderBy`
+API GET /v2/org/{org}/nico/machine-capability for the `query` request parameter `orderBy`, default value `TYPE_ASC` was added
 API GET /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/cores` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
 API GET /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/count` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`
 API GET /v2/org/{org}/nico/machine/{machineId} the `machineCapabilities/items/threads` response's property type/format changed from `integer, null`/`` to `integer, null`/`uint32` for status `200`

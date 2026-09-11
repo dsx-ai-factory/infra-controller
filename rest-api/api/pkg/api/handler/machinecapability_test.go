@@ -123,6 +123,7 @@ func TestGetAllMachineCapabilityHandler_Handle(t *testing.T) {
 			wantRespCode:  http.StatusOK,
 			wantRespCount: 6,
 			wantFirstType: cutil.GetPtr(cdbm.MachineCapabilityTypeCPU),
+			wantOrderBy:   cutil.GetPtr("TYPE_ASC"),
 		},
 		{
 			name: "success retrieving Machine Capabilities ordered by type descending",

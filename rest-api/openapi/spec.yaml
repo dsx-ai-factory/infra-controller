@@ -11313,8 +11313,10 @@ paths:
             X-Pagination:
               schema:
                 type: string
-                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
+                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "TYPE_ASC"}'
               description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-machine-capabilities
