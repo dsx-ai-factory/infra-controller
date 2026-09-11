@@ -38,7 +38,12 @@ use crate::{DatabaseError, ObjectFilter, Transaction, machine};
 /// The current version of the SKU format.  The state machine will create older
 /// versions from hardware using the currently assigned sku's version so that
 /// SKUs can maintain backward compatibility
-pub const CURRENT_SKU_VERSION: u32 = 5;
+pub const CURRENT_SKU_VERSION: u32 = 6;
+
+/// First SKU version whose generated drive locations omit the trailing node of
+/// the sysfs path, the kernel-assigned `nvmeN` controller name. See
+/// [`drive_location`].
+const SKU_VERSION_WITHOUT_NVME_CONTROLLER_NODE: u32 = 6;
 
 /// Find a SKU that matches the specified SKU using the same comparison that
 /// the SKU validation code uses. (i.e. the description, id and others are not compared)
@@ -338,7 +343,7 @@ pub async fn generate_sku_from_machine_at_version(
         2 => generate_sku_from_machine_at_version_2(txn, machine_id).await,
         3 => generate_sku_from_machine_at_version_3(txn, machine_id).await,
         4 => generate_sku_from_machine_at_version_4(txn, machine_id).await,
-        5 => generate_sku_from_machine_at_version_5(txn, machine_id).await,
+        5 | 6 => generate_sku_from_machine_at_version_5_or_6(txn, machine_id, schema_version).await,
         _ => Err(DatabaseError::new(
             "generate_sku_from_machine_at_version",
             sqlx::Error::RowNotFound,
@@ -767,9 +772,12 @@ pub async fn generate_sku_from_machine_at_version_4(
     Ok(sku)
 }
 
-pub async fn generate_sku_from_machine_at_version_5(
+/// Generates a schema version 5 or 6 SKU. The two versions share everything
+/// except the drive location they record; see [`drive_location`].
+pub async fn generate_sku_from_machine_at_version_5_or_6(
     txn: impl DbReader<'_>,
     machine_id: &MachineId,
+    schema_version: u32,
 ) -> Result<Sku, DatabaseError> {
     let Some(machine) = machine::find(
         txn,
@@ -783,26 +791,27 @@ pub async fn generate_sku_from_machine_at_version_5(
     .into_iter()
     .next() else {
         return Err(DatabaseError::new(
-            "generate sku: find machine (v5)",
+            "generate sku: find machine (v5/v6)",
             sqlx::Error::RowNotFound,
         ));
     };
 
     let Some(hardware_info) = machine.status.hardware_info.as_ref() else {
         return Err(DatabaseError::new(
-            "generate sku: load hardware info (v5)",
+            "generate sku: load hardware info (v5/v6)",
             sqlx::Error::RowNotFound,
         ));
     };
 
-    let mut sku = generate_base_sku_from_hardware(&machine, 5, hardware_info);
+    let mut sku = generate_base_sku_from_hardware(&machine, schema_version, hardware_info);
 
-    // Unlike earlier versions, v5 records one storage entry per NVMe drive so
-    // each drive's size and PCI location can be validated individually. The
-    // discovered size is stored as an exact point (min == max) and the concrete
-    // sysfs/PCI path is stored as the drive's single "pattern". An expected SKU
-    // authored from this can then widen the size range or replace the literal
-    // path with a regex. Drives are ordered by path for deterministic output.
+    // Unlike earlier versions, v5 and later record one storage entry per NVMe
+    // drive so each drive's size and PCI location can be validated
+    // individually. The discovered size is stored as an exact point (min == max)
+    // and the drive's sysfs/PCI location (see `drive_location`) is stored as its
+    // single "pattern". An expected SKU authored from this can then widen the
+    // size range or replace the literal path with a regex. Drives are ordered by
+    // path for deterministic output.
     //
     // size_mb and pci_path may be absent on hardware_info records that predate
     // the v5 fields (discovered before PR #3717). Rather than failing generation
@@ -821,8 +830,8 @@ pub async fn generate_sku_from_machine_at_version_5(
             max_size_mb: nvme.size_mb,
             pci_patterns: nvme
                 .pci_path
-                .as_ref()
-                .map(|p| vec![p.clone()])
+                .as_deref()
+                .map(|path| vec![drive_location(path, schema_version)])
                 .unwrap_or_default(),
         })
         .collect();
@@ -842,9 +851,30 @@ pub async fn generate_sku_from_machine_at_version_5(
     Ok(sku)
 }
 
+/// The location recorded for a drive whose sysfs `DEVPATH` is `pci_path`.
+///
+/// Host enumeration reports each NVMe controller's full `DEVPATH`, which ends
+/// in the kernel-assigned instance node, e.g.
+/// `/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme/nvme3`. That node is
+/// numbered in probe order, so it changes across reboots and differs between
+/// identical machines. v5 stores the path verbatim, so v5 SKUs generated from
+/// the same hardware can compare unequal. v6 drops the final node and records
+/// its parent, which is fixed by the PCI slot. v5 is left as is: what a shipped
+/// version generates decides how persisted SKUs compare, and changing it could
+/// make previously distinct SKUs match.
+fn drive_location(pci_path: &str, schema_version: u32) -> String {
+    if schema_version < SKU_VERSION_WITHOUT_NVME_CONTROLLER_NODE {
+        return pci_path.to_string();
+    }
+    match pci_path.rsplit_once('/') {
+        Some((parent, _node)) if !parent.is_empty() => parent.to_string(),
+        _ => pci_path.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::{Check, check_values, value_scenarios};
     use model::hardware_info::MemoryDeviceGroup;
     use model::test_support::machine_snapshot::host_machine;
 
@@ -947,6 +977,23 @@ mod tests {
                 },
             ],
             generated_memory,
+        );
+    }
+
+    #[test]
+    fn drive_location_by_schema_version() {
+        const CONTROLLER: &str = "/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme/nvme3";
+        value_scenarios!(run = |(path, version): (&str, u32)| drive_location(path, version);
+            "v5 stores the controller DEVPATH verbatim" {
+                (CONTROLLER, 5) => CONTROLLER.to_string(),
+            }
+            "v6 drops the kernel-assigned controller node" {
+                (CONTROLLER, 6) => "/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme".to_string(),
+            }
+            "v6 keeps a path with nothing above the final node" {
+                ("nvme3", 6) => "nvme3".to_string(),
+                ("/nvme3", 6) => "/nvme3".to_string(),
+            }
         );
     }
 }

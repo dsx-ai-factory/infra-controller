@@ -64,7 +64,7 @@ type APISkuUpdateRequest struct {
 }
 
 // CoreSkuSchemaVersion is the Core wire format emitted by REST SKU mutations.
-const CoreSkuSchemaVersion uint32 = 5
+const CoreSkuSchemaVersion uint32 = 6
 
 // Validate checks the create request before conversion to Core protobufs.
 func (ascr APISkuCreateRequest) Validate() error {

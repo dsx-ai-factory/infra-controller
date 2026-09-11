@@ -34,7 +34,7 @@ type SkuStorage struct {
 	MinSizeMiB NullableUint32 `json:"minSizeMiB,omitempty"`
 	// Inclusive maximum size in MiB for each storage device. Null or omission means no upper bound. Used for SKU schema version 5 and later.
 	MaxSizeMiB NullableUint32 `json:"maxSizeMiB,omitempty"`
-	// Regular expressions matched against storage sysfs PCI paths. An empty or omitted list disables PCI location matching. Used for SKU schema version 5 and later.
+	// Regular expressions matched against each drive's sysfs PCI path. An empty or omitted list disables PCI location matching. Used for SKU schema version 5 and later.  From schema version 6 the matched path is the NVMe controller's sysfs DEVPATH with its trailing kernel-assigned `nvmeN` node removed, for example `/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme`, because that node changes with probe order. Schema version 5 matched the full DEVPATH ending in `nvmeN`, so patterns anchored on that node (such as `nvme0$`) never match under version 6 and must be rewritten to end at `/nvme`.
 	PciPatterns []string `json:"pciPatterns,omitempty"`
 }
 

@@ -28,7 +28,7 @@ pub(in crate::tests) mod tests {
         MachineValidationContext, ManagedHostState, ValidationState,
     };
     use model::metadata::Metadata;
-    use model::sku::Sku;
+    use model::sku::{SKU_VERSION_WITH_DRIVE_LOCATION, Sku};
     use model::test_support::ManagedHostConfig;
     use sqlx::PgConnection;
 
@@ -153,7 +153,7 @@ pub(in crate::tests) mod tests {
               "count": 1,
               "min_size_mb": 1800000,
               "max_size_mb": 2000000,
-              "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/nvme/nvme0/nvme0n1"]
+              "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/nvme"]
             }
           ],
           "tpm":
@@ -164,7 +164,7 @@ pub(in crate::tests) mod tests {
               "version": "2.0"
             }
         },
-        "schema_version": 5
+        "schema_version": 6
     }"#;
 
     const SKU_DATA: &str = r#"
@@ -216,7 +216,7 @@ pub(in crate::tests) mod tests {
         "count": 1,
         "min_size_mb": 1831420,
         "max_size_mb": 1831420,
-        "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme/nvme0/nvme0n1"]
+        "pci_patterns": ["/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme"]
       }
     ],
     "memory": [
@@ -234,7 +234,7 @@ pub(in crate::tests) mod tests {
         "version": "2.0"
       }
   },
-  "schema_version": 5
+  "schema_version": 6
 }"#;
 
     pub(in crate::tests) async fn handle_inventory_update(
@@ -386,15 +386,19 @@ pub(in crate::tests) mod tests {
         .await?;
         assert_eq!(old_sku.schema_version, old_schema_version);
 
-        // diff does not check version.  comparing SKUs of different versions will fail
-        let diffs = model::sku::diff_skus(&old_sku, &new_sku);
-        assert!(!diffs.is_empty());
-
         let diffs = model::sku::diff_skus(&old_sku, &old_sku);
         assert!(diffs.is_empty());
 
+        // diff does not check version. Versions before v5 compare storage by
+        // model and count, so they never match a location-based SKU. A v6 drive
+        // location is a prefix of the v5 path, so a v6 expected SKU accepts a
+        // v5 actual.
         let diffs = model::sku::diff_skus(&old_sku, &new_sku);
-        assert!(!diffs.is_empty());
+        if old_schema_version < SKU_VERSION_WITH_DRIVE_LOCATION {
+            assert!(!diffs.is_empty());
+        } else {
+            assert!(diffs.is_empty());
+        }
 
         Ok(())
     }
