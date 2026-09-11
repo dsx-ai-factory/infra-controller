@@ -21,7 +21,7 @@ pub mod profile {
     use model::attestation::profile::{
         AttestationPolicyDocument, AttestationProfile, AttesterSelection, AttesterSelectionMode,
         ComponentIdMatch, DeleteAttestationProfile, NewAttestationProfile,
-        UpdateAttestationProfile, validate_hardware_class,
+        UpdateAttestationProfile, validate_hardware_class, validate_new_hardware_class,
     };
 
     use crate as rpc;
@@ -41,6 +41,15 @@ pub mod profile {
 
     fn parse_hardware_class(value: String) -> Result<String, RpcDataConversionError> {
         validate_hardware_class(&value)
+            .map_err(|error| RpcDataConversionError::InvalidArgument(error.to_string()))?;
+        Ok(value)
+    }
+
+    /// Creating a profile additionally requires a class exploration can record,
+    /// which update and delete do not, so a profile keyed to a class this build
+    /// no longer renders stays editable.
+    fn parse_new_hardware_class(value: String) -> Result<String, RpcDataConversionError> {
+        validate_new_hardware_class(&value)
             .map_err(|error| RpcDataConversionError::InvalidArgument(error.to_string()))?;
         Ok(value)
     }
@@ -110,8 +119,7 @@ pub mod profile {
                 rpc::forge::AttesterSelectionMode::All => Self::All,
                 rpc::forge::AttesterSelectionMode::Allowlist => Self::Allowlist,
                 rpc::forge::AttesterSelectionMode::Denylist => Self::Denylist,
-                // The sentinel an omitted mode decodes to. Refused rather than
-                // defaulted, since NONE would disable attestation for the class.
+                // The sentinel an omitted mode decodes to.
                 rpc::forge::AttesterSelectionMode::Unspecified => {
                     return Err(RpcDataConversionError::MissingArgument("mode"));
                 }
@@ -166,7 +174,7 @@ pub mod profile {
             value: rpc::forge::CreateAttestationProfileRequest,
         ) -> Result<Self, Self::Error> {
             Ok(Self {
-                hardware_class: parse_hardware_class(value.hardware_class)?,
+                hardware_class: parse_new_hardware_class(value.hardware_class)?,
                 policy_document: parse_policy_document(value.selection)?,
             })
         }

@@ -358,10 +358,11 @@ pub mod spdm {
 pub mod profile {
     use config_version::ConfigVersion;
     use serde::{Deserialize, Serialize};
+    use strum::IntoEnumIterator;
 
     use super::*;
     use crate::ConfigValidationError;
-    use crate::site_explorer::UNRECOGNIZED_HARDWARE_CLASS;
+    use crate::site_explorer::{HwType, UNRECOGNIZED_HARDWARE_CLASS};
 
     /// The one reserved class an operator may write. A profile keyed `any`
     /// covers hardware whose own class has no profile of its own.
@@ -594,6 +595,33 @@ pub mod profile {
             )));
         }
         Ok(())
+    }
+
+    /// Also rejects a class exploration never records, which resolution reads
+    /// from the endpoint, so a profile keyed outside that vocabulary could
+    /// never apply to a machine.
+    ///
+    /// Only a new profile has to satisfy this. Update and delete keep to the
+    /// rules above, so renaming an `HwType` variant leaves the profiles it
+    /// orphaned still editable and removable.
+    pub fn validate_new_hardware_class(hardware_class: &str) -> Result<(), ConfigValidationError> {
+        validate_hardware_class(hardware_class)?;
+        if hardware_class != ANY_HARDWARE_CLASS
+            && !HwType::iter().any(|hw_type| hw_type.to_string() == hardware_class)
+        {
+            let known = hardware_classes().join(", ");
+            return Err(ConfigValidationError::invalid_value(format!(
+                "unknown hardware class '{hardware_class}', expected \
+                 '{ANY_HARDWARE_CLASS}' or one of: {known}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Every class a profile may be keyed to, besides `any`, in the order
+    /// `HwType` declares them, for telling an operator what was expected.
+    fn hardware_classes() -> Vec<String> {
+        HwType::iter().map(|hw_type| hw_type.to_string()).collect()
     }
 
     /// One stored profile, as persisted in `attestation_profiles`.
@@ -881,6 +909,28 @@ mod profile_test {
             // would never be read.
             "the unrecognized marker is refused" {
                 "unrecognized" => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn new_hardware_class_validation() {
+        scenarios!(
+            run = |class: &str| validate_new_hardware_class(class).map_err(drop);
+
+            "a HwType variant name is a profile key" {
+                "Gb200" => Yields(()),
+            }
+
+            // The fallback is not hardware, so the vocabulary has to exempt it.
+            "the any fallback is writable" {
+                ANY_HARDWARE_CLASS => Yields(()),
+            }
+
+            // Resolution reads the class off the endpoint, so a profile keyed
+            // to a misspelling could never apply to a machine.
+            "a class exploration never records is refused" {
+                "Gb2000" => Fails,
             }
         );
     }

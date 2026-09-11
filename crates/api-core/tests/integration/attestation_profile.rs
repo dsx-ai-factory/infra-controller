@@ -202,6 +202,13 @@ async fn the_api_refuses_what_section_6_2_forbids(pool: PgPool) {
         .expect_err("an empty class is not a profile key");
     assert_eq!(empty_class.code(), Code::InvalidArgument);
 
+    // Resolution reads the class off the endpoint, so a profile keyed to a
+    // class exploration never records could never apply to a machine.
+    let misspelled_class = create(&env, "Gb2000", gpu_allowlist())
+        .await
+        .expect_err("a class no hardware is explored as is not a profile key");
+    assert_eq!(misspelled_class.code(), Code::InvalidArgument);
+
     // An omitted mode decodes to the unset sentinel.
     let no_mode = create(
         &env,
