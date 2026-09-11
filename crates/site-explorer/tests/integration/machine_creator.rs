@@ -21,8 +21,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_rack::test_support::RmsSim;
-use carbide_site_explorer::MachineCreator;
 use carbide_site_explorer::config::SiteExplorerConfig;
+use carbide_site_explorer::test_support::{MockEndpointExplorer, TestSiteExplorer};
+use carbide_site_explorer::{EndpointExplorationService, MachineCreator, SiteExplorer};
 use carbide_test_harness::network::segment::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
@@ -33,7 +34,7 @@ use carbide_uuid::rack::{RackId, RackProfileId};
 use db::ObjectFilter;
 use librms::protos::rack_manager as rms;
 use mac_address::MacAddress;
-use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
+use model::expected_machine::{ExpectedMachine, ExpectedMachineData, HostDpuPolicy};
 use model::expected_rack::ExpectedRack;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::rack::RackConfig;
@@ -121,9 +122,21 @@ fn machine_creator_with_dpf(
 }
 
 fn machine_creator_with_rms(env: &Env, rms_sim: &RmsSim) -> MachineCreator {
+    MachineCreator::new(
+        env.pool.clone(),
+        machine_creator_config(),
+        env.api().common_pools().clone(),
+        Arc::new(rms_rack_profiles()),
+        rms_sim.as_rms_client(),
+        env.api().credential_manager().clone(),
+        false,
+    )
+}
+
+fn rms_rack_profiles() -> RackProfileConfig {
     // Rack attributes are inherited by the compute descriptor, while its
     // role-level attribute replaces the identical rack-level key.
-    let rack_profiles = RackProfileConfig {
+    RackProfileConfig {
         rack_profiles: [(
             TEST_RMS_RACK_PROFILE_ID.to_string(),
             RackProfile {
@@ -138,6 +151,7 @@ fn machine_creator_with_rms(env: &Env, rms_sim: &RmsSim) -> MachineCreator {
                 ]),
                 rack_capabilities: RackCapabilitiesSet {
                     compute: RackCapabilityCompute {
+                        count: 1,
                         vendor: Some("NVIDIA".to_string()),
                         attributes: HashMap::from([(
                             "attribute1".to_string(),
@@ -159,17 +173,7 @@ fn machine_creator_with_rms(env: &Env, rms_sim: &RmsSim) -> MachineCreator {
         )]
         .into_iter()
         .collect(),
-    };
-
-    MachineCreator::new(
-        env.pool.clone(),
-        machine_creator_config(),
-        env.api().common_pools().clone(),
-        Arc::new(rack_profiles),
-        rms_sim.as_rms_client(),
-        env.api().credential_manager().clone(),
-        false,
-    )
+    }
 }
 
 fn expected_machine(managed_host: &ManagedHostConfig) -> ExpectedMachine {
@@ -470,6 +474,123 @@ async fn test_machine_creator_retries_rms_enrichment_after_failure(
     assert_eq!(host.status.slot_number, Some(9));
     assert_eq!(host.status.tray_index, Some(4));
 
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_site_explorer_retries_rms_after_request_deadline(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let rms_sim = RmsSim::default();
+    rms_sim
+        .set_batch_get_node_device_info_delay(Duration::from_secs(60))
+        .await;
+    let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+    let managed_host = ManagedHostConfig {
+        dpus: vec![],
+        ..ManagedHostConfig::default()
+    }
+    .with_expected_machine_data(ExpectedMachineData {
+        rack_id: Some(rack_id.clone()),
+        dpu_policy: HostDpuPolicy::Ignore,
+        ..Default::default()
+    });
+    let fixture = explored_host_fixture(&env, &managed_host).await;
+    let host_bmc_ip = fixture.host.host_bmc_ip;
+
+    let mut txn = env.pool.begin().await?;
+    db::expected_rack::create(
+        txn.as_mut(),
+        &ExpectedRack {
+            rack_id,
+            rack_profile_id: RackProfileId::new(TEST_RMS_RACK_PROFILE_ID),
+            metadata: Default::default(),
+        },
+    )
+    .await?;
+    db::expected_machine::create(txn.as_mut(), expected_machine(&managed_host)).await?;
+    db::explored_endpoints::insert(host_bmc_ip, &fixture.host_report, false, txn.as_mut()).await?;
+    db::explored_endpoints::set_preingestion_complete(host_bmc_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+
+    let endpoint_explorer = Arc::new(MockEndpointExplorer::default());
+    let explorer = TestSiteExplorer::new(
+        SiteExplorer::new(
+            env.pool.clone(),
+            machine_creator_config(),
+            env.test_harness.test_meter.meter(),
+            Arc::new(EndpointExplorationService::new(
+                env.pool.clone(),
+                endpoint_explorer.clone(),
+                Arc::new(env.api().runtime_config.get_firmware_config()),
+            )),
+            endpoint_explorer.clone(),
+            env.api().common_pools().clone(),
+            env.api().work_lock_manager_handle(),
+            rms_rack_profiles(),
+            rms_sim.as_rms_client(),
+            env.api().credential_manager().clone(),
+            false,
+        ),
+        endpoint_explorer,
+    );
+    explorer.insert_endpoints(vec![(host_bmc_ip, fixture.host_report)]);
+
+    tokio::time::timeout(Duration::from_secs(30), explorer.run_single_iteration())
+        .await
+        .expect("a stalled RMS request must not hold the Site Explorer iteration open")?;
+    let requests = rms_sim
+        .submitted_batch_get_node_device_info_requests()
+        .await;
+    assert_eq!(
+        requests.len(),
+        1,
+        "the production pass must attempt RMS enrichment"
+    );
+    let identities = db::machine::find_rms_identities_by_bmc_ips(&env.pool, &[host_bmc_ip]).await?;
+    assert_eq!(
+        identities.len(),
+        1,
+        "the host must be committed before RMS times out"
+    );
+    let host = &identities[0];
+    assert_eq!((host.slot_number, host.tray_index), (None, None));
+
+    rms_sim
+        .set_batch_get_node_device_info_delay(Duration::ZERO)
+        .await;
+    rms_sim
+        .queue_batch_get_node_device_info_response(Ok(rms::BatchGetNodeDeviceInfoResponse {
+            node_device_details: vec![rms::NodeDeviceInfo {
+                node_id: host.id.clone(),
+                slot_number: Some(9),
+                tray_index: Some(4),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .await;
+
+    // A subsequent production iteration must reacquire the work lock and retry
+    // the existing host, without going through machine creation again.
+    tokio::time::timeout(Duration::from_secs(30), explorer.run_single_iteration())
+        .await
+        .expect("Site Explorer must resume after an RMS deadline")?;
+    assert_eq!(
+        rms_sim
+            .submitted_batch_get_node_device_info_requests()
+            .await
+            .len(),
+        2
+    );
+    let identities = db::machine::find_rms_identities_by_bmc_ips(&env.pool, &[host_bmc_ip]).await?;
+    assert_eq!(identities.len(), 1);
+    assert_eq!(identities[0].id, host.id);
+    assert_eq!(
+        (identities[0].slot_number, identities[0].tray_index),
+        (Some(9), Some(4))
+    );
     Ok(())
 }
 

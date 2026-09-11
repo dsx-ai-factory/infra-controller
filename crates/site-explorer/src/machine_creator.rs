@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use carbide_instrument::emit;
 use carbide_rack::rms_node_type::compute_node_identity_for_profile;
@@ -66,6 +67,9 @@ use crate::metrics::{
 use crate::{IdentifiedManagedHost, SiteExplorerConfig};
 
 const DESIRED_BOOT_INTERFACE_RECONCILE_PAGE_SIZE: i64 = 100;
+// Match RMS's 10-second I/O timeout with a total attempt deadline: HTTP/2
+// keepalives must not extend best-effort enrichment's hold on the iteration lock.
+const RMS_MACHINE_LOCATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Creates machines from site-explorer managed-host reports.
 pub struct MachineCreator {
@@ -149,6 +153,8 @@ impl MachineCreator {
     /// Site Explorer calls this after its ingestion and audit phases so RMS
     /// latency cannot serialize machine creation. Machines whose response is
     /// absent or whose request fails remain eligible on the next iteration.
+    /// The RPC deadline includes lazy connection setup; expiry cancels this
+    /// attempt, emits a failure event, and leaves stored location data unchanged.
     pub(crate) async fn reconcile_machine_locations(
         &self,
         bmc_ips: &[IpAddr],
@@ -257,17 +263,25 @@ impl MachineCreator {
             return Ok(());
         }
 
-        let response = match rms_client
-            .batch_get_node_device_info(rms::BatchGetNodeDeviceInfoRequest {
+        let response = match tokio::time::timeout(
+            RMS_MACHINE_LOCATION_TIMEOUT,
+            rms_client.batch_get_node_device_info(rms::BatchGetNodeDeviceInfoRequest {
                 nodes: Some(rms::NodeSet { nodes }),
-            })
-            .await
+            }),
+        )
+        .await
         {
-            Ok(response) => response,
-            Err(error) => {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
                 emit(SiteExplorerMachineSlotTrayFetchFailed::new(
                     error.to_string(),
                 ));
+                return Ok(());
+            }
+            Err(_) => {
+                emit(SiteExplorerMachineSlotTrayFetchFailed::new(format!(
+                    "RMS slot and tray lookup timed out after {RMS_MACHINE_LOCATION_TIMEOUT:?}"
+                )));
                 return Ok(());
             }
         };
