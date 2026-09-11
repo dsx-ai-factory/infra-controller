@@ -468,6 +468,7 @@ impl TestEnv {
             ManagedHostState::RotatingBmc { .. } => state.clone(),
             ManagedHostState::RotatingHostUefi { .. } => state.clone(),
             ManagedHostState::Decommissioning { .. } => state.clone(),
+            ManagedHostState::Reset { .. } => state.clone(),
             ManagedHostState::RotatingDpuUefi { .. } => state.clone(),
             ManagedHostState::RotatingNicLockdown => state.clone(),
             ManagedHostState::BomValidating { .. } => state.clone(),

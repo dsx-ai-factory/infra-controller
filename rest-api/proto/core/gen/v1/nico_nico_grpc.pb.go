@@ -205,6 +205,8 @@ const (
 	Forge_ListDpuWaitingForReprovisioning_FullMethodName                    = "/forge.Forge/ListDpuWaitingForReprovisioning"
 	Forge_TriggerHostReprovisioning_FullMethodName                          = "/forge.Forge/TriggerHostReprovisioning"
 	Forge_ListHostsWaitingForReprovisioning_FullMethodName                  = "/forge.Forge/ListHostsWaitingForReprovisioning"
+	Forge_TriggerManagedHostReset_FullMethodName                            = "/forge.Forge/TriggerManagedHostReset"
+	Forge_ListManagedHostsWaitingForReset_FullMethodName                    = "/forge.Forge/ListManagedHostsWaitingForReset"
 	Forge_TriggerBmcCredentialRotation_FullMethodName                       = "/forge.Forge/TriggerBmcCredentialRotation"
 	Forge_TriggerUefiCredentialRotation_FullMethodName                      = "/forge.Forge/TriggerUefiCredentialRotation"
 	Forge_TriggerNicLockdownCredentialRotation_FullMethodName               = "/forge.Forge/TriggerNicLockdownCredentialRotation"
@@ -849,6 +851,11 @@ type ForgeClient interface {
 	TriggerHostReprovisioning(ctx context.Context, in *HostReprovisioningRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(ctx context.Context, in *HostReprovisioningListRequest, opts ...grpc.CallOption) (*HostReprovisioningListResponse, error)
+	// Trigger a reset of a managed host: tear down its instance and DPF
+	// resources, then re-ingest it from DPU discovery.
+	TriggerManagedHostReset(ctx context.Context, in *ManagedHostResetRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// List managed hosts waiting for reset
+	ListManagedHostsWaitingForReset(ctx context.Context, in *ManagedHostResetListRequest, opts ...grpc.CallOption) (*ManagedHostResetListResponse, error)
 	// Operator "force-converge this BMC now" escape hatch for a single host/DPU
 	// BMC. This is asynchronous: the handler only persists (Set) or removes
 	// (Clear) the machine's `bmc_credential_rotation_requested` flag and returns;
@@ -3256,6 +3263,26 @@ func (c *forgeClient) ListHostsWaitingForReprovisioning(ctx context.Context, in 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HostReprovisioningListResponse)
 	err := c.cc.Invoke(ctx, Forge_ListHostsWaitingForReprovisioning_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) TriggerManagedHostReset(ctx context.Context, in *ManagedHostResetRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_TriggerManagedHostReset_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ListManagedHostsWaitingForReset(ctx context.Context, in *ManagedHostResetListRequest, opts ...grpc.CallOption) (*ManagedHostResetListResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ManagedHostResetListResponse)
+	err := c.cc.Invoke(ctx, Forge_ListManagedHostsWaitingForReset_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6706,6 +6733,11 @@ type ForgeServer interface {
 	TriggerHostReprovisioning(context.Context, *HostReprovisioningRequest) (*emptypb.Empty, error)
 	// List hosts waiting for reprovisioning
 	ListHostsWaitingForReprovisioning(context.Context, *HostReprovisioningListRequest) (*HostReprovisioningListResponse, error)
+	// Trigger a reset of a managed host: tear down its instance and DPF
+	// resources, then re-ingest it from DPU discovery.
+	TriggerManagedHostReset(context.Context, *ManagedHostResetRequest) (*emptypb.Empty, error)
+	// List managed hosts waiting for reset
+	ListManagedHostsWaitingForReset(context.Context, *ManagedHostResetListRequest) (*ManagedHostResetListResponse, error)
 	// Operator "force-converge this BMC now" escape hatch for a single host/DPU
 	// BMC. This is asynchronous: the handler only persists (Set) or removes
 	// (Clear) the machine's `bmc_credential_rotation_requested` flag and returns;
@@ -7836,6 +7868,12 @@ func (UnimplementedForgeServer) TriggerHostReprovisioning(context.Context, *Host
 }
 func (UnimplementedForgeServer) ListHostsWaitingForReprovisioning(context.Context, *HostReprovisioningListRequest) (*HostReprovisioningListResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListHostsWaitingForReprovisioning not implemented")
+}
+func (UnimplementedForgeServer) TriggerManagedHostReset(context.Context, *ManagedHostResetRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method TriggerManagedHostReset not implemented")
+}
+func (UnimplementedForgeServer) ListManagedHostsWaitingForReset(context.Context, *ManagedHostResetListRequest) (*ManagedHostResetListResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListManagedHostsWaitingForReset not implemented")
 }
 func (UnimplementedForgeServer) TriggerBmcCredentialRotation(context.Context, *BmcCredentialRotationRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method TriggerBmcCredentialRotation not implemented")
@@ -12062,6 +12100,42 @@ func _Forge_ListHostsWaitingForReprovisioning_Handler(srv interface{}, ctx conte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).ListHostsWaitingForReprovisioning(ctx, req.(*HostReprovisioningListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_TriggerManagedHostReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ManagedHostResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).TriggerManagedHostReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_TriggerManagedHostReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).TriggerManagedHostReset(ctx, req.(*ManagedHostResetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ListManagedHostsWaitingForReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ManagedHostResetListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ListManagedHostsWaitingForReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ListManagedHostsWaitingForReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ListManagedHostsWaitingForReset(ctx, req.(*ManagedHostResetListRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -18387,6 +18461,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListHostsWaitingForReprovisioning",
 			Handler:    _Forge_ListHostsWaitingForReprovisioning_Handler,
+		},
+		{
+			MethodName: "TriggerManagedHostReset",
+			Handler:    _Forge_TriggerManagedHostReset_Handler,
+		},
+		{
+			MethodName: "ListManagedHostsWaitingForReset",
+			Handler:    _Forge_ListManagedHostsWaitingForReset_Handler,
 		},
 		{
 			MethodName: "TriggerBmcCredentialRotation",

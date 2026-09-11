@@ -60,6 +60,7 @@ mod machine_update_manager;
 mod machine_validation;
 mod maintenance;
 mod managed_host_decommissioning;
+mod managed_host_reset;
 #[cfg(feature = "linux-build")]
 mod measured_boot;
 mod network_security_group;

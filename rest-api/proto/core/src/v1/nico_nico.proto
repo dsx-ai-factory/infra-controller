@@ -407,6 +407,13 @@ service Forge {
   rpc TriggerHostReprovisioning(HostReprovisioningRequest) returns (google.protobuf.Empty);
   // List hosts waiting for reprovisioning
   rpc ListHostsWaitingForReprovisioning(HostReprovisioningListRequest) returns (HostReprovisioningListResponse);
+
+  // Trigger a reset of a managed host: tear down its instance and DPF
+  // resources, then re-ingest it from DPU discovery.
+  rpc TriggerManagedHostReset(ManagedHostResetRequest) returns (google.protobuf.Empty);
+  // List managed hosts waiting for reset
+  rpc ListManagedHostsWaitingForReset(ManagedHostResetListRequest) returns (ManagedHostResetListResponse);
+
   // Operator "force-converge this BMC now" escape hatch for a single host/DPU
   // BMC. This is asynchronous: the handler only persists (Set) or removes
   // (Clear) the machine's `bmc_credential_rotation_requested` flag and returns;
@@ -10382,6 +10389,39 @@ message InterfaceAddressConfig {
   // and debugging; the tenant is not expected to access this address. Writers
   // must set this value on at most one family entry.
   optional string tenant_vrf_loopback_ip = 7;
+}
+
+message ManagedHostResetRequest {
+  enum Mode {
+    // Zero value so an omitted mode is rejected, not defaulted to an action.
+    Unspecified = 0;
+    Set = 1;
+    Clear = 2;
+  }
+  // Host to reset. Not a DPU: a reset tears down every DPU attached to the
+  // host, so it is only expressible against the host.
+  common.MachineId machine_id = 1;
+  Mode mode = 2;
+  UpdateInitiator initiator = 3;
+
+  // Operator acknowledgment that resetting an assigned host destroys the live
+  // tenant instance and its data. The server rejects a Set on an assigned host
+  // unless this is set.
+  bool allow_reset_with_instance = 4;
+}
+
+message ManagedHostResetListRequest {
+}
+
+message ManagedHostResetListResponse {
+  message ManagedHostResetListItem {
+    common.MachineId id = 1; // Host machine ID
+    string state = 2; // ManagedHost state
+    string initiator = 3; // Who requested this reset.
+    google.protobuf.Timestamp requested_at = 4; // When the reset was requested.
+    optional google.protobuf.Timestamp started_at = 5; // When the reset started.
+  }
+  repeated ManagedHostResetListItem hosts = 1;
 }
 
 // Selects a fixed, versioned mlxconfig profile for DPU provisioning.
