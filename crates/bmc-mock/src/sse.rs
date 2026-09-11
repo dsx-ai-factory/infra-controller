@@ -1,21 +1,45 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Connection-owned delivery, heartbeat timing, and raw fault execution.
+//! Server-sent-event delivery for the mock's `EventService`: one connection's
+//! cursor over the bounded replay history, comment heartbeats, and the raw
+//! fault scripts a test can queue in place of a live stream. The registry these
+//! subscribers read from is `crate::redfish::event_service::EventServiceState`.
 
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use super::state::{LiveFrame, ScriptStep};
-use super::{EventServiceState, StreamStep};
+use crate::redfish::event_service::{EventServiceState, LiveFrame, ScriptStep};
+
+/// One raw fault-stream operation. Claimed scripts run once per connection,
+/// bypass normal event history, and are cancelled when their response is dropped.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StreamStep {
+    /// Send exact bytes, without SSE validation; JSON encodes bytes as integers.
+    Bytes {
+        /// Raw response bytes.
+        data: Vec<u8>,
+    },
+    /// Wait this many milliseconds; a whole script may delay at most 60 seconds.
+    Delay {
+        /// Delay in milliseconds.
+        millis: u64,
+    },
+    /// End the response cleanly. Must be the last step.
+    Eof,
+    /// End the response with an I/O error. Must be the last step.
+    Error,
+}
 
 /// Fixed at subscription: either a claimed raw script or live replay with heartbeats.
-pub(super) enum Delivery {
+pub(crate) enum Delivery {
     Live {
         next_seq: u64,
         heartbeat_at: Option<Instant>,
@@ -25,7 +49,7 @@ pub(super) enum Delivery {
     },
 }
 
-pub(super) struct Subscriber {
+pub(crate) struct Subscriber {
     state: Arc<EventServiceState>,
     id: u64,
     delivery: Delivery,
@@ -39,7 +63,7 @@ impl Drop for Subscriber {
 }
 
 impl Subscriber {
-    pub(super) fn new(
+    pub(crate) fn new(
         state: Arc<EventServiceState>,
         id: u64,
         delivery: Delivery,
@@ -55,7 +79,7 @@ impl Subscriber {
 
     /// Next body chunk: a frame, a heartbeat, or script bytes. `None` ends the
     /// body cleanly; `Err` ends it with a body error.
-    pub(super) async fn next(&mut self) -> Option<Result<Bytes, io::Error>> {
+    pub(crate) async fn next(&mut self) -> Option<Result<Bytes, io::Error>> {
         loop {
             let wake_at = match &mut self.delivery {
                 Delivery::Script { delay_until } => match *delay_until {
@@ -143,8 +167,9 @@ mod tests {
     use futures::FutureExt;
     use tokio::time::Instant;
 
-    use super::super::fixtures::{event, metric, state};
-    use super::super::{EventServiceConfig, EventServiceError, EventServiceState, StreamStep};
+    use super::StreamStep;
+    use crate::redfish::event_service::fixtures::{event, metric, state};
+    use crate::redfish::event_service::{EventServiceConfig, EventServiceError, EventServiceState};
 
     #[tokio::test]
     async fn replay_fanout_live_handoff_and_lag() {

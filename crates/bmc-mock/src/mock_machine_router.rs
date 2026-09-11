@@ -155,7 +155,7 @@ fn machine_router_inner(
         .add_routes(crate::redfish::service_root::add_routes)
         .add_routes(|router| {
             if event_service_config.is_some() {
-                crate::redfish::event_service::add_routes(router)
+                crate::event_controls::add_routes(crate::redfish::event_service::add_routes(router))
             } else {
                 router
             }

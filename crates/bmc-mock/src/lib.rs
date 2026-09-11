@@ -29,6 +29,7 @@ mod auth_router;
 pub mod availability;
 mod bmc_state;
 mod combined_server;
+mod event_controls;
 mod http;
 mod hw;
 pub mod infiniband;
@@ -39,6 +40,7 @@ mod middleware_router;
 mod mock_machine_router;
 mod rack_info;
 mod redfish;
+mod sse;
 mod tar_router;
 pub mod test_support;
 pub mod tls;
@@ -59,10 +61,10 @@ pub use mock_machine_router::{
 };
 pub use rack_info::RackInfo;
 pub use redfish::event_service::{
-    EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState,
-    EventServiceStats, StreamStep,
+    EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
 };
 pub use redfish::virtual_media::DeviceConfig as VirtualMediaDeviceConfig;
+pub use sse::StreamStep;
 
 pub const DUMMY_FACTORY_USERNAME: &str = "root";
 pub const DUMMY_FACTORY_PASSWORD: &str = "factory_password";

@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::SecondsFormat;
-use serde_json::json;
 
 use crate::injection::InjectionStore;
 use crate::redfish;
@@ -88,24 +87,15 @@ impl BmcState {
             return;
         };
         let sequence = self.event_sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        let event_id = format!("/redfish/v1/EventService/Events/{sequence}");
-        let payload = json!({
-            "@odata.type": "#Event.v1_6_0.Event",
-            "@odata.id": event_id,
-            "Id": sequence.to_string(),
-            "Name": "Event Array",
-            "Events": [{
-                "@odata.id": format!("{event_id}#/Events/0"),
-                "MemberId": "0",
-                "EventId": sequence.to_string(),
-                "EventType": "Alert",
-                "EventTimestamp": created,
-                "MessageId": draft.message_id,
-                "Message": draft.message,
-                "MessageSeverity": draft.severity.as_str(),
-                "OriginOfCondition": {"@odata.id": entry.unwrap_or(draft.origin)},
-            }],
-        });
+        let payload = redfish::event::builder(&redfish::event::resource(sequence))
+            .record(&redfish::event::EventRecord {
+                message_id: draft.message_id,
+                message: &draft.message,
+                severity: draft.severity.as_str(),
+                timestamp: &created,
+                origin: entry.as_deref().unwrap_or(&draft.origin),
+            })
+            .build();
         if let Err(error) = events.publish(payload) {
             tracing::warn!(error = %error, "lifecycle event not published");
         }

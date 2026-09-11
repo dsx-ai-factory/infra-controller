@@ -1,37 +1,728 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded per-BMC SSE publication, replay, and deterministic stream faults.
+//! Redfish `EventService`: bounded publication and replay history, subscriber
+//! admission, the `ServerSentEventUri` endpoint, and the `EventDestination`
+//! members it creates for open streams. Stream delivery and fault scripts live
+//! in `crate::sse`; the `/Mock/EventService` controls in `crate::event_controls`.
 
-mod routes;
-mod state;
-mod stream;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::Duration;
 
-pub(crate) use routes::{add_routes, resource, with_lifetime};
-pub use state::{
-    EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState,
-    EventServiceStats, StreamStep,
-};
+use axum::body::Body;
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Extension, Json, Router};
+use bytes::Bytes;
+use futures::stream;
+use nv_redfish::event_service::EventStreamPayload;
+use serde::Serialize;
+use serde_json::{Value, json};
+use tokio::sync::watch;
+
+use super::event_destination;
+use super::event_destination::SUBSCRIPTIONS;
+use crate::BmcState;
+use crate::combined_server::OutputStallTimeout;
+use crate::http::redfish_error;
+use crate::json::{JsonExt, JsonPatch};
+use crate::redfish::Resource;
+use crate::redfish::session_service::generate_token;
+use crate::sse::{Delivery, StreamStep, Subscriber};
 
 const ROOT: &str = "/redfish/v1/EventService";
 const SSE: &str = "/redfish/v1/EventService/SSE";
-const SUBSCRIPTIONS: &str = "/redfish/v1/EventService/Subscriptions";
 const MAX_SCRIPTS: usize = 8;
 const MAX_SCRIPT_BYTES: usize = 1024 * 1024;
 const MAX_QUEUED_BYTES: usize = 4 * MAX_SCRIPT_BYTES;
 const MAX_SCRIPT_STEPS: usize = 256;
 const MAX_SCRIPT_DELAY_MS: u64 = 60_000;
 
-/// Payload and state fixtures shared by the state, stream, and router tests.
-#[cfg(test)]
-mod fixtures {
-    use std::sync::Arc;
+/// Resource limits for one BMC's EventService. Validate them with
+/// `EventServiceConfig::try_from`; `Default` is always valid.
+#[derive(Clone, Debug)]
+pub struct EventServiceLimits {
+    /// Held response bodies, including closing streams. Excess opens return 503.
+    pub max_subscribers: usize,
+    /// Encoded bytes per frame, including SSE framing. Must fit in history.
+    pub max_frame_bytes: usize,
+    /// Retained replayable frames.
+    pub max_frames: usize,
+    /// Retained encoded bytes. At least `max_frame_bytes`.
+    pub max_history_bytes: usize,
+    /// Comment heartbeat interval on idle live streams. `None` disables heartbeats.
+    pub heartbeat: Option<Duration>,
+    /// How long an emitted frame may wait for transport progress before the
+    /// serving connection is closed. Idle waits between frames do not count.
+    pub output_stall_timeout: Duration,
+}
 
+impl Default for EventServiceLimits {
+    fn default() -> Self {
+        Self {
+            max_subscribers: 16,
+            max_frame_bytes: 256 * 1024,
+            max_frames: 256,
+            max_history_bytes: 4 * 1024 * 1024,
+            heartbeat: Some(Duration::from_secs(15)),
+            output_stall_timeout: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Validated [`EventServiceLimits`]; an invalid configuration cannot reach
+/// router construction.
+#[derive(Clone, Debug, Default)]
+pub struct EventServiceConfig {
+    pub(crate) limits: EventServiceLimits,
+}
+
+impl TryFrom<EventServiceLimits> for EventServiceConfig {
+    type Error = EventServiceError;
+
+    /// Every count must be positive, a frame must fit in history, and each
+    /// interval must be positive and at most one day.
+    fn try_from(limits: EventServiceLimits) -> Result<Self, EventServiceError> {
+        const MAX_INTERVAL: Duration = Duration::from_secs(86_400);
+        let bounded = |interval: Duration| !interval.is_zero() && interval <= MAX_INTERVAL;
+        let valid = limits.max_subscribers > 0
+            && limits.max_frame_bytes > 0
+            && limits.max_frames > 0
+            && limits.max_frame_bytes <= limits.max_history_bytes
+            && limits.heartbeat.is_none_or(bounded)
+            && bounded(limits.output_stall_timeout);
+        if !valid {
+            return Err(EventServiceError::Invalid(
+                "invalid event-service limits".into(),
+            ));
+        }
+        Ok(Self { limits })
+    }
+}
+
+/// Rejection from publication, subscription, or fault-script admission.
+#[derive(Debug, thiserror::Error)]
+pub enum EventServiceError {
+    /// The event service or subscription does not exist.
+    #[error("event service or subscription not found")]
+    NotFound,
+    /// The payload, cursor, or configuration is invalid; HTTP controls return 400.
+    #[error("{0}")]
+    Invalid(String),
+    /// A configured frame or script byte/step limit was exceeded; HTTP returns 413.
+    #[error("event or script exceeds its configured limit")]
+    TooLarge,
+    /// Subscriber or script capacity is exhausted; HTTP returns 503.
+    #[error("event service is at capacity")]
+    Unavailable,
+}
+
+/// Observable per-BMC stream state; transport IDs are unrelated to log entry IDs.
+#[derive(Debug, Serialize)]
+pub struct EventServiceStats {
+    /// Opaque incarnation token; changes on BMC reset.
+    pub generation: String,
+    /// Number of active EventDestination resources.
+    pub subscribers: usize,
+    /// Response bodies still held by readers/transports, including closing streams.
+    /// These retain admission slots until dropped.
+    pub streams: usize,
+    /// Number of replayable frames retained.
+    pub retained_frames: usize,
+    /// Encoded bytes retained, including frame delimiters.
+    pub retained_bytes: usize,
+    /// Scripts awaiting an accepted connection.
+    pub queued_scripts: usize,
+    /// Bytes in queued raw scripts.
+    pub queued_script_bytes: usize,
+    /// Subscribers terminated because their cursor fell behind retention.
+    pub lagged: u64,
+    /// Subscribers explicitly closed or closed by reset.
+    pub closed: u64,
+}
+
+#[derive(Debug)]
+struct Frame {
+    seq: u64,
+    bytes: Bytes,
+}
+
+#[derive(Debug)]
+struct Subscription {
+    script: Option<VecDeque<StreamStep>>,
+}
+
+#[derive(Debug)]
+struct Inner {
+    generation: String,
+    next_seq: u64,
+    next_subscriber: u64,
+    subscribers: BTreeMap<u64, Subscription>,
+    streams: usize,
+    frames: VecDeque<Frame>,
+    retained_bytes: usize,
+    scripts: VecDeque<(VecDeque<StreamStep>, usize)>,
+    script_bytes: usize,
+    lagged: u64,
+    closed: u64,
+}
+
+/// Outcome of taking a scripted subscriber's next step.
+pub(crate) enum ScriptStep {
+    /// The subscription was closed or deleted.
+    Closed,
+    /// The script has no remaining steps: clean EOF.
+    Finished,
+    Step(StreamStep),
+}
+
+/// Outcome of asking for a live subscriber's next frame.
+pub(crate) enum LiveFrame {
+    /// The subscription was closed or deleted.
+    Closed,
+    /// The cursor's next frame was evicted from history.
+    Lagged,
+    Frame(Bytes),
+    /// Nothing new has been published.
+    Pending,
+}
+
+/// Shared, bounded event state for one BMC. Publish never waits for a reader.
+/// Hardware profiles configure support; access the running service through `BmcState`.
+#[derive(Debug)]
+pub struct EventServiceState {
+    pub(crate) config: EventServiceConfig,
+    inner: Mutex<Inner>,
+    changed: watch::Sender<()>,
+}
+
+impl EventServiceState {
+    pub(crate) fn new(config: EventServiceConfig) -> Arc<Self> {
+        Arc::new(Self {
+            config,
+            inner: Mutex::new(Inner {
+                generation: generate_token(),
+                next_seq: 1,
+                next_subscriber: 1,
+                subscribers: BTreeMap::new(),
+                streams: 0,
+                frames: VecDeque::new(),
+                retained_bytes: 0,
+                scripts: VecDeque::new(),
+                script_bytes: 0,
+                lagged: 0,
+                closed: 0,
+            }),
+            changed: watch::channel(()).0,
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().expect("event state poisoned")
+    }
+
+    /// Clear replay history, queued scripts, and active subscriptions, and
+    /// start a new generation so earlier cursors are rejected.
+    pub(crate) fn reset(&self) {
+        let mut inner = self.lock();
+        inner.generation = generate_token();
+        inner.next_seq = 1;
+        inner.frames.clear();
+        inner.retained_bytes = 0;
+        inner.scripts.clear();
+        inner.script_bytes = 0;
+        self.close_locked(&mut inner);
+    }
+
+    // Destructors must not recover potentially inconsistent poisoned state.
+    pub(crate) fn unsubscribe_on_drop(&self, id: u64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.subscribers.remove(&id);
+            inner.streams = inner.streams.saturating_sub(1);
+        }
+    }
+
+    fn close_on_drop(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            self.close_locked(&mut inner);
+        }
+    }
+
+    fn close_locked(&self, inner: &mut Inner) {
+        inner.closed = inner.closed.saturating_add(inner.subscribers.len() as u64);
+        // Claimed script data belongs to the registry, so closing frees it even
+        // if transport flow control has stopped polling the response body.
+        inner.subscribers.clear();
+        self.changed.send_replace(());
+    }
+
+    /// Validate an Event or MetricReport document with the consumer's decoder
+    /// and publish it, returning its opaque SSE ID. Invalid or oversized
+    /// documents consume no sequence number and wake no reader.
+    pub fn publish(&self, payload: Value) -> Result<String, EventServiceError> {
+        let data = serde_json::to_string(&payload)
+            .map_err(|e| EventServiceError::Invalid(e.to_string()))?;
+        let _: EventStreamPayload = serde_json::from_value(payload)
+            .map_err(|e| EventServiceError::Invalid(e.to_string()))?;
+        let mut inner = self.lock();
+        let seq = inner.next_seq;
+        let next = seq.checked_add(1).ok_or(EventServiceError::Unavailable)?;
+        let id = format!("{}:{seq}", inner.generation);
+        let bytes = Bytes::from(format!("id: {id}\ndata: {data}\n\n"));
+        if bytes.len() > self.config.limits.max_frame_bytes {
+            return Err(EventServiceError::TooLarge);
+        }
+        inner.next_seq = next;
+        inner.retained_bytes += bytes.len();
+        inner.frames.push_back(Frame { seq, bytes });
+        while inner.frames.len() > self.config.limits.max_frames
+            || inner.retained_bytes > self.config.limits.max_history_bytes
+        {
+            inner.retained_bytes -= inner.frames.pop_front().unwrap().bytes.len();
+        }
+        self.changed.send_replace(());
+        Ok(id)
+    }
+
+    /// End active subscriptions without clearing replay history or queued scripts.
+    /// Closing bodies retain admission slots until the transport drops them.
+    pub fn close_subscribers(&self) {
+        let mut inner = self.lock();
+        self.close_locked(&mut inner);
+    }
+
+    /// Return bounded state and counters.
+    pub fn stats(&self) -> EventServiceStats {
+        let inner = self.lock();
+        EventServiceStats {
+            generation: inner.generation.clone(),
+            subscribers: inner.subscribers.len(),
+            streams: inner.streams,
+            retained_frames: inner.frames.len(),
+            retained_bytes: inner.retained_bytes,
+            queued_scripts: inner.scripts.len(),
+            queued_script_bytes: inner.script_bytes,
+            lagged: inner.lagged,
+            closed: inner.closed,
+        }
+    }
+
+    /// Queue a raw script for the next accepted live-only connection. Limits:
+    /// 8 queued scripts, 256 steps and 1 MiB per script, 4 MiB queued bytes,
+    /// and 60 seconds of total delay per script. A terminal step must be last;
+    /// reaching the end without one is a clean EOF.
+    pub fn queue_script(&self, steps: Vec<StreamStep>) -> Result<(), EventServiceError> {
+        if steps.is_empty() || steps.len() > MAX_SCRIPT_STEPS {
+            return Err(EventServiceError::TooLarge);
+        }
+        let mut bytes = 0usize;
+        let mut delay = 0u64;
+        for (index, step) in steps.iter().enumerate() {
+            match step {
+                StreamStep::Bytes { data } => bytes = bytes.saturating_add(data.len()),
+                StreamStep::Delay { millis } => delay = delay.saturating_add(*millis),
+                StreamStep::Eof | StreamStep::Error if index + 1 != steps.len() => {
+                    return Err(EventServiceError::Invalid(
+                        "terminal script step must be last".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if bytes > MAX_SCRIPT_BYTES || delay > MAX_SCRIPT_DELAY_MS {
+            return Err(EventServiceError::TooLarge);
+        }
+        let mut inner = self.lock();
+        if inner.scripts.len() >= MAX_SCRIPTS
+            || inner.script_bytes.saturating_add(bytes) > MAX_QUEUED_BYTES
+        {
+            return Err(EventServiceError::Unavailable);
+        }
+        inner.scripts.push_back((steps.into(), bytes));
+        inner.script_bytes += bytes;
+        Ok(())
+    }
+
+    /// Active EventDestination member IDs in ascending order.
+    fn subscription_ids(&self) -> Vec<u64> {
+        self.lock().subscribers.keys().copied().collect()
+    }
+
+    /// Opaque Context of an active subscription. Its shape differs from frame
+    /// IDs so echoing it as a `Last-Event-ID` is rejected.
+    fn subscription_context(&self, id: u64) -> Option<String> {
+        let inner = self.lock();
+        inner
+            .subscribers
+            .contains_key(&id)
+            .then(|| format!("subscription:{}:{id}", inner.generation))
+    }
+
+    /// End one subscription. Its response body keeps the admission slot until dropped.
+    fn delete_subscription(&self, id: u64) -> bool {
+        let mut inner = self.lock();
+        if inner.subscribers.remove(&id).is_none() {
+            return false;
+        }
+        inner.closed = inner.closed.saturating_add(1);
+        self.changed.send_replace(());
+        true
+    }
+
+    pub(crate) fn is_subscribed(&self, id: u64) -> bool {
+        self.lock().subscribers.contains_key(&id)
+    }
+
+    pub(crate) fn pop_script_step(&self, id: u64) -> ScriptStep {
+        let mut inner = self.lock();
+        match inner
+            .subscribers
+            .get_mut(&id)
+            .and_then(|subscription| subscription.script.as_mut())
+        {
+            None => ScriptStep::Closed,
+            Some(script) => script
+                .pop_front()
+                .map_or(ScriptStep::Finished, ScriptStep::Step),
+        }
+    }
+
+    pub(crate) fn next_frame(&self, id: u64, next_seq: u64) -> LiveFrame {
+        let mut inner = self.lock();
+        if !inner.subscribers.contains_key(&id) {
+            return LiveFrame::Closed;
+        }
+        let Some(first_seq) = inner.frames.front().map(|frame| frame.seq) else {
+            return LiveFrame::Pending;
+        };
+        if first_seq > next_seq {
+            inner.lagged += 1;
+            return LiveFrame::Lagged;
+        }
+        // Frames have contiguous sequence numbers within one generation.
+        usize::try_from(next_seq - first_seq)
+            .ok()
+            .and_then(|offset| inner.frames.get(offset))
+            .map_or(LiveFrame::Pending, |frame| {
+                LiveFrame::Frame(frame.bytes.clone())
+            })
+    }
+
+    /// Register a subscriber. Cursor validation precedes the capacity check so
+    /// a stale cursor is reported even while closing bodies hold every slot. A
+    /// cursor naming the frame just before the oldest retained one still resumes
+    /// losslessly. Only live-only opens claim a queued raw script.
+    pub(crate) fn subscribe(
+        self: &Arc<Self>,
+        last_id: Option<&str>,
+    ) -> Result<Subscriber, EventServiceError> {
+        let mut inner = self.lock();
+        let next_seq = match last_id {
+            None => inner.next_seq,
+            Some(id) => {
+                let seq = id
+                    .strip_prefix(&inner.generation)
+                    .and_then(|suffix| suffix.strip_prefix(':'))
+                    .and_then(|seq| seq.parse::<u64>().ok())
+                    .filter(|seq| id == format!("{}:{seq}", inner.generation))
+                    // Bound first: once `seq < next_seq`, `seq + 1` cannot overflow.
+                    .filter(|seq| *seq < inner.next_seq)
+                    .filter(|seq| inner.frames.front().is_some_and(|f| seq + 1 >= f.seq))
+                    .ok_or_else(|| {
+                        EventServiceError::Invalid(
+                            "Last-Event-ID is not in retained history".into(),
+                        )
+                    })?;
+                seq + 1
+            }
+        };
+        if inner.streams >= self.config.limits.max_subscribers {
+            return Err(EventServiceError::Unavailable);
+        }
+        let id = inner.next_subscriber;
+        inner.next_subscriber = id.checked_add(1).ok_or(EventServiceError::Unavailable)?;
+        let script = match last_id {
+            None => inner.scripts.pop_front().map(|(steps, bytes)| {
+                inner.script_bytes -= bytes;
+                steps
+            }),
+            Some(_) => None,
+        };
+        let delivery = if script.is_some() {
+            Delivery::Script { delay_until: None }
+        } else {
+            Delivery::Live {
+                next_seq,
+                heartbeat_at: None,
+            }
+        };
+        inner.subscribers.insert(id, Subscription { script });
+        inner.streams += 1;
+        Ok(Subscriber::new(
+            self.clone(),
+            id,
+            delivery,
+            self.changed.subscribe(),
+        ))
+    }
+}
+
+impl IntoResponse for EventServiceError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Invalid(_) => StatusCode::BAD_REQUEST,
+            Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        redfish_error(status, &self.to_string())
+    }
+}
+
+pub(crate) fn add_routes(router: Router<BmcState>) -> Router<BmcState> {
+    router
+        .route(&resource().odata_id, get(service))
+        .route(
+            SSE,
+            // Axum would otherwise serve HEAD through the GET handler and register a subscriber.
+            get(events).head(|| async { (StatusCode::METHOD_NOT_ALLOWED, [("allow", "GET")]) }),
+        )
+        .route(SUBSCRIPTIONS, get(subscriptions))
+        .route(
+            &format!("{SUBSCRIPTIONS}/{{id}}"),
+            get(subscription).delete(delete_subscription),
+        )
+}
+
+/// The BMC's event service, or the 404 every event route answers without one.
+pub(crate) fn enabled(state: &BmcState) -> Result<Arc<EventServiceState>, EventServiceError> {
+    state
+        .event_service
+        .clone()
+        .ok_or(EventServiceError::NotFound)
+}
+
+pub(crate) fn resource() -> Resource<'static> {
+    Resource {
+        odata_id: Cow::Borrowed(ROOT),
+        odata_type: Cow::Borrowed("#EventService.v1_2_0.EventService"),
+        id: Cow::Borrowed("EventService"),
+        name: Cow::Borrowed("Event Service"),
+    }
+}
+
+async fn service(State(state): State<BmcState>) -> Result<Response, EventServiceError> {
+    enabled(&state)?;
+    Ok(Json(
+        resource()
+            .json_patch()
+            .patch(json!({
+                "ServiceEnabled": true, "ServerSentEventUri": SSE,
+                "EventFormatTypes": ["Event", "MetricReport"]
+            }))
+            .patch(event_destination::collection().nav_property("Subscriptions")),
+    )
+    .into_response())
+}
+
+// HTTP list delimiters inside quoted parameter values are literal characters.
+fn split_quoted(value: &str, delimiter: char) -> impl Iterator<Item = &str> {
+    let mut quoted = false;
+    let mut escaped = false;
+    value.split(move |ch| {
+        if escaped {
+            escaped = false;
+        } else if quoted && ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            quoted = !quoted;
+        } else if !quoted && ch == delimiter {
+            return true;
+        }
+        false
+    })
+}
+
+/// Media-range negotiation for the served `text/event-stream` representation,
+/// which carries no media parameters: parameters other than `q` are ignored, a
+/// more specific range wins, and equally specific ranges take the highest weight.
+fn accepts_sse(headers: &HeaderMap) -> bool {
+    if !headers.contains_key("accept") {
+        return true;
+    }
+    let mut selected: Option<(u8, f32)> = None;
+    for value in headers.get_all("accept") {
+        let Ok(value) = value.to_str() else {
+            return false;
+        };
+        for range in split_quoted(value, ',') {
+            let mut parts = split_quoted(range, ';');
+            let specificity = match parts
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "text/event-stream" => 2,
+                "text/*" => 1,
+                "*/*" => 0,
+                _ => continue,
+            };
+            let quality = parts
+                .filter_map(|parameter| parameter.split_once('='))
+                .find(|(key, _)| key.trim().eq_ignore_ascii_case("q"))
+                .map_or(1.0, |(_, weight)| {
+                    weight
+                        .trim()
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|q| (0.0..=1.0).contains(q))
+                        .unwrap_or(0.0)
+                });
+            selected = Some(match selected {
+                Some((s, q)) if s > specificity => (s, q),
+                Some((s, q)) if s == specificity => (s, q.max(quality)),
+                _ => (specificity, quality),
+            });
+        }
+    }
+    selected.is_some_and(|(_, quality)| quality > 0.0)
+}
+
+async fn events(
+    State(state): State<BmcState>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Result<Response, EventServiceError> {
+    let state = enabled(&state)?;
+    if uri.query().is_some() {
+        return Err(EventServiceError::Invalid(
+            "SSE query options are unsupported".into(),
+        ));
+    }
+    if !accepts_sse(&headers) {
+        return Ok(StatusCode::NOT_ACCEPTABLE.into_response());
+    }
+    let last_id = match headers.get("last-event-id").map(|v| v.to_str()) {
+        Some(Err(_)) => {
+            return Err(EventServiceError::Invalid(
+                "invalid Last-Event-ID header".into(),
+            ));
+        }
+        Some(Ok(id)) => Some(id),
+        None => None,
+    };
+    let subscriber = state.subscribe(last_id)?;
+    let body = Body::from_stream(stream::unfold(Some(subscriber), |subscriber| async {
+        let mut subscriber = subscriber?;
+        match subscriber.next().await {
+            Some(Ok(bytes)) => Some((Ok(bytes), Some(subscriber))),
+            Some(Err(error)) => Some((Err(error), None)),
+            None => None,
+        }
+    }));
+    let mut response = (
+        [
+            ("content-type", "text/event-stream"),
+            ("cache-control", "no-cache"),
+        ],
+        body,
+    )
+        .into_response();
+    // CombinedServer honors this bound; a bare router (in-process tests, other
+    // embedders) serves the body without one.
+    response
+        .extensions_mut()
+        .insert(OutputStallTimeout(state.config.limits.output_stall_timeout));
+    Ok(response)
+}
+
+async fn subscriptions(State(state): State<BmcState>) -> Result<Response, EventServiceError> {
+    let members: Vec<_> = enabled(&state)?
+        .subscription_ids()
+        .into_iter()
+        .map(|id| event_destination::resource(id).entity_ref())
+        .collect();
+    Ok(Json(event_destination::collection().with_members(&members)).into_response())
+}
+
+fn subscription_id(id: &str) -> Result<u64, EventServiceError> {
+    id.parse::<u64>()
+        .ok()
+        .filter(|parsed| parsed.to_string() == id)
+        .ok_or(EventServiceError::NotFound)
+}
+
+async fn subscription(
+    State(state): State<BmcState>,
+    Path(id): Path<String>,
+) -> Result<Response, EventServiceError> {
+    let state = enabled(&state)?;
+    let id = subscription_id(&id)?;
+    let context = state
+        .subscription_context(id)
+        .ok_or(EventServiceError::NotFound)?;
+    let document = event_destination::builder(&event_destination::resource(id))
+        .context(&context)
+        .sse()
+        .build();
+    Ok(Json(document).into_response())
+}
+
+async fn delete_subscription(
+    State(state): State<BmcState>,
+    Path(id): Path<String>,
+) -> Result<Response, EventServiceError> {
+    let state = enabled(&state)?;
+    if !state.delete_subscription(subscription_id(&id)?) {
+        return Err(EventServiceError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+struct RouterLease(Weak<EventServiceState>);
+impl Drop for RouterLease {
+    fn drop(&mut self) {
+        if let Some(state) = self.0.upgrade() {
+            state.close_on_drop();
+        }
+    }
+}
+
+/// Tie active streams to the router's lifetime. Only router clones own this
+/// lease; response streams own the event state alone, so removing the final
+/// router closes streams even when a test retains `BmcState` to inspect cleanup.
+pub(crate) fn with_lifetime(router: Router, state: Option<&Arc<EventServiceState>>) -> Router {
+    match state {
+        Some(state) => router.layer(Extension(Arc::new(RouterLease(Arc::downgrade(state))))),
+        None => router,
+    }
+}
+
+/// Payload, state, and router fixtures shared by the EventService, SSE
+/// delivery, and mock-control tests.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::response::Response;
     use serde_json::{Value, json};
+    use tower::ServiceExt;
 
     use super::{EventServiceConfig, EventServiceLimits, EventServiceState};
+    use crate::test_support::{NoopCallbacks, host_info};
+    use crate::{BmcState, HardwareType, MachineRouterOptions, machine_router};
 
-    pub(super) fn event() -> Value {
+    pub(crate) fn event() -> Value {
         json!({"@odata.id": "/redfish/v1/EventService/SSE#/Event1",
             "@odata.type": "#Event.v1_6_0.Event", "Id": "1", "Name": "Test event",
             "Events": [{"@odata.id": "/redfish/v1/EventService/SSE#/Events/1",
@@ -40,7 +731,7 @@ mod fixtures {
                 "EventTimestamp": "2026-09-10T12:00:00Z", "MessageSeverity": "OK"}]})
     }
 
-    pub(super) fn metric() -> Value {
+    pub(crate) fn metric() -> Value {
         json!({"@odata.id": "/redfish/v1/TelemetryService/MetricReports/Power",
             "@odata.type": "#MetricReport.v1_3_0.MetricReport", "Id": "Power", "Name": "Power",
             "MetricReportDefinition": {"@odata.id": "/redfish/v1/TelemetryService/MetricReportDefinitions/Power"},
@@ -50,7 +741,7 @@ mod fixtures {
     }
 
     /// Heartbeats off; other limits default.
-    pub(super) fn limits(
+    pub(crate) fn limits(
         max_subscribers: usize,
         max_frame_bytes: usize,
         max_frames: usize,
@@ -67,37 +758,12 @@ mod fixtures {
         .unwrap()
     }
 
-    pub(super) fn state(frames: usize) -> Arc<EventServiceState> {
+    pub(crate) fn state(frames: usize) -> Arc<EventServiceState> {
         EventServiceState::new(limits(2, 4096, frames, 8192))
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use axum::Router;
-    use axum::body::Body;
-    use axum::http::{HeaderMap, Request, StatusCode};
-    use axum::response::Response;
-    use bytes::Bytes;
-    use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, check_cases_async};
-    use http_body_util::BodyExt;
-    use nv_redfish::event_service::EventStreamPayload;
-    use serde_json::{Value, json};
-    use tower::ServiceExt;
-
-    use super::fixtures::{event, limits, metric};
-    use super::*;
-    use crate::test_support::{NoopCallbacks, host_info, serve_https};
-    use crate::{
-        BmcEvent, BmcState, EventServiceOverride, HardwareType, MachineRouterOptions,
-        machine_router,
-    };
-
-    fn router(auth: bool) -> (Router, BmcState) {
+    /// A Dell R750 mock with a ten-millisecond outage window on reset.
+    pub(crate) fn router(auth: bool) -> (Router, BmcState) {
         machine_router(
             &host_info(HardwareType::DellPowerEdgeR750),
             Arc::new(NoopCallbacks),
@@ -110,20 +776,12 @@ mod tests {
         )
     }
 
-    fn router_with(limits: EventServiceConfig) -> (Router, BmcState) {
-        machine_router(
-            &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(NoopCallbacks),
-            "sse-limits-test".into(),
-            false,
-            MachineRouterOptions {
-                event_service: EventServiceOverride::Limits(limits),
-                ..Default::default()
-            },
-        )
-    }
-
-    async fn request(router: &Router, method: &str, uri: &str, payload: Option<Value>) -> Response {
+    pub(crate) async fn request(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        payload: Option<Value>,
+    ) -> Response {
         let body = payload
             .map(|v| Body::from(v.to_string()))
             .unwrap_or_default();
@@ -143,6 +801,206 @@ mod tests {
         .unwrap()
     }
 
+    pub(crate) async fn json_body(response: Response) -> Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{HeaderMap, Request, StatusCode};
+    use axum::response::Response;
+    use bytes::Bytes;
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use super::fixtures::{event, json_body, limits, metric, request, router, state};
+    use super::*;
+    use crate::test_support::{NoopCallbacks, host_info, serve_https};
+    use crate::{
+        BmcEvent, BmcState, EventServiceOverride, HardwareType, MachineRouterOptions,
+        machine_router,
+    };
+
+    #[test]
+    fn configuration_rejects_unbounded_or_invalid_limits() {
+        carbide_test_support::value_scenarios!(run = |limits: EventServiceLimits|
+            EventServiceConfig::try_from(limits).is_ok();
+            "resource limits" {
+                EventServiceLimits { max_subscribers: 1, max_frame_bytes: 1, max_frames: 1,
+                    max_history_bytes: 1, heartbeat: None, ..Default::default() } => true,
+                EventServiceLimits { max_subscribers: 0, ..Default::default() } => false,
+                EventServiceLimits { max_frame_bytes: 0, ..Default::default() } => false,
+                EventServiceLimits { max_frames: 0, ..Default::default() } => false,
+                EventServiceLimits { max_frame_bytes: 2, max_history_bytes: 1, ..Default::default() } => false,
+            }
+            "interval bounds" {
+                EventServiceLimits { heartbeat: Some(Duration::ZERO), ..Default::default() } => false,
+                EventServiceLimits { heartbeat: Some(Duration::from_secs(86_401)), ..Default::default() } => false,
+                EventServiceLimits { output_stall_timeout: Duration::ZERO, ..Default::default() } => false,
+            }
+        );
+    }
+
+    #[test]
+    fn poisoned_state_does_not_panic_in_destructors() {
+        let (router, bmc) = machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            Arc::new(NoopCallbacks),
+            "poison".into(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let state = bmc.event_service.as_ref().unwrap();
+        let subscriber = state.subscribe(None).unwrap();
+        let poisoner = state.clone();
+        std::thread::spawn(move || {
+            let _guard = poisoner.lock();
+            panic!("injected panic under the event lock");
+        })
+        .join()
+        .unwrap_err();
+
+        // Neither destructor tries to recover the cross-field invariants.
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(subscriber))).is_ok()
+        );
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(router))).is_ok());
+        // Ordinary operations must still fail loudly on the poisoned subsystem.
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| state.stats())).is_err());
+    }
+
+    #[test]
+    fn publication_validation_and_encoded_byte_limits() {
+        let state = state(2);
+        carbide_test_support::value_scenarios!(run = |value| {
+            let rejected = state.publish(value).is_err();
+            (rejected, state.stats().retained_frames)
+        };
+            "invalid publication leaves history unchanged" {
+                json!({"@odata.type": "#LogEntry.v1_9_0.LogEntry"}) => (true, 0),
+                json!({"@odata.type": "#Event.v1_6_0.Event"}) => (true, 0),
+                json!({"padding": "x".repeat(4096)}) => (true, 0),
+            }
+        );
+        assert!(state.publish(event()).unwrap().ends_with(":1"));
+        assert!(state.publish(metric()).unwrap().ends_with(":2"));
+        let encoded_size = state.stats().retained_bytes;
+        let event_size = {
+            let single = self::state(1);
+            single.publish(event()).unwrap();
+            single.stats().retained_bytes
+        };
+        assert!(encoded_size > event_size);
+        let exact = EventServiceState::new(limits(1, event_size, 10, event_size));
+        exact.publish(event()).unwrap();
+        exact.publish(event()).unwrap();
+        assert_eq!(
+            exact.stats().retained_frames,
+            1,
+            "byte limit evicts independently of count"
+        );
+        assert_eq!(exact.stats().retained_bytes, event_size);
+        let short = EventServiceState::new(limits(1, event_size - 1, 1, event_size));
+        assert!(matches!(
+            short.publish(event()),
+            Err(EventServiceError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn script_limits_do_not_mutate_queue_on_rejection() {
+        let state = state(1);
+        carbide_test_support::value_scenarios!(run = |steps| {
+            (state.queue_script(steps).is_err(), state.stats().queued_scripts)
+        };
+            "invalid scripts leave the queue unchanged" {
+                vec![] => (true, 0),
+                vec![StreamStep::Eof, StreamStep::Eof] => (true, 0),
+                vec![StreamStep::Delay { millis: 60_001 }] => (true, 0),
+                vec![StreamStep::Bytes { data: vec![0; MAX_SCRIPT_BYTES + 1] }] => (true, 0),
+                vec![StreamStep::Delay { millis: 0 }; MAX_SCRIPT_STEPS + 1] => (true, 0),
+            }
+        );
+        for _ in 0..MAX_SCRIPTS {
+            state.queue_script(vec![StreamStep::Eof]).unwrap();
+        }
+        assert!(matches!(
+            state.queue_script(vec![StreamStep::Eof]),
+            Err(EventServiceError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn subscription_context_is_never_a_valid_cursor() {
+        let state = state(4);
+        state.publish(event()).unwrap();
+        let live = state.subscribe(None).unwrap();
+        let [id] = state.subscription_ids()[..] else {
+            panic!("one subscription");
+        };
+        let context = state.subscription_context(id).unwrap();
+        assert!(matches!(
+            state.subscribe(Some(&context)),
+            Err(EventServiceError::Invalid(_))
+        ));
+        drop(live);
+        assert!(state.subscription_context(id).is_none());
+    }
+
+    #[test]
+    fn accept_header_honors_media_ranges_and_weights() {
+        carbide_test_support::value_scenarios!(run = |accept: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("accept", accept.parse().unwrap());
+            accepts_sse(&headers)
+        };
+            "compatible ranges" {
+                "*/*" => true,
+                "text/*;q=0.5" => true,
+                "text/event-stream;charset=utf-8" => true,
+                "text/event-stream;version=2, */*" => true,
+                "text/event-stream;" => true,
+                // The served representation has no parameters, so only the bare range applies.
+                "text/event-stream;charset=utf-8;q=0, text/event-stream" => true,
+                r#"text/event-stream;profile="a;b,c", */*"# => true,
+            }
+            "explicit exclusion or invalid weight" {
+                "application/json" => false,
+                "text/event-stream;q=0, */*;q=1" => false,
+                "text/event-stream;q=0, text/*" => false,
+                "text/event-stream;q=NaN" => false,
+                r#"application/json;profile="a,text/event-stream,b", text/event-stream;q=0"# => false,
+            }
+        );
+    }
+
+    fn router_with(limits: EventServiceConfig) -> (Router, BmcState) {
+        machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            Arc::new(NoopCallbacks),
+            "sse-limits-test".into(),
+            false,
+            MachineRouterOptions {
+                event_service: EventServiceOverride::Limits(limits),
+                ..Default::default()
+            },
+        )
+    }
+
     async fn resume(router: &Router, last_event_id: &str) -> Response {
         router
             .clone()
@@ -155,15 +1013,6 @@ mod tests {
             )
             .await
             .unwrap()
-    }
-
-    async fn json_body(response: Response) -> Value {
-        serde_json::from_slice(
-            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                .await
-                .unwrap(),
-        )
-        .unwrap()
     }
 
     async fn frame(body: &mut Body) -> Bytes {
@@ -293,47 +1142,6 @@ mod tests {
             },
         )
         .await;
-    }
-
-    #[tokio::test]
-    async fn publication_uses_consumer_payload_discriminator() {
-        let (router, bmc) = router(false);
-        check_cases_async(
-            [
-                Case {
-                    scenario: "OEM namespace",
-                    input: ("#Oem.Nvidia.Event", event()),
-                    expect: Yields(StatusCode::OK),
-                },
-                Case {
-                    scenario: "unqualified type accepted by consumer",
-                    input: ("#Event", event()),
-                    expect: Yields(StatusCode::OK),
-                },
-                Case {
-                    scenario: "final type segment controls decoding",
-                    input: ("#Event.v1_0_0.MetricReport", metric()),
-                    expect: Yields(StatusCode::OK),
-                },
-            ],
-            |(kind, mut payload)| {
-                let router = router.clone();
-                async move {
-                    payload["@odata.type"] = json!(kind);
-                    assert!(serde_json::from_value::<EventStreamPayload>(payload.clone()).is_ok());
-                    Ok::<_, std::convert::Infallible>(
-                        request(&router, "POST", "/Mock/EventService/events", Some(payload))
-                            .await
-                            .status(),
-                    )
-                }
-            },
-        )
-        .await;
-        assert_eq!(
-            bmc.event_service.as_ref().unwrap().stats().retained_frames,
-            3
-        );
     }
 
     #[tokio::test]

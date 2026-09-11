@@ -23,6 +23,8 @@ pub(crate) mod chassis;
 mod collection;
 pub(crate) mod computer_system;
 pub(crate) mod ethernet_interface;
+pub(crate) mod event;
+pub(crate) mod event_destination;
 pub(crate) mod event_service;
 pub(crate) mod host_interface;
 pub(crate) mod leak_detector;
