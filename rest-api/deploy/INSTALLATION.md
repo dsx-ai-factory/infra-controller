@@ -249,7 +249,7 @@ kubectl apply -k deploy/kustomize/base/keycloak -n nico-rest
 
 `nico-rest-cert-manager` is the internal PKI microservice (also referred as `credsmgr`). It uses native Go PKI to vend mTLS certificates for components over HTTPS, primarily for dynamic/external entities e.g. Site Agents. When the `site-manager` receives a new site registration, it calls `nico-rest-cert-manager` service to issue the client certificates `site-agent` will use to authenticate. It exposes two ports:
 
-- **8000** (HTTPS) — certificate issuance API
+- **8000** (HTTPS) — authenticated certificate issuance API; see [Certificate issuance authentication](#certificate-issuance-authentication)
 - **8001** (HTTP) — health and liveness endpoint
 
 ### Manifests
@@ -258,7 +258,7 @@ kubectl apply -k deploy/kustomize/base/keycloak -n nico-rest
 |---|---|
 | `base/cert-manager/deployment.yaml` | Deployment `nico-rest-cert-manager` — mounts `ca-signing-secret` |
 | `base/cert-manager/service.yaml` | ClusterIP Service — ports 8000 (https) and 8001 (http) |
-| `base/cert-manager/rbac.yaml` | ServiceAccount only — `credsmgr` never calls the Kubernetes API, so it carries no Role and disables token automount |
+| `base/cert-manager/rbac.yaml` | ServiceAccount with token automount, plus ClusterRole/ClusterRoleBinding granting only `create` on `tokenreviews` |
 
 ### CLI flags (set in `deployment.yaml`)
 
@@ -271,6 +271,7 @@ kubectl apply -k deploy/kustomize/base/keycloak -n nico-rest
 | `--tls-port` | `8000` | HTTPS listen port |
 | `--insecure-port` | `8001` | HTTP health port |
 | `--ca-base-dns` | `nico.local` | DNS suffix used in issued certs |
+| `--allowed-service-account` | No binary default; required | Exact `system:serviceaccount:<namespace>:<name>` identity allowed to issue certificates. The Kustomize deployment supplies its pod namespace and `nico-rest-site-manager`; Helm defaults are described below |
 | `--dns-name` | the Service's four in-cluster names plus `localhost` | SAN stamped on the HTTPS listener's own certificate |
 
 `--dns-name` is repeatable, and the first value supplied replaces the built-in
@@ -524,11 +525,11 @@ status:
 | Flag | Value | Description |
 |---|---|---|
 | `--listen-port` | `8100` | HTTPS listen port |
-| `--creds-manager-url` | `https://nico-rest-cert-manager.nico-rest:8000` | URL to nico-rest-cert-manager; the hostname must be one of that service's `--dns-name` SANs |
+| `--creds-manager-url` | `https://nico-rest-cert-manager.$(POD_NAMESPACE):8000` | URL to nico-rest-cert-manager; the hostname must be one of that service's `--dns-name` SANs |
 | `--creds-manager-ca-path` | `/etc/credsmgr-ca/ca.crt` | CA bundle verifying nico-rest-cert-manager (`tls.crt` from `ca-signing-secret`) |
 | `--tls-cert-path` | `/etc/tls/tls.crt` | TLS cert path (from `site-manager-tls` secret) |
 | `--tls-key-path` | `/etc/tls/tls.key` | TLS key path (from `site-manager-tls` secret) |
-| `--namespace` | `nico-rest` | Kubernetes namespace to watch for Site CRs |
+| `--namespace` | Pod namespace | Kubernetes namespace to watch for Site CRs |
 
 Connections to nico-rest-cert-manager are verified, so `--creds-manager-ca-path`
 must point at a readable PEM bundle containing the CA that signed that service's
@@ -600,6 +601,53 @@ Certificates already issued by the old CA stay valid until they expire, so plan
 the second step after the longest `duration` in use. If a short outage is
 acceptable, skip the bundle and restart nico-rest-cert-manager followed by Site
 Manager.
+
+### Certificate issuance authentication
+
+`POST /v1/pki/cloud-cert` requires a Kubernetes service account bearer token
+whose audience is `nico-rest-cert-manager`. Certificate Manager submits a
+TokenReview to the Kubernetes API and permits only the exact service account
+configured with its required `--allowed-service-account` flag, in the form
+`system:serviceaccount:<namespace>:<name>`. Missing or invalid credentials and
+an incorrect audience return HTTP 401; a valid token for another account
+returns 403. A TokenReview API failure returns 503 and no certificate is issued.
+The public CA retrieval and health endpoints remain available without a token.
+
+The Helm chart defaults to the `nico-rest-site-manager` account in Certificate
+Manager's namespace. Override `nico-rest-cert-manager.config.siteManagerServiceAccount`
+and `config.siteManagerNamespace` together when Site Manager uses another identity;
+an empty namespace value uses the Certificate Manager chart's namespace.
+The Kustomize base authorizes its `nico-rest-site-manager` account in the pod's
+namespace. Certificate Manager receives only `create` permission on the
+cluster-scoped `tokenreviews` resource and a mounted Kubernetes API token.
+
+Site Manager's deployment projects a separate, one-hour service account token
+for the Certificate Manager audience. Its HTTP client reloads this token through
+client-go's token-file support and verifies the server's certificate against a
+mounted public CA. Redirects are not followed. These optional Site Manager flags
+have the following binary defaults and no environment-variable fallbacks:
+
+| Flag | Default | Contract |
+|---|---|---|
+| `--creds-manager-token-file` | `/var/run/secrets/nico-rest-cert-manager/token` | Readable projected bearer-token file; missing, empty, or unreadable files and empty paths prevent client startup |
+| `--creds-manager-ca-path` | `/etc/credsmgr-ca/ca.crt` | Readable PEM CA bundle; missing, empty-path, unreadable, or invalid configuration prevents client startup |
+
+`--creds-manager-url` must use HTTPS without embedded user information.
+TLS verifies the URL hostname against Certificate Manager's configured SANs.
+The Helm chart passes `nico-rest-site-manager.args.credsManagerCaPath` to
+`--creds-manager-ca-path`. Its `credsManagerCa.secretName` defaults to
+`ca-signing-secret`, and `credsManagerCa.key` defaults to `tls.crt`; only this
+public certificate is mounted as `ca.crt`, never the CA private key. Match that
+public CA to Certificate Manager's signing CA when overriding the secret.
+The Kustomize base uses the same token audience, token path, and public-CA mount.
+
+Deploy the updated Site Manager image with its token and public-CA mounts before
+enabling the updated Certificate Manager image and its authentication settings.
+An older Site Manager cannot obtain certificates from the authenticated endpoint.
+The updated Certificate Manager also requires in-cluster Kubernetes configuration;
+there is no unauthenticated fallback for standalone execution. Site Agent
+bootstrap still requires an existing Site in `AwaitHandshake` and its correct,
+unexpired OTP. The service-account token is held by Site Manager, not the Site Agent.
 
 ### Apply
 
@@ -967,7 +1015,7 @@ kubectl kustomize --load-restrictor LoadRestrictionsNone \
 
 | Overlay | What it deploys |
 |---|---|
-| `overlays/cert-manager` | `nico-rest-cert-manager` Deployment + Service + ServiceAccount |
+| `overlays/cert-manager` | `nico-rest-cert-manager` Deployment + Service + ServiceAccount + TokenReview ClusterRole/ClusterRoleBinding |
 | `overlays/api` | `nico-rest-api` Deployment + Services + ConfigMap |
 | `overlays/workflow` | `nico-rest-cloud-worker` + `nico-rest-site-worker` Deployments + ConfigMap |
 | `overlays/site-manager` | `nico-rest-site-manager` Deployment + Service + Certificate + RBAC |
