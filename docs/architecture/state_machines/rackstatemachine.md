@@ -182,7 +182,8 @@ The rack waits until all child devices reach ready before starting the first mai
 ```text
 FirmwareUpgrade(Start -> WaitForComplete)
   -> NVOSUpdate(Start -> WaitForComplete)
-  -> ConfigureNmxCluster(Start -> WaitForScaleUpFabricManagerJob)
+  -> ConfigureNmxCluster(Start -> WaitForSwitchCertificateJob
+                               -> WaitForScaleUpFabricManagerJob)
   -> PowerSequence (optional)
   -> Completed
   -> Validating(Pending)
@@ -192,18 +193,49 @@ FirmwareUpgrade(Start -> WaitForComplete)
 |-----------|-------------|
 | **FirmwareUpgrade** | Rack-level RMS firmware upgrade for scoped machines and switches. Sets per-device `firmware_upgrade_status` and drives switch `ReProvisioning::WaitingForRackFirmwareUpgrade` / machine `HostReprovision`. |
 | **NVOSUpdate** | NVOS image update for scoped switches. Sets `nvos_update_status` and drives switch `ReProvisioning::WaitingForNVOSUpgrade`. |
-| **ConfigureNmxCluster** | NMX cluster setup. Submits the asynchronous RMS ScaleUpFabricManager job for the full rack fabric, then waits for it to complete. See sub-states below. |
+| **ConfigureNmxCluster** | Rotates every rack switch's NVUE certificate in one RMS batch, then submits the asynchronous RMS ScaleUpFabricManager job. See sub-states below. |
 | **PowerSequence** | Optional power-on/off/reset sequencing for scoped devices. |
 | **Completed** | All requested maintenance activities finished; rack advances to validation. |
 
-**ConfigureNmxCluster** sub-states:
+#### ConfigureNmxCluster sub-states
 
-```text
-Start
-  -> WaitForScaleUpFabricManagerJob { job_id }
+```mermaid
+stateDiagram-v2
+    [*] --> Start
+    Start --> Start : retryable inventory error
+    Start --> WaitForSwitchCertificateJob : certificate batch accepted; persist job_id
+    Start --> NextActivity : no switches requested or discovered
+    Start --> Error : invalid profile, endpoint, backend, or certificate submission
+    WaitForSwitchCertificateJob --> WaitForSwitchCertificateJob : running, poll error, or restart
+    WaitForSwitchCertificateJob --> WaitForScaleUpFabricManagerJob : certificate complete and V2 accepted; persist job_id
+    WaitForSwitchCertificateJob --> NextActivity : V2 has no switches requested or discovered
+    WaitForSwitchCertificateJob --> Error : certificate failed or V2 validation failed
+    WaitForScaleUpFabricManagerJob --> WaitForScaleUpFabricManagerJob : pending, poll or verification retry, restart, or V2 resubmission
+    WaitForScaleUpFabricManagerJob --> NextActivity : V2 complete and observed primary persisted
+    WaitForScaleUpFabricManagerJob --> Error : V2 failed or returned invalid state
 ```
 
-`Start` submits the RMS ScaleUpFabricManager job for the rack fabric. `WaitForScaleUpFabricManagerJob` polls the job; once it completes, the rack reads the RMS-selected primary switch and per-switch fabric manager status, persists both, and advances while switches wait in `ReProvisioning::WaitingForNMXCConfigure`.
+`Start` submits one `ConfigureSwitchCertificate` request containing every rack
+switch and the fixed `nvue_api` binding. The parent RMS job ID is persisted
+while the rack polls the complete batch. After completion, the rack submits the
+RMS ScaleUpFabricManager job. RMS selects the primary and binds NMX-C to the
+newly active NVUE certificate material. NICo persists the observed primary
+after the job completes.
+
+| Current sub-state | Condition | Result |
+|-------------------|-----------|--------|
+| `Start` | Partial scope contains no switch IDs, or the rack inventory contains no switches | Skip to the next requested maintenance activity before validating fabric prerequisites. |
+| `Start` | Rack profile is missing, unknown, or lacks `rack_hardware_topology` | Transition to `Error` before submitting a certificate batch. |
+| `Start` | Component Manager is absent, endpoint data or NVOS credentials are invalid, or RMS does not support the request | Transition to `Error` before dispatch. |
+| `Start` | Inventory loading fails, or certificate preparation returns `RejectedBeforeDispatch` | Retain `Start` and retry on the next iteration because RMS did not receive the request. Database-backed RMS node lookup failures use this path. |
+| `Start` | Certificate submission returns any other error | Transition to `Error` without automatically resubmitting because RMS may have accepted all or part of the batch. Any returned RMS job ID is retained in the error for operator reconciliation. |
+| `Start` | RMS accepts the certificate batch | Persist its parent job ID in `WaitForSwitchCertificateJob`. |
+| `WaitForSwitchCertificateJob` | Component Manager is absent, polling fails, RMS cannot find the job, or the job is `Started` or `InProgress` | Retain the same parent job ID and poll again. A controller restart resumes from this persisted state. |
+| `WaitForSwitchCertificateJob` | Certificate job is `Failed` | Transition to `Error`. |
+| `WaitForSwitchCertificateJob` | Certificate job is `Completed` | Submit RMS V2. Retryable inventory or submission errors retain the certificate wait state; skip and terminal conditions match the `Start` outcomes above. A successful submission persists `WaitForScaleUpFabricManagerJob`. |
+| `WaitForScaleUpFabricManagerJob` | Job is pending, polling or observed-status verification fails, or a restart occurs | Retain the V2 job ID and retry. If RMS no longer has the job, resubmit the idempotent V2 desired state. |
+| `WaitForScaleUpFabricManagerJob` | Job fails, has an invalid state, or a terminal validation error occurs | Transition to `Error`. |
+| `WaitForScaleUpFabricManagerJob` | Job completes and the RMS-selected primary and Fabric Manager status are persisted | Continue to the next requested maintenance activity. |
 
 #### Validating (R_Validating)
 
@@ -247,7 +279,7 @@ The Rack state machine drives or observes the Switch state machine as follows:
 | R_Discovering | Rack waits until all switches are `Ready` before moving to `Maintenance`. |
 | R_Maintenance (`FirmwareUpgrade`) | Rack sets `switch_reprovisioning_requested` and `firmware_upgrade_status`; switches enter `ReProvisioning::WaitingForRackFirmwareUpgrade`. |
 | R_Maintenance (`NVOSUpdate`) | Rack sets `nvos_update_status`; switches advance to `ReProvisioning::WaitingForNVOSUpgrade`. |
-| R_Maintenance (`ConfigureNmxCluster`) | Rack submits the RMS ScaleUpFabricManager job, then persists the RMS-selected primary switch and `fabric_manager_status`; switches advance to `ReProvisioning::WaitingForNMXCConfigure`. |
+| R_Maintenance (`ConfigureNmxCluster`) | Rack rotates every switch's NVUE certificate, submits the RMS ScaleUpFabricManager job, and persists the RMS-selected primary and `fabric_manager_status`; switches advance to `ReProvisioning::WaitingForNMXCConfigure`. |
 | R_Maintenance (any) | If the rack enters `Error`, rack-initiated switch reprovisioning is aborted and switches return to `Ready`. |
 | R_Ready | Rack monitors for switches in `Error`; any failed switch can move the rack to `Error`. |
 

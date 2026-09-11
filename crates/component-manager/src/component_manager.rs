@@ -459,6 +459,43 @@ impl ComponentManager {
             .await
     }
 
+    /// Submits asynchronous certificate configuration for all switches.
+    ///
+    /// `endpoints` must contain at least one switch. A successful submission
+    /// returns before configuration completes and provides a non-empty, opaque
+    /// parent job ID. Pass that ID to
+    /// [`Self::get_configure_switch_certificate_job_status`] until the batch
+    /// reaches a terminal state. A present `domain_name` is passed to the
+    /// backend unchanged; `None` omits the domain. `services` contains backend
+    /// service identifiers, including duplicates, in slice order. `None` and an
+    /// empty slice request no explicit service bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the endpoint list is empty, the selected backend
+    /// does not support batch certificate configuration, or endpoint resolution
+    /// or backend submission fails. An error does not establish that automatic
+    /// resubmission is safe unless it is
+    /// [`ComponentManagerError::RejectedBeforeDispatch`] or
+    /// [`ComponentManagerError::Unsupported`].
+    pub async fn batch_configure_switch_certificate(
+        &self,
+        endpoints: &[SwitchEndpoint],
+        domain_name: Option<&str>,
+        services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        self.nv_switch
+            .batch_configure_switch_certificate(endpoints, domain_name, services)
+            .await
+    }
+
+    /// Returns the aggregate state of a submitted certificate batch.
+    ///
+    /// [`ConfigureSwitchCertificateState::Started`] and
+    /// [`ConfigureSwitchCertificateState::InProgress`] are non-terminal.
+    /// [`ConfigureSwitchCertificateState::Completed`] and
+    /// [`ConfigureSwitchCertificateState::Failed`] are terminal. Observation
+    /// errors do not establish that resubmitting the certificate batch is safe.
     pub async fn get_configure_switch_certificate_job_status(
         &self,
         job_id: &str,
