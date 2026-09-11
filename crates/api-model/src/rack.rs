@@ -84,7 +84,7 @@ pub struct FirmwareUpgradeJob {
     pub job_id: Option<String>,
     #[serde(default)]
     pub firmware_id: Option<String>,
-    pub status: Option<String>,
+    pub status: Option<FirmwareProgressState>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -175,6 +175,39 @@ pub struct FirmwareUpgradeDeviceInfo {
     pub os_hostname: Option<String>,
 }
 
+/// Progress of a firmware upgrade, per device and for the job as a whole.
+///
+/// `Unknown` keeps a value written by an older revision from failing the whole
+/// rack row: `FirmwareUpgradeJob` is persisted as `jsonb`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareProgressState {
+    /// The backend accepted the upgrade but has not started it.
+    Pending,
+
+    /// The backend is applying the upgrade.
+    InProgress,
+
+    /// The upgrade completed successfully.
+    Completed,
+
+    /// The upgrade completed unsuccessfully.
+    Failed,
+
+    /// A state written by a newer producer that this revision does not recognize.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+impl FirmwareProgressState {
+    /// Returns `true` once the upgrade has settled and will not advance again
+    /// without a new request. `Unknown` is not terminal: an unrecognized value
+    /// is treated as still in flight rather than silently completed.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
+}
+
 /// Per-device status tracked inside `FirmwareUpgradeJob`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirmwareUpgradeDeviceStatus {
@@ -182,7 +215,7 @@ pub struct FirmwareUpgradeDeviceStatus {
     pub node_id: String,
     pub mac: String,
     pub bmc_ip: String,
-    pub status: String,
+    pub status: FirmwareProgressState,
     #[serde(default)]
     pub job_id: Option<String>,
     #[serde(default)]
@@ -742,6 +775,12 @@ pub struct MaintenanceScope {
     /// Which maintenance activities to perform. Empty means all activities.
     #[serde(default)]
     pub activities: Vec<MaintenanceActivity>,
+    /// When this request was accepted, stamped by the server rather than
+    /// supplied by the caller. It marks the boundary of the current maintenance
+    /// cycle, so a persisted per-device status can be tested against it to tell
+    /// this request's result from a leftover of the previous one.
+    #[serde(default)]
+    pub requested_at: Option<DateTime<Utc>>,
 }
 
 impl MaintenanceScope {
@@ -753,6 +792,29 @@ impl MaintenanceScope {
 
     pub fn should_run(&self, activity: &MaintenanceActivity) -> bool {
         self.activities.is_empty() || self.activities.iter().any(|a| a.same_kind(activity))
+    }
+
+    /// Returns `true` when `other` selects the same devices and activities as
+    /// this scope, used to tell a resubmission of the pending request
+    /// (`AlreadyPending`) from a different one arriving while it is still in
+    /// flight (`Busy`).
+    ///
+    /// This deliberately ignores [`Self::requested_at`]. That field is stamped
+    /// on acceptance, so the pending scope always carries one and an incoming
+    /// scope never does; comparing it would make every resubmission look like a
+    /// different request and turn an idempotent retry into a spurious `Busy`.
+    pub fn same_request(&self, other: &Self) -> bool {
+        let Self {
+            machine_ids,
+            switch_ids,
+            power_shelf_ids,
+            activities,
+            requested_at: _,
+        } = self;
+        *machine_ids == other.machine_ids
+            && *switch_ids == other.switch_ids
+            && *power_shelf_ids == other.power_shelf_ids
+            && *activities == other.activities
     }
 }
 
@@ -1204,5 +1266,65 @@ mod tests {
         let rejection = RackMaintenanceRejection::AlreadyPending;
         let msg = rejection.to_string();
         assert!(msg.contains("already has a pending maintenance request"));
+    }
+
+    // ── FirmwareProgressState ───────────────────────────────────────────
+
+    #[test]
+    fn firmware_progress_state_round_trips_persisted_wire_values() {
+        let cases = [
+            (FirmwareProgressState::Pending, "\"pending\""),
+            (FirmwareProgressState::InProgress, "\"in_progress\""),
+            (FirmwareProgressState::Completed, "\"completed\""),
+            (FirmwareProgressState::Failed, "\"failed\""),
+            (
+                FirmwareProgressState::Unknown("verifying".into()),
+                "\"verifying\"",
+            ),
+        ];
+
+        for (state, wire) in cases {
+            assert_eq!(serde_json::to_string(&state).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<FirmwareProgressState>(wire).unwrap(),
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn firmware_upgrade_job_tolerates_an_unrecognized_device_status() {
+        let job: FirmwareUpgradeJob = serde_json::from_str(
+            r#"{
+                "job_id": "parent-job",
+                "firmware_id": "fw-1",
+                "status": "in_progress",
+                "started_at": null,
+                "completed_at": null,
+                "machines": [
+                    {
+                        "node_id": "node-1",
+                        "mac": "00:11:22:33:44:55",
+                        "bmc_ip": "192.0.2.10",
+                        "status": "in_progress"
+                    },
+                    {
+                        "node_id": "node-2",
+                        "mac": "00:11:22:33:44:56",
+                        "bmc_ip": "192.0.2.11",
+                        "status": "sideways"
+                    }
+                ]
+            }"#,
+        )
+        .expect("one unrecognized device status must not fail the whole rack row");
+
+        assert_eq!(job.status, Some(FirmwareProgressState::InProgress));
+        assert_eq!(job.machines[0].status, FirmwareProgressState::InProgress);
+        assert_eq!(
+            job.machines[1].status,
+            FirmwareProgressState::Unknown("sideways".into())
+        );
+        assert!(!job.machines[1].status.is_terminal());
     }
 }

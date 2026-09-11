@@ -37,6 +37,7 @@ use tokio::sync::oneshot;
 
 use super::BIND_LIMIT;
 use crate::DatabaseError;
+use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
 use crate::db_read::DbReader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
@@ -962,12 +963,13 @@ pub async fn reconcile_pool_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed. Warn, don't reapply.
             (Some(stored_def), true) => {
-                tracing::warn!(
-                    pool_name = name,
-                    stored = ?stored_def,
-                    declared = ?def,
-                    "Resource Pool definition has changed since it was seeded; not re-applying"
-                );
+                emit(ConfigDefinitionDrifted {
+                    resource_kind: ConfigResourceKind::ResourcePool,
+                    drift_kind: ConfigDriftKind::Changed,
+                    name: name.clone(),
+                    stored: Some(format!("{stored_def:?}")),
+                    declared: Some(format!("{def:?}")),
+                });
             }
             // Pool exists in resource_pool but has no snapshot yet.
             // Pre-migration deployment, or a pool re-added after a snapshot
@@ -993,10 +995,13 @@ pub async fn reconcile_pool_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            tracing::warn!(
-                pool_name = name,
-                "Resource Pool exists in database but is no longer declared in any config file"
-            );
+            emit(ConfigDefinitionDrifted {
+                resource_kind: ConfigResourceKind::ResourcePool,
+                drift_kind: ConfigDriftKind::Dropped,
+                name: name.clone(),
+                stored: None,
+                declared: None,
+            });
         }
     }
 

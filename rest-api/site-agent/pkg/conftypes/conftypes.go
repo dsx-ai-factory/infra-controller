@@ -51,9 +51,11 @@ const (
 	// DefaultInventoryCloudPageSize is the fallback page size when
 	// INVENTORY_CLOUD_PAGE_SIZE is unset. Matches the historical hardcoded value.
 	DefaultInventoryCloudPageSize = 25
-	// MaxInventoryCloudPageSize caps the configurable page size. Each page is a Temporal
-	// history blob (2MB hard limit); at ~10-15KB per real Machine proto, 100 stays under
-	// 1.5MB with margin. Larger risks intermittent BlobSizeLimitError on fat nodes.
+	// MaxInventoryCloudPageSize caps the configurable page size. Do not read it as a size that
+	// fits Temporal's 2MB blob limit: a real Machine has measured at 49KB after pruning and
+	// 156KB before it, so 100 of them exceeds the limit either way. Staying under it is the
+	// publish ladder's job, which shrinks a page until it measures small enough, and this bound
+	// only keeps the starting page size somewhere sensible.
 	MaxInventoryCloudPageSize = 100
 )
 

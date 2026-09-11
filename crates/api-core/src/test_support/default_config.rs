@@ -339,7 +339,7 @@ pub fn get() -> CarbideConfig {
             bridging: None,
         }),
         mlxconfig_profiles: None,
-        rack_management_enabled: false,
+        deprecated_rack_management_enabled: None,
         rms: RmsConfig::default(),
         rack_profiles: Default::default(),
         spdm_state_controller: SpdmStateControllerConfig {

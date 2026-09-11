@@ -143,7 +143,10 @@ fn unscoped_astra_config() -> InitDpfResourcesConfig {
     InitDpfResourcesConfig {
         bluefield_software: Some(BlueFieldSoftwareParams {
             os_iso: "http://example.com/astra.iso".to_string(),
-            pldm_fw_bundle: Some("http://example.com/astra.pldm".to_string()),
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "pldmid001".to_string(),
+                "http://example.com/astra.pldm".to_string(),
+            )])),
         }),
         deployment_name: "astra-deployment".to_string(),
         deployment_type: DpuDeploymentType::Bf4Astra,
@@ -774,7 +777,10 @@ fn config_rejects_unscoped_astra() {
     let result = InitDpfResourcesConfigBuilder::default()
         .bluefield_software(BlueFieldSoftwareParams {
             os_iso: "http://example.com/astra.iso".to_string(),
-            pldm_fw_bundle: Some("http://example.com/astra.pldm".to_string()),
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "pldmid001".to_string(),
+                "http://example.com/astra.pldm".to_string(),
+            )])),
         })
         .deployment_name("astra-deployment")
         .deployment_type(DpuDeploymentType::Bf4Astra)
@@ -798,7 +804,10 @@ async fn test_create_initialization_objects_bluefield_software() {
     let config = InitDpfResourcesConfigBuilder::default()
         .bluefield_software(BlueFieldSoftwareParams {
             os_iso: "http://example.com/os.iso".to_string(),
-            pldm_fw_bundle: Some("http://example.com/fw.pldm".to_string()),
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "pldmid001".to_string(),
+                "http://example.com/astra.pldm".to_string(),
+            )])),
         })
         .deployment_name("bf4-dep")
         .deployment_type(DpuDeploymentType::Bf4Generic)
@@ -822,8 +831,8 @@ async fn test_create_initialization_objects_bluefield_software() {
     assert_eq!(bfsw.len(), 1);
     assert_eq!(bfsw[0].spec.os_iso, "http://example.com/os.iso");
     assert_eq!(
-        bfsw[0].spec.pldm_fw_bundle.as_deref(),
-        Some("http://example.com/fw.pldm")
+        bfsw[0].spec.pldm_fw_bundle.clone().unwrap().values().last(),
+        Some(&"http://example.com/astra.pldm".to_string())
     );
 
     // The DPUDeployment references the BlueFieldSoftware CR, not a BFB.
@@ -892,7 +901,10 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         InitDpfResourcesConfigBuilder::default()
             .bluefield_software(BlueFieldSoftwareParams {
                 os_iso: "http://example.com/bf4.iso".to_string(),
-                pldm_fw_bundle: Some("http://example.com/bf4.pldm".to_string()),
+                pldm_fw_bundle: Some(BTreeMap::from([(
+                    "pldmid001".to_string(),
+                    "http://example.com/bf4.pldm".to_string(),
+                )])),
             })
             .deployment_name("bf4-deployment")
             .flavor_name("bf4-flavor")
@@ -906,7 +918,10 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         InitDpfResourcesConfigBuilder::default()
             .bluefield_software(BlueFieldSoftwareParams {
                 os_iso: "http://example.com/astra.iso".to_string(),
-                pldm_fw_bundle: Some("http://example.com/astra.pldm".to_string()),
+                pldm_fw_bundle: Some(BTreeMap::from([(
+                    "pldmid001".to_string(),
+                    "http://example.com/astra.pldm".to_string(),
+                )])),
             })
             .deployment_name("astra-deployment")
             .flavor_name("astra-flavor")
@@ -1572,7 +1587,10 @@ async fn reinitialization_preserves_operator_extra_scripts() {
     let config = InitDpfResourcesConfigBuilder::default()
         .bluefield_software(BlueFieldSoftwareParams {
             os_iso: "http://example.com/bf4.iso".to_string(),
-            pldm_fw_bundle: Some("http://example.com/bf4.pldm".to_string()),
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "pldmid001".to_string(),
+                "http://example.com/bf4.pldm".to_string(),
+            )])),
         })
         .deployment_name("bf4-deployment")
         .flavor_name("bf4-flavor")

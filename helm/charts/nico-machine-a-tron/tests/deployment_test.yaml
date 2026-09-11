@@ -197,8 +197,8 @@ tests:
               rack_profile_id: NVL72
               ids:
                 - rack-001
-              oob_dhcp_relay_address: 10.96.64.1
-              admin_dhcp_relay_address: 192.168.176.1
+              bmc_dhcp_relay_address: 10.96.64.1
+              underlay_dhcp_relay_address: 192.168.176.1
     asserts:
       - equal:
           path: metadata.name

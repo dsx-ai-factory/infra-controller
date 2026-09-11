@@ -16,9 +16,7 @@
  */
 use std::default::Default;
 
-use common::api_fixtures::{
-    TestEnvOverrides, create_test_env, create_test_env_with_overrides, get_config,
-};
+use common::api_fixtures::create_test_env;
 use db::{self};
 use mac_address::MacAddress;
 use model::expected_machine::{
@@ -3567,14 +3565,7 @@ async fn test_update_preserves_bmc_retain_credentials(
 async fn test_dhcp_honors_primary_host_nic(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // rack_management_enabled is required for discover_dhcp to consult
-    // ExpectedMachine records for unknown MACs -- that's the path that
-    // reads the matched interface's `primary` flag.
-    let env = {
-        let mut config = get_config();
-        config.rack_management_enabled = true;
-        create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await
-    };
+    let env = create_test_env(pool).await;
     let bmc_mac: MacAddress = "9A:9B:9C:9D:9E:01".parse().unwrap();
     let primary_mac: MacAddress = "9A:9B:9C:9D:9E:02".parse().unwrap();
 
@@ -3633,11 +3624,7 @@ async fn test_dhcp_honors_primary_host_nic(
 async fn test_dhcp_marks_non_primary_mac_as_non_primary(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = {
-        let mut config = get_config();
-        config.rack_management_enabled = true;
-        create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await
-    };
+    let env = create_test_env(pool).await;
     let bmc_mac: MacAddress = "9A:9B:9C:9D:9E:10".parse().unwrap();
     let primary_mac: MacAddress = "9A:9B:9C:9D:9E:11".parse().unwrap();
     let other_mac: MacAddress = "9A:9B:9C:9D:9E:12".parse().unwrap();
@@ -3816,11 +3803,7 @@ async fn test_batch_update_rejects_multiple_primary_host_nics(
 async fn test_declared_primary_survives_dhcp_arrival_order(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = {
-        let mut config = get_config();
-        config.rack_management_enabled = true;
-        create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await
-    };
+    let env = create_test_env(pool).await;
     let bmc_mac: MacAddress = "9A:9B:9C:9D:9F:10".parse().unwrap();
     let primary_mac: MacAddress = "9A:9B:9C:9D:9F:11".parse().unwrap();
     let other_mac: MacAddress = "9A:9B:9C:9D:9F:12".parse().unwrap();

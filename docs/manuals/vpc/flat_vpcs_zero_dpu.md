@@ -148,18 +148,13 @@ JSON vocabulary rather than Forge protobuf symbols. Responses translate
 non-default policies back through `dpu_mode`; the default `manage` policy might
 leave that field unset.
 
-Two related Day-0 settings matter for zero-DPU sites:
+The related `[site_explorer] admin_segment_type_non_dpu` Day-0 setting defaults
+to `false`. When `true`, non-DPU hosts use the `HostInband` admin segment type
+instead of the regular `Admin` segment type for their admin-network attachment.
 
-- **`[site_explorer] admin_segment_type_non_dpu`** (default `false`). When
-  `true`, non-DPU hosts use the `HostInband` admin segment type instead of the
-  regular `Admin` segment type for their admin-network attachment.
-- **`rack_management_enabled`** (top-level, default `false`). This is the
-  standalone / air-gapped rack-manager mode for GB200/GB300/VR144 deployments.
-  It is not a DPU-policy override: rack-manager deployments that run DPUs as
-  NICs must also set `[site_explorer] dpu_policy = "nic"` (or set that
-  policy per host). The resulting `nic` policy produces zero-DPU hosts;
-  the rack-management flag alone does not. Enable the flag only when running
-  NICo with Rack Manager for those platforms.
+Rack management does not override DPU policy. Rack-manager deployments that run
+DPUs as NICs must set `[site_explorer] dpu_policy = "nic"` or set that policy
+per host.
 
 Because a zero-DPU host has no DPU to DHCP and identify host NICs for it, the
 host's data-NIC **MAC addresses must be registered** on its `ExpectedMachine`

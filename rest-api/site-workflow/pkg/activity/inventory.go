@@ -249,7 +249,7 @@ type inventoryCollector[K any, R any, P any] struct {
 	pagesPublished   int
 	itemsPublished   int
 	// itemsMissing counts IDs that FindIDs reported but FindByIDs did not return, which is what
-	// a delete landing between the two calls looks like.
+	// a delete arriving between the two calls looks like.
 	itemsMissing int
 	// pending holds items fetched but not yet published. It never exceeds one page, because the
 	// tail stays here until the caller flushes it.

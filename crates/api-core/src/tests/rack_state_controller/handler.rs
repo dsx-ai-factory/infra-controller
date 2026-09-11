@@ -37,11 +37,11 @@ use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use model::expected_machine::ExpectedMachineData;
 use model::expected_rack::ExpectedRack;
 use model::rack::{
-    ConfigureNmxClusterState, FirmwareUpgradeDeviceStatus, FirmwareUpgradeJob,
-    FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosUpdateJob, NvosUpdateState,
-    NvosUpdateSwitchStatus, Rack, RackConfig, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus,
-    RackMaintenanceState, RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState,
-    SwitchNvosUpdateStatus,
+    ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
+    FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosUpdateJob,
+    NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackConfig, RackFirmwareUpgradeState,
+    RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState, RackState,
+    RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
 };
 use model::rack_type::{
     RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -2039,7 +2039,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
     };
     let job = FirmwareUpgradeJob {
         job_id: Some("parent-job".to_string()),
-        status: Some("in_progress".to_string()),
+        status: Some(FirmwareProgressState::InProgress),
         started_at: Some(chrono::Utc::now()),
         ..Default::default()
     };
@@ -2130,7 +2130,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
     let job = rack
         .firmware_upgrade_job
         .expect("failed firmware job should be retained");
-    assert_eq!(job.status.as_deref(), Some("failed"));
+    assert_eq!(job.status, Some(FirmwareProgressState::Failed));
     assert!(job.completed_at.is_some());
 
     let blocked_machine = db::machine::find_one(
@@ -2214,7 +2214,7 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state(
         txn.as_mut(),
         &rack_id,
         Some(&FirmwareUpgradeJob {
-            status: Some("in_progress".to_string()),
+            status: Some(FirmwareProgressState::InProgress),
             started_at: Some(now),
             ..Default::default()
         }),
@@ -2320,8 +2320,8 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state(
     assert!(rack.config.maintenance_requested.is_none());
     assert!(!rack.config.maintenance_termination_requested);
     assert_eq!(
-        rack.firmware_upgrade_job.unwrap().status.as_deref(),
-        Some("failed")
+        rack.firmware_upgrade_job.unwrap().status,
+        Some(FirmwareProgressState::Failed)
     );
     assert_eq!(
         rack.nvos_update_job.unwrap().status.as_deref(),
@@ -2513,14 +2513,14 @@ async fn test_firmware_upgrade_wait_for_complete_waits_while_jobs_running(
     let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
-        status: Some("in_progress".to_string()),
+        status: Some(FirmwareProgressState::InProgress),
         started_at: Some(chrono::Utc::now()),
         batch_job_ids: vec!["batch-job-1".to_string()],
         machines: vec![FirmwareUpgradeDeviceStatus {
             node_id: host.host_snapshot.id.to_string(),
             mac: "00:11:22:33:44:55".to_string(),
             bmc_ip: "192.0.2.10".to_string(),
-            status: "in_progress".to_string(),
+            status: FirmwareProgressState::InProgress,
             job_id: Some("child-job-1".to_string()),
             parent_job_id: Some("batch-job-1".to_string()),
             error_message: None,
@@ -2617,14 +2617,14 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
     };
     let job = FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
-        status: Some("in_progress".to_string()),
+        status: Some(FirmwareProgressState::InProgress),
         started_at: Some(chrono::Utc::now()),
         batch_job_ids: vec!["batch-job-1".to_string()],
         machines: vec![FirmwareUpgradeDeviceStatus {
             node_id: host.host_snapshot.id.to_string(),
             mac: "00:11:22:33:44:55".to_string(),
             bmc_ip: "192.0.2.10".to_string(),
-            status: "in_progress".to_string(),
+            status: FirmwareProgressState::InProgress,
             job_id: Some("child-job-1".to_string()),
             parent_job_id: Some("batch-job-1".to_string()),
             error_message: None,
@@ -2692,8 +2692,8 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     assert!(rack.config.maintenance_requested.is_none());
     assert_eq!(
-        rack.firmware_upgrade_job.unwrap().status.as_deref(),
-        Some("failed")
+        rack.firmware_upgrade_job.unwrap().status,
+        Some(FirmwareProgressState::Failed)
     );
 
     let machine = db::machine::find_one(
@@ -2770,7 +2770,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
-        status: Some("in_progress".to_string()),
+        status: Some(FirmwareProgressState::InProgress),
         started_at: Some(chrono::Utc::now()),
         batch_job_ids: vec!["batch-job-1".to_string()],
         machines: vec![
@@ -2778,7 +2778,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
                 node_id: host_a.host_snapshot.id.to_string(),
                 mac: "00:11:22:33:44:55".to_string(),
                 bmc_ip: "192.0.2.10".to_string(),
-                status: "in_progress".to_string(),
+                status: FirmwareProgressState::InProgress,
                 job_id: Some("child-job-1".to_string()),
                 parent_job_id: Some("batch-job-1".to_string()),
                 error_message: None,
@@ -2787,7 +2787,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
                 node_id: host_b.host_snapshot.id.to_string(),
                 mac: "00:11:22:33:44:66".to_string(),
                 bmc_ip: "192.0.2.11".to_string(),
-                status: "in_progress".to_string(),
+                status: FirmwareProgressState::InProgress,
                 job_id: Some("child-job-2".to_string()),
                 parent_job_id: Some("batch-job-1".to_string()),
                 error_message: None,
@@ -2975,14 +2975,14 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
     let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
-        status: Some("in_progress".to_string()),
+        status: Some(FirmwareProgressState::InProgress),
         started_at: Some(chrono::Utc::now()),
         batch_job_ids: vec!["batch-job-1".to_string()],
         machines: vec![FirmwareUpgradeDeviceStatus {
             node_id: host.host_snapshot.id.to_string(),
             mac: "00:11:22:33:44:55".to_string(),
             bmc_ip: "192.0.2.10".to_string(),
-            status: "in_progress".to_string(),
+            status: FirmwareProgressState::InProgress,
             job_id: Some("child-job-1".to_string()),
             parent_job_id: Some("batch-job-1".to_string()),
             error_message: None,
@@ -3021,8 +3021,8 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
     let job = persisted_rack
         .firmware_upgrade_job
         .expect("rack firmware job should still be persisted");
-    assert_eq!(job.status.as_deref(), Some("in_progress"));
-    assert_eq!(job.machines[0].status, "in_progress");
+    assert_eq!(job.status, Some(FirmwareProgressState::InProgress));
+    assert_eq!(job.machines[0].status, FirmwareProgressState::InProgress);
     assert_eq!(
         job.machines[0].error_message.as_deref(),
         Some("Job not found: child-job-1")
@@ -3060,14 +3060,14 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
     let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
-        status: Some("in_progress".to_string()),
+        status: Some(FirmwareProgressState::InProgress),
         started_at: Some(chrono::Utc::now()),
         batch_job_ids: vec!["batch-job-1".to_string()],
         machines: vec![FirmwareUpgradeDeviceStatus {
             node_id: host.host_snapshot.id.to_string(),
             mac: "00:11:22:33:44:55".to_string(),
             bmc_ip: "192.0.2.10".to_string(),
-            status: "in_progress".to_string(),
+            status: FirmwareProgressState::InProgress,
             job_id: Some("child-job-1".to_string()),
             parent_job_id: Some("batch-job-1".to_string()),
             error_message: None,
@@ -3106,8 +3106,8 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
     let job = persisted_rack
         .firmware_upgrade_job
         .expect("rack firmware job should still be persisted");
-    assert_eq!(job.status.as_deref(), Some("in_progress"));
-    assert_eq!(job.machines[0].status, "in_progress");
+    assert_eq!(job.status, Some(FirmwareProgressState::InProgress));
+    assert_eq!(job.machines[0].status, FirmwareProgressState::InProgress);
     assert!(
         job.machines[0]
             .error_message

@@ -19,14 +19,14 @@ func (api *API) RegisterPublisher() error {
 	ManagerAccess.Data.EB.Log.Info().Msg("Machine: Successfully registered CollectAndPublishMachineInventory workflow")
 
 	// Register CollectAndPublishMachineInventory activity
-	machineInventoryManager := swa.NewManageMachineInventory(
-		uuid.MustParse(ManagerAccess.Conf.EB.Temporal.ClusterID),
-		ManagerAccess.Data.EB.Managers.CoreGrpc.Client,
-		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher,
-		ManagerAccess.Conf.EB.Temporal.TemporalPublishQueue,
-		InventoryCarbidePageSize,
-		ManagerAccess.Conf.EB.Temporal.InventoryCloudPageSize,
-	)
+	machineInventoryManager := swa.NewManageMachineInventory(swa.ManageInventoryConfig{
+		SiteID:                uuid.MustParse(ManagerAccess.Conf.EB.Temporal.ClusterID),
+		CoreGrpcAtomicClient:  ManagerAccess.Data.EB.Managers.CoreGrpc.Client,
+		TemporalPublishClient: ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher,
+		TemporalPublishQueue:  ManagerAccess.Conf.EB.Temporal.TemporalPublishQueue,
+		SitePageSize:          InventoryCarbidePageSize,
+		CloudPageSize:         ManagerAccess.Conf.EB.Temporal.InventoryCloudPageSize,
+	})
 
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(machineInventoryManager.CollectAndPublishMachineInventory)
 	ManagerAccess.Data.EB.Log.Info().Msg("Machine: Successfully registered CollectAndPublishMachineInventory activity")
