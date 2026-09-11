@@ -600,8 +600,9 @@ func TestRackConverter(t *testing.T) {
 			Room:       "Mars",
 			Position:   "Row 12",
 		},
-		Components:  make([]component.Component, 0),
-		NVLDomainID: domainID,
+		Components:      make([]component.Component, 0),
+		NVLDomainID:     domainID,
+		OperationStatus: types.PhaseError,
 	}
 
 	sharedP := pb.Rack{
@@ -619,10 +620,13 @@ func TestRackConverter(t *testing.T) {
 			Room:       shared.Loc.Room,
 			Position:   shared.Loc.Position,
 		},
-		Components:   make([]*pb.Component, 0),
-		NvlDomainIds: []*pb.UUID{{Id: domainID.String()}},
-		ExternalId:   shared.ExternalID,
+		Components:      make([]*pb.Component, 0),
+		NvlDomainIds:    []*pb.UUID{{Id: domainID.String()}},
+		ExternalId:      shared.ExternalID,
+		OperationStatus: pb.Phase_PHASE_ERROR,
 	}
+	fromProto := shared
+	fromProto.OperationStatus = types.PhaseUnknown
 	testCases := map[string]struct {
 		source     *rack.Rack
 		sourceP    *pb.Rack
@@ -632,7 +636,7 @@ func TestRackConverter(t *testing.T) {
 		"valid": {
 			source:     &shared,
 			sourceP:    &sharedP,
-			converted:  &shared,
+			converted:  &fromProto,
 			convertedP: &sharedP,
 		},
 		"nil": {

@@ -11479,6 +11479,7 @@ paths:
                       model: PowerEdge R750
                       serialNumber: SN-RACK-001
                       description: Primary compute rack
+                      operationStatus: Ready
                       nvLinkDomainIds:
                         - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                       taskStats:
@@ -11566,6 +11567,7 @@ paths:
                     model: PowerEdge R750
                     serialNumber: SN-RACK-001
                     description: Primary compute rack
+                    operationStatus: Ready
                     nvLinkDomainIds:
                       - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                     taskStats:
@@ -23348,6 +23350,7 @@ components:
       description: Rack represents a physical rack in the datacenter
       required:
         - nvLinkDomainIds
+        - operationStatus
         - taskStats
       examples:
         - id: rack-01
@@ -23356,6 +23359,7 @@ components:
           model: PowerEdge R750
           serialNumber: SN-RACK-001
           description: Primary compute rack
+          operationStatus: Ready
           nvLinkDomainIds:
             - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
           taskStats:
@@ -23400,6 +23404,17 @@ components:
         description:
           type: string
           description: Description of the Rack
+        operationStatus:
+          type: string
+          enum:
+            - Unknown
+            - Initializing
+            - Ready
+            - InUse
+            - Error
+            - Deleting
+          description: >-
+            Operability phase aggregated from tray operationStatus values.
         nvLinkDomainIds:
           type: array
           description: IDs of the NVLink Domains containing this Rack. Empty when the Rack is not assigned to an NVLink Domain.
