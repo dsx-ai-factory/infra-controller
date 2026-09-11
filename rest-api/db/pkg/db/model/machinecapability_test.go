@@ -817,22 +817,35 @@ func TestMachineCapabilitySQLDAO_GetAllDistinct(t *testing.T) {
 		Count              *int
 		DeviceType         *string
 		InactiveDevices    []int
+		orderBy            *paginator.OrderBy
 		expectedCount      int
 		expectedTotal      *int
+		expectedTypes      []MachineCapabilityType
+		wantErr            error
 		verifyChildSpanner bool
 	}{
 		{
-			desc:               "GetAll with no filters returns all objects",
-			MachineIDs:         nil,
-			InstanceTypeID:     nil,
-			Type:               nil,
-			Name:               nil,
-			Frequency:          nil,
-			Capacity:           nil,
-			Vendor:             nil,
-			Count:              nil,
-			DeviceType:         nil,
-			expectedCount:      len(MachineCapabilityTypeChoiceMap) + 1,
+			desc:           "GetAll with no filters returns all objects",
+			MachineIDs:     nil,
+			InstanceTypeID: nil,
+			Type:           nil,
+			Name:           nil,
+			Frequency:      nil,
+			Capacity:       nil,
+			Vendor:         nil,
+			Count:          nil,
+			DeviceType:     nil,
+			expectedCount:  len(MachineCapabilityTypeChoiceMap) + 1,
+			expectedTypes: []MachineCapabilityType{
+				MachineCapabilityTypeCPU,
+				MachineCapabilityTypeDPU,
+				MachineCapabilityTypeGPU,
+				MachineCapabilityTypeInfiniBand,
+				MachineCapabilityTypeMemory,
+				MachineCapabilityTypeNetwork,
+				MachineCapabilityTypeNetwork,
+				MachineCapabilityTypeStorage,
+			},
 			verifyChildSpanner: true,
 		},
 		{
@@ -970,12 +983,49 @@ func TestMachineCapabilitySQLDAO_GetAllDistinct(t *testing.T) {
 			InactiveDevices: []int{1, 3},
 			expectedCount:   1,
 		},
+		{
+			desc: "GetAll rejects ordering by a field without distinct semantics",
+			orderBy: &paginator.OrderBy{
+				Field: "created",
+				Order: paginator.OrderAscending,
+			},
+			wantErr: paginator.ErrInvalidOrderField,
+		},
+		{
+			desc: "GetAll ordered by type descending returns distinct objects",
+			orderBy: &paginator.OrderBy{
+				Field: "type",
+				Order: paginator.OrderDescending,
+			},
+			expectedCount: len(MachineCapabilityTypeChoiceMap) + 1,
+			expectedTypes: []MachineCapabilityType{
+				MachineCapabilityTypeStorage,
+				MachineCapabilityTypeNetwork,
+				MachineCapabilityTypeNetwork,
+				MachineCapabilityTypeMemory,
+				MachineCapabilityTypeInfiniBand,
+				MachineCapabilityTypeGPU,
+				MachineCapabilityTypeDPU,
+				MachineCapabilityTypeCPU,
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, total, err := mcd.GetAllDistinct(ctx, nil, tc.MachineIDs, tc.InstanceTypeID, tc.Type, tc.Name, tc.Frequency, tc.Capacity, tc.Vendor, tc.Count, tc.DeviceType, tc.InactiveDevices, nil, cutil.GetPtr(paginator.TotalLimit), nil)
-			assert.NoError(t, err)
+			got, total, err := mcd.GetAllDistinct(ctx, nil, tc.MachineIDs, tc.InstanceTypeID, tc.Type, tc.Name, tc.Frequency, tc.Capacity, tc.Vendor, tc.Count, tc.DeviceType, tc.InactiveDevices, nil, cutil.GetPtr(paginator.TotalLimit), tc.orderBy)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
 			assert.Equal(t, tc.expectedCount, len(got))
+			if tc.expectedTypes != nil {
+				gotTypes := make([]MachineCapabilityType, 0, len(got))
+				for _, mc := range got {
+					gotTypes = append(gotTypes, mc.Type)
+				}
+				assert.Equal(t, tc.expectedTypes, gotTypes)
+			}
 
 			if tc.expectedTotal != nil {
 				assert.Equal(t, *tc.expectedTotal, total)
