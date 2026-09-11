@@ -17,7 +17,7 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use bmc_mock::injection::InjectionStore;
@@ -51,6 +51,13 @@ struct SwitchLiveState {
     ssh_endpoint_port: Option<u16>,
     ssh_host_key: Option<String>,
     state: &'static str,
+    /// BMC account passwords restored from the previous snapshot at startup,
+    /// re-applied onto a freshly built BMC mock so a rotated password survives a
+    /// machine-a-tron restart (issue #5966).
+    bmc_credentials: Option<Vec<bmc_mock::BmcAccountCredential>>,
+    /// Live BMC account service, so `persisted()` can export the current
+    /// passwords at shutdown rather than a stale mirror (issue #5966).
+    bmc_account_service: Option<Weak<bmc_mock::AccountServiceState>>,
 }
 
 impl SwitchLiveState {
@@ -63,6 +70,18 @@ impl SwitchLiveState {
             ssh_endpoint_port: None,
             ssh_host_key: None,
             state: fsm.state_string(),
+            bmc_credentials: None,
+            bmc_account_service: None,
+        }
+    }
+
+    /// Credentials to write into the next device snapshot: the current live BMC
+    /// passwords when the mock is running, else the passwords restored at
+    /// startup.
+    fn bmc_accounts_for_snapshot(&self) -> Option<Vec<bmc_mock::BmcAccountCredential>> {
+        match self.bmc_account_service.as_ref().and_then(Weak::upgrade) {
+            Some(account_service) => Some(account_service.export_credentials()),
+            None => self.bmc_credentials.clone(),
         }
     }
 }
@@ -176,13 +195,15 @@ impl SwitchActor {
             desired_host_firmware: None,
         };
         let (fsm, actions) = SwitchFsm::init(true);
+        let mut live_state = SwitchLiveState::new(&fsm);
+        live_state.bmc_credentials = persisted.bmc_accounts;
         Self {
             mat_id: persisted.mat_id,
             machine_config_section,
             host_info,
             app_context,
             config,
-            live_state: Arc::new(RwLock::new(SwitchLiveState::new(&fsm))),
+            live_state: Arc::new(RwLock::new(live_state)),
             bmc_injection: Arc::new(InjectionStore::new()),
             _bmc_mock: None,
             bmc_dhcp_info: None,
@@ -409,6 +430,18 @@ impl SwitchActor {
                 .change_factory_default_password(password);
         }
 
+        // Restore snapshot-saved passwords onto the freshly built BMC mock so a
+        // rotated password survives a restart (issue #5966).
+        let saved_credentials = self.live_state.read().unwrap().bmc_credentials.clone();
+        if let Some(saved_credentials) = saved_credentials {
+            bmc_mock
+                .state()
+                .account_service_state
+                .restore_credentials(&saved_credentials);
+        }
+        self.live_state.write().unwrap().bmc_account_service =
+            Some(Arc::downgrade(&bmc_mock.state().account_service_state));
+
         let bmc_handle = {
             self.app_context
                 .bmc_registry
@@ -604,6 +637,12 @@ impl SwitchHandle {
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
             active_host_firmware: None,
+            bmc_accounts: self
+                .0
+                .live_state
+                .read()
+                .unwrap()
+                .bmc_accounts_for_snapshot(),
         }
     }
 
