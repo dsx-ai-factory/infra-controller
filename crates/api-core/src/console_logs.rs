@@ -165,9 +165,8 @@ pub(crate) async fn build_source(
     match url {
         None => Ok(Arc::new(UnavailableSource)),
         Some(url) => {
-            let tls = tls.ok_or_else(|| {
-                eyre::eyre!("ssh_console_url requires TLS certificate configuration")
-            })?;
+            let tls =
+                tls.ok_or_else(|| eyre::eyre!("ssh_console_url requires TLS configuration"))?;
             Ok(Arc::new(
                 GrpcSource::connect(url, tls, join_set, cancel_token).await?,
             ))
@@ -202,6 +201,6 @@ mod tests {
         .await
         .err()
         .expect("TLS configuration is required");
-        assert!(error.to_string().contains("requires the Core TLS"));
+        assert!(error.to_string().contains("requires TLS configuration"));
     }
 }
