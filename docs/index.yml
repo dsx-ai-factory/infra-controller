@@ -70,6 +70,10 @@ navigation:
       contents:
         - page: Overview and Components
           path: architecture/overview.md
+        - section: Backends
+          contents:
+            - page: RMS
+              path: architecture/backends/rms.md
         - section: Redfish
           contents:
             - page: Redfish Workflow
@@ -158,8 +162,8 @@ navigation:
           path: configuration/host-naming.md
         - page: DNS
           path: configuration/dns.md
-        - page: Component Manager RMS Backends
-          path: configuration/component-manager-rms.md
+        - page: RMS Configuration
+          path: configuration/rms.md
 
     - section: Operations (Day 2)
       contents:

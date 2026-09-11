@@ -4,7 +4,7 @@ Use this workflow to rotate the NVOS admin password across managed NVLink switch
 
 Related guidance:
 
-- [Component Manager RMS Backends](../configuration/component-manager-rms.md)
+- [RMS Configuration](../configuration/rms.md)
 - [NICo Admin CLI](../manuals/nico-admin-cli.md)
 
 ## Workflow Boundaries
@@ -19,7 +19,7 @@ NVOS password rotation is a site-wide, asynchronous operation. NICo publishes on
 ## Prerequisites
 
 - Configure `nico-admin-cli` with the NICo Core API URL and an identity authorized for Forge Admin CLI operations. Refer to [Connecting to nico-api](../manuals/nico-admin-cli.md#connecting-to-nico-api).
-- Configure RMS connectivity, rack profiles, and switch vendor data as described in [Component Manager RMS Backends](../configuration/component-manager-rms.md).
+- Configure RMS connectivity, rack profiles, and switch vendor data as described in [RMS Configuration](../configuration/rms.md).
 - Ensure each managed switch has a BMC MAC address.
 - Ensure each managed switch has an NVOS credential that authenticates to the switch. The credential must be available from the expected-switch record or the NICo credential store.
 - Set expected-switch NVOS username and password fields together. Both values must be non-empty, or both fields must be unset.

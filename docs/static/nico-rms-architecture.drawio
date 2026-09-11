@@ -1,0 +1,148 @@
+<mxfile host="rms-docs">
+  <diagram id="nico-rms-architecture" name="NICo-RMS-Architecture">
+    <mxGraphModel dx="1220" dy="860" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1220" pageHeight="820" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="tierUsers" value="USERS" style="text;html=1;align=center;fontColor=#76B900;fontStyle=1;fontSize=12;letterSpacing=1;" parent="1" vertex="1">
+          <mxGeometry x="20" y="58" width="90" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="tierNico" value="NICo" style="text;html=1;align=center;fontColor=#76B900;fontStyle=1;fontSize=12;letterSpacing=1;" parent="1" vertex="1">
+          <mxGeometry x="20" y="215" width="90" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="tierRms" value="RMS" style="text;html=1;align=center;fontColor=#76B900;fontStyle=1;fontSize=12;letterSpacing=1;" parent="1" vertex="1">
+          <mxGeometry x="20" y="430" width="90" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="tierHw" value="RACK HARDWARE" style="text;html=1;align=center;fontColor=#76B900;fontStyle=1;fontSize=12;letterSpacing=1;" parent="1" vertex="1">
+          <mxGeometry x="12" y="660" width="106" height="20" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="users" value="&lt;b&gt;Admin&lt;/b&gt;&amp;nbsp; ·&amp;nbsp; &lt;b&gt;Bare-metal user&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eef2f7;strokeColor=#5b6b7f;fontColor=#1a1a1a;arcSize=12;fontSize=12;" parent="1" vertex="1">
+          <mxGeometry x="150" y="44" width="300" height="48" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="nicoNs" value="&lt;b&gt;Kubernetes cluster — namespace: forge-system&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fbfbfb;strokeColor=#7a7a7a;fontColor=#1a1a1a;arcSize=3;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontSize=13;" parent="1" vertex="1">
+          <mxGeometry x="130" y="150" width="670" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="restapi" value="&lt;b&gt;NICo REST API&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f7f7f7;strokeColor=#7a7a7a;fontColor=#1a1a1a;arcSize=8;fontSize=11;" parent="1" vertex="1">
+          <mxGeometry x="150" y="186" width="300" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="nicoapi" value="&lt;b&gt;nico-api&lt;/b&gt; — NICo Core&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;component-manager&amp;nbsp; ·&amp;nbsp; rack-controller&amp;nbsp; ·&amp;nbsp; switch-controller&amp;nbsp; ·&amp;nbsp; site-explorer&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;RMS client identity: SPIFFE cert from nico-api-certificate&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f7f7f7;strokeColor=#7a7a7a;fontColor=#1a1a1a;arcSize=8;fontSize=11;" parent="1" vertex="1">
+          <mxGeometry x="150" y="244" width="630" height="86" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="platform" value="&lt;b&gt;Shared platform services&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fbfbfb;strokeColor=#7a7a7a;fontColor=#1a1a1a;arcSize=3;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontSize=13;" parent="1" vertex="1">
+          <mxGeometry x="830" y="150" width="320" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="pg" value="&lt;b&gt;Postgres Cluster&lt;/b&gt;&amp;nbsp; ·&amp;nbsp; :5432&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;separate databases and users&lt;br&gt;for NICo and RMS&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eef4fb;strokeColor=#5b83b0;fontColor=#1a1a1a;arcSize=10;fontSize=11;" parent="1" vertex="1">
+          <mxGeometry x="860" y="186" width="280" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="pki" value="&lt;b&gt;cert-manager&lt;/b&gt;&amp;nbsp; ·&amp;nbsp; &lt;b&gt;Vault&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;issues RMS server, switch server,&lt;br&gt;and switch client certificates&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fbeeee;strokeColor=#b05b5b;fontColor=#1a1a1a;arcSize=10;fontSize=11;" parent="1" vertex="1">
+          <mxGeometry x="860" y="262" width="280" height="64" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="rmsNs" value="&lt;b&gt;Kubernetes cluster — namespace: rack-manager&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fbfbfb;strokeColor=#7a7a7a;fontColor=#1a1a1a;arcSize=3;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontSize=13;" parent="1" vertex="1">
+          <mxGeometry x="130" y="400" width="670" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="rms" value="&lt;b&gt;rms-api-server&lt;/b&gt;&amp;nbsp; ·&amp;nbsp; Deployment, replicas: 1&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;:8801 gRPC (mTLS)&amp;nbsp; ·&amp;nbsp; :8802 metrics&amp;nbsp; ·&amp;nbsp; config at /etc/rms/config.toml&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eaf7d6;strokeColor=#76B900;strokeWidth=2;fontColor=#1a1a1a;arcSize=8;fontSize=12;" parent="1" vertex="1">
+          <mxGeometry x="150" y="436" width="630" height="66" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="artifact" value="&lt;b&gt;Firmware artifact host&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;artifacts named by the&lt;br&gt;firmware manifest&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fdf6e3;strokeColor=#b8912f;fontColor=#1a1a1a;arcSize=10;fontSize=11;" parent="1" vertex="1">
+          <mxGeometry x="860" y="516" width="280" height="66" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="hw" value="&lt;b&gt;Rack hardware — out-of-band management network&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fbfbfb;strokeColor=#7a7a7a;fontColor=#1a1a1a;arcSize=3;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontSize=13;" parent="1" vertex="1">
+          <mxGeometry x="130" y="620" width="1020" height="160" as="geometry"/>
+        </mxCell>
+        <mxCell id="compute" value="&lt;b&gt;Compute tray&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;BMC and HMC&lt;br&gt;Redfish&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f7f7f7;strokeColor=#7a7a7a;fontColor=#1a1a1a;arcSize=8;fontSize=11;" parent="1" vertex="1">
+          <mxGeometry x="152" y="664" width="296" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="switch" value="&lt;b&gt;NVSwitch tray&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;BMC (Redfish)&amp;nbsp; ·&amp;nbsp; NVUE REST&lt;br&gt;NVOS CLI and image transfer&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f7f7f7;strokeColor=#7a7a7a;fontColor=#1a1a1a;arcSize=8;fontSize=11;" parent="1" vertex="1">
+          <mxGeometry x="482" y="664" width="296" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="pshelf" value="&lt;b&gt;Power shelf&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;Shelf controller&lt;br&gt;Redfish&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f7f7f7;strokeColor=#7a7a7a;fontColor=#1a1a1a;arcSize=8;fontSize=11;" parent="1" vertex="1">
+          <mxGeometry x="812" y="664" width="296" height="96" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="eUsers" edge="1" parent="1" source="users" target="restapi" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#5A5A5A;curved=0;">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eUsersL" connectable="0" parent="eUsers" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;" value="HTTPS" vertex="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+
+        <mxCell id="eRest" edge="1" parent="1" source="restapi" target="nicoapi" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;strokeColor=#5A5A5A;curved=0;">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eRestL" connectable="0" parent="eRest" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;" value="gRPC" vertex="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+
+        <mxCell id="eRms" edge="1" parent="1" source="nicoapi" target="rms" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;strokeColor=#76B900;strokeWidth=2;curved=0;">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eRmsL" connectable="0" parent="eRms" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;fontColor=#4a7a10;" value="gRPC :8801&lt;br&gt;mTLS" vertex="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+
+        <mxCell id="eNicoPg" edge="1" parent="1" source="nicoapi" target="pg" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.25;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#5b83b0;curved=0;">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eNicoPgL" connectable="0" parent="eNicoPg" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;fontColor=#3c5f80;" value="TCP :5432" vertex="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+
+        <mxCell id="eRmsPg" edge="1" parent="1" source="rms" target="pg" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.6;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#5b83b0;curved=0;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1180" y="476"/><mxPoint x="1180" y="216"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="eRmsPgL" connectable="0" parent="eRmsPg" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;fontColor=#3c5f80;" value="TCP :5432&lt;br&gt;sslmode=require" vertex="1">
+          <mxGeometry relative="1" x="0.55" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+
+        <mxCell id="ePki" edge="1" parent="1" source="pki" target="rms" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.12;entryDx=0;entryDy=0;strokeColor=#b05b5b;dashed=1;curved=0;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="812" y="294"/><mxPoint x="812" y="444"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ePkiL" connectable="0" parent="ePki" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;fontColor=#8a4444;" value="issues certificates" vertex="1">
+          <mxGeometry relative="1" x="-0.1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+
+        <mxCell id="eArt" edge="1" parent="1" source="rms" target="artifact" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.9;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#b8912f;curved=0;">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eArtL" connectable="0" parent="eArt" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;fontColor=#8a6d24;" value="HTTP or HTTPS&lt;br&gt;optional API key" vertex="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+
+        <mxCell id="eCompute" edge="1" parent="1" source="rms" target="compute" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#5A5A5A;curved=0;">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eComputeL" connectable="0" parent="eCompute" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;" value="Redfish HTTPS :443&lt;br&gt;basic auth" vertex="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+
+        <mxCell id="eSwitch" edge="1" parent="1" source="rms" target="switch" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.6;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#5A5A5A;curved=0;">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eSwitchL" connectable="0" parent="eSwitch" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;" value="NVUE HTTPS :8765 — basic auth + mTLS&lt;br&gt;SSH and SFTP :22&amp;nbsp; ·&amp;nbsp; Redfish HTTPS :443" vertex="1">
+          <mxGeometry relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+
+        <mxCell id="ePshelf" edge="1" parent="1" source="rms" target="pshelf" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.95;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#5A5A5A;curved=0;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="748" y="610"/><mxPoint x="960" y="610"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ePshelfL" connectable="0" parent="ePshelf" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;" value="Redfish HTTPS :443&lt;br&gt;basic auth" vertex="1">
+          <mxGeometry relative="1" x="0.1" as="geometry"><mxPoint as="offset"/></mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
