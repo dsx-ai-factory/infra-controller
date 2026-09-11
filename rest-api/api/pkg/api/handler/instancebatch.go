@@ -590,6 +590,10 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			if sxp.SiteID != site.ID {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
 			}
+			if sxp.Status != cdbm.SpectrumXPartitionStatusReady {
+				logger.Warn().Msg(fmt.Sprintf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID))
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in request data is not in Ready state", partitionID), nil)
+			}
 		}
 	}
 

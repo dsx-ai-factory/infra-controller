@@ -151,11 +151,14 @@ func (msxp ManageSpectrumXPartition) UpdateSpectrumXPartitionsInDB(ctx context.C
 			continue
 		}
 
-		// Being reported by the Site is what makes a Partition Ready.
+		// Being reported by the Site is what makes a Partition Ready. The status row and its
+		// status detail move together so a failure cannot leave the two disagreeing.
 		if sxp.Status != cdbm.SpectrumXPartitionStatusReady {
 			readyStatus := cdbm.SpectrumXPartitionStatusReady
 			message := readyStatus.Message()
-			serr := msxp.updateSpectrumXPartitionStatusInDB(ctx, nil, sxp.ID, &readyStatus, &message)
+			serr := cdb.WithTx(ctx, msxp.dbSession, func(tx *cdb.Tx) error {
+				return msxp.updateSpectrumXPartitionStatusInDB(ctx, tx, sxp.ID, &readyStatus, &message)
+			})
 			if serr != nil {
 				slogger.Error().Err(serr).Msg("failed to update SpectrumX Partition status detail in DB")
 			}
@@ -201,24 +204,26 @@ func (msxp ManageSpectrumXPartition) UpdateSpectrumXPartitionsInDB(ctx context.C
 			continue
 		}
 
-		// Set isMissingOnSite flag to true and update status, user can decide on deletion
-		_, serr := sxpDAO.Update(
-			ctx,
-			nil,
-			cdbm.SpectrumXPartitionUpdateInput{
-				SpectrumXPartitionID: sxp.ID,
-				IsMissingOnSite:      cwutil.GetPtr(true),
-			},
-		)
-		if serr != nil {
-			slogger.Error().Err(serr).Msg("failed to set missing on Site flag in DB for SpectrumX Partition")
-			continue
-		}
-
+		// Set isMissingOnSite flag to true and update status, user can decide on deletion.
+		// The flag, the status and the status detail move together so a failure part way
+		// through cannot leave the Partition state and its history disagreeing.
 		errStatus := cdbm.SpectrumXPartitionStatusError
-		serr = msxp.updateSpectrumXPartitionStatusInDB(ctx, nil, sxp.ID, &errStatus, cwutil.GetPtr("SpectrumX Partition is missing on Site"))
+		serr := cdb.WithTx(ctx, msxp.dbSession, func(tx *cdb.Tx) error {
+			if _, derr := sxpDAO.Update(
+				ctx,
+				tx,
+				cdbm.SpectrumXPartitionUpdateInput{
+					SpectrumXPartitionID: sxp.ID,
+					IsMissingOnSite:      cwutil.GetPtr(true),
+				},
+			); derr != nil {
+				return derr
+			}
+
+			return msxp.updateSpectrumXPartitionStatusInDB(ctx, tx, sxp.ID, &errStatus, cwutil.GetPtr("SpectrumX Partition is missing on Site"))
+		})
 		if serr != nil {
-			slogger.Error().Err(serr).Msg("failed to update SpectrumX Partition status detail in DB")
+			slogger.Error().Err(serr).Msg("failed to record SpectrumX Partition as missing on Site")
 		}
 	}
 

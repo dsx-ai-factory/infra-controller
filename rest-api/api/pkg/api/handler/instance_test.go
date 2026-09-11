@@ -4303,6 +4303,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, inst1)
 
 	sxp1 := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-1", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusReady)
+	sxpPending := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-pending", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusPending)
 	assert.NotNil(t, sxp1)
 
 	existingPowerProfile := "balanced"
@@ -4979,6 +4980,80 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(1),
 			},
 			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update omits SpectrumX Attachments marked Deleting from the Site config",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				// An empty list retires the attachment left by the cases above, so the next
+				// unrelated PATCH must not re-assert it to the Site.
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript:           os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{},
+				},
+				reqInstance:                          inst1.ID.String(),
+				cleanInstanceToStatus:                inst1.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(0),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update does not re-assert a Deleting SpectrumX Attachment",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				// Omitting the list carries the persisted set forward, but the row retired
+				// above is in Deleting and must stay out of the Site config.
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+				},
+				reqInstance:                          inst1.ID.String(),
+				cleanInstanceToStatus:                inst1.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(0),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update rejects a SpectrumX Attachment on a non-Ready Partition",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{
+						{
+							SpectrumXPartitionID: sxpPending.ID.String(),
+							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+							DeviceInstance:       cutil.GetPtr(0),
+							AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+						},
+					},
+				},
+				reqInstance:           inst1.ID.String(),
+				cleanInstanceToStatus: inst1.Status,
+				reqOrg:                tnOrg1,
+				reqUser:               tnu1,
+				respCode:              http.StatusBadRequest,
+			},
 		},
 		{
 			name: "test Instance update rejects power profile when DPS power management is disabled",

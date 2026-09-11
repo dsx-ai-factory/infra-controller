@@ -666,6 +666,10 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			if sxp.SiteID != site.ID {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
 			}
+			if sxp.Status != cdbm.SpectrumXPartitionStatusReady {
+				logger.Warn().Msg(fmt.Sprintf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID))
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in request data is not in Ready state", partitionID), nil)
+			}
 		}
 	}
 
@@ -2308,8 +2312,22 @@ func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Lo
 		return timeoutResp()
 	}
 
+	// A reboot leaves the Instance's SpectrumX Attachments untouched, so load them rather
+	// than returning an empty array that contradicts the GET immediately afterward.
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(uih.dbSession)
+	sxas, _, serr := sxaDAO.GetAll(reqCtx, nil, cdbm.SpectrumXAttachmentFilterInput{
+		InstanceIDs: []uuid.UUID{ui.ID},
+	}, cdbp.PageInput{
+		OrderBy: &cdbp.OrderBy{Field: cdbm.SpectrumXAttachmentOrderByDefault, Order: cdbp.OrderAscending},
+		Limit:   cutil.GetPtr(cdbp.TotalLimit),
+	}, []string{cdbm.SpectrumXPartitionRelationName})
+	if serr != nil {
+		logger.Error().Err(serr).Msg("error retrieving SpectrumX Attachments for rebooted Instance")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve SpectrumX Attachments for Instance", nil)
+	}
+
 	// Create response
-	apiInstance := model.NewAPIInstance(ui, instance.Site, retifc, nil, nil, nil, nil, dbskgs, ssds)
+	apiInstance := model.NewAPIInstance(ui, instance.Site, retifc, nil, sxas, nil, nil, dbskgs, ssds)
 	if ui.NetworkSecurityGroupID == nil {
 		err = AttachVpcNsgPropagationDetailsToApiInstance(c, reqCtx, logger, uih.dbSession, ui, retifc, apiInstance)
 		if err != nil {
@@ -2850,6 +2868,10 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 			if sxp.SiteID != site.ID {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in spectrumXAttachments request does not belong to Site", partitionID), nil)
+			}
+			if sxp.Status != cdbm.SpectrumXPartitionStatusReady {
+				logger.Warn().Msg(fmt.Sprintf("SpectrumXPartition: %v specified in request data is not in Ready state", partitionID))
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition: %v specified in request data is not in Ready state", partitionID), nil)
 			}
 		}
 	}
@@ -4425,6 +4447,10 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		// unrelated PATCH from clearing the Instance's attachments on the Site.
 		spectrumXAttachmentConfigs := make([]*corev1.InstanceSpxAttachment, 0, len(newOrExistingSxAs))
 		for i := range newOrExistingSxAs {
+			if newOrExistingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
+				// NOTE: Don't send any SpectrumX Attachments that are being deleted
+				continue
+			}
 			spectrumXAttachmentConfigs = append(spectrumXAttachmentConfigs, newOrExistingSxAs[i].ToProto())
 		}
 		updateInstanceRequest.Config.Spxconfig = &corev1.InstanceSpxConfig{SpxAttachments: spectrumXAttachmentConfigs}
