@@ -1233,6 +1233,23 @@ func TestManageSubnet_CreateOrUpdateSubnetFromSite(t *testing.T) {
 	))
 	_, err = ipamer.AcquireSpecificChildPrefix(ctx, "10.0.0.0/8", "10.5.0.0/24")
 	require.NoError(t, err)
+	// This private IP Block is linked to a TenantManaged SitePrefix and deliberately
+	// has no IPAM root. Subnet recovery must allocate from the broader tenant IP
+	// Block created through Allocation.
+	_, err = cdbm.NewIPBlockDAO(dbSession).Create(ctx, nil, cdbm.IPBlockCreateInput{
+		Name:                     "private-site-prefix-ip-block",
+		SiteID:                   site.ID,
+		InfrastructureProviderID: provider.ID,
+		TenantID:                 &authorizedTenant.ID,
+		SitePrefixID:             cutil.GetPtr(uuid.New()),
+		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
+		Prefix:                   "10.6.0.0",
+		PrefixLength:             16,
+		ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
+		Status:                   cdbm.IPBlockStatusReady,
+		CreatedBy:                &authorizedTenantUser.ID,
+	})
+	require.NoError(t, err)
 	existingSubnet := testSubnetBuildSubnet(
 		t, dbSession, "existing-name", authorizedTenant, parentVpc, nil, nil,
 		&ipBlock.RoutingType, cutil.GetPtr("10.0.0.0"), cutil.GetPtr("10.0.0.1"),
@@ -1377,6 +1394,21 @@ func TestManageSubnet_CreateOrUpdateSubnetFromSite(t *testing.T) {
 			},
 			wantSubnet: true,
 			wantName:   "rest-id-parent-vpc-subnet",
+		},
+		{
+			name: "ignores more-specific TenantManaged SitePrefix IP Block",
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config: &corev1.NetworkSegmentConfig{
+					VpcId: &corev1.VpcId{Value: parentVpc.ID.String()},
+					Prefixes: []*corev1.NetworkPrefix{
+						{Prefix: "10.6.1.0/24", Gateway: cutil.GetPtr("10.6.1.1")},
+					},
+				},
+				Metadata: &corev1.Metadata{Name: "private-site-prefix-overlap-subnet"},
+			},
+			wantSubnet: true,
+			wantName:   "private-site-prefix-overlap-subnet",
 		},
 	}
 

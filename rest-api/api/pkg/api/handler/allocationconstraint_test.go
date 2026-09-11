@@ -24,6 +24,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	tmocks "go.temporal.io/sdk/mocks"
 )
@@ -92,6 +93,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 	ipb1 := testIPBlockBuildIPBlock(t, dbSession, "testipb", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	ipb2 := testIPBlockBuildIPBlock(t, dbSession, "testipb2", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.167.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 	ipb3 := testIPBlockBuildIPBlock(t, dbSession, "testipb3", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "10.100.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
+	operatorRoot := testIPBlockBuildIPBlock(t, dbSession, "operator-root", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "172.16.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
 
 	parentPref1, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipb1.Prefix, ipb1.PrefixLength, ipb1.RoutingType, ipb1.InfrastructureProviderID.String(), ipb1.SiteID.String())
 	assert.Nil(t, err)
@@ -105,6 +107,10 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, parentPref3)
 
+	operatorRootPrefix, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, operatorRoot.Prefix, operatorRoot.PrefixLength, operatorRoot.RoutingType, operatorRoot.InfrastructureProviderID.String(), operatorRoot.SiteID.String())
+	assert.Nil(t, err)
+	assert.NotNil(t, operatorRootPrefix)
+
 	// Setup Allocation/Constraints
 	acGoodIT1 := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it1.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 22}
 	acGoodIPB1 := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipb1.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 24}
@@ -117,6 +123,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 	acGoodIT2 := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it2.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 22}
 	acGoodIPB2 := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipb2.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 24}
 	acGoodIPB3 := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipb3.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 24}
+	acOperatorRoot := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: operatorRoot.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 24}
 	acGoodITTenant2 := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it1.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 7}
 
 	okABodyIT2, err := json.Marshal(model.APIAllocationCreateRequest{Name: "okit2", Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIT2}})
@@ -124,6 +131,8 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 	okABodyIPB2, err := json.Marshal(model.APIAllocationCreateRequest{Name: "okipb2", Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIPB2}})
 	assert.Nil(t, err)
 	okABodyIPB3, err := json.Marshal(model.APIAllocationCreateRequest{Name: "okipb3", Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIPB3}})
+	assert.Nil(t, err)
+	operatorRootAllocationBody, err := json.Marshal(model.APIAllocationCreateRequest{Name: "operator-root-allocation", Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acOperatorRoot}})
 	assert.Nil(t, err)
 	okABodyITTenant2, err := json.Marshal(model.APIAllocationCreateRequest{Name: "okit-tenant-2", Description: cutil.GetPtr(""), TenantID: tenant2.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodITTenant2}})
 	assert.Nil(t, err)
@@ -158,6 +167,9 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 	aipID3, _ := uuid.Parse(aIPB3.ID)
 	assert.NotNil(t, aipID3)
 
+	operatorRootAllocation := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(operatorRootAllocationBody))
+	operatorRootAllocationID := uuid.MustParse(operatorRootAllocation.ID)
+
 	aITTenant2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyITTenant2))
 	assert.NotNil(t, aITTenant2)
 
@@ -182,6 +194,10 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 	acsip3, _, err := acDAO.GetAll(ctx, nil, cdbm.AllocationConstraintFilterInput{AllocationIDs: []uuid.UUID{aipID3}}, cdbp.PageInput{}, nil)
 	assert.Nil(t, err)
 	assert.NotNil(t, acsip3)
+
+	operatorRootConstraints, _, err := acDAO.GetAll(ctx, nil, cdbm.AllocationConstraintFilterInput{AllocationIDs: []uuid.UUID{operatorRootAllocationID}}, cdbp.PageInput{}, nil)
+	require.NoError(t, err)
+	require.Len(t, operatorRootConstraints, 1)
 
 	// Setup test data for Allocation Constraint Update
 	okBodyIT1, err := json.Marshal(model.APIAllocationConstraintUpdateRequest{ConstraintValue: 23})
@@ -253,6 +269,28 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 	vpcPrefixForAC := testAllocationBuildVpcPrefix(t, dbSession, tenant1, vpc1, "testVPCPrefix-ac-update", childIPB3)
 	assert.NotNil(t, vpcPrefixForAC)
 
+	operatorRootConstraint := operatorRootConstraints[0]
+	require.NotNil(t, operatorRootConstraint.DerivedResourceID)
+	operatorChildID := *operatorRootConstraint.DerivedResourceID
+	operatorChild, err := ipbDAO.GetByID(ctx, nil, operatorChildID, nil)
+	require.NoError(t, err)
+	operatorChildBeforeUpdate := *operatorChild
+
+	operatorRoot, err = ipbDAO.LinkSitePrefix(ctx, nil, operatorRoot.ID, uuid.New())
+	require.NoError(t, err)
+	operatorRoot, err = ipbDAO.Update(ctx, nil, cdbm.IPBlockUpdateInput{
+		IPBlockID: operatorRoot.ID,
+		Status:    cutil.GetPtr(cdbm.IPBlockStatusDeleting),
+	})
+	require.NoError(t, err)
+
+	operatorRootUsageBeforeUpdate, err := ipam.GetIpamUsageForIPBlock(ctx, ipamStorage, operatorRoot)
+	require.NoError(t, err)
+	operatorRootNamespace := ipam.GetIpamNamespaceForIPBlock(ctx, operatorRoot.RoutingType, operatorRoot.InfrastructureProviderID.String(), operatorRoot.SiteID.String())
+	operatorChildCIDR := ipam.GetCidrForIPBlock(ctx, operatorChild.Prefix, operatorChild.PrefixLength)
+	operatorChildPrefixBeforeUpdate, err := ipamStorage.ReadPrefix(ctx, operatorChildCIDR, operatorRootNamespace)
+	require.NoError(t, err)
+
 	// OTEL Spanner configuration
 	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
 
@@ -294,6 +332,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		checkFullGrant          *bool
 		verifyChildSpanner      bool
 		tmc                     *tmocks.Client
+		assertState             func(t *testing.T)
 	}{
 		{
 			name:           "error when User is not found in Request Context",
@@ -522,6 +561,44 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 			expectedConstraintValue: 0,
 		},
 		{
+			name:               "error when OperatorManaged SitePrefix parent IP Block is deleting",
+			reqOrgName:         ipOrg1,
+			reqBody:            string(okBodyIP1),
+			user:               ipu,
+			requestedAID:       operatorRootConstraint.AllocationID,
+			requestedACS:       operatorRootConstraint,
+			acID:               operatorRootConstraint.ID.String(),
+			expectedErr:        true,
+			expectedErrMessage: "linked to an OperatorManaged SitePrefix is not Ready",
+			expectedStatus:     http.StatusBadRequest,
+			assertState: func(t *testing.T) {
+				constraintAfterUpdate, derr := acDAO.GetByID(ctx, nil, operatorRootConstraint.ID, nil)
+				if assert.NoError(t, derr) {
+					assert.Equal(t, operatorRootConstraint.ConstraintValue, constraintAfterUpdate.ConstraintValue)
+					assert.Equal(t, operatorRootConstraint.DerivedResourceID, constraintAfterUpdate.DerivedResourceID)
+				}
+
+				childAfterUpdate, derr := ipbDAO.GetByID(ctx, nil, operatorChildID, nil)
+				if assert.NoError(t, derr) {
+					assert.Equal(t, operatorChildBeforeUpdate.ID, childAfterUpdate.ID)
+					assert.Equal(t, operatorChildBeforeUpdate.Prefix, childAfterUpdate.Prefix)
+					assert.Equal(t, operatorChildBeforeUpdate.PrefixLength, childAfterUpdate.PrefixLength)
+					assert.Equal(t, operatorChildBeforeUpdate.Updated, childAfterUpdate.Updated)
+				}
+
+				operatorRootUsageAfterUpdate, derr := ipam.GetIpamUsageForIPBlock(ctx, ipamStorage, operatorRoot)
+				if assert.NoError(t, derr) {
+					assert.Equal(t, operatorRootUsageBeforeUpdate, operatorRootUsageAfterUpdate)
+				}
+
+				operatorChildPrefixAfterUpdate, derr := ipamStorage.ReadPrefix(ctx, operatorChildCIDR, operatorRootNamespace)
+				if assert.NoError(t, derr) {
+					assert.Equal(t, operatorChildPrefixBeforeUpdate.Cidr, operatorChildPrefixAfterUpdate.Cidr)
+					assert.Equal(t, operatorChildPrefixBeforeUpdate.ParentCidr, operatorChildPrefixAfterUpdate.ParentCidr)
+				}
+			},
+		},
+		{
 			name:               "error updating IP Block Allocation Constraint value due to IPAM error",
 			reqOrgName:         ipOrg1,
 			reqBody:            string(errBodyIP1),
@@ -567,6 +644,9 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 			assert.Equal(t, tc.expectedStatus, rec.Code)
 			if tc.expectedErr && tc.expectedErrMessage != "" {
 				assert.Contains(t, rec.Body.String(), tc.expectedErrMessage)
+			}
+			if tc.assertState != nil {
+				tc.assertState(t)
 			}
 			if tc.expectedErr {
 				if tc.expectedIpamErrMsg != "" {

@@ -131,6 +131,100 @@ func TestMachineLabelsGinOpsMigration(t *testing.T) {
 	require.Nil(t, newIndexName)
 }
 
+func TestIPBlockSitePrefixUniqueMigration(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.GetTestDBSession(t, true)
+	defer dbSession.Close()
+	model.TestSetupSchema(t, dbSession)
+
+	org := "site-prefix-identity-provider"
+	user := model.TestBuildUser(t, dbSession, uuid.NewString(), org, []string{authz.ProviderAdminRole})
+	provider := model.TestBuildInfrastructureProvider(t, dbSession, "site-prefix-identity-provider", org, user)
+	site := model.TestBuildSite(t, dbSession, provider, "site-prefix-identity-site", user)
+	dao := model.NewIPBlockDAO(dbSession)
+	sitePrefixID := uuid.New()
+
+	create := func(name, prefix string, linkedSitePrefixID *uuid.UUID) (*model.IPBlock, error) {
+		return dao.Create(ctx, nil, model.IPBlockCreateInput{
+			Name:                     name,
+			SiteID:                   site.ID,
+			InfrastructureProviderID: provider.ID,
+			SitePrefixID:             linkedSitePrefixID,
+			RoutingType:              model.IPBlockRoutingTypeDatacenterOnly,
+			Prefix:                   prefix,
+			PrefixLength:             24,
+			ProtocolVersion:          model.IPBlockProtocolVersionV4,
+			Status:                   model.IPBlockStatusReady,
+			CreatedBy:                &user.ID,
+		})
+	}
+
+	firstNull, err := create("first-unlinked", "10.92.0.0", nil)
+	require.NoError(t, err)
+	secondNull, err := create("second-unlinked", "10.92.1.0", nil)
+	require.NoError(t, err)
+	linked, err := create("linked", "10.92.2.0", &sitePrefixID)
+	require.NoError(t, err)
+
+	var targetMigration migrate.Migration
+	for _, migration := range Migrations.Sorted() {
+		if migration.Name == "20260910140509" {
+			targetMigration = migration
+			break
+		}
+	}
+	require.Equal(t, "ip_block_site_prefix_unique", targetMigration.Comment)
+
+	targetMigrations := migrate.NewMigrations()
+	targetMigrations.Add(targetMigration)
+	migrator := migrate.NewMigrator(
+		dbSession.DB,
+		targetMigrations,
+		migrate.WithTableName("ip_block_site_prefix_unique_migrations_test"),
+		migrate.WithLocksTableName("ip_block_site_prefix_unique_migration_locks_test"),
+		migrate.WithMarkAppliedOnSuccess(true),
+	)
+	require.NoError(t, migrator.Init(ctx))
+
+	group, err := migrator.Migrate(ctx)
+	require.NoError(t, err)
+	require.Len(t, group.Migrations, 1)
+	// A crash can leave the index committed before Bun records the migration.
+	// Replaying the callback must converge on the same schema.
+	require.NoError(t, ipBlockSitePrefixUniqueUpMigration(ctx, dbSession.DB))
+
+	for _, id := range []uuid.UUID{firstNull.ID, secondNull.ID} {
+		persisted, err := dao.GetByID(ctx, nil, id, nil)
+		require.NoError(t, err)
+		require.Nil(t, persisted.SitePrefixID)
+	}
+	thirdNull, err := create("third-unlinked", "10.92.3.0", nil)
+	require.NoError(t, err)
+	require.Nil(t, thirdNull.SitePrefixID)
+
+	var indexDefinition string
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT pg_get_indexdef('public.ip_block_site_prefix_id_key'::regclass)
+	`).Scan(&indexDefinition)
+	require.NoError(t, err)
+	require.Contains(t, indexDefinition, "WHERE (site_prefix_id IS NOT NULL)")
+
+	require.NoError(t, dao.Delete(ctx, nil, linked.ID))
+	_, err = create("replacement", "10.92.4.0", &sitePrefixID)
+	require.ErrorContains(t, err, "ip_block_site_prefix_id_key")
+
+	_, err = migrator.Rollback(ctx)
+	require.ErrorIs(t, err, errIPBlockSitePrefixIdentityRollback)
+
+	statuses, err := migrator.MigrationsWithStatus(ctx)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.True(t, statuses[0].IsApplied())
+
+	_, err = create("replacement-after-rollback", "10.92.5.0", &sitePrefixID)
+	require.ErrorContains(t, err, "ip_block_site_prefix_id_key")
+}
+
 func TestVpcSlaacEnabledMigration(t *testing.T) {
 	ctx := context.Background()
 	dbSession := util.GetTestDBSession(t, true)

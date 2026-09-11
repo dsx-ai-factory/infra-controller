@@ -461,7 +461,8 @@ func (ms ManageSubnet) createOrUpdateSubnetFromSite(
 		}
 
 		// If the Subnet is being undeleted, use its stored IPv4 Block. Otherwise
-		// find the most specific Ready tenant IPv4 Block that contains its Prefix.
+		// find the most specific Ready tenant IPv4 Block created through Allocation
+		// that contains its Prefix.
 		ipBlockDAO := cdbm.NewIPBlockDAO(ms.dbSession)
 		var ipBlock *cdbm.IPBlock
 		if existingSubnet != nil {
@@ -491,11 +492,18 @@ func (ms ManageSubnet) createOrUpdateSubnetFromSite(
 				return nil, nil
 			}
 		} else {
-			ipBlocks, _, ipBlockErr := ipBlockDAO.GetAll(ctx, tx, cdbm.IPBlockFilterInput{
-				SiteIDs:   []uuid.UUID{site.ID},
-				TenantIDs: []uuid.UUID{vpc.TenantID},
-				Statuses:  []string{cdbm.IPBlockStatusReady},
-			}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+			filter := cdbm.IPBlockFilterInput{
+				SiteIDs:  []uuid.UUID{site.ID},
+				Statuses: []string{cdbm.IPBlockStatusReady},
+			}
+			filter.TenantAllocated(vpc.TenantID)
+			ipBlocks, _, ipBlockErr := ipBlockDAO.GetAll(
+				ctx,
+				tx,
+				filter,
+				cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+				nil,
+			)
 			if ipBlockErr != nil {
 				return nil, fmt.Errorf("unable to create Subnet found on Site: failed to retrieve IPv4 Blocks, DB error: %w", ipBlockErr)
 			}

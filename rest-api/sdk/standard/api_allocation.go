@@ -49,7 +49,7 @@ Create an Allocation for the org.
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 To successfully create a compute Allocation, there must be enough unallocated Machines associated with the Instance Type to satisfy the constraint value.
-For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value.
+For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. When that IP Block is linked to an `OperatorManaged` SitePrefix, it must also be `Ready`. A conflict involving capacity, address space, or lifecycle state returns 409.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -139,6 +139,17 @@ func (a *AllocationAPIService) CreateAllocationExecute(r ApiCreateAllocationRequ
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

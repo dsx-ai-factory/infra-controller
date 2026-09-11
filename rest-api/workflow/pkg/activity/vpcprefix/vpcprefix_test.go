@@ -1058,6 +1058,24 @@ func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {
 		ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
 	)
 	require.NoError(t, err)
+	_, err = cdbm.NewIPBlockDAO(dbSession).Create(
+		ctx,
+		nil,
+		cdbm.IPBlockCreateInput{
+			Name:                     "tenant-site-prefix",
+			SiteID:                   site.ID,
+			InfrastructureProviderID: provider.ID,
+			TenantID:                 &authorizedTenant.ID,
+			SitePrefixID:             cutil.GetPtr(uuid.New()),
+			RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
+			Prefix:                   "10.6.0.0",
+			PrefixLength:             16,
+			ProtocolVersion:          cdbm.IPBlockProtocolVersionV4,
+			Status:                   cdbm.IPBlockStatusReady,
+			CreatedBy:                &authorizedTenantUser.ID,
+		},
+	)
+	require.NoError(t, err)
 	ipamer := cipam.NewWithStorage(ipamStorage)
 	ipamer.SetNamespace(ipam.GetIpamNamespaceForIPBlock(
 		ctx, ipBlock.RoutingType, ipBlock.InfrastructureProviderID.String(), ipBlock.SiteID.String(),
@@ -1182,6 +1200,19 @@ func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {
 			},
 			wantVpcPrefix: true,
 			wantName:      "rest-id-parent-vpc-prefix",
+		},
+		{
+			name: "ignores a more-specific TenantManaged SitePrefix without legacy IPAM",
+			controllerVpcPrefix: &corev1.VpcPrefix{
+				Id:    &corev1.VpcPrefixId{Value: uuid.NewString()},
+				VpcId: &corev1.VpcId{Value: parentVpc.ID.String()},
+				Config: &corev1.VpcPrefixConfig{
+					Prefix: "10.6.1.0/24",
+				},
+				Metadata: &corev1.Metadata{Name: "tenant-site-prefix-child"},
+			},
+			wantVpcPrefix: true,
+			wantName:      "tenant-site-prefix-child",
 		},
 	}
 
