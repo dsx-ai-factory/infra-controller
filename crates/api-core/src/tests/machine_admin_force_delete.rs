@@ -1534,6 +1534,13 @@ async fn test_admin_force_delete_with_dpf_uses_bmc_mac(pool: sqlx::PgPool) {
         Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let mut mock = MockDpfOperations::new();
+    mock.expect_get_service_versions_for_dpu().returning(|_| {
+        Ok(vec![carbide_dpf::DpuServiceVersion {
+            name: "test-service".to_string(),
+            version: "test-version".to_string(),
+            url: "https://example.com/test-service".to_string(),
+        }])
+    });
 
     mock.expect_register_dpu_device().returning(|_, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));

@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+#include <csignal>
+
 #include <asiolink/io_address.h>
 #include <asiolink/io_error.h>
 #include <hooks/hooks.h>
@@ -191,6 +193,11 @@ int shim_load(void *handle_ptr) {
   LibraryHandle *handle = static_cast<LibraryHandle *>(handle_ptr);
 
   LOG_INFO(loader_logger, isc::log::LOG_CARBIDE_INITIALIZATION);
+
+  // Rust installs SIG_IGN for SIGPIPE in lang_start, which runs only for Rust
+  // binaries. This hook is a cdylib loaded into Kea, so the disposition stays
+  // SIG_DFL and a write to a closed Carbide API socket terminates the server.
+  signal(SIGPIPE, SIG_IGN);
 
   auto family = configured_family();
   // Family-specific validation must happen before common metrics startup,

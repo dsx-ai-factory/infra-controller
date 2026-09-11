@@ -300,6 +300,21 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 	flag.StringVar(&conf.Temporal.TemporalServer, "temporalServer", os.Getenv("TEMPORAL_SERVER"), "Temporal server")
 	flag.StringVar(&conf.Temporal.TemporalInventorySchedule, "temporalInventorySchedule", os.Getenv("TEMPORAL_INVENTORY_SCHEDULE"), "Temporal Inventory schedule")
 
+	inventoryCloudPageSize := conftypes.DefaultInventoryCloudPageSize
+	if v := os.Getenv("INVENTORY_CLOUD_PAGE_SIZE"); v != "" {
+		parsed, perr := strconv.Atoi(v)
+		if perr != nil {
+			log.Fatal().Msgf("error loading config, INVENTORY_CLOUD_PAGE_SIZE %q is not a valid integer", v)
+		}
+		inventoryCloudPageSize = parsed
+	}
+	flag.IntVar(&conf.Temporal.InventoryCloudPageSize, "inventoryCloudPageSize", inventoryCloudPageSize, "Number of inventory items published to Cloud per Temporal workflow page")
+
+	// Must run before validation: flag.XxxVar sets the destination immediately, but a real
+	// CLI flag only overwrites it here, so validating first would let a bad CLI value slip
+	// through unchecked.
+	flag.Parse()
+
 	if conf.Temporal.TemporalPublishQueue == "" {
 		log.Fatal().Msg("error loading config, Temporal publish queue must be specified")
 	}
@@ -313,8 +328,12 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 		log.Fatal().Msgf("error loading config, %v", serr)
 	}
 
+	serr = validateInventoryCloudPageSize(conf.Temporal.InventoryCloudPageSize)
+	if serr != nil {
+		log.Fatal().Msgf("error loading config, %v", serr)
+	}
+
 	log.Info().Interface("config", conf).Msg("Config Manager: Config loaded")
-	flag.Parse()
 
 	// Set default metrics namespace if not specified
 	if conf.MetricsNamespace == "" {
@@ -343,6 +362,32 @@ func validateInventorySchedule(schedule string) error {
 			schedule, interval, cutil.MaxInventoryReceiptInterval)
 	}
 
+	return nil
+}
+
+// inventoryCarbidePageSize mirrors InventoryCarbidePageSize (hardcoded to 100 in every
+// managers/*/cron.go; importing one here would cycle back to this config package). Keep in
+// sync if that value ever changes.
+const inventoryCarbidePageSize = 100
+
+// validateInventoryCloudPageSize rejects a page size Temporal or machine pagination can't
+// handle. Must be >=1 and <=MaxInventoryCloudPageSize (2MB Temporal blob ceiling, see
+// conftypes.go). Must also divide 100 evenly: CollectAndPublishMachineInventory
+// (site-workflow/pkg/activity/machine.go) chunks each 100-item Core page into Cloud pages
+// independently rather than buffering across Core pages, so a non-divisor desyncs its
+// TotalPages/CurrentPage reconciliation. Unreachable before this value became configurable
+// (the old hardcoded 25 always divided 100 cleanly); a real fix means buffering the machine
+// publisher like the instance one already does.
+func validateInventoryCloudPageSize(pageSize int) error {
+	if pageSize < 1 {
+		return fmt.Errorf("INVENTORY_CLOUD_PAGE_SIZE %d must be at least 1", pageSize)
+	}
+	if pageSize > conftypes.MaxInventoryCloudPageSize {
+		return fmt.Errorf("INVENTORY_CLOUD_PAGE_SIZE %d exceeds the %d maximum", pageSize, conftypes.MaxInventoryCloudPageSize)
+	}
+	if inventoryCarbidePageSize%pageSize != 0 {
+		return fmt.Errorf("INVENTORY_CLOUD_PAGE_SIZE %d must evenly divide %d (the Core/site fetch page size) -- a non-divisor breaks machine-inventory pagination totals across Core page boundaries", pageSize, inventoryCarbidePageSize)
+	}
 	return nil
 }
 

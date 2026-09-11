@@ -208,9 +208,9 @@ pub struct RmsBackend {
     switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
     db: PgPool,
     rack_profiles: Arc<RackProfileConfig>,
+
     /// Tracks firmware update job IDs keyed by device MAC address.
     firmware_jobs: Mutex<HashMap<MacAddress, Vec<RmsTrackedFirmwareJob>>>,
-    nvos_password_rotation_enabled: bool,
 }
 
 #[async_trait::async_trait]
@@ -559,7 +559,7 @@ impl RmsBackend {
         switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
         db: PgPool,
         rack_profiles: Arc<RackProfileConfig>,
-        nvos_password_rotation_enabled: bool,
+        _nvos_password_rotation_enabled: bool,
     ) -> Self {
         Self {
             client,
@@ -567,7 +567,6 @@ impl RmsBackend {
             db,
             rack_profiles,
             firmware_jobs: Mutex::new(HashMap::new()),
-            nvos_password_rotation_enabled,
         }
     }
 
@@ -2049,7 +2048,7 @@ impl NvSwitchManager for RmsBackend {
     }
 
     fn supports_password_rotation(&self) -> bool {
-        self.nvos_password_rotation_enabled
+        true
     }
 
     fn supports_firmware_object_json(&self) -> bool {
@@ -2752,13 +2751,6 @@ impl NvSwitchManager for RmsBackend {
         endpoint: &SwitchEndpoint,
         next_password: &str,
     ) -> Result<String, ComponentManagerError> {
-        if !self.supports_password_rotation() {
-            return Err(ComponentManagerError::Unsupported(
-                "RMS switch password rotation is disabled; enable it only after every RMS server has been upgraded"
-                    .to_string(),
-            ));
-        }
-
         let identities =
             resolve_switch_identities(&self.db, std::slice::from_ref(&endpoint.bmc_mac)).await?;
 

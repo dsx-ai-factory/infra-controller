@@ -106,17 +106,6 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
         matches!(
             machine.current_state(),
             model::machine::ManagedHostState::Assigned {
-                instance_state: model::machine::InstanceState::WaitingForRebootToReady
-            }
-        )
-    })
-    .await;
-    env.run_machine_state_controller_iteration().await;
-    mh.host().reboot_completed().await;
-    env.run_machine_state_controller_iteration_until_state_condition(&mh.id, 5, |machine| {
-        matches!(
-            machine.current_state(),
-            model::machine::ManagedHostState::Assigned {
                 instance_state: model::machine::InstanceState::Ready
             }
         )

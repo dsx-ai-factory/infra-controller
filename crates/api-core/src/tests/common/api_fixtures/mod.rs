@@ -1719,6 +1719,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
         site_explorer_rack_profiles,
         rms_sim.as_rms_client(),
         credential_manager.clone(),
+        api.runtime_config.dpf.enabled && api.dpf_sdk.is_some(),
     );
 
     // Create some instance types

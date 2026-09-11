@@ -704,11 +704,15 @@ pub async fn find_by_query(
     find_by_hostname(txn, query).await
 }
 
+/// Records the database statement execution time as the machine's reboot timestamp.
+///
+/// This ensures a reboot reported after a concurrent state transition is recorded as newer than
+/// that transition, even when the reporting transaction began first.
 pub async fn update_reboot_time<ID: MachineIdSubtypeTrait>(
     machine: &Machine<ID>,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
-    let query = "UPDATE machines SET last_reboot_time=NOW() WHERE id=$1 RETURNING id";
+    let query = "UPDATE machines SET last_reboot_time=clock_timestamp() WHERE id=$1 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
         .bind(machine.id.to_string())
         .fetch_one(txn)
@@ -849,11 +853,16 @@ pub async fn clear_bios_password_set_time(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// Records the database statement execution time as the machine's discovery timestamp.
+///
+/// This ensures discovery completed after a concurrent state transition is recorded as newer than
+/// that transition, even when the discovery transaction began first.
 pub async fn update_discovery_time(
     machine_id: &MachineId,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
-    let query = "UPDATE machines SET last_discovery_time=NOW() WHERE id=$1 RETURNING id";
+    let query =
+        "UPDATE machines SET last_discovery_time=clock_timestamp() WHERE id=$1 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
         .fetch_one(txn)
@@ -2379,11 +2388,15 @@ pub async fn update_state(
     Ok(())
 }
 
+/// Records the database statement execution time as the machine's validation timestamp.
+///
+/// This ensures validation completed after a concurrent state transition is recorded as newer than
+/// that transition, even when the validation transaction began first.
 pub async fn update_machine_validation_time(
     machine_id: &MachineId,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
-    let query = "UPDATE machines SET last_machine_validation_time=NOW() WHERE id=$1 RETURNING id";
+    let query = "UPDATE machines SET last_machine_validation_time=clock_timestamp() WHERE id=$1 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
         .fetch_one(txn)
@@ -3640,9 +3653,17 @@ mod test {
     }
 
     #[crate::sqlx_test]
-    async fn cleanup_time_follows_state_committed_after_transaction_start(
+    async fn completion_markers_follow_state_committed_after_transaction_start(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Clone, Copy)]
+        enum CompletionMarker {
+            Cleanup,
+            Discovery,
+            MachineValidation,
+            Reboot,
+        }
+
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
         let mut setup_txn = pool.begin().await?;
@@ -3657,60 +3678,86 @@ mod test {
         .await?;
         setup_txn.commit().await?;
 
-        let mut cleanup_txn = pool.begin().await?;
-        let cleanup_transaction_started_at: chrono::DateTime<chrono::Utc> =
-            sqlx::query_scalar("SELECT transaction_timestamp()")
-                .fetch_one(cleanup_txn.as_mut())
-                .await?;
-        let machine = super::find_one(
-            cleanup_txn.as_mut(),
-            &machine_id,
-            MachineSearchConfig::default(),
-        )
-        .await?
-        .expect("machine should exist before recording cleanup");
+        for (case, marker) in [
+            ("cleanup", CompletionMarker::Cleanup),
+            ("discovery", CompletionMarker::Discovery),
+            ("machine validation", CompletionMarker::MachineValidation),
+            ("reboot", CompletionMarker::Reboot),
+        ] {
+            let mut marker_txn = pool.begin().await?;
+            let marker_transaction_started_at: chrono::DateTime<chrono::Utc> =
+                sqlx::query_scalar("SELECT transaction_timestamp()")
+                    .fetch_one(marker_txn.as_mut())
+                    .await?;
+            let machine = super::find_one(
+                marker_txn.as_mut(),
+                &machine_id,
+                MachineSearchConfig::default(),
+            )
+            .await?
+            .unwrap_or_else(|| panic!("{case}: machine should exist before recording completion"));
 
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        let mut state_txn = pool.begin().await?;
-        let machine_for_state_update = super::find_one(
-            state_txn.as_mut(),
-            &machine_id,
-            MachineSearchConfig::default(),
-        )
-        .await?
-        .expect("machine should exist before advancing its state version");
-        super::advance(
-            &machine_for_state_update,
-            state_txn.as_mut(),
-            &ManagedHostState::Ready,
-            None,
-        )
-        .await?;
-        state_txn.commit().await?;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            let mut state_txn = pool.begin().await?;
+            let machine_for_state_update = super::find_one(
+                state_txn.as_mut(),
+                &machine_id,
+                MachineSearchConfig::default(),
+            )
+            .await?
+            .unwrap_or_else(|| {
+                panic!("{case}: machine should exist before advancing its state version")
+            });
+            super::advance(
+                &machine_for_state_update,
+                state_txn.as_mut(),
+                &ManagedHostState::Ready,
+                None,
+            )
+            .await?;
+            state_txn.commit().await?;
 
-        super::update_cleanup_time(&machine, cleanup_txn.as_mut()).await?;
-        cleanup_txn.commit().await?;
+            match marker {
+                CompletionMarker::Cleanup => {
+                    super::update_cleanup_time(&machine, marker_txn.as_mut()).await?
+                }
+                CompletionMarker::Discovery => {
+                    super::update_discovery_time(&machine.id, marker_txn.as_mut()).await?
+                }
+                CompletionMarker::MachineValidation => {
+                    super::update_machine_validation_time(&machine.id, marker_txn.as_mut()).await?
+                }
+                CompletionMarker::Reboot => {
+                    super::update_reboot_time(&machine, marker_txn.as_mut()).await?
+                }
+            }
+            marker_txn.commit().await?;
 
-        let mut verify_txn = pool.begin().await?;
-        let machine = super::find_one(
-            verify_txn.as_mut(),
-            &machine_id,
-            MachineSearchConfig::default(),
-        )
-        .await?
-        .expect("machine should exist after recording cleanup");
-        let cleanup_time = machine
-            .status
-            .last_cleanup_time
-            .expect("cleanup time should be recorded");
-        assert!(
-            cleanup_transaction_started_at < machine.state.version.timestamp(),
-            "the test must start the cleanup transaction before advancing the state version"
-        );
-        assert!(
-            cleanup_time > machine.state.version.timestamp(),
-            "cleanup recorded after a state transition must be newer than that state version"
-        );
+            let mut verify_txn = pool.begin().await?;
+            let machine = super::find_one(
+                verify_txn.as_mut(),
+                &machine_id,
+                MachineSearchConfig::default(),
+            )
+            .await?
+            .unwrap_or_else(|| panic!("{case}: machine should exist after recording completion"));
+            let marker_time = match marker {
+                CompletionMarker::Cleanup => machine.status.last_cleanup_time,
+                CompletionMarker::Discovery => machine.status.last_discovery_time,
+                CompletionMarker::MachineValidation => machine.last_machine_validation_time,
+                CompletionMarker::Reboot => machine.status.last_reboot_time,
+            }
+            .unwrap_or_else(|| panic!("{case}: completion time should be recorded"));
+            assert!(
+                marker_transaction_started_at < machine.state.version.timestamp(),
+                "{case}: the marker transaction must start before advancing the state version"
+            );
+            assert!(
+                marker_time > machine.state.version.timestamp(),
+                "{case}: completion recorded after a state transition must be newer than that state version"
+            );
+            verify_txn.commit().await?;
+        }
 
         Ok(())
     }

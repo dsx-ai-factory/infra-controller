@@ -2029,6 +2029,7 @@ async fn initialize_and_start_controllers<'a>(
         carbide_config.rack_profiles.clone(),
         rms_client.clone(),
         credential_manager.clone(),
+        carbide_config.dpf.enabled && dpf_sdk.is_some(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -2430,7 +2431,7 @@ mod tests {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix,
             prefix_v6: None,
-            gateway: prefix.network(),
+            gateway: Some(prefix.network()),
             dhcpv6_link_address: None,
             mtu,
             reserve_first: 0,

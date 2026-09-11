@@ -133,12 +133,16 @@ endpoint; `enabled` must come from the TOML, or at runtime without a pod roll:
   endpoint and the flag off, overhead is near zero. Tracing IS expensive when on — treat it as
   a debug-session tool (toggle on, investigate, toggle off); for sustained use add a
   tail-sampling policy at the collector (`docs/observability/tracing.md` §2.1 has one);
-- `nico-dns` also emits spans — always-on, defaulting to
-  `opentelemetry-collector.otel.svc.cluster.local:4317` (no standard deploy values override
-  it); the installer ships an ExternalName alias with that name onto the agent so those spans
-  land instead of blackholing. The other services (pxe, dhcp, bmc-proxy, …) build no exporter
-  today;
-- spans arrive in Tempo tagged `service.name=carbide-api`; the Grafana Tempo datasource is
+- `nico-dns` can also emit spans, but is off by default (no hardcoded endpoint): set
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (the `nico-dns` chart's `otlpEndpoint` value sets this),
+  or `--otlp-endpoint`/`otlp_endpoint` in its config file, to enable it. Earlier versions
+  exported unconditionally to a hardcoded
+  `opentelemetry-collector.otel.svc.cluster.local:4317` default; the installer's ExternalName
+  alias with that name still resolves for deployments relying on that address, but new
+  deployments should point `otlpEndpoint` at the agent explicitly. The other services (pxe,
+  dhcp, …) build no exporter today;
+- spans arrive in Tempo tagged `service.name=carbide-api` (`service.name=nico-dns` for `nico-dns`
+  spans); the Grafana Tempo datasource is
   pre-provisioned with trace-to-logs linking into Loki (one direction only: NICo log lines
   carry `span_id` but no `trace_id`, so Loki→Tempo derived fields aren't wired).
 

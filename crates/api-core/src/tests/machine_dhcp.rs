@@ -703,13 +703,16 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         }))
         .await?;
 
+    let expected_machine = db::expected_machine::find_by_bmc_mac_address(&pool, expected_bmc_mac)
+        .await?
+        .expect("expected machine should exist");
+
     // The machine-wide primary declaration belongs only to the Host role.
     // DPU OS and BMC interfaces still derive their primary settings from their
     // roles when the same ExpectedMachine declares a primary Host interface.
     struct Case {
         name: &'static str,
         mac_address: MacAddress,
-        role: ExpectedInterfaceRole,
         policy: ExpectedInterfaceIpAllocation,
         interface_type: InterfaceType,
         primary: bool,
@@ -718,7 +721,6 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
     for Case {
         name,
         mac_address,
-        role,
         policy,
         interface_type,
         primary,
@@ -726,7 +728,6 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         Case {
             name: "Host dynamic",
             mac_address: host_mac,
-            role: ExpectedInterfaceRole::Host,
             policy: ExpectedInterfaceIpAllocation::Dynamic,
             interface_type: InterfaceType::Data,
             primary: true,
@@ -734,7 +735,6 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         Case {
             name: "DPU OS dynamic",
             mac_address: dpu_os_mac,
-            role: ExpectedInterfaceRole::DpuOs,
             policy: ExpectedInterfaceIpAllocation::Dynamic,
             interface_type: InterfaceType::Data,
             primary: true,
@@ -742,7 +742,6 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         Case {
             name: "DPU BMC retained",
             mac_address: dpu_bmc_mac,
-            role: ExpectedInterfaceRole::DpuBmc,
             policy: ExpectedInterfaceIpAllocation::Retained,
             interface_type: InterfaceType::Bmc,
             primary: false,
@@ -750,7 +749,6 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
         Case {
             name: "Host BMC retained",
             mac_address: expected_bmc_mac,
-            role: ExpectedInterfaceRole::HostBmc,
             policy: ExpectedInterfaceIpAllocation::Retained,
             interface_type: InterfaceType::Bmc,
             primary: false,
@@ -783,15 +781,16 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
             "case: {name}",
         );
 
+        let expected_interface = expected_machine
+            .data
+            .interfaces
+            .iter()
+            .find(|interface| interface.mac_address == mac_address)
+            .expect("the stored declaration should contain this interface");
         carbide_site_explorer::try_apply_expected_interface(
             &pool,
-            &ExpectedInterface {
-                mac_address,
-                role,
-                ip_allocation: Some(policy),
-                network_segment_type: Some(NetworkSegmentType::Underlay),
-                ..Default::default()
-            },
+            &expected_machine,
+            expected_interface,
             None,
         )
         .await;

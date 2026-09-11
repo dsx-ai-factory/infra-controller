@@ -3022,7 +3022,7 @@ impl ApiClient {
     /// needs no paging.
     pub(crate) async fn list_dpu_service_sync_history(
         &self,
-        machine_id: carbide_uuid::machine::StableHostMachineId,
+        machine_id: carbide_uuid::machine::HostMachineId,
     ) -> CarbideCliResult<Vec<PendingDpuServiceSync>> {
         let response = self
             .0

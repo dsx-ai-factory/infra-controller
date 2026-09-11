@@ -340,8 +340,7 @@ async fn test_allocate_and_release_instance_impl(
     txn.commit().await.unwrap();
 }
 
-#[crate::sqlx_test]
-async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready(
+async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready_body(
     _: PgPoolOptions,
     options: PgConnectOptions,
 ) {
@@ -824,6 +823,25 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
         0
     );
     txn.commit().await.unwrap();
+}
+
+#[test]
+fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready() {
+    let mut args = ::sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready"
+    ));
+    args.fixtures(Box::leak(Box::new(vec![])));
+
+    let test_fn: fn(PgPoolOptions, PgConnectOptions) -> _ =
+        test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_failed_to_ready_body;
+
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .expect("failed to spawn measurement test thread")
+        .join()
+        .expect("measurement test thread panicked");
 }
 
 #[crate::sqlx_test]
@@ -1346,8 +1364,6 @@ async fn test_instance_deletion_before_provisioning_finishes(
         },
     )
     .await;
-    env.run_machine_state_controller_iteration().await;
-    mh.host().reboot_completed().await;
 
     // Now go through regular deletion
     mh.delete_instance(&env, instance_id).await;
@@ -1553,8 +1569,6 @@ async fn test_instance_waits_for_primary_dpu_bgp_before_pxe_reboot(
 
     // Clearing the last PXE blocking Merge report lets provisioning reach Ready.
     remove_health_report_entry(&env, &dpu_id, "test-pxe-bgp-merge".to_string()).await;
-    env.run_machine_state_controller_iteration().await;
-    mh.host().reboot_completed().await;
     env.run_machine_state_controller_iteration_until_state_matches(
         &mh.host().id,
         1,
@@ -5316,8 +5330,15 @@ async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
     options: PgConnectOptions,
 ) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
+
+    // Register the tenant required by both FNN VPCs used in this allocation scenario.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
 
     // Create two FNN VPCs and prefixes to exercise cross-VPC allocation.
     let first_vpc = env
@@ -5615,8 +5636,15 @@ async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
     options: PgConnectOptions,
 ) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let env = create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
     let mh = create_managed_host(&env).await;
+
+    // Register the tenant required by both FNN VPCs used in this validation scenario.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
 
     // Create two FNN VPCs so the global multi-FNN check passes.
     let first_vpc = env

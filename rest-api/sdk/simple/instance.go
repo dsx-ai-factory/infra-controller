@@ -50,6 +50,7 @@ type DpuExtensionServiceDeploymentRequest struct {
 // InstanceFilter encapsulates instance list filter parameters
 type InstanceFilter struct {
 	Name  *string
+	Query *string
 	VpcID *string
 }
 
@@ -246,6 +247,9 @@ func (im InstanceManager) GetInstances(ctx context.Context, instanceFilter *Inst
 	if instanceFilter != nil {
 		if instanceFilter.Name != nil {
 			gir = gir.Name(*instanceFilter.Name)
+		}
+		if instanceFilter.Query != nil {
+			gir = gir.Query(*instanceFilter.Query)
 		}
 		if instanceFilter.VpcID != nil {
 			gir = gir.VpcId(*instanceFilter.VpcID)

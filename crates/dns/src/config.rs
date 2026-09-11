@@ -58,14 +58,15 @@ pub struct Config {
     /// Default: `/var/run/secrets/spiffe.io/tls.key`.
     #[serde(default = "Defaults::client_key_path")]
     pub client_key_path: PathBuf,
-    /// OTLP gRPC endpoint that traces are exported to.
-    /// Default: the in-cluster OpenTelemetry collector.
+    /// OTLP gRPC endpoint that traces are exported to. When unset, trace
+    /// export is disabled.
+    /// Default: unset (tracing disabled).
     #[serde(
-        default = "Defaults::otlp_endpoint",
-        serialize_with = "serialize_uri",
-        deserialize_with = "deserialize_uri"
+        default,
+        serialize_with = "serialize_optional_uri",
+        deserialize_with = "deserialize_optional_uri"
     )]
-    pub otlp_endpoint: http::Uri,
+    pub otlp_endpoint: Option<http::Uri>,
     /// How long to cache NXDomain and Refused responses, in seconds.
     /// Default: `120`.
     #[serde(default = "Defaults::negative_cache_ttl_secs")]
@@ -127,12 +128,6 @@ impl Defaults {
             .expect("BUG: default carbide URI is invalid")
     }
 
-    pub fn otlp_endpoint() -> http::Uri {
-        "http://opentelemetry-collector.otel.svc.cluster.local:4317"
-            .try_into()
-            .expect("BUG: default OTLP endpoint URI is invalid")
-    }
-
     pub fn root_ca_path() -> PathBuf {
         "/var/run/secrets/spiffe.io/ca.crt".into()
     }
@@ -165,7 +160,7 @@ impl Default for Config {
             root_ca_path: Defaults::root_ca_path(),
             client_cert_path: Defaults::client_cert_path(),
             client_key_path: Defaults::client_key_path(),
-            otlp_endpoint: Defaults::otlp_endpoint(),
+            otlp_endpoint: None,
             negative_cache_ttl_secs: Defaults::negative_cache_ttl_secs(),
             negative_cache_servfail_ttl_secs: Defaults::negative_cache_servfail_ttl_secs(),
             negative_cache_entries_max_count: Defaults::negative_cache_entries_max_count(),
@@ -188,6 +183,26 @@ where
 {
     let uri_str: String = Deserialize::deserialize(deserializer)?;
     uri_str.parse().map_err(serde::de::Error::custom)
+}
+
+fn serialize_optional_uri<S>(uri: &Option<http::Uri>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match uri {
+        Some(uri) => serializer.serialize_some(&format!("{uri}")),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_optional_uri<'de, D>(deserializer: D) -> Result<Option<http::Uri>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let uri_str: Option<String> = Deserialize::deserialize(deserializer)?;
+    uri_str
+        .map(|uri_str| uri_str.parse().map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 impl Config {

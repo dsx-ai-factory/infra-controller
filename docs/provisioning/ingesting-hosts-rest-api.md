@@ -181,7 +181,13 @@ A `Ready` machine has `status: Ready` and `isUsableByTenant: true`. Once at leas
 
 With machines ingested and `Ready`, follow the relevant API flow in the REST API Getting Started reference:
 
-- **Service Account**: create Network Allocations against each Site IP Block, create a VPC, create a VPC Prefix or Subnet, create an Operating System, create an Instance.
+- **Service Account**: create Network Allocations against each Site IP Block,
+  create a VPC, wait until it is `Ready`, and create the matching tenant
+  network resource. `FNN` VPCs use VPC Prefixes; `ETHERNET_VIRTUALIZER` VPCs
+  use IPv4 Subnets from a `Ready` tenant-allocated IPv4 IP Block at the VPC's
+  Site; `FLAT` VPCs use neither resource. For a `FLAT` VPC, set `autoNetwork`
+  to `true` and omit `interfaces` when creating the Instance. Then create an
+  Operating System and an Instance.
 - **Provider**: create Tenant Accounts, create Instance Types, associate machines with Instance Types, create Compute and Network Allocations for tenants.
 
 Both flows assume hardware ingestion is complete -- which this page covers.

@@ -199,14 +199,24 @@ which fails the check (`vault does not have a valid password entry`) — they
 must be re-seeded with any non-empty password. `machines/bmc/site/root` is not
 seeded at all; without it every run aborts with `MissingCredentials`.
 
-Beyond the preconditions, the **credential rotation flow** requires this exact
-chain (all handled by `setup-machine-a-tron.sh` Phase 4):
+For the default BlueField-3 simulation, the **credential rotation flow**
+requires this exact chain, which `setup-machine-a-tron.sh` Phase 4 handles:
 
 | Vault path | Value | Why |
 |------------|-------|-----|
 | `machines/all_hosts/factory_default/bmc-metadata-items/dell` | `root`/`factory_password` | Host BMC factory default (mock's `DUMMY_FACTORY_PASSWORD`). Path segment is **lowercase** `dell` — `BMCVendor`'s `Display` impl lowercases. |
-| `machines/all_dpus/factory_default/bmc-metadata-items/root` | `root`/`0penBmc` | DPU BMC factory default (mock's `DUMMY_FACTORY_DPU_PASSWORD`) — note it differs from the host factory password. |
+| `machines/all_dpus/factory_default/bmc-metadata-items/root` | `root`/`0penBmc` | Legacy DPU BMC catch-all (`DpuModel::Unknown`). Matches `DpuModel::default_factory_credentials()` for BF2, BF3, and unidentified models. `bmc-mock` uses that source for the BF3 account it creates; site-explorer uses it for its final fallback. It differs from the host factory password. |
 | `machines/bmc/site/root` | `root`/&lt;distinct&gt; | Rotation target. **Must differ from both factory passwords**, or the rotation is a no-op and the mock rejects with `403 Factory-default password must be changed` forever. |
+
+<Note title="BlueField-4 factory credentials">
+The machine-a-tron hardware types `dell_poweredge_r760_bf4` and `nvidia_dgx_vr`
+use BlueField-4 DPUs with `admin`/`0penBmc` factory credentials. site-explorer
+checks the model-specific entry, then the `root` catch-all, then the built-in
+per-model default. Because Phase 4 seeds the catch-all but not the model entry,
+seed `machines/all_dpus/factory_default/bmc-metadata-items/bf4` with the BF4
+credentials before using either type. Otherwise, site-explorer attempts the
+`root` username and a `401 Unauthorized` latches `AvoidLockout`.
+</Note>
 
 site-explorer logs into each BMC with its factory default, rotates the password
 to the site root value, then proceeds — using the wrong factory password (or a

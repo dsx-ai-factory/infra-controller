@@ -83,6 +83,20 @@ Confirm those targets are unused with `virsh domblklist DOMAIN --details` before
 inserting media. HTTP or HTTPS ISO URLs must be reachable from the host running
 the QEMU process. File paths must exist in that host's filesystem.
 
+## Apply boot-order changes with libvirt
+
+Persistent Redfish boot-order updates change the saved libvirt domain
+configuration. For a running VM, request `PowerCycle` to apply a changed order,
+or shut it down and then request `On`. Starting a stopped VM with `On` or
+`ForceOn` also applies the effective boot selection.
+
+`GracefulRestart` and `ForceRestart` retain their normal libvirt reboot and
+reset behavior: they keep the running VM's boot configuration. They do not
+activate a newly saved boot order. Temporary boot-source overrides likewise
+need a cold start to take effect; after a one-shot override, the backend
+restores the persistent selection in the saved configuration for a subsequent
+cold start.
+
 ## Run a separate DPU endpoint
 
 A DPU is independently addressable hardware, so expose it through its own

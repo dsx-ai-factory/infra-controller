@@ -4,6 +4,7 @@
 package config
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -180,14 +181,14 @@ func (toc *TokenOriginConfig) UpdateAllJWKS() error {
 	wg.Wait()
 	close(errChan)
 
-	// Collect errors - panic if ALL updates failed (at least 1 must work)
+	// Collect errors and report when all configured issuers were unavailable.
 	var errs []error
 	for err := range errChan {
 		errs = append(errs, err)
 	}
 
 	if len(errs) == len(jwksConfigs) {
-		log.Panic().Msgf("all JWKS updates failed (%d issuers) - at least one issuer must be reachable at startup", len(errs))
+		return fmt.Errorf("all JWKS updates failed (%d issuers)", len(errs))
 	}
 
 	if len(errs) > 0 {

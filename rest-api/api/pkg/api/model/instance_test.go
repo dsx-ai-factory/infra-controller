@@ -579,7 +579,7 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 				MachineLabelSelector: map[string]string{"custom-machine-label": "required\x00value"},
 			},
 			wantErr:          true,
-			wantErrorMessage: "machineLabelSelector: machine label selector keys and values must not contain NUL characters",
+			wantErrorMessage: "machineLabelSelector: machine label selector keys and values must not contain the Unicode NUL character (U+0000)",
 		},
 		{
 			name: "test invalid Instance with too many Machine label selector",
@@ -1292,7 +1292,7 @@ func TestAPIBatchInstanceCreateRequest_Validate(t *testing.T) {
 				MachineLabelSelector: map[string]string{"custom\x00machine-label": "required-value"},
 			},
 			wantErr:          true,
-			wantErrorMessage: "machineLabelSelector: machine label selector keys and values must not contain NUL characters",
+			wantErrorMessage: "machineLabelSelector: machine label selector keys and values must not contain the Unicode NUL character (U+0000)",
 		},
 		{
 			name: "fails with too many Machine label selector",

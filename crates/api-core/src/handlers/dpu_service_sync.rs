@@ -61,7 +61,7 @@ const MAX_RELEASE_BATCH: usize = 256;
 pub(crate) async fn find_pending_dpu_service_sync_ids(
     api: &Api,
     request: Request<rpc::FindPendingDpuServiceSyncIdsRequest>,
-) -> Result<Response<::rpc::common::StableHostMachineIdList>, Status> {
+) -> Result<Response<::rpc::common::HostMachineIdList>, Status> {
     log_request_data(&request);
 
     let machine_ids =
@@ -73,7 +73,7 @@ pub(crate) async fn find_pending_dpu_service_sync_ids(
         .map(TryInto::try_into)
         .collect::<Result<Vec<_>, _>>()
         .map_err(CarbideError::from)?;
-    Ok(Response::new(::rpc::common::StableHostMachineIdList {
+    Ok(Response::new(::rpc::common::HostMachineIdList {
         machine_ids,
     }))
 }
@@ -121,7 +121,7 @@ pub(crate) async fn list_dpu_service_sync_history(
     request: Request<rpc::ListDpuServiceSyncHistoryRequest>,
 ) -> Result<Response<rpc::ListPendingDpuServiceSyncsResponse>, Status> {
     log_request_data(&request);
-    let machine_id: StableHostMachineId =
+    let machine_id: HostMachineId =
         convert_and_log_machine_id(request.get_ref().machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
@@ -155,7 +155,7 @@ async fn project(
     actions
         .into_iter()
         .map(|action| {
-            let host_machine_id = StableHostMachineId::try_from(action.machine_id)?;
+            let host_machine_id = HostMachineId::try_from(action.machine_id)?;
             Ok::<_, CarbideError>(rpc::PendingDpuServiceSync {
                 machine_id: Some(host_machine_id),
                 requested_at: Some(action.requested_at.into()),
@@ -198,7 +198,7 @@ pub(crate) async fn release_dpu_service_sync_hold(
     // Each entry carries its own tenant policy: naming an instance consents to
     // disrupting that instance's tenant and nobody else's.
     let targets = resolve_target(api, request.get_ref()).await?;
-    let machine_ids: Vec<StableHostMachineId> = targets.iter().map(|(id, _)| *id).collect();
+    let machine_ids: Vec<HostMachineId> = targets.iter().map(|(id, _)| *id).collect();
     validate(api, &machine_ids).await?;
 
     // One machine at a time, each committed as it goes. Nothing spans the batch:
@@ -225,7 +225,7 @@ pub(crate) async fn release_dpu_service_sync_hold(
 async fn resolve_target(
     api: &Api,
     request: &rpc::ReleaseDpuServiceSyncHoldRequest,
-) -> Result<Vec<(StableHostMachineId, TenantPolicy)>, Status> {
+) -> Result<Vec<(HostMachineId, TenantPolicy)>, Status> {
     use rpc::release_dpu_service_sync_hold_request::Target;
 
     match request.target.as_ref() {
@@ -249,12 +249,12 @@ async fn resolve_target(
                         kind: "instance",
                         id: instance_id.to_string(),
                     })?;
-                // TODO: Instances should store StableHostMachineId in the first place so that we
-                // don't need to handle this.
+                // Only machines with stable IDs can be assigned to instances.
                 let instance_machine_id = StableHostMachineId::try_from(instance.machine_id)
                     .map_err(|e| {
                         CarbideError::internal(format!("bug: invalid machine ID in instance: {e}"))
-                    })?;
+                    })?
+                    .into();
                 // Consent is for this instance, not for its host: if the host
                 // has been reallocated since, the new tenant agreed to nothing.
                 targets.push((
@@ -288,33 +288,20 @@ fn check_batch_size(len: usize) -> Result<(), Status> {
 /// must not release half of itself first. It also keeps `FAILED` meaning
 /// "retry": a mistyped machine id is not retryable and would be actively
 /// misleading reported that way.
-async fn validate(api: &Api, machine_ids: &[StableHostMachineId]) -> Result<(), Status> {
+async fn validate(api: &Api, machine_ids: &[HostMachineId]) -> Result<(), Status> {
     if machine_ids.is_empty() {
         return Err(CarbideError::InvalidArgument("no machines were named".to_string()).into());
     }
     check_batch_size(machine_ids.len())?;
 
-    // A DPU id is refused rather than resolved to its host: the hold is per
-    // node, so honouring it would quietly widen the request from one DPU to
-    // every DPU on that host.
-    let dpu_ids: Vec<String> = machine_ids
-        .iter()
-        .filter(|machine_id| machine_id.machine_type().is_dpu())
-        .map(ToString::to_string)
-        .collect();
-    if !dpu_ids.is_empty() {
-        return Err(CarbideError::InvalidArgument(format!(
-            "only host ids are expected, got DPU ids: {}",
-            dpu_ids.join(", ")
-        ))
-        .into());
-    }
-
     let mut txn = api.txn_begin().await?;
     let found = db::machine::find(
         &mut txn,
         db::ObjectFilter::List(machine_ids),
-        MachineSearchConfig::default(),
+        MachineSearchConfig {
+            include_predicted_host: true,
+            ..MachineSearchConfig::default()
+        },
     )
     .await?
     .into_iter()
@@ -343,7 +330,7 @@ async fn validate(api: &Api, machine_ids: &[StableHostMachineId]) -> Result<(), 
 async fn release_one(
     api: &Api,
     dpf_sdk: &dyn carbide_machine_controller::dpf::DpfOperations,
-    machine_id: StableHostMachineId,
+    machine_id: HostMachineId,
     tenant_policy: &TenantPolicy,
 ) -> rpc::DpuServiceSyncReleaseResult {
     use rpc::DpuServiceSyncReleaseStatus as ProtoStatus;
@@ -378,7 +365,7 @@ async fn release_one(
 async fn release_one_inner(
     api: &Api,
     dpf_sdk: &dyn carbide_machine_controller::dpf::DpfOperations,
-    machine_id: StableHostMachineId,
+    machine_id: HostMachineId,
     tenant_policy: &TenantPolicy,
 ) -> Result<Option<ReleaseOutcome>, String> {
     // A pooled connection rather than a transaction, matching the automatic path.
@@ -451,7 +438,10 @@ where
     let machines = db::machine::find(
         txn,
         db::ObjectFilter::List(machine_ids),
-        MachineSearchConfig::default(),
+        MachineSearchConfig {
+            include_predicted_host: true,
+            ..MachineSearchConfig::default()
+        },
     )
     .await?;
     Ok(machines

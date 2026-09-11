@@ -560,6 +560,55 @@ impl SingleSystemState {
         }
     }
 
+    /// Resolve the first configured HPE OEM boot entry, then standard
+    /// BootOrder, then the profile default. Unknown or unconfigured HPE entries
+    /// are skipped. Returns None when no boot option is configured; callers
+    /// leave domain configuration unchanged in that case. Temporary overrides
+    /// are excluded.
+    pub(crate) fn resolve_persistent_boot_selection(&self) -> Option<BootOptionKind> {
+        self.hpe_boot_order_override
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|order| {
+                order.iter().find_map(|entry| {
+                    let (kind, reference) = entry
+                        .strip_prefix("HD.BootOption.")
+                        .map(|reference| (BootOptionKind::Disk, reference))
+                        .or_else(|| {
+                            entry
+                                .strip_prefix("NIC.BootOption.")
+                                .map(|reference| (BootOptionKind::Network, reference))
+                        })?;
+                    self.config
+                        .boot_options
+                        .iter()
+                        .flatten()
+                        .find(|option| option.kind == kind && option.boot_reference() == reference)
+                        .map(|option| option.kind)
+                })
+            })
+            .or_else(|| {
+                self.boot_order_override().and_then(|overrides| {
+                    overrides.first().and_then(|optref| {
+                        self.config
+                            .boot_options
+                            .iter()
+                            .flatten()
+                            .find(|v| v.boot_reference() == optref)
+                            .map(|opt| opt.kind)
+                    })
+                })
+            })
+            .or_else(|| {
+                self.config
+                    .boot_options
+                    .as_ref()?
+                    .first()
+                    .map(|opt| opt.kind)
+            })
+    }
+
     fn resolve_current_boot_selection(&self) -> Option<BootOptionKind> {
         let src = self.boot_source_override.lock().unwrap();
         if src.enabled.as_ref().is_some_and(|v| v != "Disabled")
@@ -581,25 +630,7 @@ impl SingleSystemState {
         } else {
             None
         }
-        .or_else(|| {
-            self.boot_order_override().and_then(|overrides| {
-                overrides.first().and_then(|optref| {
-                    self.config
-                        .boot_options
-                        .iter()
-                        .flatten()
-                        .find(|v| v.boot_reference() == optref)
-                        .map(|opt| opt.kind)
-                })
-            })
-        })
-        .or_else(|| {
-            self.config
-                .boot_options
-                .as_ref()?
-                .first()
-                .map(|opt| opt.kind)
-        })
+        .or_else(|| self.resolve_persistent_boot_selection())
     }
 }
 

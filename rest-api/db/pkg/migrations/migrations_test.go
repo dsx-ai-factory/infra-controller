@@ -66,6 +66,71 @@ func TestMigrations(t *testing.T) {
 	}
 }
 
+func TestMachineLabelsGinOpsMigration(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.GetTestDBSession(t, true)
+	defer dbSession.Close()
+	model.TestSetupSchema(t, dbSession)
+
+	_, err := dbSession.DB.ExecContext(ctx, `
+		CREATE INDEX machine_labels_gin_idx
+		ON public.machine USING GIN (labels jsonb_path_ops)
+	`)
+	require.NoError(t, err)
+
+	targetMigrations := migrate.NewMigrations()
+	for _, migration := range Migrations.Sorted() {
+		if migration.Name == "20260909000000" {
+			targetMigrations.Add(migration)
+		}
+	}
+	require.Len(t, targetMigrations.Sorted(), 1)
+
+	migrator := migrate.NewMigrator(
+		dbSession.DB,
+		targetMigrations,
+		migrate.WithTableName("machine_labels_gin_ops_migrations_test"),
+		migrate.WithLocksTableName("machine_labels_gin_ops_migration_locks_test"),
+		migrate.WithMarkAppliedOnSuccess(true),
+	)
+	require.NoError(t, migrator.Init(ctx))
+
+	group, err := migrator.Migrate(ctx)
+	require.NoError(t, err)
+	require.Len(t, group.Migrations, 1)
+
+	var indexDefinition string
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT pg_get_indexdef('public.machine_labels_gin_ops_idx'::regclass)
+	`).Scan(&indexDefinition)
+	require.NoError(t, err)
+	require.Contains(t, indexDefinition, "USING gin (labels)")
+	require.NotContains(t, indexDefinition, "jsonb_path_ops")
+
+	var oldIndexName *string
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT to_regclass('public.machine_labels_gin_idx')::text
+	`).Scan(&oldIndexName)
+	require.NoError(t, err)
+	require.Nil(t, oldIndexName)
+
+	_, err = migrator.Rollback(ctx)
+	require.NoError(t, err)
+
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT pg_get_indexdef('public.machine_labels_gin_idx'::regclass)
+	`).Scan(&indexDefinition)
+	require.NoError(t, err)
+	require.Contains(t, indexDefinition, "jsonb_path_ops")
+
+	var newIndexName *string
+	err = dbSession.DB.QueryRowContext(ctx, `
+		SELECT to_regclass('public.machine_labels_gin_ops_idx')::text
+	`).Scan(&newIndexName)
+	require.NoError(t, err)
+	require.Nil(t, newIndexName)
+}
+
 func TestVpcSlaacEnabledMigration(t *testing.T) {
 	ctx := context.Background()
 	dbSession := util.GetTestDBSession(t, true)

@@ -30,6 +30,7 @@ use super::args::Args;
 use crate::cfg::cli_options::SortField;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
+use crate::table_utils::ColumnWidths;
 use crate::{async_write_table_as_csv, async_writeln};
 
 const UNKNOWN: &str = "Unknown";
@@ -75,100 +76,97 @@ macro_rules! concat_host_and_dpu_props {
     };
 }
 
-impl From<ManagedHostOutputWrapper> for Row {
-    fn from(src: ManagedHostOutputWrapper) -> Self {
-        let value = src.managed_host_output;
-        let machine_ids = concat_host_and_dpu_props!(value, machine_id, machine_id);
-        let bmc_ip = concat_host_and_dpu_props!(value, host_bmc_ip, bmc_ip);
-        let bmc_mac = concat_host_and_dpu_props!(value, host_bmc_mac, bmc_mac);
+fn build_row(src: ManagedHostOutputWrapper, headers: &[&str], widths: &ColumnWidths) -> Row {
+    let value = src.managed_host_output;
+    let machine_ids = concat_host_and_dpu_props!(value, machine_id, machine_id);
+    let bmc_ip = concat_host_and_dpu_props!(value, host_bmc_ip, bmc_ip);
+    let bmc_mac = concat_host_and_dpu_props!(value, host_bmc_mac, bmc_mac);
 
-        let ips = concat_host_and_dpu_props!(value, host_admin_ip, oob_ip);
-        let macs = concat_host_and_dpu_props!(value, host_admin_mac, oob_mac);
+    let ips = concat_host_and_dpu_props!(value, host_admin_ip, oob_ip);
+    let macs = concat_host_and_dpu_props!(value, host_admin_mac, oob_mac);
 
-        let mut states = vec![value.state];
+    let mut states = vec![value.state];
 
-        let dpu_state = value
+    let dpu_state = value
+        .dpus
+        .first()
+        .map(|x| x.state.as_deref().unwrap_or_default())
+        .unwrap_or_default();
+
+    if states[0] != dpu_state {
+        let dpu_states = value
             .dpus
-            .first()
-            .map(|x| x.state.as_deref().unwrap_or_default())
-            .unwrap_or_default();
-
-        if states[0] != dpu_state {
-            let dpu_states = value
-                .dpus
-                .iter()
-                .enumerate()
-                .map(|(i, x)| format!("DPU{}:{}", i, x.state.as_deref().unwrap_or("Unknown State")))
-                .collect::<Vec<String>>();
-
-            states.extend(dpu_states);
-        }
-
-        let state = states
             .iter()
-            .map(|x| {
-                x.split_once(' ')
-                    .map(|(x, y)| Cow::Owned(format!("{x}\n{}", y.replace(", ", "\n"))))
-                    .unwrap_or(Cow::Borrowed(x.as_str()))
-            })
-            .collect::<Vec<Cow<str>>>()
-            .join("\n");
+            .enumerate()
+            .map(|(i, x)| format!("DPU{}:{}", i, x.state.as_deref().unwrap_or("Unknown State")))
+            .collect::<Vec<String>>();
 
-        let is_unhealthy = !value.health.alerts.is_empty()
-            | value.dpus.iter().any(|x| !x.health.alerts.is_empty());
-
-        let mut row_data = vec![
-            String::from(if is_unhealthy { "U" } else { "H" }),
-            machine_ids,
-            state,
-        ];
-
-        if src.options.has_maintenance {
-            row_data.extend_from_slice(&[format!(
-                "{}\n{}",
-                value.maintenance_reference.unwrap_or_default(),
-                value.maintenance_start_time.unwrap_or_default()
-            )]);
-        }
-
-        if src.options.show_ips {
-            row_data.extend_from_slice(&[bmc_ip, bmc_mac, ips, macs]);
-        }
-
-        if src.options.more_details {
-            row_data.extend_from_slice(&[
-                value.host_gpu_count.to_string(),
-                value.host_ib_ifs_count.to_string(),
-                value.host_memory.unwrap_or(UNKNOWN.to_owned()),
-                value.instance_type_id.unwrap_or_default(),
-            ]);
-        }
-
-        if src.options.show_quarantine_reason {
-            row_data.extend_from_slice(&[value
-                .quarantine_state
-                .and_then(|s| s.reason)
-                .unwrap_or_default()]);
-        }
-
-        Row::new(row_data.into_iter().map(|x| Cell::new(&x)).collect())
+        states.extend(dpu_states);
     }
+
+    let state = states
+        .iter()
+        .map(|x| {
+            x.split_once(' ')
+                .map(|(x, y)| Cow::Owned(format!("{x}\n{}", y.replace(", ", "\n"))))
+                .unwrap_or(Cow::Borrowed(x.as_str()))
+        })
+        .collect::<Vec<Cow<str>>>()
+        .join("\n");
+
+    let is_unhealthy =
+        !value.health.alerts.is_empty() | value.dpus.iter().any(|x| !x.health.alerts.is_empty());
+
+    let mut row_data = vec![
+        String::from(if is_unhealthy { "U" } else { "H" }),
+        machine_ids,
+        state,
+    ];
+
+    if src.options.has_maintenance {
+        row_data.extend_from_slice(&[format!(
+            "{}\n{}",
+            value.maintenance_reference.unwrap_or_default(),
+            value.maintenance_start_time.unwrap_or_default()
+        )]);
+    }
+
+    if src.options.show_ips {
+        row_data.extend_from_slice(&[bmc_ip, bmc_mac, ips, macs]);
+    }
+
+    if src.options.more_details {
+        row_data.extend_from_slice(&[
+            value.host_gpu_count.to_string(),
+            value.host_ib_ifs_count.to_string(),
+            value.host_memory.unwrap_or(UNKNOWN.to_owned()),
+            value.instance_type_id.unwrap_or_default(),
+        ]);
+    }
+
+    if src.options.show_quarantine_reason {
+        row_data.extend_from_slice(&[value
+            .quarantine_state
+            .and_then(|s| s.reason)
+            .unwrap_or_default()]);
+    }
+
+    assert_eq!(
+        row_data.len(),
+        headers.len(),
+        "row cells must match headers_for() output"
+    );
+
+    Row::new(
+        row_data
+            .into_iter()
+            .zip(headers)
+            .map(|(v, header)| Cell::new(&widths.truncate(header, &v)))
+            .collect(),
+    )
 }
 
-fn convert_managed_hosts_to_nice_output(
-    managed_hosts: Vec<carbide_rpc_utils::ManagedHostOutput>,
-    options: ManagedHostOutputOptions,
-) -> (Box<Table>, Vec<String>) {
-    let managed_hosts_wrapper = managed_hosts
-        .into_iter()
-        .map(|x| ManagedHostOutputWrapper {
-            options,
-            managed_host_output: x,
-        })
-        .collect::<Vec<ManagedHostOutputWrapper>>();
-
-    let mut table = Table::new();
-
+fn headers_for(options: &ManagedHostOutputOptions) -> Vec<&'static str> {
     let mut headers = vec!["", "Machine IDs (H/D)", "State"];
     // if any machines in the list are in maintenance mode we add the columns
     if options.has_maintenance {
@@ -192,9 +190,28 @@ fn convert_managed_hosts_to_nice_output(
         headers.extend_from_slice(&["Quarantine reason"]);
     }
 
+    headers
+}
+
+fn convert_managed_hosts_to_nice_output(
+    managed_hosts: Vec<carbide_rpc_utils::ManagedHostOutput>,
+    options: ManagedHostOutputOptions,
+    widths: &ColumnWidths,
+) -> (Box<Table>, Vec<String>) {
+    let managed_hosts_wrapper = managed_hosts
+        .into_iter()
+        .map(|x| ManagedHostOutputWrapper {
+            options,
+            managed_host_output: x,
+        })
+        .collect::<Vec<ManagedHostOutputWrapper>>();
+
+    let mut table = Table::new();
+
     // TODO additional discovery work needed for remaining information
+    let headers = headers_for(&options);
     table.set_titles(Row::new(
-        headers.into_iter().map(Cell::new).collect::<Vec<Cell>>(),
+        headers.iter().map(|h| Cell::new(h)).collect::<Vec<Cell>>(),
     ));
 
     let mut is_dpf_not_used = false;
@@ -202,7 +219,7 @@ fn convert_managed_hosts_to_nice_output(
         if let Some(dpf) = &managed_host.managed_host_output.dpf {
             is_dpf_not_used |= !dpf.used_for_ingestion;
         }
-        table.add_row(managed_host.into());
+        table.add_row(build_row(managed_host, &headers, widths));
     }
 
     let mut warnings = Vec::new();
@@ -223,6 +240,7 @@ async fn show_managed_hosts(
     output_format: OutputFormat,
     output_options: ManagedHostOutputOptions,
     sort_by: SortField,
+    widths: &ColumnWidths,
 ) -> CarbideCliResult<()> {
     let mut managed_hosts = carbide_rpc_utils::get_managed_host_output(managed_host_data);
     match sort_by {
@@ -261,7 +279,11 @@ async fn show_managed_hosts(
             }
         }
         OutputFormat::Csv => {
-            let (result, _) = convert_managed_hosts_to_nice_output(managed_hosts, output_options);
+            let (result, _) = convert_managed_hosts_to_nice_output(
+                managed_hosts,
+                output_options,
+                &ColumnWidths::default(),
+            );
             async_write_table_as_csv!(output_file, result)?;
         }
         _ => {
@@ -274,7 +296,7 @@ async fn show_managed_hosts(
                 )?;
             } else {
                 let (result, warnings) =
-                    convert_managed_hosts_to_nice_output(managed_hosts, output_options);
+                    convert_managed_hosts_to_nice_output(managed_hosts, output_options, widths);
                 crate::async_writeln!(output_file, "{}", result)?;
                 for warning in &warnings {
                     async_writeln!(output_file, "WARNING: {warning}")?;
@@ -599,6 +621,10 @@ pub(super) async fn show(
         show_quarantine_reason: args.quarantine,
         single_host_detail_view: !show_all_machines,
     };
+    let widths = args.width.widths();
+    if let Some(message) = widths.describe_unmatched_columns(&headers_for(&output_options)) {
+        warn!("{message}");
+    }
 
     show_managed_hosts(
         carbide_rpc_utils::ManagedHostMetadata {
@@ -611,6 +637,58 @@ pub(super) async fn show(
         output_format,
         output_options,
         sort_by,
+        &widths,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::table_utils::MaxWidthSpec;
+
+    #[test]
+    fn max_width_narrower_than_header_floors_at_header_length() {
+        let host = carbide_rpc_utils::ManagedHostOutput {
+            state: "a very long error message".to_string(),
+            ..Default::default()
+        };
+        // "State" is 5 characters; requesting width 1 must not truncate
+        // values below what's already needed to fit the header, since the
+        // column can't render narrower than its header anyway. Turning on
+        // `show_quarantine_reason` adds a column that's genuinely empty for
+        // a default host, giving an empty-cell case alongside the
+        // populated, truncated "State" cell.
+        let options = ManagedHostOutputOptions {
+            show_quarantine_reason: true,
+            ..Default::default()
+        };
+        let widths = ColumnWidths::new(&[MaxWidthSpec::Column("State".to_string(), 1)]);
+
+        let (table, _warnings) = convert_managed_hosts_to_nice_output(vec![host], options, &widths);
+
+        assert!(
+            table.to_string().contains("State"),
+            "header should render in full"
+        );
+
+        let headers = headers_for(&options);
+        let row = table.get_row(0).expect("one data row");
+        let state_idx = headers.iter().position(|h| *h == "State").unwrap();
+        let quarantine_idx = headers
+            .iter()
+            .position(|h| *h == "Quarantine reason")
+            .unwrap();
+
+        assert_eq!(
+            row.get_cell(state_idx).unwrap().get_content(),
+            "a\nve...",
+            "populated value should truncate to the header's length (5), not the requested width (1)"
+        );
+        assert_eq!(
+            row.get_cell(quarantine_idx).unwrap().get_content(),
+            "",
+            "a column with no data should render as an empty cell"
+        );
+    }
 }

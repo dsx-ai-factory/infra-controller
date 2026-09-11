@@ -32,7 +32,7 @@ use libredfish::SystemPowerControl;
 use model::machine::{DpfState, DpuInitState, ManagedHostState, PerformPowerOperation};
 use tokio::time::timeout;
 
-use super::{dpf_config, get_host_state};
+use super::{dpf_config, expect_dpf_service_inventory, get_host_state};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host, create_managed_host_with_dpf,
     create_test_env_with_overrides, get_config, reboot_completed,
@@ -61,6 +61,7 @@ fn expect_provisioning(mock: &mut MockDpfOperations) {
     mock.expect_deployment_type_for_dpu()
         .returning(move |__, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    expect_dpf_service_inventory(mock);
 }
 
 /// Persists one DPU's DPF substate directly so tests can isolate a handler

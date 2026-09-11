@@ -516,10 +516,6 @@ impl<'a> MockExploredHost<'a> {
                 .await
                 .unwrap()[&dpu_machine_id];
 
-        for machine_id in self.dpu_machine_ids.values() {
-            create_machine_inventory(self.test_env, *machine_id).await;
-        }
-
         self.test_env
             .run_machine_state_controller_iteration_until_state_matches(
                 &host_machine_id,
@@ -543,6 +539,10 @@ impl<'a> MockExploredHost<'a> {
                 },
             )
             .await;
+
+        for machine_id in self.dpu_machine_ids.values() {
+            create_machine_inventory(self.test_env, *machine_id).await;
+        }
 
         //run scout discovery for dpu(s)
         for dpu in self.managed_host.dpus.clone() {

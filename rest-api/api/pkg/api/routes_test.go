@@ -53,12 +53,12 @@ func TestNewAPIRoutes(t *testing.T) {
 		"infiniband-partition":      5,
 		"nvlink-interface":          2,
 		"nvlink-logical-partition":  4,
-		"expected-machine":          7,
+		"expected-machine":          9,
 		"expected-power-shelf":      5,
 		"expected-rack":             7,
 		"expected-switch":           5,
 		"instance-type":             5,
-		"machine":                   18,
+		"machine":                   20,
 		"allocation":                6,
 		"subnet":                    5,
 		"machine-instance-type":     3,
@@ -162,6 +162,19 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodPost, expectedMachineBatchPath)
 			assertRouteExists(t, got, http.MethodPatch, expectedMachineBatchPath)
 			assertRouteBefore(t, got, http.MethodPatch, expectedMachineBatchPath, http.MethodPatch, "/org/:orgName/"+cfg.GetAPIName()+"/expected-machine/:id")
+			expectedMachineLabelKeysPath := "/org/:orgName/" + cfg.GetAPIName() + "/expected-machine/label/key"
+			expectedMachineLabelValuesPath := "/org/:orgName/" + cfg.GetAPIName() + "/expected-machine/label/key/:key/value"
+			assertRouteExists(t, got, http.MethodGet, expectedMachineLabelKeysPath)
+			assertRouteExists(t, got, http.MethodGet, expectedMachineLabelValuesPath)
+			assertRouteBefore(t, got, http.MethodGet, expectedMachineLabelKeysPath, http.MethodGet, expectedMachineLabelValuesPath)
+			assertRouteBefore(t, got, http.MethodGet, expectedMachineLabelValuesPath, http.MethodGet, "/org/:orgName/"+cfg.GetAPIName()+"/expected-machine/:id")
+
+			machineLabelKeysPath := "/org/:orgName/" + cfg.GetAPIName() + "/machine/label/key"
+			machineLabelValuesPath := "/org/:orgName/" + cfg.GetAPIName() + "/machine/label/key/:key/value"
+			assertRouteExists(t, got, http.MethodGet, machineLabelKeysPath)
+			assertRouteExists(t, got, http.MethodGet, machineLabelValuesPath)
+			assertRouteBefore(t, got, http.MethodGet, machineLabelKeysPath, http.MethodGet, machineLabelValuesPath)
+			assertRouteBefore(t, got, http.MethodGet, machineLabelValuesPath, http.MethodGet, machineAdminPath)
 
 			ipxeTemplatePath := "/org/:orgName/" + cfg.GetAPIName() + "/ipxe-template"
 			assertRouteExists(t, got, http.MethodGet, ipxeTemplatePath)

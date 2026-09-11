@@ -773,6 +773,7 @@ pub async fn build_component_manager(
 
 #[cfg(test)]
 mod tests {
+    use api_test_helper::mock_rms::MockRmsApi;
     use async_trait::async_trait;
     use carbide_secrets::SecretsError;
     use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialWriter};
@@ -1394,6 +1395,34 @@ mod tests {
         assert_eq!(cm.nv_switch.name(), "mock-nsm");
         assert_eq!(cm.power_shelf.name(), "mock-psm");
         assert_eq!(cm.compute_tray.name(), "mock-ctm");
+    }
+
+    #[tokio::test]
+    async fn rms_password_rotation_support_ignores_legacy_config() {
+        let config = ComponentManagerConfig {
+            nv_switch_backend: NvSwitchBackend::Rms,
+            power_shelf_backend: PowerShelfBackend::Mock,
+            compute_tray_backend: ComputeBackend::Mock,
+            nvos_password_rotation_enabled: false,
+            ..Default::default()
+        };
+
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://postgres:postgres@localhost/test")
+            .expect("test database URL should be valid");
+
+        let cm = build_component_manager(
+            &config,
+            rms_rack_profiles(rms_rack_profile()),
+            Some(Arc::new(MockRmsApi::new())),
+            None,
+            Some(db),
+            None,
+        )
+        .await
+        .expect("RMS switch backend should build");
+
+        assert!(cm.nv_switch.supports_password_rotation());
     }
 
     #[test]

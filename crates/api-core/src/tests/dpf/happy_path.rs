@@ -32,7 +32,7 @@ use tonic::Request;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-use super::dpf_config;
+use super::{dpf_config, expect_dpf_service_inventory};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host_with_dpf, create_managed_host_with_dpf_bf4,
     create_test_env_with_overrides, get_config,
@@ -54,7 +54,9 @@ fn default_mock(deployment_type: DpuDeploymentType) -> MockDpfOperations {
 
 #[crate::sqlx_test]
 async fn test_dpu_and_host_till_ready(pool: sqlx::PgPool) {
-    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(default_mock(DpuDeploymentType::Bf3));
+    let mut mock = default_mock(DpuDeploymentType::Bf3);
+    expect_dpf_service_inventory(&mut mock);
+    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(mock);
 
     let mut config = get_config();
     config.dpf = dpf_config();
@@ -86,7 +88,9 @@ async fn test_dpu_and_host_till_ready(pool: sqlx::PgPool) {
 /// Provision a BF4 through DPF and verify that NICo performs only the
 /// credential portion of post-ready platform handling.
 async fn assert_bf4_skips_platform_configuration(pool: sqlx::PgPool, enable_secure_boot: bool) {
-    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(default_mock(DpuDeploymentType::Bf4Generic));
+    let mut mock = default_mock(DpuDeploymentType::Bf4Generic);
+    expect_dpf_service_inventory(&mut mock);
+    let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(mock);
 
     let mut config = get_config();
     config.dpf = dpf_config();

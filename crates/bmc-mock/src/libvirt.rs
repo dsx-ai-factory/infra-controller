@@ -26,7 +26,9 @@ use quick_xml::{Reader, Writer};
 use url::Url;
 
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
-use crate::{BmcState, Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl};
+use crate::{
+    BmcState, BootOptionKind, Callbacks, MockPowerState, SetSystemPowerError, SystemPowerControl,
+};
 
 #[derive(Debug, thiserror::Error)]
 enum VirtualMediaError {
@@ -56,6 +58,7 @@ pub struct LibvirtCallbacks {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct AppliedState {
+    persistent_boot_selection: Option<BootOptionKind>,
     boot_source_override: serde_json::Value,
     virtual_media: BTreeMap<String, serde_json::Value>,
 }
@@ -70,15 +73,32 @@ impl LibvirtCallbacks {
         }
     }
 
-    pub fn bind_state(&self, state: &BmcState) -> Result<(), &'static str> {
+    /// Binds this backend to the generated BMC state and applies its initial
+    /// persistent boot selection to the inactive libvirt domain XML.
+    ///
+    /// Binding succeeds at most once. An initial boot-selection failure leaves
+    /// the backend unbound so the caller can retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the BMC has no controlled `ComputerSystem`, this
+    /// backend is already bound, or libvirt cannot apply the initial selection.
+    pub fn bind_state(&self, state: &BmcState) -> Result<(), String> {
         let controlled_system = state
             .system_state
             .controlled_system()
-            .ok_or("libvirt backend has no controlled ComputerSystem")?;
+            .ok_or_else(|| "libvirt backend has no controlled ComputerSystem".to_string())?;
+        let mut applied_state = self.applied_state.lock().unwrap();
+        if self.system_state.get().is_some() {
+            return Err("libvirt backend state is already bound".to_string());
+        }
+        let applied = AppliedState::from(controlled_system);
+        self.set_persistent_boot_selection(applied.persistent_boot_selection)
+            .map_err(|error| error.to_string())?;
         self.system_state
             .set(Arc::downgrade(&state.system_state))
-            .map_err(|_| "libvirt backend state is already bound")?;
-        *self.applied_state.lock().unwrap() = AppliedState::from(controlled_system);
+            .map_err(|_| "libvirt backend state is already bound".to_string())?;
+        *applied_state = applied;
         Ok(())
     }
 
@@ -122,9 +142,55 @@ impl LibvirtCallbacks {
             std::mem::take(&mut *restore_boot_after_power_on)
         };
         if restore_boot {
-            self.set_boot_devices(&["hd"])?;
+            if let Some(system_state) = self.system_state.get().and_then(Weak::upgrade) {
+                system_state.on_boot_completed();
+            }
+            self.restore_persistent_boot_order()?;
         }
         Ok(())
+    }
+
+    fn restore_persistent_boot_order(&self) -> Result<(), SetSystemPowerError> {
+        let selection = self
+            .system_state
+            .get()
+            .and_then(Weak::upgrade)
+            .and_then(|state| {
+                state
+                    .controlled_system()
+                    .and_then(SingleSystemState::resolve_persistent_boot_selection)
+            });
+        self.set_persistent_boot_selection(selection)
+    }
+
+    fn reapply_effective_boot_order(&self) -> Result<(), SetSystemPowerError> {
+        let Some(state) = self.system_state.get().and_then(Weak::upgrade) else {
+            return Err(SetSystemPowerError::CommandSendError(
+                "libvirt backend is not bound to BMC mock state".to_string(),
+            ));
+        };
+        let Some(system) = state.controlled_system() else {
+            return Err(SetSystemPowerError::CommandSendError(
+                "BMC mock state has no controlled ComputerSystem".to_string(),
+            ));
+        };
+        let boot_source_override = system.boot_source_override();
+        if boot_source_override_is_active(&boot_source_override) {
+            self.set_boot_source_override(&boot_source_override)
+        } else {
+            self.set_persistent_boot_selection(system.resolve_persistent_boot_selection())
+        }
+    }
+
+    fn set_persistent_boot_selection(
+        &self,
+        selection: Option<BootOptionKind>,
+    ) -> Result<(), SetSystemPowerError> {
+        match selection {
+            Some(BootOptionKind::Disk) => self.set_boot_devices(&["hd"]),
+            Some(BootOptionKind::Network) => self.set_boot_devices(&["network", "hd"]),
+            None => Ok(()),
+        }
     }
 
     fn set_boot_devices(&self, devices: &[&str]) -> Result<(), SetSystemPowerError> {
@@ -211,8 +277,7 @@ impl LibvirtCallbacks {
             (_, None) => return Ok(()),
         };
         self.set_boot_devices(devices)?;
-        *self.restore_boot_after_power_on.lock().unwrap() =
-            enabled == Some("Once") && target != Some("Hdd");
+        *self.restore_boot_after_power_on.lock().unwrap() = enabled == Some("Once");
         Ok(())
     }
 
@@ -277,11 +342,19 @@ impl LibvirtCallbacks {
 
     fn reconcile_state(&self, desired: AppliedState) -> Result<(), String> {
         let mut applied = self.applied_state.lock().unwrap();
-        if desired.boot_source_override != applied.boot_source_override {
+        let desired_override_active = boot_source_override_is_active(&desired.boot_source_override);
+        if desired.boot_source_override != applied.boot_source_override && desired_override_active {
             self.set_boot_source_override(&desired.boot_source_override)
                 .map_err(|error| error.to_string())?;
-            applied.boot_source_override = desired.boot_source_override;
+        } else if !desired_override_active
+            && (desired.boot_source_override != applied.boot_source_override
+                || desired.persistent_boot_selection != applied.persistent_boot_selection)
+        {
+            self.set_persistent_boot_selection(desired.persistent_boot_selection)
+                .map_err(|error| error.to_string())?;
         }
+        applied.boot_source_override = desired.boot_source_override;
+        applied.persistent_boot_selection = desired.persistent_boot_selection;
         for (device_id, desired_device) in desired.virtual_media {
             if applied.virtual_media.get(&device_id) == Some(&desired_device) {
                 continue;
@@ -309,10 +382,21 @@ impl From<&SingleSystemState> for AppliedState {
             })
             .collect();
         Self {
+            persistent_boot_selection: system.resolve_persistent_boot_selection(),
             boot_source_override: system.boot_source_override(),
             virtual_media,
         }
     }
+}
+
+fn boot_source_override_is_active(boot_source_override: &serde_json::Value) -> bool {
+    let enabled = boot_source_override
+        .get("BootSourceOverrideEnabled")
+        .and_then(serde_json::Value::as_str);
+    let target = boot_source_override
+        .get("BootSourceOverrideTarget")
+        .and_then(serde_json::Value::as_str);
+    enabled != Some("Disabled") && !matches!(target, None | Some("None"))
 }
 
 impl Callbacks for LibvirtCallbacks {
@@ -340,6 +424,11 @@ impl Callbacks for LibvirtCallbacks {
         reset_type: SystemPowerControl,
     ) -> Result<(), SetSystemPowerError> {
         use SystemPowerControl::*;
+        // Only a cold start loads the saved domain XML. Reboot and reset keep
+        // the running domain's boot configuration and their existing semantics.
+        if matches!(reset_type, On | ForceOn | PowerCycle) {
+            self.reapply_effective_boot_order()?;
+        }
         match reset_type {
             On | ForceOn => self.start(),
             GracefulShutdown => self.domain_command("shutdown"),
@@ -555,6 +644,85 @@ mod tests {
     use crate::test_support::host_info;
     use crate::{HardwareType, MachineRouterOptions, VirtualMediaDeviceConfig, machine_router};
 
+    #[tokio::test]
+    async fn hpe_persistent_boot_settings_reconcile_libvirt() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let virsh_path = directory.path().join("virsh");
+        let defined_xml_path = directory.path().join("defined.xml");
+        fs::write(
+            &virsh_path,
+            format!(
+                r#"#!/bin/sh
+case "$3" in
+  dumpxml) printf '<domain><os><type>hvm</type><boot dev="hd"/></os><devices/></domain>\n' ;;
+  define) cp "$4" '{}' ;;
+  *) exit 1 ;;
+esac
+"#,
+                defined_xml_path.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&virsh_path, fs::Permissions::from_mode(0o755)).unwrap();
+        let callbacks = Arc::new(LibvirtCallbacks::new(Config {
+            virsh_path,
+            uri: "qemu:///system".to_string(),
+            domain: "hpe-node".to_string(),
+            virtual_media_targets: BTreeMap::new(),
+        }));
+        let (router, state) = machine_router(
+            &host_info(HardwareType::HpeProliantDl380aGen11),
+            callbacks.clone(),
+            "test-host-id".to_string(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        callbacks.bind_state(&state).unwrap();
+        assert!(
+            fs::read_to_string(&defined_xml_path)
+                .unwrap()
+                .contains("<boot dev=\"network\"/><boot dev=\"hd\"/>")
+        );
+
+        for (order, expected_xml, expected_selection) in [
+            (
+                ["HD.BootOption.Boot0001", "NIC.BootOption.Boot0000"],
+                "<boot dev=\"hd\"/>",
+                BootOptionKind::Disk,
+            ),
+            (
+                ["NIC.BootOption.Boot0000", "HD.BootOption.Boot0001"],
+                "<boot dev=\"network\"/><boot dev=\"hd\"/>",
+                BootOptionKind::Network,
+            ),
+            (
+                ["HD.BootOption.Boot9999", "HD.BootOption.Boot0001"],
+                "<boot dev=\"hd\"/>",
+                BootOptionKind::Disk,
+            ),
+        ] {
+            let status = request(
+                &router,
+                Method::PATCH,
+                "/redfish/v1/Systems/1/Bios/oem/hpe/boot/settings",
+                json!({"PersistentBootConfigOrder": order}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                state.system_state.resolve_current_boot_selection(),
+                Some(expected_selection)
+            );
+            let xml = fs::read_to_string(&defined_xml_path).unwrap();
+            assert!(xml.contains(expected_xml), "unexpected domain XML: {xml}");
+            if expected_selection == BootOptionKind::Disk {
+                assert!(!xml.contains("<boot dev=\"network\"/>"));
+            }
+        }
+    }
+
     async fn request(
         router: &Router,
         method: Method,
@@ -574,6 +742,158 @@ mod tests {
             .await
             .unwrap();
         response.status()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_state_can_retry_after_initial_boot_sync_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let virsh_path = directory.path().join("virsh");
+        let fail_define_path = directory.path().join("fail-define");
+        let defined_xml_path = directory.path().join("defined.xml");
+        fs::write(&fail_define_path, "").unwrap();
+        fs::write(
+            &virsh_path,
+            format!(
+                r#"#!/bin/sh
+case "$3" in
+  dumpxml) printf '<domain><os><type>hvm</type><boot dev="hd"/></os><devices/></domain>\n' ;;
+  define)
+    if [ -e '{}' ]; then
+      rm '{}'
+      exit 1
+    fi
+    cp "$4" '{}'
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+                fail_define_path.display(),
+                fail_define_path.display(),
+                defined_xml_path.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&virsh_path, fs::Permissions::from_mode(0o755)).unwrap();
+        let callbacks = Arc::new(LibvirtCallbacks::new(Config {
+            virsh_path,
+            uri: "qemu:///system".to_string(),
+            domain: "retry-node".to_string(),
+            virtual_media_targets: BTreeMap::new(),
+        }));
+        let (_router, state) = machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            callbacks.clone(),
+            "test-host-id".to_string(),
+            false,
+            MachineRouterOptions::default(),
+        );
+
+        assert!(callbacks.bind_state(&state).is_err());
+        callbacks.bind_state(&state).unwrap();
+        assert_eq!(
+            callbacks.bind_state(&state).unwrap_err(),
+            "libvirt backend state is already bound"
+        );
+        assert!(
+            fs::read_to_string(&defined_xml_path)
+                .unwrap()
+                .contains("<boot dev=\"network\"/><boot dev=\"hd\"/>")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_start_consumes_once_when_boot_restoration_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let virsh_path = directory.path().join("virsh");
+        let state_path = directory.path().join("domain-state");
+        let fail_restore_path = directory.path().join("fail-restore");
+        let defined_xml_path = directory.path().join("defined.xml");
+        let active_xml_path = directory.path().join("active.xml");
+        fs::write(&state_path, "shut off\n").unwrap();
+        fs::write(
+            &virsh_path,
+            format!(
+                r#"#!/bin/sh
+case "$3" in
+  domstate) cat '{}' ;;
+  start) printf 'running\n' > '{}'; cp '{}' '{}' ;;
+  dumpxml) printf '<domain><os><type>hvm</type><boot dev="hd"/></os><devices/></domain>\n' ;;
+  define)
+    if [ -e '{}' ] && [ "$(cat '{}')" = running ]; then
+      exit 1
+    fi
+    cp "$4" '{}'
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+                state_path.display(),
+                state_path.display(),
+                defined_xml_path.display(),
+                active_xml_path.display(),
+                fail_restore_path.display(),
+                state_path.display(),
+                defined_xml_path.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&virsh_path, fs::Permissions::from_mode(0o755)).unwrap();
+        let callbacks = Arc::new(LibvirtCallbacks::new(Config {
+            virsh_path,
+            uri: "qemu:///system".to_string(),
+            domain: "restore-failure-node".to_string(),
+            virtual_media_targets: BTreeMap::new(),
+        }));
+        let (router, state) = machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            callbacks.clone(),
+            "test-host-id".to_string(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        callbacks.bind_state(&state).unwrap();
+        let system = "/redfish/v1/Systems/System.Embedded.1";
+        let status = request(
+            &router,
+            Method::PATCH,
+            system,
+            json!({
+                "Boot": {
+                    "BootSourceOverrideEnabled": "Once",
+                    "BootSourceOverrideTarget": "Hdd",
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        fs::write(&fail_restore_path, "").unwrap();
+
+        let status = request(
+            &router,
+            Method::POST,
+            &format!("{system}/Actions/ComputerSystem.Reset"),
+            json!({"ResetType": "On"}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let active_xml = fs::read_to_string(&active_xml_path).unwrap();
+        assert!(active_xml.contains("<boot dev=\"hd\"/>"));
+        assert!(!active_xml.contains("<boot dev=\"network\"/>"));
+        assert_eq!(
+            state
+                .system_state
+                .controlled_system()
+                .unwrap()
+                .boot_source_override()["BootSourceOverrideEnabled"],
+            "Disabled"
+        );
     }
 
     #[test]
@@ -618,11 +938,17 @@ mod tests {
         let log_path = directory.path().join("virsh.log");
         let defined_xml_path = directory.path().join("defined.xml");
         let attached_xml_path = directory.path().join("attached.xml");
+        let active_xml_path = directory.path().join("active.xml");
+        let state_path = directory.path().join("domain-state");
+        fs::write(&state_path, "shut off\n").unwrap();
         let script = format!(
             r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
 case "$3" in
-  domstate) printf 'shut off\n' ;;
+  domstate) cat '{}' ;;
+  start) printf 'running\n' > '{}'; cp '{}' '{}' ;;
+  reset|reboot) [ "$(cat '{}')" = running ] ;;
+  destroy) printf 'shut off\n' > '{}' ;;
   dumpxml) printf '<domain><os><type>hvm</type><boot dev="hd"/></os><devices/></domain>\n' ;;
   domblklist) printf 'Type Device Target Source\nnetwork cdrom sdb http://example/old.iso\n' ;;
   define) cp "$4" '{}' ;;
@@ -630,6 +956,12 @@ case "$3" in
 esac
 "#,
             log_path.display(),
+            state_path.display(),
+            state_path.display(),
+            defined_xml_path.display(),
+            active_xml_path.display(),
+            state_path.display(),
+            state_path.display(),
             defined_xml_path.display(),
             attached_xml_path.display(),
         );
@@ -662,6 +994,102 @@ esac
         callbacks.bind_state(&state).unwrap();
         let system = "/redfish/v1/Systems/System.Embedded.1";
 
+        let defined_xml = fs::read_to_string(&defined_xml_path).unwrap();
+        assert!(defined_xml.contains("<boot dev=\"network\"/><boot dev=\"hd\"/>"));
+        let bind_log = fs::read_to_string(&log_path).unwrap();
+        assert!(!bind_log.contains("domblklist"));
+
+        fs::write(&log_path, "").unwrap();
+        let status = request(
+            &router,
+            Method::POST,
+            &format!("{system}/Actions/ComputerSystem.Reset"),
+            json!({"ResetType": "On"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let power_log = fs::read_to_string(&log_path).unwrap();
+        let define = power_log
+            .find(" define ")
+            .expect("persistent boot order was not re-applied before power on");
+        let start = power_log.find(" start ").expect("start was not sent");
+        assert!(define < start);
+
+        let status = request(
+            &router,
+            Method::PATCH,
+            system,
+            json!({"Boot": {"BootOrder": ["Boot0001", "Boot0000"]}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let defined_xml = fs::read_to_string(&defined_xml_path).unwrap();
+        assert!(defined_xml.contains("<boot dev=\"hd\"/>"));
+        assert!(!defined_xml.contains("<boot dev=\"network\"/>"));
+
+        // The saved disk-first selection must not turn a warm restart into a
+        // cold start. The fixture loads saved XML only when start is called.
+        for (reset_type, command) in [("ForceRestart", "reset"), ("GracefulRestart", "reboot")] {
+            fs::write(&log_path, "").unwrap();
+            let status = request(
+                &router,
+                Method::POST,
+                &format!("{system}/Actions/ComputerSystem.Reset"),
+                json!({"ResetType": reset_type}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let power_log = fs::read_to_string(&log_path).unwrap();
+            assert!(power_log.contains(&format!(" {command} dsx-node")));
+            for unexpected in [" define ", " destroy ", " start "] {
+                assert!(
+                    !power_log.contains(unexpected),
+                    "unexpected {unexpected} during {reset_type}"
+                );
+            }
+            assert!(
+                fs::read_to_string(&active_xml_path)
+                    .unwrap()
+                    .contains("<boot dev=\"network\"/><boot dev=\"hd\"/>")
+            );
+            assert!(
+                !fs::read_to_string(&defined_xml_path)
+                    .unwrap()
+                    .contains("<boot dev=\"network\"/>")
+            );
+        }
+
+        fs::write(&log_path, "").unwrap();
+        let status = request(
+            &router,
+            Method::POST,
+            &format!("{system}/Actions/ComputerSystem.Reset"),
+            json!({"ResetType": "PowerCycle"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let power_log = fs::read_to_string(&log_path).unwrap();
+        let define = power_log
+            .find(" define ")
+            .expect("boot order was not reapplied");
+        let destroy = power_log.find(" destroy ").expect("power off was not sent");
+        let start = power_log.find(" start ").expect("power on was not sent");
+        assert!(define < destroy && destroy < start);
+        let active_xml = fs::read_to_string(&active_xml_path).unwrap();
+        assert!(active_xml.contains("<boot dev=\"hd\"/>"));
+        assert!(!active_xml.contains("<boot dev=\"network\"/>"));
+
+        let status = request(
+            &router,
+            Method::PATCH,
+            system,
+            json!({"Boot": {"BootOrder": ["Boot0000", "Boot0001"]}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let defined_xml = fs::read_to_string(&defined_xml_path).unwrap();
+        assert!(defined_xml.contains("<boot dev=\"network\"/><boot dev=\"hd\"/>"));
+
         let status = request(
             &router,
             Method::PATCH,
@@ -679,10 +1107,70 @@ esac
             &router,
             Method::POST,
             &format!("{system}/Actions/ComputerSystem.Reset"),
-            json!({"ResetType": "On"}),
+            json!({"ResetType": "PowerCycle"}),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        let active_xml = fs::read_to_string(&active_xml_path).unwrap();
+        assert!(active_xml.contains("<boot dev=\"cdrom\"/><boot dev=\"hd\"/>"));
+        let defined_xml = fs::read_to_string(&defined_xml_path).unwrap();
+        assert!(defined_xml.contains("<boot dev=\"network\"/><boot dev=\"hd\"/>"));
+        assert!(!defined_xml.contains("<boot dev=\"cdrom\"/>"));
+
+        // Disk can also be a one-shot override when the persistent selection
+        // is network-first. The guest starts disk-first, but the saved domain
+        // must be restored for the next cold start.
+        let status = request(
+            &router,
+            Method::PATCH,
+            system,
+            json!({
+                "Boot": {
+                    "BootSourceOverrideEnabled": "Once",
+                    "BootSourceOverrideTarget": "Hdd",
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let status = request(
+            &router,
+            Method::POST,
+            &format!("{system}/Actions/ComputerSystem.Reset"),
+            json!({"ResetType": "PowerCycle"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let active_xml = fs::read_to_string(&active_xml_path).unwrap();
+        assert!(active_xml.contains("<boot dev=\"hd\"/>"));
+        assert!(!active_xml.contains("<boot dev=\"network\"/>"));
+        let defined_xml = fs::read_to_string(&defined_xml_path).unwrap();
+        assert!(defined_xml.contains("<boot dev=\"network\"/><boot dev=\"hd\"/>"));
+
+        // A one-shot override is consumed by the successful start. A second
+        // cold start without another PATCH must use the persistent selection.
+        let status = request(
+            &router,
+            Method::POST,
+            &format!("{system}/Actions/ComputerSystem.Reset"),
+            json!({"ResetType": "PowerCycle"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let active_xml = fs::read_to_string(&active_xml_path).unwrap();
+        assert!(
+            active_xml.contains("<boot dev=\"network\"/><boot dev=\"hd\"/>"),
+            "one-shot disk override was reapplied: {active_xml}"
+        );
+        assert_eq!(
+            state
+                .system_state
+                .controlled_system()
+                .unwrap()
+                .boot_source_override()["BootSourceOverrideEnabled"],
+            "Disabled"
+        );
+
         let status = request(
             &router,
             Method::POST,
@@ -726,7 +1214,7 @@ esac
         assert!(attached_xml.contains("protocol=\"http\""));
         assert!(attached_xml.contains("dev=\"sdb\""));
         let defined_xml = fs::read_to_string(defined_xml_path).unwrap();
-        assert!(defined_xml.contains("<boot dev=\"hd\"/>"));
+        assert!(defined_xml.contains("<boot dev=\"network\"/><boot dev=\"hd\"/>"));
         assert!(!defined_xml.contains("<boot dev=\"cdrom\"/>"));
     }
 }

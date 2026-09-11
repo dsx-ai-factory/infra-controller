@@ -321,10 +321,12 @@ Flat VPCs:
   the operator's network responsibility; NICo stores the association but does not
   program a DPU ACL for a zero-DPU host.
 
-> As noted in the operations matrix, the `nicocli` wrapper does not currently
-> send `networkVirtualizationType` on `vpc create`, and its
-> `vpc virtualization update` accepts only `ETHERNET_VIRTUALIZER` / `FNN`. Use
-> the REST API for this step until that gap is closed.
+> The generated `nicocli vpc create` command accepts
+> `--network-virtualization-type FLAT`. The specialized `nicocli tui` VPC
+> creation flow does not prompt for a type and uses the Site default instead.
+> Its `vpc virtualization update` request only supports changing to `FNN` and
+> is rejected while the VPC contains any Subnets or Instances. Create a Flat
+> VPC with the generated command or the REST API.
 
 ### 2. Find the HostInband segment backing the VPC
 
@@ -375,9 +377,10 @@ Rules enforced at allocation:
 - **No DPU extension services.** Extension services run on DPU agents; a zero-DPU
   host has none, so an instance config that requests them is rejected.
 
-> As with VPC creation, `nicocli` does not yet expose `autoNetwork` on
-> `instance create`; use the REST API for this step and file a bug for the
-> wrapper.
+> The generated `nicocli instance create` command accepts
+> `--auto-network=true`. The specialized `nicocli tui` flow sets
+> `autoNetwork: true` automatically when the selected VPC is `FLAT` and skips
+> the interface prompts.
 
 ### 4. Check instance status
 
@@ -478,5 +481,5 @@ operator SDN integration can tie its switch-side configuration to the VPC.
 | Instance allocation fails: segment "is not bound to a Flat VPC" | The host's `HostInband` segment has no VPC; the tenant/operator must bind it to a Flat VPC first |
 | Instance allocation fails: segment bound to a VPC whose `fabric_interface_type` is not `nic` | The `HostInband` segment is attached to a non-Flat VPC; only Flat VPCs may own `HostInband` segments |
 | Instance allocation fails: extension services on a zero-DPU host | Remove `dpu_extension_services` from the instance config; a zero-DPU host cannot run them |
-| `nicocli` won't let me choose `FLAT` / set `autoNetwork` | Known wrapper gap; use the REST API and file a bug against `nicocli` |
+| The specialized TUI does not offer `FLAT` during VPC creation | Use generated `nicocli vpc create --network-virtualization-type FLAT` or the REST API; the TUI uses the Site default |
 | Instance is `Ready` but cannot reach another host | Expected from NICo's side — Flat data-plane reachability is the operator's fabric responsibility, not something NICo programs or verifies |

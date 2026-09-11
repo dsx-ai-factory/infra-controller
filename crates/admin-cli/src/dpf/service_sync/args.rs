@@ -16,7 +16,7 @@
  */
 
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::StableHostMachineId;
+use carbide_uuid::machine::HostMachineId;
 use clap::{ArgGroup, Parser};
 use rpc::forge::ReleaseDpuServiceSyncHoldRequest;
 use rpc::forge::release_dpu_service_sync_hold_request::Target;
@@ -62,7 +62,7 @@ pub(crate) struct List {
         visible_alias = "id",
         help = "Show this host's recorded history instead of the outstanding worklist"
     )]
-    pub(super) machine_id: Option<StableHostMachineId>,
+    pub(super) machine_id: Option<HostMachineId>,
 }
 
 #[derive(Parser, Debug)]
@@ -100,7 +100,7 @@ pub(crate) struct Release {
         group = "target",
         help = "One or more host machine IDs to release"
     )]
-    pub(super) machine_ids: Vec<StableHostMachineId>,
+    pub(super) machine_ids: Vec<HostMachineId>,
 
     /// Releases the hosts currently running these instances even though they
     /// are assigned. Naming an instance is the acknowledgement that its tenant
@@ -121,7 +121,7 @@ impl From<Release> for ReleaseDpuServiceSyncHoldRequest {
         // so a non-empty instance list is the only way to reach the instance
         // target.
         let target = if args.instance_ids.is_empty() {
-            Target::MachineIds(::rpc::common::StableHostMachineIdList {
+            Target::MachineIds(::rpc::common::HostMachineIdList {
                 machine_ids: args.machine_ids,
             })
         } else {
