@@ -28,9 +28,9 @@ import (
 // (ExpectedComponentLabel* constants).
 //
 // firmware_version is intentionally absent: that column on Flow's component
-// table is owned by the runtime sync (see syncFirmwareVersions in
-// inventory.go), which reads what the BMC is actually running. Mirroring an
-// "expected" version here would clobber the runtime value every cycle.
+// table is owned by the runtime component-inventory sync, which reads what the
+// BMC is actually running. Mirroring an "expected" version here would clobber
+// the runtime value every cycle.
 const (
 	labelComponentManufacturer = "manufacturer"
 	labelComponentModel        = "model"
@@ -897,9 +897,7 @@ func planBMCReconciliation(component *model.Component, spec expectedBMCSpec) (op
 	// any stale host rows. ComponentID stays the same so downstream FKs
 	// keep resolving.
 	ops.insert = &want
-	for i := range hosts {
-		ops.deletes = append(ops.deletes, hosts[i])
-	}
+	ops.deletes = append(ops.deletes, hosts...)
 	return ops
 }
 
