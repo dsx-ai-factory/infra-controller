@@ -746,6 +746,7 @@ impl MachineHandle {
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
             active_host_firmware: live_state.active_host_firmware.clone(),
+            bmc_accounts: live_state.bmc_credentials.clone(),
         }
     }
 

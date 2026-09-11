@@ -63,6 +63,7 @@ const ADMINISTRATOR_ROLE_ID: &str = "Administrator";
 pub struct AccountServiceState {
     accounts: Mutex<Vec<Account>>,
     password_updater: Mutex<Option<Weak<dyn PasswordUpdater>>>,
+    credentials_changed_notifier: Mutex<Option<Arc<dyn CredentialsChangedNotifier>>>,
 }
 
 pub(crate) trait PasswordUpdater: Send + Sync {
@@ -74,16 +75,80 @@ pub(crate) trait PasswordUpdater: Send + Sync {
     ) -> BoxFuture<'a, Result<(), String>>;
 }
 
+/// Notified with a full credential export after every effective password
+/// change, so callers can persist credentials across restarts (issue #5966).
+pub trait CredentialsChangedNotifier: std::fmt::Debug + Send + Sync {
+    fn credentials_changed(&self, credentials: Vec<BmcAccountCredential>);
+}
+
+/// A snapshot of one BMC account's current password, suitable for durable
+/// persistence and later restoration after a mock rebuild.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BmcAccountCredential {
+    pub account_id: String,
+    pub username: String,
+    pub password: String,
+}
+
 impl AccountServiceState {
     pub(crate) fn new(factory_default_account: Account) -> Self {
         Self {
             accounts: Mutex::new(vec![factory_default_account]),
             password_updater: Mutex::new(None),
+            credentials_changed_notifier: Mutex::new(None),
         }
     }
 
     pub(crate) fn set_password_updater(&self, updater: &Arc<dyn PasswordUpdater>) {
         *self.password_updater.lock().expect("mutex poisoned") = Some(Arc::downgrade(updater));
+    }
+
+    pub fn set_credentials_changed_notifier(&self, notifier: Arc<dyn CredentialsChangedNotifier>) {
+        *self
+            .credentials_changed_notifier
+            .lock()
+            .expect("mutex poisoned") = Some(notifier);
+    }
+
+    /// Exports the current password of every account for durable persistence.
+    pub fn export_credentials(&self) -> Vec<BmcAccountCredential> {
+        self.accounts
+            .lock()
+            .expect("mutex poisoned")
+            .iter()
+            .map(|account| BmcAccountCredential {
+                account_id: account.id.clone(),
+                username: account.username.clone(),
+                password: account.password.clone(),
+            })
+            .collect()
+    }
+
+    /// Restores previously exported passwords onto matching accounts. Accounts
+    /// are matched by id and username; the factory-default password recorded at
+    /// construction is left untouched so factory-default detection still works.
+    pub fn restore_credentials(&self, credentials: &[BmcAccountCredential]) {
+        let mut accounts = self.accounts.lock().expect("mutex poisoned");
+        for credential in credentials {
+            if let Some(account) = accounts.iter_mut().find(|account| {
+                account.id == credential.account_id && account.username == credential.username
+            }) {
+                account.password = credential.password.clone();
+            }
+        }
+    }
+
+    /// Must be called WITHOUT holding the `accounts` lock: the notifier is
+    /// invoked synchronously and `export_credentials` retakes that lock.
+    fn notify_credentials_changed(&self) {
+        let notifier = self
+            .credentials_changed_notifier
+            .lock()
+            .expect("mutex poisoned")
+            .clone();
+        if let Some(notifier) = notifier {
+            notifier.credentials_changed(self.export_credentials());
+        }
     }
 
     pub(crate) fn accounts(&self) -> Vec<Account> {
@@ -146,24 +211,30 @@ impl AccountServiceState {
                 .await?;
         }
 
-        let mut accounts = self.accounts.lock().expect("mutex poisoned");
-        let account = accounts
-            .iter_mut()
-            .find(|candidate| candidate.id == account_id)
-            .expect("account existed before password synchronization");
-        account.password = password;
+        {
+            let mut accounts = self.accounts.lock().expect("mutex poisoned");
+            let account = accounts
+                .iter_mut()
+                .find(|candidate| candidate.id == account_id)
+                .expect("account existed before password synchronization");
+            account.password = password;
+        }
+        self.notify_credentials_changed();
         Ok(true)
     }
 
     /// Rotates every account on its factory default password to `new_password`
     pub fn change_factory_default_password(&self, new_password: impl Into<String>) {
         let new_password = new_password.into();
-        let mut accounts = self.accounts.lock().expect("mutex poisoned");
-        for account in accounts.iter_mut() {
-            if account.password == account.factory_default_password {
-                account.password = new_password.clone();
+        {
+            let mut accounts = self.accounts.lock().expect("mutex poisoned");
+            for account in accounts.iter_mut() {
+                if account.password == account.factory_default_password {
+                    account.password = new_password.clone();
+                }
             }
         }
+        self.notify_credentials_changed();
     }
 }
 
@@ -329,6 +400,132 @@ mod tests {
 
         assert_eq!(state.update_password("1", "new-password").await, Ok(true));
         assert!(state.is_authorized("root", "new-password"));
+    }
+
+    #[tokio::test]
+    async fn rotated_password_survives_bmc_rebuild() {
+        // Regression test for issue #5966: machine-a-tron loses rotated BMC
+        // passwords on pod restart because AccountServiceState is in-memory only.
+        let (state, _updater) = state_with_updater(Ok(()));
+        assert_eq!(
+            state.update_password("1", "rotated-password").await,
+            Ok(true)
+        );
+        assert!(state.is_authorized("root", "rotated-password"));
+
+        // The credentials exported on each password change are persisted in
+        // the machine-a-tron device snapshot.
+        let exported = state.export_credentials();
+
+        // Simulate a machine-a-tron pod restart: run_bmc_mock rebuilds every
+        // BMC from its factory-default configuration, then restores the
+        // snapshot-saved credentials.
+        let restarted =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        restarted.restore_credentials(&exported);
+
+        assert!(
+            restarted.is_authorized("root", "rotated-password"),
+            "rotated password must survive a BMC mock rebuild (issue #5966)"
+        );
+        assert!(
+            !restarted.is_authorized("root", "old-password"),
+            "factory-default password must stay rejected after rotation (issue #5966)"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_credentials_preserves_factory_default_detection() {
+        let (state, _updater) = state_with_updater(Ok(()));
+        assert_eq!(
+            state.update_password("1", "rotated-password").await,
+            Ok(true)
+        );
+        let exported = state.export_credentials();
+
+        let restarted =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        restarted.restore_credentials(&exported);
+
+        // The restored password is not the factory default, and the factory
+        // default recorded at construction must remain intact underneath.
+        assert!(!restarted.is_factory_default_password("root", "rotated-password"));
+        assert!(!restarted.is_factory_default_password("root", "old-password"));
+
+        // A never-rotated export restores onto a fresh state as still-factory.
+        let untouched =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        let untouched_export = untouched.export_credentials();
+        let restored_untouched =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        restored_untouched.restore_credentials(&untouched_export);
+        assert!(restored_untouched.is_factory_default_password("root", "old-password"));
+    }
+
+    #[tokio::test]
+    async fn restore_credentials_ignores_unknown_accounts() {
+        let state = AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        state.restore_credentials(&[super::BmcAccountCredential {
+            account_id: "2".to_string(),
+            username: "other".to_string(),
+            password: "whatever".to_string(),
+        }]);
+        assert!(state.is_authorized("root", "old-password"));
+        assert!(!state.is_authorized("other", "whatever"));
+    }
+
+    #[tokio::test]
+    async fn notifier_fires_with_exported_credentials_on_password_change() {
+        #[derive(Debug, Default)]
+        struct RecordingNotifier {
+            calls: std::sync::Mutex<Vec<Vec<super::BmcAccountCredential>>>,
+        }
+        impl super::CredentialsChangedNotifier for RecordingNotifier {
+            fn credentials_changed(&self, credentials: Vec<super::BmcAccountCredential>) {
+                self.calls.lock().unwrap().push(credentials);
+            }
+        }
+
+        let (state, _updater) = state_with_updater(Ok(()));
+        let notifier = Arc::new(RecordingNotifier::default());
+        state.set_credentials_changed_notifier(notifier.clone());
+
+        assert_eq!(
+            state.update_password("1", "rotated-password").await,
+            Ok(true)
+        );
+        {
+            let calls = notifier.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0][0].password, "rotated-password");
+            assert_eq!(calls[0][0].username, "root");
+        }
+
+        state.change_factory_default_password("ignored-not-on-factory-default");
+        // Fires again (rotation attempt), but the already-rotated password is untouched.
+        let calls = notifier.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1][0].password, "rotated-password");
+    }
+
+    #[tokio::test]
+    async fn notifier_does_not_fire_when_ipmi_update_fails() {
+        #[derive(Debug, Default)]
+        struct CountingNotifier {
+            count: std::sync::atomic::AtomicUsize,
+        }
+        impl super::CredentialsChangedNotifier for CountingNotifier {
+            fn credentials_changed(&self, _credentials: Vec<super::BmcAccountCredential>) {
+                self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let (state, _updater) = state_with_updater(Err("IPMI update failed".to_string()));
+        let notifier = Arc::new(CountingNotifier::default());
+        state.set_credentials_changed_notifier(notifier.clone());
+
+        assert!(state.update_password("1", "new-password").await.is_err());
+        assert_eq!(notifier.count.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

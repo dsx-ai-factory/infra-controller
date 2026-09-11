@@ -502,6 +502,7 @@ impl DpuMachineHandle {
             settings: self.0.dpu_info.settings.clone(),
             installed_os: self.0.live_state.read().unwrap().installed_os,
             dpu_index: self.0.dpu_index,
+            bmc_accounts: self.0.live_state.read().unwrap().bmc_credentials.clone(),
         }
     }
 

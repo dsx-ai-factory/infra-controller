@@ -57,6 +57,9 @@ pub use mock_machine_router::{
     machine_router_with_injection_store,
 };
 pub use rack_info::RackInfo;
+pub use redfish::account_service::{
+    AccountServiceState, BmcAccountCredential, CredentialsChangedNotifier,
+};
 pub use redfish::virtual_media::DeviceConfig as VirtualMediaDeviceConfig;
 
 pub const DUMMY_FACTORY_USERNAME: &str = "root";
