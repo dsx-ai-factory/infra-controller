@@ -134,7 +134,19 @@ kubectl -n nico-rest exec -it deployment/keycloak -- bash
 
 /opt/keycloak/bin/kcadm.sh config credentials \
   --server http://localhost:8080 --realm master \
-  --user admin --password admin
+  --user admin
+```
+
+Omitting `--password` makes `kcadm` prompt for it, which keeps the value out of the
+process arguments and the shell history of a pod other operators can also exec into. The
+bundled instance uses `admin`. To script the login instead, pass the password on stdin
+rather than as an argument:
+
+```bash
+/opt/keycloak/bin/kcadm.sh config credentials \
+  --server http://localhost:8080 --realm master --user admin <<'EOF'
+admin
+EOF
 ```
 
 The admin console is an alternative for operators who prefer a UI. The bundled instance
@@ -207,11 +219,19 @@ before creating any user:
 `ADMIN_EDIT` keeps the attribute writable through the admin API while leaving it out of
 end-user profile forms, which is the policy Keycloak recommends over `ENABLED`.
 
-`firstName` and `lastName` are required by Keycloak 24's default user profile, and the
-password grant fails with `Account is not fully set up` when either is unset. That check
-runs during authentication rather than being recorded on the account, so a user missing
-them still reports an empty `requiredActions` and looks complete in the Admin UI. Set
-both at creation:
+Keycloak 24's default user profile requires `email`, `firstName`, and `lastName`, and the
+password grant fails with `Account is not fully set up` when any one of them is unset.
+Read the realm's own list rather than trusting this one, since a customized profile can
+require more:
+
+```bash
+/opt/keycloak/bin/kcadm.sh get users/profile -r nico
+```
+
+That check runs during authentication rather than being recorded on the account, so a
+user missing one still reports an empty `requiredActions` and looks complete in the Admin
+UI. Note that `emailVerified` is a separate field, so setting it to `true` does not imply
+`email` itself has a value. Set all three at creation:
 
 ```bash
 /opt/keycloak/bin/kcadm.sh create users -r nico \
@@ -223,13 +243,21 @@ both at creation:
   -s enabled=true \
   -s 'attributes.oidc_id=["acme-corp-admin-001"]'
 
-/opt/keycloak/bin/kcadm.sh set-password -r nico \
-  --username tenant-admin@acme-corp.example --new-password 'REPLACE_ME'
-
 /opt/keycloak/bin/kcadm.sh add-roles -r nico \
   --uusername tenant-admin@acme-corp.example \
   --rolename acme-corp:TENANT_ADMIN
 ```
+
+Set the password as a separate step, leaving `--new-password` off so `kcadm` prompts for
+it. Passing it as an argument would expose the Tenant's password in the shell history and
+process list of a pod other operators can exec into:
+
+```bash
+/opt/keycloak/bin/kcadm.sh set-password -r nico \
+  --username tenant-admin@acme-corp.example
+```
+
+`kcadm` also reads the value from stdin, so a heredoc works when onboarding is scripted.
 
 `set-password` sets a permanent password. Adding `--temporary` would leave an
 `UPDATE_PASSWORD` required action and fail the same way.
@@ -240,12 +268,12 @@ with `oidc_id` present, which also proves the policy change above took effect:
 ```bash
 /opt/keycloak/bin/kcadm.sh get users -r nico \
   -q username=tenant-admin@acme-corp.example \
-  --fields id,username,firstName,lastName,enabled,requiredActions,attributes
+  --fields id,username,email,firstName,lastName,enabled,requiredActions,attributes
 ```
 
-`kcadm` omits fields that are unset, so read this by what is missing: `firstName`,
-`lastName`, and `attributes` all have to appear. An empty `requiredActions` does not on
-its own mean the account can authenticate.
+`kcadm` omits fields that are unset, so read this by what is missing: `email`,
+`firstName`, `lastName`, and `attributes` all have to appear. An empty `requiredActions`
+does not on its own mean the account can authenticate.
 
 Any value for `oidc_id` works as long as it is unique within the realm and stable for
 the life of the user. Changing it later makes NICo treat the login as a new user.
@@ -273,13 +301,33 @@ which are Kustomize dev values.
 `login`. Only `--client-secret`, `--username`, and `--password` belong to the subcommand.
 Putting a global flag after `login` fails with `flag provided but not defined`.
 
+Put the client secret in the config file rather than in `--client-secret`, which would
+record it in shell history and expose it in the process list. `nicocli` reads
+`auth.oidc.client_secret` when the flag is absent, and `~/.nico/config.yaml` is the file
+`nicocli` already keeps the resulting token in:
+
+```bash
+mkdir -p ~/.nico
+install -m 600 /dev/null ~/.nico/config.yaml
+cat > ~/.nico/config.yaml <<'EOF'
+api:
+  base: http://localhost:8388
+  org: acme-corp
+  name: nico
+auth:
+  oidc:
+    client_secret: REPLACE_ME
+EOF
+```
+
+`nicocli login` prompts for the password, so it never needs `--password` either:
+
 ```bash
 nicocli \
   --keycloak-url http://keycloak.nico-rest:8082 \
   --keycloak-realm nico \
   --client-id nico-rest \
   login \
-  --client-secret nico-local-secret \
   --username tenant-admin@acme-corp.example
 ```
 
@@ -467,7 +515,7 @@ authentication inactive, so confirm Keycloak is ready first.
 |---------|-------|-----------|
 | `401 Invalid authorization token in request` | Token `iss` is not `<externalBaseURL>/realms/<realm>`. Usually a token fetched over a port-forward, where Keycloak stamped the forwarded hostname instead | Decode the payload and compare `iss` with the configured issuer, then fetch the token from a host that produces a matching value |
 | `401 Service accounts are not enabled` | Token carries a `client_id` claim but `keycloak.serviceAccount` is `false` | Enable `serviceAccount` in the values and upgrade, or use a user token |
-| `nicocli login` fails with `authentication failed: Account is not fully set up` | Usually `firstName` or `lastName` is unset, which Keycloak 24's default user profile requires. The validation runs at authentication time, so `requiredActions` is empty and the Admin UI shows nothing wrong. A temporary password produces the same message, through an `UPDATE_PASSWORD` action that *is* recorded | Read the account with `kcadm.sh get users` and treat an absent `firstName` or `lastName` as the cause, since `kcadm` omits unset fields. Set both with `kcadm.sh update users/<id>`. Clear `requiredActions` only if it is non-empty |
+| `nicocli login` fails with `authentication failed: Account is not fully set up` | Usually `email`, `firstName`, or `lastName` is unset, all three of which Keycloak 24's default user profile requires. Any one of them is enough to cause it. The validation runs at authentication time, so `requiredActions` is empty and the Admin UI shows nothing wrong. A temporary password produces the same message, through an `UPDATE_PASSWORD` action that *is* recorded | Read the account with `kcadm.sh get users --fields email,firstName,lastName` and treat any absent field as the cause, since `kcadm` omits unset fields. `emailVerified: true` does not mean `email` is set. Fill them in with `kcadm.sh update users/<id>`, checking `get users/profile` for a customized required set. Clear `requiredActions` only if it is non-empty |
 | `401 Failed to retrieve or create user record, DB error` on a human user's first request, with a valid token | The `oidc_id` claim is empty because the attribute was discarded, and NICo rejects an empty user key rather than creating a row. Keycloak 24 defaults `unmanagedAttributePolicy` to `DISABLED` | Set the policy to `ADMIN_EDIT`, re-set `oidc_id` on the user, then decode the token and confirm the claim is present |
 | `403 Requested organization not found in token claims` | The `{org}` path segment does not match any role prefix. Often a case mismatch | Use the lowercase org name in the path and in `api.org` |
 | `403 User does not have any roles assigned` | No realm role parsed into an org. Usually a role name without exactly one colon | Check `realm_access.roles` in the decoded token |

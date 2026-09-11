@@ -417,17 +417,18 @@ func loginFailureHint(tokenURL string, defaulted []string) string {
 }
 
 func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
-	tokenURL := c.String("token-url")
-	if tokenURL == "" && cfg.Auth.OIDC != nil {
-		tokenURL = cfg.Auth.OIDC.TokenURL
-	}
-
 	// Values that fell back to a built-in default, recorded so a failed login can name
 	// them. Only populated where the value was actually used: a realm supplied through
 	// --token-url never goes through resolveOIDCRealm.
 	var defaulted []string
 	var resolvedRealm string
 
+	// An endpoint supplied on the command line or in the environment beats the config,
+	// matching resolveOIDCRealm and resolveOIDCClientID. `nicocli init` scaffolds
+	// auth.oidc.token_url, and login persists it, so checking the config first left
+	// --keycloak-url ignored and the login pointed at whichever realm the config named.
+	// Neither URL flag declares a Value, so a non-empty string came from the user.
+	tokenURL := c.String("token-url")
 	if tokenURL == "" {
 		keycloakURL := c.String("keycloak-url")
 		if keycloakURL != "" {
@@ -439,6 +440,9 @@ func loginWithOIDCCmd(c *cli.Context, cfg *ConfigFile) error {
 			tokenURL = fmt.Sprintf("%s/realms/%s/protocol/openid-connect/token",
 				strings.TrimRight(keycloakURL, "/"), realm)
 		}
+	}
+	if tokenURL == "" && cfg.Auth.OIDC != nil {
+		tokenURL = cfg.Auth.OIDC.TokenURL
 	}
 	if tokenURL == "" {
 		return fmt.Errorf("--token-url or --keycloak-url is required (or set auth.oidc.token_url in config)")

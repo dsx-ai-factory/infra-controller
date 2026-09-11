@@ -183,6 +183,34 @@ func TestLoginWithOIDCCmd(t *testing.T) {
 		require.Equal(t, "/realms/from-flag/protocol/openid-connect/token", gotPath)
 	})
 
+	// `nicocli init` scaffolds auth.oidc.token_url, and a successful login persists it,
+	// so a configured endpoint is the common case rather than the exception. The
+	// unreachable config URL is what makes this a regression test: if the config won,
+	// the login would never reach the server and gotPath would stay empty.
+	t.Run("explicit keycloak-url beats configured token_url", func(t *testing.T) {
+		var gotPath string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		cfg := &ConfigFile{Auth: ConfigAuth{OIDC: &ConfigOIDC{
+			TokenURL: "https://auth.example.invalid/realms/nico-dev/protocol/openid-connect/token",
+		}}}
+		require.NoError(t, SaveConfigToPath(cfg, configPath))
+		SetConfigPath(configPath)
+		defer SetConfigPath("")
+
+		app, err := NewApp([]byte(`{"openapi":"3.0.0","info":{"title":"test","version":"test"},"paths":{}}`))
+		require.NoError(t, err)
+		withArgs(t, "nicocli", "--keycloak-url", server.URL, "--keycloak-realm", "nico",
+			"login", "--client-secret", "secret")
+		require.Error(t, app.Run(os.Args))
+		require.Equal(t, "/realms/nico/protocol/openid-connect/token", gotPath)
+	})
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
