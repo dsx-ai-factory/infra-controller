@@ -197,7 +197,7 @@ func Test_pruneMachineForPublish(t *testing.T) {
 		assert.Nil(t, machine.Capabilities)
 		assert.Nil(t, machine.HwSku)
 		assert.False(t, machine.UpdateComplete)
-		// The replacements Cloud actually reads have to survive.
+		// The replacements the REST layer actually reads have to survive.
 		assert.Equal(t, "status", machine.GetStatus().GetHealth().GetSource())
 		assert.NotNil(t, machine.GetConfig())
 		assert.Equal(t, "machine-1", machine.GetId().GetId())
@@ -227,8 +227,8 @@ func Test_pruneMachineForPublish(t *testing.T) {
 	})
 
 	t.Run("carries the current state version when it falls outside the newest events", func(t *testing.T) {
-		// Cloud dates the current state from this event, so dropping it would silently empty a
-		// response field. Nothing guarantees Core orders the matching event last.
+		// The REST layer dates the current state from this event, so dropping it would silently
+		// empty a response field. Nothing guarantees Core orders the matching event last.
 		versions := []string{"V0"}
 		for i := 1; i < 30; i++ {
 			versions = append(versions, fmt.Sprintf("V%d", i))

@@ -277,22 +277,24 @@ func machineFindByIDs(ctx context.Context, grpcClient *cClient.CoreGrpcClient, i
 	return machines, nil
 }
 
-// maxPublishedMachineEvents bounds the event history a published Machine carries. Cloud reads the
-// events only to date the current state, but a Machine arrives with its whole history, which is
-// the largest thing in the message. Twenty keeps recent history worth reading without carrying
-// hundreds of entries per Machine.
+// maxPublishedMachineEvents bounds the event history a published Machine carries. The REST layer
+// reads the events only to date the current state, but a Machine arrives with its whole history,
+// which is the largest thing in the message. Twenty keeps recent history worth reading without
+// carrying hundreds of entries per Machine.
 const maxPublishedMachineEvents = 20
 
-// pruneMachineForPublish drops what Cloud does not read from a Machine before it is published.
+// pruneMachineForPublish drops what the REST layer does not read from a Machine before it is
+// published.
 //
 // Core fills both the fields under status and config and their deprecated twins on the Machine
-// itself, which the proto marks for removal once rest-api reads the new ones. Cloud already reads
-// status and config, so the twins are an exact duplicate of about a quarter of every Machine, and
-// Cloud persists the whole message as jsonb so they cost storage as well as Temporal payload.
+// itself, which the proto marks for removal once rest-api reads the new ones. The REST layer
+// already reads status and config, so the twins are an exact duplicate of about a quarter of every
+// Machine, and it persists the whole message as jsonb, so they cost storage as well as Temporal
+// payload.
 //
-// Events are the larger cost. A Machine arrives with its full state history, and Cloud uses it to
-// date one lifecycle transition, so only the events matching the current state_version are worth
-// sending.
+// Events are the larger cost. A Machine arrives with its full state history, and the REST layer
+// uses it to date one lifecycle transition, so only the events around the current state_version
+// are worth sending.
 //
 //nolint:staticcheck // Clearing the deprecated fields is the point, so SA1019 has nothing to warn about here.
 func pruneMachineForPublish(machine *corev1.Machine) {
@@ -338,8 +340,8 @@ func pruneMachineForPublish(machine *corev1.Machine) {
 
 // recentMachineEvents keeps the tail of a Machine's event history. Core reports events oldest
 // first, so the tail is the newest, and the event recording the current state version is normally
-// the last one. Cloud needs that event to date the current state, so it is carried explicitly
-// when it falls outside the tail rather than relying on the reported order.
+// the last one. The REST layer needs that event to date the current state, so it is carried
+// explicitly when it falls outside the tail rather than relying on the reported order.
 func recentMachineEvents(events []*corev1.MachineEvent, stateVersion string) []*corev1.MachineEvent {
 	if len(events) <= maxPublishedMachineEvents {
 		return events
