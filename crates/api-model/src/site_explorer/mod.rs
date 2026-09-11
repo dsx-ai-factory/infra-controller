@@ -109,6 +109,13 @@ impl HwType {
     }
 }
 
+/// How many explored endpoints carry one hardware class, or carry none.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct HardwareClassCount {
+    pub hardware_class: Option<String>,
+    pub endpoints: i64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ExploredEndpointSearchFilter {}
 

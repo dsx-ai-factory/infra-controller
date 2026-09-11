@@ -745,6 +745,7 @@ impl InternalRBACRules {
         x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI]);
         x.perm("GetAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListAttestationProfiles", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetAttestationCoverage", vec![ForgeAdminCLI]);
         x.perm("FindPowerShelves", vec![ForgeAdminCLI, Machineatron, Flow]);
         x.perm("FindPowerShelfIds", vec![ForgeAdminCLI, Machineatron, Flow]);
         x.perm(

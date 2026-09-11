@@ -17,6 +17,7 @@
 
 use ::rpc::forge as rpc;
 use carbide_test_harness::prelude::*;
+use model::site_explorer::{EndpointExplorationReport, UNRECOGNIZED_HARDWARE_CLASS};
 use tonic::{Code, Request};
 
 fn exact(id: &str) -> rpc::ComponentIdMatch {
@@ -250,4 +251,142 @@ async fn the_api_refuses_what_section_6_2_forbids(pool: PgPool) {
         .await
         .expect_err("update against a class with no profile is not a create");
     assert_eq!(unknown_class.code(), Code::NotFound);
+}
+
+/// Records an explored endpoint carrying `hardware_class`, which is what
+/// resolution reads. `None` is an endpoint last explored before the class was
+/// recorded at all.
+async fn explored(env: &TestHarness, address: &str, hardware_class: Option<&str>) {
+    let report = EndpointExplorationReport {
+        hardware_class: hardware_class.map(str::to_string),
+        ..Default::default()
+    };
+    let mut txn = env.db_txn().await;
+    db::explored_endpoints::insert(address.parse().unwrap(), &report, false, &mut txn)
+        .await
+        .expect("the endpoint is recorded");
+    txn.commit().await.expect("the api can read the endpoint");
+}
+
+fn selection_mode(value: Option<i32>) -> Option<rpc::AttesterSelectionMode> {
+    value.map(|mode| rpc::AttesterSelectionMode::try_from(mode).expect("a mode this build knows"))
+}
+
+/// One row per class, as the class, how many endpoints carry it, what would
+/// cover it, and the mode of the profile that would apply. The empty class is
+/// the endpoints carrying none.
+fn reported(
+    response: &rpc::GetAttestationCoverageResponse,
+) -> Vec<(
+    &str,
+    i32,
+    rpc::AttestationCoverage,
+    Option<rpc::AttesterSelectionMode>,
+)> {
+    response
+        .entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.hardware_class.as_str(),
+                entry.endpoints,
+                entry.coverage(),
+                selection_mode(entry.mode),
+            )
+        })
+        .collect()
+}
+
+/// What an operator reads before enabling attestation: which profile would
+/// supply the policy for each class the site actually has. The server answers
+/// from the same resolution scheduling applies to a single machine, so this
+/// also pins the rules an operator would otherwise have to infer — a class
+/// profile wins over `any`, the `unrecognized` marker falls through to `any`,
+/// and an endpoint with no class recorded is covered by nothing at all.
+#[sqlx_test]
+async fn coverage_reports_what_would_apply_to_each_class_the_site_has(pool: PgPool) {
+    let env = TestHarness::builder(pool).build().await;
+
+    explored(&env, "192.0.2.1", Some("Gb200")).await;
+    explored(&env, "192.0.2.2", Some("Gb200")).await;
+    explored(&env, "192.0.2.3", Some("DgxGb300")).await;
+    explored(&env, "192.0.2.4", Some(UNRECOGNIZED_HARDWARE_CLASS)).await;
+    explored(&env, "192.0.2.5", None).await;
+
+    create(&env, "Gb200", gpu_allowlist()).await.unwrap();
+
+    let coverage = env
+        .api()
+        .get_attestation_coverage(Request::new(()))
+        .await
+        .expect("coverage reads")
+        .into_inner();
+    assert_eq!(
+        reported(&coverage),
+        [
+            ("DgxGb300", 1, rpc::AttestationCoverage::NoProfile, None),
+            (
+                "Gb200",
+                2,
+                rpc::AttestationCoverage::OwnProfile,
+                Some(rpc::AttesterSelectionMode::Allowlist)
+            ),
+            (
+                UNRECOGNIZED_HARDWARE_CLASS,
+                1,
+                rpc::AttestationCoverage::ClassUnrecognized,
+                None
+            ),
+            ("", 1, rpc::AttestationCoverage::ClassNotRecorded, None),
+        ]
+    );
+    assert_eq!(
+        selection_mode(coverage.any_profile_mode),
+        None,
+        "no any profile is stored"
+    );
+
+    create(
+        &env,
+        "any",
+        selection(rpc::AttesterSelectionMode::All, vec![]),
+    )
+    .await
+    .unwrap();
+
+    let coverage = env
+        .api()
+        .get_attestation_coverage(Request::new(()))
+        .await
+        .expect("coverage reads")
+        .into_inner();
+    assert_eq!(
+        reported(&coverage),
+        [
+            (
+                "DgxGb300",
+                1,
+                rpc::AttestationCoverage::AnyFallback,
+                Some(rpc::AttesterSelectionMode::All)
+            ),
+            (
+                "Gb200",
+                2,
+                rpc::AttestationCoverage::OwnProfile,
+                Some(rpc::AttesterSelectionMode::Allowlist)
+            ),
+            (
+                UNRECOGNIZED_HARDWARE_CLASS,
+                1,
+                rpc::AttestationCoverage::AnyFallback,
+                Some(rpc::AttesterSelectionMode::All)
+            ),
+            ("", 1, rpc::AttestationCoverage::ClassNotRecorded, None),
+        ]
+    );
+    assert_eq!(
+        selection_mode(coverage.any_profile_mode),
+        Some(rpc::AttesterSelectionMode::All),
+        "the site's posture for everything unprofiled is visible on its own"
+    );
 }

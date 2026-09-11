@@ -3359,6 +3359,13 @@ impl Forge for Api {
         crate::handlers::attestation_profile::list(self).await
     }
 
+    async fn get_attestation_coverage(
+        &self,
+        _request: tonic::Request<()>,
+    ) -> Result<Response<rpc::GetAttestationCoverageResponse>, Status> {
+        crate::handlers::attestation_profile::coverage(self).await
+    }
+
     async fn sign_machine_identity(
         &self,
         request: tonic::Request<rpc::MachineIdentityRequest>,

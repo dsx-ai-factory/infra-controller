@@ -19,8 +19,8 @@ use carbide_authn::middleware::Principal;
 use carbide_instrument::{Event, LabelValue, emit};
 use config_version::ConfigVersion;
 use model::attestation::profile::{
-    AttestationPolicyDocument, AttestationProfile, DeleteAttestationProfile, NewAttestationProfile,
-    UpdateAttestationProfile,
+    ANY_HARDWARE_CLASS, AttestationPolicyDocument, AttestationProfile, DeleteAttestationProfile,
+    NewAttestationProfile, ProfileResolution, UpdateAttestationProfile,
 };
 use tonic::{Request, Response, Status};
 
@@ -230,6 +230,74 @@ pub(crate) async fn list(
     Ok(Response::new(rpc::ListAttestationProfilesResponse {
         profiles: profiles.into_iter().map(Into::into).collect(),
     }))
+}
+
+/// Which profile would apply to each class the site actually has, so an
+/// operator can see what attestation would do before enabling it.
+pub(crate) async fn coverage(
+    api: &Api,
+) -> Result<Response<rpc::GetAttestationCoverageResponse>, Status> {
+    let mut conn = api
+        .database_connection
+        .acquire()
+        .await
+        .map_err(|error| db::DatabaseError::new("attestation coverage", error))?;
+
+    let counts = db::explored_endpoints::hardware_class_counts(&mut *conn).await?;
+
+    let mut entries = Vec::with_capacity(counts.len());
+    for count in counts {
+        // Asked of resolution per class rather than restated here, so the view
+        // cannot disagree with what scheduling would do for one machine.
+        let resolution =
+            db::attestation_profile::resolve(&mut *conn, count.hardware_class.as_deref()).await?;
+        let (coverage, mode) = reported_coverage(&resolution);
+
+        entries.push(rpc::AttestationCoverageEntry {
+            hardware_class: count.hardware_class.unwrap_or_default(),
+            endpoints: count.endpoints as i32,
+            coverage: coverage.into(),
+            mode: mode.map(Into::into),
+        });
+    }
+
+    // Reported on its own because `any` is never a recorded class, so no entry
+    // above can carry it.
+    let any_profile = db::attestation_profile::find(&mut *conn, ANY_HARDWARE_CLASS).await?;
+
+    Ok(Response::new(rpc::GetAttestationCoverageResponse {
+        entries,
+        any_profile_mode: any_profile.map(|profile| {
+            rpc::AttesterSelectionMode::from(profile.policy_document.selection.mode).into()
+        }),
+    }))
+}
+
+/// Maps one resolution onto what the view reports: which profile would supply
+/// the policy, and its mode when one would. Spelled out rather than derived,
+/// so adding a resolution fails to compile until it has a wire value.
+fn reported_coverage(
+    resolution: &ProfileResolution,
+) -> (rpc::AttestationCoverage, Option<rpc::AttesterSelectionMode>) {
+    match resolution {
+        ProfileResolution::Resolved {
+            profile,
+            used_any_fallback,
+        } => {
+            let coverage = if *used_any_fallback {
+                rpc::AttestationCoverage::AnyFallback
+            } else {
+                rpc::AttestationCoverage::OwnProfile
+            };
+            (
+                coverage,
+                Some(profile.policy_document.selection.mode.into()),
+            )
+        }
+        ProfileResolution::ClassNotRecorded => (rpc::AttestationCoverage::ClassNotRecorded, None),
+        ProfileResolution::NoProfile => (rpc::AttestationCoverage::NoProfile, None),
+        ProfileResolution::ClassUnrecognized => (rpc::AttestationCoverage::ClassUnrecognized, None),
+    }
 }
 
 async fn find_for_update(
