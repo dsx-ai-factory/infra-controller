@@ -62,7 +62,10 @@ pub(crate) async fn get_rms_version(
                 RackManagerError::ApiInvocationError(status) => {
                     Status::new(status.code(), format!("rms: {}", status.message()))
                 }
-                other => Status::internal(format!("rms: {other}")),
+                // TlsError and any other non-API variant are connectivity
+                // failures; surface them as Unavailable so the CLI can
+                // classify them as rms-unreachable rather than generic error.
+                other => Status::unavailable(format!("rms: {other}")),
             }
         })?;
 
