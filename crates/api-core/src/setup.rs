@@ -489,6 +489,7 @@ pub(crate) async fn start_runtime(
         db_pool.clone(),
         bmc_explorer.clone(),
         Arc::new(carbide_config.get_firmware_config()),
+        carbide_config.site_explorer.exploration_timeout,
     ));
 
     let nvlink_config = carbide_config.nvlink_config.clone().unwrap_or_default();

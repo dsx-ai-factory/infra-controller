@@ -54,6 +54,26 @@ pub struct SiteExplorerConfig {
         serialize_with = "as_std_duration"
     )]
     pub run_interval: std::time::Duration,
+    /// The maximum amount of time a single endpoint's exploration is allowed to
+    /// run before it's cut off and recorded as a timeout error. Without this,
+    /// one BMC whose connection hangs (never returns, not even an error) blocks
+    /// the entire exploration cycle forever, since the cycle waits for every
+    /// endpoint's task to finish before completing -- see issue #5963. The
+    /// endpoint simply retries on the next cycle.
+    ///
+    /// This is a *per-endpoint* deadline, not a bound on the whole cycle: within
+    /// one `run_interval` many endpoints can each independently take up to
+    /// `exploration_timeout`, so this does not cap the cycle's total wall-clock
+    /// time (that is governed by `explorations_per_run` and
+    /// `concurrent_explorations`). A zero value is rejected at config-load time,
+    /// since a zero deadline would fail every exploration immediately and
+    /// discovery could never make progress.
+    #[serde(
+        default = "SiteExplorerConfig::default_exploration_timeout",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub exploration_timeout: std::time::Duration,
     /// The maximum amount of nodes that are explored concurrently.
     #[serde(default = "SiteExplorerConfig::default_concurrent_explorations")]
     pub concurrent_explorations: u64,
@@ -191,6 +211,7 @@ impl Default for SiteExplorerConfig {
             enabled: Self::default_enabled(),
             retained_boot_interface_window: None,
             run_interval: Self::default_run_interval(),
+            exploration_timeout: Self::default_exploration_timeout(),
             concurrent_explorations: Self::default_concurrent_explorations(),
             explorations_per_run: Self::default_explorations_per_run(),
             create_machines: Self::default_create_machines(),
@@ -221,6 +242,7 @@ impl PartialEq for SiteExplorerConfig {
             enabled,
             retained_boot_interface_window,
             run_interval,
+            exploration_timeout,
             concurrent_explorations,
             explorations_per_run,
             create_machines,
@@ -244,6 +266,7 @@ impl PartialEq for SiteExplorerConfig {
         enabled.load(AtomicOrdering::Relaxed) == other.enabled.load(AtomicOrdering::Relaxed)
             && *retained_boot_interface_window == other.retained_boot_interface_window
             && *run_interval == other.run_interval
+            && *exploration_timeout == other.exploration_timeout
             && *concurrent_explorations == other.concurrent_explorations
             && *explorations_per_run == other.explorations_per_run
             && create_machines.load(AtomicOrdering::Relaxed)
@@ -276,6 +299,17 @@ impl PartialEq for SiteExplorerConfig {
 
 impl SiteExplorerConfig {
     pub const fn default_run_interval() -> std::time::Duration {
+        std::time::Duration::from_secs(120)
+    }
+
+    /// Comfortably above a real exploration's normal duration (typically
+    /// well under a second; multiple sequential Redfish requests, each
+    /// individually capped at 120s, plus possible first-contact credential
+    /// rotation, could still take longer on a degraded-but-healthy
+    /// endpoint). A timed-out endpoint just retries on the next cycle, so
+    /// erring shorter recovers a real hang faster than it costs in false
+    /// positives.
+    pub const fn default_exploration_timeout() -> std::time::Duration {
         std::time::Duration::from_secs(120)
     }
 

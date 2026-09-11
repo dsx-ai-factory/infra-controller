@@ -58,24 +58,26 @@ async fn init(pool: PgPool) -> ZeroDpuEnv {
     let host_inband_segment = network_controller.create_host_inband_segment(&domain).await;
     let endpoint_explorer = Arc::new(MockEndpointExplorer::default());
     let api = test_harness.api();
+    let create_machines = Arc::new(AtomicBool::new(true));
+    let explorer_config = SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 1,
+        concurrent_explorations: 1,
+        run_interval: Duration::from_secs(1),
+        create_machines: create_machines.clone(),
+        ..Default::default()
+    };
     let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
         api.database_connection.clone(),
         endpoint_explorer.clone(),
         Arc::new(api.runtime_config.get_firmware_config()),
+        explorer_config.exploration_timeout,
     ));
-    let create_machines = Arc::new(AtomicBool::new(true));
     let site_explorer = TestSiteExplorer::new(
         SiteExplorer::new(
             api.database_connection.clone(),
-            SiteExplorerConfig {
-                enabled: Arc::new(true.into()),
-                retained_boot_interface_window: None,
-                explorations_per_run: 1,
-                concurrent_explorations: 1,
-                run_interval: Duration::from_secs(1),
-                create_machines: create_machines.clone(),
-                ..Default::default()
-            },
+            explorer_config,
             test_harness.test_meter.meter(),
             endpoint_exploration_service,
             endpoint_explorer.clone(),

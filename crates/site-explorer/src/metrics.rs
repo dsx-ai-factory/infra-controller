@@ -1223,6 +1223,7 @@ pub(super) fn exploration_error_to_metric_label(error: &EndpointExplorationError
     match error {
         EndpointExplorationError::ConnectionRefused { .. } => "connection_refused",
         EndpointExplorationError::ConnectionTimeout { .. } => "connection_timeout",
+        EndpointExplorationError::ExplorationTimeout { .. } => "exploration_timeout",
         EndpointExplorationError::Unreachable { .. } => "unreachable",
         EndpointExplorationError::UnsupportedVendor { .. } => "unsupported_vendor",
         EndpointExplorationError::RedfishError { .. } => "redfish_error",

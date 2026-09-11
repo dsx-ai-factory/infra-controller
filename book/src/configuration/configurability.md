@@ -371,6 +371,16 @@ plus thresholds for DPU agent compliance. Operators flip this from
 `[site_explorer]` settings:
 
 - `run_interval` — how often background hardware discovery scans run.
+- `exploration_timeout` — the maximum time a single endpoint's exploration may
+  run before it is cut off and recorded as a timeout error (duration string,
+  same format as `run_interval`; default `2m`). This is a *per-endpoint*
+  deadline, not a bound on the whole cycle: within one `run_interval` many
+  endpoints can each independently take up to `exploration_timeout`, so it does
+  not cap the cycle's total wall-clock time. On expiry that endpoint is retried
+  on the next cycle, and other endpoints are unaffected. Without it, a single
+  BMC whose connection hangs holds the whole discovery cycle open indefinitely.
+  A zero value is rejected at config-load time, since it would fail every
+  exploration immediately and discovery could never make progress.
 - `create_machines` — whether discovered hardware is auto-registered as
   machines (on by default; useful to disable in manual-onboarding
   environments).

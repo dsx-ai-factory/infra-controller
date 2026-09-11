@@ -1691,6 +1691,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
             retained_boot_interface_window: None,
             // run_interval shouldn't matter, this should not be run(), we only trigger intervals manually.
             run_interval: Duration::seconds(0).to_std().unwrap(),
+            exploration_timeout: SiteExplorerConfig::default_exploration_timeout(),
             concurrent_explorations: 100,
             explorations_per_run: 100,
             create_machines: Arc::new(true.into()),
