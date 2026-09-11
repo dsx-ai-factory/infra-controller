@@ -327,7 +327,8 @@ func pruneMachineForPublish(machine *corev1.Machine) {
 	machine.NvlinkInfo = nil
 	machine.NvlinkStatusObservation = nil
 	machine.SpxStatusObservation = nil
-	machine.LastScoutObservedVersion = nil
+	// LastScoutObservedVersion stays. NewAPIMachine still falls back to it when status does not
+	// carry one, and at 26 bytes clearing it would trade a response field for nothing.
 
 	// Superseded by config.
 	machine.MaintenanceReference = nil

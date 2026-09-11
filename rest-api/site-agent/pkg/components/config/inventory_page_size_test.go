@@ -19,16 +19,11 @@ func TestValidateInventoryCloudPageSize(t *testing.T) {
 		{"100 is the maximum valid value", 100, false},
 		{"101 rejected (just over max)", 101, true},
 		{"far over max rejected", 100000, true},
-		// Non-divisors of 100 break machine-inventory pagination totals across Core page
-		// boundaries (see the function doc comment) -- rejected even though they're within
-		// [1, 100].
-		{"40 rejected (does not divide 100)", 40, true},
-		{"30 rejected (does not divide 100)", 30, true},
-		{"33 rejected (does not divide 100)", 33, true},
-		{"99 rejected (does not divide 100)", 99, true},
-		{"20 accepted (divides 100)", 20, false},
-		{"10 accepted (divides 100)", 10, false},
-		{"4 accepted (divides 100)", 4, false},
+		// Every inventory publishes through the shared collector, which buffers items across
+		// Core pages, so a page size that does not divide the Core fetch page is accepted.
+		{"30 accepted (does not divide 100)", 30, false},
+		{"99 accepted (does not divide 100)", 99, false},
+		{"20 accepted", 20, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

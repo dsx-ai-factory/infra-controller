@@ -179,67 +179,80 @@ func Test_pruneMachineForPublish(t *testing.T) {
 
 		return out
 	}
-
-	t.Run("clears the deprecated twins and keeps status and config", func(t *testing.T) {
-		machine := &corev1.Machine{
-			Id:             &corev1.MachineId{Id: "machine-1"},
-			Health:         &corev1.HealthReport{Source: "deprecated"},
-			Capabilities:   &corev1.MachineCapabilitiesSet{},
-			UpdateComplete: true,
-			HwSku:          proto.String("deprecated-sku"),
-			Status:         &corev1.MachineStatus{Health: &corev1.HealthReport{Source: "status"}},
-			Config:         &corev1.MachineConfig{},
+	numberedVersions := func(n int) []string {
+		out := make([]string, 0, n)
+		for i := range n {
+			out = append(out, fmt.Sprintf("V%d", i))
 		}
 
-		pruneMachineForPublish(machine)
+		return out
+	}
 
-		assert.Nil(t, machine.Health)
-		assert.Nil(t, machine.Capabilities)
-		assert.Nil(t, machine.HwSku)
-		assert.False(t, machine.UpdateComplete)
-		// The replacements the REST layer actually reads have to survive.
-		assert.Equal(t, "status", machine.GetStatus().GetHealth().GetSource())
-		assert.NotNil(t, machine.GetConfig())
-		assert.Equal(t, "machine-1", machine.GetId().GetId())
-	})
+	// Each case asserts a different property of the pruned Machine, so the check travels with the
+	// input rather than a shared assertion block trying to cover all of them.
+	tests := []struct {
+		name    string
+		machine *corev1.Machine
+		check   func(*testing.T, *corev1.Machine)
+	}{
+		{
+			name: "clears the deprecated twins and keeps status and config",
+			machine: &corev1.Machine{
+				Id:             &corev1.MachineId{Id: "machine-1"},
+				Health:         &corev1.HealthReport{Source: "deprecated"},
+				Capabilities:   &corev1.MachineCapabilitiesSet{},
+				UpdateComplete: true,
+				HwSku:          proto.String("deprecated-sku"),
+				Status:         &corev1.MachineStatus{Health: &corev1.HealthReport{Source: "status"}},
+				Config:         &corev1.MachineConfig{},
+			},
+			check: func(t *testing.T, machine *corev1.Machine) {
+				assert.Nil(t, machine.Health)
+				assert.Nil(t, machine.Capabilities)
+				assert.Nil(t, machine.HwSku)
+				assert.False(t, machine.UpdateComplete)
+				// The replacements the REST layer actually reads have to survive.
+				assert.Equal(t, "status", machine.GetStatus().GetHealth().GetSource())
+				assert.NotNil(t, machine.GetConfig())
+				assert.Equal(t, "machine-1", machine.GetId().GetId())
+			},
+		},
+		{
+			name:    "keeps a short history whole",
+			machine: &corev1.Machine{StateVersion: "V58", Events: events("V56", "V57", "V58")},
+			check: func(t *testing.T, machine *corev1.Machine) {
+				assert.Len(t, machine.Events, 3)
+			},
+		},
+		{
+			name:    "keeps the newest events when the history is longer than the bound",
+			machine: &corev1.Machine{StateVersion: "V29", Events: events(numberedVersions(30)...)},
+			check: func(t *testing.T, machine *corev1.Machine) {
+				assert.Len(t, machine.Events, maxPublishedMachineEvents)
+				// Core reports oldest first, so the tail has to be the newest entries.
+				assert.Equal(t, "V10", machine.Events[0].GetVersion())
+				assert.Equal(t, "V29", machine.Events[maxPublishedMachineEvents-1].GetVersion())
+			},
+		},
+		{
+			// The REST layer dates the current state from this event, so dropping it would
+			// silently empty a response field. Nothing guarantees Core orders the matching event
+			// last.
+			name:    "carries the current state version when it falls outside the newest events",
+			machine: &corev1.Machine{StateVersion: "V0", Events: events(numberedVersions(30)...)},
+			check: func(t *testing.T, machine *corev1.Machine) {
+				assert.Len(t, machine.Events, maxPublishedMachineEvents+1)
+				assert.Equal(t, "V0", machine.Events[0].GetVersion())
+			},
+		},
+	}
 
-	t.Run("keeps a short history whole", func(t *testing.T) {
-		machine := &corev1.Machine{StateVersion: "V58", Events: events("V56", "V57", "V58")}
-
-		pruneMachineForPublish(machine)
-
-		assert.Len(t, machine.Events, 3)
-	})
-
-	t.Run("keeps the newest events when the history is longer than the bound", func(t *testing.T) {
-		versions := make([]string, 0, 30)
-		for i := range 30 {
-			versions = append(versions, fmt.Sprintf("V%d", i))
-		}
-		machine := &corev1.Machine{StateVersion: "V29", Events: events(versions...)}
-
-		pruneMachineForPublish(machine)
-
-		assert.Len(t, machine.Events, maxPublishedMachineEvents)
-		// Core reports oldest first, so the tail has to be the newest entries.
-		assert.Equal(t, "V10", machine.Events[0].GetVersion())
-		assert.Equal(t, "V29", machine.Events[maxPublishedMachineEvents-1].GetVersion())
-	})
-
-	t.Run("carries the current state version when it falls outside the newest events", func(t *testing.T) {
-		// The REST layer dates the current state from this event, so dropping it would silently
-		// empty a response field. Nothing guarantees Core orders the matching event last.
-		versions := []string{"V0"}
-		for i := 1; i < 30; i++ {
-			versions = append(versions, fmt.Sprintf("V%d", i))
-		}
-		machine := &corev1.Machine{StateVersion: "V0", Events: events(versions...)}
-
-		pruneMachineForPublish(machine)
-
-		assert.Len(t, machine.Events, maxPublishedMachineEvents+1)
-		assert.Equal(t, "V0", machine.Events[0].GetVersion())
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pruneMachineForPublish(tt.machine)
+			tt.check(t, tt.machine)
+		})
+	}
 }
 
 func TestManageMachineInventory_CollectAndPublishMachineInventory(t *testing.T) {

@@ -365,19 +365,11 @@ func validateInventorySchedule(schedule string) error {
 	return nil
 }
 
-// inventoryCarbidePageSize mirrors InventoryCarbidePageSize (hardcoded to 100 in every
-// managers/*/cron.go; importing one here would cycle back to this config package). Keep in
-// sync if that value ever changes.
-const inventoryCarbidePageSize = 100
-
-// validateInventoryCloudPageSize rejects a page size Temporal or machine pagination can't
-// handle. Must be >=1 and <=MaxInventoryCloudPageSize (2MB Temporal blob ceiling, see
-// conftypes.go). Must also divide 100 evenly: CollectAndPublishMachineInventory
-// (site-workflow/pkg/activity/machine.go) chunks each 100-item Core page into Cloud pages
-// independently rather than buffering across Core pages, so a non-divisor desyncs its
-// TotalPages/CurrentPage reconciliation. Unreachable before this value became configurable
-// (the old hardcoded 25 always divided 100 cleanly); a real fix means buffering the machine
-// publisher like the instance one already does.
+// validateInventoryCloudPageSize rejects a page size Temporal cannot carry. Must be >=1 and
+// <=MaxInventoryCloudPageSize (2MB Temporal blob ceiling, see conftypes.go). The page size no
+// longer has to divide the Core fetch page evenly: every inventory now publishes through the
+// shared collector, which buffers items across Core pages instead of chunking each one on its
+// own, so a page size like 30 no longer desyncs the paging totals.
 func validateInventoryCloudPageSize(pageSize int) error {
 	if pageSize < 1 {
 		return fmt.Errorf("INVENTORY_CLOUD_PAGE_SIZE %d must be at least 1", pageSize)
@@ -385,9 +377,7 @@ func validateInventoryCloudPageSize(pageSize int) error {
 	if pageSize > conftypes.MaxInventoryCloudPageSize {
 		return fmt.Errorf("INVENTORY_CLOUD_PAGE_SIZE %d exceeds the %d maximum", pageSize, conftypes.MaxInventoryCloudPageSize)
 	}
-	if inventoryCarbidePageSize%pageSize != 0 {
-		return fmt.Errorf("INVENTORY_CLOUD_PAGE_SIZE %d must evenly divide %d (the Core/site fetch page size) -- a non-divisor breaks machine-inventory pagination totals across Core page boundaries", pageSize, inventoryCarbidePageSize)
-	}
+
 	return nil
 }
 
