@@ -307,9 +307,7 @@ flowchart TD
     Q1 -->|"Yes"| O1["AttestationDisabled.<br/>Nothing scheduled, and the<br/>BMC is never contacted"]
     Q1 -->|"No"| S0["Connect to the BMC and list<br/>its ComponentIntegrity resources"]
 
-    S0 --> Q2{"Did the BMC respond?"}
-    Q2 -->|"No"| O2["EndpointUnavailable"]
-    Q2 -->|"Yes"| S1["Keep only the eligible ones:<br/>enabled, type SPDM"]
+    S0 --> S1["Keep only the eligible ones:<br/>enabled, type SPDM"]
 
     S1 --> S2["Apply the patterns to<br/>what remains"]
     S2 --> Q3{"How many attesters<br/>were selected?"}
@@ -325,6 +323,9 @@ A pattern matching no eligible attester fails the selection before anything is c
 
 `mode: NONE` never contacts the BMC, and eligibility is applied before the
 patterns, both for the reasons in §5 steps 5 and 7.
+
+A BMC that cannot be reached produces no outcome at all. It stays the retried
+error it is today.
 
 `PolicyMatchedNothing` means an operator-authored requirement went unsatisfied:
 an allowlist pattern matching no eligible attester, or a denylist excluding
@@ -354,10 +355,9 @@ rpc ListAttestationProfiles(google.protobuf.Empty) returns (ListAttestationProfi
 
 ```protobuf
 message AttesterSelection {
-  // `optional` is load-bearing: it makes an absent mode distinguishable from
-  // NONE, which the zero value would otherwise mean.
-  optional AttesterSelectionMode mode = 1;        // required; absent is rejected
-  repeated ComponentIdMatch component_ids = 2;    // empty for ALL and NONE
+  AttesterSelectionMode mode = 1;
+  // Required for ALLOWLIST and DENYLIST, and must be empty for ALL and NONE.
+  repeated ComponentIdMatch component_ids = 2;
 }
 
 message ComponentIdMatch {
@@ -511,7 +511,8 @@ ALTER TABLE explored_endpoints ADD COLUMN hardware_class TEXT;
 ```
 
 Additive and nullable, so it needs no backfill: Site Explorer fills it in as it
-re-probes (§14).
+re-probes. Until it has, the endpoint's class is absent rather than wrong, which
+§5.3 reports as its own outcome.
 
 ### 7.2 The profile table
 
@@ -658,7 +659,7 @@ it to its host (§12).
 
 ## 8 The trigger API
 
-`TriggerMachineAttestation` keeps its signature. Three response fields are added,
+`TriggerMachineAttestation` keeps its signature. Five response fields are added,
 which does not break clients.
 
 ```protobuf
@@ -666,16 +667,36 @@ message SpdmMachineAttestationTriggerResponse {
   common.MachineId machine_id = 1;
   int32 devices_under_attestation = 2;
   string resolved_hardware_class = 3;
-  string outcome = 4;
+  SpdmSchedulingOutcome outcome = 4;
   bool used_any_fallback = 5;
+  optional string profile_version = 6;
+  optional google.protobuf.Timestamp scheduled_at = 7;
 }
 ```
 
-`outcome` uses the §5.3 values. `used_any_fallback` is needed separately because
+`outcome` is an enum of the §5.3 values rather than a string, so the schema
+carries them and a client switching on it is exhaustive. `used_any_fallback` is
+needed separately because
+
 `resolved_hardware_class` reports the machine's class either way, so without it the
 response cannot distinguish a policy written for this hardware from a default
 written for everything else. Without all three, an operator testing a profile has
 to infer from a count whether it was applied.
+
+`profile_version` names the revision that decided. Reading the profile
+separately does not answer this: profiles are editable, so the one an operator
+reads before or after a trigger may not be the one that ran. It is `optional`
+because `class_not_recorded`, `no_profile`, and `class_unrecognized` are
+reached before any profile applies, so they have no version to report, and an
+empty string would read as unknown rather than none.
+
+It answers "which policy produced this response", not "which policy the machine
+is attesting under".
+
+`scheduled_at` tells a caller whether the devices it scheduled are still the
+ones the machine has. Scheduling stamps every device row it writes with the
+same `started_at`, so a caller that still finds its own value there knows
+nothing has replaced it.
 
 What a caller does with a failing outcome is not decided here; that belongs to
 whatever drives host ingestion, firmware update, and tenant switching (§12).
@@ -683,8 +704,8 @@ whatever drives host ingestion, firmware update, and tenant switching (§12).
 ## 9 Removing the old list
 
 `is_supported_product()`, `get_supported_components()`, and the `PRODUCT_GB200`
-and `PRODUCT_GB300` constants will be deleted in the same change that seeds the
-profiles.
+and `PRODUCT_GB300` constants are deleted along with the version check they
+carried, which no profile can express and none needs.
 
 ## 10 Logging and metrics
 
@@ -695,25 +716,27 @@ declared event rather than a plain log line.
 #[derive(carbide_instrument::Event)]
 #[event(event_name = "attestation_scheduled",
     metric_name = "carbide_attestation_scheduling_total",
-    component = "attestation", log = info, metric = counter,
-    message = "attestation scheduling completed",
-    describe = "Number of attestation scheduling attempts by outcome")]
+    component = "machine-controller", log = info, metric = counter,
+    message = "SPDM attestation scheduling finished",
+    describe = "Number of SPDM attestation scheduling attempts, by outcome")]
 struct AttestationScheduled {
-    #[label] outcome: AttestationSchedulingOutcome,
-    #[label] used_any_fallback: bool,
-    #[context] machine_id: String,
+    #[label] outcome: SchedulingOutcome,
+    #[context] machine_id: MachineId,
     #[context] hardware_class: String,
-    #[context] error: Option<String>,
+    #[context] used_any_fallback: bool,
+    #[context] profile_version: Option<String>,
+    #[context] devices_scheduled: u64,
 }
 ```
 
-`outcome` is a fixed enum of the §5.3 values and `used_any_fallback` is a `bool`,
-so both are safe as labels. The second makes fallback reliance trendable, so a
-site accumulating unprofiled hardware shows up on a graph.
+`outcome` is a fixed enum of the §5.3 values, so it is safe as a label, and it is
+the only one: a site accumulating unprofiled hardware is a count of machines in a
+state, which the coverage view answers directly, where this metric counts
+occurrences.
 
-Machine IDs and error text are unbounded and stay in `#[context]`. Class names
-stay there too: the explorer writes the column, so nothing at the emit site
-bounds what a stored row can contain.
+Machine IDs are unbounded and stay in `#[context]`. Class names stay there too:
+the explorer writes the column, so nothing at the emit site bounds what a stored
+row can contain.
 
 A profile is security policy, so every accepted change to one is recorded with
 the version it moved from and to.

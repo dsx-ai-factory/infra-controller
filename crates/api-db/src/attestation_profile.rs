@@ -15,7 +15,10 @@
  * limitations under the License.
  */
 use config_version::ConfigVersion;
-use model::attestation::profile::{AttestationPolicyDocument, AttestationProfile};
+use model::attestation::profile::{
+    ANY_HARDWARE_CLASS, AttestationPolicyDocument, AttestationProfile, ProfileResolution,
+};
+use model::site_explorer::UNRECOGNIZED_HARDWARE_CLASS;
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
@@ -78,6 +81,44 @@ pub async fn find_for_update(
         .fetch_optional(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Finds the profile that applies to the class recorded on an endpoint.
+///
+/// `recorded_class` is what `explored_endpoints.hardware_class` holds: a class
+/// name, the `unrecognized` marker, or nothing at all. An exact class match
+/// wins over `any`, and the `unrecognized` marker skips straight to `any`
+/// because no profile may be keyed to it.
+pub async fn resolve<DB>(
+    db: &mut DB,
+    recorded_class: Option<&str>,
+) -> DatabaseResult<ProfileResolution>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let Some(recorded_class) = recorded_class else {
+        return Ok(ProfileResolution::ClassNotRecorded);
+    };
+
+    if recorded_class != UNRECOGNIZED_HARDWARE_CLASS
+        && let Some(profile) = find(&mut *db, recorded_class).await?
+    {
+        return Ok(ProfileResolution::Resolved {
+            profile,
+            used_any_fallback: false,
+        });
+    }
+
+    match find(db, ANY_HARDWARE_CLASS).await? {
+        Some(profile) => Ok(ProfileResolution::Resolved {
+            profile,
+            used_any_fallback: true,
+        }),
+        None if recorded_class == UNRECOGNIZED_HARDWARE_CLASS => {
+            Ok(ProfileResolution::ClassUnrecognized)
+        }
+        None => Ok(ProfileResolution::NoProfile),
+    }
 }
 
 /// Every profile, ordered by class so pages and diffs stay stable.
@@ -299,6 +340,91 @@ mod test {
             .unwrap();
         assert_eq!(recreated.version.version_nr(), created.version.version_nr());
         assert_ne!(recreated.version, created.version);
+    }
+
+    /// A resolution reduced to what a caller acts on, so a case table can
+    /// state its expectation as one readable value.
+    fn summarize(resolved: ProfileResolution) -> String {
+        match resolved {
+            ProfileResolution::Resolved {
+                profile,
+                used_any_fallback: false,
+            } => format!("the {} profile", profile.hardware_class),
+            ProfileResolution::Resolved {
+                profile,
+                used_any_fallback: true,
+            } => format!("the {} profile, as a fallback", profile.hardware_class),
+            ProfileResolution::ClassNotRecorded => "no class recorded".to_string(),
+            ProfileResolution::NoProfile => "no profile".to_string(),
+            ProfileResolution::ClassUnrecognized => "class unrecognized".to_string(),
+        }
+    }
+
+    /// The fallback order in one place: a class's own profile outranks `any`,
+    /// the unrecognized marker reaches only `any`, and each way of finding
+    /// nothing is a distinct answer, because an operator fixes a missing
+    /// profile and a misclassified endpoint differently.
+    #[crate::sqlx_test]
+    async fn resolution_prefers_the_class_over_any(pool: sqlx::PgPool) {
+        struct Case {
+            scenario: &'static str,
+            stored: &'static [&'static str],
+            recorded: Option<&'static str>,
+            expect: &'static str,
+        }
+
+        let cases = [
+            Case {
+                scenario: "the class has its own profile",
+                stored: &["Gb200", ANY_HARDWARE_CLASS],
+                recorded: Some("Gb200"),
+                expect: "the Gb200 profile",
+            },
+            Case {
+                scenario: "a class with no profile of its own falls back",
+                stored: &[ANY_HARDWARE_CLASS],
+                recorded: Some("Gb200"),
+                expect: "the any profile, as a fallback",
+            },
+            Case {
+                scenario: "unrecognized hardware is covered by any",
+                stored: &[ANY_HARDWARE_CLASS],
+                recorded: Some(UNRECOGNIZED_HARDWARE_CLASS),
+                expect: "the any profile, as a fallback",
+            },
+            Case {
+                scenario: "unrecognized hardware with no fallback names classification",
+                stored: &["Gb200"],
+                recorded: Some(UNRECOGNIZED_HARDWARE_CLASS),
+                expect: "class unrecognized",
+            },
+            Case {
+                scenario: "a recognized class with no fallback names the profile",
+                stored: &[],
+                recorded: Some("Gb200"),
+                expect: "no profile",
+            },
+            Case {
+                scenario: "an unexplored endpoint does not reach any",
+                stored: &[ANY_HARDWARE_CLASS],
+                recorded: None,
+                expect: "no class recorded",
+            },
+        ];
+
+        for case in cases {
+            let mut txn = pool.begin().await.unwrap();
+            for class in case.stored {
+                create(&mut txn, class, &gpu_allowlist(), OPERATOR)
+                    .await
+                    .unwrap();
+            }
+
+            let resolved = resolve(txn.as_mut(), case.recorded).await.unwrap();
+
+            assert_eq!(summarize(resolved), case.expect, "{}", case.scenario);
+            txn.rollback().await.unwrap();
+        }
     }
 
     #[crate::sqlx_test]

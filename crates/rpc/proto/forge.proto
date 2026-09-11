@@ -1150,9 +1150,49 @@ message SpdmMachineAttestationStatus {
   SpdmAttestationStatus attestation_status = 2;
 }
 
+// Why one attestation scheduling attempt ended as it did. Only SCHEDULED
+// wrote work; the rest are the ways a machine can end up attesting nothing,
+// kept apart because an operator fixes each differently.
+enum SpdmSchedulingOutcome {
+  // Unset sentinel. The server always reports a real outcome, so this only
+  // appears to a client newer than the server it is talking to.
+  SPDM_SCHEDULING_OUTCOME_UNSPECIFIED = 0;
+  // One work row was written per selected attester.
+  SPDM_SCHEDULING_OUTCOME_SCHEDULED = 1;
+  // The profile's mode is NONE. The BMC is not contacted.
+  SPDM_SCHEDULING_OUTCOME_ATTESTATION_DISABLED = 2;
+  // The BMC offered nothing eligible, under a policy that asserted nothing
+  // about what must be there. Points at the hardware, not the profile.
+  SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND = 3;
+  // An operator-authored requirement went unsatisfied.
+  SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING = 4;
+  // No exploration has recorded a hardware class for this machine's BMC.
+  SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED = 5;
+  // Neither the machine's class nor `any` has a profile.
+  SPDM_SCHEDULING_OUTCOME_NO_PROFILE = 6;
+  // Classification matched no hardware class, and no `any` profile is stored.
+  SPDM_SCHEDULING_OUTCOME_CLASS_UNRECOGNIZED = 7;
+}
+
 message SpdmMachineAttestationTriggerResponse {
   common.MachineId machine_id = 1;
   int32 devices_under_attestation = 2;
+  // The hardware class recorded for the machine's BMC, empty when exploration
+  // has not recorded one.
+  string resolved_hardware_class = 3;
+  // Why nothing was scheduled, or that something was.
+  SpdmSchedulingOutcome outcome = 4;
+  // Whether the reserved "any" profile supplied the policy rather than one
+  // written for this machine's own class.
+  bool used_any_fallback = 5;
+  // Version of the profile that decided this call, absent when no profile
+  // applied. Scoped to this call: a later trigger replaces the machine's whole
+  // work set, so this is not a lasting claim about the attestation in flight.
+  optional string profile_version = 6;
+  // When the scheduled devices were written, absent unless something was
+  // scheduled. Every device row this call wrote carries it, so a caller can
+  // tell whether its scheduling is still the live one or was replaced.
+  optional google.protobuf.Timestamp scheduled_at = 7;
 }
 
 message SpdmAttestationDetails{

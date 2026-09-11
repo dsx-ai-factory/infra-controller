@@ -17,11 +17,16 @@
 pub(in crate::tests) mod tests {
 
     use carbide_uuid::machine::MachineId;
+    use chrono::{DateTime, Utc};
+    use model::attestation::profile::{
+        ANY_HARDWARE_CLASS, AttestationPolicyDocument, AttesterSelection, AttesterSelectionMode,
+        ComponentIdMatch,
+    };
     use model::attestation::spdm::{SpdmAttestationState, SpdmObjectId};
     use rpc::forge::forge_server::Forge;
     use rpc::forge::{
         SpdmListAttestationMachinesRequest, SpdmListAttestationMachinesRequestSelector,
-        SpdmMachineAttestationStatus, SpdmMachineAttestationTriggerRequest,
+        SpdmMachineAttestationStatus, SpdmMachineAttestationTriggerRequest, SpdmSchedulingOutcome,
         spdm_list_attestation_machines_request,
     };
     use sqlx::PgConnection;
@@ -29,6 +34,7 @@ pub(in crate::tests) mod tests {
     use tonic::Request;
 
     use crate::cfg::file::CarbideConfig;
+    use crate::test_support::fixture_config::MOCK_HOST_HARDWARE_CLASS;
     use crate::tests::common::api_fixtures::{
         TestEnv, TestEnvOverrides, create_managed_host, create_test_env,
         create_test_env_with_overrides, get_config,
@@ -79,6 +85,172 @@ pub(in crate::tests) mod tests {
         assert_eq!(0, list_machines_under_attestation(&env).await?.len());
 
         Ok(())
+    }
+
+    /// What the trigger reports for each outcome a profile can produce.
+    ///
+    /// The machine moves on to the same next state no matter which of these
+    /// happened: the profile disabled attestation, it named attesters the BMC
+    /// does not have, or nobody wrote one. Only the response tells them apart.
+    #[crate::sqlx_test]
+    async fn trigger_reports_the_profile_that_decided(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        struct Case {
+            scenario: &'static str,
+            /// Replaces the profile the fixture seeded for the mock host's
+            /// class, run before the trigger.
+            reprofile: fn() -> Vec<(String, AttesterSelection)>,
+            expect_outcome: SpdmSchedulingOutcome,
+            expect_devices: i32,
+            expect_fallback: bool,
+        }
+
+        let cases = [
+            Case {
+                scenario: "a profile written for the class attests what it names",
+                reprofile: || vec![(MOCK_HOST_HARDWARE_CLASS.to_string(), gpu_allowlist())],
+                expect_outcome: SpdmSchedulingOutcome::Scheduled,
+                expect_devices: 3,
+                expect_fallback: false,
+            },
+            Case {
+                scenario: "the any profile covers a class nobody wrote one for",
+                reprofile: || vec![(ANY_HARDWARE_CLASS.to_string(), gpu_allowlist())],
+                expect_outcome: SpdmSchedulingOutcome::Scheduled,
+                expect_devices: 3,
+                expect_fallback: true,
+            },
+            Case {
+                scenario: "NONE attests nothing without contacting the BMC",
+                reprofile: || {
+                    vec![(
+                        MOCK_HOST_HARDWARE_CLASS.to_string(),
+                        AttesterSelection {
+                            mode: AttesterSelectionMode::None,
+                            component_ids: Vec::new(),
+                        },
+                    )]
+                },
+                expect_outcome: SpdmSchedulingOutcome::AttestationDisabled,
+                expect_devices: 0,
+                expect_fallback: false,
+            },
+            Case {
+                scenario: "an unprofiled class names the missing profile",
+                reprofile: Vec::new,
+                expect_outcome: SpdmSchedulingOutcome::NoProfile,
+                expect_devices: 0,
+                expect_fallback: false,
+            },
+            Case {
+                scenario: "a profile naming absent attesters is not silent",
+                reprofile: || {
+                    vec![(
+                        MOCK_HOST_HARDWARE_CLASS.to_string(),
+                        AttesterSelection {
+                            mode: AttesterSelectionMode::Allowlist,
+                            component_ids: vec![ComponentIdMatch::Exact("NOT_PRESENT".to_string())],
+                        },
+                    )]
+                },
+                expect_outcome: SpdmSchedulingOutcome::PolicyMatchedNothing,
+                expect_devices: 0,
+                expect_fallback: false,
+            },
+        ];
+
+        // One host, reused: the fixture attests it during init, which needs
+        // the profile it seeded, so every case rewrites the profiles only
+        // after the host exists.
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
+        for case in cases {
+            // Only a scheduling run clears the device rows, so the cases that
+            // schedule nothing would otherwise inherit the previous case's.
+            let mut txn = env.pool.begin().await?;
+            sqlx::query("DELETE FROM attestation_profiles")
+                .execute(&mut *txn)
+                .await?;
+            sqlx::query("DELETE FROM spdm_machine_devices_attestation")
+                .execute(&mut *txn)
+                .await?;
+            for (hardware_class, selection) in (case.reprofile)() {
+                db::attestation_profile::create(
+                    &mut txn,
+                    &hardware_class,
+                    &AttestationPolicyDocument::new(selection),
+                    "test",
+                )
+                .await?;
+            }
+            txn.commit().await?;
+
+            let response = env
+                .api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: u32::MAX,
+                }))
+                .await?
+                .into_inner();
+
+            assert_eq!(case.expect_outcome, response.outcome(), "{}", case.scenario);
+            assert_eq!(
+                case.expect_devices, response.devices_under_attestation,
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                case.expect_fallback, response.used_any_fallback,
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                MOCK_HOST_HARDWARE_CLASS, response.resolved_hardware_class,
+                "{}: the class is reported whether or not it had a profile",
+                case.scenario
+            );
+            assert_eq!(
+                case.expect_outcome != SpdmSchedulingOutcome::NoProfile,
+                response.profile_version.is_some(),
+                "{}: a version is reported exactly when a profile decided",
+                case.scenario
+            );
+
+            // The reported instant has to be the one on the rows, or a caller
+            // cannot use it to tell its own scheduling from a later one.
+            let scheduled_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT DISTINCT started_at FROM spdm_machine_devices_attestation
+                 WHERE machine_id = $1",
+            )
+            .bind(machine_id)
+            .fetch_optional(&env.pool)
+            .await?;
+            assert_eq!(
+                scheduled_at.map(rpc::Timestamp::from),
+                response.scheduled_at,
+                "{}: the response must report the rows' own timestamp",
+                case.scenario
+            );
+        }
+
+        Ok(())
+    }
+
+    fn gpu_allowlist() -> AttesterSelection {
+        AttesterSelection {
+            mode: AttesterSelectionMode::Allowlist,
+            component_ids: vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())],
+        }
     }
 
     #[crate::sqlx_test]

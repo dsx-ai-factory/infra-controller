@@ -74,6 +74,17 @@ impl DpuConfigExt for DpuConfig {
     }
 }
 
+/// The class the mock host's BMC is explored as, and the class attestation
+/// profiles in tests key to. One of the `HwType` names, since that is what the
+/// real explorer records.
+///
+/// `Gb200` rather than the `Dell` its exploration report's vendor would imply,
+/// because attestation reads the class and then talks to that same BMC, and
+/// `RedfishSim` answers as a `GB200 NVL` reporting `HGX_IRoT_GPU_*` attesters.
+/// The two mock halves have always disagreed about the platform; this follows
+/// the half attestation acts on.
+pub const MOCK_HOST_HARDWARE_CLASS: &str = "Gb200";
+
 pub trait ManagedHostConfigExt {
     fn zero_dpu() -> Self;
     fn with_serial(self, serial: String) -> Self;
@@ -105,6 +116,7 @@ impl FixtureDefault for ManagedHostConfig {
             hardware_info_template: HardwareInfoTemplate::Default,
             expected_machine_data: None,
             vendor: Some(bmc_vendor::BMCVendor::Dell),
+            hardware_class: Some(MOCK_HOST_HARDWARE_CLASS.to_string()),
             admin_dhcp_fallback: false,
         }
     }

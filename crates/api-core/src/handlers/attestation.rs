@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 use ::rpc::forge::{self as rpc};
-use carbide_machine_controller::handler::attestation::trigger_attestation;
+use carbide_machine_controller::handler::attestation::{SchedulingOutcome, trigger_attestation};
 use carbide_uuid::machine::MachineId;
 use db::ObjectFilter;
 use model::attestation::spdm as model_spdm;
@@ -104,7 +104,7 @@ pub(crate) async fn trigger_machine_attestation(
         }
     };
 
-    let records_inserted = trigger_attestation(
+    let result = trigger_attestation(
         api.pg_pool(),
         redfish_client,
         bmc_info,
@@ -116,8 +116,28 @@ pub(crate) async fn trigger_machine_attestation(
 
     Ok(Response::new(rpc::SpdmMachineAttestationTriggerResponse {
         machine_id: Some(machine_id),
-        devices_under_attestation: records_inserted as i32,
+        devices_under_attestation: result.devices_scheduled as i32,
+        resolved_hardware_class: result.hardware_class,
+        outcome: reported_outcome(result.outcome).into(),
+        used_any_fallback: result.used_any_fallback,
+        profile_version: result.profile_version,
+        scheduled_at: result.scheduled_at.map(Into::into),
     }))
+}
+
+/// Spelled out rather than derived, so adding an outcome fails to compile
+/// until it has been given a wire value. Neither type is local to this crate,
+/// so this cannot be a `From`.
+fn reported_outcome(outcome: SchedulingOutcome) -> rpc::SpdmSchedulingOutcome {
+    match outcome {
+        SchedulingOutcome::Scheduled => rpc::SpdmSchedulingOutcome::Scheduled,
+        SchedulingOutcome::AttestationDisabled => rpc::SpdmSchedulingOutcome::AttestationDisabled,
+        SchedulingOutcome::NoAttestersFound => rpc::SpdmSchedulingOutcome::NoAttestersFound,
+        SchedulingOutcome::PolicyMatchedNothing => rpc::SpdmSchedulingOutcome::PolicyMatchedNothing,
+        SchedulingOutcome::ClassNotRecorded => rpc::SpdmSchedulingOutcome::ClassNotRecorded,
+        SchedulingOutcome::NoProfile => rpc::SpdmSchedulingOutcome::NoProfile,
+        SchedulingOutcome::ClassUnrecognized => rpc::SpdmSchedulingOutcome::ClassUnrecognized,
+    }
 }
 
 pub(crate) async fn cancel_machine_attestation(
@@ -394,4 +414,50 @@ pub(crate) async fn attest_quote(
     _request: Request<rpc::AttestQuoteRequest>,
 ) -> std::result::Result<Response<rpc::AttestQuoteResponse>, Status> {
     unimplemented!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SchedulingOutcome, reported_outcome, rpc};
+
+    /// One outcome is spelled twice: `LabelValue` snake-cases the variant for
+    /// the metric, and protobuf screaming-cases it for the wire. Two derives,
+    /// no common source, so renaming either side moves one spelling and
+    /// leaves the other, and an operator reading a metric no longer finds the
+    /// same word on the API.
+    #[test]
+    fn the_metric_label_and_the_wire_name_stay_one_vocabulary() {
+        const PREFIX: &str = "SPDM_SCHEDULING_OUTCOME_";
+
+        let covered = [
+            SchedulingOutcome::Scheduled,
+            SchedulingOutcome::AttestationDisabled,
+            SchedulingOutcome::NoAttestersFound,
+            SchedulingOutcome::PolicyMatchedNothing,
+            SchedulingOutcome::ClassNotRecorded,
+            SchedulingOutcome::NoProfile,
+            SchedulingOutcome::ClassUnrecognized,
+        ]
+        .map(|outcome| {
+            let wire = reported_outcome(outcome);
+            assert_eq!(
+                carbide_instrument::LabelValue::label_value(&outcome).as_str(),
+                wire.as_str_name()
+                    .strip_prefix(PREFIX)
+                    .expect("every value carries the enum prefix")
+                    .to_lowercase(),
+                "{outcome:?}"
+            );
+            wire
+        });
+
+        // An outcome added to the schema but never listed above would
+        // otherwise go unchecked, since nothing here iterates the enum.
+        for value in 1.. {
+            let Ok(wire) = rpc::SpdmSchedulingOutcome::try_from(value) else {
+                break;
+            };
+            assert!(covered.contains(&wire), "{wire:?} is not covered above");
+        }
+    }
 }

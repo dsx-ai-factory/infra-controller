@@ -607,6 +607,27 @@ pub mod profile {
         pub updated_by: String,
     }
 
+    /// Which profile applies to a machine, from the class recorded on its
+    /// endpoint. An exact class match always wins over `any`.
+    #[derive(Clone, Debug)]
+    pub enum ProfileResolution {
+        /// This profile applies. `used_any_fallback` distinguishes a policy
+        /// written for this hardware from the default written for everything
+        /// else, which the class alone cannot report.
+        Resolved {
+            profile: AttestationProfile,
+            used_any_fallback: bool,
+        },
+        /// No exploration has recorded a class for the endpoint, so there is
+        /// nothing to key on. `any` is not consulted: the machine is
+        /// unclassified rather than classified as something unprofiled.
+        ClassNotRecorded,
+        /// The class resolved, but neither it nor `any` has a profile.
+        NoProfile,
+        /// Classification matched no `HwType`, and no `any` profile is stored.
+        ClassUnrecognized,
+    }
+
     /// A validated request to store a profile for a class that has none.
     #[derive(Clone, Debug)]
     pub struct NewAttestationProfile {

@@ -356,6 +356,26 @@ pub async fn lookup_bmc_metadata_by_ip(
     ))
 }
 
+/// Reads the hardware class recorded for an endpoint, distinguishing a class
+/// that was recorded from one that never was.
+///
+/// The outer `Option` is absence of the endpoint row, the inner one a row whose
+/// column is still `NULL`. Both mean no exploration has recorded a class, so
+/// callers treat them alike; keeping them apart here costs nothing and leaves
+/// the query honest about what it read.
+pub async fn lookup_hardware_class_by_ip(
+    address: IpAddr,
+    db_reader: impl DbReader<'_>,
+) -> Result<Option<Option<String>>, DatabaseError> {
+    let query = "SELECT hardware_class FROM explored_endpoints WHERE address = $1";
+
+    sqlx::query_scalar(query)
+        .bind(address)
+        .fetch_optional(db_reader)
+        .await
+        .map_err(|e| DatabaseError::new("explored_endpoints lookup_hardware_class_by_ip", e))
+}
+
 /// Updates the explored information about a node
 ///
 /// This operation will return `Ok(false)` if the entry had been deleted in
