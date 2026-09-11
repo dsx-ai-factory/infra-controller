@@ -35,6 +35,7 @@ use bmc_mock::{
     BmcCommand, BmcState, Callbacks, DpuFirmwareVersions, DpuMachineInfo, DpuSettings,
     HardwareType, HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions,
     MockPowerState, SetSystemPowerError, SystemPowerControl, VirtualMediaDeviceConfig,
+    redfish_error_envelope,
 };
 use command_line::{MachineRole, StateBackend};
 use mac_address::MacAddress;
