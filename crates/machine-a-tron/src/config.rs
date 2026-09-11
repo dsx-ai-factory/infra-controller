@@ -147,6 +147,12 @@ pub struct MachineConfig {
     #[serde(default)]
     pub dpus_in_nic_mode: bool,
 
+    /// Whether hosts in this section are registered as DPF-enabled expected machines.
+    /// DPUs of a DPF-enabled host start with the DPU agent OS installed: DPF writes the
+    /// BFB before NICo answers the DPU's PXE request with EXIT. Defaults to true.
+    #[serde(default = "default_true")]
+    pub dpf_enabled: bool,
+
     /// What firmware versions to report for DPUs in this host
     #[serde(default)]
     pub dpu_firmware_versions: Option<DpuFirmwareVersions>,
@@ -257,6 +263,8 @@ impl WiwynnGb200RackConfig {
             run_interval_idle: self.run_interval_idle,
             network_status_run_interval: self.network_status_run_interval,
             dpus_in_nic_mode: self.dpus_in_nic_mode,
+            // Rack-scale GB200/GB300 hosts are always DPF-managed.
+            dpf_enabled: true,
             dpu_firmware_versions: self.dpu_firmware_versions.clone(),
             host_firmware_versions: None,
             dpu_agent_version: self.dpu_agent_version.clone(),
@@ -351,6 +359,8 @@ impl LenovoGb300RackConfig {
             run_interval_idle: self.run_interval_idle,
             network_status_run_interval: self.network_status_run_interval,
             dpus_in_nic_mode: self.dpus_in_nic_mode,
+            // Rack-scale GB200/GB300 hosts are always DPF-managed.
+            dpf_enabled: true,
             dpu_firmware_versions: self.dpu_firmware_versions.clone(),
             host_firmware_versions: None,
             dpu_agent_version: self.dpu_agent_version.clone(),
@@ -1056,6 +1066,28 @@ scout_run_interval = "5s"
     "#,
         )
         .expect("Could not parse config")
+    }
+
+    #[test]
+    fn machine_config_dpf_enabled_defaults_to_true() {
+        assert!(rack_config().machines["config"].dpf_enabled);
+
+        let disabled: MachineATronConfig = toml::from_str(
+            r#"
+carbide_api_url = "https://carbide-api.forge:443"
+pxe_server_host = "192.168.176.7"
+pxe_server_port = "8080"
+
+[machines.config]
+host_count = 1
+dpu_per_host_count = 1
+underlay_dhcp_relay_address = "192.168.176.1"
+bmc_dhcp_relay_address = "192.168.192.1"
+dpf_enabled = false
+    "#,
+        )
+        .expect("Could not parse config");
+        assert!(!disabled.machines["config"].dpf_enabled);
     }
 
     fn wiwynn_gb200_rack_from_machine(machine: &MachineConfig) -> WiwynnGb200RackConfig {
