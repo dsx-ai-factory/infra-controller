@@ -6,13 +6,13 @@ package sitemgr
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -37,13 +37,16 @@ const (
 
 // Options are args passed to the site manager at boot
 type Options struct {
-	credsMgrURL string
-	ingressHost string
-	listenPort  string
-	tlsKeyPath  string
-	tlsCertPath string
-	namespace   string
-	sentryDSN   string
+	credsMgrURL        string
+	credsMgrTokenFile  string
+	credsMgrCAFile     string
+	credsMgrServerName string
+	ingressHost        string
+	listenPort         string
+	tlsKeyPath         string
+	tlsCertPath        string
+	namespace          string
+	sentryDSN          string
 }
 
 // SiteMgr defines an instance of site manager
@@ -77,34 +80,32 @@ func NewSiteManager(ctx context.Context, o Options) (*SiteMgr, error) {
 	}
 
 	if o.sentryDSN != "" {
-		sentry.Init(sentry.ClientOptions{
+		err = sentry.Init(sentry.ClientOptions{
 			Dsn:   o.sentryDSN,
 			Debug: true,
 		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return newSiteManager(ctx, o, c)
 }
 
 func newSiteManager(ctx context.Context, o Options, c crdclient.Interface) (*SiteMgr, error) {
+	certClient, err := newCertificateClient(o)
+	if err != nil {
+		return nil, err
+	}
 	s := &SiteMgr{
-		Options: o,
-		certClient: &http.Client{
-			Timeout: vaultTimeout,
-			// wrap transport with otel
-			Transport: otelhttp.NewTransport(&http.Transport{
-				// disable cert verification as this is a local server
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			}, otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string {
-				return certMgrClientName
-			})),
-		},
-		log: core.GetLogger(ctx),
+		Options:    o,
+		certClient: certClient,
+		log:        core.GetLogger(ctx),
 	}
 
 	s.crdClient = c
 
-	err := s.tlsSetup(ctx)
+	err = s.tlsSetup(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "tlsSetup")
 	}
@@ -122,6 +123,33 @@ func newSiteManager(ctx context.Context, o Options, c crdclient.Interface) (*Sit
 	appService.Path("/v1/sitecreds").Handler(s.siteCredsHandler()).Methods("POST")
 	s.appService = appService
 	return s, nil
+}
+
+func newCertificateClient(o Options) (*http.Client, error) {
+	endpoint, err := url.Parse(o.credsMgrURL)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse certificate manager URL")
+	}
+	if endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil {
+		return nil, fmt.Errorf("certificate manager URL must use HTTPS without user information")
+	}
+	if o.credsMgrTokenFile == "" || o.credsMgrCAFile == "" {
+		return nil, fmt.Errorf("certificate manager token and CA files are required")
+	}
+	client, err := rest.HTTPClientFor(&rest.Config{
+		Host:            o.credsMgrURL,
+		BearerTokenFile: o.credsMgrTokenFile,
+		TLSClientConfig: rest.TLSClientConfig{CAFile: o.credsMgrCAFile, ServerName: o.credsMgrServerName},
+		Timeout:         vaultTimeout,
+		WrapTransport: func(rt http.RoundTripper) http.RoundTripper {
+			return otelhttp.NewTransport(rt, otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string { return certMgrClientName }))
+		},
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "configure certificate manager client")
+	}
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	return client, nil
 }
 
 // Start starts the manager
@@ -184,6 +212,9 @@ func (s *SiteMgr) getCertificate(ctx context.Context, name, app string, ttl int)
 	}
 	url := s.credsMgrURL + "/v1/pki/cloud-cert"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payloadBuf)
+	if err != nil {
+		return nil, err
+	}
 	content, err := s.roundTrip(req)
 	if err != nil {
 		return nil, errors.Wrap(err, "s.roundTrip(req)")
@@ -203,6 +234,9 @@ func (s *SiteMgr) getCertificate(ctx context.Context, name, app string, ttl int)
 func (s *SiteMgr) getCA(ctx context.Context) (string, error) {
 	url := s.credsMgrURL + "/v1/pki/ca/pem"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
 	content, err := s.roundTrip(req)
 	if err != nil {
 		return "", errors.Wrap(err, "s.roundTrip(req)")
@@ -222,7 +256,7 @@ func (s *SiteMgr) roundTrip(req *http.Request) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode > http.StatusIMUsed {
-		content, _ := ioutil.ReadAll(resp.Body)
+		content, _ := io.ReadAll(resp.Body)
 		err = fmt.Errorf("%s, %s", resp.Status, content)
 		return nil, err
 	}
@@ -231,7 +265,7 @@ func (s *SiteMgr) roundTrip(req *http.Request) ([]byte, error) {
 		return nil, nil
 	}
 
-	return ioutil.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
 }
 
 func (s *SiteMgr) siteCreateHandler() http.Handler {
