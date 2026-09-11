@@ -274,32 +274,44 @@ navigation:
               contents:
                 - page: Overview and General Troubleshooting
                   path: playbooks/stuck_objects/stuck_objects.md
-                - page: Common Mitigations
-                  path: playbooks/stuck_objects/common_mitigations.md
-                - page: Stuck in WaitingForNetworkConfig and DPU Health
-                  path: playbooks/stuck_objects/waiting_for_network_config.md
-                - page: Adding New Machines to an Existing Site
-                  path: playbooks/stuck_objects/adding_new_machines.md
-                - page: State Machine Debugging
-                  path: playbooks/stuck_objects/state_machine_debugging.md
                 - page: Diagnostic Tools
                   path: playbooks/stuck_objects/diagnostic_tools.md
+                - page: State Machine Debugging
+                  path: playbooks/stuck_objects/state_machine_debugging.md
+                - page: Common Mitigations
+                  path: playbooks/stuck_objects/common_mitigations.md
+                - page: Adding New Machines to an Existing Site
+                  path: playbooks/stuck_objects/adding_new_machines.md
+                - page: Dell PowerEdge Missing DPU Boot Device
+                  path: playbooks/stuck_objects/dell_poweredge_boot_issues.md
                 - page: DPU Provisioning Failures
                   path: playbooks/stuck_objects/dpu_provisioning_failures.md
-                - page: Host Ingestion Failures
-                  path: playbooks/stuck_objects/host_ingestion_failures.md
                 - page: Health Alerts and Overrides
                   path: playbooks/stuck_objects/health_alerts.md
-                - page: Network Connectivity Issues
-                  path: playbooks/stuck_objects/network_connectivity.md
+                - page: Host Ingestion Failures
+                  path: playbooks/stuck_objects/host_ingestion_failures.md
+                - page: Instance Boot Connection Timeout
+                  path: playbooks/stuck_objects/instance_boot_connection_timeout.md
                 - page: Instance and Fabric Issues
                   path: playbooks/stuck_objects/instance_and_fabric_issues.md
+                - page: Lenovo SR675 V3 Stuck Polling BIOS Setup
+                  path: playbooks/stuck_objects/lenovo_sr675_v3_polling_bios_setup.md
+                - page: Managed Host Stuck in UEFI Setup
+                  path: playbooks/stuck_objects/host_initializing_uefi_setup.md
+                - page: Network Connectivity Issues
+                  path: playbooks/stuck_objects/network_connectivity.md
                 - page: Site Controller Health
                   path: playbooks/stuck_objects/site_controller_health.md
+                - page: Stuck in WaitingForNetworkConfig and DPU Health
+                  path: playbooks/stuck_objects/waiting_for_network_config.md
+                - page: Troubleshooting BgpPeeringTor Alerts
+                  path: playbooks/stuck_objects/bgp_peering_tor_alert.md
                 - page: Troubleshooting noDpuLogsWarning Alerts
                   path: playbooks/troubleshooting_noDpuLogsWarning_alerts.md
             - section: Debugging Machine
               contents:
+                - page: Booting into Linux Scout
+                  path: playbooks/debugging_machine/force_linux_scout_boot.md
                 - page: Collecting Debug Bundles
                   path: playbooks/debugging_machine/debug_bundle.md
         - page: NVLink Domain Health Reports
