@@ -170,7 +170,7 @@ neither. Records with a `MessageId` keep it unchanged and do not carry these att
 The periodic log collector and the SSE collector derive the attributes the same way.
 
 LiteOn PF-1333-7R firmware r1.3.8 leaves `MessageId` null on every event log entry. The
-message families below were observed across four shelves on 2026-09-09, each with the
+message families below were observed across four shelves on 2026-09-08, each with the
 listed Redfish `Severity`. Only the `Assert` form of the parenthesised detail appeared;
 no `Deassert` entry was present in the retained log of 400 entries per shelf.
 

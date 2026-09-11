@@ -423,7 +423,11 @@ pub struct FirmwareInfo {
 /// the sensor name. Each field is present only when the sensor carries it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SensorAttribution {
+    /// Redfish `PowerSupply` `Id` the sensor belongs to. `None` when the sensor
+    /// is not related to a power supply.
     pub powersupply_id: Option<String>,
+    /// Sensor `PhysicalContext` in snake case, for example `power_supply`.
+    /// `None` for probes that are not sensors.
     pub physical_context: Option<String>,
 }
 
