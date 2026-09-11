@@ -12,15 +12,17 @@ echo "$PKG_VERSION" >/etc/scout-image-version
 # NVIDIA DRIVERS & DCGM
 # ============================================================================
 # We install these in postinst to avoid double-triggering the DKMS build
-NV_PACKAGES="cuda-drivers-580=580.126.16-1ubuntu1 datacenter-gpu-manager-4-cuda13 datacenter-gpu-manager-4-core datacenter-gpu-manager-4-proprietary-cuda13 libnvidia-cfg1-580=580.126.16-1ubuntu1 libnvidia-common-580=580.126.16-1ubuntu1 libnvidia-compute-580=580.126.16-1ubuntu1 libnvidia-decode-580=580.126.16-1ubuntu1 libnvidia-encode-580=580.126.16-1ubuntu1 libnvidia-extra-580=580.126.16-1ubuntu1 libnvidia-fbc1-580=580.126.16-1ubuntu1 libnvidia-gl-580=580.126.16-1ubuntu1 libnvidia-gpucomp-580=580.126.16-1ubuntu1 nvidia-compute-utils-580=580.126.16-1ubuntu1 nvidia-dkms-580-open=580.126.16-1ubuntu1 nvidia-driver-580-open=580.126.16-1ubuntu1 nvidia-fabricmanager=580.126.16-1 nvidia-firmware-580=580.126.16-1ubuntu1 nvidia-kernel-common-580=580.126.16-1ubuntu1 nvidia-kernel-source-580-open=580.126.16-1ubuntu1 nvidia-modprobe=580.126.16-1ubuntu1 nvidia-persistenced=580.126.16-1ubuntu1 nvidia-utils-580=580.126.16-1ubuntu1 xserver-xorg-video-nvidia-580=580.126.16-1ubuntu1 libxnvctrl0=580.126.16-1ubuntu1 nvidia-settings=580.126.16-1ubuntu1 nvidia-imex=580.126.16-1 mft"
+NV_PACKAGES="cuda-drivers datacenter-gpu-manager-4-cuda13 datacenter-gpu-manager-4-core datacenter-gpu-manager-4-proprietary-cuda13 libnvidia-cfg1 libnvidia-common libnvidia-compute libnvidia-decode libnvidia-encode libnvidia-extra libnvidia-fbc1 libnvidia-gl libnvidia-gpucomp nvidia-compute-utils nvidia-dkms-open nvidia-driver-open nvidia-fabricmanager nvidia-firmware nvidia-kernel-common nvidia-kernel-source-590-open nvidia-modprobe nvidia-persistenced nvidia-utils xserver-xorg-video-nvidia libxnvctrl0 nvidia-settings nvidia-imex mft"
 APT_SANDBOX_OPTS="-o APT::Sandbox::User=root"
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get ${APT_SANDBOX_OPTS} update
+apt-get install -y nvidia-driver-pinning-590.48.01
+apt-get ${APT_SANDBOX_OPTS} update
 
 # Debug: Check what NVIDIA driver packages are actually available
 echo "=== Checking NVIDIA repository status ==="
-apt-cache policy cuda-drivers-580 || echo "cuda-drivers-580 not found"
+apt-cache policy cuda-drivers-590 || echo "cuda-drivers-590 not found"
 echo "=== Available cuda-drivers versions ==="
 apt-cache search cuda-drivers | head -20
 echo "=== Available nvidia-driver versions ==="
@@ -125,9 +127,9 @@ do
 done
 
 # Check the nvidia driver versions are consistent
-NV_PKGS="cuda-drivers-580 libnvidia-common-580 libnvidia-compute-580 nvidia-compute-utils-580
-         nvidia-dkms-580-open nvidia-driver-580-open nvidia-fabricmanager nvidia-firmware-580
-         nvidia-kernel-common-580 nvidia-kernel-source-580-open nvidia-persistenced"
+NV_PKGS="cuda-drivers-590 libnvidia-common-590 libnvidia-compute-590 nvidia-compute-utils-590
+         nvidia-dkms-590-open nvidia-driver-590-open nvidia-fabricmanager nvidia-firmware-590
+         nvidia-kernel-common-590 nvidia-kernel-source-590-open nvidia-persistenced"
 if [ $(dpkg -l ${NV_PKGS} | grep '^ii' | awk '{print $3}' | cut -d. -f1-2 | sort -u | wc -l) -ne 1 ]
 then
   echo "ERROR: Mismatched nvidia package versions, dcgmi may not run"
