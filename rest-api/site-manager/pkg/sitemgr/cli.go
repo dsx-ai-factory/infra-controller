@@ -27,6 +27,11 @@ func NewCommand() *cli.Command {
 		Name:  "Forge Site Manager Service",
 		Usage: "Forge Site Manager Service",
 		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:  "creds-manager-token-file",
+				Value: "/var/run/secrets/nico-rest-cert-manager/token",
+				Usage: "Projected service account token file for audience nico-rest-cert-manager; reloaded by the client",
+			},
 			&cli.BoolFlag{
 				Name:  "debug",
 				Usage: "Log debug message to stderr",
@@ -92,14 +97,15 @@ func NewCommand() *cli.Command {
 			log := core.GetLogger(ctx)
 
 			o := Options{
-				credsMgrURL:    c.String("creds-manager-url"),
-				credsMgrCAPath: c.String("creds-manager-ca-path"),
-				ingressHost:    c.String("ingress-host"),
-				listenPort:     c.String("listen-port"),
-				tlsKeyPath:     c.String("tls-key-path"),
-				tlsCertPath:    c.String("tls-cert-path"),
-				namespace:      c.String("namespace"),
-				sentryDSN:      c.String("sentry-dsn"),
+				credsMgrTokenFile: c.String("creds-manager-token-file"),
+				credsMgrURL:       c.String("creds-manager-url"),
+				credsMgrCAPath:    c.String("creds-manager-ca-path"),
+				ingressHost:       c.String("ingress-host"),
+				listenPort:        c.String("listen-port"),
+				tlsKeyPath:        c.String("tls-key-path"),
+				tlsCertPath:       c.String("tls-cert-path"),
+				namespace:         c.String("namespace"),
+				sentryDSN:         c.String("sentry-dsn"),
 			}
 
 			otpHrs := c.Int("otp-duration")

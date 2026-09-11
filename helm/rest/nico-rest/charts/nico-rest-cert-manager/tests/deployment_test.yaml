@@ -19,6 +19,9 @@ tests:
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
+          content: --allowed-service-account=system:serviceaccount:nico-rest:nico-rest-site-manager
+      - contains:
+          path: spec.template.spec.containers[0].args
           content: --dns-name=nico-rest-cert-manager
       - contains:
           path: spec.template.spec.containers[0].args
@@ -57,3 +60,13 @@ tests:
       - notContains:
           path: spec.template.spec.containers[0].args
           content: --dns-name=nico-rest-cert-manager
+
+  - it: authorizes a separately configured Site Manager identity
+    set:
+      config:
+        siteManagerNamespace: registration
+        siteManagerServiceAccount: issuer-client
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --allowed-service-account=system:serviceaccount:registration:issuer-client

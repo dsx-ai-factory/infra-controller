@@ -38,22 +38,30 @@ spec:
             capabilities:
               drop:
                 - ALL
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           args:
             - --listen-port=8100
             # This host name has to be one of nico-rest-cert-manager's
             # --dns-name SANs, because the connection is verified.
-            - --creds-manager-url=https://nico-rest-cert-manager.nico-rest:8000
+            - --creds-manager-url=https://nico-rest-cert-manager.$(POD_NAMESPACE):8000
             # The CA that signs that listener, not the issuer of this service's
             # own serving certificate. They are configured independently.
             - --creds-manager-ca-path=/etc/credsmgr-ca/ca.crt
             - --tls-cert-path=/etc/tls/tls.crt
             - --tls-key-path=/etc/tls/tls.key
-            - --namespace=nico-rest
+            - --namespace=$(POD_NAMESPACE)
             - --debug
           ports:
             - containerPort: 8100
               name: https
           volumeMounts:
+            - name: creds-manager-token
+              mountPath: /var/run/secrets/nico-rest-cert-manager
+              readOnly: true
             - name: tls-certs
               mountPath: /etc/tls
               readOnly: true
@@ -84,6 +92,13 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 15
       volumes:
+        - name: creds-manager-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: nico-rest-cert-manager
+                  expirationSeconds: 3600
         - name: tls-certs
           secret:
             secretName: site-manager-tls
