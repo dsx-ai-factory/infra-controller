@@ -820,8 +820,11 @@ impl MachineStateHandler {
 
         // Don't update failed state failure cause everytime. Record first failure cause only,
         // otherwise first failure cause will be overwritten.
-        if !matches!(mh_state, ManagedHostState::Failed { .. })
-            && let Some((machine_id, details)) = get_failed_state(mh_snapshot)
+        // A reset is a deliberate teardown, so a failure record must not park it.
+        if !matches!(
+            mh_state,
+            ManagedHostState::Failed { .. } | ManagedHostState::Reset { .. }
+        ) && let Some((machine_id, details)) = get_failed_state(mh_snapshot)
         {
             let already_relocking_machine_failure = matches!(
                 &mh_state,

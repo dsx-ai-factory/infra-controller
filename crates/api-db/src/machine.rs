@@ -2256,7 +2256,8 @@ pub async fn list_machines_requested_for_reset(
 ) -> Result<Vec<HostMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            "{} WHERE m.reset_requested IS NOT NULL",
+            "{} WHERE m.reset_requested IS NOT NULL \
+             ORDER BY (m.reset_requested->>'requested_at')::timestamptz, m.id",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }

@@ -25,7 +25,7 @@ use carbide_dpf::types::{DpuDeviceSummary, DpuNodeSummary, HostDpfSnapshot};
 use carbide_dpf::{DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_uuid::machine::MachineId;
-use model::machine::{DpuDiscoveringState, ManagedHostState, ResetState};
+use model::machine::{DpuDiscoveringState, FailureDetails, ManagedHostState, ResetState};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::managed_host_reset_request::Mode;
 use rpc::forge::{ManagedHostResetListRequest, ManagedHostResetRequest, UpdateInitiator};
@@ -547,5 +547,49 @@ async fn reset_re_enters_dpu_discovery_once_the_dpf_crs_are_gone(pool: sqlx::PgP
             .await
             .reset_requested
             .is_none()
+    );
+}
+
+/// A reset is requested precisely because the host is broken, so the global failure parking
+/// must not preempt it before the teardown runs.
+#[crate::sqlx_test]
+async fn reset_survives_a_failure_record_and_reaches_discovery(pool: sqlx::PgPool) {
+    let env = reset_controller_env(pool, DpfCrs::Gone).await;
+    let managed_host = dpf_ingested_host(&env).await;
+
+    let mut txn = env.db_txn().await;
+    let host = managed_host.host().db_machine(&mut txn).await;
+    db::machine::update_failure_details(
+        &host,
+        &mut txn,
+        FailureDetails {
+            cause: model::machine::FailureCause::NVMECleanFailed {
+                err: "corrupted DPU".to_string(),
+            },
+            failed_at: chrono::Utc::now(),
+            source: model::machine::FailureSource::Scout,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    managed_host.mark_machine_for_updates().await;
+    env.api
+        .trigger_managed_host_reset(reset_request(managed_host.id.into(), Mode::Set))
+        .await
+        .unwrap();
+
+    // The hinge, then `DeletingInstance`, then `DeletingCrs`.
+    for _ in 0..3 {
+        timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
+            .await
+            .expect("timed out during state controller iteration");
+    }
+
+    let state = host_state(&env, &managed_host).await;
+    assert!(
+        matches!(state, ManagedHostState::DpuDiscoveringState { .. }),
+        "a failure record must not park a reset, got {state:?}"
     );
 }
