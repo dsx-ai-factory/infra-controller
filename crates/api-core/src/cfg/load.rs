@@ -237,14 +237,24 @@ pub fn parse_carbide_config(
 
     config.config_ctx = Some(merged_config);
 
-    for (path, is_set) in [
+    for (path, is_set, replacement) in [
         (
             "force_dpu_nic_mode",
             config.deprecated_force_dpu_nic_mode.is_some(),
+            "site_explorer.dpu_policy",
         ),
         (
             "site_explorer.force_dpu_nic_mode",
             config.site_explorer.deprecated_force_dpu_nic_mode.is_some(),
+            "site_explorer.dpu_policy",
+        ),
+        (
+            "site_explorer.rotate_switch_nvos_credentials",
+            config
+                .site_explorer
+                .deprecated_rotate_switch_nvos_credentials
+                .is_some(),
+            "no replacement",
         ),
     ] {
         if !is_set {
@@ -259,7 +269,7 @@ pub fn parse_carbide_config(
         tracing::warn!(
             config_key = path,
             config_source = %source,
-            replacement = "site_explorer.dpu_policy",
+            replacement,
             "Ignoring deprecated configuration key"
         );
     }
@@ -429,6 +439,43 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains("unknown_root_field (base.toml)"));
             assert!(message.contains("site_explorer.unknown_nested_field (base.toml)"));
+            Ok(())
+        })
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn strict_mode_accepts_deprecated_switch_nvos_rotation_key() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "base.toml",
+                r#"
+                database_url = "postgres://test"
+                listen = "[::]:1081"
+                asn = 1
+                deny_unknown_fields = true
+                [site_explorer]
+                rotate_switch_nvos_credentials = true
+                "#,
+            )?;
+
+            let figment = merged_carbide_config_figment(Path::new("base.toml"), None);
+            let (config, unknown_fields) = extract_with_unknown_fields::<CarbideConfig>(&figment)?;
+
+            let policy_result =
+                apply_unknown_field_policy(&unknown_fields, config.deny_unknown_fields);
+
+            assert!(unknown_fields.is_empty());
+
+            assert_eq!(
+                config
+                    .site_explorer
+                    .deprecated_rotate_switch_nvos_credentials,
+                Some(true)
+            );
+
+            assert!(policy_result.is_ok());
+
             Ok(())
         })
     }

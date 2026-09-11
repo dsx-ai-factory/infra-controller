@@ -83,13 +83,10 @@ pub struct SiteExplorerConfig {
     #[serde(default = "SiteExplorerConfig::default_machines_created_per_run")]
     pub machines_created_per_run: u64,
 
-    /// Whether SiteExplorer should rotate/update Switch NVOS admin credentials
-    #[serde(
-        default = "SiteExplorerConfig::default_rotate_switch_nvos_credentials",
-        deserialize_with = "deserialize_arc_atomic_bool",
-        serialize_with = "serialize_arc_atomic_bool"
-    )]
-    pub rotate_switch_nvos_credentials: Arc<AtomicBool>,
+    /// Deprecated compatibility key. This setting is ignored.
+    #[doc(hidden)]
+    #[serde(default, rename = "rotate_switch_nvos_credentials", skip_serializing)]
+    pub deprecated_rotate_switch_nvos_credentials: Option<bool>,
 
     /// DEPRECATED: Use `bmc_proxy` instead.
     /// The IP address to connect to instead of the BMC that made the dhcp request.
@@ -195,6 +192,7 @@ impl Default for SiteExplorerConfig {
             explorations_per_run: Self::default_explorations_per_run(),
             create_machines: Self::default_create_machines(),
             machines_created_per_run: Self::default_machines_created_per_run(),
+            deprecated_rotate_switch_nvos_credentials: None,
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: bmc_proxy(None),
@@ -205,7 +203,6 @@ impl Default for SiteExplorerConfig {
             power_shelves_created_per_run: Self::default_power_shelves_created_per_run(),
             create_switches: Self::default_create_switches(),
             switches_created_per_run: Self::default_switches_created_per_run(),
-            rotate_switch_nvos_credentials: Self::default_rotate_switch_nvos_credentials(),
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
             explore_mode: Self::default_explore_mode(),
@@ -225,7 +222,7 @@ impl PartialEq for SiteExplorerConfig {
             explorations_per_run,
             create_machines,
             machines_created_per_run,
-            rotate_switch_nvos_credentials,
+            deprecated_rotate_switch_nvos_credentials,
             override_target_ip,
             override_target_port,
             bmc_proxy,
@@ -249,10 +246,8 @@ impl PartialEq for SiteExplorerConfig {
             && create_machines.load(AtomicOrdering::Relaxed)
                 == other.create_machines.load(AtomicOrdering::Relaxed)
             && *machines_created_per_run == other.machines_created_per_run
-            && rotate_switch_nvos_credentials.load(AtomicOrdering::Relaxed)
-                == other
-                    .rotate_switch_nvos_credentials
-                    .load(AtomicOrdering::Relaxed)
+            && *deprecated_rotate_switch_nvos_credentials
+                == other.deprecated_rotate_switch_nvos_credentials
             && *override_target_ip == other.override_target_ip
             && *override_target_port == other.override_target_port
             && bmc_proxy.load_full() == other.bmc_proxy.load_full()
@@ -304,10 +299,6 @@ impl SiteExplorerConfig {
     /// independently of how many hosts exploration has identified.
     pub const fn default_machines_created_per_run() -> u64 {
         100
-    }
-
-    pub fn default_rotate_switch_nvos_credentials() -> Arc<AtomicBool> {
-        Arc::new(false.into())
     }
 
     pub const fn default_reset_rate_limit() -> Duration {

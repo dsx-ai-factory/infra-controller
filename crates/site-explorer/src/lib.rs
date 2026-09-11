@@ -102,7 +102,6 @@ use model::rack::Rack;
 pub use switch_creator::SwitchCreator;
 pub mod config;
 pub mod errors;
-use std::sync::atomic::AtomicBool;
 
 use errors::{SiteExplorerError, SiteExplorerResult};
 
@@ -112,7 +111,6 @@ use self::metrics::{
     SiteExplorerMachineSlotTrayFetchFailed, SiteExplorerMachineSlotTrayResponseMissing,
     SiteExplorerMachineSlotTrayValueInvalid, exploration_error_to_metric_label,
 };
-use crate::config::SiteExplorerExploreMode;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 
 /// Return whether a HostInband row can be treated as a Redfish endpoint.
@@ -128,23 +126,6 @@ fn should_scan_host_inband_interface_for_redfish(
     interface.interface_type == InterfaceType::Bmc
         || (interface.machine_id.is_none()
             && expected_host_bmc_macs.contains(&interface.mac_address))
-}
-
-/// Build an endpoint explorer over the authenticated BMC client supplied by
-/// the application composition root.
-pub fn new_bmc_explorer(
-    bmc_client: Arc<AuthenticatedBmcClient>,
-    rotate_switch_nvos_credentials: Arc<AtomicBool>,
-    mode: SiteExplorerExploreMode,
-    database_connection: PgPool,
-) -> Arc<BmcEndpointExplorer> {
-    BmcEndpointExplorer::new(
-        bmc_client,
-        rotate_switch_nvos_credentials,
-        mode,
-        Some(database_connection),
-    )
-    .into()
 }
 
 pub fn enrich_endpoint_exploration_report(

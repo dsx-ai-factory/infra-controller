@@ -18,7 +18,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bmc_explorer::Product;
@@ -31,7 +30,6 @@ use carbide_secrets::credentials::{CredentialManager, Credentials};
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
 use model::expected_entity::{BmcCredentialsData, ExpectedEntity};
-use model::expected_switch::ExpectedSwitch;
 use model::machine::MachineInterfaceSnapshot;
 use model::site_explorer::{
     BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport, LockdownStatus,
@@ -118,7 +116,6 @@ impl AuthenticatedBmcClient {
 /// An `EndpointExplorer` which uses redfish APIs to query the endpoint
 pub struct BmcEndpointExplorer {
     bmc_client: Arc<AuthenticatedBmcClient>,
-    rotate_switch_nvos_credentials: Arc<AtomicBool>,
     mode: SiteExplorerExploreMode,
     /// Used to record per-device BMC rotation convergence at the moment the
     /// device is moved onto the site-wide BMC root (see
@@ -132,13 +129,11 @@ impl BmcEndpointExplorer {
     /// Build an explorer over the shared authenticated BMC client.
     pub fn new(
         bmc_client: Arc<AuthenticatedBmcClient>,
-        rotate_switch_nvos_credentials: Arc<AtomicBool>,
         mode: SiteExplorerExploreMode,
         database_connection: Option<PgPool>,
     ) -> Self {
         Self {
             bmc_client,
-            rotate_switch_nvos_credentials,
             mode,
             database_connection,
         }
@@ -273,16 +268,6 @@ impl BmcEndpointExplorer {
         self.bmc_client
             .credential_client
             .get_dpu_factory_default_credentials(model)
-            .await
-    }
-
-    pub async fn get_switch_nvos_admin_credentials(
-        &self,
-        bmc_mac_address: MacAddress,
-    ) -> Result<Credentials, EndpointExplorationError> {
-        self.bmc_client
-            .credential_client
-            .get_switch_nvos_admin_credentials(bmc_mac_address)
             .await
     }
 
@@ -619,35 +604,6 @@ impl BmcEndpointExplorer {
         };
         Ok(vendor)
     }
-
-    // Handle switch NVOS admin credentials setup
-    // Store NVOS admin credentials in vault for the switch if they exist in expected_switch
-    pub async fn set_sitewide_switch_nvos_admin_credentials(
-        &self,
-        bmc_mac_address: MacAddress,
-        expected_switch: &ExpectedSwitch,
-    ) -> Result<(), EndpointExplorationError> {
-        if let (Some(nvos_username), Some(nvos_password)) = (
-            expected_switch.nvos_username.as_ref(),
-            expected_switch.nvos_password.as_ref(),
-        ) {
-            tracing::info!(
-                %bmc_mac_address,
-                "Storing NVOS admin credentials in vault"
-            );
-            self.bmc_client
-                .credential_client
-                .set_bmc_nvos_admin_credentials(
-                    bmc_mac_address,
-                    &Credentials::UsernamePassword {
-                        username: nvos_username.clone(),
-                        password: nvos_password.clone(),
-                    },
-                )
-                .await?;
-        }
-        Ok(())
-    }
 }
 
 impl AuthenticatedBmcClient {
@@ -934,40 +890,6 @@ impl EndpointExplorer for BmcEndpointExplorer {
                 return Err(e);
             }
         };
-
-        // Check for switch NVOS admin credentials if this is a switch
-        if let Some(ExpectedEntity::Switch(expected_switch)) = expected
-            && expected_switch.nvos_username.is_some()
-            && expected_switch.nvos_password.is_some()
-        {
-            // Only check if rotation is enabled
-            if self.rotate_switch_nvos_credentials.load(Ordering::Relaxed) {
-                match self
-                    .get_switch_nvos_admin_credentials(bmc_mac_address)
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::trace!(
-                            %bmc_ip_address, %bmc_mac_address,
-                            "NVOS admin credentials already exist in vault"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::info!(
-                            %bmc_ip_address,
-                            %bmc_mac_address,
-                            error = %e,
-                            "Failed to load NVOS admin credentials; attempting credential setup",
-                        );
-                        self.set_sitewide_switch_nvos_admin_credentials(
-                            bmc_mac_address,
-                            expected_switch,
-                        )
-                        .await?;
-                    }
-                }
-            }
-        }
 
         Ok(report)
     }
@@ -1953,12 +1875,7 @@ mod tests {
             carbide_ipmi::test_support(),
             Arc::new(TestCredentialManager::default()),
         ));
-        BmcEndpointExplorer::new(
-            bmc_client,
-            Arc::new(AtomicBool::new(false)),
-            SiteExplorerExploreMode::NvRedfish,
-            None,
-        )
+        BmcEndpointExplorer::new(bmc_client, SiteExplorerExploreMode::NvRedfish, None)
     }
 
     #[tokio::test]
@@ -2057,8 +1974,7 @@ mod tests {
             carbide_ipmi::test_support(),
             Arc::new(TestCredentialManager::default()),
         ));
-        let explorer =
-            BmcEndpointExplorer::new(bmc_client, Arc::new(AtomicBool::new(false)), mode, None);
+        let explorer = BmcEndpointExplorer::new(bmc_client, mode, None);
 
         explorer
             .generate_exploration_report(
@@ -2191,12 +2107,8 @@ mod tests {
             carbide_ipmi::test_support(),
             Arc::new(TestCredentialManager::default()),
         ));
-        let explorer = BmcEndpointExplorer::new(
-            bmc_client,
-            Arc::new(AtomicBool::new(false)),
-            SiteExplorerExploreMode::LibRedfish,
-            None,
-        );
+        let explorer =
+            BmcEndpointExplorer::new(bmc_client, SiteExplorerExploreMode::LibRedfish, None);
         let bmc_ip_address: SocketAddr = "127.0.0.1:443".parse().expect("valid test BMC address");
         let bmc_mac_address: MacAddress = "02:00:00:00:00:01".parse().expect("valid test BMC MAC");
         let interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -2314,12 +2226,8 @@ mod tests {
             carbide_ipmi::test_support(),
             credential_manager.clone(),
         ));
-        let explorer = BmcEndpointExplorer::new(
-            bmc_client,
-            Arc::new(AtomicBool::new(false)),
-            SiteExplorerExploreMode::LibRedfish,
-            None,
-        );
+        let explorer =
+            BmcEndpointExplorer::new(bmc_client, SiteExplorerExploreMode::LibRedfish, None);
         let bmc_ip_address: SocketAddr = "127.0.0.1:443".parse().expect("valid test BMC address");
         let bmc_mac_address: MacAddress = "02:00:00:00:00:01".parse().expect("valid test BMC MAC");
         let interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -2598,12 +2506,8 @@ mod tests {
             carbide_ipmi::test_support(),
             credential_manager,
         ));
-        let explorer = BmcEndpointExplorer::new(
-            bmc_client,
-            Arc::new(AtomicBool::new(false)),
-            SiteExplorerExploreMode::LibRedfish,
-            None,
-        );
+        let explorer =
+            BmcEndpointExplorer::new(bmc_client, SiteExplorerExploreMode::LibRedfish, None);
         let bmc_ip_address: SocketAddr = "127.0.0.1:443".parse().unwrap();
         let interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
 

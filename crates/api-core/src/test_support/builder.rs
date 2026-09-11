@@ -29,7 +29,8 @@ use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_site_explorer::config::SiteExplorerExploreMode;
 use carbide_site_explorer::test_support::MockEndpointExplorer;
 use carbide_site_explorer::{
-    AuthenticatedBmc, AuthenticatedBmcClient, EndpointExplorationService, EndpointExplorer,
+    AuthenticatedBmc, AuthenticatedBmcClient, BmcEndpointExplorer, EndpointExplorationService,
+    EndpointExplorer,
 };
 use carbide_utils::test_support::test_meter::TestMeter;
 use db::work_lock_manager::WorkLockManagerHandle;
@@ -239,12 +240,11 @@ impl TestApiBuilder {
             carbide_ipmi::test_support(),
             credential_manager.clone(),
         ));
-        let real_endpoint_explorer = carbide_site_explorer::new_bmc_explorer(
+        let real_endpoint_explorer = Arc::new(BmcEndpointExplorer::new(
             real_bmc_client.clone(),
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
             SiteExplorerExploreMode::NvRedfish,
-            self.db_pool.clone(),
-        );
+            Some(self.db_pool.clone()),
+        ));
         // A mock supplies both narrow interfaces so tests asserting on BMC calls
         // still see them; production-like tests use the independently constructed
         // authenticated client shared with the real explorer.

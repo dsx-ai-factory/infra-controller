@@ -6468,26 +6468,39 @@ path = "credentials.yaml"
         assert!(runtime_config.restart_ovs_on_use_admin_network_change);
     }
 
-    /// Real-world site TOMLs may still carry the now-removed
-    /// `force_dpu_nic_mode` setting (top-level and/or under
-    /// `[site_explorer]`). Keep that one compatibility exception explicit.
+    /// Site TOMLs may retain deprecated settings while operators migrate
+    /// configuration independently of the binary.
     #[test]
-    fn legacy_force_dpu_nic_mode_in_toml_still_parses() {
+    fn deprecated_site_explorer_settings_parse_but_are_not_serialized() {
         let config: CarbideConfig = Figment::new()
             .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
             .merge(Toml::string(
                 "force_dpu_nic_mode = false\n\
                  [site_explorer]\n\
-                 force_dpu_nic_mode = true\n",
+                 force_dpu_nic_mode = true\n\
+                 rotate_switch_nvos_credentials = true\n",
             ))
             .extract()
-            .expect("legacy force_dpu_nic_mode in TOML must still parse");
+            .expect("deprecated site-explorer settings in TOML must still parse");
 
         assert_eq!(config.deprecated_force_dpu_nic_mode, Some(false));
         assert_eq!(
             config.site_explorer.deprecated_force_dpu_nic_mode,
             Some(true)
         );
+
+        assert_eq!(
+            config
+                .site_explorer
+                .deprecated_rotate_switch_nvos_credentials,
+            Some(true)
+        );
+
+        let serialized = serde_json::to_value(&config.site_explorer)
+            .expect("site-explorer configuration must serialize");
+
+        assert!(serialized.get("force_dpu_nic_mode").is_none());
+        assert!(serialized.get("rotate_switch_nvos_credentials").is_none());
     }
 
     #[test]

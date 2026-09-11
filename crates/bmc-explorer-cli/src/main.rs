@@ -105,7 +105,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     };
-    let rotate_switch_nvos_credentials = Default::default();
 
     let bmc_client = Arc::new(AuthenticatedBmcClient::new(
         redfish_client_pool,
@@ -115,13 +114,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         carbide_ipmi::test_support(),
         credential_provider.clone(),
     ));
-    let explorer = BmcEndpointExplorer::new(
-        bmc_client,
-        rotate_switch_nvos_credentials,
-        mode,
-        // Standalone debug tool: no database, so rotation bookkeeping is skipped.
-        None,
-    );
+    // Standalone debug tool: no database, so rotation bookkeeping is skipped.
+    let explorer = BmcEndpointExplorer::new(bmc_client, mode, None);
 
     let ip = args.bmc_ip.parse()?;
     let port = args.bmc_port;

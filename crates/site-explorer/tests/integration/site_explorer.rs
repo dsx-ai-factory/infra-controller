@@ -1925,7 +1925,7 @@ async fn test_site_explorer_audit_exploration_results(
         power_shelves_created_per_run: 1,
         create_switches: Arc::new(true.into()),
         switches_created_per_run: 1,
-        rotate_switch_nvos_credentials: Arc::new(false.into()),
+        deprecated_rotate_switch_nvos_credentials: None,
         dpu_policy: None,
         deprecated_force_dpu_nic_mode: None,
         // Tests use MockEndpointExplorer. So this doesn't affect anything.

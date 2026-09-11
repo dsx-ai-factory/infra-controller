@@ -59,7 +59,9 @@ use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
 use carbide_secrets::certificates::CertificateProvider;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
-use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
+use carbide_site_explorer::{
+    AuthenticatedBmcClient, BmcEndpointExplorer, EndpointExplorationService, SiteExplorer,
+};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
 use carbide_spdm_controller::handler::SpdmAttestationStateHandler;
 use carbide_spdm_controller::io::SpdmStateControllerIO;
@@ -476,15 +478,11 @@ pub(crate) async fn start_runtime(
         ipmi_tool.clone(),
         credential_manager.clone(),
     ));
-    let bmc_explorer = carbide_site_explorer::new_bmc_explorer(
+    let bmc_explorer = Arc::new(BmcEndpointExplorer::new(
         bmc_client.clone(),
-        carbide_config
-            .site_explorer
-            .rotate_switch_nvos_credentials
-            .clone(),
         carbide_config.site_explorer.explore_mode,
-        db_pool.clone(),
-    );
+        Some(db_pool.clone()),
+    ));
     let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
         db_pool.clone(),
         bmc_explorer.clone(),

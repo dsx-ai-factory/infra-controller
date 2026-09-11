@@ -32,10 +32,6 @@ pub(super) fn get_bmc_root_credential_key(bmc_mac_address: MacAddress) -> Creden
     }
 }
 
-fn get_bmc_nvos_admin_credential_key(bmc_mac_address: MacAddress) -> CredentialKey {
-    CredentialKey::SwitchNvosAdmin { bmc_mac_address }
-}
-
 #[derive(Clone)]
 pub(super) struct CredentialClient {
     credential_manager: Arc<dyn CredentialManager>,
@@ -230,15 +226,6 @@ impl CredentialClient {
         self.get_credentials(&bmc_root_credential_key).await
     }
 
-    pub(super) async fn get_switch_nvos_admin_credentials(
-        &self,
-        bmc_mac_address: MacAddress,
-    ) -> Result<Credentials, EndpointExplorationError> {
-        let switch_nvos_admin_credential_key = get_bmc_nvos_admin_credential_key(bmc_mac_address);
-        self.get_credentials(&switch_nvos_admin_credential_key)
-            .await
-    }
-
     pub(super) async fn set_bmc_root_credentials(
         &self,
         bmc_mac_address: MacAddress,
@@ -246,16 +233,6 @@ impl CredentialClient {
     ) -> Result<(), EndpointExplorationError> {
         let bmc_root_credential_key = get_bmc_root_credential_key(bmc_mac_address);
         self.set_credentials(&bmc_root_credential_key, credentials)
-            .await
-    }
-
-    pub(super) async fn set_bmc_nvos_admin_credentials(
-        &self,
-        bmc_mac_address: MacAddress,
-        credentials: &Credentials,
-    ) -> Result<(), EndpointExplorationError> {
-        let bmc_nvos_admin_credential_key = get_bmc_nvos_admin_credential_key(bmc_mac_address);
-        self.set_credentials(&bmc_nvos_admin_credential_key, credentials)
             .await
     }
 }
