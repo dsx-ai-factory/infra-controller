@@ -51,6 +51,9 @@ struct SwitchLiveState {
     ssh_endpoint_port: Option<u16>,
     ssh_host_key: Option<String>,
     state: &'static str,
+    /// Current BMC account passwords, persisted across restarts so a rotated
+    /// password is not reset to the factory default (issue #5966).
+    bmc_credentials: Option<Vec<bmc_mock::BmcAccountCredential>>,
 }
 
 impl SwitchLiveState {
@@ -63,7 +66,22 @@ impl SwitchLiveState {
             ssh_endpoint_port: None,
             ssh_host_key: None,
             state: fsm.state_string(),
+            bmc_credentials: None,
         }
+    }
+}
+
+/// See `LiveStateCredentialsNotifier` in `machine_state_machine.rs` (issue #5966).
+#[derive(Debug)]
+struct SwitchCredentialsNotifier {
+    state: Arc<RwLock<SwitchLiveState>>,
+    snapshot_save_notify: Arc<tokio::sync::Notify>,
+}
+
+impl bmc_mock::CredentialsChangedNotifier for SwitchCredentialsNotifier {
+    fn credentials_changed(&self, credentials: Vec<bmc_mock::BmcAccountCredential>) {
+        self.state.write().unwrap().bmc_credentials = Some(credentials);
+        self.snapshot_save_notify.notify_one();
     }
 }
 
@@ -176,13 +194,15 @@ impl SwitchActor {
             desired_host_firmware: None,
         };
         let (fsm, actions) = SwitchFsm::init(true);
+        let mut live_state = SwitchLiveState::new(&fsm);
+        live_state.bmc_credentials = persisted.bmc_accounts;
         Self {
             mat_id: persisted.mat_id,
             machine_config_section,
             host_info,
             app_context,
             config,
-            live_state: Arc::new(RwLock::new(SwitchLiveState::new(&fsm))),
+            live_state: Arc::new(RwLock::new(live_state)),
             bmc_injection: Arc::new(InjectionStore::new()),
             _bmc_mock: None,
             bmc_dhcp_info: None,
@@ -409,6 +429,23 @@ impl SwitchActor {
                 .change_factory_default_password(password);
         }
 
+        // Restore snapshot-saved passwords and keep the snapshot current on
+        // future password changes (issue #5966).
+        let saved_credentials = self.live_state.read().unwrap().bmc_credentials.clone();
+        if let Some(saved_credentials) = saved_credentials {
+            bmc_mock
+                .state()
+                .account_service_state
+                .restore_credentials(&saved_credentials);
+        }
+        bmc_mock
+            .state()
+            .account_service_state
+            .set_credentials_changed_notifier(Arc::new(SwitchCredentialsNotifier {
+                state: self.live_state.clone(),
+                snapshot_save_notify: self.app_context.snapshot_save_notify.clone(),
+            }));
+
         let bmc_handle = {
             self.app_context
                 .bmc_registry
@@ -604,6 +641,7 @@ impl SwitchHandle {
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
             active_host_firmware: None,
+            bmc_accounts: self.0.live_state.read().unwrap().bmc_credentials.clone(),
         }
     }
 

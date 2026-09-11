@@ -93,6 +93,7 @@ pub async fn run_local(
         forge_api_client,
         dhcp_client,
         mac_address_pool,
+        snapshot_save_notify: Arc::new(tokio::sync::Notify::new()),
     });
 
     let mat = MachineATron::new(app_context.clone());

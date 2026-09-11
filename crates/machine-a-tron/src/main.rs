@@ -150,6 +150,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         forge_api_client,
         dhcp_client,
         mac_address_pool: Mutex::new(mac_address_pool).into(),
+        snapshot_save_notify: Arc::new(tokio::sync::Notify::new()),
     });
 
     let info = app_context.forge_api_client.version(false).await?;
@@ -174,6 +175,51 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Vec<_>>()
             .as_slice(),
     )?;
+
+    // Rewrite the snapshot whenever a BMC credential changes so rotated
+    // passwords survive an unclean pod restart (issue #5966). Leading-edge
+    // debounce: the first change in an idle period is persisted immediately,
+    // so a lone rotation survives a near-instant force-kill; further changes
+    // that land during a short quiet window are coalesced into a single
+    // follow-up write, so a burst of rotations is a couple of writes rather
+    // than one per BMC. A failed write leaves the state dirty and is retried
+    // by the next rotation, which always persists the full current snapshot.
+    {
+        let app_context = app_context.clone();
+        let simulators = simulators.clone();
+        tokio::spawn(async move {
+            let persist = || {
+                let devices = simulators
+                    .devices()
+                    .iter()
+                    .map(SimulatorLifecycle::persisted)
+                    .collect::<Vec<_>>();
+                if let Err(error) = app_context.app_config.write_persisted_devices(&devices) {
+                    tracing::warn!(%error, "failed to write device snapshot after credential change");
+                }
+            };
+            loop {
+                // Block until the first change in an idle period, then persist
+                // it right away (leading edge).
+                app_context.snapshot_save_notify.notified().await;
+                persist();
+
+                // Coalesce any further changes that arrive during the quiet
+                // window; each new change resets the window so a continuous
+                // burst still settles into one trailing write.
+                let mut coalesced = false;
+                loop {
+                    tokio::select! {
+                        _ = app_context.snapshot_save_notify.notified() => coalesced = true,
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => break,
+                    }
+                }
+                if coalesced {
+                    persist();
+                }
+            }
+        });
+    }
 
     // Launch the control UI after the machines are created so it can report their handles. In
     // combined-BMC mode it shares the combined BMC listener. In per-IP mode it listens on the

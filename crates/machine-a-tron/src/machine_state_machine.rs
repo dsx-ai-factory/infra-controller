@@ -184,6 +184,22 @@ impl Callbacks for LiveStateCallbacks {
     }
 }
 
+/// Mirrors every BMC credential change into [`LiveState`] (so `persisted()`
+/// includes it in the next snapshot) and wakes the snapshot-writer task
+/// (issue #5966).
+#[derive(Debug)]
+struct LiveStateCredentialsNotifier {
+    state: Arc<RwLock<LiveState>>,
+    snapshot_save_notify: Arc<tokio::sync::Notify>,
+}
+
+impl bmc_mock::CredentialsChangedNotifier for LiveStateCredentialsNotifier {
+    fn credentials_changed(&self, credentials: Vec<bmc_mock::BmcAccountCredential>) {
+        self.state.write().unwrap().bmc_credentials = Some(credentials);
+        self.snapshot_save_notify.notify_one();
+    }
+}
+
 #[derive(Debug, Clone)]
 struct LiveStateHostnameQuery(Arc<RwLock<LiveState>>);
 
@@ -225,6 +241,10 @@ pub(super) struct LiveState {
     /// firmware is applied.  Used by `persisted()` so restarts resume from the
     /// last observed versions rather than the operator-configured starting point.
     pub(super) active_host_firmware: Option<bmc_mock::HostFirmwareVersions>,
+    /// Current BMC account passwords, kept up to date on every password change
+    /// so `persisted()` can save them and a restart can restore them instead of
+    /// resetting to factory defaults (issue #5966).
+    pub(super) bmc_credentials: Option<Vec<bmc_mock::BmcAccountCredential>>,
 }
 
 impl Default for LiveState {
@@ -247,6 +267,7 @@ impl Default for LiveState {
             infiniband_port_states: HashMap::new(),
             dpu_flipped_to_nic_mode: false,
             active_host_firmware: None,
+            bmc_credentials: None,
         }
     }
 }
@@ -333,12 +354,15 @@ impl MachineStateMachine {
         dpu_dhcp_relay: Option<DpuDhcpRelay>,
         mat_host_id: Uuid,
     ) -> MachineStateMachine {
-        let (initial_os_image, tpm_ek_certificate) = match persisted_machine {
-            PersistedMachine::Host(h) => (h.installed_os, h.tpm_ek_certificate),
-            PersistedMachine::Dpu(d) => (d.installed_os, None),
+        let (initial_os_image, tpm_ek_certificate, bmc_credentials) = match persisted_machine {
+            PersistedMachine::Host(h) => (h.installed_os, h.tpm_ek_certificate, h.bmc_accounts),
+            PersistedMachine::Dpu(d) => (d.installed_os, None, d.bmc_accounts),
         };
         let (fsm, actions) = MachineFsm::init(true, Self::is_bmc_only(&machine_info, &config));
         let resolved_timings = Self::resolve_timings(&machine_info, &config);
+        let mut live_state =
+            LiveState::for_machine(&machine_info, MockPowerState::On, tpm_ek_certificate);
+        live_state.bmc_credentials = bmc_credentials;
         MachineStateMachine {
             fsm,
             actions: actions.into_iter().collect(),
@@ -354,11 +378,7 @@ impl MachineStateMachine {
             dhcp_retry_deadline: None,
             machine_discovery_result: None,
             installed_os: initial_os_image,
-            live_state: Arc::new(RwLock::new(LiveState::for_machine(
-                &machine_info,
-                MockPowerState::On,
-                tpm_ek_certificate,
-            ))),
+            live_state: Arc::new(RwLock::new(live_state)),
             machine_info,
             bmc_command_channel,
             config,
@@ -1257,6 +1277,25 @@ impl MachineStateMachine {
                 .account_service_state
                 .change_factory_default_password(pw);
         }
+
+        // Restore the passwords saved in the device snapshot so a rotated BMC
+        // password survives a machine-a-tron restart instead of resetting to
+        // the factory default (issue #5966). Applied after the password
+        // override above so the restored (most recent) credentials win.
+        let saved_credentials = self.live_state.read().unwrap().bmc_credentials.clone();
+        if let Some(saved_credentials) = saved_credentials {
+            bmc_mock
+                .state()
+                .account_service_state
+                .restore_credentials(&saved_credentials);
+        }
+        bmc_mock
+            .state()
+            .account_service_state
+            .set_credentials_changed_notifier(Arc::new(LiveStateCredentialsNotifier {
+                state: self.live_state.clone(),
+                snapshot_save_notify: self.app_context.snapshot_save_notify.clone(),
+            }));
 
         let maybe_bmc_mock_handle = {
             self.app_context
