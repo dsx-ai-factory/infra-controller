@@ -128,7 +128,8 @@ impl BmcMockWrapper {
     /// keeps the registry at one entry per BMC. If the address differs from the previous
     /// registration, the previous key is removed only while it still holds this wrapper's
     /// router: DHCP may have handed that address to another BMC in the meantime, and that BMC's
-    /// registration is left alone.
+    /// registration is left alone. Replacing an entry that belongs to another BMC is logged,
+    /// since it means two BMCs claim one DHCP address.
     pub(super) async fn register(&mut self, registry: &BmcMockRegistry, ip_address: Ipv4Addr) {
         let authority = ip_address.to_string();
         let mut registry = registry.write().await;
@@ -139,6 +140,16 @@ impl BmcMockWrapper {
                 .is_some_and(|entry| entry.owner == self.registration)
         {
             registry.remove(&previous);
+        }
+        if let Some(replaced) = registry.get(&authority)
+            && replaced.owner != self.registration
+        {
+            tracing::warn!(
+                authority = %authority,
+                replaced_owner = %replaced.owner,
+                owner = %self.registration,
+                "BMC registration replaced another BMC's router under the same address; two BMCs claim one DHCP address",
+            );
         }
         registry.insert(
             authority.clone(),
@@ -415,6 +426,23 @@ mod tests {
         let registry = registry.read().await;
         assert_eq!(registry.keys().collect::<Vec<_>>(), ["10.0.0.9"]);
         assert_eq!(registry["10.0.0.9"].owner, bmc.registration);
+    }
+
+    #[tokio::test]
+    async fn another_bmc_under_the_same_address_replaces_the_entry() {
+        // The registry cannot tell which of two BMCs claiming one DHCP address is right, so the
+        // latest registration wins and the replacement is logged.
+        let registry = BmcMockRegistry::default();
+        let mut first = dell_host_bmc();
+        let mut second = dell_host_bmc();
+        let address = Ipv4Addr::new(10, 0, 0, 5);
+
+        first.register(&registry, address).await;
+        second.register(&registry, address).await;
+
+        let registry = registry.read().await;
+        assert_eq!(registry.keys().collect::<Vec<_>>(), ["10.0.0.5"]);
+        assert_eq!(registry["10.0.0.5"].owner, second.registration);
     }
 
     #[tokio::test]
