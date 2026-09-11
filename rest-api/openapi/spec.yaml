@@ -5628,7 +5628,7 @@ paths:
                             minSizeMiB: 7680000
                             maxSizeMiB: 7680000
                             pciPatterns:
-                               - ^/devices/pci.*nvme0$
+                               - ^/devices/pci.*/nvme$
                             count: 4
                         chassis:
                           vendor: Supermicro
@@ -5734,7 +5734,7 @@ paths:
                             minSizeMiB: 7680000
                             maxSizeMiB: 7680000
                             pciPatterns:
-                               - ^/devices/pci.*nvme0$
+                               - ^/devices/pci.*/nvme$
                             count: 4
                       chassis:
                         vendor: Supermicro
@@ -5773,7 +5773,7 @@ paths:
         Update selected mutable fields on a SKU. The Site is determined from the saved SKU record.
 
         Fields omitted from the request retain their current values. If a user updates the components field,
-        the schema version will be updated to the current version (5).
+        the schema version will be updated to the current version (6).
 
         The Org must have an Infrastructure Provider that owns the SKU's Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -27753,7 +27753,7 @@ components:
         - id: lenovo.sr650v2.cpu.1
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           description: Lenovo SR650 V2 compute node
-          schemaVersion: 5
+          schemaVersion: 6
           deviceType: gpu
           associatedMachineIds:
             - fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
@@ -28012,7 +28012,7 @@ components:
           minSizeMiB: 1831420
           maxSizeMiB: 1831420
           pciPatterns:
-            - ^/devices/pci.*nvme0$
+            - /0000:65:00\.0/nvme$
         - vendor: ''
           model: SAMSUNG MZTL63T8HFLT-00AW7
           capacityMb: 0
@@ -28020,7 +28020,7 @@ components:
           minSizeMiB: 3662840
           maxSizeMiB: 3662840
           pciPatterns:
-            - ^/devices/pci.*nvme[1-8]$
+            - ^/devices/pci.*/nvme$
       properties:
         vendor:
           type: string
@@ -28056,7 +28056,10 @@ components:
           description: Inclusive maximum size in MiB for each storage device. Null or omission means no upper bound. Used for SKU schema version 5 and later.
         pciPatterns:
           type: array
-          description: Regular expressions matched against storage sysfs PCI paths. An empty or omitted list disables PCI location matching. Used for SKU schema version 5 and later.
+          description: |-
+            Regular expressions matched against each drive's sysfs PCI path. An empty or omitted list disables PCI location matching. Used for SKU schema version 5 and later.
+
+            From schema version 6 the matched path is the NVMe controller's sysfs DEVPATH with its trailing kernel-assigned `nvmeN` node removed, for example `/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme`, because that node changes with probe order. Schema version 5 matched the full DEVPATH ending in `nvmeN`, so patterns anchored on that node (such as `nvme0$`) never match under version 6 and must be rewritten to end at `/nvme`.
           items:
             type: string
     SkuChassis:

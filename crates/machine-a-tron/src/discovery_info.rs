@@ -698,12 +698,12 @@ fn nvme_size_mb(model: &str) -> u32 {
 }
 
 /// Distinct fake sysfs DEVPATH for the Nth mock NVMe controller, mirroring the
-/// shape the real host enumeration reports (`…/nvme/nvmeN/nvmeNn1`). Each drive
-/// needs a unique PCI path so v5 SKU generation records one storage entry per
-/// drive.
+/// shape the real host enumeration reports (`…/<pci function>/nvme/nvmeN`).
+/// Each drive sits behind its own PCI function so v5+ SKU generation records
+/// one storage entry per drive.
 fn nvme_pci_path(index: usize) -> String {
     format!(
-        "/devices/pci0000:00/0000:64:00.0/0000:{:02x}:00.0/nvme/nvme{index}/nvme{index}n1",
+        "/devices/pci0000:00/0000:64:00.0/0000:{:02x}:00.0/nvme/nvme{index}",
         0x65 + index
     )
 }
