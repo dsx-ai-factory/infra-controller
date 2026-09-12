@@ -59,6 +59,9 @@ pub struct RuntimePrelude {
 /// Starts the core runtime work that follows logging initialization and precedes
 /// external resource initialization.
 ///
+/// Process-wide settings derived from the validated configuration are installed
+/// here, immediately before runtime consumers can observe them.
+///
 /// Rack-profile attribute override collisions are logged once here so the
 /// configured tracing subscriber receives the diagnostics.
 #[doc(hidden)]
@@ -68,6 +71,13 @@ pub fn start_runtime_prelude(
     join_set: &mut JoinSet<()>,
     cancel_token: &CancellationToken,
 ) -> RuntimePrelude {
+    // Install process-wide settings only after the caller has finished loading
+    // and validating the configuration.
+    crate::init_tools(carbide_config.web_ui_sidebar_tools.clone());
+    crate::init_site_name(carbide_config.sitename.clone());
+    crate::init_logs_link_template(carbide_config.web_ui_logs_link_template.clone());
+    db::host_naming::configure(carbide_config.host_naming_strategy);
+
     // These diagnostics require the tracing subscriber installed by the caller.
     warn_rms_node_descriptor_attribute_overrides(&carbide_config.rack_profiles);
 

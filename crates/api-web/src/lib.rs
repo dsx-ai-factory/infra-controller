@@ -57,12 +57,12 @@ use tower_http::normalize_path::NormalizePath;
 /// `Self::tools()`.
 ///
 /// The tool list itself is owned by `carbide-api-core` (it is derived from the
-/// parsed `CarbideConfig` during API Core configuration loading).
+/// validated `CarbideConfig` during API Core runtime startup).
 /// This trait just surfaces it to templates.
 trait Base {
     /// Configured external tool links rendered in the admin UI's
     /// "Tools" sidebar. Empty when no tools are configured or
-    /// before API Core configuration loading has initialized them (e.g. unit tests).
+    /// before API Core runtime startup has initialized them (e.g. unit tests).
     fn tools() -> &'static [ToolLink] {
         carbide_api_core::configured_tools()
     }

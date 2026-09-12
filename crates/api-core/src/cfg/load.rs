@@ -329,23 +329,6 @@ pub fn parse_carbide_config(
         config.periodic_state_republish.validate()?;
     }
 
-    // Publish the configured tool list so the admin-UI sidebar and per-machine
-    // "Logs" deep link can read it back via `crate::configured_tools`. The list
-    // is owned here (not in `carbide-api-web`) because it is derived from the
-    // parsed config, before the web layer exists.
-    crate::init_tools(config.web_ui_sidebar_tools.clone());
-
-    // Publish the site name the same way, for the admin-UI sidebar header.
-    crate::init_site_name(config.sitename.clone());
-
-    // Publish the logs link URL template for the "Logs" link on machine and
-    // endpoint detail pages.
-    crate::init_logs_link_template(config.web_ui_logs_link_template.clone());
-
-    // Publish the deployment-wide host naming policy so the DB layer can read it
-    // wherever an interface is [re]named (same way we do it w/ `init_tools` above).
-    db::host_naming::configure(config.host_naming_strategy);
-
     // Validate that the firmware profile config keys match their inner
     // part_number and psid values. Mismatches are logged as warnings.
     config.validate_supernic_firmware_profiles();
@@ -422,6 +405,80 @@ mod tests {
             assert_eq!(
                 warning.fields.get("config_source").map(String::as_str),
                 Some("config.toml")
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn valid_base_and_site_configs_are_merged_and_validated() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "base.toml",
+                r#"
+                database_url = "postgres://base"
+                listen = "[::]:1081"
+                asn = 65000
+                sitename = "base-site"
+                web_ui_logs_link_template = "https://logs.example.com/{search}"
+                host_naming_strategy = "fun"
+
+                [[web_ui_sidebar_tools]]
+                name = "grafana"
+                display_name = "Grafana"
+                url = "https://grafana.example.com"
+                "#,
+            )?;
+            jail.create_file(
+                "site.toml",
+                r#"
+                listen = "[::]:1082"
+                sitename = "site-override"
+                "#,
+            )?;
+
+            let config = parse_carbide_config(Path::new("base.toml"), Some(Path::new("site.toml")))
+                .expect("valid merged config should parse");
+
+            assert_eq!(config.database_url, "postgres://base");
+            assert_eq!(config.listen, "[::]:1082".parse().unwrap());
+            assert_eq!(config.asn, 65000);
+            assert_eq!(config.sitename.as_deref(), Some("site-override"));
+            assert!(crate::configured_tools().is_empty());
+            assert_eq!(crate::configured_site_name(), None);
+            assert_eq!(crate::configured_logs_link_template(), "");
+            assert_eq!(db::host_naming::configured(), Default::default());
+            Ok(())
+        })
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn semantic_error_in_site_config_is_rejected() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "base.toml",
+                r#"
+                database_url = "postgres://test"
+                listen = "[::]:1081"
+                asn = 1
+                "#,
+            )?;
+            jail.create_file(
+                "site.toml",
+                r#"
+                [api_admission_control]
+                max_work_in_flight = 0
+                "#,
+            )?;
+
+            let error = parse_carbide_config(Path::new("base.toml"), Some(Path::new("site.toml")))
+                .expect_err("invalid merged config should be rejected");
+
+            assert_eq!(
+                error.to_string(),
+                "api_admission_control.max_work_in_flight must be greater than zero"
             );
             Ok(())
         })

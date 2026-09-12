@@ -2817,6 +2817,14 @@ attributes = { attribute1 = "site", additional_attribute3 = "site" }
                 database_url = "postgres://test"
                 listen = "[::]:1081"
                 asn = 1
+                sitename = "rejected-site"
+                web_ui_logs_link_template = "https://logs.example.com/{search}"
+                host_naming_strategy = "fun"
+
+                [[web_ui_sidebar_tools]]
+                name = "grafana"
+                display_name = "Grafana"
+                url = "https://grafana.example.com"
 
                 [component_manager]
                 nv_switch_backend = "rms"
@@ -2840,6 +2848,11 @@ attributes = { attribute1 = "site", additional_attribute3 = "site" }
             "#,
         )?;
 
+        assert!(crate::configured_tools().is_empty());
+        assert_eq!(crate::configured_site_name(), None);
+        assert_eq!(crate::configured_logs_link_template(), "");
+        assert_eq!(db::host_naming::configured(), Default::default());
+
         let result = parse_carbide_config(config.path(), None);
         let Err(error) = result else {
             panic!("missing RMS vendor should be rejected");
@@ -2852,6 +2865,10 @@ attributes = { attribute1 = "site", additional_attribute3 = "site" }
                 && error.contains("rack profile does not identify an RMS switch vendor"),
             "error message should identify the rack profile and missing role vendor: {error}"
         );
+        assert!(crate::configured_tools().is_empty());
+        assert_eq!(crate::configured_site_name(), None);
+        assert_eq!(crate::configured_logs_link_template(), "");
+        assert_eq!(db::host_naming::configured(), Default::default());
 
         Ok(())
     }
