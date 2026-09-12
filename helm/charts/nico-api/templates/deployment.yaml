@@ -100,9 +100,10 @@ spec:
           image: "{{ include "nico-api.image" . }}"
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
           securityContext:
-            capabilities:
-              add:
-                - SYS_PTRACE
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           command:
             - /bin/sh
             - -c
@@ -168,7 +169,7 @@ spec:
             - name: DATASTORE_USER
               valueFrom:
                 secretKeyRef:
-                  key: username
+                  key: {{ .Values.envFrom.databaseCredentials.usernameKey | default "username" }}
                   name: {{ .Values.envFrom.databaseCredentials.secretName }}
             - name: DATASTORE_PASSWORD
               valueFrom:

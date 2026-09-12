@@ -67,6 +67,15 @@ legacyAlias:
       createNamespace: false
 
 replicas: 1
+
+## Container-level security context. Override for OpenShift, where the
+## restricted SCC does not permit SYS_PTRACE:
+##   containerSecurityContext: null
+containerSecurityContext:
+  capabilities:
+    add:
+      - SYS_PTRACE
+
 automountServiceAccountToken: true
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-api.name" . }}-config-files,{{ include "nico-api.name" . }}-site-config-files'
@@ -240,6 +249,12 @@ nvSwitchTls:
 
 migrationJob:
   sslMode: require
+  backoffLimit: 30
+  ## Optional init container that polls pg_isready before running migrations.
+  ## Override the image for air-gapped or private-registry environments.
+  waitForPostgres:
+    enabled: false
+    image: postgres:14.4-alpine
 
 ## Grace period for nico-api to stop claiming state-controller work and drain
 ## handlers already in flight. Keep this greater than the largest configured

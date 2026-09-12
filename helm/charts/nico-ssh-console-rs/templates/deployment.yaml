@@ -57,9 +57,10 @@ spec:
               fi
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
           securityContext:
-            capabilities:
-              add:
-                - IPC_LOCK
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: ssh
               containerPort: {{ .Values.service.port }}

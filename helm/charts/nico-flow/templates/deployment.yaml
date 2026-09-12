@@ -46,7 +46,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.database.flow.credentialsSecret }}
-                  key: username
+                  key: {{ .Values.database.flow.usernameKey | default "username" }}
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:

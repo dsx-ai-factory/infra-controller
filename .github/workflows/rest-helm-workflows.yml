@@ -54,6 +54,48 @@ jobs:
           template: 'true'
           valueOverrides: ${{ matrix.valueOverrides }}
 
+  verify-securitycontext-configurable:
+    name: Verify pod securityContext is overridable
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Assert podSecurityContext override is honored
+        # Regression guard: every nico-rest workload must let the operator
+        # replace the chart's default pod securityContext (e.g. drop the
+        # hardcoded runAsUser/fsGroup so OpenShift can inject a range UID).
+        # Rendering with each subchart's podSecurityContext set to null must
+        # leave zero runAsUser in the output; a chart that hardcodes it
+        # instead of using `{{- with .Values.podSecurityContext }}` fails here.
+        run: |
+          set -euo pipefail
+          cd helm/rest/nico-rest
+          helm dependency build
+          rendered="$(helm template t . \
+            --set nico-rest-api.config.keycloak.enabled=true \
+            --set nico-rest-api.config.keycloak.baseURL=http://keycloak:8082 \
+            --set nico-rest-api.config.keycloak.realm=test \
+            --set nico-rest-api.config.keycloak.clientID=test \
+            --set nico-rest-api.podSecurityContext=null \
+            --set nico-rest-workflow.podSecurityContext=null \
+            --set nico-rest-site-manager.podSecurityContext=null \
+            --set nico-rest-cert-manager.podSecurityContext=null \
+            --set nico-rest-db.podSecurityContext=null)"
+          count="$(printf '%s\n' "$rendered" | grep -c 'runAsUser' || true)"
+          if [ "$count" -ne 0 ]; then
+            echo "::error::podSecurityContext is not overridable: found $count hardcoded runAsUser entries after nulling every subchart's podSecurityContext."
+            printf '%s\n' "$rendered" | grep -n 'runAsUser' || true
+            exit 1
+          fi
+          echo "OK: no hardcoded runAsUser remains when podSecurityContext is overridden."
+
   push-charts:
     name: Push Helm Charts
     needs:

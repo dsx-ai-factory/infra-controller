@@ -14,6 +14,7 @@ metadata:
     helm.sh/hook-delete-policy: before-hook-creation
     helm.sh/hook-weight: "-5"
 spec:
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
   template:
     metadata:
       name: {{ include "nico-api.name" . }}-migrate
@@ -25,6 +26,37 @@ spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.migrationJob.waitForPostgres.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.migrationJob.waitForPostgres.image }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          env:
+            - name: PGHOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.envFrom.databaseConfig.configMapName }}
+                  key: DB_HOST
+            - name: PGPORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.envFrom.databaseConfig.configMapName }}
+                  key: DB_PORT
+          command:
+            - /bin/sh
+            - -c
+            - |
+              retries=0
+              until pg_isready -h "$PGHOST" -p "$PGPORT"; do
+                retries=$((retries + 1))
+                if [ "$retries" -ge 60 ]; then
+                  echo "PostgreSQL not ready after 60 attempts, giving up"
+                  exit 1
+                fi
+                echo "Waiting for PostgreSQL (attempt $retries/60)..."
+                sleep 5
+              done
       {{- end }}
       containers:
         - name: {{ include "nico-api.name" . }}-migrate
@@ -40,7 +72,7 @@ spec:
             - name: DATASTORE_USER
               valueFrom:
                 secretKeyRef:
-                  key: username
+                  key: {{ .Values.envFrom.databaseCredentials.usernameKey | default "username" }}
                   name: {{ .Values.envFrom.databaseCredentials.secretName }}
             - name: DATASTORE_PASSWORD
               valueFrom:
