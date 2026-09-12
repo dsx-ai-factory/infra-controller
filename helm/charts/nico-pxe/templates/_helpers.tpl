@@ -39,10 +39,24 @@ app.kubernetes.io/component: pxe
 {{- end }}
 
 {{/*
-Global image reference
+Image reference. A component image lets local development package PXE
+separately; an empty repository preserves the shared production image.
 */}}
 {{- define "nico-pxe.image" -}}
-{{ .Values.global.image.repository }}:{{ .Values.global.image.tag }}
+{{- if not (eq (toString (.Values.image.repository | default "")) "") }}
+{{- .Values.image.repository }}:{{ .Values.image.tag | default "latest" }}
+{{- else }}
+{{- .Values.global.image.repository }}:{{ .Values.global.image.tag }}
+{{- end }}
+{{- end }}
+
+{{/* Follow the image source when selecting its pull policy. */}}
+{{- define "nico-pxe.imagePullPolicy" -}}
+{{- if not (eq (toString (.Values.image.repository | default "")) "") }}
+{{- .Values.image.pullPolicy | default .Values.global.image.pullPolicy }}
+{{- else }}
+{{- .Values.global.image.pullPolicy }}
+{{- end }}
 {{- end }}
 
 {{/*

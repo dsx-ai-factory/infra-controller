@@ -207,6 +207,10 @@ jobs:
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yaml'
               - 'dev/k8s/machine-a-tron-controller/**'
+              - 'deploy/components/boot-artifacts-containers/**'
+              - 'deploy/nico-base/api/**'
+              - 'deploy/nico-base/pxe/**'
+              - 'deploy/tests/**'
       - name: Calculate version
         id: version
         run: |
@@ -1640,6 +1644,9 @@ jobs:
       # remaining steps run as root against the runner-owned bind mount.
       - name: Trust the workspace in this container
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Test PXE Kustomize renders
+        run: deploy/tests/test-pxe-non-root.sh
 
       - name: Validate Cargo metadata
         run: cargo metadata --locked --no-deps --format-version 1 >/dev/null

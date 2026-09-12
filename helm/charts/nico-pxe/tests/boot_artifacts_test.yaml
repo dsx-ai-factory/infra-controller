@@ -2,18 +2,21 @@ suite: boot artifact init containers
 templates:
   - deployment.yaml
 tests:
-  - it: should not render init containers or boot-artifacts volume when bootArtifactContainers is empty
+  - it: should mount writable boot-artifacts storage without init containers
     asserts:
       - isKind:
           of: Deployment
       - notExists:
           path: spec.template.spec.initContainers
-      - notContains:
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 10001
+      - contains:
           path: spec.template.spec.volumes
           content:
             name: boot-artifacts
             emptyDir: {}
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: boot-artifacts
@@ -47,6 +50,14 @@ tests:
           content:
             name: boot-artifacts
             mountPath: /forge-boot-artifacts/blobs/internal
+      - notExists:
+          path: spec.template.spec.initContainers[0].securityContext.runAsUser
+      - notExists:
+          path: spec.template.spec.initContainers[0].securityContext.runAsNonRoot
+      - notExists:
+          path: spec.template.spec.initContainers[1].securityContext.runAsUser
+      - notExists:
+          path: spec.template.spec.initContainers[1].securityContext.runAsNonRoot
 
   - it: should build image from repository + tag when provided (new fields win)
     set:
@@ -101,12 +112,22 @@ tests:
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
           pattern: '-s /custom-boot-path'
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: boot-artifacts
+            mountPath: /custom-boot-path/blobs/internal
 
   - it: should default serve path to /forge-boot-artifacts
     asserts:
       - matchRegex:
           path: spec.template.spec.containers[0].command[2]
           pattern: '-s /forge-boot-artifacts'
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: boot-artifacts
+            mountPath: /forge-boot-artifacts/blobs/internal
 
   - it: should merge bootArtifactContainers and initContainers
     set:

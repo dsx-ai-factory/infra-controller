@@ -17,7 +17,7 @@ tests:
             readOnly: true
       - lengthEqual:
           path: spec.template.spec.volumes
-          count: 1
+          count: 2
 
   - it: preserves the legacy deployment when bootstrapRootCa is null
     set:
@@ -30,7 +30,7 @@ tests:
             value: /var/run/secrets/bootstrap-root-ca/ca.crt
       - lengthEqual:
           path: spec.template.spec.volumes
-          count: 1
+          count: 2
 
   - it: treats a null environment as an empty map
     set:
