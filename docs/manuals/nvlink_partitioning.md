@@ -17,10 +17,10 @@ NVLink Partitioning is only supported for GB200 compute nodes.
 
 ## Operations: Who Does What
 
-NVLink splits between operator site setup against NMX-C and tenant partition
-management. Notably, two operator steps (fallback NMX-C endpoint
-registration and the GPU-mapping populate step) are **not exposed via the
-REST API** and are therefore driven through `nico-admin-cli` over gRPC. See
+NVLink operations are split between operator site setup against NMX-C and
+tenant partition management. Notably, one operator step (fallback NMX-C endpoint
+registration) is **not exposed via the REST API** and is therefore driven
+through `nico-admin-cli` over gRPC. See
 [Network Isolation → Who configures what, and how](network_isolation.md#who-configures-what-and-how)
 for the role and interface model.
 
@@ -28,12 +28,11 @@ for the role and interface model.
 |---|---|---|
 | Enable NVLink; NMX-C connection and TLS settings | Operator | **TOML** (`[nvlink_config]`) — Day 0 / rare |
 | Fallback NMX-C endpoints (per chassis serial) | Operator | `nico-admin-cli nvlink-nmxc-endpoints ...` (gRPC) — not in REST |
-| Populate the machine → NMX-C GPU mapping | Operator | `nico-admin-cli machine nvlink-info populate` (gRPC) — not in REST |
 | Create / update / delete an NVLink Logical Partition | Tenant | **REST** `.../nico/nvlink-logical-partition` · `nicocli nvlink-logical-partition create` |
 | Assign or change an instance's GPUs' partition | Tenant | **REST** `.../nico/instance` (`nvLinkInterfaces`) · `nicocli instance update` |
-| Inspect a machine's GPU domain placement (triage) | Operator | `nico-admin-cli machine nvlink-info` (gRPC) |
+| Inspect a machine's GPU domain placement (triage) | Operator | `nico-admin-cli machine nvlink-info show <MACHINE_ID>` (gRPC) |
 
-The operator NMX setup (the first three rows) is detailed under
+The operator NMX setup (the first two rows) is detailed under
 [Enabling NMX-C-based NVLink Partitioning](#enabling-nmx-c-based-nvlink-partitioning).
 The tenant rows are the REST / `nicocli` flow described next.
 
@@ -232,15 +231,13 @@ The TLS material in TOML applies uniformly to every NMX-C endpoint NICo
 talks to. Per-endpoint credential overrides are not currently supported;
 deploy a uniform trust posture across the site's NMX-C control plane.
 
-For machines discovered before NVLink partitioning was enabled, populate the
-machine's GPU mapping from Redfish and NMX-C:
-
-```bash
-nico-admin-cli machine nvlink-info populate --update-db <machine-id>
-```
-
+The machine → NMX-C GPU mapping (`nvlink_info`) needs no operator step.
 Machines discovered after NVLink partitioning is enabled are populated during
-discovery and do not require this step.
+discovery, and the NVLink partition manager populates or repairs the mapping
+for any managed machine whose `nvlink_info` is missing or deviates from what
+NMX-C reports. `nico-admin-cli machine nvlink-info populate` is retained only
+as a deprecated compatibility command and always returns an error; inspect the
+stored mapping with `nico-admin-cli machine nvlink-info show <machine-id>`.
 
 ### Verifying a Tenant's NVLink Placement
 

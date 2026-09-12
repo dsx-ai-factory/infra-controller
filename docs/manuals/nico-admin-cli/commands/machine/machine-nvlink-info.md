@@ -4,8 +4,8 @@ _[Hardware commands](../../hardware.md) › [machine](./machine.md) › **nvlink
 
 ## NAME
 
-nico-admin-cli-machine-nvlink-info - Update/show NVLink info for an
-MNNVL machine
+nico-admin-cli-machine-nvlink-info - Show NVLink info for an MNNVL
+machine
 
 ## SYNOPSIS
 
@@ -14,7 +14,7 @@ MNNVL machine
 
 ## DESCRIPTION
 
-Update/show NVLink info for an MNNVL machine
+Show NVLink info for an MNNVL machine
 
 ## OPTIONS
 
@@ -42,7 +42,6 @@ Print help (see a summary with -h)
 
 ```sh
 nico-admin-cli machine nvlink-info show 12345678-1234-5678-90ab-cdef01234567
-nico-admin-cli machine nvlink-info populate 12345678-1234-5678-90ab-cdef01234567 --update-db
 ```
 
 ## Subcommands
@@ -50,7 +49,7 @@ nico-admin-cli machine nvlink-info populate 12345678-1234-5678-90ab-cdef01234567
 | Subcommand | Description |
 |---|---|
 | [`show`](./machine-nvlink-info-show.md) | Show existing NVLink info |
-| [`populate`](./machine-nvlink-info-populate.md) | Build NVLink info from Redfish + NMX-C and populate DB |
+| [`populate`](./machine-nvlink-info-populate.md) | Deprecated compatibility command; NVLink info is populated automatically by NICo |
 
 ---
 
