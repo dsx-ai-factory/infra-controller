@@ -4,7 +4,7 @@ This page covers the hardware requirements for both the NICo site controller and
 
 ## Site Controller
 
-The site controller runs the NICo control plane on a Kubernetes cluster. A minimum of 3 nodes is required for high availability; 5 nodes are recommended for large GB200-class sites.
+The site controller runs the NICo control plane on a Kubernetes cluster. A minimum of 3 nodes is required for high availability; 5 nodes are recommended for large sites (approximately 5,000 managed compute nodes). As a capacity-planning guideline, a 5-node cluster on recommended hardware can support ~5,000 managed compute nodes; this is a sizing guideline, not a hard limit — actual capacity varies by configuration, workload, and environment, so validate with SVT/scalability testing for your BOM.
 
 | Component | Requirement |
 |---|---|

@@ -589,6 +589,15 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 
 	isList := isListAction(ro.action)
 	if isList {
+		// Default to table for list actions so nicocli <resource> list shows readable output
+		for i := range flags {
+			if sf, ok := flags[i].(*cli.StringFlag); ok && sf.Name == "output" {
+				sf.Value = "table"
+				break
+			}
+		}
+	}
+	if isList {
 		flags = append(flags, &cli.BoolFlag{
 			Name:  "all",
 			Usage: "Fetch all pages of results",
@@ -770,7 +779,7 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 			}
 
 			if isList && c.Bool("all") {
-				return fetchAllPages(client, ro.method, ro.path, pathParams, queryParams, c.String("output"))
+				return fetchAllPages(client, ro.method, ro.path, pathParams, queryParams, c.String("output"), ro.op.OperationID)
 			}
 
 			respBody, respHeaders, err := ro.execute(client, pathParams, queryParams, body)
@@ -784,7 +793,7 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 				return nil
 			}
 
-			return FormatOutput(respBody, c.String("output"))
+			return FormatOutputWithOperation(respBody, c.String("output"), ro.op.OperationID)
 		},
 	}
 
@@ -1121,7 +1130,7 @@ func printPaginationSummary(headers http.Header) {
 	}
 }
 
-func fetchAllPages(client *Client, method, path string, pathParams, queryParams map[string]string, outputFormat string) error {
+func fetchAllPages(client *Client, method, path string, pathParams, queryParams map[string]string, outputFormat, operationID string) error {
 	const maxPageSize = 100
 	const maxPages = 1000
 	pageNumber := 1
@@ -1145,7 +1154,7 @@ func fetchAllPages(client *Client, method, path string, pathParams, queryParams 
 		var pageItems []json.RawMessage
 		if len(respBody) > 0 {
 			if err := json.Unmarshal(respBody, &pageItems); err != nil {
-				return FormatOutput(respBody, outputFormat)
+				return FormatOutputWithOperation(respBody, outputFormat, operationID)
 			}
 		}
 		allItems = append(allItems, pageItems...)
@@ -1179,7 +1188,7 @@ func fetchAllPages(client *Client, method, path string, pathParams, queryParams 
 	if err != nil {
 		return err
 	}
-	return FormatOutput(merged, outputFormat)
+	return FormatOutputWithOperation(merged, outputFormat, operationID)
 }
 
 func coerceValue(v string, schemaType SchemaType) (interface{}, error) {
