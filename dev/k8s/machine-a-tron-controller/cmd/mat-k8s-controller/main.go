@@ -156,6 +156,7 @@ func runReconcile(ctx context.Context, r *controller.Reconciler, logger zerolog.
 
 	logEvent := logger.Info().
 		Int("created", result.Created).
+		Int("adopted", result.Adopted).
 		Int("updated", result.Updated).
 		Int("deleted", result.Deleted).
 		Dur("elapsed", elapsed)
@@ -163,6 +164,7 @@ func runReconcile(ctx context.Context, r *controller.Reconciler, logger zerolog.
 	if len(result.Errors) > 0 {
 		logEvent = logger.Error().
 			Int("created", result.Created).
+			Int("adopted", result.Adopted).
 			Int("updated", result.Updated).
 			Int("deleted", result.Deleted).
 			Int("errors", len(result.Errors)).

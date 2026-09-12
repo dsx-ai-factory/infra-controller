@@ -7,17 +7,22 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/NVIDIA/infra-controller/dev/k8s/machine-a-tron-controller/pkg/matclient"
 )
@@ -70,6 +75,17 @@ const (
 	// DefaultConcurrency is the default number of concurrent workers for K8s API calls.
 	DefaultConcurrency = 50
 )
+
+// DefaultCreateBackoff bounds the in-cycle retries of a Service create that the
+// API server rejected because the requested ClusterIP was still held by another
+// Service. Addresses released by deletes running in the same cycle become
+// available within this window; anything still held is retried next cycle.
+var DefaultCreateBackoff = wait.Backoff{
+	Steps:    4,
+	Duration: 250 * time.Millisecond,
+	Factor:   2.0,
+	Jitter:   0.1,
+}
 
 // ServiceBuilder builds Kubernetes Services from machine status.
 type ServiceBuilder struct {
@@ -196,22 +212,44 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 
 // BuildServicesFromStatus builds Services for all machines in the status response.
 // podName is used to create pod-specific selectors for multi-pod deployments.
+//
+// Machines that have not reported a BMC IP yet are skipped. A Service created
+// without an explicit ClusterIP is given an arbitrary address from the
+// ServiceCIDR by the API server, and that address can collide with a BMC IP
+// that NICo DHCP later leases to another device. The skipped machine gets its
+// Service on the first cycle after its BMC IP is known.
 func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatusResponse, podName string) []*corev1.Service {
 	var services []*corev1.Service
 
 	for _, machine := range status.Machines {
 		// Build service for the host
-		svc := b.BuildService(&machine, MachineTypeHost, "", podName)
-		services = append(services, svc)
+		if hasBMCIP(&machine) {
+			services = append(services, b.BuildService(&machine, MachineTypeHost, "", podName))
+		}
 
 		// Build services for DPUs
 		for _, dpu := range machine.DPUs {
-			dpuSvc := b.BuildService(&dpu, MachineTypeDPU, machine.MatID, podName)
-			services = append(services, dpuSvc)
+			if hasBMCIP(&dpu) {
+				services = append(services, b.BuildService(&dpu, MachineTypeDPU, machine.MatID, podName))
+			}
 		}
 	}
 
 	return services
+}
+
+// hasBMCIP reports whether the machine has a BMC IP to pin the ClusterIP to.
+func hasBMCIP(machine *matclient.MachineStatus) bool {
+	return machine.BMC.IP != nil && *machine.BMC.IP != ""
+}
+
+// countMachines returns the number of hosts and DPUs in a status response.
+func countMachines(status *matclient.MachinesStatusResponse) int {
+	n := 0
+	for _, machine := range status.Machines {
+		n += 1 + len(machine.DPUs)
+	}
+	return n
 }
 
 // ServiceDiff represents the differences between desired and existing services.
@@ -399,6 +437,7 @@ func isControllerAnnotation(k string) bool {
 // K8sServiceClient defines the interface for Kubernetes service operations.
 type K8sServiceClient interface {
 	List(ctx context.Context, namespace string, labelSelector string) ([]*corev1.Service, error)
+	Get(ctx context.Context, namespace, name string) (*corev1.Service, error)
 	Create(ctx context.Context, svc *corev1.Service) error
 	Update(ctx context.Context, svc *corev1.Service) error
 	Delete(ctx context.Context, namespace, name string) error
@@ -410,7 +449,10 @@ type ReconcileResult struct {
 	Updated   int
 	Deleted   int
 	Recreated int
-	Errors    []error
+	// Adopted counts Services that already existed under the desired name but
+	// were not in the managed List, and were brought under management in place.
+	Adopted int
+	Errors  []error
 }
 
 // Discovery is an interface for discovering machine-a-tron instances.
@@ -442,6 +484,8 @@ type Reconciler struct {
 	statusFetcher    StatusFetcherFunc // Optional, for testing. If nil, uses matclient.
 	logger           zerolog.Logger
 	concurrency      int
+	// createBackoff bounds in-cycle retries of creates rejected for a held ClusterIP.
+	createBackoff wait.Backoff
 
 	// clientCache caches StatusFetcher instances by URL for connection reuse.
 	// Entries are evicted when their URLs are absent from discovery.
@@ -470,6 +514,7 @@ func NewReconciler(
 		clientOpts:       clientOpts,
 		logger:           logger,
 		concurrency:      DefaultConcurrency,
+		createBackoff:    DefaultCreateBackoff,
 		clientCache:      make(map[string]StatusFetcher),
 	}
 }
@@ -593,6 +638,12 @@ func (r *Reconciler) Reconcile(ctx context.Context) ReconcileResult {
 			Msg("fetched machine status")
 
 		services := r.serviceBuilder.BuildServicesFromStatus(status, instance.PodName)
+		if skipped := countMachines(status) - len(services); skipped > 0 {
+			r.logger.Info().
+				Str("pod", instance.PodName).
+				Int("skipped", skipped).
+				Msg("machines without a BMC IP yet, no Service built for them")
+		}
 		allDesired = append(allDesired, services...)
 	}
 
@@ -630,17 +681,22 @@ func (r *Reconciler) Reconcile(ctx context.Context) ReconcileResult {
 		result.Deleted = deleted
 	}
 
-	// Process recreates (delete then create for immutable field changes like ClusterIP)
-	// Skip recreates if any fetch failed to prevent spurious Service removal
-	if !fetchFailed && len(diff.Recreate) > 0 {
+	// Process recreates (delete then create for immutable field changes like ClusterIP).
+	// A recreate is only computed for a device whose status was fetched this
+	// cycle, so it runs even when another instance's fetch failed. Holding it
+	// back would keep the Service on an address the device no longer has and
+	// block that address for whichever device now holds it.
+	if len(diff.Recreate) > 0 {
 		recreated := r.processRecreatesConcurrently(ctx, diff.Recreate, &result)
 		result.Recreated = recreated
 	}
 
-	// Process creates concurrently
+	// Process creates concurrently. The pre-cycle listing tells a create which
+	// managed Service holds an address the API server refuses to allocate.
 	if len(diff.Create) > 0 {
-		created := r.processCreatesConcurrently(ctx, diff.Create, &result)
+		created, adopted := r.processCreatesConcurrently(ctx, diff.Create, servicesByClusterIP(existing), &result)
 		result.Created = created
+		result.Adopted = adopted
 	}
 
 	// Process updates concurrently
@@ -711,16 +767,19 @@ func (r *Reconciler) processRecreatesConcurrently(ctx context.Context, services 
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if err := r.k8sClient.Delete(ctx, r.serviceBuilder.Namespace, svc.Name); err != nil {
+			if err := r.k8sClient.Delete(ctx, r.serviceBuilder.Namespace, svc.Name); err != nil && !apierrors.IsNotFound(err) {
 				r.logger.Error().Err(err).Str("service", svc.Name).Msg("failed to delete service for recreate")
 				errMu.Lock()
 				result.Errors = append(result.Errors, fmt.Errorf("deleting service %s for recreate: %w", svc.Name, err))
 				errMu.Unlock()
 				return
 			}
-			// Clear ResourceVersion for create
+			// Clear ResourceVersion for create. Recreates in this batch run
+			// concurrently and may briefly hold each other's addresses, which
+			// the retry inside createService absorbs. No holder index is passed
+			// because those Services are legitimately mid-move.
 			svc.ResourceVersion = ""
-			if err := r.k8sClient.Create(ctx, svc); err != nil {
+			if _, err := r.createService(ctx, svc, nil); err != nil {
 				r.logger.Error().Err(err).Str("service", svc.Name).Msg("failed to create service after delete")
 				errMu.Lock()
 				result.Errors = append(result.Errors, fmt.Errorf("creating service %s after recreate delete: %w", svc.Name, err))
@@ -735,9 +794,11 @@ func (r *Reconciler) processRecreatesConcurrently(ctx context.Context, services 
 	return int(recreated)
 }
 
-// processCreatesConcurrently creates services using a worker pool.
-func (r *Reconciler) processCreatesConcurrently(ctx context.Context, services []*corev1.Service, result *ReconcileResult) int {
-	var created int64
+// processCreatesConcurrently creates services using a worker pool. holders
+// indexes the managed Services listed at the start of the cycle by ClusterIP,
+// see createService. It returns the number of Services created and adopted.
+func (r *Reconciler) processCreatesConcurrently(ctx context.Context, services []*corev1.Service, holders map[string]*corev1.Service, result *ReconcileResult) (int, int) {
+	var created, adopted int64
 	var wg sync.WaitGroup
 	var errMu sync.Mutex
 	sem := make(chan struct{}, r.concurrency)
@@ -758,18 +819,187 @@ func (r *Reconciler) processCreatesConcurrently(ctx context.Context, services []
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if err := r.k8sClient.Create(ctx, svc); err != nil {
+			wasAdopted, err := r.createService(ctx, svc, holders)
+			switch {
+			case err != nil:
 				errMu.Lock()
 				result.Errors = append(result.Errors, fmt.Errorf("creating service %s: %w", svc.Name, err))
 				errMu.Unlock()
-			} else {
+			case wasAdopted:
+				r.logger.Info().Str("service", svc.Name).Msg("adopted existing service")
+				atomic.AddInt64(&adopted, 1)
+			default:
 				atomic.AddInt64(&created, 1)
 			}
 		}(svc)
 	}
 
 	wg.Wait()
-	return int(created)
+	return int(created), int(adopted)
+}
+
+// createService creates svc and resolves the two API server rejections that
+// otherwise leave a device without a Service until a later cycle:
+//
+//   - AlreadyExists: a Service with this name exists but was not returned by
+//     the managed List (it lacks the managed-by label, or it was created between
+//     the List and this call). It is brought under management by adoptService.
+//   - Invalid on spec.clusterIPs, "provided IP is already allocated": another
+//     Service holds the requested BMC IP. If holders shows a managed Service
+//     occupying the address without owning it, that Service is deleted (see
+//     evictClusterIPHolder), and the create is retried with backoff so an
+//     address released during this cycle can be taken.
+//
+// The returned bool reports whether an existing Service was adopted rather than
+// created. Any other error is returned unchanged for the caller to record.
+func (r *Reconciler) createService(ctx context.Context, svc *corev1.Service, holders map[string]*corev1.Service) (bool, error) {
+	backoff := r.createBackoff
+	if backoff.Steps < 1 {
+		backoff.Steps = 1
+	}
+
+	adopted := false
+	evicted := false
+	err := retry.OnError(backoff, isRetriableCreateError, func() error {
+		err := r.k8sClient.Create(ctx, svc)
+		switch {
+		case err == nil:
+			adopted = false
+			return nil
+		case apierrors.IsAlreadyExists(err):
+			adopted = true
+			return r.adoptService(ctx, svc)
+		case isClusterIPConflict(err) && !evicted:
+			evicted = true
+			r.evictClusterIPHolder(ctx, svc, holders)
+			return err
+		default:
+			return err
+		}
+	})
+	return adopted && err == nil, err
+}
+
+// adoptService brings a Service that already exists under the desired name
+// under management. ClusterIP is immutable, so when the existing address
+// differs from the desired BMC IP the Service is deleted and created again.
+// Otherwise the desired spec and controller-owned metadata are written over
+// it, keeping foreign labels and annotations, so the Service ends up carrying
+// the same annotations a freshly created one would.
+func (r *Reconciler) adoptService(ctx context.Context, desired *corev1.Service) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, err := r.k8sClient.Get(ctx, desired.Namespace, desired.Name)
+		if err != nil {
+			return err
+		}
+
+		if desired.Spec.ClusterIP != "" && existing.Spec.ClusterIP != "" &&
+			desired.Spec.ClusterIP != existing.Spec.ClusterIP {
+			r.logger.Info().
+				Str("service", desired.Name).
+				Str("existing_cluster_ip", existing.Spec.ClusterIP).
+				Str("cluster_ip", desired.Spec.ClusterIP).
+				Msg("existing service has a different ClusterIP, replacing it")
+			if err := r.k8sClient.Delete(ctx, desired.Namespace, desired.Name); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+			desired.ResourceVersion = ""
+			return r.k8sClient.Create(ctx, desired)
+		}
+
+		if desired.Spec.ClusterIP == "" {
+			desired.Spec.ClusterIP = existing.Spec.ClusterIP
+		}
+		desired.ResourceVersion = existing.ResourceVersion
+		preserveForeignMetadata(desired, existing)
+		return r.k8sClient.Update(ctx, desired)
+	})
+}
+
+// evictClusterIPHolder deletes the managed Service that holds svc's requested
+// ClusterIP when that Service does not own the address: its recorded BMC IP
+// annotation differs from its ClusterIP, which is the signature of a Service
+// created before its device had reported a BMC IP and given an arbitrary
+// address by the API server. The holder is re-read first so a Service that
+// has since moved to another address is never touched. A holder whose BMC IP
+// is the address is left alone: two devices reporting the same BMC IP is a
+// data problem that must surface as an error rather than be resolved here.
+func (r *Reconciler) evictClusterIPHolder(ctx context.Context, svc *corev1.Service, holders map[string]*corev1.Service) {
+	holder, ok := holders[svc.Spec.ClusterIP]
+	if !ok || holder.Name == svc.Name {
+		return
+	}
+
+	current, err := r.k8sClient.Get(ctx, r.serviceBuilder.Namespace, holder.Name)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			r.logger.Error().Err(err).Str("service", holder.Name).Msg("failed to read service holding a requested ClusterIP")
+		}
+		return
+	}
+	if current.Spec.ClusterIP != svc.Spec.ClusterIP {
+		return
+	}
+	if current.Annotations[AnnotationBMCIP] == current.Spec.ClusterIP {
+		r.logger.Error().
+			Str("service", svc.Name).
+			Str("cluster_ip", svc.Spec.ClusterIP).
+			Str("held_by", current.Name).
+			Msg("requested ClusterIP is the BMC IP of another managed service")
+		return
+	}
+
+	if err := r.k8sClient.Delete(ctx, r.serviceBuilder.Namespace, current.Name); err != nil && !apierrors.IsNotFound(err) {
+		r.logger.Error().Err(err).Str("service", current.Name).Msg("failed to delete service holding a ClusterIP it does not own")
+		return
+	}
+	r.logger.Info().
+		Str("service", svc.Name).
+		Str("cluster_ip", svc.Spec.ClusterIP).
+		Str("deleted", current.Name).
+		Msg("deleted service holding a ClusterIP it does not own")
+}
+
+// isRetriableCreateError reports whether a failed create should be attempted
+// again within the cycle: the requested ClusterIP was still held by another
+// Service, or the Service under the same name changed between our calls.
+func isRetriableCreateError(err error) bool {
+	return isClusterIPConflict(err) || apierrors.IsAlreadyExists(err) || apierrors.IsNotFound(err)
+}
+
+// isClusterIPConflict reports whether err is the API server rejecting a create
+// because the requested ClusterIP is held by another Service. The allocator
+// reports this as an Invalid error whose cause is on spec.clusterIPs with the
+// message "failed to allocate IP <ip>: provided IP is already allocated".
+// Other spec.clusterIPs rejections, such as an address outside the
+// ServiceCIDR, are configuration errors and are not treated as conflicts.
+func isClusterIPConflict(err error) bool {
+	var statusErr *apierrors.StatusError
+	if !apierrors.IsInvalid(err) || !errors.As(err, &statusErr) {
+		return false
+	}
+	details := statusErr.ErrStatus.Details
+	if details == nil {
+		return false
+	}
+	for _, cause := range details.Causes {
+		if (cause.Field == "spec.clusterIPs" || cause.Field == "spec.clusterIP") &&
+			strings.Contains(cause.Message, "already allocated") {
+			return true
+		}
+	}
+	return false
+}
+
+// servicesByClusterIP indexes Services by the address they hold.
+func servicesByClusterIP(services []*corev1.Service) map[string]*corev1.Service {
+	byIP := make(map[string]*corev1.Service, len(services))
+	for _, svc := range services {
+		if svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != corev1.ClusterIPNone {
+			byIP[svc.Spec.ClusterIP] = svc
+		}
+	}
+	return byIP
 }
 
 // processUpdatesConcurrently updates services using a worker pool.
