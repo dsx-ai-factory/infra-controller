@@ -900,6 +900,40 @@ jobs:
       timeout_minutes: 30
     secrets: inherit
 
+  build-site-health-probe:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.source_files_changed == 'true'
+      }}
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      dockerfile_path: crates/site-health-probe/Dockerfile
+      context_path: .
+      # No layer cache, same reasoning as machine-a-tron above: the Dockerfile
+      # does `COPY . .` before the cargo build, so any new commit invalidates
+      # the builder layer and nothing expensive can ever be restored.
+      cache: false
+      build_args: >-
+        ${{ format('{{"VERSION":"{0}","CI_COMMIT_SHORT_SHA":"{1}"}}',
+          needs.prepare.outputs.version,
+          needs.prepare.outputs.short_sha) }}
+      image_name: ${{ needs.prepare.outputs.image_registry }}/site-health-probe
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/site-health-probe:${{ needs.prepare.outputs.major_minor_version }}-latest
+      platforms: linux/amd64,linux/arm64
+      runner: linux-amd64-cpu16
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: false
+      scan: true
+      tag_latest: false
+      timeout_minutes: 60
+    secrets: inherit
+
   # Like the release-container builds above, deliberately not gated on
   # `check-rest-core-proto-sync`: the tests do not read anything it produces,
   # and `core-ci-pass` still fails the merge when the protos are out of sync.
@@ -1725,6 +1759,7 @@ jobs:
             helm/charts/nico-hardware-health
             helm/charts/nico-machine-a-tron
             helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
+            helm/charts/nico-machine-a-tron/charts/nico-site-health-probe
             helm/charts/nico-pxe
             helm/charts/nico-ssh-console-rs
             helm/charts/unbound
@@ -2098,6 +2133,7 @@ jobs:
       - build-release-container-aarch64
       - build-machine-a-tron
       - build-mat-k8s-controller
+      - build-site-health-probe
       - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
@@ -2161,6 +2197,7 @@ jobs:
           IMAGES["build-release-artifacts-x86-host"]="${{ needs.build-release-artifacts-x86-host.outputs.image_ref }}"
           IMAGES["build-release-artifacts-arm-host"]="${{ needs.build-release-artifacts-arm-host.outputs.image_ref }}"
           IMAGES["build-mat-k8s-controller"]="${{ needs.build-mat-k8s-controller.outputs.image_ref }}"
+          IMAGES["build-site-health-probe"]="${{ needs.build-site-health-probe.outputs.image_ref }}"
 
           for job in "${!IMAGES[@]}"; do
             image="${IMAGES[$job]}"
@@ -2205,6 +2242,7 @@ jobs:
       - build-release-container-aarch64
       - build-machine-a-tron
       - build-mat-k8s-controller
+      - build-site-health-probe
       - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
@@ -2282,6 +2320,7 @@ jobs:
       - merge-manifests-nvmetal-carbide
       - build-machine-a-tron
       - build-mat-k8s-controller
+      - build-site-health-probe
       - test-release-container-services
 
       # CLI images

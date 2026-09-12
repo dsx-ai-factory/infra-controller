@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+## nico-site-health-probe — synthetic monitoring for NICo APIs (issue #5360).
+##
+## Runs read-only probes against nico-api (gRPC) and nico-rest-api (REST) on
+## fixed intervals and exposes latency/outcome metrics for the standard
+## collector to scrape. Designed as a probe FRAMEWORK: new probe kinds are
+## added to this component, not as new tooling.
+##
+## TODO(#5360-followup): active lifecycle probes — machine_count parameter
+## (1 = production canary, all = scale test) with blast-radius guards.
+## TODO(#5360-followup): progress reporting — p50/p95/p99 of machine progress
+## (e.g. created→ready) during scale tests.
+
+## Toggled by the parent chart's `nico-site-health-probe.enabled` condition.
+enabled: true
+
+## Container image.
+##
+## IMPORTANT: deployments must override these defaults — the default
+## repository has no registry prefix and will not resolve in real clusters.
+##   nico-site-health-probe:
+##     image:
+##       repository: <registry>/site-health-probe
+##       tag: "<version>"
+image:
+  repository: site-health-probe
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+## Metrics endpoint (also serves /health and /ready).
+metrics:
+  port: 9009
+
+serviceMonitor:
+  enabled: false
+
+## SPIFFE client certificate for nico-api mTLS. The identity namespace is
+## pinned to nico-system because nico-api accepts SPIFFE URIs under the
+## /nico-system/sa/ base regardless of the pod's actual namespace (the parent
+## machine-a-tron chart relies on the same behavior). The service name must
+## stay "nico-site-health-probe" — nico-api's internal RBAC grants exactly
+## this identity read access to FindMachineIds/FindMachinesByIds.
+certificate:
+  identityNamespace: nico-system
+  spiffeServiceName: nico-site-health-probe
+
+## CA bundle for verifying nico-rest-api's TLS (its certs come from the REST
+## stack's own issuer, not system roots). Required when a REST probe is
+## enabled and the target is https. Points at an existing Secret.
+restCa:
+  existingSecret:
+    name: ""
+    key: "ca.crt"
+
+## Probe configuration, rendered into the pod's config.yaml.
+probes:
+  ## Read-only gRPC probes against nico-api (works on every NICo site).
+  grpcMachines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: 10s
+    timeout: 5s
+    pageSize: 50
+  ## Read-only REST probes against nico-rest-api. Disabled by default because
+  ## they need site-specific inputs: the org, a Keycloak service-account
+  ## client, and its secret. Enable per site once those exist.
+  restMachines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: 10s
+    timeout: 5s
+    org: ""
+    auth:
+      tokenUrl: ""
+      clientId: "nico-site-health-probe"
+      ## Existing Secret holding the Keycloak client secret.
+      existingSecret:
+        name: ""
+        key: "client-secret"
+  restInstances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: 10s
+    timeout: 5s
+    org: ""
+    auth:
+      tokenUrl: ""
+      clientId: "nico-site-health-probe"
+      existingSecret:
+        name: ""
+        key: "client-secret"
