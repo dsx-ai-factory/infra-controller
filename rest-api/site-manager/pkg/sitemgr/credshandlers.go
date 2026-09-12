@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	cutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	crdsv1 "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/crds/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/types"
 	k8serr "k8s.io/apimachinery/pkg/api/errors"
@@ -36,7 +37,11 @@ func (h *credsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	siteObj, err := h.manager.crdClient.ForgeV1().Sites(h.manager.namespace).Get(r.Context(), objName, metav1.GetOptions{})
 	if err != nil {
-		log.Errorf("Site Creds Req: %+v  %v", req, err)
+		// This line and the rejections below report the OTP that arrived rather
+		// than the request, which carries it in full and stays usable until a
+		// handshake consumes it.
+		log.Errorf("Site Creds Req: site %s, OTP %s  %v", req.SiteUUID,
+			cutils.RedactSecret(req.OTP, cutils.SecretLogPrefixLen), err)
 		var errStr string
 		if k8serr.IsNotFound(err) {
 			errStr = fmt.Sprintf("site %s not found", req.SiteUUID)
@@ -48,26 +53,29 @@ func (h *credsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if siteObj.Status.BootstrapState != crdsv1.SiteAwaitHandshake {
-		log.Infof("Creds request with used OTP: %+v", req)
+		log.Infof("Creds request with used OTP: site %s, OTP %s", req.SiteUUID,
+			cutils.RedactSecret(req.OTP, cutils.SecretLogPrefixLen))
 		http.Error(w, "OTP already used", http.StatusInternalServerError)
 		return
 	}
 
 	if req.OTP != siteObj.Status.OTP.Passcode {
-		log.Infof("Bad OTP received: %+v", req)
+		log.Infof("Bad OTP received: site %s, OTP %s", req.SiteUUID,
+			cutils.RedactSecret(req.OTP, cutils.SecretLogPrefixLen))
 		http.Error(w, "Bad OTP", http.StatusInternalServerError)
 		return
 	}
 
 	expiry, err := parseExpiry(&siteObj.Status.OTP)
 	if err != nil {
-		log.Errorf("Error parsing expiry: %v +%v", err, siteObj.Status.OTP)
+		log.Errorf("Error parsing expiry: %v +%v", err, siteObj.Status.OTP.Timestamp)
 		http.Error(w, "check logs", http.StatusInternalServerError)
 		return
 	}
 
 	if time.Now().After(*expiry) {
-		log.Infof("Expired OTP received: %+v", req)
+		log.Infof("Expired OTP received: site %s, OTP %s", req.SiteUUID,
+			cutils.RedactSecret(req.OTP, cutils.SecretLogPrefixLen))
 		http.Error(w, "OTP expired", http.StatusInternalServerError)
 		return
 	}

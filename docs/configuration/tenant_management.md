@@ -14,9 +14,11 @@ This guide assumes you have completed the [Quick Start Guide](../getting-started
 - At least one site registered and in `Registered` status, with machines discovered and available for allocation.
 - `nicocli` installed (`make nico-cli` from the `rest-api/` directory of the `infra-controller` repo) and reachable on `$PATH`.
 
-If you plan to enable SPIFFE JWT-SVID **machine identity**, complete [Day 0 Machine Identity](../getting-started/installation-options/day0-machine-identity.md) before provisioning instances, then configure per-org identity after tenants exist — see [Machine Identity](machine_identity.md).
+If you plan to enable SPIFFE JWT-SVID **machine identity**, complete [Day 0 Machine Identity](../getting-started/installation-options/day0-machine-identity.md) before provisioning instances, then configure per-org identity after tenants exist. Refer to [Machine Identity](machine_identity.md).
 
-> **Note on CLI naming**: Older docs reference `carbidecli` (built via `make carbide-cli`). It's the same source under a previous name. This guide uses `nicocli` (built via `make nico-cli`) consistently.
+<Tip title="CLI naming">
+Older docs reference `carbidecli` (built via `make carbide-cli`). It's the same source under a previous name. This guide uses `nicocli` (built via `make nico-cli`) consistently.
+</Tip>
 
 For nicocli mechanics and conventions (flag ordering, `api.name` selection, `--data` vs flag forms, output formats, pagination, `--debug`), see the nicocli reference guide. The examples in this guide assume you've read it.
 
@@ -31,6 +33,8 @@ NICo's authorization model has three roles, all managed in the upstream identity
 | Tenant Admin (`TENANT_ADMIN`) | Tenant org | Managing the tenant's instances, VPCs, VPC Prefixes, Subnets, and SSH keys |
 
 A single user can hold roles in multiple orgs simultaneously. On dev/service-account orgs, one user typically holds both Provider Admin and Tenant Admin in the same org.
+
+These roles are not settable through NICo. They are assigned in the identity provider and read from each request's token, which makes them a Day 0 concern that has to be in place before any of the Day 1 steps below will work. [Authentication and Authorization](/rest-api-reference/authentication-and-authorization) is the authoritative reference for that configuration, covering both the `issuers` and `keycloak` modes, the four claim-mapping recipes, and the deployment surfaces where each value belongs.
 
 ### Authentication
 
@@ -73,7 +77,9 @@ nicocli tui
 - The authenticated user must be a member of the organization specified in the nicocli config (`api.org`).
 - The user must hold the Tenant Admin role within that org.
 
-If either condition is not met, the API returns HTTP 403. NICo trusts whatever the IdP says in the token's claims, so getting these conditions met is an IdP administration task -- it is not done through nicocli or the NICo API. The [Quick Start Guide](../getting-started/quick-start.md) walks through the bundled Keycloak reference implementation (a dev Keycloak deployed by `setup.sh` with a pre-loaded realm), which is the simplest path for first-time setup. For production, point NICo at any OIDC-compatible IdP (Keycloak, Okta, Auth0, your existing enterprise IdP) by configuring the `issuers` block in `nico-rest-api`'s config -- see [`getting-started/installation-options/reference-install.md`](../getting-started/installation-options/reference-install.md) for the deployment-side wiring.
+If either condition is not met, the API returns HTTP 403. NICo trusts whatever the IdP says in the token's claims, so getting these conditions met is an IdP administration task. It is not done through nicocli or the NICo API. The [Quick Start Guide](../getting-started/quick-start.md) walks through the bundled Keycloak reference implementation (a dev Keycloak deployed by `setup.sh` with a pre-loaded realm), which is the simplest path for first-time setup. For production, point NICo at any OIDC-compatible IdP (Keycloak, Okta, Auth0, your existing enterprise IdP) by configuring the `issuers` block in `nico-rest-api`'s config. Refer to [Authentication and Authorization](/rest-api-reference/authentication-and-authorization) for the deployment-side wiring. Its "Provider with Multiple Tenant IdPs" example is the recipe for one provider org serving tenants that each authenticate through their own identity provider.
+
+For Keycloak deployments, [Tenant Management with Keycloak](tenant-management-keycloak.md) covers the realm-side steps in full: the realm role naming convention NICo reads as org membership, creating the Tenant's identity, and granting the privileged Tenant capability.
 
 ### Worked Example
 
@@ -96,7 +102,7 @@ $ nicocli tenant current
 | `id` | UUID identifier for the tenant, used in all subsequent API calls |
 | `org` | Organization name (matches your config `api.org`) |
 | `orgDisplayName` | Human-readable name pulled from the IdP's org metadata |
-| `capabilities.targetedInstanceCreation` | Whether this tenant can specify a particular machine ID when creating instances. Set during initial tenant creation: lazy-create via `tenant current` typically leaves it `false`; the service-account bootstrap path (`service-account current`) sets it `true` for self-tenants. |
+| `capabilities.targetedInstanceCreation` | **Deprecated, removal scheduled for October 1, 2026.** A read-only aggregate across the tenant's `Ready` tenant accounts, not a setting on the tenant. It is `true` only when every such account enables the capability and no site override disables it, and it is absent rather than `false` when disabled: the field is omitted, and on the `tenantSummary` objects embedded in other resources `capabilities` is always `{}`. A Provider Admin configures the capability per tenant account, and optionally per site. See [Granting Targeted Instance Creation](#granting-targeted-instance-creation). |
 
 ### Verifying the Tenant
 
@@ -195,6 +201,71 @@ Only accounts in `Invited` status can be accepted. Attempting to update a `Ready
 $ nicocli tenant-account update --data '{}' <account-id>
 Error: API error 400: Tenant Account status is not Invited
 ```
+
+### Granting Targeted Instance Creation
+
+`targetedInstanceCreation` is the privileged tenant capability. A tenant that has it can:
+
+- Create an instance against a specific machine ID, or narrow placement with a machine label selector.
+- Set `isRepairTenant: true` when releasing an instance, which is what the repair tenant workflow requires.
+- Read a set of otherwise provider-only resources, including machines, machine health, SKUs, racks, trays, and expected machines, at the sites of a provider it holds a `Ready` tenant account with, wherever the capability is effective. A site override that disables it also removes these reads at that site.
+- Receive alternative VPC routing profiles from `tenant/current/routing-profile`.
+
+A Provider Admin configures it per tenant account with the `siteCapabilities` field. This is
+the only supported way to grant it, and it applies to regular tenants as well as
+service-account orgs:
+
+```bash
+nicocli tenant-account update \
+  --data '{"siteCapabilities":[{"siteIds":[],"targetedInstanceCreation":true}]}' \
+  <account-id>
+```
+
+#### Payload rules
+
+- Exactly one entry must have an empty or omitted `siteIds`. That entry sets the account-level default.
+- Any further entry lists site IDs that override the default. Each site must already be associated with the tenant, which happens when the tenant's first allocation at that site is created.
+- No site ID may appear in more than one entry.
+- `targetedInstanceCreation` is required on every entry.
+- The request must not also carry `tenantContactId`, which is the invitation-acceptance field. Sending both returns HTTP 400.
+
+Updates use replace semantics. A per-site override whose site ID is omitted from a later
+payload is cleared. To leave the capability on everywhere except one site, send both
+entries together:
+
+```json
+{
+  "siteCapabilities": [
+    {"siteIds": [], "targetedInstanceCreation": true},
+    {"siteIds": ["<site-uuid>"], "targetedInstanceCreation": false}
+  ]
+}
+```
+
+#### How the effective value resolves
+
+Three inputs decide whether the capability is in force for a tenant at a given site:
+
+1. The tenant account must be `Ready`. Setting the capability on an `Invited` account grants nothing until the tenant accepts.
+2. The account-level default applies where no site override exists.
+3. A site override, when present, wins over the account default.
+
+Because the account is per provider, a tenant with accounts at two providers can be
+privileged at one and not the other.
+
+#### Reading the current value
+
+`nicocli tenant-account list` returns `siteCapabilities` and is the source of truth:
+
+```bash
+nicocli tenant-account list --tenant-id <tenant-uuid>
+```
+
+<Warning title="Deprecation">
+Do not read `capabilities.targetedInstanceCreation` from `nicocli tenant current`. It is a deprecated read-only aggregate, scheduled for removal on **October 1, 2026**. It reports `true` only when every `Ready` tenant account enables the capability and no site override disables it, and it is omitted rather than returned as `false` otherwise, so a client cannot branch on a boolean here. On the `tenantSummary` objects embedded in other resources it is always omitted, leaving `"capabilities": {}`.
+
+Use `nicocli tenant-account list` instead.
+</Warning>
 
 ## Instance Types
 
@@ -552,7 +623,7 @@ An instance in NICo is a bare-metal machine assigned to a tenant within a VPC. C
 | `--name` | yes | |
 | `--tenant-id` | yes | Owning tenant -- often missed in older docs |
 | `--vpc-id` | yes | Parent VPC |
-| `--machine-id` | no | Pin to a specific machine (requires `targetedInstanceCreation: true` on the tenant) |
+| `--machine-id` | no | Pin to a specific machine (requires [targeted instance creation](#granting-targeted-instance-creation) on the tenant's account for that site) |
 | `--instance-type-id` | no | Pick from the pool of machines of this type (alternative to `--machine-id`) |
 | `--operating-system-id` | no | OS for PXE provisioning |
 | `--allow-unhealthy-machine` | no | Override health checks |
@@ -581,7 +652,7 @@ nicocli instance create --data-file - <<'EOF'
 EOF
 ```
 
-If you want to target a specific machine instead, replace `instanceTypeId` with `machineId`. Machine targeting requires the tenant to have `capabilities.targetedInstanceCreation: true`.
+If you want to target a specific machine instead, replace `instanceTypeId` with `machineId`. Machine targeting requires the tenant's account with the site's provider to be `Ready` and to have the capability enabled for that site. Refer to [Granting Targeted Instance Creation](#granting-targeted-instance-creation).
 
 TUI flow:
 
@@ -1001,13 +1072,15 @@ Flag-first ordering -- always put flags before positional args.
 
 ## Related Documentation
 
-- [Network Isolation](network-isolation.md) -- Per-plane tenant isolation (Ethernet, InfiniBand, NVLink)
-- [Organization & Permissions](org-permissions.md) -- IdP-managed roles and user setup
-- [Quick Start Guide](../getting-started/quick-start.md) -- NICo deployment and Day Zero walkthrough
-- [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md) -- Profile configuration and behavior
-- [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md) -- Full networking architecture
-- [VPC Peering](../manuals/vpc/vpc_peering_management.md) -- Connecting VPCs (gRPC only)
-- [NVLink Partitioning](../manuals/nvlink_partitioning.md) -- NVLink logical partition management
-- [Machine Reboot Playbook](../playbooks/machine_reboot.md) -- Emergency BMC reboot procedures
-- [Force Delete Playbook](../playbooks/force_delete.md) -- Removing stuck machines
-- [Day 0/1/2 Lifecycle](../overview/lifecycle.md) -- NICo lifecycle model overview
+- [Authentication and Authorization](/rest-api-reference/authentication-and-authorization), Day 0 auth configuration: `issuers` and `keycloak` modes, claim mappings, validation rules
+- [Tenant Management with Keycloak](tenant-management-keycloak.md), realm-side steps for onboarding a tenant on Keycloak deployments
+- [Network Isolation](network-isolation.md), per-plane tenant isolation (Ethernet, InfiniBand, NVLink)
+- [Organization & Permissions](org-permissions.md), IdP-managed roles and user setup
+- [Quick Start Guide](../getting-started/quick-start.md), NICo deployment and Day Zero walkthrough
+- [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md), profile configuration and behavior
+- [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md), full networking architecture
+- [VPC Peering](../manuals/vpc/vpc_peering_management.md), connecting VPCs (gRPC only)
+- [NVLink Partitioning](../manuals/nvlink_partitioning.md), NVLink logical partition management
+- [Machine Reboot Playbook](../playbooks/machine_reboot.md), emergency BMC reboot procedures
+- [Force Delete Playbook](../playbooks/force_delete.md), removing stuck machines
+- [Day 0/1/2 Lifecycle](../overview/lifecycle.md), NICo lifecycle model overview

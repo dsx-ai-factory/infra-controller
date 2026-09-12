@@ -179,7 +179,8 @@ func TestEnvOverridesFromEnvironment_ReportsUnappliedFlagOnlyVars(t *testing.T) 
 		"NICO_KEYCLOAK_URL is flag-only and should report Applied=false")
 
 	require.Contains(t, byName, "NICO_KEYCLOAK_REALM")
-	assert.False(t, byName["NICO_KEYCLOAK_REALM"].Applied)
+	assert.True(t, byName["NICO_KEYCLOAK_REALM"].Applied,
+		"NICO_KEYCLOAK_REALM maps to auth.oidc.realm and should report Applied=true")
 
 	require.Contains(t, byName, "NICO_BASE_URL")
 	assert.True(t, byName["NICO_BASE_URL"].Applied,
