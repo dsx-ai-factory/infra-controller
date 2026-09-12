@@ -45,11 +45,12 @@ enum RulePrincipal {
     Flow,
     MaintenanceJobs,
     DsxExchangeConsumer,
+    MaestroRelayAgent,
     Anonymous, // Permitted for everything
 }
 use self::RulePrincipal::{
     Agent, Anonymous, BmcProxy, Dhcp, Dns, DsxExchangeConsumer, Flow, ForgeAdminCLI, Health,
-    Machineatron, MaintenanceJobs, Pxe, Scout, SiteAgent, Ssh, SshRs,
+    Machineatron, MaestroRelayAgent, MaintenanceJobs, Pxe, Scout, SiteAgent, Ssh, SshRs,
 };
 
 impl InternalRBACRules {
@@ -163,11 +164,27 @@ impl InternalRBACRules {
         );
         x.perm(
             "InsertMachineHealthReport",
-            vec![ForgeAdminCLI, Health, SiteAgent, Ssh, SshRs, Flow],
+            vec![
+                ForgeAdminCLI,
+                Health,
+                SiteAgent,
+                Ssh,
+                SshRs,
+                Flow,
+                MaestroRelayAgent,
+            ],
         );
         x.perm(
             "RemoveMachineHealthReport",
-            vec![ForgeAdminCLI, Health, SiteAgent, Ssh, SshRs, Flow],
+            vec![
+                ForgeAdminCLI,
+                Health,
+                SiteAgent,
+                Ssh,
+                SshRs,
+                Flow,
+                MaestroRelayAgent,
+            ],
         );
         x.perm(
             "ListRackHealthReports",
@@ -243,6 +260,7 @@ impl InternalRBACRules {
                 Ssh,
                 SshRs,
                 Flow,
+                MaestroRelayAgent,
             ],
         );
         x.perm(
@@ -255,6 +273,7 @@ impl InternalRBACRules {
                 Ssh,
                 SshRs,
                 Flow,
+                MaestroRelayAgent,
             ],
         );
         x.perm("FindConnectedDevicesByDpuMachineIds", vec![ForgeAdminCLI]);
@@ -325,7 +344,10 @@ impl InternalRBACRules {
         x.perm("AdminGrowResourcePool", vec![ForgeAdminCLI]);
         x.perm("SetMaintenance", vec![ForgeAdminCLI, SiteAgent, Flow]);
         x.perm("SetDynamicConfig", vec![ForgeAdminCLI, Machineatron]);
-        x.perm("TriggerDpuReprovisioning", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm(
+            "TriggerDpuReprovisioning",
+            vec![ForgeAdminCLI, SiteAgent, MaestroRelayAgent],
+        );
         x.perm("TriggerHostReprovisioning", vec![ForgeAdminCLI, Flow]);
         x.perm("ListDpuWaitingForReprovisioning", vec![ForgeAdminCLI]);
         x.perm("MarkManualFirmwareUpgradeComplete", vec![ForgeAdminCLI]);
@@ -543,8 +565,11 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, SiteAgent],
         );
         x.perm("HeartbeatMachineValidationRun", vec![Scout, SiteAgent]);
-        x.perm("AdminBmcReset", vec![ForgeAdminCLI]);
-        x.perm("AdminPowerControl", vec![ForgeAdminCLI, SiteAgent, Flow]);
+        x.perm("AdminBmcReset", vec![ForgeAdminCLI, MaestroRelayAgent]);
+        x.perm(
+            "AdminPowerControl",
+            vec![ForgeAdminCLI, SiteAgent, Flow, MaestroRelayAgent],
+        );
         x.perm("AdminGpuReset", vec![ForgeAdminCLI, Flow]);
         x.perm("DisableSecureBoot", vec![ForgeAdminCLI]);
         x.perm("MachineSetup", vec![ForgeAdminCLI]);
@@ -1073,6 +1098,9 @@ impl RuleInfo {
                         "nico-dsx-exchange-consumer",
                         "carbide-dsx-exchange-consumer",
                     ),
+                    RulePrincipal::MaestroRelayAgent => vec![Principal::SpiffeServiceIdentifier(
+                        "maestro-relay-agent".to_string(),
+                    )],
                     RulePrincipal::Anonymous => vec![Principal::Anonymous],
                 })
                 .collect(),
@@ -1180,6 +1208,31 @@ mod rbac_rule_tests {
                 None,
             ))],
         ));
+    }
+
+    #[test]
+    fn maestro_relay_agent_has_only_required_permissions() {
+        let principal = Principal::SpiffeServiceIdentifier("maestro-relay-agent".to_string());
+        let mut allowed_methods = INTERNAL_RBAC_RULES
+            .perms
+            .iter()
+            .filter(|(_, rule)| rule.principals.contains(&principal))
+            .map(|(method, _)| method.as_str())
+            .collect::<Vec<_>>();
+        allowed_methods.sort_unstable();
+
+        assert_eq!(
+            allowed_methods,
+            [
+                "AdminBmcReset",
+                "AdminPowerControl",
+                "FindMachineIds",
+                "FindMachinesByIds",
+                "InsertMachineHealthReport",
+                "RemoveMachineHealthReport",
+                "TriggerDpuReprovisioning",
+            ]
+        );
     }
 
     #[test]
