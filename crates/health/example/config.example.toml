@@ -485,6 +485,10 @@ platform_environment_status_enabled = true
 # platform_general_enabled is true)
 gnmi_port = 9339
 sample_interval = "5m"
+# Applied independently to connection establishment, opening the Subscribe RPC,
+# and initial synchronization. One attempt may take nearly three times this
+# duration before reconnect backoff. Updates before sync_response=true do not
+# extend the synchronization timeout.
 request_timeout = "30s"
 # Keep strict TLS certificate and hostname verification by default. Set true only
 # for lab/self-signed NVOS gNMI endpoints where that dangerous bypass is required.
