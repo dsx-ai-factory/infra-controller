@@ -16,7 +16,7 @@
  */
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -478,6 +478,7 @@ pub struct GaugeMetrics {
     metric_name_prefix: String,
     metric_help: String,
     static_labels: Vec<proto::LabelPair>,
+    static_label_names: HashSet<String>,
     desc: Desc,
 }
 
@@ -490,20 +491,27 @@ impl GaugeMetrics {
         static_labels: Vec<(impl Into<String>, impl Into<String>)>,
     ) -> Result<Self, prometheus::Error> {
         let desc = Desc::new(id.clone(), id, Vec::new(), HashMap::new())?;
+        let mut static_label_names = HashSet::with_capacity(static_labels.len());
+        let static_labels = static_labels
+            .into_iter()
+            .map(|(name, value)| {
+                let name = name.into();
+                static_label_names.insert(name.clone());
+
+                let mut label = LabelPair::new();
+                label.set_name(name);
+                label.set_value(value.into());
+                label
+            })
+            .collect();
+
         let metrics = Self {
             gauges: Arc::new(DashMap::new()),
             current_generation: Arc::new(AtomicU64::new(0)),
             metric_name_prefix: metric_name_prefix.into(),
             metric_help: metric_help.into(),
-            static_labels: static_labels
-                .into_iter()
-                .map(|(name, value)| {
-                    let mut label = LabelPair::new();
-                    label.set_name(name.into());
-                    label.set_value(value.into());
-                    label
-                })
-                .collect(),
+            static_labels,
+            static_label_names,
             desc,
         };
 
@@ -513,6 +521,10 @@ impl GaugeMetrics {
 
     pub fn begin_update(&self) {
         self.current_generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn has_static_label(&self, name: &str) -> bool {
+        self.static_label_names.contains(name)
     }
 
     pub fn record(&self, reading: GaugeReading) {

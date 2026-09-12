@@ -125,19 +125,19 @@ impl PrometheusSink {
     /// Normalizes effective dynamic labels before they enter the registry.
     fn normalize_label_names(
         context: &EventContext,
+        stream_metrics: &GaugeMetrics,
         metric: &str,
         labels: &mut [(Cow<'static, str>, String)],
     ) -> Result<(), HealthError> {
-        let mut label_names = Self::stream_static_labels(context)
-            .into_iter()
-            .map(|(name, _)| name.into_owned())
-            .collect::<HashSet<_>>();
+        let mut label_names = HashSet::with_capacity(labels.len());
 
         for (name, _) in labels {
             let original_name = name.clone();
             let normalized_name = Self::normalize_label_name(original_name.clone());
 
-            if !label_names.insert(normalized_name.to_string()) {
+            if stream_metrics.has_static_label(&normalized_name)
+                || !label_names.insert(normalized_name.clone())
+            {
                 tracing::warn!(
                     endpoint_key = context.endpoint_key(),
                     collector = context.collector_type,
@@ -298,7 +298,12 @@ impl DataSink for PrometheusSink {
                             .map(|(name, value)| (Cow::Owned(name.clone()), value.clone())),
                     );
 
-                    Self::normalize_label_names(context, &sample.name, &mut labels)?;
+                    Self::normalize_label_names(
+                        context,
+                        &stream_metrics,
+                        &sample.name,
+                        &mut labels,
+                    )?;
 
                     stream_metrics.record(
                         GaugeReading::new(
