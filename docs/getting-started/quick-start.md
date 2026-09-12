@@ -169,15 +169,20 @@ Open `helm-prereqs/values/nico-core.yaml` and update the following values:
   | `[pools.lo-ip]` ranges | Loopback IP range allocated to bare-metal hosts |
   | `[pools.vlan-id]` ranges | VLAN ID allocation range |
   | `[pools.vni]` ranges | VXLAN Network Identifier range |
-  | `[networks.admin]` | Admin network CIDR, gateway, and MTU |
+  | `[networks.admin]` | `type = "admin"`, an IPv4 `prefix` and `gateway` for DPU provisioning, `mtu`, and `reserve_first` |
   | `[networks.<underlay>]` | Underlay data-plane network(s) — one block per L3 segment |
 
 All fields are documented with inline comments in the file.
 
-**Required fields--do not leave empty:** You must set `[networks.admin]`, `prefix`, and `gateway` to real values. `nico-api` crashes at startup with a parse error if these are empty strings. Similarly, `[pools.lo-ip]`, `[pools.vlan-id]`, and `[pools.vni]` ranges must be non-empty.
+Define the site networks to create at startup using the
+[Initial Network Configuration](../provisioning/ip-and-network-configuration.md#initial-network-configuration)
+requirements. An IPv4 prefix requires a gateway; an IPv6-only definition can
+omit it. DPU provisioning requires an admin segment with an IPv4 prefix and
+gateway. Do not use empty strings for address fields. The `[pools.lo-ip]`,
+`[pools.vlan-id]`, and `[pools.vni]` ranges must be non-empty.
 
 <Tip>
-The following fields are safe to leave as empty arrays: `dhcp_servers`, `ntp_servers`, `site_fabric_prefixes`, and `deny_prefixes`. Do not delete any field from the TOML block; missing keys cause a different crash than empty ones.
+The following fields are safe to leave as empty arrays: `dhcp_servers`, `ntp_servers`, `site_fabric_prefixes`, and `deny_prefixes`. Keep required fields in the TOML block; optional network fields follow the initial network configuration requirements above.
 </Tip>
 
 ### 3d. NICo REST source tree

@@ -157,10 +157,14 @@ The API allocates from these pools when creating instances, VPCs, etc.
 
 ### Networks
 
-`[networks.<name>]` — one block per L3 segment. Fields: `type` (`admin` |
-`underlay`), `prefix`, `gateway`, `mtu`, `reserve_first`. The `admin` network
-is mandatory and must have a non-empty `prefix` and `gateway` — `nico-api`
-crashes at startup if either is missing.
+Each `[networks.<name>]` block defines one L3 segment to create at startup, with
+`type` (`admin`, `underlay`, or `hostinband`), `prefix`, `mtu`, and `reserve_first`.
+Definitions support IPv4-only, IPv6-only, or both address families (dual-stack).
+A gateway is required whenever an IPv4 prefix is present. DPU provisioning
+requires an admin segment with an IPv4 prefix and gateway. Editing the
+configuration does not update an existing segment. Refer to
+[Initial Network Configuration](../../../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration)
+for `prefix_v6`, `dhcpv6_link_address`, examples, and compatibility requirements.
 
 ### Tenant traffic policy
 
