@@ -1,10 +1,11 @@
-# Component Manager Configuration
+# Flow Component Managers
 
-This document explains the configuration files for the Component Manager system.
+This page configures Flow’s component-manager implementations and API providers. Configure Core’s downstream hardware backends separately in [Component Manager RMS Backends](component-manager-rms.md).
 
 ## Overview
 
 The Component Manager configuration controls:
+
 1. Which implementation to use for each component type (compute, NVL switch, power shelf)
 2. Manager behavior settings for selected implementations
 3. Which API providers to enable and their client settings
@@ -46,7 +47,7 @@ Available implementations:
 
 | Component Type | Available Implementations | Description |
 |----------------|---------------------------|-------------|
-| `compute` | `nicolegacy`, `nico`, `mock` | Manages compute nodes. `nico` (current default) routes through Core's Component Manager dispatch (`ComponentPowerControl`, `UpdateComponentFirmware`, ...) like nvswitch and powershelf already do. `nicolegacy` calls NICo Core's machine-centric RPCs (`AdminPowerControl`, `SetFirmwareUpdateTimeWindow`, ...). See [Selecting the compute implementation](#selecting-the-compute-implementation) for the override knob. |
+| `compute` | `nicolegacy`, `nico`, `mock` | Manages compute nodes. `nico` (default) routes through Core's Component Manager dispatch (`ComponentPowerControl`, `UpdateComponentFirmware`, ...) like nvswitch and powershelf already do. `nicolegacy` calls NICo Core's machine-centric RPCs (`AdminPowerControl`, `SetFirmwareUpdateTimeWindow`, ...). See [Selecting the compute implementation](#selecting-the-compute-implementation) for the override knob. |
 | `nvswitch` | `nico`, `mock` | Manages NVLink switches |
 | `powershelf` | `nico`, `mock` | Manages power shelves |
 
@@ -166,15 +167,15 @@ providers:
 
 ## Usage
 
-Set the configuration file path via:
+Flow selects the base configuration in this precedence order:
 
-1. **Command line flag**: `--component-config <path>`
+1. **Command line flag**: `flow serve --component-config <path>`
 2. **Environment variable**: `COMPONENT_MANAGER_CONFIG=<path>`
 3. **Default**: embedded service config
 
 ### Selecting the compute implementation
 
-Compute currently has two NICo-backed implementations:
+Compute has two NICo-backed implementations:
 
 | Implementation | RPC path | Notes |
 |----------------|----------|-------|
@@ -194,15 +195,13 @@ COMPONENT_MANAGER_COMPUTE=nicolegacy
 ```
 
 The override is consumed by `flow serve` after the base config is
-loaded and replaces only the `compute` entry in `component_managers`.
+loaded and replaces only the `compute` entry in `component_managers`. An unset or whitespace-only override leaves the base selection unchanged.
 An invalid value surfaces as a normal startup failure during catalog
-validation. Once every Flow deployment no longer needs `nicolegacy` the
-override and the `compute/nicolegacy` package will be removed.
+validation. The `nicolegacy` implementation is an opt-in compatibility path for deployments using machine-centric Core RPCs.
 
 ## Timing Parameters
 
 Power control and firmware update timing (delays, poll intervals, timeouts) are
 configured **per-rule** via action parameters in operation rules, not here.
 
-See `CLAUDE.md` (Action-Based Operation Rules section) and
-`examples/operation-rules-example.yaml` for examples.
+See [Operation Rules](../operations/flow/operation-rules.md) for action parameters and examples.

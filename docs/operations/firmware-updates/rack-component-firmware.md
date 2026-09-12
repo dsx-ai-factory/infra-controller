@@ -173,7 +173,7 @@ The built-in rule deliberately excludes power shelves and does not perform an
 AC power cycle after flashing. Use an approved custom operation rule for power
 shelves. If firmware activation requires a power cycle, submit the appropriate
 power-recycle task separately or include it in a custom rule. Refer to the
-Flow [Operation Rules Guide](../../../rest-api/flow/docs/operation-rules-guide.md).
+Flow [Operation Rules Guide](../flow/operation-rules.md).
 
 ## Component behavior
 

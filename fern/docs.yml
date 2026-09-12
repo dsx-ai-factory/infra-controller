@@ -35,6 +35,8 @@ products:
     #     path: ../docs/index.yml
 
 redirects:
+  - source: "/infra-controller/documentation/operations-day-2/firmware-updates/flow-operation-rules"
+    destination: "/infra-controller/documentation/operations-day-2/flow-operations/operation-rules"
   - source: "/infra-controller/index.html"
     destination: "/infra-controller/"
   - source: "/infra-controller/dev/index.html"

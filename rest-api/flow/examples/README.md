@@ -11,11 +11,13 @@ of each component type: TOR switches, compute trays, NVL switches, and power
 shelves.
 
 **Usage:**
+
 ```bash
 flow rack create --file examples/rack-create-example.json
 ```
 
 **JSON format notes:**
+
 - `info.id` — optional UUID; a new one is generated if omitted
 - `location.datacenter` — matches the `datacenter` field (not `data_center`)
 - `components[].type` — one of: `compute`, `nvswitch`, `powershelf`,
@@ -31,10 +33,10 @@ flow rack create --file examples/rack-create-example.json
 ### `operation-rules-example.yaml`
 
 Canonical reference for operation rules loaded via `flow rule create`. Covers
-graceful and forceful power on/off, restart, firmware upgrade, and rack
-bring-up sequences.
+graceful and forceful power on/off, restart, and firmware upgrade sequences.
 
 **Usage:**
+
 ```bash
 # Load rules (skip existing)
 flow rule create --from-yaml examples/operation-rules-example.yaml
@@ -46,5 +48,5 @@ flow rule create --from-yaml examples/operation-rules-example.yaml --overwrite
 flow rule create --from-yaml examples/operation-rules-example.yaml --dry-run
 ```
 
-See `docs/operation-rules-guide.md` for a full explanation of the rule schema
+See [Operation Rules](../../../docs/operations/flow/operation-rules.md) for a full explanation of the rule schema
 and available actions.
