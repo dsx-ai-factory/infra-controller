@@ -262,6 +262,7 @@ impl TestApiBuilder {
             self.db_pool.clone(),
             endpoint_explorer.clone(),
             Arc::new(runtime_config.get_firmware_config()),
+            runtime_config.site_explorer.exploration_timeout,
         ));
         let metric_emitter = self.metric_emitter.unwrap_or_else(|| {
             let test_meter = TestMeter::default();

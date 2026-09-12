@@ -515,6 +515,7 @@ shipped configuration selects a plaintext mode.
 | ------- | ------ | --------- | ------------- |
 | `enabled` | `bool` | `true` | Enables hardware discovery. |
 | `run_interval` | `Duration` | `120s` | Interval between exploration runs. |
+| `exploration_timeout` | `Duration` | `120s` | Max time a single endpoint's exploration may run before it's cut off and recorded as `ExplorationTimeout`; bounds one hung BMC connection to a single retry cycle instead of blocking the whole site's discovery indefinitely. A zero value is rejected at config-load time. |
 | `concurrent_explorations` | `u64` | `100` | Max nodes explored in parallel. |
 | `explorations_per_run` | `u64` | `360` | Max nodes explored per run. |
 | `create_machines` | `bool` | `true` | When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true. Dynamically toggleable. |

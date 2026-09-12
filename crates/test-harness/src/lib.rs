@@ -131,6 +131,7 @@ impl TestHarness {
             api.database_connection.clone(),
             endpoint_explorer.clone(),
             Arc::new(api.runtime_config.get_firmware_config()),
+            config.exploration_timeout,
         ));
         let site_explorer = SiteExplorer::new(
             api.database_connection.clone(),

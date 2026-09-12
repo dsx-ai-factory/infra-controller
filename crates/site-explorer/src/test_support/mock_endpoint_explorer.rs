@@ -44,13 +44,26 @@ pub struct EndpointExplorationCall {
 pub struct MockEndpointExplorationBlocker {
     started: Arc<Notify>,
     release: Arc<Notify>,
+    /// Address of the `explore_endpoint` call that actually grabbed this
+    /// blocker. Populated before `started` is notified, so it's always set by
+    /// the time [`Self::wait_until_started`] returns. Lets tests with more
+    /// than one candidate endpoint (where scheduling order isn't guaranteed)
+    /// find out *which* endpoint ended up being the one that hung, instead of
+    /// having to assume it.
+    blocked_address: Arc<Mutex<Option<IpAddr>>>,
 }
 
 impl MockEndpointExplorationBlocker {
-    pub async fn wait_until_started(&self) {
+    /// Waits for some `explore_endpoint` call to hit this blocker, then
+    /// returns the address it was called with.
+    pub async fn wait_until_started(&self) -> IpAddr {
         tokio::time::timeout(Duration::from_secs(10), self.started.notified())
             .await
             .expect("timed out waiting for endpoint exploration to start");
+        self.blocked_address
+            .lock()
+            .unwrap()
+            .expect("blocked_address is set before `started` is notified")
     }
 
     pub fn release(&self) {
@@ -121,6 +134,7 @@ impl MockEndpointExplorer {
         let blocker = MockEndpointExplorationBlocker {
             started: Arc::new(Notify::new()),
             release: Arc::new(Notify::new()),
+            blocked_address: Arc::default(),
         };
         *self.next_exploration_blocker.lock().unwrap() = Some(blocker.clone());
         blocker
@@ -202,6 +216,7 @@ impl EndpointExplorer for MockEndpointExplorer {
             });
         let blocker = self.next_exploration_blocker.lock().unwrap().take();
         if let Some(blocker) = blocker {
+            *blocker.blocked_address.lock().unwrap() = Some(bmc_ip_address.ip());
             blocker.started.notify_one();
             blocker.release.notified().await;
         }

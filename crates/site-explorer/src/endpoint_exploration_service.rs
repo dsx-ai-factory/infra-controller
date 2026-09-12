@@ -74,6 +74,7 @@ pub struct EndpointExplorationService {
     endpoint_explorer: Arc<dyn EndpointExplorer>,
     firmware_config: Arc<FirmwareConfig>,
     locks: EndpointExplorationLocks,
+    exploration_timeout: Duration,
 }
 
 impl EndpointExplorationService {
@@ -81,12 +82,26 @@ impl EndpointExplorationService {
         database_connection: PgPool,
         endpoint_explorer: Arc<dyn EndpointExplorer>,
         firmware_config: Arc<FirmwareConfig>,
+        exploration_timeout: Duration,
     ) -> Self {
+        // A zero timeout would make every exploration fail immediately, so
+        // discovery would never make progress -- clamp instead of trusting a
+        // misconfigured value verbatim (see issue #5963).
+        let exploration_timeout = if exploration_timeout.is_zero() {
+            tracing::warn!(
+                "site_explorer.exploration_timeout is 0, which would fail every exploration \
+                 immediately; falling back to the default"
+            );
+            crate::config::SiteExplorerConfig::default_exploration_timeout()
+        } else {
+            exploration_timeout
+        };
         Self {
             database_connection,
             endpoint_explorer,
             firmware_config,
             locks: EndpointExplorationLocks::default(),
+            exploration_timeout,
         }
     }
 
@@ -117,16 +132,23 @@ impl EndpointExplorationService {
         let guard = self.locks.try_claim(address.ip())?;
 
         let redfish_explore_started_at = Instant::now();
-        let result = self
-            .endpoint_explorer
-            .explore_endpoint(
+        let result = match tokio::time::timeout(
+            self.exploration_timeout,
+            self.endpoint_explorer.explore_endpoint(
                 address,
                 interface,
                 expected,
                 last_exploration_error,
                 boot_interface.as_ref(),
-            )
-            .await;
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(EndpointExplorationError::exploration_timed_out(
+                self.exploration_timeout,
+            )),
+        };
         let redfish_explore_duration = redfish_explore_started_at.elapsed();
 
         Some(EndpointProbeResult {

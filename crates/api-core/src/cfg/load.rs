@@ -320,6 +320,18 @@ pub fn parse_carbide_config(
         }
     }
 
+    // A zero exploration_timeout would cut off every endpoint's exploration
+    // immediately, so discovery could never make progress. Fail fast on this
+    // misconfiguration at startup rather than silently falling back (the runtime
+    // clamp in EndpointExplorationService::new stays as defense-in-depth). See
+    // issue #5963.
+    if config.site_explorer.exploration_timeout.is_zero() {
+        eyre::bail!(
+            "site_explorer.exploration_timeout must be greater than zero; a zero timeout would \
+             fail every endpoint exploration immediately"
+        );
+    }
+
     // Validate that admin-UI tool entries have unique names.
     config.validate_web_ui_sidebar_tools()?;
     config.validate_service_vpc_slots()?;

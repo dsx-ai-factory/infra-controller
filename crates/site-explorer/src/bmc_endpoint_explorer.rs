@@ -128,6 +128,76 @@ pub struct BmcEndpointExplorer {
     database_connection: Option<PgPool>,
 }
 
+/// Record a device's credential convergence: open a transaction, upsert the
+/// convergence row at the current site-wide target version, and commit.
+///
+/// Non-spawning on purpose. Callers run this *inside* a cancellation-surviving
+/// [`tokio::spawn`]ed task -- for the BMC root path, chained after the per-device
+/// Vault write -- so the whole "hardware is already mutated, now durably record
+/// it everywhere" sequence completes as one unit even if the caller's future is
+/// dropped (e.g. the per-endpoint exploration timeout fires) partway through.
+/// See issue #5963.
+async fn record_device_converged(
+    database_connection: &PgPool,
+    bmc_mac_address: MacAddress,
+    credential_type: db::credential_rotation::CredentialRotationType,
+) -> Result<(), EndpointExplorationError> {
+    let segment = credential_rotation_key_segment(credential_type);
+    let make_err = move |cause: String| EndpointExplorationError::SetCredentials {
+        key: format!("device_credential_rotation/{segment}/{bmc_mac_address}"),
+        cause,
+    };
+    let mut txn = db::Transaction::begin(database_connection)
+        .await
+        .map_err(|e| make_err(e.to_string()))?;
+    db::credential_rotation::record_device_converged(&mut txn, bmc_mac_address, credential_type)
+        .await
+        .map_err(|e| make_err(e.to_string()))?;
+    txn.commit().await.map_err(|e| make_err(e.to_string()))
+}
+
+/// Record convergence in a task that survives outer-future cancellation, for
+/// call sites whose only post-hardware-mutation durable step is the DB record.
+///
+/// This fits the BF4 DPU service password path: its site-wide `service` password
+/// is read (and created if missing) *before* the hardware mutation, so no Vault
+/// write follows the mutation and the DB commit is the only durable step left to
+/// protect. The BMC root path additionally performs a post-mutation Vault write
+/// and therefore spawns that write together with the DB commit itself, rather
+/// than through this helper -- see
+/// [`BmcEndpointExplorer::set_bmc_root_credentials`].
+async fn spawn_record_device_converged(
+    database_connection: PgPool,
+    bmc_mac_address: MacAddress,
+    credential_type: db::credential_rotation::CredentialRotationType,
+) -> Result<(), EndpointExplorationError> {
+    let segment = credential_rotation_key_segment(credential_type);
+    tokio::spawn(async move {
+        record_device_converged(&database_connection, bmc_mac_address, credential_type).await
+    })
+    .await
+    .map_err(|join_error| EndpointExplorationError::SetCredentials {
+        key: format!("device_credential_rotation/{segment}/{bmc_mac_address}"),
+        cause: format!("credential convergence recording task failed: {join_error}"),
+    })?
+}
+
+/// The `device_credential_rotation` key segment for each rotation type, matching
+/// the original per-call-site key strings.
+fn credential_rotation_key_segment(
+    credential_type: db::credential_rotation::CredentialRotationType,
+) -> &'static str {
+    use db::credential_rotation::CredentialRotationType;
+    match credential_type {
+        CredentialRotationType::Bmc => "bmc",
+        CredentialRotationType::DpuBmcService => "dpu_bmc_service",
+        CredentialRotationType::HostUefi => "host_uefi",
+        CredentialRotationType::DpuUefi => "dpu_uefi",
+        CredentialRotationType::Nvos => "nvos",
+        CredentialRotationType::LockdownIkm => "lockdown_ikm",
+    }
+}
+
 impl BmcEndpointExplorer {
     /// Build an explorer over the shared authenticated BMC client.
     pub fn new(
@@ -291,37 +361,46 @@ impl BmcEndpointExplorer {
         bmc_mac_address: MacAddress,
         credentials: &Credentials,
     ) -> Result<(), EndpointExplorationError> {
-        self.bmc_client
-            .credential_client
-            .set_bmc_root_credentials(bmc_mac_address, credentials)
-            .await?;
-
-        // The device is now on the site-wide BMC root (just changed on the
-        // hardware, or validated as already-set on reingest) and its per-device
-        // secret is in Vault. Record bmc convergence at the current site-wide
-        // target version so the rotation engine tracks every host, DPU, switch,
-        // and power shelf from the moment NICo owns its BMC password. Idempotent,
-        // so reexploration of an already-recorded device is a no-op. Skipped only
-        // by the no-database `bmc-explorer-cli` debug tool.
-        if let Some(database_connection) = &self.database_connection {
-            let record_err = |cause: String| EndpointExplorationError::SetCredentials {
-                key: format!("device_credential_rotation/bmc/{bmc_mac_address}"),
-                cause,
-            };
-            let mut txn = db::Transaction::begin(database_connection)
-                .await
-                .map_err(|e| record_err(e.to_string()))?;
-            db::credential_rotation::record_device_converged(
-                &mut txn,
-                bmc_mac_address,
-                db::credential_rotation::CredentialRotationType::Bmc,
-            )
-            .await
-            .map_err(|e| record_err(e.to_string()))?;
-            txn.commit().await.map_err(|e| record_err(e.to_string()))?;
-        }
-
-        Ok(())
+        // The BMC root password was just changed on the hardware (or validated as
+        // already-set on reingest). Two durable writes must now happen: the
+        // per-device secret into Vault, then -- so the rotation engine tracks this
+        // device from the moment NICo owns its BMC password -- the bmc convergence
+        // record at the current site-wide target version. Both must survive the
+        // outer per-endpoint exploration timeout firing mid-flight: dropping this
+        // future between the hardware mutation and either write would leave NICo
+        // unable to reach the BMC (missing Vault entry) or believing the device
+        // never rotated (missing convergence row) while the hardware already
+        // carries the new credential -- a lockout-adjacent split. Running the
+        // Vault write AND the DB commit inside a single tokio::spawn makes the
+        // whole sequence an independent task that finishes even when this
+        // JoinHandle await is cancelled; wrapping only the DB commit (as an
+        // earlier fix did) still left the Vault write cancellable. Vault-before-DB
+        // preserves the original ordering. The convergence record is idempotent,
+        // so reexploration of an already-recorded device is a no-op, and is
+        // skipped entirely by the no-database `bmc-explorer-cli` debug tool. See
+        // issue #5963.
+        let credential_client = self.bmc_client.credential_client.clone();
+        let database_connection = self.database_connection.clone();
+        let credentials = credentials.clone();
+        tokio::spawn(async move {
+            credential_client
+                .set_bmc_root_credentials(bmc_mac_address, &credentials)
+                .await?;
+            if let Some(database_connection) = database_connection {
+                record_device_converged(
+                    &database_connection,
+                    bmc_mac_address,
+                    db::credential_rotation::CredentialRotationType::Bmc,
+                )
+                .await?;
+            }
+            Ok::<(), EndpointExplorationError>(())
+        })
+        .await
+        .map_err(|join_error| EndpointExplorationError::SetCredentials {
+            key: format!("bmc_root_credentials/{bmc_mac_address}"),
+            cause: format!("BMC root credential persistence task failed: {join_error}"),
+        })?
     }
 
     async fn rotate_dpu_service_password_from_factory_defaults(
@@ -345,21 +424,21 @@ impl BmcEndpointExplorer {
         // reexploration is a no-op. Skipped only by the no-database
         // `bmc-explorer-cli` debug tool.
         if let Some(database_connection) = &self.database_connection {
-            let record_err = |cause: String| EndpointExplorationError::SetCredentials {
-                key: format!("device_credential_rotation/dpu_bmc_service/{bmc_mac_address}"),
-                cause,
-            };
-            let mut txn = db::Transaction::begin(database_connection)
-                .await
-                .map_err(|e| record_err(e.to_string()))?;
-            db::credential_rotation::record_device_converged(
-                &mut txn,
+            // Like `set_bmc_root_credentials`, the DPU service password was just
+            // changed on the hardware, so the convergence record must be committed
+            // durably even if the outer exploration timeout cancels this future
+            // mid-flight. Unlike that path there is no post-mutation Vault write to
+            // protect here (the site-wide `service` password was read/created
+            // before the hardware mutation above), so the DB commit is the only
+            // durable step, and `spawn_record_device_converged` runs it in a
+            // cancellation-surviving task. See issue #5963.
+            let database_connection = database_connection.clone();
+            spawn_record_device_converged(
+                database_connection,
                 bmc_mac_address,
                 db::credential_rotation::CredentialRotationType::DpuBmcService,
             )
-            .await
-            .map_err(|e| record_err(e.to_string()))?;
-            txn.commit().await.map_err(|e| record_err(e.to_string()))?;
+            .await?;
         }
 
         Ok(())
@@ -1934,6 +2013,9 @@ mod tests {
         BmcCredentialType, CredentialKey, CredentialReader, CredentialWriter,
     };
     use carbide_secrets::test_support::credentials::TestCredentialManager;
+    // Brings the `sqlx_testing` crate into scope for the `#[sqlx_test]` macro
+    // expansion (the DB-backed convergence regression test below).
+    use carbide_test_harness::prelude::sqlx_testing;
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases_async, value_scenarios};
     use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
@@ -2635,5 +2717,94 @@ mod tests {
             "established report traffic authenticates by key, never with \
              explicit credentials"
         );
+    }
+
+    /// Regression test for issue #5963 at the Vault-write-blocking level.
+    ///
+    /// After the hardware BMC root password is mutated, `set_bmc_root_credentials`
+    /// must durably persist both the per-device Vault entry and the convergence
+    /// DB record. An earlier fix wrapped only the DB commit in a
+    /// cancellation-surviving `tokio::spawn`, which left the *Vault write* -- the
+    /// step that runs first, right after the hardware mutation -- still inside the
+    /// cancellable region: if the per-endpoint exploration timeout fired during
+    /// the Vault write, the spawned DB task was never even created, so the DB
+    /// stayed convinced the device never rotated while the hardware already
+    /// carried the new credential.
+    ///
+    /// This test stalls the Vault write past a short outer timeout, cancels the
+    /// outer future mid-write, and asserts the convergence record still lands --
+    /// which can only happen if the Vault write AND the DB commit both run inside
+    /// the same spawned task. With the pre-fix boundary the convergence row would
+    /// never appear.
+    #[carbide_test_harness::prelude::sqlx_test]
+    async fn set_bmc_root_credentials_persists_convergence_when_vault_write_outlives_timeout(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let credential_manager = Arc::new(TestCredentialManager::default());
+        // Make the Vault write take far longer than the outer timeout below, so
+        // the outer future is guaranteed to be cancelled while it is still in
+        // flight.
+        credential_manager
+            .set_credentials_sleep_time_ms
+            .store(400, Ordering::Release);
+
+        let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
+        let bmc_client = Arc::new(AuthenticatedBmcClient::new(
+            Arc::new(RedfishSim::default()),
+            Arc::new(NvRedfishClientPool::new(proxy_address)),
+            None,
+            carbide_ipmi::test_support(),
+            credential_manager.clone(),
+        ));
+        let explorer = BmcEndpointExplorer::new(
+            bmc_client,
+            Arc::new(AtomicBool::new(false)),
+            SiteExplorerExploreMode::NvRedfish,
+            Some(pool.clone()),
+        );
+
+        let bmc_mac_address: MacAddress = "02:00:00:00:59:63".parse().unwrap();
+        let credentials = Credentials::UsernamePassword {
+            username: "root".to_string(),
+            password: "sitewide-password".to_string(),
+        };
+
+        // Cancel the outer future well before the stalled Vault write can finish.
+        let outer = tokio::time::timeout(
+            Duration::from_millis(50),
+            explorer.set_bmc_root_credentials(bmc_mac_address, &credentials),
+        )
+        .await;
+        assert!(
+            outer.is_err(),
+            "the outer future should have been cancelled while the Vault write was still stalled"
+        );
+
+        // Despite the cancellation, the spawned task keeps running: it finishes
+        // the Vault write and then commits the convergence record. Poll until the
+        // row lands (or fail after a generous bound).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let converged: Option<i32> = sqlx::query_scalar(
+                "SELECT current_version FROM device_credential_rotation \
+                 WHERE device_mac = $1 AND credential_type = $2",
+            )
+            .bind(bmc_mac_address)
+            .bind(db::credential_rotation::CredentialRotationType::Bmc)
+            .fetch_optional(&pool)
+            .await?;
+            if converged.is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "convergence record never landed after the outer future was cancelled mid \
+                 Vault write -- the Vault write is not inside the cancellation-surviving task \
+                 (issue #5963)"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        Ok(())
     }
 }

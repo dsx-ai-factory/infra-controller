@@ -553,6 +553,189 @@ async fn test_suppression_is_acknowledged_before_precondition_failure(
     Ok(())
 }
 
+/// Regression test for issue #5963: one unresponsive endpoint must not stall
+/// the whole discovery cycle.
+///
+/// `explore_site` drains its `FuturesUnordered` task set to completion (see the
+/// comment above `task_set.collect::<Vec<_>>().await` in `lib.rs`) before
+/// persisting any results, so without a per-endpoint bound a single BMC whose
+/// connection hangs would hold the entire cycle open -- not even recording the
+/// endpoints that finished exploring fine. `try_explore_endpoint` wraps each
+/// `explore_endpoint` call in a `site_explorer.exploration_timeout` deadline to
+/// prevent that.
+///
+/// The invariant this test protects going forward: one endpoint made to hang
+/// via `block_next_exploration` reaches its configured deadline and is recorded
+/// with an `ExplorationTimeout` error, while every other endpoint in the same
+/// cycle is still explored and persisted, and the cycle itself completes within
+/// an outer test-level timeout. It then runs a second cycle to confirm the
+/// timed-out endpoint is simply retried and recovers -- the deadline bounds one
+/// endpoint, it does not permanently wedge it.
+#[sqlx_test]
+async fn test_one_hung_endpoint_does_not_block_the_whole_exploration_cycle(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let mut stuck_machine = env.new_machine("02:00:00:00:59:63", "VendorStuck");
+    let mut healthy_machine = env.new_machine("02:00:00:00:59:64", "VendorHealthy");
+    stuck_machine.discover_dhcp(env.api()).await?;
+    healthy_machine.discover_dhcp(env.api()).await?;
+    let stuck_ip: IpAddr = stuck_machine.ip.parse()?;
+    let healthy_ip: IpAddr = healthy_machine.ip.parse()?;
+
+    let stuck_report = EndpointExplorationReport {
+        endpoint_type: EndpointType::Bmc,
+        ..Default::default()
+    };
+    let healthy_report = EndpointExplorationReport {
+        endpoint_type: EndpointType::Bmc,
+        ..Default::default()
+    };
+
+    let explorer_config = SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 2,
+        concurrent_explorations: 2,
+        run_interval: Duration::from_secs(1),
+        // Short enough that the stuck endpoint's per-endpoint deadline fires
+        // well within this test's outer 8s bound. The default (2 minutes)
+        // would exceed that bound.
+        exploration_timeout: Duration::from_millis(500),
+        create_machines: Arc::new(false.into()),
+        create_power_shelves: Arc::new(false.into()),
+        create_switches: Arc::new(false.into()),
+        ..Default::default()
+    };
+    // Held in an `Arc` so the same explorer survives the first (spawned) cycle
+    // and can be driven through a second cycle below to prove the stuck endpoint
+    // recovers.
+    let explorer = Arc::new(env.test_site_explorer(explorer_config));
+    explorer.insert_endpoints(vec![(stuck_ip, stuck_report), (healthy_ip, healthy_report)]);
+
+    // Whichever of the two endpoints is scheduled first will grab this
+    // blocker and hang forever -- we don't need to know (or control) which
+    // one that ends up being: `wait_until_started` tells us.
+    let blocker = explorer.endpoint_explorer().block_next_exploration();
+    let mock = explorer.endpoint_explorer().clone();
+
+    let run_explorer = explorer.clone();
+    let run = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(8), run_explorer.run_single_iteration()).await
+    });
+
+    // Bound the wait: if `run_single_iteration` were to exit before ever calling
+    // `explore_endpoint` (so the blocker never engages), this would otherwise hang
+    // forever. Fail the test cleanly instead.
+    let stuck_address = tokio::time::timeout(Duration::from_secs(5), blocker.wait_until_started())
+        .await
+        .expect(
+            "no endpoint exploration started within 5s -- run_single_iteration never reached \
+             explore_endpoint, so the blocker never engaged",
+        );
+    let healthy_address = if stuck_address == stuck_ip {
+        healthy_ip
+    } else {
+        stuck_ip
+    };
+
+    // Poll (bounded) for the healthy endpoint's exploration to show up on the
+    // mock's call list, instead of a fixed sleep -- it isn't blocked so it
+    // should complete almost immediately, but a fixed sleep can flake under a
+    // loaded CI worker that doesn't get around to scheduling it in time.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if mock
+                .explore_endpoint_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.ip_address == healthy_address)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect(
+        "healthy endpoint's exploration should have been attempted \
+         even though the other endpoint is stuck",
+    );
+
+    let result = run
+        .await
+        .expect("run_single_iteration task panicked")
+        .expect(
+            "run_single_iteration did not complete within the outer test timeout -- \
+             one hung BMC exploration blocked the entire cycle (issue #5963)",
+        );
+    result?;
+
+    let mut txn = env.pool.begin().await?;
+    let healthy_after = db::explored_endpoints::find_all_by_ip(healthy_address, txn.as_mut())
+        .await?
+        .pop()
+        .expect("healthy endpoint's exploration result should have been persisted");
+    txn.commit().await?;
+    assert!(
+        healthy_after.report.last_exploration_error.is_none(),
+        "healthy endpoint should have a clean report even though the other endpoint hung"
+    );
+
+    let mut txn = env.pool.begin().await?;
+    let stuck_after = db::explored_endpoints::find_all_by_ip(stuck_address, txn.as_mut())
+        .await?
+        .pop()
+        .expect(
+            "stuck endpoint's exploration result should have been persisted, with a timeout error",
+        );
+    txn.commit().await?;
+    assert!(
+        matches!(
+            stuck_after.report.last_exploration_error,
+            Some(EndpointExplorationError::ExplorationTimeout { .. })
+        ),
+        "stuck endpoint should be recorded with an ExplorationTimeout error, got {:?}",
+        stuck_after.report.last_exploration_error
+    );
+
+    // The timeout must not permanently wedge the endpoint: it should be retried
+    // and recover on the next cycle. Release the (single-use, already consumed)
+    // blocker so nothing hangs, then run a second cycle. This time the formerly
+    // stuck endpoint explores normally and its persisted timeout error clears.
+    blocker.release();
+
+    let calls_before_retry = mock.explore_endpoint_call_count();
+    tokio::time::timeout(Duration::from_secs(8), explorer.run_single_iteration())
+        .await
+        .expect("second exploration cycle did not complete within the outer test timeout")?;
+    assert!(
+        mock.explore_endpoint_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(calls_before_retry)
+            .any(|call| call.ip_address == stuck_address),
+        "the formerly stuck endpoint should be re-explored on the next cycle"
+    );
+
+    let mut txn = env.pool.begin().await?;
+    let stuck_recovered = db::explored_endpoints::find_all_by_ip(stuck_address, txn.as_mut())
+        .await?
+        .pop()
+        .expect("stuck endpoint should still be present after the retry cycle");
+    txn.commit().await?;
+    assert!(
+        stuck_recovered.report.last_exploration_error.is_none(),
+        "the formerly stuck endpoint's timeout error should clear once it explores successfully, \
+         got {:?}",
+        stuck_recovered.report.last_exploration_error
+    );
+
+    Ok(())
+}
+
 #[sqlx_test]
 async fn test_suppression_acknowledgement_waits_for_in_flight_exploration(
     pool: PgPool,
@@ -1913,6 +2096,7 @@ async fn test_site_explorer_audit_exploration_results(
         explorations_per_run: 7,
         concurrent_explorations: 1,
         run_interval: std::time::Duration::from_secs(1),
+        exploration_timeout: SiteExplorerConfig::default_exploration_timeout(),
         create_machines: Arc::new(true.into()),
         machines_created_per_run: 1,
         override_target_ip: None,

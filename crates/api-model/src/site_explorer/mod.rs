@@ -1260,6 +1260,15 @@ pub enum EndpointExplorationError {
     #[error("the connection to the endpoint was refused: {details:?}")]
     #[serde(rename_all = "PascalCase")]
     ConnectionRefused { details: String },
+    /// The exploration as a whole (not a single request) did not complete
+    /// within the configured `[site_explorer] exploration_timeout`. Unlike
+    /// `ConnectionTimeout` (a single reqwest request timing out), this means
+    /// the entire multi-request exploration of this endpoint ran long enough
+    /// to be forcibly cut off, so the rest of the exploration cycle isn't
+    /// blocked waiting on it. The endpoint is retried on the next cycle.
+    #[error("exploration did not complete within the configured deadline ({timeout_secs}s)")]
+    #[serde(rename_all = "PascalCase")]
+    ExplorationTimeout { timeout_secs: u64 },
     /// Some other generic error happened while attempting to connect
     /// and make a request (or receive a response) from the endpoint
     /// which was not otherwise handled by connection timeout or
@@ -1369,6 +1378,15 @@ impl EndpointExplorationError {
          known UEFI/BMC race and re-explores on its next run (~2 min). It escalates to a BMC \
          reset if the empty BIOS attributes persist.";
 
+    /// Build an [`EndpointExplorationError::ExplorationTimeout`] from the
+    /// configured deadline. The reported seconds are rounded UP: a sub-second
+    /// timeout (e.g. 500ms) would otherwise floor to `0s` via `Duration::as_secs`
+    /// and misleadingly read as an immediate/zero timeout in the error message.
+    pub fn exploration_timed_out(timeout: std::time::Duration) -> Self {
+        let timeout_secs = timeout.as_secs() + u64::from(timeout.subsec_nanos() > 0);
+        EndpointExplorationError::ExplorationTimeout { timeout_secs }
+    }
+
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, EndpointExplorationError::Unauthorized { .. })
             || matches!(self, EndpointExplorationError::AvoidLockout)
@@ -1380,6 +1398,7 @@ impl EndpointExplorationError {
             EndpointExplorationError::ConnectionTimeout { .. }
                 | EndpointExplorationError::ConnectionRefused { .. }
                 | EndpointExplorationError::Unreachable { .. }
+                | EndpointExplorationError::ExplorationTimeout { .. }
         )
     }
 
@@ -1422,6 +1441,9 @@ impl OperatorError for EndpointExplorationError {
                 ErrorCode::nico(SiteExplorer, 101)
             }
             EndpointExplorationError::Unreachable { .. } => ErrorCode::nico(SiteExplorer, 102),
+            EndpointExplorationError::ExplorationTimeout { .. } => {
+                ErrorCode::nico(SiteExplorer, 103)
+            }
             EndpointExplorationError::UnsupportedVendor { .. } => {
                 ErrorCode::nico(SiteExplorer, 120)
             }
@@ -1456,6 +1478,11 @@ impl OperatorError for EndpointExplorationError {
             | EndpointExplorationError::ConnectionRefused { .. }
             | EndpointExplorationError::Unreachable { .. } => Some(
                 "Verify endpoint network reachability and that the BMC Redfish service is listening.",
+            ),
+            EndpointExplorationError::ExplorationTimeout { .. } => Some(
+                "Retries automatically on the next exploration cycle. If this persists for one \
+                 endpoint, check its BMC's health and network path; if healthy-but-slow endpoints \
+                 are being falsely flagged, raise site_explorer.exploration_timeout.",
             ),
             EndpointExplorationError::UnsupportedVendor { .. }
             | EndpointExplorationError::MissingVendor { .. } => Some(
@@ -2328,6 +2355,35 @@ mod explored_mlx_device_tests {
     }
 
     #[test]
+    fn exploration_timeout_rounds_subsecond_up_to_one_second() {
+        // A sub-second timeout must not floor to 0s, which would misleadingly
+        // read as an immediate/zero timeout in the error message.
+        let err =
+            EndpointExplorationError::exploration_timed_out(std::time::Duration::from_millis(500));
+        assert_eq!(
+            err,
+            EndpointExplorationError::ExplorationTimeout { timeout_secs: 1 }
+        );
+
+        // A whole-second timeout is reported exactly, not rounded up.
+        let err =
+            EndpointExplorationError::exploration_timed_out(std::time::Duration::from_secs(120));
+        assert_eq!(
+            err,
+            EndpointExplorationError::ExplorationTimeout { timeout_secs: 120 }
+        );
+
+        // A timeout just over a whole second still rounds up to the next second.
+        let err = EndpointExplorationError::exploration_timed_out(
+            std::time::Duration::from_millis(1_500),
+        );
+        assert_eq!(
+            err,
+            EndpointExplorationError::ExplorationTimeout { timeout_secs: 2 }
+        );
+    }
+
+    #[test]
     fn is_bf4_dpu_part_number_matches_vera_rubin_sku() {
         assert!(is_bf4_dpu_part_number("900-9D4B4-CWAA-TSA"));
         assert!(is_bf4_dpu_part_number("900-9D4A4-00CB-TS4"));
@@ -2866,6 +2922,7 @@ mod tests {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum MitigationGroup {
         Network,
+        Timeout,
         HardwareCompatibility,
         Credentials,
         IntermittentCredentials,
@@ -2898,6 +2955,12 @@ mod tests {
                     Self::HardwareCompatibility
                 }
                 Some(mitigation) if mitigation.contains("network reachability") => Self::Network,
+                Some(mitigation)
+                    if mitigation
+                        .contains("Retries automatically on the next exploration cycle") =>
+                {
+                    Self::Timeout
+                }
                 Some(mitigation) => panic!("unclassified mitigation: {mitigation}"),
             }
         }
@@ -2995,6 +3058,19 @@ mod tests {
                         },
                         None,
                         Network,
+                    ),
+                },
+                Check {
+                    scenario: "exploration timeout",
+                    input: EndpointExplorationError::ExplorationTimeout { timeout_secs: 120 },
+                    expect: expected_error_behavior(
+                        ErrorCode::nico(SiteExplorer, 103),
+                        EndpointPredicates {
+                            unreachable: true,
+                            ..Default::default()
+                        },
+                        None,
+                        Timeout,
                     ),
                 },
                 Check {
