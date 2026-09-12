@@ -198,6 +198,8 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 		flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, "rack-id-1",
 	)
 
+	mockComponent.Bmcs = []*flowv1.BMCInfo{{MacAddress: "d8:ab:cd:ef:00:01"}}
+
 	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
@@ -222,6 +224,15 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			mockComponent:  mockComponent,
 			expectedStatus: http.StatusOK,
 			wantErr:        false,
+		},
+		{
+			name:           "success - get tray by response MAC",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         model.NewAPITray(mockComponent).BMCs[0].MacAddress,
+			queryParams:    map[string]string{"siteId": site.ID.String()},
+			mockComponent:  mockComponent,
+			expectedStatus: http.StatusOK,
 		},
 		{
 			name:   "failure - Flow not enabled on site",
@@ -331,6 +342,8 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			assert.Equal(t, trayID, apiTray.ID)
 			assert.Equal(t, "Compute", apiTray.Type)
 			assert.Equal(t, "NVIDIA", apiTray.Manufacturer)
+			require.Len(t, apiTray.BMCs, 1)
+			assert.Equal(t, "d8:ab:cd:ef:00:01", apiTray.BMCs[0].MacAddress)
 		})
 	}
 }

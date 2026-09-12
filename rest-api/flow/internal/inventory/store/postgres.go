@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -429,6 +430,9 @@ func (s *PostgresStore) GetComponentByBMCMAC(
 	}
 
 	c, err := model.GetComponentByBMCMAC(ctx, s.pg.DB, macAddress)
+	if stderrors.Is(err, model.ErrAmbiguousBMCMAC) {
+		return nil, status.Errorf(codes.FailedPrecondition, "component with BMC MAC %q is ambiguous", macAddress)
+	}
 	if err != nil {
 		return nil, s.checkDBGetError(err, fmt.Sprintf("component with BMC MAC %s", macAddress))
 	}
