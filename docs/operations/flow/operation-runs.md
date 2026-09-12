@@ -78,7 +78,7 @@ deterministic and auditable. Selection rounds up: 1% of three candidate racks se
 
 - `max_concurrent_targets`: required positive maximum for concurrent target work.
 - `safety_policy`: required, with at least one safety gate.
-- `conflict_policy`: optional; defaults are operation-type/code based.
+- `conflict_policy`: optional; defaults to retry with the durations listed below.
 - `ordering_policy`: optional; defaults to random ordering with generated seed.
 - `phase_policy`: optional; defaults to one phase containing all selected
   targets.
@@ -93,23 +93,35 @@ Supported gates are:
 - `OperationRunFailureRateGate`
 - `OperationRunFailureCountGate`
 
-Both require a `CURRENT_PHASE` or `CUMULATIVE_RUN` scope. Failure-rate thresholds are integers from 1 through 100 percent; failure-count thresholds must be positive. Failure rate uses
+Both support `CURRENT_PHASE` or `CUMULATIVE_RUN` scope. Omitting `scope` or sending
+`UNKNOWN` defaults to `CURRENT_PHASE`. Failure-rate thresholds are integers from 1 through 100 percent; failure-count thresholds must be positive. Failure rate uses
 `failed_targets / planned_targets` for the selected scope.
 
 ### Ordering, Conflict, And Phases
 
 Ordering is a `oneof` policy. Random ordering is supported. Physical-location ordering has a protobuf policy branch but is rejected by the planner.
 
-Conflict handling supports retry policy only. Missing retry durations
-are filled from operation-specific defaults and stored as effective
-configuration.
+Conflict handling supports retry policy only. Omitting `conflict_policy` uses
+retry; each omitted retry duration defaults independently as follows and is
+stored in the effective configuration:
+
+| Field | Default |
+|---|---|
+| `retry_timeout` | 1 hour |
+| `initial_retry_delay` | 30 seconds |
+| `max_retry_delay` | 5 minutes |
+
+All three durations must be positive, and `max_retry_delay` must be at least
+`initial_retry_delay`. Exceeding the retry timeout pauses the run with
+`CONFLICT_RETRY_TIMEOUT`.
 
 Phase policy supports equal phases, explicit percentage phases, and explicit
 count phases. For count phases, configured counts define the early phases; the
 final generated phase covers the remaining targets. Percentage phases must sum to 100. Phase allocation uses cumulative rounding; for seven targets, 50%/50% gives four and three. A phase that receives zero targets is rejected, so use fewer phases for small cohorts.
 
-`OperationRunPhaseAdvancePolicy.auto_advance` controls phase boundaries. When
-false, a successful phase pauses with `PHASE_GATE` and waits for
+`OperationRunPhaseAdvancePolicy.auto_advance` controls phase boundaries and
+defaults to false, including when `advance_policy` is omitted. When false, a
+successful non-final phase pauses with `PHASE_GATE` and waits for
 `AdvanceOperationRunPhase`. When true, the dispatcher advances automatically as long
 as safety gates are not tripped.
 

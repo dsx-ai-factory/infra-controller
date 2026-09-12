@@ -190,7 +190,7 @@ Creates a schedule and its initial scope in a single transaction.
 
 | Field | Default | Notes |
 |---|---|---|
-| `schedule.spec.timezone` | `"UTC"` | IANA timezone name (e.g. `"America/Los_Angeles"`), only used for cron specs. Abbreviations like `"PT"` or `"EST"` are not valid. |
+| `schedule.spec.timezone` | `"UTC"` | IANA timezone name (e.g. `"America/Los_Angeles"`), only used for cron specs. Alias availability (for example, `"EST"`) depends on the deployed Go timezone database; unrecognized names are rejected. Prefer full IANA location names. |
 | `schedule.overlap_policy` | `skip` | `SKIP` or `QUEUE`. |
 
 The initial scope is derived from the operation's `target_spec`. Use the scope
@@ -205,10 +205,14 @@ required and controls which fields are written.
 
 | Mask path | Effect |
 |---|---|
-| `"schedule.name"` | Replaces the display name. |
+| `"schedule.name"` | Replaces the display name; it must remain unique across all schedules. |
 | `"schedule.overlap_policy"` | Replaces the overlap behaviour. |
 | `"schedule.spec"` | Replaces the full spec block (type + spec string). `next_run_at` is recomputed. |
 | `"schedule.spec.timezone"` | Replaces the timezone only. The spec type and string are unchanged. |
+
+Renaming a schedule to another schedule's name fails the database uniqueness
+constraint and returns gRPC `UNKNOWN`. The update is rejected without changing
+the schedule, including other fields supplied in the same request.
 
 The operation itself (what the schedule runs) and scope (which racks it targets)
 cannot be changed via `UpdateTaskSchedule`. To change the operation, delete the
