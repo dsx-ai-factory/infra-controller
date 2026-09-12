@@ -280,6 +280,40 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
         services: Option<&[i32]>,
     ) -> Result<String, ComponentManagerError>;
 
+    /// Submits asynchronous certificate configuration for all `endpoints`.
+    ///
+    /// `endpoints` must be non-empty. A successful submission returns before
+    /// certificate configuration completes and provides a non-empty, opaque
+    /// parent job ID. Callers must pass that ID to
+    /// [`Self::get_configure_switch_certificate_job_status`] until the batch
+    /// reaches a terminal state. A present `domain_name` is passed to the
+    /// backend unchanged; `None` omits the domain. `services` contains backend
+    /// service identifiers, including duplicates, in slice order. `None` and an
+    /// empty slice request no explicit service bindings.
+    ///
+    /// A submission error does not establish that automatic resubmission is
+    /// safe unless it is [`ComponentManagerError::RejectedBeforeDispatch`] or
+    /// [`ComponentManagerError::Unsupported`]. The default implementation
+    /// returns [`ComponentManagerError::Unsupported`].
+    async fn batch_configure_switch_certificate(
+        &self,
+        _endpoints: &[SwitchEndpoint],
+        _domain_name: Option<&str>,
+        _services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(
+            "rack-wide switch certificate configuration is not supported by this backend"
+                .to_string(),
+        ))
+    }
+
+    /// Returns the aggregate state of a submitted certificate batch.
+    ///
+    /// [`ConfigureSwitchCertificateState::Started`] and
+    /// [`ConfigureSwitchCertificateState::InProgress`] are non-terminal.
+    /// [`ConfigureSwitchCertificateState::Completed`] and
+    /// [`ConfigureSwitchCertificateState::Failed`] are terminal. Observation
+    /// errors do not establish that resubmitting the certificate batch is safe.
     async fn get_configure_switch_certificate_job_status(
         &self,
         job_id: &str,

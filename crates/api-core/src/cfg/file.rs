@@ -3488,7 +3488,7 @@ pub struct RackStateControllerConfig {
     pub controller: StateControllerConfig,
 
     /// Switch mTLS services for NMX cluster setup. Accepted and ignored: rack
-    /// maintenance does not configure switch certificates. Per-switch
+    /// `ConfigureNmxCluster` uses the fixed `nvue_api` binding. Per-switch
     /// certificate configuration uses
     /// `[switch_state_controller].switch_mtls_services`.
     #[serde(default)]

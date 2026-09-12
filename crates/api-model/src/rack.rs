@@ -490,11 +490,10 @@ impl Display for RackMaintenanceState {
 
 /// Sub-states of `RackMaintenanceState::ConfigureNmxCluster`.
 ///
-/// `Start` submits the asynchronous RMS ScaleUpFabricManager workflow.
-/// `WaitForScaleUpFabricManagerJob` polls the submitted job; after it
-/// completes, NICo reads the observed fabric status, validates the
-/// RMS-selected primary, persists it with the per-switch Fabric Manager
-/// status, and advances to the next requested maintenance activity.
+/// `Start` rotates every rack switch's NVUE certificate before submitting the
+/// asynchronous RMS ScaleUpFabricManager workflow.
+/// `WaitForSwitchCertificateJob` polls the certificate batch, and
+/// `WaitForScaleUpFabricManagerJob` polls the fabric-manager job.
 ///
 /// The remaining variants name sub-states of a workflow this version does not
 /// run. A `controller_state` row can still hold one, so they are decoded to
@@ -503,6 +502,12 @@ impl Display for RackMaintenanceState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfigureNmxClusterState {
     Start,
+
+    /// Waits for the RMS switch-certificate batch to complete.
+    WaitForSwitchCertificateJob {
+        /// Parent RMS job identifier returned by batch certificate configuration.
+        job_id: String,
+    },
 
     WaitForScaleUpFabricManagerJob {
         /// RMS job identifier returned by submission.
@@ -527,6 +532,9 @@ impl Display for ConfigureNmxClusterState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConfigureNmxClusterState::Start => write!(f, "Start"),
+            ConfigureNmxClusterState::WaitForSwitchCertificateJob { job_id } => {
+                write!(f, "WaitForSwitchCertificateJob({job_id})")
+            }
             ConfigureNmxClusterState::WaitForScaleUpFabricManagerJob { job_id } => {
                 write!(f, "WaitForScaleUpFabricManagerJob({job_id})")
             }
