@@ -52,6 +52,20 @@ spec:
                   per-device BMC credentials. The secret must contain a "password" key with the BMC credential value.
                   If specified, this password takes precedence over the shared bmc-shared-password secret.
                 type: string
+              bmcFactoryResetPolicy:
+                default: OnInitialization
+                description: |-
+                  BMCFactoryResetPolicy controls whether DPF resets this DPU BMC to factory defaults
+                  while initializing the DPUDevice. The reset clears all BMC configuration, including
+                  network settings, so the BMC must obtain its address via DHCP.
+                  - OnInitialization (default): reset the BMC once, while the DPUDevice is initialized.
+                  - Never: never reset.
+                  The value is honored only until the factory reset step finishes; changing it
+                  after BMCFactoryResetReady is True has no effect.
+                enum:
+                - OnInitialization
+                - Never
+                type: string
               bmcIp:
                 description: |-
                   BMCIP is the IP address of the BMC (Base Management Controller) on the device.
@@ -169,6 +183,13 @@ spec:
               bmcCredentialSecretName:
                 description: BMCCredentialSecretName is the name of the Secret last
                   used successfully for BMC authentication.
+                type: string
+              bmcFactoryResetRequestTime:
+                description: |-
+                  BMCFactoryResetRequestTime is when DPF submitted ResetToDefaults to the BMC.
+                  It is nil until the request has been accepted, and once set it is never cleared:
+                  it is what keeps the BMC from being reset again for this DPUDevice.
+                format: date-time
                 type: string
               bmcIp:
                 description: |-

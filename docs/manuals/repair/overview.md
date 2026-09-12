@@ -35,11 +35,13 @@ In a multi-Tenant Site, NICo allows certain Tenants to be designated as privileg
 - Update the labels of a Machine to indicate repair related metadata
 - Create a new Instance by specifying a Machine ID
 
-Tenant privileges are described in terms of Capabilities. The capabilities of a Tenant can be viewed by calling the [`GET /v2/org/{org}/nico/tenant/current` REST API endpoint](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/tenant/get-current-tenant) and inspecting the `capabilities` field. To elevate a Tenants privileges so they can access the above endpoints, the Tenant must have the `targetedInstanceCreation` capability enabled.
+Tenant privileges are described in terms of Capabilities. A Tenant is privileged at a Site when its Tenant Account with that Site's Provider is `Ready` and `targetedInstanceCreation` is effective there, meaning the account default enables it and no Site override turns it off.
 
-In service account mode, the `targetedInstanceCreation` capability is granted to Service Account Tenant when [`GET /v2/org/{org}/nico/service-account/current` REST API endpoint](https://docs.nvidia.com/infra-controller/rest-api-reference/api-reference/service-account/get-current-service-account) is called.
+A Provider Admin grants the capability by setting `siteCapabilities` on the Tenant Account, through [`PATCH /v2/org/{org}/nico/tenant/account/{accountId}`](api:PATCH/v2/org/:org/nico/tenant/account/:accountId). This works for regular Tenants as well as Service Account orgs, and the capability can be set as an account-wide default or overridden per Site. For the payload rules, the per-Site override behavior, and how the effective value resolves, see [Granting Targeted Instance Creation](../../configuration/tenant_management.md#granting-targeted-instance-creation).
 
-At present turning this capability on for regular Tenants (who are not part of a Service Account org) is not supported via the REST API. However the feature is in active development and can be tracked in [issue #2104](https://github.com/dsx-ai-factory/infra-controller/issues/2104).
+To read the current value, call [`GET /v2/org/{org}/nico/tenant/account`](api:GET/v2/org/:org/nico/tenant/account) and inspect `siteCapabilities`. Do not use the `capabilities` field on `GET /tenant/current`: it is a deprecated read-only aggregate scheduled for removal on October 1, 2026, and it omits `targetedInstanceCreation` rather than returning `false`. On the Tenant summaries embedded in other resources it is always omitted, so `capabilities` serializes as `{}` regardless of the real value.
+
+In Service Account mode, [`GET /v2/org/{org}/nico/service-account/current`](api:GET/v2/org/:org/nico/service-account/current) creates a `Ready` Tenant Account with the capability already enabled, so a Service Account org is privileged without a separate grant.
 
 NOTE: Privileged Tenants still need Network Allocations from Provider in order to create Instances.
 

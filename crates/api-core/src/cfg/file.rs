@@ -729,39 +729,13 @@ pub struct CarbideConfig {
     )]
     pub mlxconfig_profiles: Option<HashMap<String, MlxConfigProfile>>,
 
-    /// The intent of this config option is to use the NICo site controller as a standalone
-    /// (disconnected / air-gapped) infrastructure manager for racks of GB200/GB300/VR144.
-    /// Only set this if using NICo site controller with Rack Manager to manage GB200/300/VR144.
-    /// It will change site controller behavior significantly in the following ways, etc.:
-    /// 1. skip DPU management and use DPUs as NICs (set the site-wide `[site_explorer] dpu_policy = "nic"`, or per-host `ExpectedMachine.dpu_policy`)
-    ///    a. no dpu bfb upgrade and host power cycle
-    ///    b. no firmware upgrade and host power cycle
-    ///    c. no hbn deployment (no ecmp, etc)
-    ///    d. no dpu agent deployment
-    ///    e. no restricted mode configuration
-    ///    f. no tenant overlay network via L2 vxlan/evpn or L3 vni (fnn)
-    /// 2. support any other nic interface on the compute nodes including the onboard 3p nic
-    /// 3. require expected machines table rows to have other/all mac addresses for each machine
-    /// 4. restrict dhcp service to only provide ip address to known mac addresses
-    ///    a. for additional mac addresses, use HostInband network segment when dpu is in nic mode
-    /// 5. disable compute host individual firmware upgrades
-    ///    a. only rack level firmware upgrades are allowed
-    /// 6. enable nvlink switch and power shelf discovery and ingestion
-    ///    a. site explorer changes to explore switch and power shelf bmc
-    ///    b. state machine for ingestion workflow
-    ///    c. nvlink switch nvos deployment/upgrade via onie
-    ///    d. nvlink switch default configuration and machine validation
-    /// 7. enable rack state machine and calls to rack manager
-    ///    a. depend on rack manager for firmware upgrades of the rack
-    ///    b. depend on rack manager for all power sequencing of the rack and components
-    ///    c. override/suspend component level state machine state transitions as needed
-    /// 8. enable nvlink control plane integration with nmx-c
-    ///    a. export nmx-c apis via site controller
-    ///    b. hardware health daemon polling of switch telemetry and collection into site controller
-    ///    prometheus instance
-    /// 9. enable domain power service integration
-    #[serde(default)]
-    pub rack_management_enabled: bool,
+    /// Deprecated compatibility key. This setting no longer affects runtime
+    /// behavior now that expected-machine DHCP lookup is unconditional. It
+    /// remains accepted so strict unknown-field validation does not block
+    /// upgrades from configurations that still contain the key.
+    #[doc(hidden)]
+    #[serde(default, rename = "rack_management_enabled", skip_serializing)]
+    pub deprecated_rack_management_enabled: Option<bool>,
 
     /// Rack Manager Service configuration for rack-level firmware upgrades,
     /// power sequencing, and mTLS connectivity.
@@ -2374,18 +2348,15 @@ fn append_gb200_label_suffix(label_key: &str) -> String {
 /// the `provisioning.dpu.nvidia.com/v1alpha1` `BlueFieldSoftware` CR.
 ///
 /// The PLDM firmware bundle is PSID-specific, so `pldm_fw_bundle` maps each PSID
-/// to its bundle URL. One `BlueFieldSoftware` CR and one DPUDeployment are
-/// created per PSID (see
-/// [`DpfDeploymentConfig::per_psid_deployment_name`] and
-/// [`DpfDeploymentConfig::per_psid_node_label_key`]).
+/// to its bundle URL. A single `BlueFieldSoftware` CR carries the complete map
+/// so DPF can select the matching bundle for each DPU model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DpfBlueFieldSoftwareConfig {
     /// OS ISO URL used by the DPU OS installation flow (`spec.osIso`). Shared
     /// across all PSIDs.
     pub os_iso: String,
-    /// Map of PSID → PLDM firmware bundle URL (`spec.pldmFwBundle`). Each entry
-    /// fans out to its own `BlueFieldSoftware` CR and DPUDeployment.
+    /// Map of PSID → PLDM firmware bundle URL (`spec.pldmFwBundle`).
     #[serde(default)]
     pub pldm_fw_bundle: BTreeMap<String, String>,
 }
@@ -2550,14 +2521,9 @@ impl DpfDeploymentsConfig {
                 (None, None) => errors.push(format!(
                     "deployment {name:?} sets neither bfb_url nor bluefield_software; set exactly one"
                 )),
-                // Exactly one PSID entry is allowed for now. Multi-PSID support
-                // is pending a DPF change that lets one `BlueFieldSoftware` CR
-                // carry a PSID→PLDM map; until then a single BF4 deployment uses
-                // the one entry's PLDM bundle.
-                (None, Some(bfs)) if bfs.pldm_fw_bundle.len() != 1 => errors.push(format!(
-                    "deployment {name:?} bluefield_software.pldm_fw_bundle must have exactly one \
-                     PSID → PLDM bundle URL entry (found {}).",
-                    bfs.pldm_fw_bundle.len()
+                (None, Some(bfs)) if bfs.pldm_fw_bundle.is_empty() => errors.push(format!(
+                    "deployment {name:?} bluefield_software.pldm_fw_bundle must have at least one \
+                     PSID → PLDM bundle URL entry.",
                 )),
                 _ => {}
             }
@@ -8114,16 +8080,7 @@ helm_repo_url = "oci://registry.example.test/doca"
     }
 
     #[test]
-    fn validate_provisioning_sources_requires_exactly_one_psid() {
-        // Exactly one PSID entry is accepted.
-        let one = DpfDeploymentsConfig {
-            bf3: DpfDeploymentConfig::default(),
-            bf4_generic: Some(bf4_config(None, Some(bf4_with_psids(&["MT_0000000884"])))),
-            bf4_astra: None,
-        };
-        assert!(one.validate_provisioning_sources().is_ok());
-
-        // More than one PSID is rejected (multi-PSID support is pending a DPF change).
+    fn validate_provisioning_sources_accepts_multiple_psids() {
         let many = DpfDeploymentsConfig {
             bf3: DpfDeploymentConfig::default(),
             bf4_generic: Some(bf4_config(
@@ -8132,6 +8089,6 @@ helm_repo_url = "oci://registry.example.test/doca"
             )),
             bf4_astra: None,
         };
-        assert!(many.validate_provisioning_sources().is_err());
+        assert!(many.validate_provisioning_sources().is_ok());
     }
 }

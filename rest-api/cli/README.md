@@ -174,6 +174,7 @@ The scalar fields listed below can also be set via a `NICO_*` environment variab
 | `NICO_TOKEN_COMMAND` | `auth.token_command` | Shell command that prints a bearer token |
 | `NICO_AUTH_SCRIPT` | `auth.token_command` | Alias of `NICO_TOKEN_COMMAND` (canonical name wins when both set) |
 | `NICO_TOKEN_URL` | `auth.oidc.token_url` | |
+| `NICO_KEYCLOAK_REALM` | `auth.oidc.realm` | Used only when the token endpoint is built from `--keycloak-url` |
 | `NICO_CLIENT_ID` | `auth.oidc.client_id` | |
 | `NICO_CLIENT_SECRET` | `auth.oidc.client_secret` | |
 | `NICO_OIDC_USERNAME` | `auth.oidc.username` | |
@@ -185,7 +186,14 @@ The scalar fields listed below can also be set via a `NICO_*` environment variab
 | `NICO_AUTHN_URL` | `auth.api_key.authn_url` | Required for legacy NGC keys; ignored for `nvapi-` bearer keys |
 | `NICO_API_KEY_TOKEN` | `auth.api_key.token` | Persisted token after NGC exchange |
 
-`NICO_KEYCLOAK_URL` and `NICO_KEYCLOAK_REALM` do not map to a single config field; they feed the login command and construct the OIDC `token_url` at login time.
+`NICO_KEYCLOAK_URL` does not map to a config field of its own; it feeds the login command and
+constructs the OIDC `token_url`, which is what gets persisted.
+
+`--keycloak-realm` and `--client-id` both carry built-in defaults (`nico-dev` and `nico-api`)
+that match the Kustomize development realm, not the realm `helm-prereqs/setup.sh` installs.
+Set `auth.oidc.realm` and `auth.oidc.client_id` for your deployment rather than relying on
+them. When a login fails, the error names the token endpoint it contacted and any value that
+came from a built-in default.
 
 Client-credentials configurations can also set `auth.oidc.scopes` as a YAML list,
 `auth.oidc.token_parameters` as a map of additional non-secret form parameters,
@@ -307,7 +315,7 @@ Commands follow `nicocli <resource> [sub-resource] <action> [args] [flags]`.
 
 Nested API paths appear as sub-resource groups:
 
-```text
+```bash
 nicocli allocation list
 nicocli allocation constraint list
 nicocli allocation constraint create <allocationId>

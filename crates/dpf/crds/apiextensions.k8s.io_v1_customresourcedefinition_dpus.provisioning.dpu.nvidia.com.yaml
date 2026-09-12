@@ -324,6 +324,28 @@ spec:
                 description: AgentStatus contains the information reported from inside
                   the DPU
                 properties:
+                  clock:
+                    description: |-
+                      Clock is the DPU clock compared against the host clock, recorded while the DPU agent was
+                      acquiring its identity. A DPU whose clock is skewed cannot verify the API server certificate,
+                      so it never obtains the identity it would need to report this itself. Set by the host agent,
+                      in trusted-host mode only.
+                    properties:
+                      dpuTime:
+                        description: dpuTime is the DPU clock as reported by the DPU
+                          agent.
+                        format: date-time
+                        type: string
+                      hostTime:
+                        description: |-
+                          hostTime is the host clock when that report arrived. The host is the trusted side of the
+                          comparison, so a difference is attributed to the DPU.
+                        format: date-time
+                        type: string
+                    required:
+                    - dpuTime
+                    - hostTime
+                    type: object
                   conditions:
                     description: Conditions contains the conditions reported from
                       inside the DPU
@@ -404,25 +426,12 @@ spec:
                         description: succeeded indicates host OS init was released
                           or was already cleared.
                         properties:
-                          releaseAfter:
-                            description: releaseAfter echoes the effective gate used
-                              for release.
-                            properties:
-                              dpuServiceCriticalPodsReady:
-                                description: dpuServiceCriticalPodsReady waits for
-                                  DPU.status.operationalConditions[DPUServiceCriticalPodsReady]
-                                  == True.
-                                type: object
-                              operationalReady:
-                                description: operationalReady waits for DPU.status.operationalConditions[OperationalReady]
-                                  == True.
-                                type: object
-                            type: object
-                            x-kubernetes-validations:
-                            - message: exactly one of operationalReady or dpuServiceCriticalPodsReady
-                                must be set
-                              rule: '(has(self.operationalReady) ? 1 : 0) + (has(self.dpuServiceCriticalPodsReady)
-                                ? 1 : 0) == 1'
+                          gate:
+                            description: gate echoes the effective gate used for release.
+                            enum:
+                            - DPUServiceCriticalPodsReady
+                            - OperationalReady
+                            type: string
                         type: object
                     type: object
                     x-kubernetes-validations:
@@ -563,7 +572,6 @@ spec:
                     - SystemLevelReset
                     - FirmwareReset
                     - DPUWarmReboot
-                    - HostlessDPUReboot
                     type: string
                   rebootSequenceCount:
                     description: |-
@@ -857,7 +865,7 @@ spec:
                 - DPU Config
                 - DPU Cluster Config
                 - Host Network Configuration
-                - Host OS Init Release
+                - Service Readiness
                 - Ready
                 - Error
                 - Deleting
@@ -887,7 +895,7 @@ spec:
                 - DPU Config
                 - DPU Cluster Config
                 - Host Network Configuration
-                - Host OS Init Release
+                - Service Readiness
                 - Ready
                 - Error
                 - Deleting
@@ -921,7 +929,6 @@ spec:
                     - SystemLevelReset
                     - FirmwareReset
                     - DPUWarmReboot
-                    - HostlessDPUReboot
                     type: string
                   phase:
                     description: Phase is the current host reboot progress.
@@ -955,8 +962,8 @@ spec:
             - phase
             type: object
             x-kubernetes-validations:
-            - message: 'identityMode is stamp-once: can only transition from unset
-                to a value'
+            - message: 'identityMode is immutable once set: can only transition from
+                unset to a value'
               rule: '!has(oldSelf.identityMode) || (has(self.identityMode) && self.identityMode
                 == oldSelf.identityMode)'
         type: object

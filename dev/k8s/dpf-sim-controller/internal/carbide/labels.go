@@ -22,6 +22,11 @@ const (
 	LabelHostBMCIP       = "carbide.nvidia.com/host-bmc-ip"
 	LabelIsPrimaryDPU    = "carbide.nvidia.com/is-primary-dpu"
 	LabelControlledNode2 = "carbide.nvidia.com/controlled.node.v2" // on DPUNode
+	// LabelOwnedByDPUDeployment is set by the DPF DPUSet controller on every DPU it
+	// creates from a DPUDeployment. NICo lists DPUs by this label when a node's
+	// deployment type resolves to a DPUDeployment (the GB200 path), so the
+	// simulator must stamp it the same way or NICo never finds the DPU.
+	LabelOwnedByDPUDeployment = "svc.dpu.nvidia.com/owned-by-dpudeployment"
 )
 
 // Annotations exchanged on the DPF CRs.

@@ -93,8 +93,8 @@ tests:
               dpu_reboot_delay: 20
               host_reboot_delay: 10
               acceleration_factor: 0.03
-              oob_dhcp_relay_address: 10.96.64.1
-              admin_dhcp_relay_address: 192.168.176.1
+              bmc_dhcp_relay_address: 10.96.64.1
+              underlay_dhcp_relay_address: 192.168.176.1
     asserts:
       - matchRegex:
           path: data["mat.toml"]
@@ -124,8 +124,8 @@ tests:
                 - rack-001
               dpu_reboot_delay: 20
               host_reboot_delay: 10
-              oob_dhcp_relay_address: 10.96.64.1
-              admin_dhcp_relay_address: 192.168.176.1
+              bmc_dhcp_relay_address: 10.96.64.1
+              underlay_dhcp_relay_address: 192.168.176.1
     asserts:
       - matchRegex:
           path: data["mat.toml"]
@@ -175,3 +175,42 @@ tests:
       - matchRegex:
           path: data["mat.toml"]
           pattern: "enable_ipmi_simulation = true"
+
+  - it: should render the DHCP relay values under the machine-a-tron key names
+    set:
+      pods:
+        mat-0:
+          machines:
+            dell-hosts:
+              hostCount: 2
+              dpuPerHostCount: 2
+              bmcDhcpRelayAddress: "10.96.64.1"
+              underlayDhcpRelayAddress: "10.104.0.1"
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'bmc_dhcp_relay_address = "10.96.64.1"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'underlay_dhcp_relay_address = "10.104.0.1"'
+      - notMatchRegex:
+          path: data["mat.toml"]
+          pattern: '(oob|admin)_dhcp_relay_address'
+
+  - it: should still accept the deprecated oobDhcpRelayAddress and adminDhcpRelayAddress names
+    set:
+      pods:
+        mat-0:
+          machines:
+            dell-hosts:
+              hostCount: 2
+              dpuPerHostCount: 2
+              oobDhcpRelayAddress: "10.96.64.1"
+              adminDhcpRelayAddress: "10.104.0.1"
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'bmc_dhcp_relay_address = "10.96.64.1"'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'underlay_dhcp_relay_address = "10.104.0.1"'

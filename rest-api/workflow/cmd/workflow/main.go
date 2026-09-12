@@ -232,7 +232,7 @@ func main() {
 
 	w := tsdkWorker.New(tc, tcfg.Queue, tsdkWorker.Options{
 		WorkflowPanicPolicy:              tsdkWorker.FailWorkflow,
-		MaxConcurrentActivityTaskPollers: 10,
+		MaxConcurrentActivityTaskPollers: cfg.GetMaxConcurrentActivityPollers(),
 		MaxConcurrentWorkflowTaskPollers: 10,
 		Interceptors:                     wInterceptors,
 	})

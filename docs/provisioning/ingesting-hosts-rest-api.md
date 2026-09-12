@@ -8,7 +8,7 @@ Make sure the following are in place before you begin:
 
 1. NICo is deployed and the REST API service is reachable at a known URL.
 1. You have `nicocli` installed (`make nico-cli` from the infra-controller repo) and a working config under `~/.nico/`. For setup, authentication, and config conventions, see the [Quick Start Guide](../getting-started/quick-start.md) and the nicocli reference guide.
-1. You hold the `PROVIDER_ADMIN` role in the org you are operating in. Tenant Admins with `targetedInstanceCreation` capability can also register Expected Machines, but the canonical path is provider-side.
+1. You hold the `PROVIDER_ADMIN` role in the org you are operating in. Tenant Admins with [effective targeted instance creation](../configuration/tenant_management.md#granting-targeted-instance-creation) at the site can also register Expected Machines, but the canonical path is provider-side.
 1. DHCP requests from all managed host BMC networks have been forwarded to the NICo DHCP service.
 1. For every host you plan to register, you have:
    - The MAC address of the host BMC
@@ -28,7 +28,7 @@ nicocli user get
 
 An Expected Machine pre-registers a physical machine so NICo can authenticate to it on discovery and accept it for ingestion. Each Expected Machine carries the factory default BMC credentials NICo uses for first contact, plus identifying information (chassis serial, optional rack/SKU metadata).
 
-The Expected Machine endpoints are scoped per-org per-site. All requests require `PROVIDER_ADMIN` (or `TENANT_ADMIN` with `targetedInstanceCreation`).
+The Expected Machine endpoints are scoped per-org per-site. All requests require `PROVIDER_ADMIN`, or `TENANT_ADMIN` with [effective targeted instance creation](../configuration/tenant_management.md#granting-targeted-instance-creation) at that site.
 
 ### Single Machine
 

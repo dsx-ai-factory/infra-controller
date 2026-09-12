@@ -117,7 +117,7 @@ dynamically creates/updates/deletes Kubernetes Services as machines come online.
 
 ### Setup
 
-All pods can share the same `oobDhcpRelayAddress` - NICo assigns unique IPs
+All pods can share the same `bmcDhcpRelayAddress` - NICo assigns unique IPs
 from the subnet.
 
 ```yaml
@@ -133,16 +133,16 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 5
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
+        underlayDhcpRelayAddress: "10.104.0.1"
   mat-1:
     machines:
       rack-machines:
         hwType: wiwynn_gb200_nvl
         hostCount: 5
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "10.96.64.1"
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.96.64.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
 
 macAddressPool:
   enabled: true
@@ -210,7 +210,7 @@ adds a dynamic target UDP port for IPMI access.
 
 ### Requirements
 
-- `oobDhcpRelayAddress` must be within Kubernetes ServiceCIDR
+- `bmcDhcpRelayAddress` must be within Kubernetes ServiceCIDR
 - NICo assigns unique BMC IPs from the configured network
 - Default ServiceCIDR ranges:
   - `10.96.0.0/12` - vanilla Kubernetes (kubeadm)
@@ -262,8 +262,8 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 10
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "10.96.64.1"
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.96.64.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
 ```
 
 ### IPMI/SOL Simulation
@@ -484,7 +484,7 @@ provided IP is already allocated
 
 The BMC IP conflicts with an existing Service. Either:
 
-- Use a different `oobDhcpRelayAddress` range
+- Use a different `bmcDhcpRelayAddress` range
 - Reserve a ServiceCIDR for machine-a-tron (K8s 1.29+)
 
 ### ClusterIP outside ServiceCIDR

@@ -512,8 +512,8 @@ This `GET` endpoint lazily initializes the org on first call as follows:
 
 1. Checks if service account is enabled in the auth config
 2. Creates an **InfrastructureProvider** for the org if one doesn't exist
-3. Creates a **Tenant** with targeted instance creation enabled if one doesn't exist
-4. Creates a **TenantAccount** linking the provider and tenant if one doesn't exist
+3. Creates a **Tenant** for the org if one doesn't exist
+4. Creates a **TenantAccount** linking the provider and tenant if one doesn't exist, already in `Ready` status with the `targetedInstanceCreation` capability enabled
 5. Returns the service account status with the provider and tenant IDs
 
 Without this call, site operations return 404. Subsequent calls are read-only.

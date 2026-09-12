@@ -28,14 +28,14 @@ type EnvOverride struct {
 	Sensitive bool
 	// Applied is true when ApplyEnvOverrides actually wrote this value
 	// back into the ConfigFile. Env vars that only feed flags
-	// (e.g. NICO_KEYCLOAK_URL) are reported but not applied here.
+	// (NICO_CONFIG, NICO_KEYCLOAK_URL) are reported but not applied here.
 	Applied bool
 }
 
 // envOverrideEntry is the static description of a known NICO_* env var.
 // apply may be nil for env vars that affect only the flag layer
-// (NICO_CONFIG, NICO_KEYCLOAK_URL, NICO_KEYCLOAK_REALM); they are still
-// reported by EnvOverridesFromEnvironment but ApplyEnvOverrides skips them.
+// (NICO_CONFIG, NICO_KEYCLOAK_URL); they are still reported by
+// EnvOverridesFromEnvironment but ApplyEnvOverrides skips them.
 type envOverrideEntry struct {
 	name       string
 	configPath string
@@ -163,16 +163,17 @@ var envOverrideRegistry = []envOverrideEntry{
 		apply:      func(cfg *ConfigFile, v string) { ensureAPIKey(cfg).Token = v },
 	},
 
-	// Login-flow flag-only env vars. They have no direct config field but
-	// are honored by the login command via urfave EnvVars; surface them
-	// so users see them in --debug and the TUI env command.
+	// NICO_KEYCLOAK_URL has no config field of its own: it exists only to build
+	// auth.oidc.token_url at login, and that is what gets persisted. Surface it so
+	// users still see it in --debug and the TUI env command.
 	{
 		name:       "NICO_KEYCLOAK_URL",
 		configPath: "(--keycloak-url; constructs auth.oidc.token_url at login)",
 	},
 	{
 		name:       "NICO_KEYCLOAK_REALM",
-		configPath: "(--keycloak-realm; used with NICO_KEYCLOAK_URL)",
+		configPath: "auth.oidc.realm",
+		apply:      func(cfg *ConfigFile, v string) { ensureOIDC(cfg).Realm = v },
 	},
 }
 

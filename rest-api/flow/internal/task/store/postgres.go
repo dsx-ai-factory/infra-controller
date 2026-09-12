@@ -224,18 +224,23 @@ func (s *PostgresStore) UpdateScheduledTask(
 	return nil
 }
 
-// UpdateTaskStatus persists status, message, and (optionally) the report
-// snapshot. The report carried in arg is treated as authoritative: when
-// non-empty it replaces the stored document, when empty the stored
-// document is left untouched (the underlying model omits the report
-// column from the UPDATE in that case). No read-modify-write is performed,
-// so concurrent transitions cannot lose updates.
+// UpdateTaskStatus persists status and message, plus optional report and queue
+// deadline changes. Finished statuses clear the queue deadline; otherwise nil
+// optional values leave their stored columns untouched. No read-modify-write is
+// performed, so concurrent transitions cannot lose updates.
 func (s *PostgresStore) UpdateTaskStatus(
 	ctx context.Context,
 	arg *taskdef.TaskStatusUpdate,
 ) error {
 	taskDao := &model.Task{ID: arg.ID}
-	err := taskDao.UpdateTaskStatus(ctx, s.idb(ctx), arg.Status, arg.Message, arg.Report)
+	err := taskDao.UpdateTaskStatus(
+		ctx,
+		s.idb(ctx),
+		arg.Status,
+		arg.Message,
+		arg.Report,
+		arg.QueueExpiresAt,
+	)
 	if err != nil {
 		return errors.GRPCErrorInternal(err.Error())
 	}

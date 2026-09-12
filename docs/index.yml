@@ -144,6 +144,8 @@ navigation:
               path: manuals/networking/infiniband_partitioning.md
         - page: Tenant Management
           path: configuration/tenant_management.md
+        - page: Tenant Management with Keycloak
+          path: configuration/tenant-management-keycloak.md
         - page: Image-Based Operating Systems
           path: configuration/image-based-operating-systems.md
         - page: Organization & Permissions

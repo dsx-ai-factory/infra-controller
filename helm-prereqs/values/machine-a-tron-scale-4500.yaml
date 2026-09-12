@@ -108,8 +108,8 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        oobDhcpRelayAddress: "10.233.16.1"
-        adminDhcpRelayAddress: "10.102.0.1"
+        bmcDhcpRelayAddress: "10.233.16.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
         dpusInNicMode: false
   mat-1:
     machines:
@@ -123,8 +123,8 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        oobDhcpRelayAddress: "10.233.32.1"
-        adminDhcpRelayAddress: "10.102.0.1"
+        bmcDhcpRelayAddress: "10.233.32.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
         dpusInNicMode: false
   mat-2:
     machines:
@@ -138,8 +138,8 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        oobDhcpRelayAddress: "10.233.8.1"
-        adminDhcpRelayAddress: "10.102.0.1"
+        bmcDhcpRelayAddress: "10.233.8.1"
+        underlayDhcpRelayAddress: "10.104.0.1"
         dpusInNicMode: false
 
 extraEnv:

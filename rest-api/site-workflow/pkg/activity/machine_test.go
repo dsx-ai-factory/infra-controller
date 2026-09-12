@@ -6,6 +6,7 @@ package activity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -15,6 +16,7 @@ import (
 	tmocks "go.temporal.io/sdk/mocks"
 	"go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cClient "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
@@ -167,198 +169,88 @@ func TestManageMachine_DeleteMachineHealthReportOnSite(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func Test_getPagedInventory(t *testing.T) {
-	// Generate inventories
-	pageSize := 25
+//nolint:staticcheck // Asserting the deprecated fields were cleared means reading them.
+func Test_pruneMachineForPublish(t *testing.T) {
+	events := func(versions ...string) []*corev1.MachineEvent {
+		out := []*corev1.MachineEvent{}
+		for _, v := range versions {
+			out = append(out, &corev1.MachineEvent{Version: v, Event: "state change"})
+		}
 
-	inventory1Machines := []*corev1.Machine{}
-	inventory1MachineIDs := []*corev1.MachineId{}
-	for i := 0; i < 95; i++ {
-		inventory1Machines = append(inventory1Machines, &corev1.Machine{
-			Id: &corev1.MachineId{
-				Id: uuid.NewString(),
-			},
-			State: "Ready",
-		})
-		inventory1MachineIDs = append(inventory1MachineIDs, inventory1Machines[i].Id)
+		return out
+	}
+	numberedVersions := func(n int) []string {
+		out := make([]string, 0, n)
+		for i := range n {
+			out = append(out, fmt.Sprintf("V%d", i))
+		}
+
+		return out
 	}
 
-	inventory2Machines := []*corev1.Machine{}
-	inventory2MachineIDs := []*corev1.MachineId{}
-	for i := 0; i < pageSize-5; i++ {
-		inventory2Machines = append(inventory2Machines, &corev1.Machine{
-			Id: &corev1.MachineId{
-				Id: uuid.NewString(),
-			},
-			State: "Ready",
-		})
-		inventory2MachineIDs = append(inventory2MachineIDs, inventory2Machines[i].Id)
-	}
-
-	type args struct {
-		pagedMachines   []*corev1.Machine
-		pagedMachineIDs []*corev1.MachineId
-		totalCount      int
-		page            int
-		pageSize        int
-		status          corev1.InventoryStatus
-		statusMessage   string
-	}
+	// Each case asserts a different property of the pruned Machine, so the check travels with the
+	// input rather than a shared assertion block trying to cover all of them.
 	tests := []struct {
-		name             string
-		args             args
-		wantMachineCount int
-		wantTotalPages   int
-		wantCurrentPage  int
-		wantTotalItems   int
-		wantItemIDCount  int
+		name    string
+		machine *corev1.Machine
+		check   func(*testing.T, *corev1.Machine)
 	}{
 		{
-			name: "test generating first page for empty inventory",
-			args: args{
-				pagedMachines:   nil,
-				pagedMachineIDs: nil,
-				totalCount:      0,
-				page:            1,
-				pageSize:        pageSize,
-				status:          corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-				statusMessage:   "No Machines reported by SIte Controller",
+			name: "clears the deprecated twins and keeps status and config",
+			machine: &corev1.Machine{
+				Id:             &corev1.MachineId{Id: "machine-1"},
+				Health:         &corev1.HealthReport{Source: "deprecated"},
+				Capabilities:   &corev1.MachineCapabilitiesSet{},
+				UpdateComplete: true,
+				HwSku:          proto.String("deprecated-sku"),
+				Status:         &corev1.MachineStatus{Health: &corev1.HealthReport{Source: "status"}},
+				Config:         &corev1.MachineConfig{},
 			},
-			wantMachineCount: 0,
-			wantTotalPages:   0,
-			wantCurrentPage:  1,
-			wantTotalItems:   0,
-			wantItemIDCount:  0,
+			check: func(t *testing.T, machine *corev1.Machine) {
+				assert.Nil(t, machine.Health)
+				assert.Nil(t, machine.Capabilities)
+				assert.Nil(t, machine.HwSku)
+				assert.False(t, machine.UpdateComplete)
+				// The replacements the REST layer actually reads have to survive.
+				assert.Equal(t, "status", machine.GetStatus().GetHealth().GetSource())
+				assert.NotNil(t, machine.GetConfig())
+				assert.Equal(t, "machine-1", machine.GetId().GetId())
+			},
 		},
 		{
-			name: "test generating first page for normal inventory",
-			args: args{
-				pagedMachines:   inventory1Machines[:pageSize],
-				pagedMachineIDs: inventory1MachineIDs[:pageSize],
-				totalCount:      95,
-				page:            1,
-				pageSize:        pageSize,
-				status:          corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-				statusMessage:   "Successfully retrieved Machines from Site Controller",
+			name:    "keeps a short history whole",
+			machine: &corev1.Machine{StateVersion: "V58", Events: events("V56", "V57", "V58")},
+			check: func(t *testing.T, machine *corev1.Machine) {
+				assert.Len(t, machine.Events, 3)
 			},
-			wantMachineCount: pageSize,
-			wantTotalPages:   4,
-			wantCurrentPage:  1,
-			wantTotalItems:   95,
-			wantItemIDCount:  pageSize,
 		},
 		{
-			name: "test generating last page for inventory sized less than page size",
-			args: args{
-				pagedMachines:   inventory2Machines,
-				pagedMachineIDs: inventory2MachineIDs,
-				totalCount:      pageSize - 5,
-				page:            1,
-				pageSize:        pageSize,
-				status:          corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-				statusMessage:   "Successfully retrieved Machines from Site Controller",
+			name:    "keeps the newest events when the history is longer than the bound",
+			machine: &corev1.Machine{StateVersion: "V29", Events: events(numberedVersions(30)...)},
+			check: func(t *testing.T, machine *corev1.Machine) {
+				assert.Len(t, machine.Events, maxPublishedMachineEvents)
+				// Core reports oldest first, so the tail has to be the newest entries.
+				assert.Equal(t, "V10", machine.Events[0].GetVersion())
+				assert.Equal(t, "V29", machine.Events[maxPublishedMachineEvents-1].GetVersion())
 			},
-			wantMachineCount: pageSize - 5,
-			wantTotalPages:   1,
-			wantCurrentPage:  1,
-			wantTotalItems:   pageSize - 5,
-			wantItemIDCount:  pageSize - 5,
+		},
+		{
+			// The REST layer dates the current state from this event, so dropping it would
+			// silently empty a response field. Nothing guarantees Core orders the matching event
+			// last.
+			name:    "carries the current state version when it falls outside the newest events",
+			machine: &corev1.Machine{StateVersion: "V0", Events: events(numberedVersions(30)...)},
+			check: func(t *testing.T, machine *corev1.Machine) {
+				assert.Len(t, machine.Events, maxPublishedMachineEvents+1)
+				assert.Equal(t, "V0", machine.Events[0].GetVersion())
+			},
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := getPagedMachineInventory(tt.args.pagedMachines, tt.args.pagedMachineIDs, tt.args.totalCount, tt.args.page, tt.args.pageSize, tt.args.status, tt.args.statusMessage)
-			assert.Equal(t, tt.wantMachineCount, len(got.Machines))
-			assert.Equal(t, tt.wantCurrentPage, int(got.InventoryPage.CurrentPage))
-			assert.Equal(t, tt.wantTotalPages, int(got.InventoryPage.TotalPages))
-			assert.Equal(t, tt.wantTotalItems, int(got.InventoryPage.TotalItems))
-			assert.Equal(t, tt.wantItemIDCount, len(got.InventoryPage.ItemIds))
-
-			assert.Equal(t, tt.args.status, got.InventoryStatus)
-			assert.Equal(t, tt.args.statusMessage, got.StatusMsg)
-		})
-	}
-}
-
-func Test_getPagedMachineIDs(t *testing.T) {
-	type args struct {
-		machineIDs []*corev1.MachineId
-		page       int
-		pageSize   int
-	}
-	tests := []struct {
-		name               string
-		args               args
-		wantMachineIDCount int
-	}{
-		{
-			name: "test getting first page for empty machine IDs",
-			args: args{
-				machineIDs: nil,
-				page:       1,
-				pageSize:   25,
-			},
-			wantMachineIDCount: 0,
-		},
-		{
-			name: "test getting first page for normal machine IDs",
-			args: args{
-				machineIDs: []*corev1.MachineId{
-					{Id: "machine-1"},
-					{Id: "machine-2"},
-					{Id: "machine-3"},
-					{Id: "machine-4"},
-					{Id: "machine-5"},
-					{Id: "machine-6"},
-					{Id: "machine-7"},
-					{Id: "machine-8"},
-					{Id: "machine-9"},
-					{Id: "machine-10"},
-				},
-				page:     1,
-				pageSize: 5,
-			},
-			wantMachineIDCount: 5,
-		},
-		{
-			name: "test getting last page for machine IDs",
-			args: args{
-				machineIDs: []*corev1.MachineId{
-					{Id: "machine-1"},
-					{Id: "machine-2"},
-					{Id: "machine-3"},
-					{Id: "machine-4"},
-					{Id: "machine-5"},
-					{Id: "machine-6"},
-					{Id: "machine-7"},
-					{Id: "machine-8"},
-					{Id: "machine-9"},
-					{Id: "machine-10"},
-				},
-				page:     2,
-				pageSize: 5,
-			},
-			wantMachineIDCount: 5,
-		},
-		{
-			name: "test getting last page for machine IDs with less than page size",
-			args: args{
-				machineIDs: []*corev1.MachineId{
-					{Id: "machine-1"},
-					{Id: "machine-2"},
-					{Id: "machine-3"},
-					{Id: "machine-4"},
-				},
-				page:     1,
-				pageSize: 5,
-			},
-			wantMachineIDCount: 4,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := getPagedMachineIDs(tt.args.machineIDs, tt.args.page, tt.args.pageSize)
-			assert.Equal(t, tt.wantMachineIDCount, len(got))
+			pruneMachineForPublish(tt.machine)
+			tt.check(t, tt.machine)
 		})
 	}
 }
@@ -424,12 +316,14 @@ func TestManageMachineInventory_CollectAndPublishMachineInventory(t *testing.T) 
 			tc.AssertNumberOfCalls(t, "ExecuteWorkflow", 0)
 
 			mmi := &ManageMachineInventory{
-				siteID:                tt.fields.siteID,
-				coreGrpcAtomicClient:  tt.fields.coreGrpcAtomicClient,
-				temporalPublishClient: tc,
-				temporalPublishQueue:  tt.fields.temporalPublishQueue,
-				sitePageSize:          tt.fields.sitePageSize,
-				cloudPageSize:         tt.fields.cloudPageSize,
+				config: ManageInventoryConfig{
+					SiteID:                tt.fields.siteID,
+					CoreGrpcAtomicClient:  tt.fields.coreGrpcAtomicClient,
+					TemporalPublishClient: tc,
+					TemporalPublishQueue:  tt.fields.temporalPublishQueue,
+					SitePageSize:          tt.fields.sitePageSize,
+					CloudPageSize:         tt.fields.cloudPageSize,
+				},
 			}
 
 			ctx := context.Background()

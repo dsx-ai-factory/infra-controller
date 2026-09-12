@@ -294,8 +294,11 @@ hwMacAddressRanges:
 ##   - hwType: Hardware type (required)
 ##   - hostCount: Number of hosts (required)
 ##   - dpuPerHostCount: DPUs per host (default: 0)
-##   - oobDhcpRelayAddress: OOB network gateway
-##   - adminDhcpRelayAddress: Admin network gateway
+##   - bmcDhcpRelayAddress: BMC (OOB) network gateway, the relay for BMC DHCP
+##   - underlayDhcpRelayAddress: underlay segment gateway, the relay for DPU OOB
+##     and switch NVOS DHCP
+##     (the previous names oobDhcpRelayAddress and adminDhcpRelayAddress are accepted as
+##     deprecated aliases; rack groups use bmc_dhcp_relay_address / underlay_dhcp_relay_address)
 ##
 ## All other settings inherit from machineDefaults above.
 ##
@@ -322,8 +325,8 @@ pods:
         hwType: wiwynn_gb200_nvl
         hostCount: 10
         dpuPerHostCount: 2
-        oobDhcpRelayAddress: "192.168.192.1"
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "192.168.192.1"
+        underlayDhcpRelayAddress: "192.168.176.1"
         ## Host firmware upgrade simulation (optional).
         ## Set initial versions older than the API's desired versions to trigger
         ## the upgrade flow: version detection -> upload -> task polling ->
@@ -344,18 +347,18 @@ pods:
 #        hwType: wiwynn_gb200_nvl
 #        hostCount: 252       # 18 trays × 14 racks
 #        dpuPerHostCount: 2   # 2 BF3 per tray
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.96.64.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #      switches:
 #        hwType: nvidia_switch_nd5200_ld
 #        hostCount: 126       # 9 switches × 14 racks
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.96.64.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #      power:
 #        hwType: liteon_power_shelf
 #        hostCount: 112       # 8 shelves × 14 racks
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.96.64.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #
 #  mat-1:
 #    machines:
@@ -363,8 +366,8 @@ pods:
 #        hwType: wiwynn_gb200_nvl
 #        hostCount: 252
 #        dpuPerHostCount: 2
-#        oobDhcpRelayAddress: "10.96.64.1"
-#        adminDhcpRelayAddress: "192.168.176.1"
+#        bmcDhcpRelayAddress: "10.96.64.1"
+#        underlayDhcpRelayAddress: "192.168.176.1"
 #      # ... same pattern
 
 ## Persistence volume for machine state

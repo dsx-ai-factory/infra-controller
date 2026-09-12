@@ -833,6 +833,7 @@ pub(crate) async fn on_demand_rack_maintenance(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| CarbideError::InvalidArgument(format!("invalid power_shelf_id: {e}")))?,
         activities,
+        requested_at: None,
     };
 
     if !scope.is_full_rack() {

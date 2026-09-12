@@ -24,6 +24,7 @@ pub mod bmc_redfish_session;
 pub mod bmc_suppression;
 pub mod carbide_version;
 pub mod compute_allocation;
+mod config_drift;
 pub mod credential_rotation;
 pub mod db_read;
 pub mod desired_firmware;
