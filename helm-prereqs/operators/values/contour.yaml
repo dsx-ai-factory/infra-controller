@@ -1,0 +1,33 @@
+# =============================================================================
+# operators/values/contour.yaml — Project Contour Helm chart static values
+#
+# Optional cluster-level Ingress controller for NICo REST ingress exposure.
+# Envoy's Service is type LoadBalancer and is expected to receive an external
+# IP from MetalLB.
+#
+# Some settings below match the chart's own defaults. That is deliberate, not
+# redundant: pinning them means a chart upgrade that changes a default shows up
+# as a diff here instead of silently changing how REST is exposed. Keep them
+# when bumping the chart version, and re-check each one against
+# `helm show values contour/contour --version <new>`.
+#
+# Chart: contour/contour 0.7.0 (Contour 1.33.6, Envoy 1.38.3)
+# =============================================================================
+
+contour:
+  ingressClass:
+    name: contour
+    create: true
+    # Contour must not become the cluster-wide default IngressClass. An Ingress
+    # with no className set belongs to whatever the site already runs.
+    default: false
+
+envoy:
+  kind: daemonset
+  service:
+    type: LoadBalancer
+    # Local keeps the caller's source address. Cluster would make kube-proxy
+    # SNAT the connection, so nico-rest-api would record the node address in
+    # audit_entries.client_ip and rate-limit every caller behind a node as one.
+    # Envoy is a DaemonSet, so every node has a ready endpoint to advertise.
+    externalTrafficPolicy: Local

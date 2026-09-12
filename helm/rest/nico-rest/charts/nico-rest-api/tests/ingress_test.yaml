@@ -1,0 +1,327 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: ingress configurability
+templates:
+  - ingress.yaml
+  - ingress-certificate.yaml
+release:
+  namespace: nico-rest
+set:
+  # Provided by the nico-rest parent chart at render time; set here so the
+  # subchart's certificate template renders standalone under helm-unittest.
+  global.certificate.issuerRef.name: nico-rest-ca-issuer
+  global.certificate.issuerRef.kind: ClusterIssuer
+  global.certificate.issuerRef.group: cert-manager.io
+tests:
+  - it: does not render an ingress by default
+    template: ingress.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: does not render an ingress certificate when ingress is disabled
+    template: ingress-certificate.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rejects enabling ingress and plaintext NodePort together
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+      nodePort:
+        enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-rest-api: ingress and nodePort cannot both be enabled; disable nodePort to avoid exposing plaintext HTTP alongside TLS ingress"
+
+  - it: rejects enabling ingress with no hosts
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        hosts: []
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-rest-api: ingress.enabled requires at least one entry in ingress.hosts"
+
+  - it: renders ingress rules, class, and annotations when enabled
+    template: ingress.yaml
+    set:
+      service:
+        port: 9443
+      ingress:
+        enabled: true
+        className: contour
+        annotations:
+          projectcontour.io/response-timeout: 30s
+          projectcontour.io/num-retries: "3"
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+              - path: /v2
+                pathType: ImplementationSpecific
+    asserts:
+      - isKind:
+          of: Ingress
+      - equal:
+          path: spec.ingressClassName
+          value: contour
+      - equal:
+          path: metadata.annotations["projectcontour.io/response-timeout"]
+          value: 30s
+      - equal:
+          path: metadata.annotations["projectcontour.io/num-retries"]
+          value: "3"
+      - equal:
+          path: spec.rules[0].host
+          value: api.nico.example.com
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.name
+          value: nico-rest-api
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.port.number
+          value: 9443
+      - equal:
+          path: spec.rules[0].http.paths[1].pathType
+          value: ImplementationSpecific
+
+  # Renaming a host must carry into spec.tls[].hosts. A host missing from that
+  # list is served over plaintext HTTP, so these two assertions are what keep
+  # the ingress from silently dropping TLS.
+  - it: derives tls from ingress hosts so a host rename cannot drop TLS
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+          - host: api-alt.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+    asserts:
+      - equal:
+          path: spec.tls
+          value:
+            - secretName: nico-rest-api-ingress-tls
+              hosts:
+                - api.nico.example.com
+                - api-alt.nico.example.com
+      - equal:
+          path: spec.rules[0].host
+          value: api.nico.example.com
+      - equal:
+          path: spec.rules[1].host
+          value: api-alt.nico.example.com
+
+  - it: serves an unmanaged Secret when ingress.tls is set explicitly
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        certificate:
+          enabled: false
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+        tls:
+          - secretName: api-nico-example-com-tls
+            hosts:
+              - api.nico.example.com
+    asserts:
+      - equal:
+          path: spec.tls
+          value:
+            - secretName: api-nico-example-com-tls
+              hosts:
+                - api.nico.example.com
+
+  # A leading '*' is a YAML alias indicator, so an unquoted wildcard host fails
+  # to render at all rather than producing a wrong value.
+  - it: quotes a wildcard host in the ingress tls block
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        hosts:
+          - host: "*.nico.example.com"
+            paths:
+              - path: /
+                pathType: Prefix
+    asserts:
+      - equal:
+          path: spec.tls[0].hosts[0]
+          value: "*.nico.example.com"
+      - equal:
+          path: spec.rules[0].host
+          value: "*.nico.example.com"
+
+  - it: quotes a wildcard host in the certificate commonName and dnsNames
+    template: ingress-certificate.yaml
+    set:
+      ingress:
+        enabled: true
+        hosts:
+          - host: "*.nico.example.com"
+            paths:
+              - path: /
+                pathType: Prefix
+    asserts:
+      - equal:
+          path: spec.commonName
+          value: "*.nico.example.com"
+      - equal:
+          path: spec.dnsNames
+          value:
+            - "*.nico.example.com"
+
+  - it: rejects an explicit ingress.tls that leaves a host without TLS
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        certificate:
+          enabled: false
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+          - host: admin.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+        tls:
+          - secretName: api-nico-example-com-tls
+            hosts:
+              - api.nico.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: 'nico-rest-api: ingress.hosts entry "admin.nico.example.com" is not covered by any ingress.tls host, so it would be served over plaintext HTTP; add it to ingress.tls[].hosts, or clear ingress.tls to derive the block from ingress.hosts'
+
+  - it: accepts a wildcard ingress.tls host covering one label
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        certificate:
+          enabled: false
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+        tls:
+          - secretName: wildcard-nico-example-com-tls
+            hosts:
+              - "*.nico.example.com"
+    asserts:
+      - equal:
+          path: spec.tls[0].secretName
+          value: wildcard-nico-example-com-tls
+
+  # An Ingress wildcard matches exactly one label, so *.nico.example.com must not
+  # be treated as covering a deeper name.
+  - it: rejects a wildcard ingress.tls host against a two-label host
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        certificate:
+          enabled: false
+        hosts:
+          - host: a.b.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+        tls:
+          - secretName: wildcard-nico-example-com-tls
+            hosts:
+              - "*.nico.example.com"
+    asserts:
+      - failedTemplate:
+          errorMessage: 'nico-rest-api: ingress.hosts entry "a.b.nico.example.com" is not covered by any ingress.tls host, so it would be served over plaintext HTTP; add it to ingress.tls[].hosts, or clear ingress.tls to derive the block from ingress.hosts'
+
+  - it: renders ingress certificate from ingress host defaults
+    template: ingress-certificate.yaml
+    set:
+      ingress:
+        enabled: true
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+          - host: api-alt.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+    asserts:
+      - isKind:
+          of: Certificate
+      - equal:
+          path: metadata.name
+          value: nico-rest-api-ingress-tls
+      - equal:
+          path: spec.secretName
+          value: nico-rest-api-ingress-tls
+      - equal:
+          path: spec.commonName
+          value: api.nico.example.com
+      - equal:
+          path: spec.dnsNames
+          value:
+            - api.nico.example.com
+            - api-alt.nico.example.com
+      - equal:
+          path: spec.usages
+          value:
+            - server auth
+      - equal:
+          path: spec.issuerRef
+          value:
+            name: nico-rest-ca-issuer
+            kind: ClusterIssuer
+            group: cert-manager.io
+
+  - it: honours an explicit certificate commonName over the first host
+    template: ingress-certificate.yaml
+    set:
+      ingress:
+        enabled: true
+        certificate:
+          commonName: api-canonical.nico.example.com
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+    asserts:
+      - equal:
+          path: spec.commonName
+          value: api-canonical.nico.example.com
+      - equal:
+          path: spec.dnsNames
+          value:
+            - api.nico.example.com
+
+  - it: skips ingress certificate when using an existing TLS secret
+    template: ingress-certificate.yaml
+    set:
+      ingress:
+        enabled: true
+        certificate:
+          enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

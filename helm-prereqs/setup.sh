@@ -44,6 +44,7 @@
 #                          StorageClass. Default: true.
 #   NICO_STORAGE_CLASS     StorageClass for Postgres and Vault data and audit PVCs.
 #                          Default: local-path-persistent.
+#   NICO_INSTALL_CONTOUR   Install Contour/Envoy after MetalLB. Default: false.
 #   VAULT_NS               Vault namespace. Default: vault
 #   CERT_MANAGER_NS        cert-manager namespace. Default: cert-manager
 #   PREFLIGHT_CHECK_IMAGE  Image for preflight per-node checks.
@@ -137,6 +138,7 @@
 #   ./setup.sh --skip-core --skip-rest  # fully non-interactive infra-only run
 #   ./setup.sh --core-values /path/to/values.yaml      # use site-specific values for Phase 6
 #   ./setup.sh --metallb-config /path/to/metallb.yaml  # use site-specific MetalLB config (file or kustomize dir)
+#   ./setup.sh --install-contour      # install optional Contour/Envoy Ingress controller
 #   ./setup.sh --site-overlay /path/to/kustomize-dir   # kubectl apply -k after Phase 6 (NTP services, etc.)
 #   ./setup.sh --skip-dpf               # skip DPF DPU provisioning (installed by default otherwise)
 #   ./setup.sh --with-observability     # also install the local monitoring stack (Loki, Tempo,
@@ -171,6 +173,7 @@ INSTALL_DPF="${NICO_INSTALL_DPF:-true}"
 INSTALL_RMS="${NICO_INSTALL_RMS:-true}"
 [[ "${NICO_SKIP_RMS:-false}" == "true" ]] && INSTALL_RMS=false
 WITH_OBSERVABILITY="${WITH_OBSERVABILITY:-false}"
+INSTALL_CONTOUR="${NICO_INSTALL_CONTOUR:-false}"
 CORE_VALUES=""
 METALLB_CONFIG=""
 SITE_OVERLAY=""
@@ -185,6 +188,7 @@ while [[ $# -gt 0 ]]; do
         --install-rms)  INSTALL_RMS=true ;;   # explicit; RMS is the default
         --skip-rms)     INSTALL_RMS=false ;;
         --with-observability) WITH_OBSERVABILITY=true ;;
+        --install-contour) INSTALL_CONTOUR=true ;;
         --debug)        set -x         ;;
         --core-values)
             [[ -z "${2:-}" ]] && { echo "Error: --core-values requires a file path"; exit 1; }
@@ -201,7 +205,7 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-flow] [--skip-dpf] [--skip-rms] [--with-observability] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-flow] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
@@ -222,6 +226,10 @@ esac
 case "${INSTALL_RMS}" in
     true|false) ;;
     *) echo "Error: NICO_INSTALL_RMS must be true or false (got '${INSTALL_RMS}')"; exit 1 ;;
+esac
+case "${INSTALL_CONTOUR}" in
+    true|false) ;;
+    *) echo "Error: NICO_INSTALL_CONTOUR must be true or false (got '${INSTALL_CONTOUR}')"; exit 1 ;;
 esac
 
 # The predecessor Flow chart bundled PSM and NSM in the Flow Deployment. This
@@ -701,6 +709,25 @@ else
     kubectl apply -f "${SCRIPT_DIR}/values/metallb-config.yaml"
 fi
 echo "MetalLB ready"
+
+# ---------------------------------------------------------------------------
+# 1d. Contour/Envoy — optional Ingress controller.
+#     Install after MetalLB so the Envoy LoadBalancer Service can receive an
+#     external address. Skip this when the cluster already has an Ingress
+#     controller.
+# ---------------------------------------------------------------------------
+if [[ "${INSTALL_CONTOUR}" == "true" ]]; then
+    _SETUP_PHASE="[1d] Contour/Envoy"
+    echo "=== [1d] Contour/Envoy ==="
+    # No --include-needs. Phase 1c above already installed MetalLB, and pulling
+    # it in here would re-sync that release without the CRD apply/re-apply that
+    # phase 1c wraps around it. The release sets wait: true, so this returns
+    # only once Contour and the Envoy DaemonSet are ready.
+    helmfile sync -l name=contour
+    echo "Contour/Envoy ready"
+else
+    echo "Skipping Contour/Envoy (set NICO_INSTALL_CONTOUR=true or pass --install-contour to install it)"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. cert-manager + Prometheus CRDs + Vault TLS bootstrap

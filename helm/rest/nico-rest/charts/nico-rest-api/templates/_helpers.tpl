@@ -53,3 +53,45 @@ app.kubernetes.io/component: api
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "nico-rest-api.validateExposure" -}}
+{{- if and .Values.ingress.enabled .Values.nodePort.enabled -}}
+{{- fail "nico-rest-api: ingress and nodePort cannot both be enabled; disable nodePort to avoid exposing plaintext HTTP alongside TLS ingress" -}}
+{{- end -}}
+{{- if and .Values.ingress.enabled (not .Values.ingress.hosts) -}}
+{{- fail "nico-rest-api: ingress.enabled requires at least one entry in ingress.hosts" -}}
+{{- end -}}
+{{/*
+An explicit ingress.tls replaces the block derived from ingress.hosts, but every
+ingress.hosts entry still gets a rule. A rule host with no TLS entry is served
+over plaintext HTTP, so require coverage rather than let the override silently
+reintroduce that. A wildcard TLS host matches exactly one label, per the Ingress
+spec, so *.example.com covers api.example.com but not a.b.example.com.
+*/}}
+{{- if and .Values.ingress.enabled .Values.ingress.tls -}}
+{{- $covered := list -}}
+{{- range .Values.ingress.tls -}}
+{{- $covered = concat $covered (.hosts | default list) -}}
+{{- end -}}
+{{- range .Values.ingress.hosts -}}
+{{- $host := .host -}}
+{{- $ok := false -}}
+{{- range $covered -}}
+{{- if eq . $host -}}
+{{- $ok = true -}}
+{{- else if hasPrefix "*." . -}}
+{{- $suffix := trimPrefix "*" . -}}
+{{- if hasSuffix $suffix $host -}}
+{{- $label := trimSuffix $suffix $host -}}
+{{- if and $label (not (contains "." $label)) -}}
+{{- $ok = true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if not $ok -}}
+{{- fail (printf "nico-rest-api: ingress.hosts entry %q is not covered by any ingress.tls host, so it would be served over plaintext HTTP; add it to ingress.tls[].hosts, or clear ingress.tls to derive the block from ingress.hosts" $host) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

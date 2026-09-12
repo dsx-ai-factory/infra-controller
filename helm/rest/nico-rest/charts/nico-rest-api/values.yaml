@@ -17,8 +17,58 @@ service:
   metricsPort: 9360
 
 nodePort:
+  # -- Expose the API over plaintext NodePort. Cannot be enabled with ingress.
   enabled: false
   port: 30388
+
+ingress:
+  # -- Expose the API over TLS through an ingress controller. Cannot be enabled
+  # with nodePort. The ingress routes to the chart-managed Service on
+  # service.port, so ClusterIP is sufficient and the API still serves plain
+  # HTTP inside the cluster.
+  enabled: false
+  className: contour
+  annotations: {}
+  # -- Hosts to serve. Every entry is added to spec.tls[].hosts and to the
+  # certificate dnsNames, so this is the only place a DNS name needs to change.
+  hosts:
+    - host: nico-rest-api.local
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- Fully override spec.tls. When empty, a single entry is generated from
+  # certificate.secretName and ingress.hosts. Set this with certificate.enabled
+  # false to serve a Secret this chart does not manage, such as one issued for a
+  # fully qualified domain by an external CA.
+  # Example:
+  #   tls:
+  #     - secretName: api-example-com-tls
+  #       hosts:
+  #         - api.example.com
+  #   certificate:
+  #     enabled: false
+  tls: []
+  certificate:
+    # -- Create a cert-manager Certificate for the ingress TLS Secret when ingress is enabled.
+    # Set false when ingress.tls points at a pre-existing Secret.
+    enabled: true
+    secretName: nico-rest-api-ingress-tls
+    duration: 2160h
+    renewBefore: 360h
+    # -- Certificate subject common name. When empty, the first ingress.hosts entry is used.
+    commonName: ""
+    # -- Fully override the certificate dnsNames. When empty, dnsNames are
+    # generated from ingress.hosts.
+    dnsNames: []
+    # -- SPIFFE/SAN URIs for the certificate. When empty, no uris are set.
+    uris: []
+    subject:
+      # -- List of organizations for the certificate subject
+      organizations: []
+    privateKey:
+      algorithm: RSA
+      encoding: PKCS1
+      size: 2048
 
 resources:
   requests:

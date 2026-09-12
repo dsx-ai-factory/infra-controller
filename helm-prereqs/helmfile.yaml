@@ -39,6 +39,8 @@ repositories:
     url: https://argoproj.github.io/argo-helm
   - name: nfd
     url: https://kubernetes-sigs.github.io/node-feature-discovery/charts
+  - name: contour
+    url: https://projectcontour.github.io/helm-charts/
 
 releases:
   # ---------------------------------------------------------------------------
@@ -58,6 +60,25 @@ releases:
     timeout: 600
     values:
       - operators/values/metallb.yaml
+
+  # ---------------------------------------------------------------------------
+  # Contour — optional Ingress controller for clusters that do not already
+  # provide one. setup.sh installs it only when requested; Envoy's Service uses
+  # type LoadBalancer and receives an address from MetalLB.
+  #
+  # Deliberately declares no `needs` on metallb. setup.sh phase 1c wraps the
+  # metallb sync in a CRD apply/re-apply, and `needs` plus --include-needs would
+  # re-run that release without those guards. Phase 1c always precedes 1d.
+  # ---------------------------------------------------------------------------
+  - name: contour
+    namespace: projectcontour
+    createNamespace: true
+    chart: contour/contour
+    version: "0.7.0"
+    wait: true
+    timeout: 600
+    values:
+      - operators/values/contour.yaml
 
   # ---------------------------------------------------------------------------
   # Zalando postgres-operator — manages nico-pg-cluster HA Patroni cluster.
