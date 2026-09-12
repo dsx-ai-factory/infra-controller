@@ -1600,6 +1600,7 @@ mod tests {
         super::super::subscriber::GnmiStreamMetrics {
             connection_state: IntGauge::new("test_conn_state", "test").unwrap(),
             connected: IntGauge::new("test_connected", "test").unwrap(),
+            synchronized: IntGauge::new("test_synchronized", "test").unwrap(),
             reconnections_total: Counter::new("test_reconn", "test").unwrap(),
             server_initiated_closures_total: Counter::new("test_closures", "test").unwrap(),
             connection_established_timestamp: Gauge::new("test_conn_ts", "test").unwrap(),
