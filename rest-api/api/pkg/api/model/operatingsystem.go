@@ -734,17 +734,17 @@ func (osur *APIOperatingSystemUpdateRequest) Validate(existingOS *cdbm.Operating
 	} else {
 		err = validation.ValidateStruct(osur,
 			validation.Field(&osur.ImageSHA,
-				validation.Nil.Error("imageSHA cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageSHA cannot be specified unless OS is image-based")),
 			validation.Field(&osur.ImageAuthType,
-				validation.Nil.Error("imageAuthType cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageAuthType cannot be specified unless OS is image-based")),
 			validation.Field(&osur.ImageAuthToken,
-				validation.Nil.Error("imageAuthToken cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageAuthToken cannot be specified unless OS is image-based")),
 			validation.Field(&osur.ImageDisk,
-				validation.Nil.Error("imageDisk cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("imageDisk cannot be specified unless OS is image-based")),
 			validation.Field(&osur.RootFsID,
-				validation.Nil.Error("rootFsID cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("rootFsID cannot be specified unless OS is image-based")),
 			validation.Field(&osur.RootFsLabel,
-				validation.Nil.Error("rootFsLabel cannot be specified if imageURL is not specified")),
+				validation.Nil.Error("rootFsLabel cannot be specified unless OS is image-based")),
 		)
 	}
 

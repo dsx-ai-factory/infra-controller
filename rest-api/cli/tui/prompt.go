@@ -65,29 +65,72 @@ func PromptConfirm(label string) (bool, error) {
 	return answer == "y" || answer == "yes", nil
 }
 
-// PromptChoice displays a label with a list of options and reads a selection.
-// If the user enters an empty string and a default is provided, the default is
-// returned. Input matching is case-insensitive and the canonical option value
-// is returned. A non-empty defaultValue must appear in options (case
-// insensitively) or PromptChoice returns an error before prompting -- a
-// misconfigured default must not be able to bypass choice validation.
+// PromptOptionalBool displays a yes/no prompt where blank means no update.
+func PromptOptionalBool(label string) (bool, bool, error) {
+	for {
+		fmt.Printf("%s [y/n, blank to keep] ", Bold(label))
+		input, err := readPromptLine()
+		if err != nil {
+			return false, false, err
+		}
+		answer := strings.TrimSpace(strings.ToLower(input))
+		switch answer {
+		case "":
+			return false, false, nil
+		case "y", "yes":
+			return true, true, nil
+		case "n", "no":
+			return false, true, nil
+		default:
+			fmt.Println(Red("  (enter y, n, or leave blank to keep)"))
+		}
+	}
+}
+
+// PromptChoice displays an interactive selector when attached to a terminal.
+// Piped input uses a line-oriented prompt so commands remain scriptable and
+// tests can supply deterministic input. Input matching is case-insensitive and
+// returns the canonical option value. When provided, the default is selected
+// initially in the menu and accepted for empty piped input.
 func PromptChoice(label string, options []string, defaultValue string) (string, error) {
 	if len(options) == 0 {
 		return "", fmt.Errorf("no options provided")
 	}
+	defaultIndex := -1
 	if defaultValue != "" {
-		canonical := ""
-		for _, opt := range options {
+		for index, opt := range options {
 			if strings.EqualFold(defaultValue, opt) {
-				canonical = opt
+				defaultIndex = index
+				defaultValue = opt
 				break
 			}
 		}
-		if canonical == "" {
+		if defaultIndex < 0 {
 			return "", fmt.Errorf("default value %q is not in allowed options %v", defaultValue, options)
 		}
-		defaultValue = canonical
 	}
+
+	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+		menuOptions := append([]string(nil), options...)
+		if defaultIndex > 0 {
+			defaultOption := menuOptions[defaultIndex]
+			copy(menuOptions[1:defaultIndex+1], menuOptions[:defaultIndex])
+			menuOptions[0] = defaultOption
+		}
+		items := make([]SelectItem, len(menuOptions))
+		for index, option := range menuOptions {
+			items[index] = SelectItem{
+				Label: option,
+				ID:    option,
+			}
+		}
+		selected, err := Select(label, items)
+		if err != nil {
+			return "", err
+		}
+		return selected.ID, nil
+	}
+
 	display := strings.Join(options, "/")
 	suffix := fmt.Sprintf("[%s]", display)
 	if defaultValue != "" {
