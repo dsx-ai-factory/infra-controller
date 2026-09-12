@@ -365,6 +365,48 @@ write_files:
       with open(path, 'w') as f:
           f.write(content)
       print(f"CARBIDE PATCH: {path} patched successfully")
+  - path: /opt/forge/patch-sfc-link-propagation.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env python3
+      """Add reciprocal host VF relationships to SFC link propagation."""
+      import re
+      import sys
+      from pathlib import Path
+
+      path = Path(sys.argv[1] if len(sys.argv) > 1 else '/etc/mellanox/sfc.conf')
+      vf_mapping = re.compile(r'(pf0vf[0-9]+(?:_if_r)?):(.*)\n').fullmatch
+
+      try:
+          lines = path.read_text().splitlines(keepends=True)
+          starts = [
+              index
+              for index, line in enumerate(lines)
+              if line == 'LINK_PROPAGATION_ARR=(\n'
+          ]
+          if len(starts) != 1:
+              raise ValueError(f'expected one propagation array; found {len(starts)}')
+          start = starts[0]
+          end = lines.index(')\n', start + 1)
+
+          additions = []
+          for entry in lines[start + 1:end]:
+              match = vf_mapping(entry)
+              if match is None:
+                  continue
+              source, target = match.groups()
+              if source.endswith('_if_r'):
+                  raise ValueError(f'unexpected host VF mapping source {source}')
+              if target == f'{source}_if_r':
+                  additions.append(f'{target}:{source}\n')
+
+          if additions:
+              lines[end:end] = additions
+              path.write_text(''.join(lines))
+              print(f'CARBIDE PATCH: added {len(additions)} VF relationships to {path}')
+      except (OSError, ValueError) as error:
+          print(f'CARBIDE PATCH: failed to patch {path}: {error}', file=sys.stderr)
+          sys.exit(1)
   - path: /opt/forge/runcmds.sh
     permissions: '0755'
     content: |
@@ -556,6 +598,7 @@ write_files:
       chmod +x /opt/forge/doca_container_configs/scripts/hbn-dpu-setup.sh
       cd /opt/forge/doca_container_configs/scripts/
       ip vrf exec mgmt /bin/bash hbn-dpu-setup.sh
+      python3 /opt/forge/patch-sfc-link-propagation.py
       python3 /opt/forge/patch-hbn-manifest.py
       ctr -n=k8s.io image import /opt/forge/doca_hbn.tar
       /opt/mellanox/doca/services/telemetry/import_doca_telemetry.sh
