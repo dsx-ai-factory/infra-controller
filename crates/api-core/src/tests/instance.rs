@@ -50,10 +50,11 @@ use futures_util::future::join_all;
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use itertools::Itertools;
 use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::dpa_interface::{DpaInterfaceType, NewDpaInterface};
 use model::dpu_machine_update::DpuMachineUpdate;
 use model::instance::config::network::{
     DeviceLocator, InstanceInterfaceIpFamilyMode, InstanceInterfaceVpcSelection,
-    InstanceNetworkConfig, Ipv6InterfaceConfig, NetworkDetails,
+    InstanceNetworkConfig, InterfaceFunctionId, Ipv6InterfaceConfig, NetworkDetails,
 };
 use model::machine::{
     AttestationMode, CleanupContext, CleanupState, FailureDetails, HostMachine, InstanceState,
@@ -6537,6 +6538,11 @@ async fn test_dpf_topology_rejects_unselected_vf_on_create_and_update(
     let config = crate::test_support::default_config::with_dpf_intercept_topology(&[7]);
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
     let managed_host = create_managed_host(&env).await;
+    let mut txn = env.pool.begin().await.unwrap();
+    db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &managed_host.id)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
     let segment_ids = env.create_vpc_and_tenant_segments(2).await;
 
     // VF0 is structurally valid and globally enabled, but the replacement topology selects VF7.
@@ -6608,6 +6614,361 @@ async fn test_dpf_topology_rejects_unselected_vf_on_create_and_update(
     txn.rollback().await.unwrap();
 }
 
+/// Verifies a non-DPF host uses its configured instance VF inventory even at a DPF-enabled site.
+#[crate::sqlx_test]
+async fn test_instance_vf_inventory_rejects_unavailable_vf_on_create_and_update(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    // The site topology selects VF14, while the non-DPF HBN inventory exposes only VF0-VF13.
+    // Per-host DPF state must choose the HBN inventory for this host.
+    let mut config = crate::test_support::default_config::with_dpf_intercept_topology(&[14]);
+    config.dpu_config.num_of_vfs = 16;
+    config
+        .vmaas_config
+        .as_mut()
+        .expect("the DPF topology config includes VMaaS")
+        .hbn_reps = Some("pf0hpf,pf0vf0-pf0vf13,pf1hpf".to_string());
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let managed_host = create_managed_host(&env).await;
+    let segment_ids = env.create_vpc_and_tenant_segments(2).await;
+
+    // VF14 is supported by the hardware population but absent from the configured inventory.
+    let mut network_with_unavailable_vf =
+        single_interface_network_config_with_vfs(segment_ids.clone());
+    network_with_unavailable_vf.interfaces[1].virtual_function_id = Some(14);
+    let create_error = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(managed_host.id)
+                .config(
+                    InstanceConfig::default_tenant_and_os()
+                        .network(network_with_unavailable_vf.clone()),
+                )
+                .tonic_request(),
+        )
+        .await
+        .expect_err("an unavailable VF must not be allocated");
+    assert!(create_error.message().contains(
+        "virtual function VF14 is not available in the configured instance VF inventory"
+    ));
+
+    // A PF-only instance remains valid; adding VF14 must fail without staging the replacement.
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_ids[0])
+        .build()
+        .await;
+    let update_error = env
+        .api
+        .update_instance_config(tonic::Request::new(
+            rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: instance.rpc_instance().await.rpc_id(),
+                if_version_match: None,
+                config: Some(rpc::InstanceConfig {
+                    tenant: Some(default_tenant_config()),
+                    os: Some(default_os_config()),
+                    network: Some(network_with_unavailable_vf),
+                    infiniband: None,
+                    network_security_group_id: None,
+                    dpu_extension_services: None,
+                    nvlink: None,
+                    spxconfig: None,
+                    power_profile: None,
+                }),
+                metadata: Some(rpc::forge::Metadata {
+                    name: "unavailable-vf-update".to_string(),
+                    description: String::new(),
+                    labels: vec![],
+                }),
+            },
+        ))
+        .await
+        .expect_err("an unavailable VF must not be staged");
+    assert!(update_error.message().contains(
+        "virtual function VF14 is not available in the configured instance VF inventory"
+    ));
+
+    let mut txn = env.db_txn().await;
+    assert!(
+        instance
+            .db_instance(&mut txn)
+            .await
+            .update_network_config_request
+            .is_none()
+    );
+    txn.rollback().await.unwrap();
+}
+
+/// Verifies older callers that omit VF IDs use sparse HBN inventory on create and update.
+#[crate::sqlx_test]
+async fn test_implicit_instance_vfs_follow_sparse_hbn_inventory_on_create_and_update(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let mut config = get_config();
+    config.dpu_config.num_of_vfs = 16;
+    config
+        .vmaas_config
+        .as_mut()
+        .expect("the default test configuration includes VMaaS")
+        .hbn_reps = Some("pf0hpf,pf0vf2,pf0vf5,pf1hpf".to_string());
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let create_host = create_managed_host(&env).await;
+    let update_host = create_managed_host(&env).await;
+    let segment_ids = env.create_vpc_and_tenant_segments(3).await;
+
+    let implicit_network = || {
+        let mut network = single_interface_network_config_with_vfs(segment_ids.clone());
+        for interface in &mut network.interfaces {
+            if interface.function_type() == rpc::InterfaceFunctionType::Virtual {
+                interface.virtual_function_id = None;
+            }
+        }
+        network
+    };
+
+    let created_instance = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(create_host.id)
+                .config(InstanceConfig::default_tenant_and_os().network(implicit_network()))
+                .tonic_request(),
+        )
+        .await
+        .expect("implicit VFs from a sparse inventory must be allocated")
+        .into_inner();
+    let created_vfs = created_instance
+        .config
+        .expect("the allocated instance includes its config")
+        .network
+        .expect("the allocated instance includes its network config")
+        .interfaces
+        .into_iter()
+        .filter(|interface| interface.function_type() == rpc::InterfaceFunctionType::Virtual)
+        .map(|interface| {
+            interface
+                .virtual_function_id
+                .expect("NICo resolves every implicit VF ID")
+        })
+        .collect_vec();
+    assert_eq!(created_vfs, vec![2, 5]);
+
+    let update_instance = update_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_ids[0])
+        .build()
+        .await;
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: update_instance.rpc_instance().await.rpc_id(),
+            if_version_match: None,
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(default_os_config()),
+                network: Some(implicit_network()),
+                infiniband: None,
+                network_security_group_id: None,
+                dpu_extension_services: None,
+                nvlink: None,
+                spxconfig: None,
+                power_profile: None,
+            }),
+            metadata: Some(rpc::forge::Metadata {
+                name: "implicit-vf-update".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+        }))
+        .await
+        .expect("an update with implicit VFs must use the sparse inventory");
+
+    let mut txn = env.db_txn().await;
+    let staged_update = update_instance
+        .db_instance(&mut txn)
+        .await
+        .update_network_config_request
+        .expect("the replacement network config must be staged");
+    let staged_vfs = staged_update
+        .new_config
+        .interfaces
+        .iter()
+        .filter_map(|interface| match &interface.function_id {
+            InterfaceFunctionId::Physical {} => None,
+            InterfaceFunctionId::Virtual { id } => Some(*id),
+        })
+        .collect_vec();
+    assert_eq!(staged_vfs, vec![2, 5]);
+    txn.rollback().await.unwrap();
+}
+
+/// Verifies BF4 Astra ignores a site intercept topology and uses its static VF inventory.
+#[crate::sqlx_test]
+async fn test_bf4_astra_implicit_instance_vfs_use_static_inventory_on_create_and_update(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    async fn create_bf4_astra_host(env: &TestEnv) -> TestManagedHost {
+        let host = create_managed_host(env).await;
+        let mut txn = env.db_txn().await;
+        let dpu = host.dpu().db_machine(&mut txn).await;
+        let mut hardware_info = dpu
+            .status
+            .hardware_info
+            .expect("the fixture DPU includes hardware information");
+        hardware_info
+            .dmi_data
+            .as_mut()
+            .expect("the fixture DPU includes DMI information")
+            .product_name = "BlueField-4 SmartNIC Main Card".to_string();
+        db::machine_topology::set_topology_update_needed(txn.as_mut(), &dpu.id, true)
+            .await
+            .unwrap();
+        db::machine_topology::create_or_update(txn.as_mut(), &dpu.id, &hardware_info)
+            .await
+            .unwrap();
+        db::machine::mark_machine_ingestion_done_with_dpf(txn.as_mut(), &host.id)
+            .await
+            .unwrap();
+        db::dpa_interface::persist(
+            NewDpaInterface {
+                machine_id: *host.id,
+                mac_address: mac_address::MacAddress::from([0x02, 0, 0, 0, 0, 1]),
+                device_type: "ConnectX-9".to_string(),
+                pci_name: "0000:01:00.0".to_string(),
+                device_description: None,
+                interface_type: DpaInterfaceType::Astra,
+            },
+            txn.as_mut(),
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+
+        host
+    }
+
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let mut config = crate::test_support::default_config::with_dpf_intercept_topology(&[14]);
+    config.dpu_config.num_of_vfs = 16;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let create_host = create_bf4_astra_host(&env).await;
+    let update_host = create_bf4_astra_host(&env).await;
+    let segment_ids = env.create_vpc_and_tenant_segments(2).await;
+
+    let implicit_network = || {
+        let mut network = single_interface_network_config_with_vfs(segment_ids.clone());
+        network.interfaces[1].virtual_function_id = None;
+        network
+    };
+
+    let created_instance = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(create_host.id)
+                .config(InstanceConfig::default_tenant_and_os().network(implicit_network()))
+                .tonic_request(),
+        )
+        .await
+        .expect("BF4 Astra must allocate an implicit VF from its static inventory")
+        .into_inner();
+    let created_vfs = created_instance
+        .config
+        .expect("the allocated instance includes its config")
+        .network
+        .expect("the allocated instance includes its network config")
+        .interfaces
+        .into_iter()
+        .filter(|interface| interface.function_type() == rpc::InterfaceFunctionType::Virtual)
+        .map(|interface| {
+            interface
+                .virtual_function_id
+                .expect("NICo resolves every implicit VF ID")
+        })
+        .collect_vec();
+    assert_eq!(created_vfs, vec![0]);
+
+    // Allocate directly instead of advancing the machine to Ready: an Astra interface makes the
+    // host wait for DPA readiness, which is unrelated to this admission contract.
+    let update_instance = env
+        .api
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(update_host.id)
+                .config(
+                    InstanceConfig::default_tenant_and_os()
+                        .network(single_interface_network_config(segment_ids[0])),
+                )
+                .tonic_request(),
+        )
+        .await
+        .expect("the update fixture instance must be allocated")
+        .into_inner();
+    let update_instance_id = update_instance
+        .id
+        .expect("the allocated update fixture includes its ID");
+    // Network updates require an assigned Ready host. Skip only the unrelated Astra DPA
+    // convergence; the update handler still reloads the persisted Astra inventory below.
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        txn.as_mut(),
+        &update_host.id,
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(update_instance_id),
+            if_version_match: None,
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(default_os_config()),
+                network: Some(implicit_network()),
+                infiniband: None,
+                network_security_group_id: None,
+                dpu_extension_services: None,
+                nvlink: None,
+                spxconfig: None,
+                power_profile: None,
+            }),
+            metadata: Some(rpc::forge::Metadata {
+                name: "bf4-astra-implicit-vf-update".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+        }))
+        .await
+        .expect("a BF4 Astra update must use the static VF inventory");
+
+    let mut txn = env.db_txn().await;
+    let staged_update = db::instance::find_by_id(txn.as_mut(), update_instance_id)
+        .await
+        .unwrap()
+        .expect("the update fixture instance remains persisted")
+        .update_network_config_request
+        .expect("the replacement network config must be staged");
+    let staged_vfs = staged_update
+        .new_config
+        .interfaces
+        .iter()
+        .filter_map(|interface| match &interface.function_id {
+            InterfaceFunctionId::Physical {} => None,
+            InterfaceFunctionId::Virtual { id } => Some(*id),
+        })
+        .collect_vec();
+    assert_eq!(staged_vfs, vec![0]);
+    txn.rollback().await.unwrap();
+}
+
 /// Verifies raw protobuf VF identities cannot alias selected topology VFs during conversion.
 #[crate::sqlx_test]
 async fn test_public_instance_endpoints_reject_out_of_range_wire_vfs(
@@ -6621,6 +6982,13 @@ async fn test_public_instance_endpoints_reject_out_of_range_wire_vfs(
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
     let create_host = create_managed_host(&env).await;
     let update_host = create_managed_host(&env).await;
+    let mut txn = env.pool.begin().await.unwrap();
+    for managed_host in [&create_host, &update_host] {
+        db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &managed_host.id)
+            .await
+            .unwrap();
+    }
+    txn.commit().await.unwrap();
     let segment_ids = env.create_vpc_and_tenant_segments(2).await;
     let update_instance = update_host
         .instance_builer(&env)

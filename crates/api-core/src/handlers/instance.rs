@@ -64,10 +64,11 @@ use crate::cfg::file::CarbideConfig;
 use crate::ethernet_virtualization::validate_instance_interface_routing_profiles;
 use crate::instance::{
     InstanceAllocationRequest, allocate_ib_port_guid, allocate_instance, allocate_network,
-    allocate_spx_port_mac, ib_memberships_from_config, load_extension_services,
-    load_ib_partition_pkeys, validate_ib_partition_ownership, validate_instance_extension_services,
-    validate_instance_vfs_against_dpf_topology, validate_os_definition_usable,
-    validate_spx_partition_ownership,
+    allocate_spx_port_mac, assign_implicit_instance_vfs_from_effective_dpu_inventory,
+    ib_memberships_from_config, instance_vf_inventory_source, load_extension_services,
+    load_ib_partition_pkeys, requests_implicit_vf_allocation, validate_ib_partition_ownership,
+    validate_instance_extension_services, validate_instance_vfs_against_effective_dpu_inventory,
+    validate_os_definition_usable, validate_spx_partition_ownership,
 };
 use crate::{CarbideError, CarbideResult};
 
@@ -1321,6 +1322,11 @@ pub(crate) async fn update_instance_config(
             network.auto && network.auto_config.is_none() && network.interfaces.is_empty()
         });
 
+    let implicit_vf_allocation = request
+        .config
+        .as_ref()
+        .is_some_and(requests_implicit_vf_allocation);
+
     let mut config: InstanceConfig = match request.config {
         None => return Err(CarbideError::MissingArgument("config").into()),
         Some(config) => config.try_into().map_err(CarbideError::from)?,
@@ -1382,6 +1388,17 @@ pub(crate) async fn update_instance_config(
         kind: "machine",
         id: machine_id.to_string(),
     })?;
+    if mh_snapshot.host_snapshot.config.dpf.used_for_ingestion {
+        mh_snapshot.dpa_interface_snapshots = db::dpa_interface::find_by_machine_id(
+            &mut txn,
+            machine_id,
+            DpaSearchConfig {
+                only_svpc: false,
+                only_astra: true,
+            },
+        )
+        .await?;
+    }
     // We assign `initial_instance` from this first snapshot as the baseline for
     // request validation and resource updates. An IB change later locks the
     // Instance and Machine, reloads the snapshot, and uses the refreshed
@@ -1494,6 +1511,7 @@ pub(crate) async fn update_instance_config(
         initial_instance,
         &mut config.network,
         &mh_snapshot,
+        implicit_vf_allocation,
         &mut txn,
     )
     .await?;
@@ -1612,6 +1630,7 @@ async fn update_instance_network_config(
     instance: &InstanceSnapshot,
     network: &mut InstanceNetworkConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
+    implicit_vf_allocation: bool,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), CarbideError> {
     if instance.update_network_config_request.is_some() {
@@ -1678,6 +1697,16 @@ async fn update_instance_network_config(
         )?;
     }
 
+    let vf_inventory_source = instance_vf_inventory_source(mh_snapshot);
+
+    if implicit_vf_allocation {
+        assign_implicit_instance_vfs_from_effective_dpu_inventory(
+            network,
+            runtime_config,
+            vf_inventory_source,
+        )?;
+    }
+
     if !instance
         .config
         .network
@@ -1725,7 +1754,11 @@ async fn update_instance_network_config(
                 .unwrap_or(true),
         )
         .map_err(CarbideError::from)?;
-    validate_instance_vfs_against_dpf_topology(network, runtime_config)?;
+    validate_instance_vfs_against_effective_dpu_inventory(
+        network,
+        runtime_config,
+        vf_inventory_source,
+    )?;
     validate_instance_interface_routing_profiles(txn, network, runtime_config.fnn.as_ref()).await?;
 
     // Allocate IPs and add them to the network config
