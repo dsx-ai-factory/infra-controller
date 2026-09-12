@@ -1,0 +1,286 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/NVIDIA/bare-metal-manager-core/config/schemas/general.json",
+  "title": "GeneralConfig",
+  "description": "Top-level nico-api service configuration. All fields live under the [general] TOML section.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["listen", "database_url", "asn"],
+  "properties": {
+    "listen": {
+      "type": "string",
+      "description": "Socket address for the gRPC API server. Clients and nico-admin-cli connect here.",
+      "examples": ["[::]:1079", "0.0.0.0:1079"]
+    },
+    "listen_only": {
+      "type": "boolean",
+      "description": "Run passively — no background services, only RPC/web connections. Used in dev mode when a second nico instance runs against a cluster that already has a full instance.",
+      "default": false
+    },
+    "metrics_endpoint": {
+      "type": "string",
+      "description": "Socket address for the HTTP server serving Prometheus metrics under /metrics. Omit to disable metrics.",
+      "examples": ["[::]:1080"]
+    },
+    "alt_metric_prefix": {
+      "type": "string",
+      "description": "Alternative metric prefix emitted alongside carbide_ during dashboard migrations. Increases observability system load; remove once migration is complete."
+    },
+    "database_url": {
+      "type": "string",
+      "description": "Postgres connection string for all persistent state. The password is typically injected via the CARBIDE_API_DATABASE_URL environment variable rather than stored in this file.",
+      "examples": ["postgres://user:password@hostname/dbname"]
+    },
+    "max_database_connections": {
+      "type": "integer",
+      "description": "Maximum size of the database connection pool.",
+      "default": 1000,
+      "minimum": 1
+    },
+    "database_pool_acquire_timeout": {
+      "type": "string",
+      "description": "How long a caller may wait for a connection from the pool before failing. Trips on a stalled database or saturated pool.",
+      "default": "30s",
+      "examples": ["30s", "1m"]
+    },
+    "database_pool_idle_timeout": {
+      "type": "string",
+      "description": "How long a pooled connection may sit unused before the pool closes it. Should be well inside the Postgres server's idle-session timeout (typically 60 minutes).",
+      "default": "10m",
+      "examples": ["10m", "30m"]
+    },
+    "database_pool_max_lifetime": {
+      "type": "string",
+      "description": "Maximum age of a pooled connection before it is replaced. Keeps the pool rebalancing onto the current primary after a database failover.",
+      "default": "30m",
+      "examples": ["30m", "1h"]
+    },
+    "asn": {
+      "type": "integer",
+      "description": "Autonomous System Number, fixed per environment. Used by nico-dpu-agent to write frr.conf for BGP routing.",
+      "minimum": 1,
+      "maximum": 4294967295,
+      "examples": [4294967000]
+    },
+    "dhcp_servers": {
+      "type": "array",
+      "description": "DHCP server IPv4 addresses announced to DPUs during network provisioning.",
+      "default": [],
+      "items": {
+        "type": "string",
+        "format": "ipv4"
+      }
+    },
+    "ntp_servers": {
+      "type": "array",
+      "description": "NTP server IPv4 addresses for the site.",
+      "default": [],
+      "items": {
+        "type": "string",
+        "format": "ipv4"
+      }
+    },
+    "route_servers": {
+      "type": "array",
+      "description": "Route server IP addresses for L2VPN (Ethernet Virtual) network support on DPUs.",
+      "default": [],
+      "items": {
+        "type": "string",
+        "anyOf": [
+          { "format": "ipv4" },
+          { "format": "ipv6" }
+        ]
+      }
+    },
+    "enable_route_servers": {
+      "type": "boolean",
+      "description": "Enable route server injection into DPU FRR configs for L2VPN Ethernet Virtual networks.",
+      "default": false
+    },
+    "deny_prefixes": {
+      "type": "array",
+      "description": "IPv4 CIDR prefixes that tenant instances are not permitted to communicate with.",
+      "default": [],
+      "items": {
+        "type": "string",
+        "examples": ["192.168.0.0/24"]
+      }
+    },
+    "site_fabric_prefixes": {
+      "type": "array",
+      "description": "IPv4 and IPv6 CIDR prefixes assigned for tenant use within this site.",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "anycast_site_prefixes": {
+      "type": "array",
+      "description": "Aggregate IPv4 CIDR prefixes containing tenant-assigned prefixes that the DPU may announce (e.g. BYOIP).",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "common_tenant_host_asn": {
+      "type": "integer",
+      "description": "ASN allocated for tenants peering with the DPU. When unset, remote-as external is used, allowing any ASN.",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "vpc_isolation_behavior": {
+      "type": "string",
+      "description": "VPC isolation policy enforced on tenant traffic.",
+      "default": "isolated",
+      "enum": ["isolated", "open"]
+    },
+    "host_naming_strategy": {
+      "type": "string",
+      "description": "Strategy for deriving machine hostnames. Only 'fun' preserves existing real names; others re-derive on reconcile.",
+      "default": "ip_address",
+      "enum": ["ip_address", "fun", "serial_number", "mac_address"]
+    },
+    "attestation_enabled": {
+      "type": "boolean",
+      "description": "Require machine attestation before a machine can transition from Discovered to Ready. Introduces the Measuring state. Roll out per-site after verifying the Scout image supports Action::MEASURE.",
+      "default": false
+    },
+    "tpm_required": {
+      "type": "boolean",
+      "description": "Require a TPM module for machine registration. When false, the chassis serial is used as the stable machine identifier instead.",
+      "default": true
+    },
+    "bypass_rbac": {
+      "type": "boolean",
+      "description": "Disable role-based access control enforcement. For testing and development only.",
+      "default": false
+    },
+    "max_find_by_ids": {
+      "type": "integer",
+      "description": "Maximum number of IDs accepted by find_*_by_ids APIs to prevent oversized queries.",
+      "default": 100,
+      "minimum": 1
+    },
+    "bmc_session_lockout_threshold": {
+      "type": "integer",
+      "description": "Number of consecutive HTTP 401/403 responses from a BMC before the session-token path stops attempting to log in, to avoid exhausting the BMC root account retry budget.",
+      "default": 3,
+      "minimum": 1
+    },
+    "allow_bmc_basic_auth_fallback": {
+      "type": "boolean",
+      "description": "When true, GetBmcCredentials may return UsernamePassword credentials for BMCs whose Redfish ServiceRoot does not expose SessionService.",
+      "default": false
+    },
+    "initial_dpu_agent_upgrade_policy": {
+      "type": "string",
+      "description": "Initial policy for deciding whether a nico-dpu-agent should be upgraded. Overridable via nico-admin-cli.",
+      "enum": ["up_only", "any", "none"]
+    },
+    "initial_domain_name": {
+      "type": "string",
+      "description": "Domain to create if no domains exist. Most sites use a single domain for their lifetime."
+    },
+    "sitename": {
+      "type": "string",
+      "description": "Human-readable site name exposed to tenant OS via the FMDS endpoint."
+    },
+    "internet_l3_vni": {
+      "type": "integer",
+      "description": "Network infrastructure-provided L3 VNI for FNN VPC Internet connectivity. Combined with datacenter_asn to form a route-target.",
+      "default": 100001,
+      "minimum": 1
+    },
+    "datacenter_asn": {
+      "type": "integer",
+      "description": "Datacenter ASN used by FNN to build DC-specific route targets for VRF import and export.",
+      "default": 11414,
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "pxe_public_base_url": {
+      "type": "string",
+      "description": "Canonical PXE base URL.",
+      "examples": ["http://nico-pxe.example.com"]
+    },
+    "x86_pxe_boot_url_override": {
+      "type": "string",
+      "description": "Override PXE boot URL for x86 machines."
+    },
+    "arm_pxe_boot_url_override": {
+      "type": "string",
+      "description": "Override PXE boot URL for ARM machines."
+    },
+    "external_api_url": {
+      "type": "string",
+      "description": "Alternate API URL for external hosts that cannot resolve the internal hostname. Use an IP or externally resolvable hostname.",
+      "examples": ["https://10.0.0.1:1079", "https://nico-api.corp.example.com"]
+    },
+    "external_pxe_url": {
+      "type": "string",
+      "description": "Alternate PXE URL for external hosts, used for cloud-init and root CA retrieval.",
+      "examples": ["http://10.0.0.1:8080"]
+    },
+    "external_static_pxe_url": {
+      "type": "string",
+      "description": "Alternate static PXE URL for external hosts, used for kernel/blob downloads. Falls back to external_pxe_url when unset.",
+      "examples": ["http://10.0.0.1:8081"]
+    },
+    "initial_objects_file": {
+      "type": "string",
+      "description": "Path to initial_objects.toml for seeding the database.",
+      "examples": ["/etc/nico/nico-api/initial_objects.toml"]
+    },
+    "min_dpu_functioning_links": {
+      "type": "integer",
+      "description": "Minimum functioning DPU links required for the DPU to be considered healthy. When unset, all links must be functional.",
+      "minimum": 0
+    },
+    "site_global_vpc_vni": {
+      "type": "integer",
+      "description": "Force all VRFs to use this VNI. Required on sites where Cumulus Linux route-leaking limits VRF count to one.",
+      "minimum": 1
+    },
+    "rack_management_enabled": {
+      "type": "boolean",
+      "description": "Use nico as a standalone infrastructure manager for racks of GB200/GB300/VR144 via Rack Manager. Changes site controller behavior significantly.",
+      "default": false
+    },
+    "enable_admin_ui": {
+      "type": "boolean",
+      "description": "Serve the admin web UI at /admin. When false, only the gRPC API is available.",
+      "default": true
+    },
+    "dhcp_lease_expiry_handling": {
+      "type": "boolean",
+      "description": "Clean up IP allocations when DHCP leases expire.",
+      "default": false
+    },
+    "dpu_network_monitor_pinger_type": {
+      "type": "string",
+      "description": "Pinger implementation used by the DPU network monitor to health-check DPU links.",
+      "examples": ["OobNetBind"]
+    },
+    "retained_boot_interface_window": {
+      "type": "string",
+      "description": "How long a retained boot interface pair stays applicable after its machine_interfaces row was deleted. Omit to retain forever.",
+      "examples": ["30d", "7d"]
+    },
+    "default_tenant_routing_profile_type": {
+      "type": "string",
+      "description": "Default routing profile assigned when a tenant is created.",
+      "default": "internal"
+    },
+    "compute_allocation_enforcement": {
+      "type": "string",
+      "description": "Controls compute allocation enforcement when a new instance is requested.",
+      "default": "warn_only",
+      "enum": ["warn_only", "enforce_if_present", "always"]
+    },
+    "max_concurrent_machine_updates": {
+      "type": "integer",
+      "description": "Deprecated. Use [machine_updater] max_concurrent_machine_updates_absolute instead.",
+      "deprecated": true
+    }
+  }
+}
