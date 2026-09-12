@@ -188,10 +188,15 @@ FirmwareUpgrade(Start -> WaitForComplete)
   -> Validating(Pending)
 ```
 
+During automatic maintenance, a missing rack-profile `firmware_object` skips
+both update phases. If a switch in the maintenance scope is already in
+`ReProvisioning::WaitingForNVOSUpgrade`, the rack transitions to `Error` instead
+of skipping the NVOS phase.
+
 | Sub-state | Description |
 |-----------|-------------|
 | **FirmwareUpgrade** | Rack-level RMS firmware upgrade for scoped machines and switches. Sets per-device `firmware_upgrade_status` and drives switch `ReProvisioning::WaitingForRackFirmwareUpgrade` / machine `HostReprovision`. |
-| **NVOSUpdate** | NVOS image update for scoped switches. Sets `nvos_update_status` and drives switch `ReProvisioning::WaitingForNVOSUpgrade`. |
+| **NVOSUpdate** | NVOS image update and NVOS admin password recovery for scoped switches. Sets `nvos_update_status` and drives switch `ReProvisioning::WaitingForNVOSUpgrade`. |
 | **ConfigureNmxCluster** | NMX cluster setup. Submits the asynchronous RMS ScaleUpFabricManager job for the full rack fabric, then waits for it to complete. See sub-states below. |
 | **PowerSequence** | Optional power-on/off/reset sequencing for scoped devices. |
 | **Completed** | All requested maintenance activities finished; rack advances to validation. |

@@ -30,7 +30,8 @@ use carbide_rack::rms_node_type::{
     switch_node_identity_for_profile,
 };
 use carbide_secrets::credentials::Credentials;
-use carbide_uuid::rack::RackProfileId;
+use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::switch::SwitchId;
 use db::direct_dispatch_firmware_job::FirmwareJobKind;
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use librms::{RackManagerError, RmsApi};
@@ -346,6 +347,7 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
                         .cloned()
                         .or_else(|| parent_job_id.clone()),
                     error_message: None,
+                    ..Default::default()
                 };
 
                 if status.job_id.is_none() {
@@ -454,6 +456,49 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
 
         Ok(updated)
     }
+
+    async fn start_nvos_password_update(
+        &self,
+        rack_id: &RackId,
+        profile: &RackProfile,
+        switch_id: &SwitchId,
+        nvos_ip: IpAddr,
+        credentials: &Credentials,
+    ) -> Result<String, ComponentManagerError> {
+        let switch_identity = switch_node_identity_for_profile(profile)
+            .map_err(|error| ComponentManagerError::InvalidArgument(error.to_string()))?;
+
+        let Credentials::UsernamePassword { password, .. } = credentials;
+
+        let mut node = rms::NodeInfo {
+            node_id: switch_id.to_string(),
+            rack_id: rack_id.to_string(),
+            host_endpoint: Some(rms::Endpoint {
+                interface: Some(rms::NetworkInterface {
+                    ip_address: nvos_ip.to_string(),
+                    ..Default::default()
+                }),
+                credentials: Some(credentials_to_rms(credentials)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        switch_identity.apply_to_node_info(&mut node);
+
+        // RMS image work and job tracking are process-local. After an RMS
+        // restart, sending the desired password as both the current and target
+        // password is safe: RMS verifies it first, then uses the factory admin
+        // credential only when recovery is needed.
+        rms_ensure_switch_password_rotation(self.client.as_ref(), node, credentials, password).await
+    }
+
+    async fn get_nvos_password_update_status(
+        &self,
+        job_id: &str,
+    ) -> Result<SwitchPasswordRotationState, ComponentManagerError> {
+        rms_get_switch_password_rotation_job_status(self.client.as_ref(), job_id).await
+    }
 }
 
 fn apply_nvos_job_status_response(
@@ -514,14 +559,16 @@ fn apply_nvos_job_status_response(
                 response.error_message
             };
 
-            tracing::warn!(
-                job_id = %job_id,
-                job_status = response.status,
-                error = %message,
-                "RMS returned a non-success switch image job status lookup; retrying later",
-            );
-
+            // RMS reports a missing process-local job as an ordinary failure
+            // response. Its image outcome is unknown, so run password recovery.
+            switch.status = "failed".into();
             switch.error_message = Some(message);
+        }
+        Err(RackManagerError::ApiInvocationError(status))
+            if status.code() == tonic::Code::NotFound =>
+        {
+            switch.status = "failed".into();
+            switch.error_message = Some(format!("RMS lost NVOS image job {job_id}"));
         }
         Err(error) => {
             let cause = match error {
@@ -3919,6 +3966,7 @@ mod tests {
                 status: "pending".into(),
                 job_id: Some("child-job".into()),
                 error_message: Some("stale error".into()),
+                ..Default::default()
             }],
         };
 
@@ -3972,6 +4020,7 @@ mod tests {
             status: "in_progress".into(),
             job_id: Some("job-2".into()),
             error_message: None,
+            ..Default::default()
         };
 
         apply_nvos_job_status_response(
@@ -4003,6 +4052,7 @@ mod tests {
             status: "pending".into(),
             job_id: Some("job-3".into()),
             error_message: None,
+            ..Default::default()
         };
 
         apply_nvos_job_status_response(
@@ -4021,6 +4071,88 @@ mod tests {
             switch.error_message.as_deref(),
             Some("Unknown RMS switch image job state mystery")
         );
+    }
+
+    #[test]
+    fn nvos_polling_treats_missing_rms_job_as_unknown_image_failure() {
+        let mut switch = NvosUpdateSwitchStatus {
+            status: "in_progress".into(),
+            job_id: Some("lost-job".into()),
+            ..Default::default()
+        };
+
+        apply_nvos_job_status_response(
+            &mut switch,
+            "lost-job",
+            Ok(rms::GetSwitchSystemImageJobStatusResponse {
+                message: "job lost-job not found".into(),
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(switch.status, "failed");
+
+        assert_eq!(
+            switch.error_message.as_deref(),
+            Some("job lost-job not found")
+        );
+    }
+
+    #[tokio::test]
+    async fn rack_nvos_password_recovery_uses_desired_password() {
+        let mock = Arc::new(MockRmsApi::new());
+
+        mock.enqueue_update_switch_system_password(Ok(rms::UpdateSwitchSystemPasswordResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "password-job".into(),
+                ..Default::default()
+            }),
+        }))
+        .await;
+
+        let manager = RmsNvosUpdateManager {
+            client: mock.clone(),
+        };
+
+        let credentials = Credentials::UsernamePassword {
+            username: "admin".into(),
+            password: "desired-password".into(),
+        };
+
+        let job_id = manager
+            .start_nvos_password_update(
+                &RackId::new("rack-1"),
+                &test_rms_profile(),
+                &crate::test_support::test_switch_id("switch-1"),
+                "192.0.2.20".parse().unwrap(),
+                &credentials,
+            )
+            .await
+            .unwrap();
+
+        let calls = mock.update_switch_system_password_calls().await;
+        let request = &calls[0];
+
+        let endpoint = request.nodes.as_ref().unwrap().nodes[0]
+            .host_endpoint
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(job_id, "password-job");
+        assert_eq!(request.password, "desired-password");
+
+        assert!(
+            request.nodes.as_ref().unwrap().nodes[0]
+                .bmc_endpoint
+                .is_none()
+        );
+
+        assert!(matches!(
+            endpoint.credentials.as_ref().and_then(|value| value.auth.as_ref()),
+            Some(rms::credentials::Auth::UserPass(value))
+                if value.password == "desired-password"
+        ));
     }
 
     #[tokio::test]

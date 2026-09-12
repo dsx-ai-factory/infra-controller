@@ -715,7 +715,13 @@ impl RmsApi for MockRmsClient {
         &self,
         _cmd: rms::UpdateSwitchSystemPasswordRequest,
     ) -> Result<rms::UpdateSwitchSystemPasswordResponse, RackManagerError> {
-        Ok(rms::UpdateSwitchSystemPasswordResponse::default())
+        Ok(rms::UpdateSwitchSystemPasswordResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "rms-sim-password-update".into(),
+                ..Default::default()
+            }),
+        })
     }
 
     async fn batch_reset_switch_sdn_factory_default(
