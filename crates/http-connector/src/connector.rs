@@ -19,7 +19,6 @@ use std::error::Error as StdError;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -281,10 +280,58 @@ struct ConnectingTcpFallback {
     remote: ConnectingTcpRemote,
 }
 
+#[derive(Clone)]
+enum Dial {
+    Direct,
+    Socks5 { targets: Arc<[SocketAddr]> },
+}
+
+impl Dial {
+    async fn connect(
+        &self,
+        addr: SocketAddr,
+        config: &Config,
+        connect_timeout: Option<Duration>,
+    ) -> Result<TcpStream, ConnectError> {
+        match self {
+            Dial::Direct => connect(&addr, config, connect_timeout)?.await,
+            Dial::Socks5 { targets } => {
+                let mut err = None;
+                for &target in targets.iter() {
+                    match connect_with_socks_proxy(addr, target, config.clone(), connect_timeout)?
+                        .await
+                    {
+                        Ok(tcp) => return Ok(tcp),
+                        Err(e) => {
+                            warn!(proxy_addr = %addr, target = %target, error = %e, "connection error");
+                            err = Some(e);
+                        }
+                    }
+                }
+                match err {
+                    Some(_) => Err(ConnectError::new(
+                        "connection via proxy failed",
+                        format!(
+                            "{} endpoint targets via proxy {} failed",
+                            targets.len(),
+                            addr
+                        ),
+                    )),
+                    None => Err(ConnectError::new(
+                        "dial not possible",
+                        "no connection targets were provided",
+                    )),
+                }
+            }
+        }
+    }
+}
+
 struct ConnectingTcpRemote {
     addrs: resolver::SocketAddrs,
     connect_timeout: Option<Duration>,
     metrics: ConnectorMetrics,
+    dial: Dial,
 }
 
 impl ConnectingTcpRemote {
@@ -292,13 +339,21 @@ impl ConnectingTcpRemote {
         addrs: resolver::SocketAddrs,
         connect_timeout: Option<Duration>,
         metrics: ConnectorMetrics,
+        dial: Dial,
     ) -> Self {
-        let connect_timeout = connect_timeout.map(|t| t / addrs.len() as u32);
+        let connect_timeout = match dial {
+            Dial::Direct => connect_timeout.and_then(|t| t.checked_div(addrs.len() as u32)),
+            // for socks case addrs param is the resolved proxy addrs, so slice using targets
+            Dial::Socks5 { ref targets } => {
+                connect_timeout.and_then(|t| t.checked_div(targets.len() as u32))
+            }
+        };
 
         Self {
             addrs,
             connect_timeout,
             metrics,
+            dial,
         }
     }
 }
@@ -307,38 +362,15 @@ impl ConnectingTcpRemote {
     async fn connect(&mut self, config: &Config) -> Result<TcpStream, ConnectError> {
         let mut err = None;
         for addr in &mut self.addrs {
-            if let Some(proxy) = config.socks5_proxy.as_deref() {
-                let proxy_addr = SocketAddr::from_str(proxy)
-                    .map_err(|e| ConnectError::new("Invalid proxy setting", e))?;
-                let connect_start = Instant::now();
-                match connect_with_socks_proxy(
-                    proxy_addr,
-                    addr,
-                    config.clone(),
-                    self.connect_timeout,
-                )?
-                .await
-                {
-                    Ok(tcp) => {
-                        self.metrics.connect_success(proxy_addr, connect_start);
-                        return Ok(tcp);
-                    }
-                    Err(e) => {
-                        self.metrics.connect_error(proxy_addr, connect_start, &e);
-                        err = Some(e);
-                    }
+            let connect_start = Instant::now();
+            match self.dial.connect(addr, config, self.connect_timeout).await {
+                Ok(tcp) => {
+                    self.metrics.connect_success(addr, connect_start);
+                    return Ok(tcp);
                 }
-            } else {
-                let connect_start = Instant::now();
-                match connect(&addr, config, self.connect_timeout)?.await {
-                    Ok(tcp) => {
-                        self.metrics.connect_success(addr, connect_start);
-                        return Ok(tcp);
-                    }
-                    Err(e) => {
-                        self.metrics.connect_error(addr, connect_start, &e);
-                        err = Some(e);
-                    }
+                Err(e) => {
+                    self.metrics.connect_error(addr, connect_start, &e);
+                    err = Some(e);
                 }
             }
         }
@@ -482,12 +514,15 @@ async fn proxy_connect(
     target: SocketAddr,
     config: &Config,
 ) -> Result<TcpStream, ConnectError> {
-    let proxy_stream = connect(&proxy_addr, config, None)?.await?;
-
-    Ok(Socks5Stream::connect_with_socket(proxy_stream, target)
-        .await
-        .map_err(|e| ConnectError::new("proxy connect error: {}", e))?
-        .into_inner())
+    match connect(&proxy_addr, config, None)?.await {
+        Err(e) => Err(ConnectError::new("proxy is unreachable", e)),
+        Ok(stream) => Ok(Socks5Stream::connect_with_socket(stream, target)
+            .await
+            .map_err(|e| {
+                ConnectError::new("proxy stream established but target is unreachable: ", e)
+            })?
+            .into_inner()),
+    }
 }
 
 fn connect_with_socks_proxy(
@@ -504,7 +539,7 @@ fn connect_with_socks_proxy(
                 Ok(Ok(s)) => Ok(s),
                 Ok(Err(e)) => Err(e),
                 Err(e) => Err(ConnectError::new(
-                    "Proxy connect timed out",
+                    "proxy connect timed out",
                     io::Error::new(io::ErrorKind::TimedOut, e),
                 )),
             },
@@ -518,6 +553,7 @@ impl<'a> ConnectingTcp<'a> {
         remote_addrs: resolver::SocketAddrs,
         config: &'a Config,
         metrics: ConnectorMetrics,
+        dial: Dial,
     ) -> Self {
         trace!(?config, "ConnectingTcp config");
 
@@ -530,6 +566,7 @@ impl<'a> ConnectingTcp<'a> {
                         preferred_addrs,
                         config.connect_timeout,
                         metrics,
+                        dial,
                     ),
                     fallback: None,
                     config,
@@ -541,6 +578,7 @@ impl<'a> ConnectingTcp<'a> {
                     preferred_addrs,
                     config.connect_timeout,
                     metrics.clone(),
+                    dial.clone(),
                 ),
                 fallback: Some(ConnectingTcpFallback {
                     delay: tokio::time::sleep(fallback_timeout),
@@ -548,13 +586,19 @@ impl<'a> ConnectingTcp<'a> {
                         fallback_addrs,
                         config.connect_timeout,
                         metrics,
+                        dial,
                     ),
                 }),
                 config,
             }
         } else {
             ConnectingTcp {
-                preferred: ConnectingTcpRemote::new(remote_addrs, config.connect_timeout, metrics),
+                preferred: ConnectingTcpRemote::new(
+                    remote_addrs,
+                    config.connect_timeout,
+                    metrics,
+                    dial,
+                ),
                 fallback: None,
                 config,
             }
@@ -972,12 +1016,23 @@ impl From<Vec<std::net::SocketAddr>> for resolver::SocketAddrs {
     }
 }
 
-impl ForgeHttpConnector {
-    async fn call_async(&mut self, dst: Uri) -> Result<TcpStream, ConnectError> {
-        let config = &self.config;
-        let (host, port) = get_host_port(config, &dst)?;
-        let host = host.trim_start_matches('[').trim_end_matches(']');
+fn get_proxy_host_port(proxy: &str) -> Result<(&str, u16), ConnectError> {
+    let (host, port) = proxy.rsplit_once(':').ok_or_else(|| ConnectError {
+        msg: "invalid proxy setting".into(),
+        cause: None,
+    })?;
+    let port: u16 = port
+        .parse()
+        .map_err(|e| ConnectError::new("invalid proxy setting", e))?;
+    Ok((host, port))
+}
 
+impl ForgeHttpConnector {
+    async fn resolve_host(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<resolver::SocketAddrs, ConnectError> {
         let addrs = if let Some(addrs) = resolver::SocketAddrs::try_parse(host, port) {
             addrs
         } else {
@@ -994,7 +1049,30 @@ impl ForgeHttpConnector {
                     addr
                 })
                 .collect();
+            if addrs.is_empty() {
+                return Err(ConnectError::dns(format!(
+                    "no addresses resolved for {host}:{port}"
+                )));
+            }
             resolver::SocketAddrs::new(addrs)
+        };
+        Ok(addrs)
+    }
+    async fn call_async(&mut self, dst: Uri) -> Result<TcpStream, ConnectError> {
+        let config = &self.config;
+        let (host, port) = get_host_port(config, &dst)?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+
+        let (addrs, dial) = match config.socks5_proxy.as_deref() {
+            None => (self.resolve_host(host, port).await?, Dial::Direct),
+            Some(proxy) => {
+                trace!(%proxy, "connecting via proxy");
+                let (proxy_host, proxy_port) = get_proxy_host_port(proxy)?;
+                let proxy_host = proxy_host.trim_start_matches('[').trim_end_matches(']');
+                let targets: Arc<[SocketAddr]> = self.resolve_host(host, port).await?.collect();
+                let proxy_addrs = self.resolve_host(proxy_host, proxy_port).await?;
+                (proxy_addrs, Dial::Socks5 { targets })
+            }
         };
 
         let retry_config = RetryFutureConfig::new(self.config.connect_retries_max.unwrap_or(0))
@@ -1006,7 +1084,7 @@ impl ForgeHttpConnector {
 
         tryhard::retry_fn(|| {
             trace!(destination_address = %dst, "establishing new tcp connection");
-            let c = ConnectingTcp::new(addrs.clone(), config, self.metrics.clone());
+            let c = ConnectingTcp::new(addrs.clone(), config, self.metrics.clone(), dial.clone());
             c.connect()
         })
         .with_config(retry_config)
