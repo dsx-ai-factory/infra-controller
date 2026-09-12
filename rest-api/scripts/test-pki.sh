@@ -33,6 +33,10 @@
 set -e
 
 NAMESPACE="nico-rest"
+# Match the deployed Certificate Manager CA Secret and serving certificate name.
+CM_CA_SECRET=${CM_CA_SECRET:-ca-signing-secret}
+CM_SERVER_NAME=${CM_SERVER_NAME:-credsmgr.csm}
+CM_CA_FILE=""
 PASSED=0
 FAILED=0
 STRICT_MODE=${STRICT_MODE:-true}
@@ -48,6 +52,9 @@ fail() {
 }
 
 cleanup() {
+    if [[ -n "$CM_CA_FILE" ]]; then
+        rm -f "$CM_CA_FILE"
+    fi
     if [[ -n "$CM_PF_PID" ]]; then
         kill $CM_PF_PID 2>/dev/null || true
     fi
@@ -435,10 +442,32 @@ echo "=========================================="
 echo ""
 echo "--- Test 25: PKI API Issues Certificate ---"
 echo "Checks: POST to /v1/pki/cloud-cert returns a certificate and private key"
-echo "        This is the API that services call to get their certs"
-ISSUE_RESP=$(curl -sk -X POST https://localhost:18000/v1/pki/cloud-cert \
+echo "        Authenticate as the deployed Site Manager service account"
+SITE_MANAGER_SA=$(kubectl -n "$NAMESPACE" get pods -l app=nico-rest-site-manager \
+    -o jsonpath='{.items[0].spec.serviceAccountName}')
+if [[ -z "$SITE_MANAGER_SA" ]]; then
+    fail "Cannot determine the Site Manager service account"
+    exit 1
+fi
+# Obtain trust through Kubernetes, not the unauthenticated port-forward endpoint.
+CM_CA_FILE=$(mktemp)
+CM_CA_B64=$(kubectl -n "$NAMESPACE" get secret "$CM_CA_SECRET" \
+    -o jsonpath='{.data.tls\.crt}')
+printf '%s' "$CM_CA_B64" | base64 -d > "$CM_CA_FILE"
+if ! ISSUE_TOKEN=$(kubectl -n "$NAMESPACE" create token "$SITE_MANAGER_SA" \
+    --audience=nico-rest-cert-manager --duration=10m); then
+    fail "Cannot request the Site Manager token (requires create on serviceaccounts/token)"
+    exit 1
+fi
+# Feed the header through stdin so the token is not exposed in curl's arguments.
+ISSUE_RESP=$(printf 'Authorization: Bearer %s\n' "$ISSUE_TOKEN" | \
+    curl -sSf --cacert "$CM_CA_FILE" --noproxy "$CM_SERVER_NAME" \
+    --resolve "$CM_SERVER_NAME:18000:127.0.0.1" \
+    -X POST "https://$CM_SERVER_NAME:18000/v1/pki/cloud-cert" \
+    -H @- \
     -H "Content-Type: application/json" \
-    -d '{"name":"test-service","app":"e2e-test","ttl":24}' 2>/dev/null || echo "")
+    -d '{"name":"test-service","app":"e2e-test","ttl":24}' || echo "")
+unset ISSUE_TOKEN
 if echo "$ISSUE_RESP" | jq -e '.certificate' > /dev/null 2>&1; then
     ISSUED_CERT=$(echo "$ISSUE_RESP" | jq -r '.certificate')
     ISSUED_KEY=$(echo "$ISSUE_RESP" | jq -r '.key')

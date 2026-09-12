@@ -68,6 +68,9 @@ func GetSiteOTP(ctx context.Context, logger zerolog.Logger, uuid, url string) (*
 	}
 	defer resp.Body.Close()
 	c, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	var siteResp csmtypes.SiteGetResponse
 	err = json.Unmarshal(c, &siteResp)

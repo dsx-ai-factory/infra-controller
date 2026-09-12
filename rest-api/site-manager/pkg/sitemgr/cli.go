@@ -27,6 +27,21 @@ func NewCommand() *cli.Command {
 		Name:  "Forge Site Manager Service",
 		Usage: "Forge Site Manager Service",
 		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:  "creds-manager-token-file",
+				Value: "/var/run/secrets/nico-rest-cert-manager/token",
+				Usage: "Projected service account token file for audience nico-rest-cert-manager; reloaded by the client",
+			},
+			&cli.StringFlag{
+				Name:  "creds-manager-ca-file",
+				Value: "/etc/pki/creds-manager/ca.crt",
+				Usage: "PEM CA bundle used to verify the certificate manager TLS certificate",
+			},
+			&cli.StringFlag{
+				Name:  "creds-manager-server-name",
+				Value: "credsmgr.csm",
+				Usage: "TLS server name expected from certificate manager; empty uses the URL host",
+			},
 			&cli.BoolFlag{
 				Name:  "debug",
 				Usage: "Log debug message to stderr",
@@ -86,13 +101,16 @@ func NewCommand() *cli.Command {
 			log := core.GetLogger(ctx)
 
 			o := Options{
-				credsMgrURL: c.String("creds-manager-url"),
-				ingressHost: c.String("ingress-host"),
-				listenPort:  c.String("listen-port"),
-				tlsKeyPath:  c.String("tls-key-path"),
-				tlsCertPath: c.String("tls-cert-path"),
-				namespace:   c.String("namespace"),
-				sentryDSN:   c.String("sentry-dsn"),
+				credsMgrTokenFile:  c.String("creds-manager-token-file"),
+				credsMgrCAFile:     c.String("creds-manager-ca-file"),
+				credsMgrServerName: c.String("creds-manager-server-name"),
+				credsMgrURL:        c.String("creds-manager-url"),
+				ingressHost:        c.String("ingress-host"),
+				listenPort:         c.String("listen-port"),
+				tlsKeyPath:         c.String("tls-key-path"),
+				tlsCertPath:        c.String("tls-cert-path"),
+				namespace:          c.String("namespace"),
+				sentryDSN:          c.String("sentry-dsn"),
 			}
 
 			otpHrs := c.Int("otp-duration")
