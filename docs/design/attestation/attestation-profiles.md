@@ -351,6 +351,7 @@ rpc UpdateAttestationProfile(UpdateAttestationProfileRequest) returns (Attestati
 rpc DeleteAttestationProfile(DeleteAttestationProfileRequest) returns (DeleteAttestationProfileResponse);
 rpc GetAttestationProfile(GetAttestationProfileRequest) returns (AttestationProfile);
 rpc ListAttestationProfiles(google.protobuf.Empty) returns (ListAttestationProfilesResponse);
+rpc GetAttestationCoverage(google.protobuf.Empty) returns (GetAttestationCoverageResponse);
 ```
 
 ```protobuf
@@ -368,10 +369,13 @@ message ComponentIdMatch {
 }
 
 enum AttesterSelectionMode {
-  ATTESTER_SELECTION_MODE_NONE = 0;
-  ATTESTER_SELECTION_MODE_ALL = 1;
-  ATTESTER_SELECTION_MODE_ALLOWLIST = 2;
-  ATTESTER_SELECTION_MODE_DENYLIST = 3;
+  // Zero is not a real mode: an omitted one would otherwise read as NONE and
+  // silently disable attestation for the class.
+  ATTESTER_SELECTION_MODE_UNSPECIFIED = 0;
+  ATTESTER_SELECTION_MODE_NONE = 1;
+  ATTESTER_SELECTION_MODE_ALL = 2;
+  ATTESTER_SELECTION_MODE_ALLOWLIST = 3;
+  ATTESTER_SELECTION_MODE_DENYLIST = 4;
 }
 
 message AttestationProfile {
@@ -399,6 +403,35 @@ message DeleteAttestationProfileRequest {
 }
 
 message DeleteAttestationProfileResponse {}
+```
+
+The coverage read (§6.4) reports the §5.3 rule applied to each class the site
+has, so a caller does not restate it:
+
+```protobuf
+enum AttestationCoverage {
+  ATTESTATION_COVERAGE_UNSPECIFIED = 0;
+  ATTESTATION_COVERAGE_OWN_PROFILE = 1;
+  ATTESTATION_COVERAGE_ANY_FALLBACK = 2;
+  ATTESTATION_COVERAGE_NO_PROFILE = 3;
+  ATTESTATION_COVERAGE_CLASS_UNRECOGNIZED = 4;
+  ATTESTATION_COVERAGE_CLASS_NOT_RECORDED = 5;
+}
+
+message AttestationCoverageEntry {
+  // Empty for the endpoints exploration has recorded no class for.
+  string hardware_class = 1;
+  int32 endpoints = 2;
+  AttestationCoverage coverage = 3;
+  // The mode that would apply, absent when nothing would.
+  optional AttesterSelectionMode mode = 4;
+}
+
+message GetAttestationCoverageResponse {
+  repeated AttestationCoverageEntry entries = 1;
+  // Absent when no `any` profile is stored.
+  optional AttesterSelectionMode any_profile_mode = 2;
+}
 ```
 
 `updated_by` is a response field only; the server derives it (§7.1).
@@ -432,36 +465,56 @@ never produce `any` or `unrecognized` (§5.1).
 
 ### 6.3 The admin CLI
 
+The commands sit under the existing `attestation spdm` group, alongside the
+`trigger`, `get`, `list`, and `cancel` commands that act on the machines these
+profiles decide:
+
 ```text
-nico-admin-cli attestation profile list
-nico-admin-cli attestation profile get <hardware-class>
-nico-admin-cli attestation profile create <hardware-class> --mode allowlist --prefix HGX_IRoT_GPU_
-nico-admin-cli attestation profile update <hardware-class> --mode denylist --exact HGX_BMC_0 [--if-version-match <version>]
-nico-admin-cli attestation profile delete <hardware-class> [--if-version-match <version>]
-nico-admin-cli attestation coverage
+nico-admin-cli attestation spdm profile list
+nico-admin-cli attestation spdm profile get <hardware-class>
+nico-admin-cli attestation spdm profile create <hardware-class> --mode allowlist --prefix HGX_IRoT_GPU_
+nico-admin-cli attestation spdm profile update <hardware-class> --mode denylist --exact HGX_BMC_0 [--if-version-match <version>] [--force]
+nico-admin-cli attestation spdm profile delete <hardware-class> [--if-version-match <version>] [--force]
+nico-admin-cli attestation spdm coverage
 ```
 
 Patterns are two repeatable flags, `--exact <id>` and `--prefix <string>`, so a
 selection can mix them:
 
 ```text
-nico-admin-cli attestation profile create Gb200 \
-  --mode allowlist --prefix HGX_IRoT_GPU_ --exact VERA_CPU_0
+nico-admin-cli attestation spdm profile create Gb200 --mode allowlist --prefix HGX_IRoT_GPU_ --exact VERA_CPU_0
 ```
+
+A command line does not record the order two flags were interleaved in, so the
+patterns are sent `--exact` values first and then `--prefix` ones, each in the
+order given.
 
 `--mode allowlist` and `--mode denylist` require at least one pattern flag;
-`--mode all` and `--mode none` reject both. `--if-version-match` is optional;
-`get` and `list` print the version it takes.
+`--mode all` and `--mode none` reject both. That is enforced by the server
+alone, so the CLI holds no inter-flag rule that would have to agree with it.
+`--if-version-match` is optional; `get` and `list` print the version it takes.
 
-**Creating** `any` **with** `mode: none` **requires confirmation.** It is the one profile
-that switches attestation off for every class without one of its own. Every other
-combination writes without prompting, including `any` with `--mode all`.
+`create` refuses a hardware class exploration never records (§6.2) before it
+sends anything, naming the classes that would have worked. The server refuses it
+too; checking locally spends no round trip on a misspelling.
+
+**Edits that stop attesting hardware not named on the command line require**
+`--force`. Those are exactly two: switching `any` to `--mode none`, and deleting
+`any`. Both leave every class without a profile of its own attesting nothing.
+Everything else writes unprompted, including `any` with `--mode all`, and
+`--mode none` on a single class, which stops attesting only the class named.
 
 ```text
-nico-admin-cli attestation profile create any --mode none
-error: this disables attestation for all hardware without its own profile
-       re-run with --yes-disable-unprofiled-attestation to confirm
+$ nico-admin-cli attestation spdm profile delete any
+error: generic error: removing the 'any' fallback leaves every hardware class
+       without a profile of its own attesting nothing; re-run with --force to
+       confirm
 ```
+
+`attestation spdm trigger` prints what §5.3 decided for the machine: the
+outcome, the hardware class resolved for it, and the profile version that
+applied. A trigger that schedules nothing still succeeds, so without the outcome
+its response cannot be told from one that scheduled work.
 
 These are Clap declarations under `crates/admin-cli/src/`. The reference pages
 are generated, so run `cargo make gen-cli-docs` and `cargo make check-cli-docs`
@@ -471,17 +524,25 @@ after changing them.
 
 Which classes a site has is not written down anywhere, and §5.3 makes enablement
 depend on it. One read-only view groups `explored_endpoints` by `hardware_class`
-and left-joins the profile table:
+and resolves each group against the profile table:
 
 ```text
-$ nico-admin-cli attestation coverage
-HARDWARE CLASS        MACHINES  PROFILE  WOULD USE
-Gb200                       72  yes      its own profile (allowlist)
-LenovoGb300                 18  no       any (all)
-Dell                         4  yes      its own profile (none)
-unrecognized                 2  n/a      any (all)
-(no class recorded)          1  n/a      nothing: ClassNotRecorded
-any                          —  yes      —
+$ nico-admin-cli attestation spdm coverage
++---------------------+--------------------+-------------+-----------------------------------------------------------+
+| HARDWARE CLASS      | EXPLORED ENDPOINTS | OWN PROFILE | WOULD USE                                                 |
++=====================+====================+=============+===========================================================+
+| Gb200               | 72                 | yes         | its own profile (allowlist)                               |
++---------------------+--------------------+-------------+-----------------------------------------------------------+
+| LenovoGb300         | 18                 | no          | any (all)                                                 |
++---------------------+--------------------+-------------+-----------------------------------------------------------+
+| Dell                | 4                  | yes         | its own profile (none)                                    |
++---------------------+--------------------+-------------+-----------------------------------------------------------+
+| unrecognized        | 2                  | no          | any (all)                                                 |
++---------------------+--------------------+-------------+-----------------------------------------------------------+
+| (no class recorded) | 1                  | n/a         | nothing: no class recorded; explore these endpoints again |
++---------------------+--------------------+-------------+-----------------------------------------------------------+
+| any                 | —                  | yes         | its own profile (all)                                     |
++---------------------+--------------------+-------------+-----------------------------------------------------------+
 ```
 
 Eighteen Lenovo GB300 trays would be attested by the fallback rather than by a
@@ -490,9 +551,21 @@ and one needs re-exploring. The `any` row is listed so the site's posture is
 visible rather than inferred, and the unparenthesised rows are values actually
 stored in `hardware_class`.
 
+`EXPLORED ENDPOINTS` counts rows of `explored_endpoints` rather than machines,
+because `hardware_class` is recorded per endpoint and a machine can present more
+than one. Hardware nobody has explored has no row at all.
+`OWN PROFILE` is `n/a` where no profile may be keyed to the row at all,
+which is the `unrecognized` marker (§6.2) and the endpoints carrying no class.
+The `any` row carries no count, because `any` is never recorded on an endpoint.
+
 `WOULD USE` is the §5.3 rule applied per group, not a second implementation of
-it. The view contacts no BMC, so it cannot say whether a policy matches real
-components (§12).
+it: the server reports which profile would supply the policy, and the CLI only
+spells it. The view contacts no BMC, so it cannot say whether a policy matches
+real components (§12).
+
+`--format json` and `--format yaml` report the same rows, with the class absent
+rather than labelled for the endpoints carrying none, and the count absent on
+the `any` row. `--format csv` is refused.
 
 ### 6.5 What editing a profile does not do
 
