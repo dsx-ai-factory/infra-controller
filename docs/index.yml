@@ -125,6 +125,8 @@ navigation:
           path: provisioning/site-setup-api-parity.md
         - page: Boot Interfaces and DPU Policies
           path: provisioning/boot-interfaces-and-dpu-modes.md
+        - page: iPXE Script Variables
+          path: provisioning/ipxe-script-variables.md
         - page: Machine Validation
           path: provisioning/machine-validation.md
         - page: SKU Validation
