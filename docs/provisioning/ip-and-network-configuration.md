@@ -90,17 +90,21 @@ BMC, and host BMC interfaces. Every role supports three allocation policies:
 | Policy | Behavior |
 |---|---|
 | **Dynamic** | At DHCP discovery, NICo allocates an address from the segment selected by the DHCP relay or DHCPv6 link address. |
-| **Fixed** | NICo reserves the configured `fixed_ip` before DHCP. The address normally selects the managed segment whose prefix contains it; [legacy inferred reservations](expected-machine-interfaces.md#network-segment-selection) can fall back to `static-assignments`. |
-| **Retained** | NICo allocates an address through DHCP, then keeps it static for the lifetime of the machine-interface record. |
+| **Fixed** | NICo reserves the configured `fixed_ip` as Static for its address family before serving DHCP. The address normally selects the managed segment whose prefix contains it; [legacy inferred reservations](expected-machine-interfaces.md#network-segment-selection) can fall back to `static-assignments`. |
+| **Retained** | NICo selects an address through DHCP and immediately stores it as Static. It remains reserved until explicit removal or deletion of the machine-interface record. |
 
 All four interface roles (`host`, `dpu_os`, `dpu_bmc`, and `host_bmc`) support
 all three policies. The default is Dynamic for every role except `host_bmc`,
 which defaults to Retained. A declaration with `fixed_ip` and no explicit
 policy remains Fixed for backward compatibility.
 
-Mixing policies within the same site and Expected Machine is supported.
-See [Configure Expected Machine Interfaces](expected-machine-interfaces.md)
-for the complete field reference and examples.
+NICo applies the current configuration separately to each family's first
+successful DHCP or Static allocation. Mixing policies within the same site
+and Expected Machine is supported.
+Refer to [Configure Expected Machine Interfaces](expected-machine-interfaces.md)
+for the complete field reference and examples, and
+[Address Allocation Lifetime](expected-machine-interfaces.md#address-allocation-lifetime)
+for per-family allocation, recovery, and rollout limits.
 
 #### Physical Management Networks
 
@@ -133,7 +137,7 @@ Explicit `unspecified`/`Unspecified` resets the policy to Auto.
 
 | Expected Machine configuration | Effective policy | Behavior |
 |---|---|---|
-| Omit both fields, or select Auto without an address | **Retained** (default) | DHCP selects an address; Site Explorer makes it static for that machine-interface row's lifetime. |
+| Omit both fields, or select Auto without an address | **Retained** (default) | DHCP selects the family's first address and immediately stores it as Static. |
 | Set `bmc_ip_address`; omit `bmc_ip_allocation` or select Auto | **Fixed** | NICo reserves and serves the configured address. |
 | Select Dynamic without an address | **Dynamic** | DHCP allocates a normal lease that can expire and change. |
 | Select Retained without an address | **Retained** | Same retained behavior as the default. |
@@ -195,11 +199,12 @@ enum number `2` for the Underlay segment type:
 
 For this fixed declaration:
 
-- NICo records the fixed intent with the Expected Machine. The API update path
-  and Site Explorer reconciliation materialize the machine-interface
-  reservation; the DHCP path also restores it if the interface was deleted.
-- The first DHCP DISCOVER from that BMC's MAC is answered with the reserved
-  address; `nico-dhcp` does not draw another address for that host.
+- NICo records the fixed intent with the Expected Machine. The reservation
+  applies only before that family's first DHCP or Static allocation. Updating the
+  template does not guarantee immediate allocation of a missing family.
+- After NICo creates the reservation, DHCP DISCOVER from that BMC's MAC is
+  answered with the reserved address; `nico-dhcp` does not draw another address
+  for that host.
 - For a BMC on a managed segment, the address must fall within that segment's
   prefix. It can be inside the segment's otherwise-dynamic pool: once the
   reservation exists, NICo's address-uniqueness constraint prevents the
@@ -207,11 +212,10 @@ For this fixed declaration:
 - The optional `underlay` segment guard rejects the configuration if the
   containing segment has another type.
 
-Reconciliation can replace an existing DHCP or SLAAC address with the Fixed
-reservation. It does not automatically replace one Fixed Static address with
-another or return a Static address to Dynamic allocation. For those changes,
-follow the targeted procedure in
-[Retained Address Lifetime](expected-machine-interfaces.md#retained-address-lifetime).
+Expected Machine edits do not replace an existing DHCP or Static allocation.
+For the SLAAC exception, allocation lifetime, and targeted address changes,
+refer to
+[Address Allocation Lifetime](expected-machine-interfaces.md#address-allocation-lifetime).
 
 The legacy top-level `bmc_ip_address` and `bmc_ip_allocation` fields remain
 supported. They act as explicit overrides when a matching `host_bmc` entry is
@@ -289,14 +293,18 @@ an explicit site security decision.
 
 `nico-dhcp` is **not** a standalone DHCP daemon. It is a [Kea DHCP](https://www.isc.org/kea/) hooks library (`cdylib`) loaded into the upstream Kea v4 server inside the `nico-dhcp` container. Every DHCPDISCOVER/REQUEST is intercepted by the hooks library and forwarded to `nico-api` over mTLS gRPC (the `discover_dhcp` RPC). `nico-api` decides what address to lease based on:
 
-- Whether the source MAC matches a Fixed Expected Machine interface
-  reservation, including one declared through the compatible top-level
-  `bmc_ip_address` field.
-- Otherwise, whether the source MAC has a Dynamic or Retained Expected Machine
-  policy or is a known host, host BMC, DPU BMC, or DPU OS interface.
-  `nico-api` uses relay metadata to select the applicable network segment.
-  Dynamic interfaces receive the next free address. Retained interfaces reuse
-  their existing static address, or receive a new address when none exists.
+- Whether the interface already has a DHCP or Static address for the requested
+  family. NICo reuses it without applying later Expected Machine edits.
+- For a family's first DHCP or Static allocation, the source MAC's current Expected
+  Machine policy. Fixed uses a matching-family configured address; Dynamic and
+  Retained use the segment selected by relay metadata. Retained stores the
+  address directly as Static. Without an applicable declaration, NICo uses
+  ordinary DHCP.
+- After a DHCP or Static address is removed while its interface record remains,
+  ordinary DHCP allocation rules apply instead of Fixed or Retained intent.
+  Refer to
+  [Address Allocation Lifetime](expected-machine-interfaces.md#address-allocation-lifetime)
+  for the removal-history support boundary.
 - Vendor class (option 60) determines whether the client is a PXE/iPXE/BlueField boot client, which influences the boot options returned.
 
 The hook callouts (`lease4_select` and `lease4_renew`) overwrite the lease that Kea would have selected — `yiaddr`, valid lifetime, and DHCP options are replaced with the values `nico-api` produced, and the hook can return `SKIP` to cancel Kea's own lease assignment and database write. The result is written to Kea's memfile (`kea-leases4.csv`), but the authoritative record lives in `nico-api`. From an operator perspective this means:
@@ -353,11 +361,10 @@ To configure these flows:
    it serves. In the shared HostInband topology, both the host BMC and host OS
    paths must produce relay metadata for that HostInband prefix.
 3. **For Fixed policies**, upload `expected_machines.json` with the applicable
-   interface reservations before the device first powers on. NICo can replace
-   an existing DHCP or SLAAC address with a Fixed reservation. If the interface
-   already has a Static address that blocks the change, follow the targeted
-   address update procedure in
-   [Retained Address Lifetime](expected-machine-interfaces.md#retained-address-lifetime).
+   interface reservations before the device first powers on. If the family
+   already has a DHCP or Static allocation, changing the template does not
+   replace it. Follow the targeted address update procedure in
+   [Address Allocation Lifetime](expected-machine-interfaces.md#address-allocation-lifetime).
 4. **For reservation-only segments**, set
    `allocation_strategy = "reserved"` and configure every Fixed reservation
    before DHCP. Dynamic and Retained declarations cannot acquire their first
