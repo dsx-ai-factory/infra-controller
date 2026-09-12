@@ -95,7 +95,7 @@ pub async fn run_local(
         mac_address_pool,
     });
 
-    let mat = MachineATron::new(app_context.clone());
+    let mut mat = MachineATron::new(app_context.clone());
     let simulators = mat.make_devices(false).await?;
     let provisionable_handles = simulators.provisionable_handles();
 

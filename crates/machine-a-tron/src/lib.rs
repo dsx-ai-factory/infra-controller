@@ -28,6 +28,7 @@ mod dhcp_wrapper;
 mod dhcp_wrapper_udp;
 mod discovery_info;
 mod dpu_machine;
+mod expected_inventory;
 mod host_machine;
 pub mod lifecycle_timings;
 mod machine_a_tron;
@@ -47,9 +48,9 @@ use std::time::{Duration, Instant};
 
 pub use bmc_mock_wrapper::BmcMockRegistry;
 pub use config::{
-    DhcpType, LenovoGb300RackConfig, LogFormat, MachineATronArgs, MachineATronConfig,
-    MachineATronContext, MachineConfig, PersistedDevice, PersistedDpuMachine, RackConfig,
-    RackModelConfig, WiwynnGb200RackConfig,
+    DhcpType, ExpectedInventoryRegistrationConfig, LenovoGb300RackConfig, LogFormat,
+    MachineATronArgs, MachineATronConfig, MachineATronContext, MachineConfig, PersistedDevice,
+    PersistedDpuMachine, RackConfig, RackModelConfig, WiwynnGb200RackConfig,
 };
 pub use control_router::{ControlState, append as append_control_routes};
 pub use device_handle::DeviceHandle;
@@ -58,6 +59,7 @@ pub use device_simulator::{
 };
 pub use dhcp_wrapper::{DhcpClient, UdpDhcpService};
 pub use dpu_machine::DpuMachineHandle;
+pub use expected_inventory::ExpectedInventorySummary;
 pub use machine_a_tron::MachineATron;
 pub use mock_ssh_server::{
     Credentials as MockSshCredentials, MockSshServerHandle, PromptBehavior,

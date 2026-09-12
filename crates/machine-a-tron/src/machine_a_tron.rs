@@ -24,10 +24,12 @@ use rpc::forge::{ExpectedInterface, NetworkSegmentType};
 use tokio::sync::mpsc;
 
 use crate::PersistedDevice;
+use crate::api_client::ExpectedRecord;
 use crate::config::MachineATronContext;
 use crate::device_simulator::{
     DeviceSimulator, MachineSimulator, PowerShelfSimulator, SimulatorLifecycle, SwitchSimulator,
 };
+use crate::expected_inventory::{ExpectedInventorySummary, register_all, register_with_retry};
 use crate::host_machine::HostMachine;
 use crate::power_shelf_simulator::PowerShelfActor;
 use crate::simulator_registry::SimulatorRegistry;
@@ -36,6 +38,7 @@ use crate::switch_simulator::SwitchActor;
 
 pub struct MachineATron {
     app_context: Arc<MachineATronContext>,
+    expected_inventory: ExpectedInventorySummary,
 }
 
 fn expected_interfaces(
@@ -70,10 +73,20 @@ fn expected_interfaces(
 
 impl MachineATron {
     pub fn new(app_context: Arc<MachineATronContext>) -> Self {
-        Self { app_context }
+        Self {
+            app_context,
+            expected_inventory: ExpectedInventorySummary::default(),
+        }
     }
 
-    pub async fn make_devices(&self, paused: bool) -> eyre::Result<SimulatorRegistry> {
+    /// Outcome of the expected inventory registration performed by the most
+    /// recent [`MachineATron::make_devices`] call. All counts are zero when
+    /// registration is disabled or has not run yet.
+    pub fn expected_inventory_summary(&self) -> &ExpectedInventorySummary {
+        &self.expected_inventory
+    }
+
+    pub async fn make_devices(&mut self, paused: bool) -> eyre::Result<SimulatorRegistry> {
         let resolved_configs = self.app_context.app_config.resolved_device_configs()?;
 
         for (machine_group, machine) in &resolved_configs.machines {
@@ -249,12 +262,21 @@ impl MachineATron {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
+        let registration_config = &self.app_context.app_config.expected_inventory_registration;
         if self.app_context.app_config.register_expected_machines {
+            let api_client = self.app_context.api_client();
             for rack in &resolved_configs.racks {
-                self.app_context
-                    .api_client()
-                    .ensure_expected_rack(rack.rack_id.clone(), rack.rack_profile_id.clone())
-                    .await?;
+                register_with_retry(
+                    &format!("rack {}", rack.rack_id),
+                    registration_config,
+                    || {
+                        api_client.ensure_expected_rack(
+                            rack.rack_id.clone(),
+                            rack.rack_profile_id.clone(),
+                        )
+                    },
+                )
+                .await?;
             }
         }
 
@@ -264,81 +286,70 @@ impl MachineATron {
             .build()?;
 
         if self.app_context.app_config.register_expected_machines {
-            for device in simulators.devices() {
-                let machine = device.handle();
-                let host_info = machine.host_info();
-                let machine_config = resolved_configs
-                    .machines
-                    .get(machine.machine_config_section())
-                    .expect("machine was constructed from a configured machine group");
-                let rack_id = machine_config.rack_id.clone();
-                let result = match device {
-                    DeviceSimulator::PowerShelf(_) => {
-                        self.app_context
-                            .api_client()
-                            .add_expected_power_shelf(
-                                host_info.bmc_mac_address.to_string(),
-                                host_info.serial.clone(),
-                                rack_id,
-                            )
-                            .await
-                    }
-                    DeviceSimulator::Switch(_) => {
-                        self.app_context
-                            .api_client()
-                            .add_expected_switch(
-                                host_info.bmc_mac_address.to_string(),
-                                host_info
-                                    .switch_serial_number
-                                    .clone()
-                                    .unwrap_or_else(|| host_info.serial.clone()),
-                                host_info
-                                    .nvos_mac_addresses
-                                    .iter()
-                                    .map(|mac| mac.to_string())
-                                    .collect(),
-                                rack_id,
-                            )
-                            .await
-                    }
-                    DeviceSimulator::Machine(_) => {
-                        // Derive the expected `dpu_policy` from the machine's
-                        // MachineConfig: zero-DPU hosts declare `Ignore`, hosts
-                        // running their DPUs as NICs declare `Nic`, and
-                        // everything else defers to the default (`Manage`).
-                        // Site-explorer's ingestion gate requires this explicit
-                        // declaration for any host without DPU PCIe devices.
-                        let dpu_policy = if machine_config.dpu_per_host_count == 0 {
-                            Some(HostDpuPolicy::Ignore)
-                        } else if machine_config.dpus_in_nic_mode {
-                            Some(HostDpuPolicy::Nic)
-                        } else {
-                            None
-                        };
-                        let interfaces = expected_interfaces(host_info, dpu_policy);
-                        self.app_context
-                            .api_client()
-                            .add_expected_machine(
-                                host_info.bmc_mac_address.to_string(),
-                                host_info.serial.clone(),
+            let records = simulators
+                .devices()
+                .iter()
+                .map(|device| {
+                    let machine = device.handle();
+                    let host_info = machine.host_info();
+                    let machine_config = resolved_configs
+                        .machines
+                        .get(machine.machine_config_section())
+                        .expect("machine was constructed from a configured machine group");
+                    let rack_id = machine_config.rack_id.clone();
+                    match device {
+                        DeviceSimulator::PowerShelf(_) => ExpectedRecord::PowerShelf {
+                            bmc_mac_address: host_info.bmc_mac_address.to_string(),
+                            shelf_serial_number: host_info.serial.clone(),
+                            rack_id,
+                        },
+                        DeviceSimulator::Switch(_) => ExpectedRecord::Switch {
+                            bmc_mac_address: host_info.bmc_mac_address.to_string(),
+                            switch_serial_number: host_info
+                                .switch_serial_number
+                                .clone()
+                                .unwrap_or_else(|| host_info.serial.clone()),
+                            nvos_mac_addresses: host_info
+                                .nvos_mac_addresses
+                                .iter()
+                                .map(|mac| mac.to_string())
+                                .collect(),
+                            rack_id,
+                        },
+                        DeviceSimulator::Machine(_) => {
+                            // Derive the expected `dpu_policy` from the machine's
+                            // MachineConfig: zero-DPU hosts declare `Ignore`, hosts
+                            // running their DPUs as NICs declare `Nic`, and
+                            // everything else defers to the default (`Manage`).
+                            // Site-explorer's ingestion gate requires this explicit
+                            // declaration for any host without DPU PCIe devices.
+                            let dpu_policy = if machine_config.dpu_per_host_count == 0 {
+                                Some(HostDpuPolicy::Ignore)
+                            } else if machine_config.dpus_in_nic_mode {
+                                Some(HostDpuPolicy::Nic)
+                            } else {
+                                None
+                            };
+                            ExpectedRecord::Machine {
+                                bmc_mac_address: host_info.bmc_mac_address.to_string(),
+                                chassis_serial_number: host_info.serial.clone(),
                                 rack_id,
                                 dpu_policy,
-                                interfaces,
-                            )
-                            .await
+                                interfaces: expected_interfaces(host_info, dpu_policy),
+                            }
+                        }
                     }
-                };
+                })
+                .collect::<Vec<_>>();
 
-                result
-                    .inspect_err(|e| {
-                        tracing::warn!(
-                            error=?e,
-                            hardware_type = %host_info.hw_type,
-                            "error adding expected inventory record, likely already ingested"
-                        );
-                    })
-                    .ok();
-            }
+            let api_client = self.app_context.api_client();
+            let summary = register_all(records, registration_config, |record| {
+                let api_client = api_client.clone();
+                async move { api_client.add_expected_record(record).await }
+            })
+            .await;
+            summary.log();
+            self.expected_inventory = summary;
         } else {
             tracing::info!(
                 device_count = simulators.devices().len(),
