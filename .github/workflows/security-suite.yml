@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Security Suite (Pulse + CodeQL)
+
+on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Mirrors the Core CI policy in ci.yaml.
+concurrency:
+  group: ${{ github.event_name == 'push' && github.run_attempt == '1' && startsWith(github.ref, 'refs/heads/pull-request/') && format('security-pr-{0}', github.ref_name) || format('security-run-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.run_attempt == '1' && startsWith(github.ref, 'refs/heads/pull-request/') }}
+
+jobs:
+  security-suite:
+    name: Security Suite
+    # Forks have no nv-gha-runners grant, so Pulse cannot reach Vault or nvcr.io there.
+    if: github.repository == 'NVIDIA/infra-controller'
+    permissions:
+      actions: read
+      contents: read
+      id-token: write  # OIDC -> Vault -> nvcr.io
+      security-events: write
+    uses: NVIDIA/security-workflows/.github/workflows/security-suite.yml@c736f0454dc99764a66af6b906adfcdfbf621985  # v0.4.0
+    with:
+      enable-secret-scan: true
+      enable-sast-scan: true
+      # The only scan needing a self-hosted runner; CodeQL keeps the hosted default.
+      secret-runs-on: linux-amd64-cpu4
+      # Set failure_policy explicitly so enforcement can't drift with upstream defaults.
+      #   unverified — fail on verified/live secrets (183); warn on unverified (185)  [default]
+      #   strict     — fail on any finding (verified or unverified)
+      #   all        — warn only; never fail the job on findings
+      secret-failure-policy: unverified
+      sast-languages: '["actions","python","rust"]'

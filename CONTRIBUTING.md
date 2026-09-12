@@ -13,6 +13,7 @@ We welcome contributions of all sizes — from fixing a typo in the docs to addi
 - [Developer Certificate of Origin (DCO)](#developer-certificate-of-origin-dco)
 - [Cryptographic Commit Signatures](#cryptographic-commit-signatures)
 - [Fork and Setup](#fork-and-setup)
+- [Secret Scanning](#secret-scanning)
 - [Contribution Process](#contribution-process)
 - [Engineering Guidelines](#engineering-guidelines)
 - [Pull Request Guidelines](#pull-request-guidelines)
@@ -188,6 +189,25 @@ Use descriptive branch names like:
 - `feature/add-new-api`
 - `fix/resolve-dhcp-issue`
 - `docs/update-readme`
+
+## Secret Scanning
+
+Credentials are the one class of mistake that a later commit cannot take back, so this repository scans for them locally as well as in CI.
+The [`.pre-commit-config.yaml`](.pre-commit-config.yaml) at the repository root declares a single hook, `secret-scan-trufflehog`, from [`NVIDIA/security-workflows`](https://github.com/NVIDIA/security-workflows).
+
+It checks your staged files at `git commit` time:
+
+```bash
+pip install pre-commit   # or: brew install pre-commit
+pre-commit install
+```
+
+The hook installs its own pinned TruffleHog build into an isolated environment on first run, so there is no scanner to install separately, on Linux, macOS, or Windows.
+
+When the hook reports a finding, treat the credential as compromised — remove it *and* rotate it, because deleting the line leaves the value in your local history.
+
+This check is advisory and skippable (`git commit --no-verify`).
+The authoritative check is the Pulse secret scan in [`.github/workflows/security-suite.yml`](.github/workflows/security-suite.yml), which runs server-side on pushes to `main` and to the `pull-request/[0-9]+` mirror of your pull request, and fails on verified secrets.
 
 ## Contribution Process
 
