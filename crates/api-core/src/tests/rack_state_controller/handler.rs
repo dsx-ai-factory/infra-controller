@@ -1455,6 +1455,7 @@ async fn test_ingestion_transitions_to_firmware_upgrade_and_submits_rack_profile
         .unwrap()
         .firmware_object = Some(RackFirmwareObjectConfig {
         url: url::Url::parse(FIRMWARE_OBJECT_URL).unwrap(),
+        access_token_credential: None,
         fetch_timeout: std::time::Duration::from_secs(17),
     });
 
@@ -1784,6 +1785,7 @@ async fn test_firmware_upgrade_start_submits_json_and_deletes_access_token(
         .unwrap()
         .firmware_object = Some(RackFirmwareObjectConfig {
         url: url::Url::parse("https://firmware.example.invalid/sot/nvl72.json").unwrap(),
+        access_token_credential: None,
         fetch_timeout: std::time::Duration::from_secs(11),
     });
 

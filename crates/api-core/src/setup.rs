@@ -1877,7 +1877,7 @@ async fn initialize_and_start_controllers<'a>(
                 nmx_cluster_switch_mtls_services: carbide_config
                     .rack_state_controller
                     .effective_nmx_cluster_switch_mtls_services_as_i32(),
-                firmware_object_fetcher: Arc::new(firmware_object_fetcher),
+                firmware_object_fetcher: Arc::new(firmware_object_fetcher.clone()),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
             .into(),
@@ -2032,7 +2032,7 @@ async fn initialize_and_start_controllers<'a>(
     )
     .start(join_set, cancel_token.clone())?;
 
-    PreingestionManager::new(
+    let preingestion_manager = PreingestionManager::new(
         db_pool.clone(),
         carbide_config.preingestion_manager(),
         shared_redfish_pool.clone(),
@@ -2042,8 +2042,23 @@ async fn initialize_and_start_controllers<'a>(
         Some(api_service.credential_manager.clone()),
         work_lock_manager_handle.clone(),
         carbide_config.ntp_servers.clone(),
-    )
-    .start(join_set, cancel_token.clone())?;
+    );
+
+    let preingestion_manager = match component_manager.as_ref() {
+        Some(manager)
+            if manager.compute_tray.backend()
+                == component_manager::compute_tray_manager::Backend::Rms =>
+        {
+            preingestion_manager.with_rack_firmware(
+                carbide_config.rack_profiles.clone(),
+                manager.compute_tray.clone(),
+                Arc::new(firmware_object_fetcher),
+            )
+        }
+        _ => preingestion_manager,
+    };
+
+    preingestion_manager.start(join_set, cancel_token.clone())?;
 
     MeasuredBootMetricsCollector::new(
         db_pool.clone(),

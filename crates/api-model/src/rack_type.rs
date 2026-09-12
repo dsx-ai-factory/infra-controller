@@ -427,8 +427,21 @@ pub struct RackCapabilitiesSet {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RackFirmwareObjectConfig {
-    /// URL from which rack ingestion fetches the SOT JSON document.
+    /// URL from which NICo fetches the SOT JSON document.
     pub url: url::Url,
+
+    /// Named credential containing the artifact access token sent to RMS during
+    /// compute-tray preingestion.
+    ///
+    /// The credential is read when the operation starts, so rack profiles do
+    /// not contain secret material. When omitted, RMS receives its no-auth
+    /// sentinel.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_credential_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub access_token_credential: Option<String>,
 
     /// Maximum duration for the complete HTTP request.
     ///
@@ -445,6 +458,21 @@ impl RackFirmwareObjectConfig {
     const fn default_fetch_timeout() -> std::time::Duration {
         std::time::Duration::from_secs(30)
     }
+}
+
+fn deserialize_optional_credential_name<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let name = Option::<String>::deserialize(deserializer)?;
+
+    if name.as_deref() == Some("") {
+        return Err(D::Error::custom(
+            "firmware artifact access-token credential name must not be empty",
+        ));
+    }
+
+    Ok(name)
 }
 
 /// RackProfile describes the hardware identity and expected device
@@ -804,10 +832,12 @@ count = 0
 [Rack.firmware_object]
 url = "https://firmware.example.invalid/sot/rack.json"
 fetch_timeout = "45s"
+access_token_credential = "rack-artifacts"
 "#,
                 Some((
                     "https://firmware.example.invalid/sot/rack.json",
                     std::time::Duration::from_secs(45),
+                    Some("rack-artifacts"),
                 )),
             ),
             (
@@ -819,6 +849,7 @@ url = "https://firmware.example.invalid/sot/rack.json"
                 Some((
                     "https://firmware.example.invalid/sot/rack.json",
                     std::time::Duration::from_secs(30),
+                    None,
                 )),
             ),
             ("not configured", "[Rack]\n", None),
@@ -835,11 +866,39 @@ url = "https://firmware.example.invalid/sot/rack.json"
                     .firmware_object
                     .as_ref()
                     .map(|firmware_object| {
-                        (firmware_object.url.as_str(), firmware_object.fetch_timeout)
+                        (
+                            firmware_object.url.as_str(),
+                            firmware_object.fetch_timeout,
+                            firmware_object.access_token_credential.as_deref(),
+                        )
                     });
 
             assert_eq!(actual, expected, "{name}");
         }
+    }
+
+    #[test]
+    fn rack_profile_rejects_empty_firmware_access_token_credential_name() {
+        let input = r#"
+[Rack.firmware_object]
+url = "https://firmware.example.invalid/sot/rack.json"
+access_token_credential = ""
+
+[Rack.rack_capabilities.compute]
+count = 0
+[Rack.rack_capabilities.switch]
+count = 0
+[Rack.rack_capabilities.power_shelf]
+count = 0
+"#;
+
+        let error = toml::from_str::<RackProfileConfig>(input).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("firmware artifact access-token credential name must not be empty")
+        );
     }
 
     #[test]
