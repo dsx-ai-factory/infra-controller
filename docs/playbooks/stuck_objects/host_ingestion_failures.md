@@ -95,7 +95,7 @@ Look for:
 
 NICo records the build version of Scout most recently observed during machine
 discovery. Use this value to determine whether ingestion or validation failures
-may correlate with a specific Scout release:
+correlate with a specific Scout release:
 
 ```bash
 nico-admin-cli -a <api-url> -f json machine show <host-machine-id> \
