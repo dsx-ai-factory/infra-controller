@@ -17,6 +17,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::result::Result as StdResult;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bmc_mock::HostnameQuerying;
 use eyre::Context;
@@ -331,12 +332,13 @@ impl server::Handler for MockSshHandler {
             ConsoleState::Bmc => {
                 if data == b"\n" || data == b"\r\n" || data == b"\r" {
                     let command = std::mem::take(&mut self.buffer);
-                    match self.prompt_behavior {
+                    let print_prompt = match self.prompt_behavior {
                         PromptBehavior::Dell if command.starts_with(b"connect com2") => {
                             tracing::info!(
                                 "Got `connect com2` in bmc prompt, simulating system console"
                             );
                             self.console_state = ConsoleState::SystemConsole;
+                            true
                         }
                         PromptBehavior::LenovoSr650 if command.starts_with(b"console kill 1") => {
                             tracing::info!(
@@ -346,24 +348,37 @@ impl server::Handler for MockSshHandler {
                                 channel,
                                 "\r\nThe command line contains extraneous arguments\r\n",
                             )?;
+                            // Model the fragmented XCC3 response seen in production: the error
+                            // text and trailing BMC prompt arrive in separate SSH packets.
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            true
                         }
                         PromptBehavior::LenovoSr650 if command.starts_with(b"console kill") => {
                             tracing::info!(
                                 "Got Lenovo `console kill`, simulating terminated SOL session"
                             );
                             session.data(channel, "\r\nSession on channel 1 is terminated\r\n")?;
+                            true
                         }
                         PromptBehavior::LenovoSr650 if command.starts_with(b"console start") => {
-                            tracing::info!("Got Lenovo `console start`, simulating system console");
+                            tracing::info!(
+                                "Got Lenovo `console start`, simulating silent system console"
+                            );
                             self.console_state = ConsoleState::SystemConsole;
+                            // XCC3 emits no success message after `console start`. The host prompt
+                            // appears only after the connected frontend sends input.
+                            false
                         }
                         PromptBehavior::Hpe if command.starts_with(b"vsp") => {
                             tracing::info!("Got HPE `vsp`, simulating system console");
                             self.console_state = ConsoleState::SystemConsole;
+                            true
                         }
-                        _ => {}
+                        _ => true,
+                    };
+                    if print_prompt {
+                        self.print_prompt(session, channel)?;
                     }
-                    self.print_prompt(session, channel)?;
                 } else {
                     self.buffer = [&self.buffer, data].concat();
                     session.data(channel, data.to_owned())?;

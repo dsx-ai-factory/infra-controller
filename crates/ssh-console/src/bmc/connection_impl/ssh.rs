@@ -45,6 +45,7 @@ use crate::bmc::vendor::SshBmcVendor;
 
 static RUSSH_CLIENT_CONFIG: LazyLock<Arc<russh::client::Config>> =
     LazyLock::new(russh_client_config);
+const LENOVO_SOL_ACTIVATION_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 
 /// Connect to a BMC one time, returning a [`Handle`]. Will not retry on connection errors.
 pub(in crate::bmc) async fn spawn(
@@ -241,6 +242,8 @@ pub(in crate::bmc) enum ConsoleActivateError {
     },
     #[error("unable to activate serial console after timeout")]
     Timeout,
+    #[error("BMC returned to its command prompt while activating serial console")]
+    ReturnedToBmcPrompt,
 }
 
 /// Builds and authenticates an SSH client to a machine, using credentials from carbide-api or
@@ -452,12 +455,29 @@ async fn trigger_and_await_sol_console(
     let mut fallback_activate_sent = false;
     let mut fallback_activate_commands: Option<&'static [&'static [u8]]> = None;
     let mut next_fallback_command_index = 0;
+    let mut lenovo_confirmation_pending = false;
+    let mut lenovo_confirmation_deadline = timeout;
+    let mut lenovo_confirmation_command: Option<&'static [u8]> = None;
 
     let mut activation_step = SerialConsoleActivationStep::WaitingForBmcPrompt;
     loop {
         tokio::select! {
             _ = tokio::time::sleep_until(timeout) => {
                 return Err(ConsoleActivateError::Timeout);
+            }
+            _ = tokio::time::sleep_until(lenovo_confirmation_deadline), if lenovo_confirmation_pending => {
+                let confirmation_command = lenovo_confirmation_command
+                    .expect("BUG: pending Lenovo confirmation must have a command");
+                let activation_output = output_after_last_command(&prompt_buf, confirmation_command)
+                    .expect("BUG: pending Lenovo confirmation command must be in output");
+                if activation_output
+                    .windows(bmc_prompt.len())
+                    .any(|window| window == bmc_prompt)
+                {
+                    return Err(ConsoleActivateError::ReturnedToBmcPrompt);
+                }
+                tracing::debug!(%machine_id, "Lenovo activation response grace period elapsed without a BMC prompt, letting client use console");
+                break;
             }
             res = ssh_client_channel.wait() => {
                 let Some(msg) = res else {
@@ -504,6 +524,8 @@ async fn trigger_and_await_sol_console(
                             fallback_activate_sent = true;
                             fallback_activate_commands = Some(fallback_commands);
                             next_fallback_command_index = 0;
+                            lenovo_confirmation_pending = false;
+                            lenovo_confirmation_command = None;
                             let fallback_command = fallback_commands[next_fallback_command_index];
                             next_fallback_command_index += 1;
                             skip_data_read_len = bmc_prompt.len() + fallback_command.len();
@@ -525,6 +547,8 @@ async fn trigger_and_await_sol_console(
                         {
                             let fallback_command = fallback_commands[next_fallback_command_index];
                             next_fallback_command_index += 1;
+                            lenovo_confirmation_pending = false;
+                            lenovo_confirmation_command = None;
                             skip_data_read_len = bmc_prompt.len() + fallback_command.len();
                             timeout = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
                             send_command_bytewise(
@@ -540,30 +564,42 @@ async fn trigger_and_await_sol_console(
                             .is_some_and(|commands| next_fallback_command_index < commands.len());
                         let fallback_sequence_complete = fallback_activate_commands
                             .is_some_and(|commands| next_fallback_command_index == commands.len());
-                        let activation_output = if fallback_sequence_complete
+                        let final_activation_command = if fallback_sequence_complete
                             && let Some(fallback_commands) = fallback_activate_commands
                         {
-                            let final_fallback_command = fallback_commands[fallback_commands.len() - 1];
-                            prompt_buf
-                                .windows(final_fallback_command.len())
-                                .rposition(|window| window == final_fallback_command)
-                                .map(|command_offset| &prompt_buf[command_offset..])
+                            fallback_commands[fallback_commands.len() - 1]
+                        } else {
+                            activate_command
+                        };
+                        let activation_output = if matches!(bmc_vendor, SshBmcVendor::Lenovo) {
+                            output_after_last_command(&prompt_buf, final_activation_command)
                         } else {
                             Some(prompt_buf.as_slice())
                         };
                         if matches!(activation_step, SerialConsoleActivationStep::ActivateSent)
                             && !waiting_for_fallback_prompt
                             && let Some(activation_output) = activation_output
-                            && !(fallback_sequence_complete
-                                && activation_output
+                        {
+                            if matches!(bmc_vendor, SshBmcVendor::Lenovo) {
+                                if activation_output
                                     .windows(bmc_prompt.len())
-                                    .any(|window| window == bmc_prompt))
-                            && bmc_vendor.should_accept_sol_activation_output(
+                                    .any(|window| window == bmc_prompt)
+                                {
+                                    return Err(ConsoleActivateError::ReturnedToBmcPrompt);
+                                }
+                                if !lenovo_confirmation_pending {
+                                    lenovo_confirmation_pending = true;
+                                    lenovo_confirmation_deadline = tokio::time::Instant::now()
+                                        + LENOVO_SOL_ACTIVATION_RESPONSE_GRACE;
+                                    lenovo_confirmation_command = Some(final_activation_command);
+                                }
+                            } else if bmc_vendor.should_accept_sol_activation_output(
                                 activation_output,
                                 skip_data_read_len,
                             ) {
-                            tracing::debug!(%machine_id, "confirmed serial activate command sent, letting client use console");
-                            break;
+                                tracing::debug!(%machine_id, "confirmed serial activate command sent, letting client use console");
+                                break;
+                            }
                         }
                     }
                     msg => {
@@ -579,6 +615,21 @@ async fn trigger_and_await_sol_console(
     }
 
     Ok(())
+}
+
+/// Return the output beginning at the last echo of the final command in a command sequence.
+///
+/// Lenovo's legacy activation sequence contains two newline-separated commands. Ignoring output
+/// before the final command lets the expected prompt after `console kill 1` coexist with a
+/// successful, silent `console 1` transition.
+fn output_after_last_command<'a>(output: &'a [u8], command_sequence: &[u8]) -> Option<&'a [u8]> {
+    let final_command = command_sequence
+        .rsplit(|byte| *byte == b'\n')
+        .find(|command| !command.is_empty())?;
+    output
+        .windows(final_command.len())
+        .rposition(|window| window == final_command)
+        .map(|command_offset| &output[command_offset..])
 }
 
 struct Handler;
@@ -697,6 +748,31 @@ fn test_ringbuf_contains() {
     assert!(ringbuf_contains(&rb, b"")); // empty always true
     assert!(!ringbuf_contains(&rb, b"rustacean")); // longer than buf
     assert!(!ringbuf_contains(&rb, b"aean")); // non-contiguous
+}
+
+#[test]
+fn output_after_last_command_uses_final_command_echo() {
+    assert_eq!(
+        output_after_last_command(
+            b"console kill 1\r\nsystem> console 1\r\n",
+            b"console kill 1\nconsole 1",
+        ),
+        Some(b"console 1\r\n".as_slice()),
+    );
+    assert_eq!(
+        output_after_last_command(
+            b"stale console start\r\nsystem> console start\r\n",
+            b"console start",
+        ),
+        Some(b"console start\r\n".as_slice()),
+    );
+    assert_eq!(
+        output_after_last_command(
+            b"console kill 1\r\nThe command line contains extraneous arguments\r\n",
+            b"console kill 1\nconsole 1",
+        ),
+        None,
+    );
 }
 
 #[derive(Clone)]
