@@ -132,8 +132,7 @@ impl PrometheusSink {
         let mut label_names = HashSet::with_capacity(labels.len());
 
         for (name, _) in labels {
-            let original_name = name.clone();
-            let normalized_name = Self::normalize_label_name(original_name.clone());
+            let normalized_name = Self::normalize_label_name(name.clone());
 
             if stream_metrics.has_static_label(&normalized_name)
                 || !label_names.insert(normalized_name.clone())
@@ -142,13 +141,13 @@ impl PrometheusSink {
                     endpoint_key = context.endpoint_key(),
                     collector = context.collector_type,
                     metric,
-                    label = original_name.as_ref(),
+                    label = name.as_ref(),
                     normalized_label = normalized_name.as_ref(),
                     "Prometheus metric has conflicting label names"
                 );
 
                 return Err(HealthError::GenericError(format!(
-                    "prometheus label {original_name:?} conflicts after normalization as {normalized_name:?}"
+                    "prometheus label {name:?} conflicts after normalization as {normalized_name:?}"
                 )));
             }
 
