@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM debian:12-slim
+FROM debian:12-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+
+ARG KEA_VERSION
 
 # Set in gitlab-templates/scripts/build-push-container-image.sh
 ARG CI_COMMIT_SHORT_SHA
@@ -51,9 +53,9 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 		ipmitool \
 		iproute2 \
 		iputils-ping \
-		kea-dhcp4-server \
-		kea-dhcp6-server \
-		kea-ctrl-agent \
+		kea-dhcp4-server=${KEA_VERSION} \
+		kea-dhcp6-server=${KEA_VERSION} \
+		kea-ctrl-agent=${KEA_VERSION} \
 		libaio1 \
 		libc-ares2 \
 		libgrpc++1.51 \
@@ -69,3 +71,6 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 		tpm2-tools \
 		zlib1g && \
 	rm -rf /var/lib/apt/lists/*
+
+RUN test "$(dpkg-query -W -f='${Version}' kea-dhcp6-server)" = "${KEA_VERSION}" && \
+	kea-dhcp6 -V

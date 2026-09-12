@@ -265,8 +265,8 @@ pub async fn process_packet(
     }
     ensure_server_identifier(&decoded.message, config)?;
 
-    // TODO(dhcpv6-rapid-commit): Milestone 05 may turn SOLICIT directly into
-    // REPLY when option 14 is present. This milestone always uses ADVERTISE.
+    // Rapid commit is gated by the Kea hook's `hook-rapid-commit-v6` setting;
+    // this standalone server has no equivalent gate and retains ADVERTISE.
     let wire_type = decoded.message.msg_type();
     let ia_na = decoded.ia_na()?;
 

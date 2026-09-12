@@ -61,6 +61,7 @@ pub(super) struct V6Discovery {
     pub(super) desired_addr: Option<Ipv6Addr>,
     pub(super) ia_addrs: Vec<Ipv6Addr>,
     pub(super) has_ia_na: bool,
+    pub(super) rapid_commit_requested: bool,
     pub(super) client_link_layer: Option<MacAddress>,
 }
 
@@ -246,6 +247,7 @@ fn select_identity(decoded: DecodedV6) -> Result<V6Discovery, V6DecodeError> {
     let ia_addrs = ia_addrs(options);
     let desired_addr = ia_addrs.first().copied();
     let vendor_class = vendor_class(options);
+    let rapid_commit_requested = options.get(OptionCode::RapidCommit).is_some();
     let message_type = decoded.message.msg_type();
     let lease_end_message = matches!(message_type, MessageType::Release | MessageType::Decline);
     let api_bound_message = message_kind_for(message_type, has_ia_na).is_some();
@@ -274,6 +276,7 @@ fn select_identity(decoded: DecodedV6) -> Result<V6Discovery, V6DecodeError> {
         desired_addr,
         ia_addrs,
         has_ia_na,
+        rapid_commit_requested,
         client_link_layer,
     })
 }

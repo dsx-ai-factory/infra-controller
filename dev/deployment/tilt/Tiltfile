@@ -16,6 +16,7 @@ core_charts = os.path.join(repo_root, 'helm/charts')
 rest_charts = os.path.join(repo_root, 'helm/rest')
 rest_api_dir = os.path.join(repo_root, 'rest-api')
 values_file = os.path.join(tilt_dir, 'values.yaml')
+kea_version = str(read_file(os.path.join(repo_root, 'dev/docker/kea.version'))).strip()
 
 all_values = read_yaml(values_file)
 tilt_values = all_values['tilt']
@@ -807,6 +808,7 @@ docker_build(
         repo_root,
         'dev/docker/Dockerfile.build-container-x86_64',
     ),
+    build_args={'KEA_VERSION': kea_version},
 )
 docker_build(
     'nico-devspace-core-artifacts',

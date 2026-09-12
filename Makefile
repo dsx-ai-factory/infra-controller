@@ -59,6 +59,10 @@ core/check-isolated-package-builds: ## Check each Rust package independently wit
 core/tests: ## Run Core tests with isolated PostgreSQL (TEST_ARGS="...")
 	make tests -f dev/Makefile.core
 
+.PHONY: core/test-dhcp
+core/test-dhcp: ## Run DHCP integration tests in the pinned Bookworm/Kea container
+	cargo make test-dhcp-docker
+
 # =============================================================================
 # Getting started (build host setup)
 # =============================================================================
@@ -100,6 +104,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 CI_COMMIT_SHORT_SHA ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LOCAL_REGISTRY_CONTAINER ?= nico-build-registry
 BOOT_ARTIFACTS_RUNTIME_IMAGE ?= docker.io/library/alpine:3.20.10@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+KEA_VERSION ?= $(shell cat dev/docker/kea.version)
 
 # Architectures to build, per image group. Each defaults to both so the
 # published tags stay multi-arch unless you deliberately narrow them, e.g.:
@@ -186,8 +191,8 @@ images-base: ## Build and push the Core base containers (NICO_ARCHES="amd64 arm6
 			arm64) build_file=dev/docker/Dockerfile.build-container-aarch64; build_tag=$(CORE_BUILD_CONTAINER_ARM64); \
 			       runtime_file=dev/docker/Dockerfile.runtime-container-aarch64; runtime_tag=$(CORE_RUNTIME_CONTAINER_ARM64) ;; \
 		esac; \
-		docker buildx build --platform linux/$$arch --push --file $$build_file -t $$build_tag . ; \
-		docker buildx build --platform linux/$$arch --push --file $$runtime_file -t $$runtime_tag . ; \
+		docker buildx build --platform linux/$$arch --push --build-arg KEA_VERSION=$(KEA_VERSION) --file $$build_file -t $$build_tag . ; \
+		docker buildx build --platform linux/$$arch --push --build-arg KEA_VERSION=$(KEA_VERSION) --file $$runtime_file -t $$runtime_tag . ; \
 	done
 
 images-core: ## Build the NICo Core image (nico) (NICO_ARCHES="amd64 arm64")

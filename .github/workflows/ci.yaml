@@ -160,6 +160,7 @@ jobs:
       proto_files_changed: ${{ steps.base-container-gate.outputs.proto_files_changed }}
       core_rpc_proto_files_changed: ${{ steps.base-container-gate.outputs.core_rpc_proto_files_changed }}
       source_files_changed: ${{ steps.base-container-gate.outputs.source_files_changed }}
+      kea_version: ${{ steps.kea-version.outputs.version }}
       release_build_args: ${{ steps.release-metadata.outputs.build_args }}
       release_build_args_aarch64: ${{ steps.release-metadata.outputs.build_args_aarch64 }}
     steps:
@@ -169,6 +170,10 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           fetch-tags: true
+
+      - name: Load Kea version
+        id: kea-version
+        run: echo "version=$(cat dev/docker/kea.version)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python for CI helpers
         uses: actions/setup-python@v5
@@ -185,12 +190,16 @@ jobs:
           filters: |
             build_container:
               - 'dev/docker/Dockerfile.build-container-x86_64'
+              - 'dev/docker/kea.version'
             runtime_container:
               - 'dev/docker/Dockerfile.runtime-container-x86_64'
+              - 'dev/docker/kea.version'
             runtime_container_aarch64:
               - 'dev/docker/Dockerfile.runtime-container-aarch64'
+              - 'dev/docker/kea.version'
             build_container_aarch64:
               - 'dev/docker/Dockerfile.build-container-aarch64'
+              - 'dev/docker/kea.version'
             build_artifacts_x86_64:
               - 'dev/docker/Dockerfile.build-artifacts-container-x86_64'
             build_artifacts_aarch64:
@@ -609,6 +618,7 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.build-container-x86_64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/build-container-x86_64
       image_tag: ${{ needs.prepare.outputs.build_container_x86_64_version }}
       additional_tags: ${{ needs.prepare.outputs.build_container_x86_64_version_latest }}
@@ -627,6 +637,7 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.build-container-aarch64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/build-container-aarch64
       image_tag: ${{ needs.prepare.outputs.build_container_aarch64_version }}
       additional_tags: ${{ needs.prepare.outputs.build_container_aarch64_version_latest }}
@@ -645,6 +656,7 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.runtime-container-x86_64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/runtime-container-x86_64
       image_tag: ${{ needs.prepare.outputs.runtime_container_x86_64_version }}
       additional_tags: ${{ needs.prepare.outputs.runtime_container_x86_64_version_latest }}
@@ -663,6 +675,7 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.runtime-container-aarch64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/runtime-container-aarch64
       image_tag: ${{ needs.prepare.outputs.runtime_container_aarch64_version }}
       additional_tags: ${{ needs.prepare.outputs.runtime_container_aarch64_version_latest }}

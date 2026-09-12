@@ -33,6 +33,9 @@ isc::log::Logger loader_logger("kea-shim-loader");
 using namespace isc::hooks;
 using namespace isc::data;
 
+static_assert(KEA_HOOKS_VERSION >= 20200,
+              "carbide-dhcp requires Kea 2.2 or newer");
+
 using StringSetter = void (*)(const char *);
 using ValidatedStringSetter = bool (*)(const char *);
 using BoolSetter = void (*)(bool);
@@ -156,6 +159,67 @@ bool configure_v4(LibraryHandle *handle) {
   return true;
 }
 
+// Return the first statically configured subnet whose effective Rapid Commit
+// setting is disabled. Kea has already applied defaults and inheritance to the
+// JSON tree before invoking dhcp6_srv_configured.
+ConstElementPtr disabled_rapid_commit_subnet(ConstElementPtr config) {
+  const auto find_disabled = [](ConstElementPtr subnets) -> ConstElementPtr {
+    if (!subnets) {
+      return ConstElementPtr();
+    }
+
+    for (const auto &subnet : subnets->listValue()) {
+      const auto rapid_commit = subnet->get("rapid-commit");
+      if (!rapid_commit || !rapid_commit->boolValue()) {
+        return subnet;
+      }
+    }
+    return ConstElementPtr();
+  };
+
+  auto disabled = find_disabled(config->get("subnet6"));
+  if (disabled) {
+    return disabled;
+  }
+
+  const auto shared_networks = config->get("shared-networks");
+  if (shared_networks) {
+    for (const auto &network : shared_networks->listValue()) {
+      disabled = find_disabled(network->get("subnet6"));
+      if (disabled) {
+        return disabled;
+      }
+    }
+  }
+
+  return ConstElementPtr();
+}
+
+// Reject configurations where Core would commit a SOLICIT but Kea would only
+// advertise a fake allocation. Kea 2.2+ propagates DROP as a config error.
+extern "C" int dhcp6_srv_configured(CalloutHandle &handle) {
+  if (!hook_get_config_rapid_commit_v6()) {
+    return 0;
+  }
+
+  ConstElementPtr config;
+  handle.getArgument("json_config", config);
+  const auto disabled = disabled_rapid_commit_subnet(config);
+  if (!disabled) {
+    return 0;
+  }
+
+  const auto prefix = disabled->get("subnet");
+  const std::string subnet = prefix ? prefix->stringValue() : "<unknown>";
+  const std::string error =
+      "hook-rapid-commit-v6 requires Kea rapid-commit to be enabled for subnet " +
+      subnet;
+  LOG_ERROR(loader_logger, "%1").arg(error);
+  handle.setArgument("error", error);
+  handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+  return 0;
+}
+
 bool configure_v6(LibraryHandle *handle) {
   // New DHCPv6 hook params intentionally use hook-* names.
   if (!set_validated_string_parameter(handle, "hook-dns-servers-ipv6",
@@ -169,6 +233,10 @@ bool configure_v6(LibraryHandle *handle) {
                           hook_set_config_rapid_commit_v6)) {
     return false;
   }
+
+  // Validate after Kea applies subnet defaults and inheritance. This avoids
+  // depending on Kea headers that Debian does not publish as a complete set.
+  handle->registerCallout("dhcp6_srv_configured", dhcp6_srv_configured);
 
   handle->registerCallout("pkt6_receive", pkt6_receive);
   handle->registerCallout("lease6_select", lease6_select);

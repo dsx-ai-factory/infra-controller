@@ -61,6 +61,8 @@ pub(crate) struct Kea6Config {
     pub(crate) valid_lifetime: u32,
     pub(crate) renew_timer: u32,
     pub(crate) rebind_timer: u32,
+    pub(crate) rapid_commit_v6: bool,
+    pub(crate) kea_rapid_commit_v6: bool,
     pub(crate) mac_sources: Option<&'static [&'static str]>,
     pub(crate) expired_leases_processing: Option<Kea6ExpiredLeasesProcessing>,
 }
@@ -72,6 +74,8 @@ impl Default for Kea6Config {
             valid_lifetime: 7200,
             renew_timer: 1800,
             rebind_timer: 2880,
+            rapid_commit_v6: false,
+            kea_rapid_commit_v6: true,
             mac_sources: None,
             expired_leases_processing: None,
         }
@@ -509,6 +513,12 @@ impl Kea6 {
                 "name": lease_file.to_string_lossy(),
                 "lfc-interval": 3600
             },
+            // Exercise the hook's advertised Kea multithreading compatibility.
+            "multi-threading": {
+                "enable-multi-threading": true,
+                "thread-pool-size": 4,
+                "packet-queue-size": 28
+            },
             "preferred-lifetime": config.preferred_lifetime,
             "valid-lifetime": config.valid_lifetime,
             "renew-timer": config.renew_timer,
@@ -527,13 +537,16 @@ impl Kea6 {
                         // Keep optional v6 parameters explicit so loader
                         // parsing is exercised even when the option is off.
                         "hook-provisioning-server-ipv6": "",
-                        "hook-rapid-commit-v6": false
+                        "hook-rapid-commit-v6": config.rapid_commit_v6
                     }
                 }
             ],
             "subnet6": [
                 {
                     "subnet": "::/0",
+                    // Kea owns the rapid-commit state transition; the hook
+                    // remains the policy gate by stripping option 14.
+                    "rapid-commit": config.kea_rapid_commit_v6,
                     "pools": [{
                         "pool": "2001:db8::1-2001:db8::ffff"
                     }]
