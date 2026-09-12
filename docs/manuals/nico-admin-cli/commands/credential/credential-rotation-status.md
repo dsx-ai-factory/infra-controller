@@ -1,6 +1,6 @@
 # `nico-admin-cli credential rotation-status`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › **rotation-status**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › **rotation-status***
 
 ## NAME
 
@@ -9,9 +9,11 @@ site-wide credential rotation
 
 ## SYNOPSIS
 
-**nico-admin-cli credential rotation-status** \<**--type**\>
-\[**--mac-address**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli credential rotation-status <--type>
+[--mac-address] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -19,10 +21,10 @@ Show convergence status of a site-wide credential rotation
 
 ## OPTIONS
 
-**--type**=*\<CREDENTIAL_TYPE\>*  
-Credential family to report on\
+`--type=<CREDENTIAL_TYPE>`
 
-\
+Credential family to report on
+
 *Possible values:*
 
 - bmc
@@ -37,27 +39,30 @@ Credential family to report on\
 
 - dpu-bmc-service
 
-**--mac-address** *\<MAC_ADDRESS\>*  
+`--mac-address <MAC_ADDRESS>`
+
 Report on a single device by MAC instead of the whole site
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

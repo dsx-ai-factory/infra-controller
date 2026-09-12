@@ -1,6 +1,6 @@
 # `nico-admin-cli machine-interfaces remove-address`
 
-_[Hardware commands](../../hardware.md) › [machine-interfaces](./machine-interfaces.md) › **remove-address**_
+*[Hardware commands](../../hardware.md) › [machine-interfaces](./machine-interfaces.md) › **remove-address***
 
 ## NAME
 
@@ -9,9 +9,11 @@ address from a machine interface
 
 ## SYNOPSIS
 
-**nico-admin-cli machine-interfaces remove-address** \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\] \<*INTERFACE_ID*\>
-\<*IP_ADDRESS*\>
+```text
+nico-admin-cli machine-interfaces remove-address [--extended]
+[--sort-by] [-h|--help] <INTERFACE_ID>
+<IP_ADDRESS>
+```
 
 ## DESCRIPTION
 
@@ -19,30 +21,34 @@ Remove a static address from a machine interface
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*INTERFACE_ID*\>  
+`<INTERFACE_ID>`
+
 The machine interface ID to remove the address from
 
-\<*IP_ADDRESS*\>  
+`<IP_ADDRESS>`
+
 The IP address to remove
 
 ## Examples

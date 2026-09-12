@@ -1,6 +1,6 @@
 # `nico-admin-cli site-explorer get-report endpoint`
 
-_[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › [get-report](./site-explorer-get-report.md) › **endpoint**_
+*[Tenant commands](../../tenant.md) › [site-explorer](./site-explorer.md) › [get-report](./site-explorer-get-report.md) › **endpoint***
 
 ## NAME
 
@@ -8,10 +8,12 @@ nico-admin-cli-site-explorer-get-report-endpoint - Get Endpoint details.
 
 ## SYNOPSIS
 
-**nico-admin-cli site-explorer get-report endpoint**
-\[**-v**\|**--vendor**\] \[**--unpairedonly**\] \[**--erroronly**\]
-\[**--successonly**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \[*ADDRESS*\]
+```text
+nico-admin-cli site-explorer get-report endpoint
+[-v|--vendor] [--unpairedonly] [--erroronly]
+[--successonly] [--extended] [--sort-by]
+[-h|--help] [ADDRESS]
+```
 
 ## DESCRIPTION
 
@@ -19,40 +21,47 @@ Get Endpoint details.
 
 ## OPTIONS
 
-**-v**, **--vendor** *\<VENDOR\>*  
+`-v, --vendor <VENDOR>`
+
 Filter based on vendor. Valid only for table view.
 
-**--unpairedonly**  
+`--unpairedonly`
+
 By default shows all endpoints. If wants to see unpairedonly, choose
 this option.
 
-**--erroronly**  
+`--erroronly`
+
 Show only endpoints which have error.
 
-**--successonly**  
+`--successonly`
+
 Show only endpoints which have no error.
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\[*ADDRESS*\]  
+[*ADDRESS*]
+
 BMC IP address of Endpoint.
 
 ## Examples

@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish reset-bios`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **reset-bios**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **reset-bios***
 
 ## NAME
 
@@ -10,8 +10,10 @@ restart is required for the settings to take effect
 
 ## SYNOPSIS
 
-**nico-admin-cli redfish reset-bios** \[**-r**\|**--reboot**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli redfish reset-bios [-r|--reboot]
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -21,27 +23,30 @@ effect
 
 ## OPTIONS
 
-**-r**, **--reboot**  
+`-r, --reboot`
+
 Perform a forced restart after the BMC accepts the BIOS reset request
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

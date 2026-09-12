@@ -1,6 +1,6 @@
 # `nico-admin-cli credential force-uefi set`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-uefi](./credential-force-uefi.md) › **set**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-uefi](./credential-force-uefi.md) › **set***
 
 ## NAME
 
@@ -9,9 +9,11 @@ credential rotation of a machine (host).
 
 ## SYNOPSIS
 
-**nico-admin-cli credential force-uefi set** \[**-i**\|**--id**\]
-\[**--bmc-mac**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli credential force-uefi set [-i|--id]
+[--bmc-mac] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -19,32 +21,36 @@ Request an immediate UEFI credential rotation of a machine (host).
 
 ## OPTIONS
 
-**-i**, **--id** *\<ID\>*  
+`-i, --id <ID>`
+
 Machine ID that owns the UEFI credential (a host machine). Provide this
 or --bmc-mac.
 
-**--bmc-mac** *\<BMC_MAC\>*  
-MAC of the machines BMC. Provide this or --id; if both are given they
-must identify the same machine.
+`--bmc-mac <BMC_MAC>`
 
-**--extended**  
+MAC of the BMC for the machine. Provide this or --id; if both are given
+they must identify the same machine.
+
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

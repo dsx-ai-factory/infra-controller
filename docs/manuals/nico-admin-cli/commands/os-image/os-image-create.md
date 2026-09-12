@@ -1,6 +1,6 @@
 # `nico-admin-cli os-image create`
 
-_[Tenant commands](../../tenant.md) › [os-image](./os-image.md) › **create**_
+*[Tenant commands](../../tenant.md) › [os-image](./os-image.md) › **create***
 
 ## NAME
 
@@ -9,15 +9,17 @@ catalog for a tenant.
 
 ## SYNOPSIS
 
-**nico-admin-cli os-image create** \<**-i**\|**--id**\>
-\<**-u**\|**--url**\> \<**-m**\|**--digest**\>
-\<**-t**\|**--tenant-org-id**\> \[**-v**\|**--create-volume**\]
-\[**-s**\|**--capacity**\] \[**-n**\|**--name**\]
-\[**-d**\|**--description**\] \[**-y**\|**--auth-type**\]
-\[**-p**\|**--auth-token**\] \[**-f**\|**--rootfs-id**\]
-\[**-l**\|**--rootfs-label**\] \[**-b**\|**--boot-disk**\]
-\[**--bootfs-id**\] \[**--extended**\] \[**--efifs-id**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli os-image create <-i|--id>
+<-u|--url> <-m|--digest>
+<-t|--tenant-org-id> [-v|--create-volume]
+[-s|--capacity] [-n|--name]
+[-d|--description] [-y|--auth-type]
+[-p|--auth-token] [-f|--rootfs-id]
+[-l|--rootfs-label] [-b|--boot-disk]
+[--bootfs-id] [--extended] [--efifs-id]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -25,80 +27,96 @@ Create an OS image entry in the OS catalog for a tenant.
 
 ## OPTIONS
 
-**-i**, **--id** *\<ID\>*  
+`-i, --id <ID>`
+
 uuid of the OS image to create.
 
-**-u**, **--url** *\<URL\>*  
+`-u, --url <URL>`
+
 url of the OS image qcow file.
 
-**-m**, **--digest** *\<DIGEST\>*  
+`-m, --digest <DIGEST>`
+
 Digest of the OS image file, typically a SHA-256.
 
-**-t**, **--tenant-org-id** *\<TENANT_ORG_ID\>*  
+`-t, --tenant-org-id <TENANT_ORG_ID>`
+
 Tenant organization identifier for the OS catalog to create this in.
 
-**-v**, **--create-volume** *\<CREATE_VOLUME\>*  
-Create a source volume for block storage use.\
+`-v, --create-volume <CREATE_VOLUME>`
 
-\
+Create a source volume for block storage use.
+
 *Possible values:*
 
 - true
 
 - false
 
-**-s**, **--capacity** *\<CAPACITY\>*  
+`-s, --capacity <CAPACITY>`
+
 Size of the OS image source volume to create.
 
-**-n**, **--name** *\<NAME\>*  
+`-n, --name <NAME>`
+
 Name of the OS image entry.
 
-**-d**, **--description** *\<DESCRIPTION\>*  
+`-d, --description <DESCRIPTION>`
+
 Description of the OS image entry.
 
-**-y**, **--auth-type** *\<AUTH_TYPE\>*  
+`-y, --auth-type <AUTH_TYPE>`
+
 Authentication type, usually Bearer.
 
-**-p**, **--auth-token** *\<AUTH_TOKEN\>*  
+`-p, --auth-token <AUTH_TOKEN>`
+
 Authentication token, usually in base64.
 
-**-f**, **--rootfs-id** *\<ROOTFS_ID\>*  
+`-f, --rootfs-id <ROOTFS_ID>`
+
 uuid of the root filesystem of the OS image.
 
-**-l**, **--rootfs-label** *\<ROOTFS_LABEL\>*  
+`-l, --rootfs-label <ROOTFS_LABEL>`
+
 Label of the root filesystem of the OS image.
 
-**-b**, **--boot-disk** *\<BOOT_DISK\>*  
+`-b, --boot-disk <BOOT_DISK>`
+
 Whole-disk target that the image overwrites. Accepts smallest,
-/dev/nvme\<controller\>n\<namespace\>, /dev/sd\<letters\>,
-/dev/vd\<letters\>, or /dev/disk/by-id/\<identifier\>. If omitted or
+/dev/nvme`<controller>`n`<namespace>`, /dev/sd`<letters>`,
+/dev/vd`<letters>`, or /dev/disk/by-id/`<identifier>`. If omitted or
 empty, selection prefers a disk with an EFI partition, then /dev/nvme0n1
 or /dev/sda.
 
-**--bootfs-id** *\<BOOTFS_ID\>*  
+`--bootfs-id <BOOTFS_ID>`
+
 UUID of the image boot filesystem (/boot)
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--efifs-id** *\<EFIFS_ID\>*  
+`--efifs-id <EFIFS_ID>`
+
 UUID of the image EFI filesystem (/boot/efi)
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

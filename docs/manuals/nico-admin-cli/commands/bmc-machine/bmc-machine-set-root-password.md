@@ -1,56 +1,64 @@
 # `nico-admin-cli bmc-machine set-root-password`
 
-_[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **set-root-password**_
+*[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **set-root-password***
 
 ## NAME
 
-nico-admin-cli-bmc-machine-set-root-password - Set a BMCs root password
-out-of-band (for fleet rotation use \`credential rotate\`)
+nico-admin-cli-bmc-machine-set-root-password - Set the root password of
+a BMC out-of-band (for fleet rotation use `credential rotate`)
 
 ## SYNOPSIS
 
-**nico-admin-cli bmc-machine set-root-password**
-\[**-i**\|**--ip-address**\] \[**--mac-address**\]
-\[**-m**\|**--machine**\] \<**--new-password**\> \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli bmc-machine set-root-password
+[-i|--ip-address] [--mac-address]
+[-m|--machine] <--new-password> [--extended]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
-Set a BMCs root password out-of-band (for fleet rotation use
-\`credential rotate\`)
+Set the root password of a BMC out-of-band (for fleet rotation use
+`credential rotate`)
 
 ## OPTIONS
 
-**-i**, **--ip-address** *\<IP_ADDRESS\>*  
+`-i, --ip-address <IP_ADDRESS>`
+
 IP of the BMC whose root password to set
 
-**--mac-address** *\<MAC_ADDRESS\>*  
+`--mac-address <MAC_ADDRESS>`
+
 MAC of the BMC whose root password to set
 
-**-m**, **--machine** *\<MACHINE\>*  
+`-m, --machine <MACHINE>`
+
 ID of the machine whose BMC root password to set
 
-**--new-password** *\<NEW_PASSWORD\>*  
+`--new-password <NEW_PASSWORD>`
+
 New BMC root password to set
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

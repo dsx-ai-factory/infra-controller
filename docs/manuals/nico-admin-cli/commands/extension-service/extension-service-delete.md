@@ -1,6 +1,6 @@
 # `nico-admin-cli extension-service delete`
 
-_[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **delete**_
+*[Tenant commands](../../tenant.md) › [extension-service](./extension-service.md) › **delete***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-extension-service-delete - Delete an extension service
 
 ## SYNOPSIS
 
-**nico-admin-cli extension-service delete** \<**-i**\|**--id**\>
-\[**-v**\|**--versions**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli extension-service delete <-i|--id>
+[-v|--versions] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,30 +20,34 @@ Delete an extension service
 
 ## OPTIONS
 
-**-i**, **--id** *\<SERVICE_ID\>*  
+`-i, --id <SERVICE_ID>`
+
 The extension service ID to delete
 
-**-v**, **--versions** *\<VERSIONS\>*  
+`-v, --versions <VERSIONS>`
+
 Version strings to delete (optional, leave empty to keep all versions)
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

@@ -1,6 +1,6 @@
 # `nico-admin-cli bmc-machine admin-power-control`
 
-_[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **admin-power-control**_
+*[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **admin-power-control***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-bmc-machine-admin-power-control - Redfish Power Control
 
 ## SYNOPSIS
 
-**nico-admin-cli bmc-machine admin-power-control** \<**--machine**\>
-\<**--action**\> \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli bmc-machine admin-power-control <--machine>
+<--action> [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,13 +20,14 @@ Redfish Power Control
 
 ## OPTIONS
 
-**--machine** *\<MACHINE\>*  
+`--machine <MACHINE>`
+
 ID of the machine to reboot
 
-**--action** *\<ACTION\>*  
-Power control action\
+`--action <ACTION>`
 
-\
+Power control action
+
 *Possible values:*
 
 - on
@@ -39,24 +42,26 @@ Power control action\
 
 - ac-powercycle
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

@@ -1,6 +1,6 @@
 # `nico-admin-cli network-segment attach-vpc`
 
-_[Network commands](../../network.md) › [network-segment](./network-segment.md) › **attach-vpc**_
+*[Network commands](../../network.md) › [network-segment](./network-segment.md) › **attach-vpc***
 
 ## NAME
 
@@ -9,9 +9,11 @@ VPC
 
 ## SYNOPSIS
 
-**nico-admin-cli network-segment attach-vpc** \<**--id**\>
-\<**--vpc-id**\> \[**--force**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli network-segment attach-vpc <--id>
+<--vpc-id> [--force] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -19,40 +21,45 @@ Attach Network Segment to VPC
 
 ## OPTIONS
 
-**--id** *\<ID\>*  
-Id of the network segment
+`--id <ID>`
 
-**--vpc-id** *\<VPC_ID\>*  
-Id of the VPC
+ID of the network segment
 
-**--force**  
+`--vpc-id <VPC_ID>`
+
+ID of the VPC
+
+`--force`
+
 Allow reassigning a segment that is attached to another VPC
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples
 
 ```sh
-carbide-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 --vpc-id abcdef01-2345-6789-abcd-ef0123456789
-carbide-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 --vpc-id abcdef01-2345-6789-abcd-ef0123456789 --force
+nico-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 --vpc-id abcdef01-2345-6789-abcd-ef0123456789
+nico-admin-cli network-segment attach-vpc --id 12345678-1234-5678-90ab-cdef01234567 --vpc-id abcdef01-2345-6789-abcd-ef0123456789 --force
 ```
 
 ---

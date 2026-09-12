@@ -1,6 +1,6 @@
 # `nico-admin-cli attestation measured-boot`
 
-_[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › **measured-boot**_
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › **measured-boot***
 
 ## NAME
 
@@ -9,8 +9,10 @@ nico-admin-cli-attestation-measured-boot - Work with measured boot data
 
 ## SYNOPSIS
 
-**nico-admin-cli attestation measured-boot** \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\] \<*subcommands*\>
+```text
+nico-admin-cli attestation measured-boot [--extended]
+[--sort-by] [-h|--help] <subcommands>
+```
 
 ## DESCRIPTION
 
@@ -19,24 +21,26 @@ site).
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Subcommands

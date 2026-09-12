@@ -1,6 +1,6 @@
 # `nico-admin-cli power-shelf list`
 
-_[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › **list**_
+*[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › **list***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-power-shelf-list - List all power shelves
 
 ## SYNOPSIS
 
-**nico-admin-cli power-shelf list** \[**--deleted**\]
-\[**--controller-state**\] \[**--bmc-mac**\] \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli power-shelf list [--deleted]
+[--controller-state] [--bmc-mac] [--extended]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,10 +20,10 @@ List all power shelves
 
 ## OPTIONS
 
-**--deleted** *\<DELETED\>* \[default: exclude\]  
-Include deleted power shelves\
+`--deleted <DELETED> [default: exclude]`
 
-\
+Include deleted power shelves
+
 *Possible values:*
 
 - exclude: Exclude deleted resources (default behavior)
@@ -30,30 +32,34 @@ Include deleted power shelves\
 
 - include: Include both deleted and non-deleted resources
 
-**--controller-state** *\<CONTROLLER_STATE\>*  
+`--controller-state <CONTROLLER_STATE>`
+
 Filter by controller state (e.g. "ready", "initializing", "error")
 
-**--bmc-mac** *\<BMC_MAC\>*  
+`--bmc-mac <BMC_MAC>`
+
 Filter by BMC MAC address
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

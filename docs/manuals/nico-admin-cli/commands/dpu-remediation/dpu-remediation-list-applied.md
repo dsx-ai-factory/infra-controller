@@ -1,6 +1,6 @@
 # `nico-admin-cli dpu-remediation list-applied`
 
-_[Hardware commands](../../hardware.md) › [dpu-remediation](./dpu-remediation.md) › **list-applied**_
+*[Hardware commands](../../hardware.md) › [dpu-remediation](./dpu-remediation.md) › **list-applied***
 
 ## NAME
 
@@ -9,9 +9,11 @@ applied remediations
 
 ## SYNOPSIS
 
-**nico-admin-cli dpu-remediation list-applied** \[**--remediation-id**\]
-\[**--machine-id**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli dpu-remediation list-applied [--remediation-id]
+[--machine-id] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -19,34 +21,38 @@ Display information about applied remediations
 
 ## OPTIONS
 
-**--remediation-id** *\<REMEDIATION_ID\>*  
+`--remediation-id <REMEDIATION_ID>`
+
 The remediation id to query, in case the user wants to see which
 machines have a specific remediation applied. Provide both arguments to
 see all the details for a specific remediation and machine.
 
-**--machine-id** *\<MACHINE_ID\>*  
+`--machine-id <MACHINE_ID>`
+
 The machine id to query, in case the user wants to see which
 remediations have been applied to a specific box. Provide both arguments
 to see all the details for a specific remediation and machine.
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

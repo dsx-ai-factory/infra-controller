@@ -1,6 +1,6 @@
 # `nico-admin-cli dpu set-uefi-password`
 
-_[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › **set-uefi-password**_
+*[Hardware commands](../../hardware.md) › [dpu](./dpu.md) › **set-uefi-password***
 
 ## NAME
 
@@ -9,8 +9,10 @@ the device (via Redfish)
 
 ## SYNOPSIS
 
-**nico-admin-cli dpu set-uefi-password** \<**-q**\|**--query**\>
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli dpu set-uefi-password <-q|--query>
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -18,27 +20,30 @@ Set DPU UEFI password directly on the device (via Redfish)
 
 ## OPTIONS
 
-**-q**, **--query** *\<QUERY\>*  
-ID, IPv4, MAC or hostnmame of the machine to query
+`-q, --query <QUERY>`
 
-**--extended**  
+ID, IPv4, MAC or hostname of the machine to query
+
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

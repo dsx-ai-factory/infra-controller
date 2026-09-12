@@ -1,6 +1,6 @@
 # `nico-admin-cli expected-switch update`
 
-_[Tenant commands](../../tenant.md) › [expected-switch](./expected-switch.md) › **update**_
+*[Tenant commands](../../tenant.md) › [expected-switch](./expected-switch.md) › **update***
 
 ## NAME
 
@@ -8,15 +8,17 @@ nico-admin-cli-expected-switch-update - Update expected switch
 
 ## SYNOPSIS
 
-**nico-admin-cli expected-switch update**
-\[**-a**\|**--bmc-mac-address**\] \[**--id**\]
-\[**-u**\|**--bmc-username**\] \[**-p**\|**--bmc-password**\]
-\[**-s**\|**--switch-serial-number**\] \[**--nvos-mac-address**\]
-\[**--nvos-username**\] \[**--nvos-password**\] \[**--meta-name**\]
-\[**--meta-description**\] \[**--label**\] \[**--rack_id**\]
-\[**--bmc-ip-address**\] \[**--extended**\] \[**--nvos-ip-address**\]
-\[**--bmc-retain-credentials**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli expected-switch update
+[-a|--bmc-mac-address] [--id]
+[-u|--bmc-username] [-p|--bmc-password]
+[-s|--switch-serial-number] [--nvos-mac-address]
+[--nvos-username] [--nvos-password] [--meta-name]
+[--meta-description] [--label] [--rack_id]
+[--bmc-ip-address] [--extended] [--nvos-ip-address]
+[--bmc-retain-credentials] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -24,81 +26,97 @@ Update expected switch
 
 ## OPTIONS
 
-**-a**, **--bmc-mac-address** *\<BMC_MAC_ADDRESS\>*  
+`-a, --bmc-mac-address <BMC_MAC_ADDRESS>`
+
 BMC MAC Address of the expected switch
 
-**--id** *\<ID\>*  
+`--id <ID>`
+
 ID (UUID) of the expected switch to update.
 
-**-u**, **--bmc-username** *\<BMC_USERNAME\>*  
+`-u, --bmc-username <BMC_USERNAME>`
+
 BMC username of the expected switch
 
-**-p**, **--bmc-password** *\<BMC_PASSWORD\>*  
+`-p, --bmc-password <BMC_PASSWORD>`
+
 BMC password of the expected switch
 
-**-s**, **--switch-serial-number** *\<SWITCH_SERIAL_NUMBER\>*  
+`-s, --switch-serial-number <SWITCH_SERIAL_NUMBER>`
+
 Switch serial number of the expected switch
 
-**--nvos-mac-address** *\<NVOS_MAC_ADDRESSES\>*  
+`--nvos-mac-address <NVOS_MAC_ADDRESSES>`
+
 NVOS MAC address(es) of the expected switch
 
-**--nvos-username** *\<NVOS_USERNAME\>*  
+`--nvos-username <NVOS_USERNAME>`
+
 NVOS username of the expected switch
 
-**--nvos-password** *\<NVOS_PASSWORD\>*  
+`--nvos-password <NVOS_PASSWORD>`
+
 NVOS password of the expected switch
 
-**--meta-name** *\<META_NAME\>*  
+`--meta-name <META_NAME>`
+
 The name that should be used as part of the Metadata for newly created
 Switches. If empty, the SwitchId will be used
 
-**--meta-description** *\<META_DESCRIPTION\>*  
+`--meta-description <META_DESCRIPTION>`
+
 The description that should be used as part of the Metadata for newly
 created Machines
 
-**--label** *\<LABEL\>*  
+`--label <LABEL>`
+
 A label that will be added as metadata for the newly created Machine.
 The labels key and value must be separated by a : character
 
-**--rack_id** *\<RACK_ID\>*  
+`--rack_id <RACK_ID>`
+
 Rack ID for this switch
 
-**--bmc-ip-address** *\<BMC_IP_ADDRESS\>*  
+`--bmc-ip-address <BMC_IP_ADDRESS>`
+
 BMC IP address of the expected switch
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--nvos-ip-address** *\<NVOS_IP_ADDRESS\>*  
+`--nvos-ip-address <NVOS_IP_ADDRESS>`
+
 Static IP for the single wired NVOS port. Requires exactly one
 --nvos-mac-address
 
-**--bmc-retain-credentials** *\<BMC_RETAIN_CREDENTIALS\>*  
-When true, site-explorer skips BMC password rotation and stores
-factory-default credentials in Vault as-is\
+`--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`
 
-\
+When true, site-explorer skips BMC password rotation and stores
+factory-default credentials in Vault as-is
+
 *Possible values:*
 
 - true
 
 - false
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

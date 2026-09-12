@@ -1,6 +1,6 @@
 # `nico-admin-cli bmc-machine is-infinite-boot-enabled`
 
-_[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **is-infinite-boot-enabled**_
+*[Hardware commands](../../hardware.md) › [bmc-machine](./bmc-machine.md) › **is-infinite-boot-enabled***
 
 ## NAME
 
@@ -9,9 +9,11 @@ boot is enabled
 
 ## SYNOPSIS
 
-**nico-admin-cli bmc-machine is-infinite-boot-enabled**
-\<**--machine**\> \[**-r**\|**--reboot**\] \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli bmc-machine is-infinite-boot-enabled
+<--machine> [-r|--reboot] [--extended]
+[--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -19,30 +21,34 @@ Check if infinite boot is enabled
 
 ## OPTIONS
 
-**--machine** *\<MACHINE\>*  
+`--machine <MACHINE>`
+
 ID of the machine to enable/query infinite boot
 
-**-r**, **--reboot**  
+`-r, --reboot`
+
 Issue reboot to apply BIOS change
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

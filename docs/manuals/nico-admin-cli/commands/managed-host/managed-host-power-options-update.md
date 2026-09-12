@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host power-options update`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › [power-options](./managed-host-power-options.md) › **update**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › [power-options](./managed-host-power-options.md) › **update***
 
 ## NAME
 
@@ -8,18 +8,20 @@ nico-admin-cli-managed-host-power-options-update
 
 ## SYNOPSIS
 
-**nico-admin-cli managed-host power-options update**
-\<**-d**\|**--desired-power-state**\> \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\] \<*MACHINE*\>
+```text
+nico-admin-cli managed-host power-options update
+<-d|--desired-power-state> [--extended]
+[--sort-by] [-h|--help] <MACHINE>
+```
 
 ## DESCRIPTION
 
 ## OPTIONS
 
-**-d**, **--desired-power-state** *\<DESIRED_POWER_STATE\>*  
-Desired Power State\
+`-d, --desired-power-state <DESIRED_POWER_STATE>`
 
-\
+Desired Power State
+
 *Possible values:*
 
 - on
@@ -28,27 +30,30 @@ Desired Power State\
 
 - power-manager-disabled
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*MACHINE*\>  
+`<MACHINE>`
+
 ID of the host
 
 ## Examples

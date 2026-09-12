@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host set-primary-interface`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **set-primary-interface**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › **set-primary-interface***
 
 ## NAME
 
@@ -9,10 +9,12 @@ interface (boot device) for the managed host
 
 ## SYNOPSIS
 
-**nico-admin-cli managed-host set-primary-interface**
-\[**--force-reconcile**\] \[**--reboot**\] \[**--extended**\]
-\[**--sort-by**\] \[**-h**\|**--help**\] \<*HOST_MACHINE_ID*\>
-\<*INTERFACE_ID*\>
+```text
+nico-admin-cli managed-host set-primary-interface
+[--force-reconcile] [--reboot] [--extended]
+[--sort-by] [-h|--help] <HOST_MACHINE_ID>
+<INTERFACE_ID>
+```
 
 ## DESCRIPTION
 
@@ -25,42 +27,48 @@ is eligible.
 
 ## OPTIONS
 
-**--force-reconcile**  
+`--force-reconcile`
+
 Request a fresh machine-controller reconciliation even when this
 interface is already selected. Sends only force_reconcile=true; servers
 without force_reconcile support ignore it, while supporting servers
 leave any required restart to machine-controller
 
-**--reboot**  
+`--reboot`
+
 Deprecated compatibility option for servers without force_reconcile
 support. Sends reboot=true and force_reconcile=true; supporting servers
 treat it as reconciliation, while older servers force-restart the host
 after changing the target
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*HOST_MACHINE_ID*\>  
+`<HOST_MACHINE_ID>`
+
 ID of the host machine
 
-\<*INTERFACE_ID*\>  
+`<INTERFACE_ID>`
+
 ID of the machine interface to make primary (the boot device)
 
 ## Examples

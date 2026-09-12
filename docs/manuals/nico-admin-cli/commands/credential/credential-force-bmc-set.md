@@ -1,51 +1,57 @@
 # `nico-admin-cli credential force-bmc set`
 
-_[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-bmc](./credential-force-bmc.md) › **set**_
+*[Hardware commands](../../hardware.md) › [credential](./credential.md) › [force-bmc](./credential-force-bmc.md) › **set***
 
 ## NAME
 
 nico-admin-cli-credential-force-bmc-set - Request an immediate BMC
-credential rotation of a machine, switch, or power shelf.
+credential rotation of a machine, DPU, switch, or power shelf.
 
 ## SYNOPSIS
 
-**nico-admin-cli credential force-bmc set** \[**-i**\|**--id**\]
-\[**--bmc-mac**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli credential force-bmc set [-i|--id]
+[--bmc-mac] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
-Request an immediate BMC credential rotation of a machine, switch, or
-power shelf.
+Request an immediate BMC credential rotation of a machine, DPU, switch,
+or power shelf.
 
 ## OPTIONS
 
-**-i**, **--id** *\<ID\>*  
+`-i, --id <ID>`
+
 ID of the machine, DPU, switch, or power shelf that owns the BMC.
 Provide this or --bmc-mac.
 
-**--bmc-mac** *\<BMC_MAC\>*  
-MAC of the BMC to target (machine, switch, or power shelf). Provide this
-or --id; if an id is also given they must identify the same device.
+`--bmc-mac <BMC_MAC>`
 
-**--extended**  
+MAC of the BMC to target (machine, DPU, switch, or power shelf). Provide
+this or --id; if an id is also given they must identify the same device.
+
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

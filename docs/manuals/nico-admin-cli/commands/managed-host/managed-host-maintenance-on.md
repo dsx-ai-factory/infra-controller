@@ -1,6 +1,6 @@
 # `nico-admin-cli managed-host maintenance on`
 
-_[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › [maintenance](./managed-host-maintenance.md) › **on**_
+*[Hardware commands](../../hardware.md) › [managed-host](./managed-host.md) › [maintenance](./managed-host-maintenance.md) › **on***
 
 ## NAME
 
@@ -9,9 +9,11 @@ maintenance mode. Prevents an instance being assigned to it
 
 ## SYNOPSIS
 
-**nico-admin-cli managed-host maintenance on** \<**--host**\>
-\<**--reference**\> \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli managed-host maintenance on <--host>
+<--reference> [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -20,30 +22,34 @@ assigned to it
 
 ## OPTIONS
 
-**--host** *\<HOST\>*  
+`--host <HOST>`
+
 Managed Host ID
 
-**--reference** *\<REFERENCE\>*  
+`--reference <REFERENCE>`
+
 URL of reference (ticket, issue, etc) for this machines maintenance
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

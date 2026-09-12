@@ -49,10 +49,16 @@ pub(crate) struct Args {
     #[clap(long, help = "Set whether this OS definition is active.")]
     pub(super) is_active: Option<bool>,
 
-    #[clap(long, help = "Set whether users can override OS parameters.")]
+    #[clap(
+        long,
+        help = "Set whether instance requests can override the raw iPXE boot script stored by this OS definition. Applies only when the definition stores a raw iPXE script; does not affect templated definitions or user data."
+    )]
     pub(super) allow_override: Option<bool>,
 
-    #[clap(long, help = "Set whether phone-home on first boot is enabled.")]
+    #[clap(
+        long,
+        help = "Set whether instances using this OS definition wait for a guest phone-home callback before reporting ready. If the callback never arrives, the instance remains in a provisioning state. REST workflows inject the cloud-init phone_home block and require valid cloud-init YAML; callers using Core directly must arrange the callback. See https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home."
+    )]
     pub(super) phone_home_enabled: Option<bool>,
 
     #[clap(long, help = "Update the cloud-init / user-data script.")]

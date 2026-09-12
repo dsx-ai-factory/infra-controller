@@ -1,6 +1,6 @@
 # `nico-admin-cli power-shelf force-delete`
 
-_[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › **force-delete**_
+*[Hardware commands](../../hardware.md) › [power-shelf](./power-shelf.md) › **force-delete***
 
 ## NAME
 
@@ -9,10 +9,12 @@ optionally its interfaces and BMC suppressions
 
 ## SYNOPSIS
 
-**nico-admin-cli power-shelf force-delete**
-\[**-d**\|**--delete-interfaces**\] \[**--delete-bmc-suppressions**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
-\<*POWER_SHELF_ID*\>
+```text
+nico-admin-cli power-shelf force-delete
+[-d|--delete-interfaces] [--delete-bmc-suppressions]
+[--extended] [--sort-by] [-h|--help]
+<POWER_SHELF_ID>
+```
 
 ## DESCRIPTION
 
@@ -21,34 +23,39 @@ suppressions
 
 ## OPTIONS
 
-**-d**, **--delete-interfaces**  
+`-d, --delete-interfaces`
+
 Delete machine interfaces associated with this power shelf.
 
-**--delete-bmc-suppressions**  
+`--delete-bmc-suppressions`
+
 Delete BMC suppressions (site explorer and DHCP) for this power shelf
 BMC MAC.
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\<*POWER_SHELF_ID*\>  
+`<POWER_SHELF_ID>`
+
 Power Shelf ID to force delete.
 
 ## Examples

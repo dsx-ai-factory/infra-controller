@@ -1,6 +1,6 @@
 # `nico-admin-cli dpf service-sync release`
 
-_[Hardware commands](../../hardware.md) › [dpf](./dpf.md) › [service-sync](./dpf-service-sync.md) › **release**_
+*[Hardware commands](../../hardware.md) › [dpf](./dpf.md) › [service-sync](./dpf-service-sync.md) › **release***
 
 ## NAME
 
@@ -9,9 +9,11 @@ hold blocking a DPUService rollout
 
 ## SYNOPSIS
 
-**nico-admin-cli dpf service-sync release** \[**--machine-id**\]
-\[**--instance-id**\] \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\]
+```text
+nico-admin-cli dpf service-sync release [--machine-id]
+[--instance-id] [--extended] [--sort-by]
+[-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -19,30 +21,34 @@ Release the DPF maintenance hold blocking a DPUService rollout
 
 ## OPTIONS
 
-**--machine-id** *\<MACHINE_ID\>...*  
+`--machine-id <MACHINE_ID>...`
+
 One or more host machine IDs to release
 
-**--instance-id** *\<INSTANCE_ID\>...*  
+`--instance-id <INSTANCE_ID>...`
+
 Release the hosts running these instances, disrupting their tenants
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

@@ -1,6 +1,6 @@
 # `nico-admin-cli redfish dpu`
 
-_[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **dpu**_
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **dpu***
 
 ## NAME
 
@@ -8,8 +8,10 @@ nico-admin-cli-redfish-dpu - DPU specific operations
 
 ## SYNOPSIS
 
-**nico-admin-cli redfish dpu** \[**--extended**\] \[**--sort-by**\]
-\[**-h**\|**--help**\] \<*subcommands*\>
+```text
+nico-admin-cli redfish dpu [--extended] [--sort-by]
+[-h|--help] <subcommands>
+```
 
 ## DESCRIPTION
 
@@ -17,24 +19,26 @@ DPU specific operations
 
 ## OPTIONS
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

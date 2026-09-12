@@ -37,7 +37,7 @@ pub(crate) struct Args {
     #[clap(
         long,
         short,
-        help = "Vpc prefix, tenant network segment, or HostInband segment?"
+        help = "VPC prefix, tenant network segment, or HostInband segment?"
     )]
     pub(super) mode: NetworkChoice,
 }

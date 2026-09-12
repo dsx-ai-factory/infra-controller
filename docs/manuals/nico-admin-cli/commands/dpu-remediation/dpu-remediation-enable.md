@@ -1,6 +1,6 @@
 # `nico-admin-cli dpu-remediation enable`
 
-_[Hardware commands](../../hardware.md) › [dpu-remediation](./dpu-remediation.md) › **enable**_
+*[Hardware commands](../../hardware.md) › [dpu-remediation](./dpu-remediation.md) › **enable***
 
 ## NAME
 
@@ -8,8 +8,10 @@ nico-admin-cli-dpu-remediation-enable - Enable a remediation
 
 ## SYNOPSIS
 
-**nico-admin-cli dpu-remediation enable** \<**--id**\>
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
+```text
+nico-admin-cli dpu-remediation enable <--id>
+[--extended] [--sort-by] [-h|--help]
+```
 
 ## DESCRIPTION
 
@@ -17,27 +19,30 @@ Enable a remediation
 
 ## OPTIONS
 
-**--id** *\<ID\>*  
+`--id <ID>`
+
 The id of the remediation to enable
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
 ## Examples

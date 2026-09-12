@@ -1,6 +1,6 @@
 # `nico-admin-cli vpc show`
 
-_[Network commands](../../network.md) › [vpc](./vpc.md) › **show**_
+*[Network commands](../../network.md) › [vpc](./vpc.md) › **show***
 
 ## NAME
 
@@ -8,9 +8,11 @@ nico-admin-cli-vpc-show - Display VPC information
 
 ## SYNOPSIS
 
-**nico-admin-cli vpc show** \[**-t**\|**--tenant-org-id**\]
-\[**-n**\|**--name**\] \[**--label-key**\] \[**--label-value**\]
-\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\] \[*ID*\]
+```text
+nico-admin-cli vpc show [-t|--tenant-org-id]
+[-n|--name] [--label-key] [--label-value]
+[--extended] [--sort-by] [-h|--help] [ID]
+```
 
 ## DESCRIPTION
 
@@ -18,39 +20,46 @@ Display VPC information
 
 ## OPTIONS
 
-**-t**, **--tenant-org-id** *\<TENANT_ORG_ID\>*  
+`-t, --tenant-org-id <TENANT_ORG_ID>`
+
 The Tenant Org ID to query
 
-**-n**, **--name** *\<NAME\>*  
+`-n, --name <NAME>`
+
 The VPC name to query
 
-**--label-key** *\<LABEL_KEY\>*  
+`--label-key <LABEL_KEY>`
+
 The key of VPC label to query
 
-**--label-value** *\<LABEL_VALUE\>*  
+`--label-value <LABEL_VALUE>`
+
 The value of VPC label to query
 
-**--extended**  
+`--extended`
+
 Extended result output.
 
 This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
-**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
-Sort output by specified field\
+`--sort-by <SORT_BY> [default: primary-id]`
 
-\
+Sort output by specified field
+
 *Possible values:*
 
 - primary-id: Sort by the primary ID
 
 - state: Sort by state
 
-**-h**, **--help**  
+`-h, --help`
+
 Print help (see a summary with -h)
 
-\[*ID*\]  
+[*ID*]
+
 The VPC ID to query, leave empty for all (default)
 
 ## Examples
