@@ -406,6 +406,21 @@ async fn test_assign_remove_then_dhcp_reallocates(
         }))
         .await?;
 
+    // A later expected declaration must not be reapplied after an explicit
+    // address removal.
+    env.api()
+        .add_expected_machine(Request::new(rpc::forge::ExpectedMachine {
+            bmc_mac_address: "aa:bb:cc:dd:ef:16".into(),
+            chassis_serial_number: "EXPLICIT-REMOVE-RETURNS-TO-DHCP".into(),
+            host_nics: vec![rpc::forge::ExpectedInterface {
+                mac_address: mac.to_string(),
+                ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .await?;
+
     // Now, remove the static address.
     let remove_resp = env
         .api()

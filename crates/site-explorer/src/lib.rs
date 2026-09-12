@@ -2401,12 +2401,9 @@ impl SiteExplorer {
             .map(|sku| (sku.id, sku.device_type))
             .collect();
 
-        // Record Expected Machine metrics and apply configured address
-        // policies. Every role uses `try_apply_expected_interface`; its role
-        // only determines the row's interface type and primary setting. Fixed
-        // addresses create rows when needed, while Retained changes a matching
-        // DHCP address to `Static`. The database helpers are idempotent, so
-        // steady-state passes do not change rows.
+        // Record Expected Machine metrics and create initial Fixed
+        // reservations. DHCP inserts Retained allocations as `Static`; later
+        // inventory passes leave existing allocation types unchanged.
         let preallocate_start = Instant::now();
         for expected_machine in &expected_machines {
             let device_type = expected_machine
@@ -4143,12 +4140,9 @@ pub async fn try_preallocate_one(
 /// `try_apply_expected_interface` applies the allocation policy for one
 /// configured or compatibility-derived expected interface.
 ///
-/// Every role follows this same policy path. Fixed reservations are
-/// materialized while expected configuration is reconciled. Retained follows
-/// the existing Host BMC behavior: a matching DHCP address becomes `Static`
-/// for this interface row's lifetime, but the selected address is not written
-/// back to `ExpectedMachine` for a later re-ingestion. Dynamic needs no
-/// reconciliation here.
+/// Fixed reservations apply only before that family's first stateful
+/// allocation. Dynamic and Retained allocations are created by DHCP, so
+/// neither requires reconciliation here.
 ///
 /// Each interface gets its own transaction so one invalid reservation cannot
 /// stop Site Explorer from processing the remaining expected inventory.
@@ -4163,21 +4157,18 @@ pub async fn try_apply_expected_interface(
     expected_interface: &ExpectedInterface,
     retained_window: Option<chrono::Duration>,
 ) {
-    let allocation = expected_interface.resolved_ip_allocation();
-    let mut txn = match allocation {
-        ExpectedInterfaceIpAllocation::Dynamic => return,
-        ExpectedInterfaceIpAllocation::Fixed | ExpectedInterfaceIpAllocation::Retained => {
-            match db::Transaction::begin(pool).await {
-                Ok(txn) => txn,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        mac_address = %expected_interface.mac_address,
-                        "Site-explorer expected-interface allocation: txn_begin failed"
-                    );
-                    return;
-                }
-            }
+    if expected_interface.resolved_ip_allocation() != ExpectedInterfaceIpAllocation::Fixed {
+        return;
+    }
+    let mut txn = match db::Transaction::begin(pool).await {
+        Ok(txn) => txn,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                mac_address = %expected_interface.mac_address,
+                "Site-explorer expected-interface allocation: txn_begin failed"
+            );
+            return;
         }
     };
 
@@ -4230,26 +4221,12 @@ pub async fn try_apply_expected_interface(
         return;
     }
 
-    let result = match allocation {
-        ExpectedInterfaceIpAllocation::Dynamic => {
-            unreachable!("dynamic allocation returns before opening a transaction")
-        }
-        ExpectedInterfaceIpAllocation::Fixed => {
-            db::machine_interface::preallocate_expected_machine_interface(
-                txn.as_pgconn(),
-                expected_interface,
-                retained_window,
-            )
-            .await
-        }
-        ExpectedInterfaceIpAllocation::Retained => {
-            db::machine_interface::retain_expected_machine_interface_address(
-                txn.as_pgconn(),
-                expected_interface,
-            )
-            .await
-        }
-    };
+    let result = db::machine_interface::preallocate_expected_machine_interface(
+        txn.as_pgconn(),
+        expected_interface,
+        retained_window,
+    )
+    .await;
 
     match result {
         Ok(()) => {

@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
 use carbide_uuid::rack::RackId;
 use mac_address::MacAddress;
@@ -292,12 +293,12 @@ pub enum ExpectedInterfaceIpAllocation {
     /// prefix selects the segment, and a configured segment-type guard must
     /// match it.
     Fixed,
-    /// Allocate through DHCP, then change that address row to Static for the
-    /// lifetime of this interface row. The address is not saved in
+    /// Allocate through DHCP and insert the address as Static on that family's
+    /// first stateful allocation. The address is not saved in
     /// `ExpectedMachine` for reuse after the interface is deleted and
-    /// re-ingested, and changing the policy later does not convert that row
-    /// back to DHCP. A configured segment-type guard must match the segment
-    /// selected by the DHCP relay.
+    /// re-ingested. Later policy changes do not convert existing addresses.
+    /// A configured segment-type guard must match the segment selected by the
+    /// DHCP relay.
     Retained,
 }
 
@@ -409,10 +410,6 @@ impl ExpectedInterface {
     }
 
     /// Validate the declaration and require one resolved allocation policy.
-    ///
-    /// Callers that materialize Fixed or Retained state use this shared check
-    /// so policy validation cannot drift between API, DHCP, and Site Explorer
-    /// paths.
     pub fn require_ip_allocation(
         &self,
         required: ExpectedInterfaceIpAllocation,
@@ -584,6 +581,49 @@ impl ExpectedMachine {
         host_bmc.role = ExpectedInterfaceRole::HostBmc;
         host_bmc.primary = None;
         host_bmc
+    }
+
+    /// `interface_for_initial_allocation` selects the declaration for one MAC
+    /// and address family without changing its explicit or inferred policy.
+    /// Callers must separately check whether this family has already allocated.
+    /// An unmatched MAC returns `None`.
+    ///
+    /// The owning BMC MAC uses [`Self::effective_host_bmc`]. Other MACs prefer
+    /// a Fixed address in the requested family, then an addressless declaration,
+    /// then a Fixed declaration for the other family. Equally applicable
+    /// declarations retain their list order.
+    ///
+    /// A Fixed address in the other family supplies only interface metadata;
+    /// the caller must use normal DHCP for the requested family. Keeping the
+    /// original declaration preserves legacy segment and external-IP behavior.
+    pub fn interface_for_initial_allocation(
+        &self,
+        mac_address: MacAddress,
+        address_family: IpAddressFamily,
+    ) -> Option<ExpectedInterface> {
+        if mac_address == self.bmc_mac_address {
+            return Some(self.effective_host_bmc());
+        }
+
+        let mut interfaces = self
+            .data
+            .interfaces
+            .iter()
+            .filter(|interface| interface.mac_address == mac_address);
+        interfaces
+            .clone()
+            .find(|interface| {
+                interface
+                    .fixed_ip
+                    .is_some_and(|address| address.is_address_family(address_family))
+            })
+            .or_else(|| {
+                interfaces
+                    .clone()
+                    .find(|interface| interface.fixed_ip.is_none())
+            })
+            .or_else(|| interfaces.next())
+            .cloned()
     }
 
     /// Return the top-level BMC policy that compatibility readers should see.
@@ -1675,6 +1715,140 @@ mod tests {
     #[test]
     fn bmc_ip_allocation_default_is_auto() {
         assert_eq!(BmcIpAllocationType::default(), BmcIpAllocationType::Auto);
+    }
+
+    #[test]
+    fn initial_allocation_selects_family_without_rewriting_declarations() {
+        let mac_address = "AA:BB:CC:DD:EE:01".parse().unwrap();
+        let legacy_v4 = ExpectedInterface {
+            mac_address,
+            fixed_ip: Some("192.0.2.10".parse().unwrap()),
+            fixed_mask: Some("255.255.255.0".to_string()),
+            fixed_gateway: Some("192.0.2.1".parse().unwrap()),
+            network_segment_type: Some(NetworkSegmentType::Admin),
+            nic_type: Some("onboard".to_string()),
+            primary: Some(true),
+            ..Default::default()
+        };
+        let explicit_v6 = ExpectedInterface {
+            mac_address,
+            ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
+            fixed_ip: Some("2001:db8::10".parse().unwrap()),
+            network_segment_type: Some(NetworkSegmentType::Admin),
+            ..Default::default()
+        };
+        let retained = ExpectedInterface {
+            mac_address,
+            ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
+            ..Default::default()
+        };
+
+        check_values(
+            [
+                Check {
+                    scenario: "IPv6 selects the second Fixed declaration",
+                    input: (
+                        vec![legacy_v4.clone(), explicit_v6.clone()],
+                        IpAddressFamily::Ipv6,
+                    ),
+                    expect: Some(explicit_v6.clone()),
+                },
+                Check {
+                    scenario: "IPv4 selects the legacy declaration after IPv6",
+                    input: (vec![explicit_v6, legacy_v4.clone()], IpAddressFamily::Ipv4),
+                    expect: Some(legacy_v4.clone()),
+                },
+                Check {
+                    scenario: "Retained applies to the family without a Fixed declaration",
+                    input: (
+                        vec![legacy_v4.clone(), retained.clone()],
+                        IpAddressFamily::Ipv6,
+                    ),
+                    expect: Some(retained.clone()),
+                },
+                Check {
+                    scenario: "Fixed takes precedence over an addressless declaration",
+                    input: (vec![retained, legacy_v4.clone()], IpAddressFamily::Ipv4),
+                    expect: Some(legacy_v4.clone()),
+                },
+                Check {
+                    scenario: "Fixed in another family preserves metadata for DHCP fallback",
+                    input: (vec![legacy_v4.clone()], IpAddressFamily::Ipv6),
+                    expect: Some(legacy_v4),
+                },
+            ],
+            |(interfaces, address_family)| {
+                let machine = ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: "AA:BB:CC:DD:EE:FF".parse().unwrap(),
+                    data: ExpectedMachineData {
+                        interfaces,
+                        ..Default::default()
+                    },
+                };
+                machine.interface_for_initial_allocation(mac_address, address_family)
+            },
+        );
+    }
+
+    #[test]
+    fn initial_allocation_uses_effective_host_bmc_before_matching_mac() {
+        let mac_address = "AA:BB:CC:DD:EE:FF".parse().unwrap();
+        let fixed_v4 = "192.0.2.10".parse().unwrap();
+        check_values(
+            [
+                Check {
+                    scenario: "legacy Dynamic override is authoritative",
+                    input: (BmcIpAllocationType::Dynamic, None),
+                    expect: ExpectedInterface {
+                        mac_address,
+                        role: ExpectedInterfaceRole::HostBmc,
+                        ip_allocation: Some(ExpectedInterfaceIpAllocation::Dynamic),
+                        network_segment_type: Some(NetworkSegmentType::Underlay),
+                        ..Default::default()
+                    },
+                },
+                Check {
+                    scenario: "legacy Fixed IPv4 remains visible to the IPv6 caller",
+                    input: (BmcIpAllocationType::Auto, Some(fixed_v4)),
+                    expect: ExpectedInterface {
+                        mac_address,
+                        role: ExpectedInterfaceRole::HostBmc,
+                        fixed_ip: Some(fixed_v4),
+                        network_segment_type: Some(NetworkSegmentType::Underlay),
+                        ..Default::default()
+                    },
+                },
+            ],
+            |(bmc_ip_allocation, bmc_ip_address)| {
+                let machine = ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: mac_address,
+                    data: ExpectedMachineData {
+                        bmc_ip_allocation,
+                        bmc_ip_address,
+                        interfaces: vec![
+                            ExpectedInterface {
+                                mac_address,
+                                fixed_ip: Some("2001:db8::10".parse().unwrap()),
+                                ..Default::default()
+                            },
+                            ExpectedInterface {
+                                mac_address,
+                                role: ExpectedInterfaceRole::HostBmc,
+                                ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
+                                network_segment_type: Some(NetworkSegmentType::Underlay),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                };
+                machine
+                    .interface_for_initial_allocation(mac_address, IpAddressFamily::Ipv6)
+                    .expect("owning BMC should always have an effective declaration")
+            },
+        );
     }
 
     /// An authoritative interface replacement removes nested-only Host BMC

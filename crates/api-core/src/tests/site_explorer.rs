@@ -324,9 +324,10 @@ async fn test_site_explorer_fixtures_zerodpu_site_explorer_before_host_dhcp(
         ..ManagedHostConfig::default()
     };
     api_fixtures::site_explorer::register_expected_machine(&env, &mock_host, None).await;
+    let inband_mac = *mock_host.non_dpu_macs.first().unwrap();
     let mock_explored_host = MockExploredHost::new(&env, mock_host);
 
-    let snapshot: ManagedHostStateSnapshot = mock_explored_host
+    let mock_explored_host = mock_explored_host
         // Run host BMC DHCP first
         .discover_dhcp_host_bmc(|result, _| {
             let response = result.unwrap().into_inner();
@@ -341,14 +342,43 @@ async fn test_site_explorer_fixtures_zerodpu_site_explorer_before_host_dhcp(
         .mark_preingestion_complete()
         .await?
         .run_site_explorer_iteration()
-        .await
-        // Get DHCP on the host in-band NIC
-        .discover_dhcp_host_primary_iface(|result, _| {
+        .await;
+
+    let mut shared_allocation = pool.begin().await?;
+    let predicted =
+        db::predicted_machine_interface::find_by_mac_address(&mut shared_allocation, inband_mac)
+            .await?
+            .expect("the host should have a pending interface prediction");
+    assert!(
+        db::machine_interface::find_by_mac_address(&mut *shared_allocation, inband_mac)
+            .await?
+            .is_empty()
+    );
+    let segment = db::network_segment::for_relay(
+        &mut shared_allocation,
+        FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip(),
+    )
+    .await?
+    .expect("the fixture should have a host-inband segment");
+    db::machine_interface::lock_network_segments_shared(
+        &mut shared_allocation,
+        std::slice::from_ref(&segment.id),
+    )
+    .await?;
+
+    // Promoting the prediction must preserve shared IPv4 allocation.
+    let mock_explored_host = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        mock_explored_host.discover_dhcp_host_primary_iface(|result, _| {
             let response = result.unwrap().into_inner();
-            assert!(response.machine_id.is_some());
+            assert_eq!(response.machine_id, Some(predicted.machine_id));
             Ok(())
-        })
-        .await?
+        }),
+    )
+    .await??;
+    shared_allocation.rollback().await?;
+
+    let snapshot: ManagedHostStateSnapshot = mock_explored_host
         // Run discovery
         .discover_machine(|result, _| {
             assert!(result.is_ok());

@@ -90,10 +90,14 @@ pub async fn find_by_address(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// `delete` removes all addresses during interface teardown. The caller must
+/// delete the interface in the same transaction; use a scoped deletion helper
+/// when the interface remains so its allocation removal is recorded.
 pub async fn delete(
     txn: &mut PgConnection,
     interface_id: &MachineInterfaceId,
 ) -> Result<(), DatabaseError> {
+    lock_interface_for_address_change(txn, *interface_id).await?;
     let query = "DELETE FROM machine_interface_addresses WHERE interface_id = $1";
     sqlx::query(query)
         .bind(interface_id)
@@ -101,6 +105,22 @@ pub async fn delete(
         .await
         .map(|_| ())
         .map_err(|e| DatabaseError::query(query, e))
+}
+
+// Lock the owner before changing its addresses. An allocator holds that same
+// lock while checking removal history, so it cannot mistake expiry for first
+// allocation. A missing interface keeps the deletion's existing no-op behavior.
+async fn lock_interface_for_address_change(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+) -> Result<(), DatabaseError> {
+    let query = "SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE";
+    sqlx::query_scalar::<_, MachineInterfaceId>(query)
+        .bind(interface_id)
+        .fetch_optional(txn)
+        .await
+        .map(|_| ())
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// Find all addresses for an interface, including their allocation type.
@@ -142,15 +162,20 @@ pub async fn delete_by_interface_family(
     family: IpAddressFamily,
     allocation_type: AllocationType,
 ) -> Result<bool, DatabaseError> {
+    lock_interface_for_address_change(txn, interface_id).await?;
     let query = "DELETE FROM machine_interface_addresses WHERE interface_id = $1 AND family(address) = $2 AND allocation_type = $3";
-    sqlx::query(query)
+    let removed = sqlx::query(query)
         .bind(interface_id)
         .bind(family.pg_family())
         .bind(allocation_type)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
         .map(|r| r.rows_affected() > 0)
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if removed && allocation_type != AllocationType::Slaac {
+        crate::machine_interface::record_allocation_removal(txn, interface_id, family).await?;
+    }
+    Ok(removed)
 }
 
 /// Delete a specific address from a specific interface. Returns true if a
@@ -163,15 +188,25 @@ pub async fn delete_by_interface_and_address(
     address: IpAddr,
     allocation_type: AllocationType,
 ) -> Result<bool, DatabaseError> {
+    lock_interface_for_address_change(txn, interface_id).await?;
     let query = "DELETE FROM machine_interface_addresses WHERE interface_id = $1 AND address = $2::inet AND allocation_type = $3";
-    sqlx::query(query)
+    let removed = sqlx::query(query)
         .bind(interface_id)
         .bind(address)
         .bind(allocation_type)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
         .map(|r| r.rows_affected() > 0)
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if removed && allocation_type != AllocationType::Slaac {
+        crate::machine_interface::record_allocation_removal(
+            txn,
+            interface_id,
+            address.address_family(),
+        )
+        .await?;
+    }
+    Ok(removed)
 }
 
 /// `insert` assigns an unowned address to an interface.
@@ -249,6 +284,7 @@ pub async fn assign_static(
     interface_id: MachineInterfaceId,
     address: IpAddr,
 ) -> Result<AssignStaticResult, DatabaseError> {
+    lock_interface_for_address_change(txn, interface_id).await?;
     let family = address.address_family();
 
     let existing = find_allocation_type_for_family(&mut *txn, interface_id, family).await?;
@@ -279,13 +315,11 @@ pub async fn delete_by_address(
     address: IpAddr,
     allocation_type: AllocationType,
 ) -> Result<Vec<MachineInterfaceId>, DatabaseError> {
-    let query = "DELETE FROM machine_interface_addresses WHERE address = $1::inet AND allocation_type = $2 RETURNING interface_id";
-    sqlx::query_scalar(query)
-        .bind(address)
-        .bind(allocation_type)
-        .fetch_all(txn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))
+    let Some(owner) = find_by_address(&mut *txn, address).await? else {
+        return Ok(Vec::new());
+    };
+    let removed = delete_by_interface_and_address(txn, owner.id, address, allocation_type).await?;
+    Ok(removed.then_some(owner.id).into_iter().collect())
 }
 
 /// Delete an address allocation for a given (ip, mac) pair, which
@@ -300,20 +334,14 @@ pub async fn delete_by_address_and_mac(
     mac_address: mac_address::MacAddress,
     allocation_type: AllocationType,
 ) -> Result<Vec<MachineInterfaceId>, DatabaseError> {
-    let query = "DELETE FROM machine_interface_addresses mia
-        USING machine_interfaces mi
-        WHERE mia.interface_id = mi.id
-          AND mia.address = $1::inet
-          AND mia.allocation_type = $2
-          AND mi.mac_address = $3::macaddr
-        RETURNING mia.interface_id";
-    sqlx::query_scalar(query)
-        .bind(address)
-        .bind(allocation_type)
-        .bind(mac_address)
-        .fetch_all(txn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))
+    let Some(owner) = find_by_address(&mut *txn, address)
+        .await?
+        .filter(|owner| owner.mac_address == mac_address)
+    else {
+        return Ok(Vec::new());
+    };
+    let removed = delete_by_interface_and_address(txn, owner.id, address, allocation_type).await?;
+    Ok(removed.then_some(owner.id).into_iter().collect())
 }
 
 /// Check whether an interface has any address assigned for the

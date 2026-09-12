@@ -16,6 +16,7 @@
  */
 
 use carbide_instrument::emit;
+use carbide_network::ip::IdentifyAddressFamily;
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::allocation_type::AllocationType;
@@ -64,8 +65,9 @@ pub(super) async fn update_preallocated_machine_interface(
 /// Apply the existing safe update behavior to a fixed expected interface.
 ///
 /// An addressed interface remains unchanged. A missing row is created with
-/// the declared interface settings. Any addressless row receives the fixed IP,
-/// but only an unassociated row also receives the role-derived settings.
+/// the declared interface settings. An addressless row receives the fixed IP
+/// only before that family's first stateful allocation, and only an
+/// unassociated row also receives the role-derived settings.
 pub(super) async fn update_preallocated_expected_machine_interface(
     txn: &mut sqlx::PgConnection,
     expected_interface: &ExpectedInterface,
@@ -95,8 +97,11 @@ async fn update_preallocated_expected_machine_interface_inner(
             ))
         })?;
 
-    update_preallocated_machine_interface_with_settings(
-        txn,
+    // Updates process declarations in request order. Release locks from a
+    // skipped declaration before the next one can lock a different interface.
+    let mut savepoint = db::Transaction::begin_inner(txn).await?;
+    let result = update_preallocated_machine_interface_with_settings(
+        savepoint.as_pgconn(),
         expected_interface.mac_address,
         fixed_ip,
         Some(ExpectedInterfaceSettings {
@@ -107,7 +112,13 @@ async fn update_preallocated_expected_machine_interface_inner(
         }),
         retained_window,
     )
-    .await
+    .await?;
+    if result == PreallocationSuccess::Skipped {
+        savepoint.rollback().await?;
+    } else {
+        savepoint.commit().await?;
+    }
+    Ok(result)
 }
 
 /// ExpectedInterface settings that may be applied with a fixed-address
@@ -132,9 +143,9 @@ struct ExpectedInterfaceSettings {
 /// Create or safely update a fixed-address reservation.
 ///
 /// Existing addressed rows remain unchanged. Addressless rows receive the
-/// fixed address, but ExpectedInterface settings are applied only while the row
-/// is unassociated. Passing no settings preserves the existing generic
-/// reservation update behavior.
+/// fixed address, but ExpectedInterface reservations also require that family
+/// to have no prior stateful allocation. Their settings apply only while the
+/// row is unassociated. Passing no settings preserves generic preallocation.
 async fn update_preallocated_machine_interface_with_settings(
     txn: &mut sqlx::PgConnection,
     mac_address: MacAddress,
@@ -156,7 +167,25 @@ async fn update_preallocated_machine_interface_with_settings(
     };
     let existing = db::machine_interface::find_by_mac_address(&mut *txn, mac_address).await?;
 
-    if let Some(iface) = existing.first() {
+    if let Some(mut iface) = existing.into_iter().next() {
+        if settings.is_some() && iface.addresses.is_empty() {
+            let family = ip_address.address_family();
+            // Do not refill a family whose stateful address was removed.
+            if !db::machine_interface::can_apply_expected_allocation(txn, iface.id, family).await? {
+                return Ok(PreallocationSuccess::Skipped);
+            }
+            // Fixed assignment does not need a segment advisory lock. Keeping
+            // one across a batch update would reverse DHCP's lock order:
+            // ExpectedMachine first, then its allocation segment.
+            db::machine_interface::lock_for_allocation(txn, iface.id).await?;
+            iface = db::machine_interface::find_one(&mut *txn, iface.id).await?;
+            if !iface.addresses.is_empty()
+                || !db::machine_interface::can_apply_expected_allocation(txn, iface.id, family)
+                    .await?
+            {
+                return Ok(PreallocationSuccess::Skipped);
+            }
+        }
         if iface.addresses.is_empty() {
             // No addresses -- safe to assign the static IP.
             db::machine_interface_address::assign_static(txn, iface.id, ip_address).await?;
@@ -464,6 +493,151 @@ mod tests {
     use carbide_instrument::testing::capture_logs;
 
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn expected_preallocation_rechecks_after_assignment_and_releases_skipped_locks(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let env = crate::tests::create_test_env(pool).await;
+        let pool = &env.api.database_connection;
+        let mac_address = "02:00:00:00:41:88".parse()?;
+        let mut txn = pool.begin().await?;
+        let interface = db::machine_interface::find_or_create_observed_machine_interface(
+            &mut txn,
+            None,
+            mac_address,
+            &["192.0.2.1".parse()?],
+            None,
+            None,
+            None,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let expected_interface = ExpectedInterface {
+            mac_address,
+            ip_allocation: Some(model::expected_machine::ExpectedInterfaceIpAllocation::Fixed),
+            fixed_ip: Some("192.0.2.240".parse()?),
+            ..Default::default()
+        };
+
+        // A successful assignment must not hold the segment lock while the
+        // enclosing ExpectedMachine update processes other declarations.
+        let mut allocating = pool.begin().await?;
+        let result = update_preallocated_expected_machine_interface_inner(
+            &mut allocating,
+            &expected_interface,
+            None,
+        )
+        .await?;
+        assert_eq!(result, PreallocationSuccess::Assigned);
+        let addresses =
+            db::machine_interface_address::find_for_interface(&mut allocating, interface.id)
+                .await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(Some(addresses[0].address), expected_interface.fixed_ip);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+        let mut probe = pool.begin().await?;
+        sqlx::query("SET LOCAL lock_timeout = '1s'")
+            .execute(&mut *probe)
+            .await?;
+        db::machine_interface::lock_network_segments_exclusive(
+            &mut probe,
+            std::slice::from_ref(&interface.segment_id),
+        )
+        .await?;
+        probe.rollback().await?;
+        allocating.rollback().await?;
+
+        let mut assigning = pool.begin().await?;
+        let assigning_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *assigning)
+            .await?;
+        db::machine_interface::lock_for_allocation(&mut assigning, interface.id).await?;
+        let mut outer_txn = pool.begin().await?;
+        let applying_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *outer_txn)
+            .await?;
+        let applying_interface = expected_interface.clone();
+        let mut applying = tokio::task::JoinSet::new();
+        applying.spawn(async move {
+            let result = update_preallocated_expected_machine_interface_inner(
+                &mut outer_txn,
+                &applying_interface,
+                None,
+            )
+            .await?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((outer_txn, result))
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                    .bind(assigning_pid)
+                    .bind(applying_pid)
+                    .fetch_one(pool)
+                    .await?;
+                if waiting {
+                    return Ok::<(), sqlx::Error>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+
+        // The first eligibility read saw an empty family. Commit an operator
+        // assignment while preallocation waits for the interface lock.
+        let assigned_ip = "192.0.2.241".parse()?;
+        db::machine_interface_address::assign_static(&mut assigning, interface.id, assigned_ip)
+            .await?;
+        assigning.commit().await?;
+        let (outer_txn, result) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), applying.join_next())
+                .await?
+                .expect("the preallocation task should finish")??;
+        assert_eq!(result, PreallocationSuccess::Skipped);
+
+        // A skipped declaration must release its locks even while the
+        // enclosing ExpectedMachine update still has more declarations.
+        let mut probe = pool.begin().await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(interface.id)
+            .fetch_one(&mut *probe)
+            .await?;
+        let addresses =
+            db::machine_interface_address::find_for_interface(&mut probe, interface.id).await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, assigned_ip);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+        probe.rollback().await?;
+        outer_txn.rollback().await?;
+
+        // Removing the allocation does not make this family eligible again.
+        let mut txn = pool.begin().await?;
+        assert!(
+            db::machine_interface_address::delete_by_interface_and_address(
+                &mut txn,
+                interface.id,
+                assigned_ip,
+                AllocationType::Static,
+            )
+            .await?
+        );
+        txn.commit().await?;
+
+        let mut txn = pool.begin().await?;
+        let result = update_preallocated_expected_machine_interface_inner(
+            &mut txn,
+            &expected_interface,
+            None,
+        )
+        .await?;
+        assert_eq!(result, PreallocationSuccess::Skipped);
+        let addresses =
+            db::machine_interface_address::find_for_interface(&mut txn, interface.id).await?;
+        assert!(addresses.is_empty());
+        txn.rollback().await?;
+        Ok(())
+    }
 
     #[test]
     fn preallocation_error_is_emitted_once() {
