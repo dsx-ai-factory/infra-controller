@@ -300,16 +300,113 @@ async fn connect_postgres(config: &CarbideConfig) -> eyre::Result<PgPool> {
         );
     }
 
-    Ok(sqlx::pool::PoolOptions::new()
+    let pool_options = sqlx::pool::PoolOptions::new()
         .max_connections(max_connections)
         // Lifecycle settings are operator-configurable; each `database_pool_*`
         // config field documents what it bounds. The defaults are sqlx's own,
         // so exposing them changes no behavior -- tuning belongs to the site.
         .acquire_timeout(config.database_pool_acquire_timeout)
         .idle_timeout(Some(config.database_pool_idle_timeout))
-        .max_lifetime(Some(config.database_pool_max_lifetime))
-        .connect_with(options)
-        .await?)
+        .max_lifetime(Some(config.database_pool_max_lifetime));
+
+    connect_with_retry(pool_options, options, config.database_startup_retry_timeout).await
+}
+
+/// Establish the initial database connection, retrying with bounded
+/// exponential backoff for up to `retry_timeout` instead of failing on the
+/// first error. A transient outage (failover, rolling upgrade, DNS blip)
+/// that clears within the window no longer takes the whole process down;
+/// a genuinely unreachable database still fails once the window elapses.
+///
+/// Each attempt itself is capped by whatever time remains in the window
+/// (independent of `database_pool_acquire_timeout`), so a single slow or
+/// hanging attempt -- e.g. a DNS lookup that never returns -- can't run
+/// the total past `retry_timeout`. Once the window is exhausted, no further
+/// attempt is even started -- the last error is returned as-is, so a
+/// connection that happens to become ready in that same instant doesn't
+/// count as succeeding within a window that's already closed. `retry_timeout`
+/// of zero attempts the connection exactly once, unbounded by this function
+/// (matching the old behavior, subject only to the pool's own
+/// `acquire_timeout`).
+async fn connect_with_retry(
+    pool_options: sqlx::pool::PoolOptions<sqlx::Postgres>,
+    connect_options: sqlx::postgres::PgConnectOptions,
+    retry_timeout: std::time::Duration,
+) -> eyre::Result<PgPool> {
+    const INITIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+    const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
+    // Runs one attempt, bounded to `remaining` (`None` for a zero
+    // `retry_timeout`, meaning unbounded here).
+    async fn try_connect(
+        pool_options: &sqlx::pool::PoolOptions<sqlx::Postgres>,
+        connect_options: &sqlx::postgres::PgConnectOptions,
+        remaining: Option<std::time::Duration>,
+    ) -> Result<PgPool, sqlx::Error> {
+        let attempt = pool_options.clone().connect_with(connect_options.clone());
+        match remaining {
+            Some(remaining) => tokio::time::timeout(remaining, attempt)
+                .await
+                .unwrap_or(Err(sqlx::Error::PoolTimedOut)),
+            None => attempt.await,
+        }
+    }
+
+    let start = std::time::Instant::now();
+    let mut retry_delay = INITIAL_RETRY_DELAY;
+    let time_remaining = |elapsed: std::time::Duration| {
+        (!retry_timeout.is_zero()).then(|| retry_timeout.saturating_sub(elapsed))
+    };
+
+    let mut error = match try_connect(
+        &pool_options,
+        &connect_options,
+        time_remaining(start.elapsed()),
+    )
+    .await
+    {
+        Ok(pool) => return Ok(pool),
+        Err(error) => error,
+    };
+
+    while !retry_timeout.is_zero() && start.elapsed() < retry_timeout {
+        let elapsed = start.elapsed();
+        tracing::warn!(
+            %error,
+            elapsed_secs = elapsed.as_secs_f64(),
+            retry_in_secs = retry_delay.as_secs_f64(),
+            "failed to connect to postgres at startup, retrying"
+        );
+        tokio::time::sleep(retry_delay.min(retry_timeout.saturating_sub(elapsed))).await;
+        retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
+
+        // The sleep above may have used up the rest of the window. Only
+        // attempt again if time actually remains -- otherwise stop without
+        // touching `error`, so a window that closes mid-sleep still reports
+        // the real error from the last actual attempt instead of a
+        // synthetic "out of time" one that would obscure it.
+        let Some(remaining) = time_remaining(start.elapsed()).filter(|r| !r.is_zero()) else {
+            break;
+        };
+        error = match try_connect(&pool_options, &connect_options, Some(remaining)).await {
+            Ok(pool) => return Ok(pool),
+            Err(error) => error,
+        };
+    }
+
+    let elapsed = start.elapsed();
+    tracing::warn!(
+        %error,
+        elapsed_secs = elapsed.as_secs_f64(),
+        "failed to connect to postgres at startup, giving up"
+    );
+    Err(error).wrap_err_with(|| {
+        if retry_timeout.is_zero() {
+            "failed to connect to postgres".to_string()
+        } else {
+            format!("failed to connect to postgres after retrying for {elapsed:.0?}")
+        }
+    })
 }
 
 fn validate_database_pool_durations(
@@ -1011,5 +1108,116 @@ mod tests {
                 "error must name `{field}`, got: {error}"
             );
         }
+    }
+
+    fn unreachable_connect_options() -> sqlx::postgres::PgConnectOptions {
+        // Nothing listens on this port on localhost, so the connection is
+        // refused immediately instead of hanging on a real timeout.
+        "postgres://user:pass@127.0.0.1:1/db"
+            .parse()
+            .expect("valid connection string")
+    }
+
+    fn bounded_pool_options() -> sqlx::pool::PoolOptions<sqlx::Postgres> {
+        // Some environments don't refuse a closed low port immediately (e.g.
+        // a firewall drops the SYN instead of sending RST), so each attempt
+        // is bounded explicitly rather than relying on the OS to fail fast.
+        sqlx::pool::PoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(200))
+    }
+
+    /// A `retry_timeout` of zero preserves the old behavior: fail on the
+    /// very first connection attempt, no retry, and the error doesn't
+    /// falsely claim it retried.
+    #[tokio::test]
+    async fn connect_with_retry_fails_immediately_when_timeout_is_zero() {
+        let start = std::time::Instant::now();
+        let error = connect_with_retry(
+            bounded_pool_options(),
+            unreachable_connect_options(),
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect_err("an unreachable database must fail");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "a zero retry timeout must not wait between attempts"
+        );
+        assert!(
+            !error.to_string().contains("retrying"),
+            "a single, unretried attempt must not claim it retried, got: {error}"
+        );
+    }
+
+    /// With a non-zero `retry_timeout`, a still-unreachable database keeps
+    /// getting retried until the window elapses, then fails -- it does not
+    /// give up on the first error, and it does not retry forever.
+    #[tokio::test]
+    async fn connect_with_retry_retries_until_timeout_then_fails() {
+        let retry_timeout = std::time::Duration::from_millis(1500);
+        let start = std::time::Instant::now();
+        let error = connect_with_retry(
+            bounded_pool_options(),
+            unreachable_connect_options(),
+            retry_timeout,
+        )
+        .await
+        .expect_err("a database that never becomes reachable must eventually fail");
+        assert!(
+            start.elapsed() >= retry_timeout,
+            "must keep retrying for the full window before giving up"
+        );
+        assert!(
+            error.to_string().contains("retrying for"),
+            "error should explain it gave up after retrying, got: {error}"
+        );
+    }
+
+    /// A hostname that can never resolve (DNS failure, not just a refused
+    /// TCP connection) is retried like any other connection error, and a
+    /// lookup that hangs can't run a single attempt past the remaining
+    /// window: total time stays close to `retry_timeout` either way.
+    #[tokio::test]
+    async fn connect_with_retry_bounds_a_dns_resolution_failure() {
+        // ".invalid" is reserved by RFC 2606 to never resolve.
+        let connect_options = "postgres://user:pass@nowhere.invalid/db"
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .expect("valid connection string");
+        let retry_timeout = std::time::Duration::from_millis(1500);
+        let start = std::time::Instant::now();
+        let error = connect_with_retry(bounded_pool_options(), connect_options, retry_timeout)
+            .await
+            .expect_err("a hostname that never resolves must eventually fail");
+        assert!(
+            start.elapsed() >= retry_timeout
+                && start.elapsed() < retry_timeout + std::time::Duration::from_secs(2),
+            "must give up close to the retry window even if DNS resolution hangs, took {:?}",
+            start.elapsed()
+        );
+        assert!(error.to_string().contains("retrying for"));
+    }
+
+    /// Once the retry window has fully elapsed, the loop gives up right
+    /// away instead of sleeping for a full backoff delay and trying again --
+    /// a `retry_timeout` shorter than the first backoff delay means the
+    /// window is already gone by the time the loop would otherwise retry.
+    #[tokio::test]
+    async fn connect_with_retry_does_not_retry_once_the_window_is_already_gone() {
+        let retry_timeout = std::time::Duration::from_millis(50);
+        let start = std::time::Instant::now();
+        let _ = connect_with_retry(
+            bounded_pool_options(),
+            unreachable_connect_options(),
+            retry_timeout,
+        )
+        .await
+        .expect_err("an unreachable database must fail");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "must give up as soon as the window closes rather than sleeping for a full \
+             backoff delay first, took {:?}",
+            start.elapsed()
+        );
     }
 }

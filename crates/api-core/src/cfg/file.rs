@@ -187,6 +187,18 @@ pub struct CarbideConfig {
     )]
     pub database_pool_max_lifetime: std::time::Duration,
 
+    /// How long to keep retrying the initial database connection at
+    /// startup before giving up. A transient outage (failover, rolling
+    /// upgrade, brief DNS blip) shorter than this window no longer takes
+    /// the process down. Set to `0` to fail on the first attempt, matching
+    /// the old behavior. Default is 5m.
+    #[serde(
+        default = "default_database_startup_retry_timeout",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub database_startup_retry_timeout: std::time::Duration,
+
     /// Bounds the number of API requests that may execute or wait for
     /// execution. The limits are shared by gRPC and admin HTTP traffic.
     #[serde(default)]
@@ -3643,6 +3655,10 @@ pub const fn default_database_pool_max_lifetime() -> std::time::Duration {
     std::time::Duration::from_secs(30 * 60)
 }
 
+pub const fn default_database_startup_retry_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(5 * 60)
+}
+
 const fn default_api_admission_max_work_in_flight() -> usize {
     64
 }
@@ -5873,6 +5889,10 @@ path = "credentials.yaml"
         assert_eq!(
             config.database_pool_max_lifetime,
             std::time::Duration::from_secs(30 * 60)
+        );
+        assert_eq!(
+            config.database_startup_retry_timeout,
+            std::time::Duration::from_secs(5 * 60)
         );
         assert_eq!(
             config.api_admission_control,
