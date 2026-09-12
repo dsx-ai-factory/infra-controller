@@ -17,22 +17,40 @@
 
 use crate::HardwareType;
 
-const FIRST_COMPUTE_RANGE_START: u8 = 11;
-const FIRST_COMPUTE_RANGE_END: u8 = 18;
-const SECOND_COMPUTE_RANGE_START: u8 = 28;
-const SECOND_COMPUTE_RANGE_END: u8 = 37;
-
+/// Where a unit sits in its rack and what its platform reports for it.
+///
+/// Built by the rack's platform implementation (see `RackInfo::placement`),
+/// which owns the arithmetic that turns a rack position into the numbers a
+/// chassis reports. Redfish and RMS both read the result from here, so they
+/// cannot disagree about where a node sits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RackPlacement {
     position: u8,
     topology_id: u32,
+    tray: Option<TrayPlacement>,
+}
+
+/// The platform's numbering for the tray at a position, when it holds one.
+/// Power shelves and empty positions have none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrayPlacement {
+    /// A compute tray: its index among the rack's compute trays and the
+    /// physical slot number its chassis reports.
+    Compute {
+        tray_index: u8,
+        chassis_physical_slot_number: u32,
+    },
+    /// An NVLink switch tray: its index among the rack's switch trays and the
+    /// slot number reported for it.
+    Switch { tray_index: u8, slot_number: u32 },
 }
 
 impl RackPlacement {
-    pub(crate) fn new(position: u8, topology_id: u32) -> Self {
+    pub(crate) fn new(position: u8, topology_id: u32, tray: Option<TrayPlacement>) -> Self {
         Self {
             position,
             topology_id,
+            tray,
         }
     }
 
@@ -44,15 +62,14 @@ impl RackPlacement {
         self.topology_id
     }
 
+    pub fn tray(self) -> Option<TrayPlacement> {
+        self.tray
+    }
+
     pub(crate) fn compute_tray_index(self) -> Option<u8> {
-        match self.position {
-            FIRST_COMPUTE_RANGE_START..=FIRST_COMPUTE_RANGE_END => {
-                Some(self.position - FIRST_COMPUTE_RANGE_START)
-            }
-            SECOND_COMPUTE_RANGE_START..=SECOND_COMPUTE_RANGE_END => {
-                Some(self.position - SECOND_COMPUTE_RANGE_START + 8)
-            }
-            _ => None,
+        match self.tray? {
+            TrayPlacement::Compute { tray_index, .. } => Some(tray_index),
+            TrayPlacement::Switch { .. } => None,
         }
     }
 }
