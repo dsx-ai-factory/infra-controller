@@ -70,6 +70,9 @@ navigation:
       contents:
         - page: Overview and Components
           path: architecture/overview.md
+        - page: NICo Flow
+          path: architecture/flow.md
+          slug: flow
         - section: Redfish
           contents:
             - page: Redfish Workflow
@@ -160,6 +163,9 @@ navigation:
           path: configuration/host-naming.md
         - page: DNS
           path: configuration/dns.md
+        - page: Flow Component Managers
+          path: configuration/flow-component-manager.md
+          slug: flow-component-managers
         - page: Component Manager RMS Backends
           path: configuration/component-manager-rms.md
 
@@ -178,6 +184,21 @@ navigation:
               path: manuals/dpu_extension_service.md
             - page: BlueField DPU Operations
               path: dpu-management/dpu-operations.md
+        - section: Flow Operations
+          slug: flow-operations
+          contents:
+            - page: Overview
+              path: operations/flow/overview.md
+              slug: overview
+            - page: Operation Rules
+              path: operations/flow/operation-rules.md
+              slug: operation-rules
+            - page: Task Schedules
+              path: operations/flow/task-schedules.md
+              slug: task-schedules
+            - page: Operation Runs
+              path: operations/flow/operation-runs.md
+              slug: operation-runs
         - section: Firmware Updates
           contents:
             - page: Overview
@@ -192,8 +213,6 @@ navigation:
               path: operations/firmware-updates/dpu-firmware.md
             - page: Rack and Tray Firmware Updates
               path: operations/firmware-updates/rack-component-firmware.md
-            - page: Flow Operation Rules
-              path: ../rest-api/flow/docs/operation-rules-guide.md
         - page: NVOS Password Rotation
           path: operations/nvos-password-rotation.md
         - page: Monitoring and Health
