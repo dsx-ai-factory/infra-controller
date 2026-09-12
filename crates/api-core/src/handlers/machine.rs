@@ -23,7 +23,9 @@ use ::rpc::forge as rpc;
 use ::rpc::model::machine::ManagedHostStateSnapshotRpc;
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
-use carbide_uuid::machine::{DpuMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
+};
 use libredfish::SystemPowerControl;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::hardware_info::MachineNvLinkInfo;
@@ -146,6 +148,20 @@ pub(crate) async fn find_machines_by_ids(
     )
     .await?;
 
+    // SpectrumX attachment selectors are live DPA-interface inventory, not a
+    // signal that SpectrumX is enabled or fully ready at the site. Load all
+    // requested hosts' device-description groups in one narrow, aggregated query.
+    let host_machine_ids = snapshots
+        .keys()
+        .filter_map(|machine_id| match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Host(host_id) => Some(host_id),
+            HostOrDpuId::Dpu(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let spectrum_x_capabilities_by_machine =
+        db::dpa_interface::find_spectrum_x_capabilities_by_machine_ids(&mut txn, &host_machine_ids)
+            .await?;
+
     txn.commit().await?;
 
     let sla_config = model::machine::slas::MachineSlaConfig::new(
@@ -156,6 +172,7 @@ pub(crate) async fn find_machines_by_ids(
     Ok(Response::new(snapshot_map_to_rpc_machines(
         snapshots,
         &sla_config,
+        spectrum_x_capabilities_by_machine,
     )))
 }
 
@@ -961,16 +978,43 @@ pub(crate) async fn get_dpu_info_list(
 fn snapshot_map_to_rpc_machines(
     snapshots: HashMap<MachineId, ManagedHostStateSnapshot>,
     sla_config: &model::machine::slas::MachineSlaConfig,
+    mut spectrum_x_capabilities_by_machine: HashMap<
+        HostMachineId,
+        Vec<db::dpa_interface::SpectrumXDeviceCapability>,
+    >,
 ) -> rpc::MachineList {
     let mut result = rpc::MachineList {
         machines: Vec::with_capacity(snapshots.len()),
     };
 
-    for (machine_id, snapshot) in snapshots.into_iter() {
+    for (machine_id, snapshot) in snapshots {
         let dpu_machine_id = DpuMachineId::try_from(machine_id).ok();
-        if let Some(rpc_machine) =
+        let spectrum_x_capabilities = match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Host(host_id) => spectrum_x_capabilities_by_machine
+                .remove(&host_id)
+                .map(spectrum_x_capabilities),
+            HostOrDpuId::Dpu(_) => None,
+        };
+        if let Some(mut rpc_machine) =
             snapshot.into_rpc_machine_state(dpu_machine_id.as_ref(), sla_config)
         {
+            if let Some(spectrum_x_capabilities) = spectrum_x_capabilities
+                && !spectrum_x_capabilities.is_empty()
+            {
+                let capabilities = rpc_machine
+                    .status
+                    .get_or_insert_default()
+                    .capabilities
+                    .get_or_insert_default();
+                capabilities.network.extend(spectrum_x_capabilities);
+                capabilities.network.sort_unstable_by(|a, b| {
+                    a.name.cmp(&b.name).then(a.device_type.cmp(&b.device_type))
+                });
+                #[allow(deprecated)]
+                {
+                    rpc_machine.capabilities = Some(capabilities.clone());
+                }
+            }
             result.machines.push(rpc_machine);
         }
         // A log message for the None case is already emitted inside
@@ -978,6 +1022,20 @@ fn snapshot_map_to_rpc_machines(
     }
 
     result
+}
+
+fn spectrum_x_capabilities(
+    devices: Vec<db::dpa_interface::SpectrumXDeviceCapability>,
+) -> Vec<rpc::MachineCapabilityAttributesNetwork> {
+    devices
+        .into_iter()
+        .map(|device| rpc::MachineCapabilityAttributesNetwork {
+            name: device.device,
+            count: device.count,
+            vendor: None,
+            device_type: Some(rpc::MachineCapabilityDeviceType::SpectrumX as i32),
+        })
+        .collect()
 }
 
 async fn clear_bmc_credentials<ID: MachineIdSubtypeTrait>(

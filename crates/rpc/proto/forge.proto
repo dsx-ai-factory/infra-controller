@@ -7608,10 +7608,14 @@ message MachineValidationRunResponse {
   string message = 1;
 }
 
+// Machine capability device categories. SPECTRUM_X identifies DPA-interface
+// inventory that can supply attachment selectors; it does not indicate
+// site-level enablement or full reference-architecture readiness.
 enum MachineCapabilityDeviceType {
   MACHINE_CAPABILITY_DEVICE_TYPE_UNKNOWN = 0;
   MACHINE_CAPABILITY_DEVICE_TYPE_DPU = 1;
   MACHINE_CAPABILITY_DEVICE_TYPE_NVLINK = 2;
+  MACHINE_CAPABILITY_DEVICE_TYPE_SPECTRUM_X = 3;
 }
 
 message MachineCapabilityAttributesCpu {
@@ -7654,7 +7658,9 @@ message MachineCapabilityAttributesStorage {
 
 message MachineCapabilityAttributesNetwork {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // For SPECTRUM_X, the exact value accepted by InstanceSpxAttachment.device.
   string name                                                   = 1;
+  // For SPECTRUM_X, valid device_instance values are [0, count), resolved in PCI-name order.
   uint32 count                                                  = 2;
   optional string vendor                                        = 3;
   optional MachineCapabilityDeviceType device_type              = 4;

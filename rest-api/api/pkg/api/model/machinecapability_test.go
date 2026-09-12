@@ -29,3 +29,55 @@ func TestMachineCapability_NewAPIMachineCapability(t *testing.T) {
 	assert.Equal(t, *dbmc.Vendor, *apimc.Vendor)
 	assert.Equal(t, *dbmc.Count, *apimc.Count)
 }
+
+func TestAPIMachineCapabilities_Validate(t *testing.T) {
+	dpu := cdbm.MachineCapabilityDeviceTypeDPU
+	spectrumX := cdbm.MachineCapabilityDeviceTypeSpectrumX
+	tests := []struct {
+		name               string
+		caps               APIMachineCapabilities
+		wantErrContains    string
+		wantErrNotContains string
+	}{
+		{
+			name: "same type and name with distinct device types",
+			caps: APIMachineCapabilities{
+				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", DeviceType: &dpu},
+				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", DeviceType: &spectrumX},
+			},
+		},
+		{
+			name: "duplicate full identity",
+			caps: APIMachineCapabilities{
+				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", DeviceType: &spectrumX},
+				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8", DeviceType: &spectrumX},
+			},
+			wantErrContains: "duplicate Capability name and device type: ConnectX-8, SpectrumX",
+		},
+		{
+			name: "duplicate identity without device type",
+			caps: APIMachineCapabilities{
+				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8"},
+				{Type: cdbm.MachineCapabilityTypeNetwork, Name: "ConnectX-8"},
+			},
+			wantErrContains:    "duplicate Capability name: ConnectX-8",
+			wantErrNotContains: "device type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.caps.Validate()
+			if tt.wantErrContains == "" {
+				assert.NoError(t, err)
+				return
+			}
+			if assert.Error(t, err) {
+				assert.ErrorContains(t, err, tt.wantErrContains)
+				if tt.wantErrNotContains != "" {
+					assert.NotContains(t, err.Error(), tt.wantErrNotContains)
+				}
+			}
+		})
+	}
+}

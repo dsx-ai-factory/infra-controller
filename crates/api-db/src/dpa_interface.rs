@@ -375,6 +375,76 @@ pub async fn find_by_machine_ids(
     ))
 }
 
+/// A SpectrumX attachment-selector group projected from non-deleted DPA interfaces.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpectrumXDeviceCapability {
+    /// The non-empty device description used as the attachment `device` selector.
+    pub device: String,
+    /// The number of interfaces in the group. Valid `device_instance` selectors
+    /// are `0..count`, resolved in PCI-name order during attachment allocation.
+    pub count: u32,
+}
+
+/// Batch-load SpectrumX attachment-selector inventory for a set of host machines.
+///
+/// This intentionally projects and aggregates only the fields needed by
+/// machine capability discovery instead of loading complete DPA-interface rows,
+/// whose configuration and device-info JSON can be substantially wider. This
+/// inventory does not represent site-level SpectrumX enablement or readiness.
+pub async fn find_spectrum_x_capabilities_by_machine_ids(
+    txn: impl DbReader<'_>,
+    machine_ids: &[HostMachineId],
+) -> Result<std::collections::HashMap<HostMachineId, Vec<SpectrumXDeviceCapability>>, DatabaseError>
+{
+    if machine_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct SpectrumXCapabilityRow {
+        machine_id: HostMachineId,
+        device: String,
+        count: i64,
+    }
+
+    let query = "SELECT machine_id, device_description AS device, COUNT(*) AS count
+        FROM dpa_interfaces
+        WHERE deleted IS NULL
+          AND machine_id = ANY($1)
+          AND device_description IS NOT NULL
+          AND device_description <> ''
+        GROUP BY machine_id, device_description
+        ORDER BY machine_id, device_description";
+    let rows = sqlx::query_as::<_, SpectrumXCapabilityRow>(query)
+        .bind(machine_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    let mut capabilities_by_machine =
+        std::collections::HashMap::<HostMachineId, Vec<SpectrumXDeviceCapability>>::new();
+    for row in rows {
+        let count = row
+            .count
+            .try_into()
+            .map_err(|error| DatabaseError::Internal {
+                message: format!(
+                    "SpectrumX interface count {} for machine {} and device {:?} does not fit in u32: {error}",
+                    row.count, row.machine_id, row.device,
+                ),
+            })?;
+        capabilities_by_machine
+            .entry(row.machine_id)
+            .or_default()
+            .push(SpectrumXDeviceCapability {
+                device: row.device,
+                count,
+            });
+    }
+
+    Ok(capabilities_by_machine)
+}
+
 pub async fn find_by_ids(
     txn: impl DbReader<'_>,
     dpa_ids: &[DpaInterfaceId],

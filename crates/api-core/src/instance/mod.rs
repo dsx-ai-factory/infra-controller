@@ -2557,15 +2557,20 @@ pub(crate) fn sort_spx_by_slot(
     sorted_spx_hw_info_vec.sort_by(|a, b| a.pci_name.cmp(&b.pci_name));
 
     for spx in sorted_spx_hw_info_vec {
-        if let Some(device) = &spx.device_description.clone() {
-            let entry: &mut Vec<DpaInterface> = spx_hw_map.entry(device.clone()).or_default();
-            entry.push(spx);
-        } else {
-            tracing::info!(
+        let Some(device) = spx
+            .device_description
+            .clone()
+            .filter(|device| !device.is_empty())
+        else {
+            tracing::debug!(
                 spx = ?spx,
-                "SPX device description is missing",
+                "SpectrumX device description is missing or empty",
             );
-        }
+            continue;
+        };
+
+        let entry: &mut Vec<DpaInterface> = spx_hw_map.entry(device).or_default();
+        entry.push(spx);
     }
 
     spx_hw_map

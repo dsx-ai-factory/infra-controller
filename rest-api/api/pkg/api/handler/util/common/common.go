@@ -996,7 +996,10 @@ func GetIsProviderRequest(ctx context.Context, logger zerolog.Logger, dbSession 
 	return isProviderRequest, orgInfrastructureProvider, orgTenant, nil
 }
 
-// MatchInstanceTypeCapabilitiesForMachines is a utility function to check if Instance Type Capabilities are present in the Capabilities of Machines
+// MatchInstanceTypeCapabilitiesForMachines checks that every requested Machine
+// has at least one capability matching each Instance Type capability. Type and
+// Name always match exactly; optional fields on the Instance Type capability
+// constrain the match only when they are populated.
 func MatchInstanceTypeCapabilitiesForMachines(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, instanceTypeID uuid.UUID, machineIds []string) (bool, *string, *cutil.APIError) {
 	if len(machineIds) == 0 {
 		return true, nil, nil
@@ -1017,13 +1020,6 @@ func MatchInstanceTypeCapabilitiesForMachines(ctx context.Context, logger zerolo
 
 	}
 
-	// Build a map of capability type to capability object for instancetype
-	itmcCapMap := make(map[string]*cdbm.MachineCapability)
-	for _, imc := range instmcs {
-		cimc := imc
-		itmcCapMap[imc.Name] = &cimc
-	}
-
 	// Get Machine Capabilities for Machines
 	mmcs, mtotal, serr := mcDAO.GetAll(ctx, nil, machineIds, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, cutil.GetPtr(cdbp.TotalLimit), nil)
 	if serr != nil {
@@ -1036,75 +1032,83 @@ func MatchInstanceTypeCapabilitiesForMachines(ctx context.Context, logger zerolo
 		return false, nil, cutil.NewAPIError(http.StatusConflict, "Machines specified in request currently do not have any Capabilities to match against Instance Type", nil)
 	}
 
-	// Build a map of Machine ID to Machine Capabilities
-	mmcCapMapByMachinId := make(map[string]map[string]*cdbm.MachineCapability)
+	// Index candidates by the fields that always match exactly. Keep a slice at
+	// each `(Type, Name)` key because generic, DPU, and SpectrumX network capabilities
+	// may legitimately share those fields. A full `(Type, Name, DeviceType)` key
+	// is not sufficient: an Instance Type filter with no DeviceType must retain
+	// the existing wildcard behavior and may match any of those candidates.
+	type capabilityLookupKey struct {
+		capabilityType cdbm.MachineCapabilityType
+		name           string
+	}
+	mmcCapMapByMachineID := make(map[string]map[capabilityLookupKey][]*cdbm.MachineCapability)
 	for _, mmc := range mmcs {
 		cmmc := mmc
-		if mmcCapMapByMachinId[*mmc.MachineID] == nil {
-			mmcCapMapByMachinId[*mmc.MachineID] = make(map[string]*cdbm.MachineCapability)
+		machineCapabilities := mmcCapMapByMachineID[*mmc.MachineID]
+		if machineCapabilities == nil {
+			machineCapabilities = make(map[capabilityLookupKey][]*cdbm.MachineCapability)
+			mmcCapMapByMachineID[*mmc.MachineID] = machineCapabilities
 		}
-
-		// It's possible for two capabilities to have the same name but different types:
-		//
-		// name            |    type    | frequency | capacity | count |        vendor         |            created
-		// ----------------------------+------------+-----------+----------+-------+-----------------------+-------------------------------
-		// MT2910 Family [ConnectX-7] | Network    |           |          |     2 | Mellanox Technologies | 2025-03-27 02:40:43.50987+00
-		// MT2910 Family [ConnectX-7] | InfiniBand |           |          |     8 | Mellanox Technologies | 2024-02-02 21:41:13.149839+00
-		//
-		// If we can assume that name+type can never have a duplicate,
-		// we can rely on prefixing the map entries with type.
-		mmcCapMapByMachinId[*mmc.MachineID][mmc.MapKey()] = &cmmc
+		key := capabilityLookupKey{capabilityType: mmc.Type, name: mmc.Name}
+		machineCapabilities[key] = append(machineCapabilities[key], &cmmc)
 	}
 
-	// Loop through Capabilities of Instance Type with Machines
+	// Every Instance Type capability must have at least one matching candidate on
+	// every Machine. Which candidate matches is deliberately independent for each
+	// filter; a same-name SpectrumX capability must not hide a matching DPU capability.
+	// Iterate the request rather than the index so a requested Machine with no
+	// capability rows is still evaluated and rejected.
 	for _, imc := range instmcs {
-		// Compare each Capabilities of Instance Type with Machine's Capabilities
-		for mID, mCapMap := range mmcCapMapByMachinId {
-
-			// See earlier comments above about prefixing with type.
-			mmc, found := mCapMap[imc.MapKey()]
-			if !found {
+		key := capabilityLookupKey{capabilityType: imc.Type, name: imc.Name}
+		for _, mID := range machineIds {
+			machineCapabilities := mmcCapMapByMachineID[mID]
+			if !slices.ContainsFunc(machineCapabilities[key], func(machineCapability *cdbm.MachineCapability) bool {
+				return machineCapabilityMatchesFilter(machineCapability, &imc)
+			}) {
 				return false, &mID, nil
-			}
-
-			if imc.Frequency != nil {
-				if mmc.Frequency == nil || (*imc.Frequency != *mmc.Frequency) {
-					return false, &mID, nil
-				}
-			}
-
-			if imc.Capacity != nil {
-				if mmc.Capacity == nil || (*imc.Capacity != *mmc.Capacity) {
-					return false, &mID, nil
-				}
-			}
-
-			if imc.Vendor != nil {
-				if mmc.Vendor == nil || (*imc.Vendor != *mmc.Vendor) {
-					return false, &mID, nil
-				}
-			}
-
-			if imc.DeviceType != nil {
-				if mmc.DeviceType == nil || (*imc.DeviceType != *mmc.DeviceType) {
-					return false, &mID, nil
-				}
-			}
-
-			if imc.InactiveDevices != nil {
-				if !slices.Equal(imc.InactiveDevices, mmc.InactiveDevices) {
-					return false, &mID, nil
-				}
-			}
-
-			if imc.Count != nil {
-				if mmc.Count == nil || (*imc.Count != *mmc.Count) {
-					return false, &mID, nil
-				}
 			}
 		}
 	}
 	return true, nil, nil
+}
+
+// machineCapabilityMatchesFilter performs the asymmetric matching used by
+// Instance Type selection. Type and Name are required identity fields. Every
+// other field is a constraint only when present on the Instance Type filter;
+// in particular, a nil DeviceType is a wildcard, while DPU or SpectrumX requires an
+// exact DeviceType match.
+func machineCapabilityMatchesFilter(machineCapability, filter *cdbm.MachineCapability) bool {
+	if machineCapability.Type != filter.Type || machineCapability.Name != filter.Name {
+		return false
+	}
+	if filter.Frequency != nil && (machineCapability.Frequency == nil || *filter.Frequency != *machineCapability.Frequency) {
+		return false
+	}
+	if filter.Capacity != nil && (machineCapability.Capacity == nil || *filter.Capacity != *machineCapability.Capacity) {
+		return false
+	}
+	if filter.HardwareRevision != nil && (machineCapability.HardwareRevision == nil || *filter.HardwareRevision != *machineCapability.HardwareRevision) {
+		return false
+	}
+	if filter.Cores != nil && (machineCapability.Cores == nil || *filter.Cores != *machineCapability.Cores) {
+		return false
+	}
+	if filter.Threads != nil && (machineCapability.Threads == nil || *filter.Threads != *machineCapability.Threads) {
+		return false
+	}
+	if filter.Vendor != nil && (machineCapability.Vendor == nil || *filter.Vendor != *machineCapability.Vendor) {
+		return false
+	}
+	if filter.DeviceType != nil && (machineCapability.DeviceType == nil || *filter.DeviceType != *machineCapability.DeviceType) {
+		return false
+	}
+	if filter.InactiveDevices != nil && !slices.Equal(filter.InactiveDevices, machineCapability.InactiveDevices) {
+		return false
+	}
+	if filter.Count != nil && (machineCapability.Count == nil || *filter.Count != *machineCapability.Count) {
+		return false
+	}
+	return true
 }
 
 // GetAllocationResourceTypeMaps is a utility function to get resource info based on resource type in allocation constraints
