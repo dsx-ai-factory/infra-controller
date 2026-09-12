@@ -26,10 +26,12 @@ metrics port for each component:
 | nico-pxe | 8080 | Boot request counts |
 | nico-ssh-console-rs | 9009 | Console sessions, BMC connections |
 
-All NICo metrics use the `carbide_` prefix. Metric types are indicated by the `# TYPE`
-comment in Prometheus exposition format. Note that NICo uses `_count` as a suffix for
-some gauges (e.g., `carbide_hosts_usable_count`, `carbide_dpus_healthy_count`) - check
-the `# TYPE` metadata to determine the actual metric type.
+NICo metrics use the `carbide_` prefix. A small number of legacy metrics
+(`site_explorer_create_switches_latency_seconds`, `site_explorer_create_power_shelves_latency_seconds`)
+predate this convention. Metric types are indicated by the `# TYPE` comment in Prometheus
+exposition format. Note that NICo uses `_count` as a suffix for some gauges
+(e.g., `carbide_hosts_usable_count`, `carbide_dpus_healthy_count`) - check the `# TYPE`
+metadata to determine the actual metric type.
 
 ## 2. What the metrics tell you
 
