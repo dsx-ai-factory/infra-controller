@@ -158,6 +158,16 @@ fn test_nvos_update_manager(
     })
 }
 
+fn test_rack_firmware_update_manager(
+    rms_sim: &RmsSim,
+) -> Option<Arc<dyn component_manager::RackFirmwareUpdateManager>> {
+    rms_sim.as_rms_client().map(|client| {
+        Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
+            client,
+        )) as Arc<dyn component_manager::RackFirmwareUpdateManager>
+    })
+}
+
 pub(in crate::tests) mod dpu;
 pub(in crate::tests) mod host;
 pub(in crate::tests) mod ib_partition;
@@ -377,7 +387,6 @@ impl TestEnv {
     pub(in crate::tests) fn rack_state_handler_services(&self) -> RackStateHandlerServices {
         RackStateHandlerServices {
             db_pool: self.pool.clone(),
-            rms_client: self.rms_sim.as_rms_client(),
             site_config: RackConfig {
                 rms: self.config.rms.clone(),
                 rack_validation_config: self.config.rack_validation_config.clone(),
@@ -385,6 +394,7 @@ impl TestEnv {
             }
             .into(),
             nvos_update_manager: test_nvos_update_manager(&self.rms_sim),
+            rack_firmware_update_manager: test_rack_firmware_update_manager(&self.rms_sim),
             credential_manager: self.test_credential_manager.clone(),
             component_manager: self.test_component_manager.clone(),
             nmx_cluster_switch_mtls_services:
@@ -1657,7 +1667,6 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
         .services(
             RackStateHandlerServices {
                 db_pool: db_pool.clone(),
-                rms_client: rms_sim.as_rms_client(),
                 site_config: RackConfig {
                     rms: config.rms.clone(),
                     rack_validation_config: config.rack_validation_config.clone(),
@@ -1665,6 +1674,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
                 }
                 .into(),
                 nvos_update_manager: test_nvos_update_manager(&rms_sim),
+                rack_firmware_update_manager: test_rack_firmware_update_manager(&rms_sim),
                 credential_manager: credential_manager.clone(),
                 component_manager: test_component_manager.clone(),
                 nmx_cluster_switch_mtls_services:
