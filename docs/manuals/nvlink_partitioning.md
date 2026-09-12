@@ -35,6 +35,8 @@ for the role and interface model.
 
 The operator NMX setup (the first three rows) is detailed under
 [Enabling NMX-C-based NVLink Partitioning](#enabling-nmx-c-based-nvlink-partitioning).
+Certificate lifecycle setup and alerting are described in
+[NMX-C Certificate Monitoring and Rotation](../operations/nvlink-certificate-rotation.md).
 The tenant rows are the REST / `nicocli` flow described next.
 
 ### Creating a NVLink Logical Partition
@@ -115,7 +117,7 @@ If you want finer control, leave `nvLinkLogicalPartitionId` unset on the VPC and
 
 ### How NICo Reconciles NVLink State
 
-NICo runs a periodic reconciler against NMX-C to keep the actual NVLink
+NICo runs a periodic monitor against NMX-C to keep the actual NVLink
 partition topology aligned with the desired state implied by tenant instance
 configurations. The behaviour matters whenever an operator is
 diagnosing latency between an API call and an instance becoming `Ready`.
@@ -137,7 +139,7 @@ Cadence is set by `nvlink_config.monitor_run_interval` (default `60s`).
 
 #### Metrics
 
-The reconciler exposes metrics under the
+The monitor exposes metrics under the
 `carbide_nvlink_partition_monitor_*` namespace. Useful ones:
 
 | Metric | Use | `health` values |
@@ -157,9 +159,9 @@ The reconciler exposes metrics under the
 When an instance is released (via `ReleaseInstance`):
 
 1. The instance's NVLink configuration is cleared from the database.
-1. The reconciler observes that GPUs previously assigned to the instance
+1. The monitor observes that GPUs previously assigned to the instance
    are no longer requested in any live partition.
-1. The reconciler removes those GPUs from their NMX-C partitions.
+1. The monitor removes those GPUs from their NMX-C partitions.
 1. Once all NVLink state is removed, the machine's GPU status observation
    reflects an empty domain assignment and the host becomes eligible for
    reuse.
@@ -191,8 +193,9 @@ Configure the NMX-C client under `[nvlink_config]`:
 enabled = true
 monitor_run_interval = "60s"
 
-# Optional TLS material for NMX-C. Leave unset to use the system trust
-# store and present no client certificate.
+# TLS material for NMX-C. The CA path is required by the certificate
+# monitor. Configure the client certificate and key together when NMX-C
+# requires mTLS.
 nmx_c_tls_ca_cert_path     = "/etc/nico/nmxc/ca.pem"
 nmx_c_tls_client_cert_path = "/etc/nico/nmxc/client.crt"
 nmx_c_tls_client_key_path  = "/etc/nico/nmxc/client.key"
@@ -204,18 +207,16 @@ allow_insecure = false
 
 | Field | Purpose |
 | ----- | ------- |
-| `nmx_c_tls_ca_cert_path` | Optional PEM containing additional CAs for verifying the NMX-C endpoint's certificate |
+| `nmx_c_tls_ca_cert_path` | Optional PEM containing additional CAs for normal NMX-C connectivity. The certificate monitor requires this file and does not use the system trust store |
 | `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C |
 | `nmx_c_tls_client_key_path` | Optional client key matching the certificate above |
 | `nmx_c_tls_authority` | Optional override for the expected server name during certificate verification (SNI / hostname check) |
 | `nmx_c_endpoint_port` | Optional gRPC port used when deriving an endpoint from a switch NVOS IP; defaults to `9370` |
-| `allow_insecure` | When `true`, disables TLS verification entirely. Intended for development |
+| `allow_insecure` | Development option that can select plaintext HTTP for rack-derived endpoints when no client certificate and key are configured. It does not disable certificate-monitor TLS verification |
 
-NMX-C endpoints are resolved per chassis. NICo first uses the NVOS IP of a
-ready switch with its Fabric Manager control plane configured. If no suitable
-switch endpoint is available, NICo falls back to an explicit chassis mapping
-stored in the database. Register fallback mappings with `nico-admin-cli`,
-keyed by chassis serial:
+Rack-associated machines use the NVOS IP of a ready Fabric Manager
+control-plane switch in the rack. Machines without a rack association use an
+explicit mapping stored in the database, keyed by chassis serial:
 
 ```bash
 nico-admin-cli nvlink-nmxc-endpoints create \
@@ -225,12 +226,20 @@ nico-admin-cli nvlink-nmxc-endpoints create \
 nico-admin-cli nvlink-nmxc-endpoints show
 ```
 
-`update` and `delete` subcommands follow the same pattern. The reconciler
-picks up new endpoints on the next iteration; no restart is required.
+`update` and `delete` subcommands follow the same pattern. The partition
+monitor picks up new mappings for unassociated machines on the next iteration;
+no restart is required. Separately, the certificate monitor can use a chassis
+mapping as an alert-only fallback when no ready rack endpoint exists. It cannot
+request automatic rotation for that target because the mapping does not
+identify an actionable rack.
 
 The TLS material in TOML applies uniformly to every NMX-C endpoint NICo
 talks to. Per-endpoint credential overrides are not currently supported;
 deploy a uniform trust posture across the site's NMX-C control plane.
+
+To monitor the certificate presented by those endpoints and request rotation
+before expiry, follow
+[NMX-C Certificate Monitoring and Rotation](../operations/nvlink-certificate-rotation.md).
 
 For machines discovered before NVLink partitioning was enabled, populate the
 machine's GPU mapping from Redfish and NMX-C:
@@ -244,12 +253,12 @@ discovery and do not require this step.
 
 ### Verifying a Tenant's NVLink Placement
 
-After an instance has been created and the reconciler has had at least one
-opportunity to run, an operator can confirm correct placement with the
+After an instance has been created and the monitor has had at least one
+opportunity to run, you can confirm correct placement with the
 following checks. There is no single all-in-one health command; the steps
 below should be repeatable as a checklist.
 
-1. **Reconciler is running.**
+1. **Monitor is running.**
    `carbide_nvlink_partition_monitor_iteration_latency_milliseconds` is being
    recorded. Evaluate the recent increase or rate of
    `carbide_nvlink_partition_monitor_nmxc_connect_error_count` over a time
@@ -278,6 +287,6 @@ below should be repeatable as a checklist.
 1. **Cleanup after release.** After releasing an instance, the same
    `machine nvlink-info` output should show an empty Domain assignment
    on the affected GPUs within one or two reconcile intervals. Failure
-   to clear indicates the reconciler could not remove the GPU from its NMX-C
+   to clear indicates the monitor could not remove the GPU from its NMX-C
    partition; investigate the corresponding connect-error and op-latency
    metrics.
