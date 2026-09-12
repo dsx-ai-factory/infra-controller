@@ -61,8 +61,11 @@ impl RmsMock {
     }
 }
 
-/// An inventory fixed at construction, for tests and for hosts with nothing to
-/// report.
+/// An [`RmsInventory`] whose node set is fixed at construction.
+///
+/// Every `nodes()` call returns the same shared snapshot; nothing is rebuilt
+/// or observed after construction. Tests and hosts with nothing to report use
+/// this in place of a live inventory.
 pub struct StaticInventory(std::sync::Arc<[SimNode]>);
 
 impl StaticInventory {
