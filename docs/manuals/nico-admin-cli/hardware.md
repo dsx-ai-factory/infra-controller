@@ -7,6 +7,7 @@ For global flags and setup, see [the overview](./README.md) and [`setup.md`](./s
 | Command | Description |
 |---|---|
 | [`attestation`](./commands/attestation/attestation.md) | MeasuredBoot or SPDM attestations. |
+| [`backend`](./commands/backend/backend.md) | NICo backend service operations. |
 | [`bmc-machine`](./commands/bmc-machine/bmc-machine.md) | BMC Machine related handling. |
 | [`boot-interface`](./commands/boot-interface/boot-interface.md) | Machine boot-interface management. |
 | [`boot-override`](./commands/boot-override/boot-override.md) | Machine boot override. |
