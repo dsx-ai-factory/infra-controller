@@ -61,6 +61,12 @@ lru.workspace = true
 [dev-dependencies]
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
+futures = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+prost = { workspace = true }
+tokio-util = { workspace = true }
 
 [build-dependencies]
 carbide-version = { path = "../version" }
