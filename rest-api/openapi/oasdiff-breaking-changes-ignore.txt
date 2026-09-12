@@ -258,3 +258,13 @@ API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} added the patt
 API POST /v2/org/{org}/nico/instance removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
 API POST /v2/org/{org}/nico/instance/batch removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
 API PATCH /v2/org/{org}/nico/instance/{instanceId} removed the enum value `OVN` of the request property `spectrumXAttachments/items/attachmentType`
+API GET /v2/org/{org}/nico/vpc the `items/vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API GET /v2/org/{org}/nico/vpc the `items/routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API POST /v2/org/{org}/nico/vpc the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `201`
+API POST /v2/org/{org}/nico/vpc the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `201`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId} the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
