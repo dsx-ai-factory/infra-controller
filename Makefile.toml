@@ -214,7 +214,7 @@ echo "Image carbide-build-minimal built. Run: cargo make cargo-docker-minimal --
 
 [tasks.build-pxe-build-container]
 category = "Build"
-description = "Build the PXE artifact build container image (Ubuntu 24.04 + Rust 1.97 + mkosi deps). Required once before pxe-docker-x86."
+description = "Build the native-architecture PXE builder that produces x86_64 Scout artifacts. Required once before pxe-docker-x86."
 workspace = false
 script = '''
 set -e
@@ -224,10 +224,15 @@ echo "Image carbide-pxe-builder built. Run: cargo make pxe-docker-x86"
 
 [tasks.pxe-docker-x86]
 category = "Build"
-description = "Build x86_64 PXE boot artifacts inside a privileged container. Requires build-pxe-build-container first. Artifacts land in pxe/static/blobs/internal/x86_64/ via the repo mount."
+description = "Build x86_64 PXE boot artifacts in a native AMD64 or ARM64 privileged container. Requires build-pxe-build-container first. Artifacts land in pxe/static/blobs/internal/x86_64/ via the repo mount."
 workspace = false
 script = '''
 set -e
+if [ "$(uname -m)" != "x86_64" ]; then
+  BINFMT_IMAGE="tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0"
+  docker run --privileged --rm "${BINFMT_IMAGE}" --uninstall qemu-x86_64
+  docker run --privileged --rm "${BINFMT_IMAGE}" --install amd64
+fi
 if [ -z "$CARGO_HOME" ]; then CARGO_HOME="$HOME/.cargo"; fi
 SCCACHE_HOST="${SCCACHE_DIR:-$HOME/.sccache}"
 mkdir -p "$SCCACHE_HOST"

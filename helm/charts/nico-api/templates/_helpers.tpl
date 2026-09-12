@@ -174,7 +174,9 @@ dnsNames:
   - {{ printf "%s.%s" (.cert.serviceName | default .svcName) (.cert.identityNamespace | default .namespace) }}
 {{- end }}
 {{- range .cert.extraDnsNames | default list }}
-  - {{ . }}
+{{- if . }}
+  - {{ . | quote }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- if .cert.ipAddresses }}

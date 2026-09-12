@@ -57,10 +57,14 @@ envConfig:
   # DeadlineExceeded on the initial Version health-check RPC and leaves the
   # NicoClient nil, causing all inventory activity panics.
   # Site-agent reads CORE_GRPC_* first, then CARBIDE_* legacy fallbacks.
-  CORE_GRPC_ADDRESS: "nico-api.nico-system.svc.cluster.local:1079"
+  # The trailing dot makes this an absolute DNS name. Without it, resolver
+  # search domains can consume the gRPC connection deadline before CoreDNS
+  # receives the valid cluster-local query.
+  CORE_GRPC_ADDRESS: "nico-api.nico-system.svc.cluster.local.:1079"
   CORE_GRPC_SEC_OPT: "2"
-  CARBIDE_ADDRESS: "nico-api.nico-system.svc.cluster.local:1079"
+  CARBIDE_ADDRESS: "nico-api.nico-system.svc.cluster.local.:1079"
   CARBIDE_SEC_OPT: "2"
+  FLOW_GRPC_ADDRESS: "flow.flow.svc.cluster.local.:50051"
 
   # DB connection — nico-pg-cluster (Zalando-managed, shared with nico-rest-api).
   # DB_USER and DB_PASSWORD are injected from the db-creds Secret (secrets.dbCreds).
@@ -68,7 +72,7 @@ envConfig:
   DB_DATABASE: "nico_rest"
   DB_PORT: "5432"
 
-  TEMPORAL_HOST: "temporal-frontend.temporal"
+  TEMPORAL_HOST: "temporal-frontend-headless.temporal.svc.cluster.local."
   TEMPORAL_PORT: "7233"
   TEMPORAL_SERVER: "interservice.server.temporal.local"
   TEMPORAL_PUBLISH_NAMESPACE: "site"

@@ -197,8 +197,15 @@ data:
 
     {{- end }}
 
+    {{- if $.Values.server.config.publicClient }}
+    publicClient:
+    {{- with $.Values.server.config.publicClient }}
+    {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- else }}
     publicClient:
       hostPort: "{{ include "temporal.componentname" (list $ "frontend") }}.{{ $.Release.Namespace }}.svc.cluster.local.:{{ $.Values.server.frontend.service.port }}"
+    {{- end }}
 
     dynamicConfigClient:
       filepath: "/etc/temporal/dynamic_config/dynamic_config.yaml"

@@ -168,7 +168,6 @@ dependencies = [
   "mkdir-static",
   "cleanup-pxe-submodule",
   { name = "package-scout-x86_64-release-local", path = "${REPO_ROOT}" },
-  "build",
   "create-ephemeral-image-x86-host",
   "ipxe-x86_64",
   "setup-apt-repo-amd64",
@@ -178,7 +177,6 @@ dependencies = [
 dependencies = [
   "mkdir-static",
   { name = "package-scout-x86_64-release-local", path = "${REPO_ROOT}" },
-  "build",
   "create-ephemeral-image-x86-host",
   "ipxe-x86_64",
   "setup-apt-repo-amd64",
@@ -739,16 +737,24 @@ dependencies = ["ipxe-build-efi-aarch64-ci"]
 category = "iPXE Kernel"
 description = "Build the x86_64 EFI iPXE kernel"
 script = '''
+  CROSS_ARG=""
   LD_ARG=""
-  if [ -n "${SA_ENABLEMENT}" ]; then
-    LD_ARG="LD=/usr/bin/ld.bfd"
+  if [ "$(uname -m)" != "x86_64" ]; then
+    CROSS_ARG="CROSS_COMPILE=x86_64-linux-gnu-"
   fi
-  make -j ${LD_ARG} \
+  if [ -n "${SA_ENABLEMENT}" ]; then
+    if [ -n "${CROSS_ARG}" ]; then
+      LD_ARG="LD=/usr/bin/x86_64-linux-gnu-ld.bfd"
+    else
+      LD_ARG="LD=/usr/bin/ld.bfd"
+    fi
+  fi
+  make -j ${CROSS_ARG} ${LD_ARG} \
     bin-x86_64-efi/snponly.efi \
     VERSION=${IPXE_BANNER_VERSION} \
     EMBED=${REPO_ROOT}/pxe/ipxe/local/embed.ipxe \
     DEBUG=tls
-  make -j ${LD_ARG} \
+  make -j ${CROSS_ARG} ${LD_ARG} \
     bin-x86_64-efi/golan.efi \
     VERSION=${IPXE_BANNER_VERSION} \
     EMBED=${REPO_ROOT}/pxe/ipxe/local/embed.ipxe \

@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # =============================================================================
-# unseal_vault.sh — initialize and unseal a 3-pod HashiCorp Vault HA cluster
+# unseal_vault.sh — initialize and unseal a HashiCorp Vault Raft cluster
 #
 # Run AFTER `helmfile sync -l name=vault` and BEFORE `helm install nico-prereqs`.
 #
@@ -34,6 +34,8 @@
 #   VAULT_STATUS_SLEEP_SECONDS — delay between status attempts (default: 5)
 #   VAULT_UNSEAL_ROUNDS        — full key-sequence retries per pod before
 #                                giving up (default: 3)
+#   VAULT_INIT_STABILIZE_SECONDS — delay before first-time initialization so
+#                                  certificate reload hooks can settle (default: 15)
 # =============================================================================
 set -euo pipefail
 
@@ -41,10 +43,18 @@ NAMESPACE="vault"
 VAULT_STATUS_RETRIES="${VAULT_STATUS_RETRIES:-36}"
 VAULT_STATUS_SLEEP_SECONDS="${VAULT_STATUS_SLEEP_SECONDS:-5}"
 VAULT_UNSEAL_ROUNDS="${VAULT_UNSEAL_ROUNDS:-3}"
+VAULT_INIT_STABILIZE_SECONDS="${VAULT_INIT_STABILIZE_SECONDS:-15}"
 
 if ! [[ "${VAULT_STATUS_RETRIES}" =~ ^[1-9][0-9]*$ ]] ||
-   ! [[ "${VAULT_UNSEAL_ROUNDS}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: VAULT_STATUS_RETRIES and VAULT_UNSEAL_ROUNDS must be positive integers." >&2
+   ! [[ "${VAULT_UNSEAL_ROUNDS}" =~ ^[1-9][0-9]*$ ]] ||
+   ! [[ "${VAULT_INIT_STABILIZE_SECONDS}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: Vault retry values must be positive integers and VAULT_INIT_STABILIZE_SECONDS must be a non-negative integer." >&2
+    exit 1
+fi
+
+VAULT_REPLICAS="$(kubectl get statefulset vault -n "${NAMESPACE}" -o jsonpath='{.spec.replicas}')"
+if ! [[ "${VAULT_REPLICAS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: Vault StatefulSet has an invalid replica count: ${VAULT_REPLICAS:-unset}" >&2
     exit 1
 fi
 
@@ -88,10 +98,11 @@ _vault_status_json() {
     return 1
 }
 
-echo "Waiting for all 3 Vault pods to be initialized..."
-# StatefulSets create pods sequentially — vault-1/vault-2 may not exist yet.
-# Poll until each pod exists, then wait for Initialized.
-for POD in vault-0 vault-1 vault-2; do
+echo "Waiting for all ${VAULT_REPLICAS} Vault pods to be initialized..."
+# StatefulSets create pods sequentially. Poll until each configured ordinal
+# exists, then wait for Initialized.
+for ORDINAL in $(seq 0 "$((VAULT_REPLICAS - 1))"); do
+    POD="vault-${ORDINAL}"
     until kubectl get pod "${POD}" -n "${NAMESPACE}" &>/dev/null; do
         echo "  ${POD} not yet created, retrying in 5s..."
         sleep 5
@@ -101,7 +112,7 @@ for POD in vault-0 vault-1 vault-2; do
         --for=condition=Initialized \
         --timeout=300s
 done
-echo "All Vault pods are initialized"
+echo "All ${VAULT_REPLICAS} Vault pods are initialized"
 
 echo "Checking Vault status on vault-0..."
 VAULT_STATUS_JSON="$(_vault_status_json vault-0)"
@@ -113,6 +124,22 @@ echo "Vault initialized: ${INITIALIZED}"
 echo "Vault sealed:      ${SEALED}"
 
 if [[ "${INITIALIZED}" == "false" ]]; then
+    # vault-cert-reload can send SIGHUP shortly after the pod starts. If that
+    # races with `vault operator init`, Vault may persist its barrier keys but
+    # terminate the client before it returns the only copy of those keys.
+    # Wait for startup certificate reloads to settle, then check again before
+    # issuing the irreversible initialization request.
+    if (( VAULT_INIT_STABILIZE_SECONDS > 0 )); then
+        echo "Waiting ${VAULT_INIT_STABILIZE_SECONDS}s for Vault certificate reload hooks to settle..."
+        sleep "${VAULT_INIT_STABILIZE_SECONDS}"
+        VAULT_STATUS_JSON="$(_vault_status_json vault-0)"
+        INITIALIZED="$(echo "${VAULT_STATUS_JSON}" | jq -r '.initialized')"
+        if [[ "${INITIALIZED}" != "false" ]]; then
+            echo "ERROR: Vault became initialized during the stabilization wait; refusing to initialize without confirmed key capture." >&2
+            exit 1
+        fi
+    fi
+
     echo "Vault is not initialized. Initializing via vault-0..."
     kubectl exec -n "${NAMESPACE}" vault-0 -c vault -- \
         vault operator init -tls-skip-verify -key-shares=5 -key-threshold=3 -format=json \
@@ -182,10 +209,13 @@ unseal_pod() {
 }
 
 unseal_pod vault-0
-# Wait for vault-0 (leader) to be elected before unsealing followers
-sleep 10
-unseal_pod vault-1
-unseal_pod vault-2
+if (( VAULT_REPLICAS > 1 )); then
+    # Wait for vault-0 (leader) to be elected before unsealing followers.
+    sleep 10
+    for ORDINAL in $(seq 1 "$((VAULT_REPLICAS - 1))"); do
+        unseal_pod "vault-${ORDINAL}"
+    done
+fi
 
 # Store individual unseal keys and root token as K8s secrets
 CLUSTER_JSON="$(kubectl -n "${NAMESPACE}" get secret vault-cluster-keys -o json \

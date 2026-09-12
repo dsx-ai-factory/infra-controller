@@ -28,10 +28,10 @@ clusterApiServer: ""
 
 ## ---------------------------------------------------------------------------
 ## Vault connection (used by vault-pki-config Job and vault-nico-issuer)
-## Vault address uses vaultNamespace above: vault.<vaultNamespace>.svc.cluster.local
+## Vault address uses the namespace-qualified service name.
 ## ---------------------------------------------------------------------------
 vault:
-  address: "https://vault.vault.svc.cluster.local:8200"
+  address: "https://vault.vault:8200"
   ## Optional Vault Enterprise/HCP Vault Dedicated namespace. This is not a Kubernetes namespace.
   namespace: ""
   ## setup.sh/helmfile supplies this dynamically from vaultroottoken.
@@ -226,10 +226,10 @@ keycloak:
 postgresql:
   enabled: true
   instances: 3
-  ## Patroni synchronous replication. Set false for single-instance clusters
-  ## (for development or simulation) — strict sync mode with no replicas
-  ## blocks all writes.
-  synchronousMode: true
+  ## Patroni synchronous replication. null selects automatically from instances:
+  ## disabled for one instance and enabled when a standby exists. Set an explicit
+  ## boolean only when the deployment needs to override that topology-derived mode.
+  synchronousMode: null
   volumeSize: "10Gi"
   storageClass: "local-path-persistent"
   ## DB_HOST in nico-system-nico-database-config ConfigMap.

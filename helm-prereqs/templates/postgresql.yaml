@@ -1,4 +1,12 @@
 {{- if .Values.postgresql.enabled }}
+{{- $configuredSynchronousMode := .Values.postgresql.synchronousMode }}
+{{- if not (or (kindIs "invalid" $configuredSynchronousMode) (kindIs "bool" $configuredSynchronousMode)) }}
+{{- fail "postgresql.synchronousMode must be true, false, or null (automatic)" }}
+{{- end }}
+{{- $synchronousMode := gt (int .Values.postgresql.instances) 1 }}
+{{- if kindIs "bool" $configuredSynchronousMode }}
+{{- $synchronousMode = $configuredSynchronousMode }}
+{{- end }}
 ## =============================================================================
 ## nico-pg-cluster-env — injected into every postgres pod as env vars.
 ## Created here (nico-prereqs chart) so Values.siteName flows in at install.
@@ -91,12 +99,10 @@ spec:
     keycloak: keycloak.nico
     {{- end }}
   patroni:
-    # Templated (no `| default`): Go templates treat an explicit `false` as empty,
-    # so a default here would silently re-enable sync mode. Default lives in values.yaml.
-    # Single-instance clusters must set synchronousMode=false or Patroni strict sync
-    # blocks all writes (including the operator's own CREATE DATABASE).
-    synchronous_mode: {{ .Values.postgresql.synchronousMode }}
-    synchronous_mode_strict: {{ .Values.postgresql.synchronousMode }}
+    # Automatic mode enables synchronous replication only when a standby exists.
+    # An explicit boolean value overrides the topology-derived behavior.
+    synchronous_mode: {{ $synchronousMode }}
+    synchronous_mode_strict: {{ $synchronousMode }}
     synchronous_node_count: 1
   postgresql:
     version: "15"

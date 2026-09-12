@@ -73,7 +73,7 @@ if [[ -z "${NICO_NS:-}" ]]; then
 fi
 
 # vault namespace: parse from VAULT_SERVICE in vault-cluster-info
-# e.g. https://vault.vault.svc.cluster.local:8200 → vault
+# e.g. https://vault.vault:8200 → vault
 if [[ -z "${VAULT_NS:-}" ]]; then
   _VAULT_SVC=$(kc get configmap -n "${NICO_NS}" vault-cluster-info \
     -o jsonpath='{.data.VAULT_SERVICE}' || true)

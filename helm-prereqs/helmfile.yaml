@@ -69,10 +69,9 @@ releases:
     namespace: postgres
     createNamespace: true
     chart: postgres-operator/postgres-operator
-    # NOTE: chart versions below 1.11.0 are no longer published in Zalando's chart
-    # repository. The CRD API (acid.zalan.do/v1) is unchanged across this bump, and
-    # nico-pg-cluster pins postgresql.version explicitly, so the database is unaffected.
-    version: "1.11.0"
+    # v1.15.1 publishes a multi-architecture operator image. Older releases such
+    # as v1.11.0 resolve to an amd64-only image and cannot run on arm64 clusters.
+    version: "1.15.1"
     wait: true
     timeout: 600
     values:

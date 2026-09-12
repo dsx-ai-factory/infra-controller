@@ -18,37 +18,57 @@
 # Must be run with --privileged so mkosi can use Linux user namespaces.
 #
 # Ubuntu 24.04 matches the mkosi ToolsTreeRelease=noble used by the PXE profiles.
+# The container runs on the build host architecture and always produces x86_64
+# artifacts. This avoids running Rust under QEMU when building on ARM64 hosts.
 #
 # Build: cargo make build-pxe-build-container
 # Use:   cargo make pxe-docker-x86
 #
-FROM ubuntu:24.04
+ARG BUILDPLATFORM
+FROM --platform=$BUILDPLATFORM ubuntu:24.04
 
 ARG RUST_VERSION=1.97.1
+ARG BUILDARCH
 
-RUN apt-get update && \
+RUN set -eux; \
+	case "${BUILDARCH}" in \
+		amd64) \
+			target_packages='kea-dev kea-dhcp4-server kea-dhcp6-server libboost-dev libgrpc-dev libgrpc++-dev libprotobuf-dev libssl-dev libtss2-dev libudev-dev liblzma-dev' \
+			;; \
+		arm64) \
+			dpkg --add-architecture amd64; \
+			rm -f /etc/apt/sources.list.d/ubuntu.sources; \
+			printf '%s\n' \
+				'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse' \
+				'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse' \
+				'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse' \
+				'deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse' \
+				'deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse' \
+				'deb [arch=amd64] http://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse' \
+				> /etc/apt/sources.list; \
+			target_packages='kea-dev:amd64 libboost-dev:amd64 libgrpc-dev:amd64 libgrpc++-dev:amd64 libprotobuf-dev:amd64 libssl-dev:amd64 libtss2-dev:amd64 libudev-dev:amd64 liblzma-dev:amd64' \
+			;; \
+		*) \
+			echo "unsupported build architecture: ${BUILDARCH}" >&2; \
+			exit 1 \
+			;; \
+	esac; \
+	apt-get update; \
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 	# Rust install
 	curl \
 	ca-certificates \
 	# For carbide-scout (Rust binary deps)
 	binutils-aarch64-linux-gnu \
+	binutils-x86-64-linux-gnu \
 	build-essential \
-	kea-dev \
-	kea-dhcp4-server \
-	kea-dhcp6-server \
-	libboost-dev \
-	libgrpc-dev \
-	libgrpc++-dev \
-	libprotobuf-dev \
+	g++-x86-64-linux-gnu \
+	gcc-x86-64-linux-gnu \
+	libc6-dev-amd64-cross \
 	libssl-dev \
-	libtss2-dev \
-	libudev-dev \
 	lld \
 	pkg-config \
 	protobuf-compiler \
-	# For iPXE build
-	liblzma-dev \
 	# For mkosi (OS image builder) — the binary comes from the pxe/mkosi submodule;
 	# these are the host-side deps mkosi needs for image construction
 	apt-utils \
@@ -78,11 +98,15 @@ RUN apt-get update && \
 	git \
 	jq \
 	zip \
-	&& rm -rf /var/lib/apt/lists/*
+	${target_packages}; \
+	# Cross GCC searches its target binutils directory for the selected linker.
+	ln -sf /usr/bin/ld.lld /usr/x86_64-linux-gnu/bin/ld.lld; \
+	rm -rf /var/lib/apt/lists/*
 
 # Install Rust via rustup, pinned to match rust-toolchain.toml
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 	sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal && \
+	/root/.cargo/bin/rustup target add x86_64-unknown-linux-gnu && \
 	rm -rf /root/.cargo/registry
 
 ENV PATH="/root/.cargo/bin:${PATH}"
@@ -91,6 +115,12 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # tokio_unstable enables tokio::task::Builder used by several crates.
 # Note: iPXE uses its own Makefile with gcc/ld directly; RUSTFLAGS does not affect it.
 ENV RUSTFLAGS="-C link-arg=-fuse-ld=lld --cfg tokio_unstable"
+ENV AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
+ENV CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc
+ENV CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV PKG_CONFIG_PATH_x86_64_unknown_linux_gnu=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
 
 RUN cargo install cargo-make sccache --locked && \
 	rm -rf /root/.cargo/registry
