@@ -271,6 +271,58 @@ struct Journal {
     entries: VecDeque<StoredEntry>,
 }
 
+/// The one `$filter` the entries collections serve: `Created ge <instant>`
+/// or `Created gt <instant>`, the instant in RFC 3339, quoted or bare. A
+/// client resuming a log asks for the entries stamped at or after the newest
+/// it has, which is what a BMC's own filter support is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CreatedFilter {
+    since: chrono::DateTime<chrono::Utc>,
+    inclusive: bool,
+}
+
+impl CreatedFilter {
+    pub(crate) fn parse(expression: &str) -> Result<Self, String> {
+        let unsupported = || {
+            format!(
+                "unsupported $filter `{expression}`: this collection serves `Created ge|gt <RFC 3339 instant>`"
+            )
+        };
+        // Property and operator are single words; the literal is everything
+        // after them, because a `+` in its offset arrives as a space once
+        // the query is decoded, and no RFC 3339 instant contains a space of
+        // its own.
+        let mut words = expression.trim().splitn(3, char::is_whitespace);
+        let (Some("Created"), Some(operator), Some(literal)) =
+            (words.next(), words.next(), words.next())
+        else {
+            return Err(unsupported());
+        };
+        let inclusive = match operator {
+            "ge" => true,
+            "gt" => false,
+            _ => return Err(unsupported()),
+        };
+        let literal = literal.trim().trim_matches('\'').replace(' ', "+");
+        let since = chrono::DateTime::parse_from_rfc3339(&literal)
+            .map_err(|_| format!("`{literal}` is not an RFC 3339 instant"))?
+            .with_timezone(&chrono::Utc);
+        Ok(Self { since, inclusive })
+    }
+
+    fn admits(&self, created: &str) -> bool {
+        let Ok(created) = chrono::DateTime::parse_from_rfc3339(created) else {
+            return false;
+        };
+        let created = created.with_timezone(&chrono::Utc);
+        if self.inclusive {
+            created >= self.since
+        } else {
+            created > self.since
+        }
+    }
+}
+
 /// One page of an entries collection.
 pub(crate) struct EntryPage {
     pub(crate) members: Vec<Value>,
@@ -369,24 +421,31 @@ impl EventLog {
         journal.next_id = 0;
     }
 
-    /// One page of entries under `collection`, oldest first. `top` is capped
-    /// at the profile's page size; unpaged logs serve everything from `skip`.
+    /// One page of entries under `collection`, oldest first, of those
+    /// `filter` admits. `top` is capped at the profile's page size; unpaged
+    /// logs serve everything from `skip`. The count is of the entries
+    /// admitted, as `$filter` narrows a collection's count.
     pub(crate) fn page(
         &self,
         collection: &redfish::Collection<'_>,
         skip: usize,
         top: Option<usize>,
+        filter: Option<&CreatedFilter>,
     ) -> EntryPage {
         let journal = self.lock();
-        let total = journal.entries.len();
+        let admitted: Vec<&StoredEntry> = journal
+            .entries
+            .iter()
+            .filter(|entry| filter.is_none_or(|filter| filter.admits(&entry.created)))
+            .collect();
+        let total = admitted.len();
         let limit = match (top, self.page_size) {
             (Some(top), Some(page)) => Some(top.min(page)),
             (Some(top), None) => Some(top),
             (None, page) => page,
         };
-        let members: Vec<Value> = journal
-            .entries
-            .iter()
+        let members: Vec<Value> = admitted
+            .into_iter()
             .skip(skip)
             .take(limit.unwrap_or(usize::MAX))
             .map(|entry| entry.render(collection))
@@ -472,7 +531,7 @@ mod tests {
 
     fn ids(log: &EventLog) -> Vec<String> {
         let collection = system_entries_collection("S", log.id());
-        log.page(&collection, 0, None)
+        log.page(&collection, 0, None, None)
             .members
             .iter()
             .map(|entry| entry["Id"].as_str().unwrap().to_owned())
@@ -511,21 +570,21 @@ mod tests {
     fn pages_are_capped_at_the_page_size_and_link_onward() {
         let log = EventLog::new("SEL", 10, Some(2), ["a", "b", "c", "d", "e"]);
         let collection = system_entries_collection("S", "SEL");
-        let first = log.page(&collection, 0, None);
+        let first = log.page(&collection, 0, None, None);
         assert_eq!(
             (first.members.len(), first.total, first.next_skip),
             (2, 5, Some(2))
         );
-        let capped = log.page(&collection, 0, Some(4));
+        let capped = log.page(&collection, 0, Some(4), None);
         assert_eq!(capped.members.len(), 2, "$top cannot exceed the page size");
-        let last = log.page(&collection, 4, None);
+        let last = log.page(&collection, 4, None, None);
         assert_eq!((last.members.len(), last.next_skip), (1, None));
-        assert!(log.page(&collection, 9, None).members.is_empty());
+        assert!(log.page(&collection, 9, None, None).members.is_empty());
 
         let unpaged = EventLog::new("SEL", 10, None, ["a", "b", "c"]);
-        let all = unpaged.page(&collection, 0, None);
+        let all = unpaged.page(&collection, 0, None, None);
         assert_eq!((all.members.len(), all.next_skip), (3, None));
-        let top = unpaged.page(&collection, 0, Some(2));
+        let top = unpaged.page(&collection, 0, Some(2), None);
         assert_eq!(top.next_skip, Some(2), "a client-supplied $top still pages");
     }
 }
