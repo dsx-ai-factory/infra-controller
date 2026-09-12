@@ -721,7 +721,10 @@ mod tests {
 
     fn pending_pairs(state: &UpdateServiceState) -> Vec<(String, String)> {
         let pending = state.pending_upgrades.read().unwrap();
-        pending.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        pending
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     #[test]

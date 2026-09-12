@@ -96,8 +96,8 @@ pub async fn run_local(
     });
 
     // Same refresher as production main.rs, so integration suites exercise
-    // live target changes; detached - it ends with the test process.
-    spawn_desired_firmware_refresher(app_context.clone());
+    // live target changes; aborted in shutdown so it cannot outlive the helper.
+    let firmware_refresher = spawn_desired_firmware_refresher(app_context.clone());
 
     let mat = MachineATron::new(app_context.clone());
     let simulators = mat.make_devices(false).await?;
@@ -129,6 +129,7 @@ pub async fn run_local(
         MachineATronHandle {
             _stop_tx: stop_tx,
             _join_handle: join_handle,
+            firmware_refresher,
             dhcp_service,
         },
     ))
@@ -137,6 +138,7 @@ pub async fn run_local(
 pub struct MachineATronHandle {
     _stop_tx: oneshot::Sender<()>,
     _join_handle: JoinHandle<eyre::Result<()>>,
+    firmware_refresher: JoinHandle<()>,
     dhcp_service: Option<UdpDhcpService>,
 }
 
@@ -144,6 +146,7 @@ impl MachineATronHandle {
     pub async fn shutdown(mut self) -> eyre::Result<()> {
         drop(self._stop_tx);
         let mat_result = self._join_handle.await?;
+        self.firmware_refresher.abort();
         if let Some(dhcp_service) = self.dhcp_service.take() {
             dhcp_service.shutdown().await?;
         }
