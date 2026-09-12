@@ -229,3 +229,11 @@ than an append-only list:
 - Lifecycle entries carry `Created` at one-second resolution, `MessageId`,
   `Severity`, and `Links.OriginOfCondition`, matching the Event published for
   them.
+- The entries collections serve `$filter=Created ge <instant>` and
+  `Created gt <instant>`, the instant in RFC 3339 with or without quotes, so
+  a client resuming from the newest entry it holds asks for that second
+  onward; `Members@odata.count` is then the count of what matched, and a
+  paged answer's `nextLink` keeps the filter. Any other expression is a 400.
+  The service root advertises `ProtocolFeaturesSupported.FilterQuery` for it;
+  other collections still ignore `$filter`, which is the gap a client that
+  trusts the advertisement will notice first.
