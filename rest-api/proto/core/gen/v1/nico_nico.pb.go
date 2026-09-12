@@ -62522,8 +62522,10 @@ type ReWrapSecretsResponse struct {
 	// Journal rows already wrapped by the routed KEK.
 	AlreadyCurrent uint64 `protobuf:"varint,2,opt,name=already_current,json=alreadyCurrent,proto3" json:"already_current,omitempty"`
 	// Journal rows still wrapped by a KEK outside the
-	// routing config after the walk. Zero means every
-	// unrouted KEK can be retired.
+	// routing config after the walk. Zero means no live
+	// journal row requires an unrouted KEK; retained backups
+	// and rollback windows are not inspected and may still
+	// require it.
 	StaleRemaining uint64 `protobuf:"varint,3,opt,name=stale_remaining,json=staleRemaining,proto3" json:"stale_remaining,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache

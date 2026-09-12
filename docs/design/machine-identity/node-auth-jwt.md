@@ -31,6 +31,16 @@ It is distinct from the tenant-facing [SPIFFE JWT-SVID design](spiffe-svid-sdd.m
 that issues identity tokens *to tenant workloads* via IMDS; this design covers
 how *NICo's own node agents* authenticate to the NICo API.
 
+> **Vault-removal status:** This document describes the implementation merged
+> for [#355](https://github.com/dsx-ai-factory/infra-controller/issues/355), which signs
+> with the private key of the Vault-issued mTLS machine certificate. The
+> required Vault-free path keeps that signing model and reissues the certificate
+> through the non-Vault provider tracked under
+> [#5200](https://github.com/dsx-ai-factory/infra-controller/issues/5200).
+> fTPM-backed DPU signing in
+> [#5272](https://github.com/dsx-ai-factory/infra-controller/issues/5272) is an
+> optional stretch goal.
+
 ## How it works
 
 ```text

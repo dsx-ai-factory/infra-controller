@@ -10034,8 +10034,10 @@ message ReWrapSecretsResponse {
   // Journal rows already wrapped by the routed KEK.
   uint64 already_current = 2;
   // Journal rows still wrapped by a KEK outside the
-  // routing config after the walk. Zero means every
-  // unrouted KEK can be retired.
+  // routing config after the walk. Zero means no live
+  // journal row requires an unrouted KEK; retained backups
+  // and rollback windows are not inspected and may still
+  // require it.
   uint64 stale_remaining = 3;
 }
 

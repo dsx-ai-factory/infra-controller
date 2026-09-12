@@ -332,9 +332,10 @@ pub async fn find_batch_after(
 }
 
 /// Count the rows whose DEK is wrapped by a KEK outside the given set.
-/// After a re-wrap, a zero here is the operator's signal that every KEK
-/// absent from the routing config can be retired; nonzero right after a
-/// re-wrap means concurrent writers landed rows mid-walk -- run it again.
+/// After a re-wrap, zero means no live row requires a KEK outside the set;
+/// retained backups and rollback windows are not inspected. Nonzero right
+/// after a re-wrap means concurrent writers landed rows mid-walk -- run it
+/// again.
 pub async fn count_wrapped_outside(
     txn: impl DbReader<'_>,
     kek_ids: &[String],
