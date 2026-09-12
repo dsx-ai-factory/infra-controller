@@ -127,6 +127,33 @@ impl BuildVersion<'_> {
         self.version.starts_with("20")
     }
 
+    /// Parse the numeric part of the release-candidate component.
+    ///
+    /// Accepts both the legacy ``rc8`` form and the newer ``rc.8`` form.
+    /// Returns ``None`` for final releases (no rc component) or malformed
+    /// rc strings, so callers can order final releases after candidates.
+    fn rc_number(&self) -> Option<u32> {
+        let rest = self.rc.strip_prefix("rc")?;
+        let rest = rest.strip_prefix('.').unwrap_or(rest);
+        if rest.is_empty() {
+            return None;
+        }
+        rest.parse().ok()
+    }
+
+    /// Compare the release-candidate components numerically, with a final
+    /// release (no rc) sorting after any release candidate of the same
+    /// version. String comparison would order ``rc.8`` after ``rc.15``.
+    fn compare_rc(&self, other: &Self) -> Ordering {
+        match (self.rc_number(), other.rc_number()) {
+            (Some(self_rc), Some(other_rc)) => self_rc.cmp(&other_rc),
+            // A final release is newer than any release candidate.
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    }
+
     /// Parse semver "X.Y.Z" into (major, minor, patch) for comparison
     fn parse_semver(&self) -> Option<(u32, u32, u32)> {
         let parts: Vec<&str> = self.version.split('.').collect();
@@ -279,7 +306,7 @@ impl Ord for BuildVersion<'_> {
                 {
                     return self_ver
                         .cmp(&other_ver)
-                        .then_with(|| self.rc.cmp(other.rc))
+                        .then_with(|| self.compare_rc(other))
                         .then_with(|| self.hotfix.cmp(&other.hotfix))
                         .then_with(|| self.commits.cmp(&other.commits));
                 }
@@ -292,7 +319,7 @@ impl Ord for BuildVersion<'_> {
         // Default: string comparison (works for date-based versions)
         self.version
             .cmp(other.version)
-            .then_with(|| self.rc.cmp(other.rc))
+            .then_with(|| self.compare_rc(other))
             .then_with(|| self.hotfix.cmp(&other.hotfix))
             .then_with(|| self.commits.cmp(&other.commits))
     }
@@ -688,6 +715,53 @@ mod tests {
                     },
                     expect: true,
                 },
+                // RC components compare numerically, so rc.8 < rc.15 even
+                // though string comparison would order them the other way.
+                Check {
+                    scenario: "up-only, rc.8 to rc.15 (dot form)",
+                    input: Inputs {
+                        policy: AgentUpgradePolicy::UpOnly,
+                        agent: "v2.0.0-rc.8",
+                        carbide: "v2.0.0-rc.15",
+                    },
+                    expect: true,
+                },
+                Check {
+                    scenario: "up-only, rc8 to rc15 (legacy form)",
+                    input: Inputs {
+                        policy: AgentUpgradePolicy::UpOnly,
+                        agent: "v2.0.0-rc8",
+                        carbide: "v2.0.0-rc15",
+                    },
+                    expect: true,
+                },
+                Check {
+                    scenario: "up-only, rc.15 to final release",
+                    input: Inputs {
+                        policy: AgentUpgradePolicy::UpOnly,
+                        agent: "v2.0.0-rc.15",
+                        carbide: "v2.0.0",
+                    },
+                    expect: true,
+                },
+                Check {
+                    scenario: "up-only, rc.15 to rc.8 (no downgrade)",
+                    input: Inputs {
+                        policy: AgentUpgradePolicy::UpOnly,
+                        agent: "v2.0.0-rc.15",
+                        carbide: "v2.0.0-rc.8",
+                    },
+                    expect: false,
+                },
+                Check {
+                    scenario: "up-only, final release to rc.15 (no downgrade)",
+                    input: Inputs {
+                        policy: AgentUpgradePolicy::UpOnly,
+                        agent: "v2.0.0",
+                        carbide: "v2.0.0-rc.15",
+                    },
+                    expect: false,
+                },
                 Check {
                     scenario: "up-only, invalid agent version forces upgrade",
                     input: Inputs {
@@ -939,6 +1013,35 @@ mod tests {
                 panic!("Pos {i} does not match. Got {got} expected {expect}.");
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_rc_ordering_is_numerical() -> eyre::Result<()> {
+        fn compare(left: &str, right: &str) -> std::cmp::Ordering {
+            BuildVersion::try_from(left)
+                .unwrap()
+                .cmp(&BuildVersion::try_from(right).unwrap())
+        }
+
+        // rc.8 < rc.15 in both the dot and legacy forms
+        assert_eq!(compare("v2.0.0-rc.8", "v2.0.0-rc.15"), Ordering::Less);
+        assert_eq!(compare("v2.0.0-rc8", "v2.0.0-rc15"), Ordering::Less);
+        assert_eq!(compare("v2.0.0-rc.9", "v2.0.0-rc.10"), Ordering::Less);
+        // A final release sorts after any release candidate
+        assert_eq!(compare("v2.0.0-rc.15", "v2.0.0"), Ordering::Less);
+        assert_eq!(compare("v2.0.0", "v2.0.0-rc.15"), Ordering::Greater);
+        assert_eq!(compare("v2.0.0", "v2.0.0"), Ordering::Equal);
+        // Date-based versions with rc components order the same way
+        assert_eq!(
+            compare("v2024.05.02-rc9-0", "v2024.05.02-rc10-0"),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare("v2024.05.02-rc3-0", "v2024.05.02"),
+            Ordering::Less
+        );
 
         Ok(())
     }
