@@ -1901,13 +1901,16 @@ pub async fn update_slot_and_tray(
     slot_number: Option<i32>,
     tray_index: Option<i32>,
 ) -> DatabaseResult<()> {
-    sqlx::query("UPDATE machines SET slot_number = $1, tray_index = $2 WHERE id = $3")
-        .bind(slot_number)
-        .bind(tray_index)
-        .bind(machine_id)
-        .execute(txn)
-        .await
-        .map_err(|e| DatabaseError::new("update_slot_and_tray", e))?;
+    sqlx::query(
+        "UPDATE machines SET slot_number = COALESCE($1, slot_number), \
+         tray_index = COALESCE($2, tray_index) WHERE id = $3",
+    )
+    .bind(slot_number)
+    .bind(tray_index)
+    .bind(machine_id)
+    .execute(txn)
+    .await
+    .map_err(|e| DatabaseError::new("update_slot_and_tray", e))?;
     Ok(())
 }
 
@@ -3446,6 +3449,10 @@ pub struct MachineRmsIdentity {
     pub bmc_mac_address: MacAddress,
     pub rack_id: Option<RackId>,
     pub rack_profile_id: Option<RackProfileId>,
+    /// Physical slot number last reported by RMS, or `None` if none has been recorded.
+    pub slot_number: Option<i32>,
+    /// Physical tray index last reported by RMS, or `None` if none has been recorded.
+    pub tray_index: Option<i32>,
 }
 
 /// Look up RMS identities and rack profile context for compute tray machines by
@@ -3461,7 +3468,9 @@ pub async fn find_rms_identities_by_bmc_ips(
             mia.address AS bmc_ip,
             mi.mac_address AS bmc_mac_address,
             m.rack_id,
-            r.rack_profile_id
+            r.rack_profile_id,
+            m.slot_number,
+            m.tray_index
         FROM machines m
         LEFT JOIN racks r ON r.id = m.rack_id
         JOIN machine_interfaces mi

@@ -109,8 +109,7 @@ use errors::{SiteExplorerError, SiteExplorerResult};
 use self::metrics::{
     BmcResetFinished, BmcResetMethod, BmcResetStatus, BmcResetTimestampPersistenceFailed,
     BootInterfaceSelected, DpuMigrationSignal, PairingBlockerReason, SiteExplorerIterationFinished,
-    SiteExplorerMachineSlotTrayFetchFailed, SiteExplorerMachineSlotTrayResponseMissing,
-    SiteExplorerMachineSlotTrayValueInvalid, exploration_error_to_metric_label,
+    exploration_error_to_metric_label,
 };
 use crate::config::SiteExplorerExploreMode;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
@@ -251,43 +250,6 @@ fn rms_location_value(value: Option<u32>) -> Result<Option<i32>, u32> {
     value
         .map(|value| i32::try_from(value).map_err(|_| value))
         .transpose()
-}
-
-/// Fetches `slot_number` and `tray_index` from RMS for one rack/node pair.
-/// Each value remains usable when the other is absent or outside `i32`.
-pub async fn fetch_slot_and_tray(
-    rms_client: &dyn librms::RmsApi,
-    request: librms::protos::rack_manager::BatchGetNodeDeviceInfoRequest,
-) -> (Option<i32>, Option<i32>) {
-    match rms_client.batch_get_node_device_info(request).await {
-        Ok(info) => {
-            let Some(node_device_details) = info.node_device_details.first() else {
-                carbide_instrument::emit(SiteExplorerMachineSlotTrayResponseMissing::new());
-                return (None, None);
-            };
-
-            let slot_number =
-                rms_location_value(node_device_details.slot_number).unwrap_or_else(|value| {
-                    carbide_instrument::emit(SiteExplorerMachineSlotTrayValueInvalid::SlotNumber {
-                        value,
-                    });
-                    None
-                });
-            let tray_index =
-                rms_location_value(node_device_details.tray_index).unwrap_or_else(|value| {
-                    carbide_instrument::emit(SiteExplorerMachineSlotTrayValueInvalid::TrayIndex {
-                        value,
-                    });
-                    None
-                });
-
-            (slot_number, tray_index)
-        }
-        Err(e) => {
-            carbide_instrument::emit(SiteExplorerMachineSlotTrayFetchFailed::new(e.to_string()));
-            (None, None)
-        }
-    }
 }
 
 pub struct Endpoint<'a> {
@@ -1205,6 +1167,26 @@ impl SiteExplorer {
                 );
             }
         }
+
+        let reconcile_machine_locations_start = Instant::now();
+        let host_bmc_ips = identified_hosts
+            .iter()
+            .map(|identified| identified.explored_host.host_bmc_ip)
+            .collect::<Vec<_>>();
+        if let Err(error) = self
+            .machine_creator
+            .reconcile_machine_locations(&host_bmc_ips)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                "Machine RMS location reconciliation failed; a later Site Explorer run will retry"
+            );
+        }
+        metrics.record_phase_latency(
+            "reconcile_machine_locations",
+            reconcile_machine_locations_start.elapsed(),
+        );
 
         Ok(identified_hosts
             .into_iter()
