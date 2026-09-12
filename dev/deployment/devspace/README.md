@@ -12,6 +12,8 @@ The intent is that the app deploy path stays the same whether the prerequisites 
 - installed by the provided bootstrap script, or
 - brought by the developer from elsewhere.
 
+On Apple Silicon, see [Running DevSpace on MacOS with Colima](#running-devspace-on-macos-with-colima) for a wrapper that performs both steps.
+
 ## Prerequisites Bootstrap
 
 The bootstrap script operates on the current Kubernetes context and does not require a particular Kubernetes distribution. The provided full-stack deploy path uses kind-specific hooks to load locally built images into contexts named `kind-<cluster>`.
@@ -35,7 +37,7 @@ By default this script assumes an empty cluster and will idempotently:
 - deploy the local Keycloak realm
 - share the Core CA with REST so the site agent can use mTLS with Core
 - create the Secrets and ConfigMaps that the Helm chart expects
-- write [`values.generated.yaml`](values.generated.yaml) for the app deploy step
+- write `values.generated.yaml` for the app deploy step
 
 It is safe to re-run. It uses `helm upgrade --install`, `kubectl apply`, and Vault checks before writing mounts/roles/secrets.
 
@@ -246,6 +248,96 @@ DevSpace then deploys the Helm chart with:
 
 The REST images are built from the existing `rest-api/docker/local` Dockerfiles and are passed to the three existing REST Helm charts with the same generated tag.
 
+## Running DevSpace on MacOS with Colima
+
+Colima is a lightweight container runtime that doesn't need a GUI app or other companion applications running on Mac and using up resources. Install it using:
+
+```bash
+brew install colima
+```
+
+VM used for this devspace will claim 6 vCPU, 16GB of memory and 200GB disk so your Mac will likely need 20 core/48 GB. However the vCPU/memory maximums are usually reached only during build time, during runtime the memory usage lies around 3GB.
+
+[`setup-devspace-mac-colima.sh`](setup-devspace-mac-colima.sh) runs this stack on Apple Silicon. Colima already uses Apple's Virtualization.framework through Lima's `vz` VM type, so it supplies the Linux host DevSpace needs without a second VM. The script exits unless it is on macOS and `arm64`.
+
+[`setup-devspace-on-host.sh`](setup-devspace-on-host.sh) is not usable here. Colima's guest is Ubuntu 24.04 and would satisfy that script's OS check, but it installs Docker CE and rewrites the daemon's `data-root` along with the containerd root, which conflicts with Colima's own Docker. The host preparation it performs is reproduced against the Colima Docker daemon instead.
+
+### First run
+
+```bash
+dev/deployment/devspace/setup-devspace-mac-colima.sh up
+dev/deployment/devspace/setup-devspace-mac-colima.sh deploy
+```
+
+`up` starts Colima, installs the pinned tooling, creates the kind cluster, and verifies all three. `deploy` then runs [`bootstrap-prereqs.sh`](bootstrap-prereqs.sh), `devspace deploy -n nico-system`, and an image prune. Substitute `recreate` for `up` to rebuild an existing Colima profile from scratch, which also deletes the Lima disk so a new `COLIMA_DISK_GIB` takes effect.
+
+The remaining actions are `grow-disk`, `tooling`, `cluster`, `verify`, `prune`, `status`, and `reset`. Run `help` for the current list.
+
+### Prerequisites
+
+Colima, `curl`, `docker`, `jq`, `shasum`, and `tar` on `PATH`, plus a working `docker buildx`. Homebrew installs the buildx plugin under its own prefix, which the Docker CLI does not scan, so link it once:
+
+```bash
+mkdir -p ~/.docker/cli-plugins
+ln -sfn /opt/homebrew/opt/docker-buildx/bin/docker-buildx ~/.docker/cli-plugins/docker-buildx
+```
+
+Without that link every image build fails with `unknown flag: --tag`, and only after the deploy has started. `up` checks for it before doing any work.
+
+### Pinned tooling
+
+The script installs `darwin-arm64` builds of DevSpace, kind, kubectl, and Helm into `$HOME/.nico-devspace/bin`, verifying each published checksum. The versions come from [`versions.env`](versions.env), which [`setup-devspace-on-host.sh`](setup-devspace-on-host.sh) and [`prepare-ubuntu-host-for-dev.sh`](prepare-ubuntu-host-for-dev.sh) source as well, so the macOS and Ubuntu paths cannot drift apart. Helm 3 matters in particular, because the charts are not exercised against Helm 4. Run `help` to print the resolved versions.
+
+Nothing in Homebrew's prefix is modified, so that directory has to come first on `PATH` when running `kubectl`, `helm`, or `devspace` by hand:
+
+```bash
+export PATH="$HOME/.nico-devspace/bin:$PATH"
+export GODEBUG=tlsmlkem=0
+```
+
+`GODEBUG=tlsmlkem=0` keeps registry TLS handshakes working against endpoints that abort on `X25519MLKEM768`. The script exports it internally and writes the same setting into the kind node's containerd.
+
+### Defaults
+
+| Setting | Value | Override |
+| --- | --- | --- |
+| CPUs | 6 | `COLIMA_CPUS` |
+| Memory | 16 GiB | `COLIMA_MEMORY_GIB` |
+| Disk | 200 GiB | `COLIMA_DISK_GIB` |
+| Colima profile | `default` | `COLIMA_PROFILE` |
+| kind cluster | `nico-dev` | `CLUSTER_NAME` |
+| Tooling directory | `$HOME/.nico-devspace/bin` | `TOOL_DIR` |
+
+A full Core build peaks near 8 GiB with the cluster already running, so 16 GiB leaves headroom. The VM starts with `--arch aarch64 --vm-type vz --mount-type virtiofs`.
+
+### Reaching the services
+
+The kind node publishes only `6443`, so the NodePorts this deployment creates are unreachable from macOS. Forward the services instead:
+
+```bash
+kubectl -n nico-rest port-forward service/nico-rest-api 18388:8388
+kubectl -n nico-rest port-forward service/keycloak 18082:8082
+```
+
+Keycloak has to be forwarded to local port `18082`. `nico-rest-api` matches a token's `iss` claim against `externalBaseURL` in its `nico-rest-api-config` ConfigMap, and Keycloak derives `iss` from the request host and port, so any other local port produces a 401 on every REST call.
+
+### Disk
+
+`deploy` prunes superseded images when it finishes. DevSpace gives each build a unique tag and never removes the previous one, so without that step every deploy leaves a complete image set behind. The prune never touches the build cache, because its `/cargo-target` mount is what keeps the Rust build incremental.
+
+To enlarge the disk without losing images, volumes, or build cache, raise `COLIMA_DISK_GIB` and run `grow-disk`. It stops Colima, resizes the Lima disk in place, and starts it again. `recreate` also applies a new size but discards everything.
+
+### When Colima misreports its state
+
+`colima status` can report `not running` and `colima list` can report `Broken` while the VM is healthy and serving Docker, so the script treats a reachable Docker daemon as authoritative. `colima list` also reports the disk size recorded in `colima.yaml`, which differs from reality whenever Colima reused an existing Lima disk. Ask Lima instead:
+
+```bash
+LIMA_HOME="$HOME/.colima/_lima" limactl list
+LIMA_HOME="$HOME/.colima/_lima" limactl disk list
+```
+
+Colima names both the Lima instance and its persistent disk `colima` for the `default` profile, and `colima-<profile>` for any other.
+
 ## Resetting the local environment
 
 Once deployed, the `nico-api` container will run and initialize its database, and the `machine-a-tron` container will run a set of mock machines, which will be discovered and ingested into the database, and run through the state machine until they reach a Ready state.
@@ -286,11 +378,13 @@ devspace deploy -n nico-system
 
 - [`prepare-ubuntu-host-for-dev.sh`](prepare-ubuntu-host-for-dev.sh)
 - [`setup-devspace-on-host.sh`](setup-devspace-on-host.sh)
+- [`setup-devspace-mac-colima.sh`](setup-devspace-mac-colima.sh)
 - [`reset-devspace-on-host.sh`](reset-devspace-on-host.sh)
 - [`bootstrap-prereqs.sh`](bootstrap-prereqs.sh)
 - [`reset-kind-cluster.sh`](reset-kind-cluster.sh)
 - [`setup-rest-integration.sh`](setup-rest-integration.sh)
 - [`devspace.yaml`](../../../devspace.yaml)
 - [`values.base.yaml`](values.base.yaml)
-- [`values.generated.yaml`](values.generated.yaml)
+- [`versions.env`](versions.env)
+- `values.generated.yaml`, written by `bootstrap-prereqs.sh` and not tracked
 - [`nuke-postgres.sh`](nuke-postgres.sh)

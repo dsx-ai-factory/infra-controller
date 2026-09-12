@@ -22,8 +22,10 @@ PROTO_SHA256_X86_64="877408bab02767938d1e5555f11c39dfe05e96f2a9571bc59dd2639f33d
 PROTO_SHA256_AARCH_64="58135d20be2831d9ca5a39675f4499f9cbad8b44f9c3d814287c0b543155a812"
 GRPCURL_VERSION="1.8.7"
 VAULT_VERSION="1.21.4-1"
-CORE_POSTGRES_IMAGE="postgres:14.5-alpine"
-REST_POSTGRES_IMAGE="postgres:14.4-alpine"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=versions.env
+source "${SCRIPT_DIR}/versions.env"
 CORE_POSTGRES_CONTAINER="nico-core-test-postgres"
 SCRIPT_START_SECONDS="${SECONDS}"
 
