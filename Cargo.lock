@@ -874,6 +874,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bmc-platform"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "carbide-test-support",
+ "mac_address",
+ "nv-redfish",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bmc-vendor"
 version = "0.1.0"
 dependencies = [
