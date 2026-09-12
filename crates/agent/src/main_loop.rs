@@ -47,6 +47,7 @@ use version_compare::Version;
 
 use crate::command_line::HbnConfigMode;
 use crate::dpu::DpuNetworkInterfaces;
+use crate::dpu::host_vf_link::HostVfLinkManager;
 use crate::dpu::interface::Interface;
 use crate::dpu::route::{DpuRoutePlan, IpRoute, Route};
 use crate::duppet::{SummaryFormat, SyncOptions};
@@ -419,6 +420,7 @@ pub(super) async fn setup_and_run(
         nvue_context,
         dhcp_interface_translation_mode,
         current_network_version: CurrentNetworkVersion::default(),
+        host_vf_link_manager: None,
         last_ovs_restart_version: None,
         ovs_restart_retry_backoff: None,
     };
@@ -456,6 +458,7 @@ struct MainLoop {
     nvue_context: Option<NvueClientContext>,
     dhcp_interface_translation_mode: Option<InterfaceTranslationMode>,
     current_network_version: CurrentNetworkVersion,
+    host_vf_link_manager: Option<HostVfLinkManager>,
     last_ovs_restart_version: Option<String>,
     ovs_restart_retry_backoff: Option<OvsRestartRetryBackoff>,
 }
@@ -787,24 +790,37 @@ impl MainLoop {
         }
     }
 
+    async fn get_or_init_vf_link_manager(&mut self) -> eyre::Result<&mut HostVfLinkManager> {
+        match &mut self.host_vf_link_manager {
+            Some(manager) => Ok(manager),
+            slot @ None => {
+                let manager = slot.insert(HostVfLinkManager::init_for_dpu_os().await?);
+                tracing::info!("Loaded host VF link mapping");
+                Ok(manager)
+            }
+        }
+    }
+
+    // The return value uses the outer Result to indicate success/failure and
+    // the inner bool to indicate whether it actually restarted OVS.
     async fn restart_ovs_after_admin_network_change_if_needed(
         &mut self,
         conf: &ManagedHostNetworkConfigResponse,
         status_out: &mut rpc::DpuNetworkStatus,
-    ) -> bool {
+    ) -> Result<bool, ()> {
         if !conf.use_admin_network_changed.unwrap_or_default() {
-            return true;
+            return Ok(false);
         }
 
         let now = Instant::now();
-        let mut can_ack_network_config = true;
-        if !self.options.agent_platform_type.is_dpu_os() {
+        let result = if !self.options.agent_platform_type.is_dpu_os() {
             tracing::info!(
                 agent_platform_type = ?self.options.agent_platform_type,
                 managed_host_config_version =
                     conf.managed_host_config_version.as_str(),
                 "Skip OVS restart because agent is not running on DPU OS"
             );
+            Ok(false)
         } else if self.last_ovs_restart_version.as_deref()
             == Some(conf.managed_host_config_version.as_str())
         {
@@ -812,6 +828,7 @@ impl MainLoop {
                 managed_host_config_version = conf.managed_host_config_version.as_str(),
                 "Skip OVS restart because this network config version already restarted OVS"
             );
+            Ok(false)
         } else if self
             .ovs_restart_retry_backoff
             .as_ref()
@@ -826,34 +843,38 @@ impl MainLoop {
             );
             status_out.network_config_error =
                 Some("waiting to retry OVS restart after prior failure".to_string());
-            can_ack_network_config = false;
+            Err(())
         } else {
             tracing::info!(
                 managed_host_config_version = conf.managed_host_config_version.as_str(),
                 "Restart OVS because use_admin_network_changed is set to true"
             );
-            if let Err(err) = crate::ovs::restart_ovs()
+            match crate::ovs::restart_ovs()
                 .await
                 .wrap_err("restarting OVS after admin network change")
             {
-                carbide_instrument::emit(OvsRestart::Retrying {
-                    error: format!("{err:#}"),
-                    managed_host_config_version: conf.managed_host_config_version.clone(),
-                });
-                status_out.network_config_error = Some(err.to_string());
-                self.ovs_restart_retry_backoff = Some(OvsRestartRetryBackoff {
-                    managed_host_config_version: conf.managed_host_config_version.clone(),
-                    retry_after: Instant::now() + OVS_RESTART_RETRY_BACKOFF,
-                });
-                can_ack_network_config = false;
-            } else {
-                self.last_ovs_restart_version = Some(conf.managed_host_config_version.clone());
-                self.ovs_restart_retry_backoff = None;
+                Err(err) => {
+                    carbide_instrument::emit(OvsRestart::Retrying {
+                        error: format!("{err:#}"),
+                        managed_host_config_version: conf.managed_host_config_version.clone(),
+                    });
+                    status_out.network_config_error = Some(err.to_string());
+                    self.ovs_restart_retry_backoff = Some(OvsRestartRetryBackoff {
+                        managed_host_config_version: conf.managed_host_config_version.clone(),
+                        retry_after: Instant::now() + OVS_RESTART_RETRY_BACKOFF,
+                    });
+                    Err(())
+                }
+                Ok(()) => {
+                    self.last_ovs_restart_version = Some(conf.managed_host_config_version.clone());
+                    self.ovs_restart_retry_backoff = None;
+                    Ok(true)
+                }
             }
-        }
-        tracing::info!(can_ack_network_config, "Finished restarting OVS");
+        };
+        tracing::info!(success = result.is_ok(), "Finished restarting OVS");
 
-        can_ack_network_config
+        result
     }
 
     /// Runs a single iteration of the main loop
@@ -1116,12 +1137,50 @@ impl MainLoop {
                                 tracing::error!(error = %err, "Error reading/setting MTU for p0 or p1");
                             }
 
-                            let can_ack_network_config = self
+                            let ovs_restart_result = self
                                 .restart_ovs_after_admin_network_change_if_needed(
                                     &conf,
                                     &mut status_out,
                                 )
                                 .await;
+
+                            let (mut can_ack_network_config, must_invalidate_vf_cache) =
+                                match ovs_restart_result {
+                                    Ok(restarted_ovs) => (true, restarted_ovs),
+                                    Err(()) => (false, false),
+                                };
+
+                            // If we haven't failed already at this point and
+                            // we're on a DPU OS, we'll reconcile the VF link
+                            // states.
+                            if can_ack_network_config
+                                && self.options.agent_platform_type.is_dpu_os()
+                            {
+                                match self.get_or_init_vf_link_manager().await {
+                                    Ok(manager) => {
+                                        if must_invalidate_vf_cache {
+                                            manager.invalidate_cached_state();
+                                        }
+                                        if let Err(error) = manager.reconcile(&conf).await {
+                                            tracing::error!(
+                                                managed_host_config_version =
+                                                    conf.managed_host_config_version,
+                                                error = format!("{error:#}"),
+                                                "Failed to reconcile host VF link state"
+                                            );
+                                            status_out.network_config_error =
+                                                Some(error.to_string());
+                                            can_ack_network_config = false;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let error = format!("{error:#}");
+                                        tracing::error!(%error, "Failed to load host VF link mapping");
+                                        status_out.network_config_error = Some(error);
+                                        can_ack_network_config = false;
+                                    }
+                                }
+                            }
 
                             if can_ack_network_config {
                                 (

@@ -21,6 +21,7 @@ use std::time::Duration;
 use carbide_host_support::agent_config::FmdsDpuNetworkingConfig;
 use ipnetwork::IpNetwork;
 
+pub(crate) mod host_vf_link;
 pub mod interface;
 pub mod link;
 pub mod route;
