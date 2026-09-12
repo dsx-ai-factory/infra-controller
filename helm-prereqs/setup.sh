@@ -1392,6 +1392,7 @@ fi
 # ---------------------------------------------------------------------------
 # NICo Core
 # ---------------------------------------------------------------------------
+_CORE_INSTALLED_THIS_RUN=false
 if "${SKIP_CORE}"; then
     echo "=== [6/6] NICo Core ==="
     echo "Skipped (--skip-core flag set)."
@@ -1670,6 +1671,7 @@ else
             kubectl rollout status deployment/nico-api -n nico-system --timeout=300s
             echo "DPF enabled in carbide-api"
         fi
+        _CORE_INSTALLED_THIS_RUN=true
     elif "${INSTALL_DPF}"; then
         # The DPF path deploys from a mktemp values file that the EXIT trap
         # deletes, and enablement is a two-phase flow (deploy DPF-off, set the
@@ -1704,16 +1706,33 @@ fi
 #   helm-prereqs/observability/install-observability.sh
 # Docs: helm-prereqs/observability/README.md
 # ---------------------------------------------------------------------------
+_resolve_nico_servicemonitors_mode() {
+    local core_installed_this_run="$1"
+    local requested_mode="${NICO_SERVICEMONITORS:-}"
+
+    if [[ "${core_installed_this_run}" == "true" ]]; then
+        printf '%s\n' "${requested_mode:-true}"
+    elif [[ "${requested_mode}" == "false" ]]; then
+        printf 'false\n'
+    else
+        # Never upgrade an existing Core release from this checkout unless the
+        # same setup run successfully installed it. This also covers a declined
+        # Core prompt in addition to --skip-core.
+        printf 'hint\n'
+    fi
+}
+
 _OBSERVABILITY_INSTALLED=false
 if "${WITH_OBSERVABILITY}"; then
     echo ""
     _SETUP_PHASE="observability"
     echo "=== Observability (--with-observability) ==="
     # The stack is optional: a failure here must not abort the rest of the install.
-    # NICO_SERVICEMONITORS=true is safe in this integrated path — Core was just installed
-    # from this same tree, so the release upgrade the installer performs is a no-op apart
-    # from adding the monitor objects.
-    if NICO_SERVICEMONITORS="${NICO_SERVICEMONITORS:-true}" \
+    # Reconcile Core metrics only when this run installed Core from the same tree.
+    # Otherwise use the standalone-safe hint path and leave any existing release untouched.
+    _nico_servicemonitors_mode="$(_resolve_nico_servicemonitors_mode \
+        "${_CORE_INSTALLED_THIS_RUN}")"
+    if NICO_SERVICEMONITORS="${_nico_servicemonitors_mode}" \
         "${SCRIPT_DIR}/observability/install-observability.sh"; then
         _OBSERVABILITY_INSTALLED=true
     else

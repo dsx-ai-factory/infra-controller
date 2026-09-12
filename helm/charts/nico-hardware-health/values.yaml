@@ -55,6 +55,8 @@ env:
   RUST_BACKTRACE: "full"
   RUST_LIB_BACKTRACE: "0"
   NICO_HEALTH__COLLECTORS__LOGS__ENABLED: "true"
+  ## Keep direct Prometheus collection independent of optional OTLP analyzer targets.
+  CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED: "true"
 
 livenessProbe:
   httpGet:
@@ -66,7 +68,8 @@ livenessProbe:
   failureThreshold: 3
   successThreshold: 1
 
-## Scrapes /metrics: service operational metrics (discovery, collectors, components).
+## Scrapes /metrics: service operational metrics (discovery, collectors, components,
+## including the optional BMC latency histogram).
 serviceMonitor:
   enabled: false
   interval: 30s
@@ -74,7 +77,8 @@ serviceMonitor:
 
 ## Scrapes /telemetry: hardware sensor samples exported by the Prometheus sink
 ## (temperature, power, fans, and other Redfish-derived gauge readings per endpoint).
-## High cardinality; enable only when Prometheus retention and scrape budget allow it.
+## Requires CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED=true. High cardinality;
+## enable only when Prometheus retention and scrape budget allow it.
 telemetryServiceMonitor:
   enabled: false
   interval: 30s

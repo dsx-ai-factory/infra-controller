@@ -1,0 +1,49 @@
+suite: hardware-health direct observability
+templates:
+  - charts/nico-hardware-health/templates/deployment.yaml
+  - charts/nico-hardware-health/templates/service-monitor.yaml
+  - charts/nico-hardware-health/templates/telemetry-service-monitor.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: observability overlay restores Prometheus without disabling the configured OTLP target
+    template: charts/nico-hardware-health/templates/deployment.yaml
+    values:
+      - fixtures/hardware-health-otlp-values.yaml
+      - ../../helm-prereqs/observability/values-nico-servicemonitors.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED
+            value: "true"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_HEALTH__SINKS__OTLP__ENABLED
+            value: "true"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_HEALTH__SINKS__OTLP__TARGETS
+            value: '[ {endpoint="http://otlp-receiver.observability.svc.cluster.local:4317"} ]'
+
+  - it: observability overlay scrapes hardware-health service metrics
+    template: charts/nico-hardware-health/templates/service-monitor.yaml
+    values:
+      - fixtures/hardware-health-otlp-values.yaml
+      - ../../helm-prereqs/observability/values-nico-servicemonitors.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].path
+          value: /metrics
+
+  - it: observability overlay scrapes original hardware telemetry
+    template: charts/nico-hardware-health/templates/telemetry-service-monitor.yaml
+    values:
+      - fixtures/hardware-health-otlp-values.yaml
+      - ../../helm-prereqs/observability/values-nico-servicemonitors.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].path
+          value: /telemetry

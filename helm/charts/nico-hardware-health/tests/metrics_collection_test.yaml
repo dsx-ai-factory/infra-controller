@@ -1,0 +1,102 @@
+suite: hardware-health metrics collection
+templates:
+  - templates/deployment.yaml
+  - templates/service-monitor.yaml
+  - templates/telemetry-service-monitor.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: keeps the direct Prometheus sink enabled by default
+    template: templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED
+            value: "true"
+
+  - it: scrapes BMC latency and other service metrics from /metrics
+    template: templates/service-monitor.yaml
+    set:
+      serviceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: spec.endpoints[0].path
+          value: /metrics
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/metrics"]
+          value: nico-hardware-health
+
+  - it: scrapes raw hardware samples from /telemetry
+    template: templates/telemetry-service-monitor.yaml
+    set:
+      telemetryServiceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: spec.endpoints[0].path
+          value: /telemetry
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/metrics"]
+          value: nico-hardware-health
+
+  - it: follows nameOverride when selecting the hardware-health Service
+    template: templates/telemetry-service-monitor.yaml
+    set:
+      nameOverride: carbide-hardware-health
+      telemetryServiceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: metadata.name
+          value: carbide-hardware-health-telemetry
+      - equal:
+          path: metadata.labels.app
+          value: carbide-hardware-health
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/metrics"]
+          value: carbide-hardware-health
+
+  - it: suppresses the telemetry monitor when the Prometheus sink is false
+    template: templates/telemetry-service-monitor.yaml
+    set:
+      telemetryServiceMonitor.enabled: true
+      env.CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED: "false"
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: suppresses the telemetry monitor when the Prometheus sink is empty
+    template: templates/telemetry-service-monitor.yaml
+    set:
+      telemetryServiceMonitor.enabled: true
+      env.CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED: ""
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: suppresses the telemetry monitor when the Prometheus sink is zero
+    template: templates/telemetry-service-monitor.yaml
+    set:
+      telemetryServiceMonitor.enabled: true
+      env.CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED: "0"
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: suppresses the telemetry monitor when the Prometheus sink is misspelled
+    template: templates/telemetry-service-monitor.yaml
+    set:
+      telemetryServiceMonitor.enabled: true
+      env.CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED: "ture"
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: uses the binary's enabled default when the environment map is null
+    template: templates/telemetry-service-monitor.yaml
+    set:
+      telemetryServiceMonitor.enabled: true
+      env: null
+    asserts:
+      - equal:
+          path: spec.endpoints[0].path
+          value: /telemetry
