@@ -28,12 +28,6 @@ use serde::{Deserialize, Serialize};
 mod errors;
 mod machine_validation;
 mod plugin_contract;
-// This foundation is intentionally dormant until the control-plane wiring is
-// introduced in the next PR.
-#[expect(
-    dead_code,
-    reason = "plugin runner is introduced before its opt-in wiring"
-)]
 mod plugin_runner;
 
 pub const MACHINE_VALIDATION_SERVER: &str = "carbide-pxe.forge";
@@ -44,6 +38,8 @@ pub const MACHINE_VALIDATION_IMAGE_FILE: &str = "/tmp/machine_validation.tar";
 pub const MACHINE_VALIDATION_RUNNER_BASE_PATH: &str = "nvcr.io/nvidian/nvforge/";
 pub const MACHINE_VALIDATION_RUNNER_TAG: &str = "latest";
 pub const IMAGE_LIST_FILE: &str = "/tmp/list.json";
+/// Default container-visible base directory for Machine Validation plugin files.
+pub const DEFAULT_PLUGIN_CONTRACT_DIR: &str = "/opt/forge/mv";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MachineValidationOptions {
@@ -51,6 +47,8 @@ pub struct MachineValidationOptions {
     pub root_ca: String,
     pub client_cert: String,
     pub client_key: String,
+    /// Container-visible base directory for plugin input and output files.
+    pub plugin_contract_dir: String,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MachineValidation {
@@ -182,7 +180,7 @@ impl MachineValidationManager {
             expected_time_duration += test.timeout.unwrap_or(7200);
             selected_tests.push(test.clone());
         }
-        run_request.selected_tests = selected_tests;
+        run_request.selected_tests = selected_tests.clone();
         run_request.duration_to_complete = Some(rpc::Duration::from(
             std::time::Duration::from_secs(expected_time_duration as u64),
         ));
@@ -192,7 +190,7 @@ impl MachineValidationManager {
             .await?;
         mc.run(
             machine_id,
-            tests,
+            selected_tests,
             context,
             validation_id,
             true,

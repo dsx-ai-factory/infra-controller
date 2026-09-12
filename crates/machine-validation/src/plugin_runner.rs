@@ -23,7 +23,7 @@
 
 #[cfg(unix)]
 use std::ffi::CString;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::Stdio;
 #[cfg(unix)]
 use std::{os::unix::ffi::OsStrExt, os::unix::fs::MetadataExt, os::unix::fs::PermissionsExt};
@@ -37,14 +37,13 @@ use uuid::Uuid;
 use crate::plugin_contract::{PluginResult, read_plugin_result};
 
 const MAX_OUTPUT_SIZE: usize = 1024 * 1024;
+const MAX_ERROR_OUTPUT_SIZE: usize = 4096;
 const MAX_INPUT_SIZE: usize = 64 * 1024;
 const PLUGIN_UID: u32 = 65532;
 const PLUGIN_GID: u32 = 65532;
 const CONTAINER_CLEANUP_TIMEOUT_SECONDS: u64 = 30;
 const CONTAINER_REMOVE_ATTEMPTS: u8 = 3;
 
-const INPUT_PATH: &str = "/opt/nico/mv/input";
-const OUTPUT_PATH: &str = "/opt/nico/mv/output";
 const ATTEMPT_BASE_DIR: &str = "/run/nico/machine-validation";
 
 /// The runtime access granted to an approved plugin revision.
@@ -147,8 +146,10 @@ pub(crate) async fn execute_plugin(
     spec: &PluginRuntimeSpec,
     input: &Value,
     timeout: std::time::Duration,
+    contract_dir: &Path,
 ) -> Result<PluginExecution, String> {
     validate_runtime_spec(spec)?;
+    validate_contract_dir(contract_dir)?;
     let input = serialize_plugin_input(input)?;
     let attempt_dir = plugin_attempt_directory()?;
     let input_dir = attempt_dir.join("input");
@@ -173,6 +174,7 @@ pub(crate) async fn execute_plugin(
                 &output_dir,
                 &container_name,
                 spec,
+                contract_dir,
             ))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -198,12 +200,14 @@ pub(crate) async fn execute_plugin(
                     true,
                 )
             }
-            Ok(Ok((status, _, _))) => {
+            Ok(Ok((status, stdout, stderr))) => {
                 cleanup_guard.disarm();
                 (
                     Err(format!(
-                        "plugin exited unsuccessfully with status {:?}; ignoring result.json",
-                        status.code()
+                        "plugin exited unsuccessfully with status {:?}; ignoring result.json; stdout: {}; stderr: {}",
+                        status.code(),
+                        output_error_summary(stdout),
+                        output_error_summary(stderr),
                     )),
                     true,
                 )
@@ -273,6 +277,21 @@ fn validate_runtime_spec(spec: &PluginRuntimeSpec) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_contract_dir(contract_dir: &Path) -> Result<(), String> {
+    if !contract_dir.is_absolute()
+        || contract_dir.as_os_str().is_empty()
+        || contract_dir.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::CurDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err("plugin contract directory must be an absolute normalized path".to_owned());
+    }
+    Ok(())
+}
+
 fn serialize_plugin_input(input: &Value) -> Result<Vec<u8>, String> {
     let input = serde_json::to_vec(input)
         .map_err(|error| format!("failed to serialize plugin input: {error}"))?;
@@ -327,12 +346,30 @@ fn output_to_string(output: CapturedOutput) -> String {
     contents
 }
 
+fn output_error_summary(output: CapturedOutput) -> String {
+    let output = output_to_string(output);
+    if output.len() <= MAX_ERROR_OUTPUT_SIZE {
+        return output;
+    }
+    let mut end = MAX_ERROR_OUTPUT_SIZE;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[plugin output shortened for the error summary]",
+        &output[..end]
+    )
+}
+
 fn plugin_runtime_args(
     input_dir: &Path,
     output_dir: &Path,
     container_name: &str,
     spec: &PluginRuntimeSpec,
+    contract_dir: &Path,
 ) -> Vec<String> {
+    let input_path = contract_dir.join("input");
+    let output_path = contract_dir.join("output");
     let mut args = vec![
         "-n".to_owned(),
         "default".to_owned(),
@@ -342,13 +379,15 @@ fn plugin_runtime_args(
         "none".to_owned(),
         "--mount".to_owned(),
         format!(
-            "type=bind,src={},dst={INPUT_PATH},options=rbind:ro",
-            input_dir.display()
+            "type=bind,src={},dst={},options=rbind:ro",
+            input_dir.display(),
+            input_path.display()
         ),
         "--mount".to_owned(),
         format!(
-            "type=bind,src={},dst={OUTPUT_PATH},options=rbind:rw",
-            output_dir.display()
+            "type=bind,src={},dst={},options=rbind:rw",
+            output_dir.display(),
+            output_path.display()
         ),
     ];
 
@@ -521,6 +560,7 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
+    use crate::DEFAULT_PLUGIN_CONTRACT_DIR;
 
     fn spec(privilege: PluginPrivilege) -> PluginRuntimeSpec {
         PluginRuntimeSpec {
@@ -537,6 +577,7 @@ mod tests {
             Path::new("/tmp/output"),
             "plugin-test",
             &spec(PluginPrivilege::Isolated),
+            Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
         );
 
         assert!(args.windows(2).any(|pair| pair == ["--network", "none"]));
@@ -549,10 +590,38 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--security-opt", "no-new-privileges"])
         );
-        assert!(args.iter().any(|arg| arg.contains(INPUT_PATH)));
-        assert!(args.iter().any(|arg| arg.contains(OUTPUT_PATH)));
+        assert!(args.iter().any(|arg| arg.contains("/opt/forge/mv/input")));
+        assert!(args.iter().any(|arg| arg.contains("/opt/forge/mv/output")));
         assert!(!args.iter().any(|arg| arg == "--privileged"));
         assert!(!args.iter().any(|arg| arg.contains("dst=/host")));
+    }
+
+    #[test]
+    fn plugin_contract_directory_can_be_changed_for_a_scout_deployment() {
+        let contract_dir = Path::new("/var/lib/nico/plugin-contract");
+        let args = plugin_runtime_args(
+            Path::new("/tmp/input"),
+            Path::new("/tmp/output"),
+            "plugin-test",
+            &spec(PluginPrivilege::Isolated),
+            contract_dir,
+        );
+
+        assert!(
+            args.iter()
+                .any(|arg| arg.contains("dst=/var/lib/nico/plugin-contract/input"))
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg.contains("dst=/var/lib/nico/plugin-contract/output"))
+        );
+    }
+
+    #[test]
+    fn plugin_contract_directory_must_be_absolute_and_normalized() {
+        assert!(validate_contract_dir(Path::new("/var/lib/nico/plugin-contract")).is_ok());
+        assert!(validate_contract_dir(Path::new("relative/plugin-contract")).is_err());
+        assert!(validate_contract_dir(Path::new("/opt/nico/../plugin-contract")).is_err());
     }
 
     #[test]
@@ -562,6 +631,7 @@ mod tests {
             Path::new("/tmp/output"),
             "plugin-test",
             &spec(PluginPrivilege::Privileged),
+            Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
         );
 
         assert!(args.iter().any(|arg| arg == "--privileged"));
@@ -575,6 +645,7 @@ mod tests {
             Path::new("/tmp/output"),
             "plugin-test",
             &spec(PluginPrivilege::FullHost),
+            Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
         );
 
         assert!(args.iter().any(|arg| arg == "--privileged"));
@@ -684,5 +755,18 @@ mod tests {
         assert_eq!(output.bytes.len(), MAX_OUTPUT_SIZE);
         assert!(output.truncated);
         assert!(output_to_string(output).ends_with("[plugin output truncated at 1 MiB]"));
+    }
+
+    #[test]
+    fn failed_plugin_output_is_shortened_for_result_errors() {
+        let output = CapturedOutput {
+            bytes: vec![b'x'; MAX_ERROR_OUTPUT_SIZE + 1],
+            truncated: false,
+        };
+
+        let summary = output_error_summary(output);
+        assert!(summary.contains("[plugin output shortened for the error summary]"));
+        assert!(summary.len() > MAX_ERROR_OUTPUT_SIZE);
+        assert!(summary.len() < MAX_ERROR_OUTPUT_SIZE + 128);
     }
 }
