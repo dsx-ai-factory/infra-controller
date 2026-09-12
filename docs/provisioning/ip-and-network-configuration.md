@@ -366,10 +366,10 @@ To configure these flows:
    reachable from bare-metal hosts. This list is informational and is passed
    through to agents; it does not change how `nico-dhcp` itself serves leases.
    May be left as `[]`.
-6. **Set `ntp_servers`** in `siteConfig` to your NTP server IPs. NICo uses this
-   list to configure BMC NTP through Redfish during pre-ingestion, includes it
-   in `DiscoverDhcp` responses, and passes it to DPU agents so their DHCP server
-   advertises the same NTP servers to managed hosts.
+6. **Set `ntp_servers`** in `siteConfig` to your IPv4 NTP server IPs. NICo uses
+   this list to configure BMC NTP through Redfish during pre-ingestion, includes
+   it in `DiscoverDhcp` responses, and passes it to DPU agents for DHCPv4 option
+   42.
 
 The values that `nico-dhcp` returns in DHCP options (nameservers, NTP servers, next-server, boot file, etc.) are sourced from:
 
@@ -377,8 +377,19 @@ The values that `nico-dhcp` returns in DHCP options (nameservers, NTP servers, n
 - The Kea hook parameters in the `nico-dhcp` Helm chart (`nico-nameserver`, `nico-ntpserver`, etc.) — set these to the `unbound.nico` (or `unbound.nico`, see [section 3](#3-dns-configuration)) recursive resolver VIP. `nico-ntpserver` is used only as a fallback when `siteConfig.ntp_servers` is empty.
 - The per-segment definitions in `siteConfig` `[networks.<name>]` blocks — gateway, MTU, additional routes.
 
+The DPU-local DHCP server evaluates NTP precedence independently for each
+address family. Valid site-configured addresses replace service-discovered
+addresses only for the same family; when a family has no valid site-configured
+address, its service-discovered fallback is retained. Because
+`siteConfig.ntp_servers` accepts IPv4 addresses, it overrides DHCPv4 option 42
+without suppressing service-discovered IPv6 servers advertised through DHCPv6
+option 56.
+
 <Note>
-NICo does not run a standalone NTP service. Point `siteConfig.ntp_servers` to your enterprise NTP servers. NICo also attempts to set those servers on host BMCs during pre-ingestion; if the Redfish operation fails repeatedly, pre-ingestion continues and the failure is logged.
+NICo does not run a standalone NTP service. Point `siteConfig.ntp_servers` to
+your enterprise IPv4 NTP servers. NICo also attempts to set those servers on
+host BMCs during pre-ingestion; if the Redfish operation fails repeatedly,
+pre-ingestion continues and the failure is logged.
 </Note>
 
 ### 2.3 How to Verify DHCP Is Working
@@ -463,7 +474,11 @@ The resolver is responsible for:
 
 To configure `unbound`:
 
-1. Populate the `local_data.conf` ConfigMap consumed by the `unbound` Helm chart with one A record per service VIP (see [section 3.3](#33-nico-dns-service-endpoints)).
+1. Populate the `local_data.conf` ConfigMap consumed by the `unbound` Helm
+   chart with an A record for each IPv4 service VIP. To advertise the NTP
+   fallback through DHCPv6 option 56, also add AAAA records for reachable IPv6
+   NTP endpoints (see [section 3.3](#33-nico-dns-service-endpoints)). The chart
+   derives the record type from each address in `unbound.localData`.
 2. Add a forward zone entry for `initial_domain_name` pointing at the `nico-dns` VIPs.
 3. Allow public-internet recursion (the default for the upstream `unbound` image) unless your site is fully air-gapped.
 
@@ -478,16 +493,20 @@ Two TLD conventions exist:
 - **`.forge`** is the compiled default in `crates/agent/src/util.rs` and the host PXE loader scripts. The agent resolves `carbide-pxe.forge`, `carbide-ntp.forge`, etc. at startup. This is the TLD used by deployments built from the current binaries.
 - **`.nico`** is the rebranded TLD documented in [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md). New deployments may use this convention, but only if the agent and PXE images have been rebuilt with the new TLD.
 
-Choose the convention that matches your binaries — do not mix. Verify by checking what the agent actually resolves at startup (`kubectl exec -n nico-system <agent-pod> -- getent hosts carbide-pxe.forge` or the `.nico` equivalent).
+Choose the convention that matches your binaries. The stock names change both
+the first label and the TLD: for example, the NTP name is exactly
+`carbide-ntp.forge`, not `nico-ntp.forge`. Verify the name by checking what the
+agent actually resolves at startup with
+`kubectl exec -n nico-system <agent-pod> -- getent hosts carbide-ntp.forge`.
 
-The required A records (shown for `.nico`; substitute `.nico` if your binaries use it) are:
+The required DNS records are shown with both NTP names where they differ:
 
 | Hostname | Port | Resolves to | Purpose | Configurable at runtime? |
 |---|---|---|---|---|
 | `nico-api.nico` | 443 | `nico-api` external LoadBalancer VIP | NICo gRPC API | Yes — `NICO_API_URL` env var on most clients |
 | `nico-pxe.nico` | 80 | `nico-pxe` LoadBalancer VIP | iPXE scripts, cloud-init, internal APT, and the legacy bootstrap-CA endpoint | The DNS record remains fixed for general consumers. DPF can separately configure bootstrap CA acquisition through a complete URL override or mounted Secret or ConfigMap. Non-DPF boot instructions include `pxe_uri`. Other consumers retain the compatibility hostname. |
 | `nico-static-pxe.nico` | 80 | Static PXE asset server VIP | `scout.squashfs`, `scout.efi`, BFB images, and other static boot artifacts | **No** — hardcoded in the host boot scripts that ship inside boot images |
-| `nico-ntp.nico` | 123 | Operator-supplied NTP server IP(s) — the record points at your existing NTP infrastructure, not a NICo-deployed service | Legacy NTP fallback for DPU agents when `siteConfig.ntp_servers` is empty | **Fallback only** — prefer `siteConfig.ntp_servers`, but keep this DNS record if any deployed agent still relies on it |
+| `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | Operator-supplied NTP server IPs — A and AAAA records point at your existing NTP infrastructure, not a NICo-deployed service | Per-family NTP fallback for DPU-agent DHCP when that family has no valid site-configured address | **Fallback only** — prefer `siteConfig.ntp_servers` for IPv4; configure the exact hostname queried by the agent with at least one AAAA record for DHCPv6 option 56 |
 | `unbound.nico` | 53 | `unbound` LoadBalancer VIP | Recursive DNS resolver | Yes — the resolver address itself is distributed via DHCP option 6 |
 | `otel-receiver.nico` | 443 | OTel receiver VIP on the site controller | OTLP ingestion endpoint for DPU otel-collector sidecars | Yes — set in the otel-collector configuration YAML and re-deployed |
 
@@ -581,12 +600,25 @@ service zone resolves:
 
 ```bash
 for name in nico-api.nico nico-pxe.nico nico-static-pxe.nico \
-            nico-ntp.nico unbound.nico otel-receiver.nico; do
+            unbound.nico otel-receiver.nico; do
     printf "%-30s -> %s\n" "$name" "$(dig +short "$name" @<UNBOUND_VIP> || echo 'FAILED')"
 done
+
+# Stock agent: A is the IPv4 fallback; AAAA is required for DHCPv6 option 56.
+dig +short A carbide-ntp.forge @<UNBOUND_VIP>
+dig +short AAAA carbide-ntp.forge @<UNBOUND_VIP>
 ```
 
-Substitute `.nico` if that is the TLD baked into your binaries. Every name must return a non-empty A record set; a `FAILED` or empty result means the `local_data.conf` ConfigMap is missing that record. If your environment also runs a SOCKS5 proxy, extend the loop with `socks.nico`.
+The loop shows the other rebranded `.nico` service names. NTP is checked
+separately because stock agents query the exact `carbide-ntp.forge` name; do
+not derive it by replacing only the TLD. For an image rebuilt to query
+`nico-ntp.nico`, replace the complete NTP hostname in both commands. Every
+applicable name must return a non-empty A record set. For dual-stack NTP
+service, the explicit AAAA query must also return at least one address;
+otherwise the DPU server has no service-discovered IPv6 NTP address for
+DHCPv6 option 56. A `FAILED` or empty result means the `local_data.conf`
+ConfigMap is missing the corresponding record. If your environment also runs
+a SOCKS5 proxy, extend the loop with `socks.nico`.
 
 **Confirm reachability on the expected ports:**
 
@@ -628,7 +660,7 @@ expanding the rollout to the rest of the fleet:
       managed DPUs, configured with a DHCP relay pointing to the `nico-dhcp`
       LoadBalancer VIP.
 - [ ] LoadBalancer VIPs assigned for `nico-api`, `nico-dhcp`, `nico-pxe`, `nico-dns` (one per replica), `nico-ssh-console-rs`, and `unbound`.
-- [ ] `unbound`'s `local_data.conf` ConfigMap contains A records for `nico-api`, `nico-pxe`, `nico-static-pxe`, `unbound`, and `otel-receiver` in the `.nico` zone; include `nico-ntp` pointing at your operator-supplied NTP server if you use the legacy fallback.
+- [ ] `unbound`'s `local_data.conf` ConfigMap contains A records for `nico-api`, `nico-pxe`, `nico-static-pxe`, `unbound`, and `otel-receiver` in the `.nico` zone; include A records for the exact NTP hostname queried by the deployed agent and AAAA records for its DHCPv6 option-56 fallback (`carbide-ntp.forge` for stock agents).
 - [ ] `nico-dns` zone for `initial_domain_name` is delegated from upstream DNS, or `unbound` forwards the zone to the `nico-dns` VIPs.
 - [ ] `unbound.nico` resolves every NICo service hostname (verified with the `dig` loop in [section 3.4](#34-how-to-verify-dns-is-working)).
 - [ ] Select the bootstrap-CA mode intentionally.

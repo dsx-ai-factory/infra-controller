@@ -242,6 +242,12 @@ MetalLB provides LoadBalancer IPs for NICo Core services (nico-api, DHCP, DNS, P
 NICo includes a built-in NTP service (`nico-ntp`). This is a 3-replica chrony StatefulSet where each replica gets its own MetalLB VIP.
 
 To use the service, set `nico-ntp.externalService.enabled: true`, assign three VIPs from your internal pool via `nico-ntp.externalService.perPodAnnotations`, and set `nico-dhcp.config.kea.hookParameters.ntpServer` to a comma-separated list of those same VIPs so DPUs receive them over DHCP. Enterprise NTP server IPs in `siteConfig.ntp_servers` continue to be used for BMC pre-ingestion time sync independently of `nico-ntp`.
+
+For the DPU-local server to advertise NTP through DHCPv6 option 56, provide
+reachable IPv6 NTP addresses under `unbound.localData` for the NTP hostname
+baked into the agent (`carbide-ntp.forge` by default). The Unbound chart emits
+IPv6 entries as AAAA records. Without an AAAA record, the IPv4 NTP path remains
+available but there is no service-discovered IPv6 NTP fallback.
 </Note>
 
 Edit `helm-prereqs/values/metallb-config.yaml`--this file ships pre-populated with example values. Replace all values labeled `# EXAMPLE` with your site-specific configuration before running `setup.sh`.

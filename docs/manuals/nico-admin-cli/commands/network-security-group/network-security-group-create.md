@@ -38,7 +38,8 @@ JSON map of simple key:value pairs to be applied as labels to the
 network security group
 
 **-s**, **--stateful-egress**  
-Optional, whether egress rules are stateful
+Enable stateful egress (default: false); rejected when site-level
+stateful ACL support is disabled
 
 **-r**, **--rules** *\<RULES\>*  
 Optional, JSON array containing a defined set of network security group

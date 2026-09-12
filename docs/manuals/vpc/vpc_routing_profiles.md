@@ -137,29 +137,32 @@ The exact route-target values, leak settings, and `access_tier` values are site-
 
 ## How Tenant Routing Profiles Affect VPC Creation
 
-Each tenant may have a `routing_profile_type`. In a production site, this serves as the default routing profile for VPCs created under that tenant. This has two important consequences:
+Each tenant may have a `routing_profile_type`. In a production site, this serves as the default routing profile for VPCs created under that tenant. This has the following important consequences:
 
 - If a VPC creation request does not specify `routing_profile_type`, the tenant's routing profile is used automatically.
 - If the tenant is configured with a profile that is not present in `fnn.routing_profiles`, VPC creation will fail.
+- An FNN VPC creation request must reference an existing tenant with a routing profile.
 
 For this reason, tenant configuration and API server routing profile configuration must be managed together.
 
 ## Changing a Tenant’s Routing Profile
 
-A tenant's routing profile can only be changed if *the tenant has no active VPCs*. Otherwise, the API server rejects the update.
+A tenant's routing profile can only be changed if *the tenant has no active FNN VPCs*. Otherwise, the API server rejects the update.
 
-This restriction exists because VPC behavior depends on the tenant's permitted routing profile, and changing the tenant's profile while VPCs already exist could invalidate assumptions made when those VPCs were created.
+When FNN is enabled, `UpdateTenant` requests must include `routing_profile_type`. Clients updating only tenant metadata must preserve and resend the tenant's current profile.
+
+This restriction exists because FNN VPC behavior depends on the tenant's permitted routing profile, and changing the tenant's profile while FNN VPCs already exist could invalidate assumptions made when those VPCs were created. Non-FNN VPCs do not consume tenant routing policy, so they do not block a profile change.
 
 ### Process for Changing a Tenant's Routing Profile
 
 The following is a safe operational sequence for changing a tenant's routing profile:
 
 1. Confirm that the destination routing profile is already defined in `fnn.routing_profiles` on the API server.
-2. Verify that the tenant has no active VPCs.
+2. Verify that the tenant has no active FNN VPCs.
 3. Update the tenant's `routing_profile_type`.
 4. Create new VPCs for that tenant using the updated profile policy.
 
-If the tenant has active VPCs, those VPCs must be deleted before the tenant profile can be changed.
+If the tenant has active FNN VPCs, those VPCs must be deleted before the tenant profile can be changed. Non-FNN VPCs may remain active.
 
 ### Using the admin-cli
 
@@ -190,7 +193,7 @@ This is the recommended workflow for changing a tenant's routing profile using t
 
    `admin-cli tenant show <tenant-org>`
 
-2. Confirm that the tenant has no active VPCs.
+2. Confirm that the tenant has no active FNN VPCs.
 
 3. Apply the update:
 
@@ -206,11 +209,11 @@ admin-cli tenant update <tenant-org> -p INTERNAL -v <current-version>
 
 This flag is optional. It is not a verbosity setting, but is used for optimistic concurrency checking and causes the update to be rejected if the tenant record has changed since it was last reviewed.
 
-If the tenant still has active VPCs, the command will fail. In this case, the existing VPCs must be removed before the tenant routing profile can be changed.
+If the tenant still has active FNN VPCs, the command will fail. In this case, the existing FNN VPCs must be removed before the tenant routing profile can be changed.
 
 ### Operational implication
 
-This means the tenant routing profile should be treated as a planning decision rather than a casual runtime toggle. It is possible to change, but only when the tenant has been returned to a state with no active VPCs.
+This means the tenant routing profile should be treated as a planning decision rather than a casual runtime toggle. It is possible to change while non-FNN VPCs remain active, but only when the tenant has no active FNN VPCs.
 
 ## Troubleshooting Example: External Routing Profile Not Found
 
