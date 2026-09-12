@@ -43,9 +43,10 @@ Like the forward zone, reverse zones must be delegated from your upstream DNS - 
 
 ## Server Behavior Worth Knowing
 
-- `nico-dns` answers A, AAAA, and PTR queries only; every other type answers "not implemented". It never recurses, and it serves no SOA or NS records and no zone transfers, so put it behind your recursive resolver (a forward zone works best) rather than in a client's resolver list.
-- Answers reflect the database live: there is no positive cache and no zone-serial machinery. A record change is visible on the next query.
-- A name that exists with only the other address family answers NXDomain rather than an empty answer, and negative answers are cached at the edge briefly (120 seconds by default).
+- `nico-dns` forwards A, AAAA, PTR, SOA, NS, CNAME, MX, and TXT queries to the API; any other type, and zone transfers, answer "not implemented". It never recurses. It publishes no NS or CNAME/MX/TXT records, so those types answer NOERROR with an empty answer section inside a held zone. SOA at a zone apex is answered. Put it behind your recursive resolver (a forward zone works best) rather than in a client's resolver list.
+- Positive answers reflect the database live: there is no positive cache and no zone-serial machinery. A new or changed record is visible on the next query for it, unless a negative answer for that name and type is still cached (see below), in which case it appears when that entry expires.
+- Inside a zone NICo holds, a name that exists without the requested type (for example, only the other address family) answers NOERROR with an empty answer section, and a name that does not exist answers NXDomain; both carry the zone SOA and set the AA bit. A name outside every held zone answers Refused rather than NXDomain, since it may exist elsewhere.
+- `nico-dns` caches the negative answers it gets from the API, and a cached answer replays the same code, AA bit, and SOA. NOERROR-with-no-data and NXDomain are cached for the shortest of the zone SOA record TTL, the SOA minimum, and `negative_cache_ttl_secs` (120 seconds by default); the SOA TTL in both the first answer and every replay is the time the cache entry has left. Refused carries no SOA and is cached for `negative_cache_ttl_secs`. ServFail from an upstream failure is cached for `negative_cache_servfail_ttl_secs` (5 seconds by default) so a retry storm collapses into one upstream call without outliving the recovery. The "not implemented" answer for an unsupported query type and the FORMERR for an unreadable query are decided before the API is asked and are not cached.
 - Hosts learn their own FQDN over DHCP option 12 on every path; hosts served by a DPU also receive it as DHCP option 15.
 
 ## Resolvers Handed to Hosts

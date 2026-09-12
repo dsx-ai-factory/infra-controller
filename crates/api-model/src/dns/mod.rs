@@ -18,15 +18,21 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod answer;
+pub mod arpa;
 pub mod domain_info;
 pub mod metadata;
 pub mod resource_record;
 pub mod snapshot;
+pub mod zone;
 
+pub use answer::Answer;
+pub use arpa::{arpa_qname_to_ip, arpa_qname_to_prefix};
 pub use domain_info::DomainInfo;
 pub use metadata::DomainMetadata;
 pub use resource_record::ResourceRecord;
 pub use snapshot::SoaSnapshot;
+pub use zone::{Fqdn, NameError};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Domain {

@@ -18,6 +18,7 @@ use std::net::IpAddr;
 
 use carbide_uuid::domain::DomainId;
 use dns_record::SoaRecord;
+use ipnetwork::IpNetwork;
 use sqlx::postgres::PgRow;
 use sqlx::{Error, FromRow, Row};
 
@@ -220,6 +221,75 @@ pub async fn find_ptr_record(
     sqlx::query_as::<_, DbPtrRecord>(query)
         .bind(address.to_string())
         .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Is there any published record under `name`?
+///
+/// `name` is absolute and lowercase with its trailing dot, such as
+/// `rack1.example.com.`. Only names strictly below it count; a record at
+/// `name` itself does not.
+///
+/// This decides NODATA versus NXDOMAIN for a name that has no records of its
+/// own. If `gpu1.rack1.example.com.` exists then `rack1.example.com.` exists
+/// too, even with nothing published at it (RFC 8020 §2), and a query for it
+/// must not be answered NXDOMAIN.
+// TODO: the suffix predicate cannot use an index and `dns_records` is a view,
+// so this scans the view on every in-zone miss. The only forward names this
+// product publishes under are `adm.<zone>` and `bmc.<zone>`; replace the scan
+// with `EXISTS` probes on those two source tables keyed by `domain_id`.
+pub async fn any_record_below(txn: impl DbReader<'_>, name: &str) -> Result<bool, DatabaseError> {
+    let query = r#"
+    SELECT EXISTS (
+        SELECT 1 FROM dns_records
+        WHERE right(lower(q_name), length($1) + 1) = '.' || $1
+    )"#;
+    sqlx::query_scalar::<_, bool>(query)
+        .bind(name)
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// True when any address inside `prefix` has a PTR that would be published.
+///
+/// The two arms are the `ptr_candidates` arms of [`find_ptr_record`] with
+/// `<<=` in place of `=`: a primary or BMC machine interface with a live
+/// domain, or an instance address the `dns_records_instance` view publishes.
+/// An address whose only owner cannot publish a name does not count, so a
+/// reverse name exists exactly when some PTR exists at or below it. Used to
+/// tell an empty non-terminal in a reverse zone (NODATA) from a name with
+/// nothing under it (NXDOMAIN).
+///
+/// An address with two publishable owners does count, even though
+/// [`find_ptr_record`] withholds its answer. The name then classifies as
+/// NODATA: the site has PTR data for it and declines to choose. NXDOMAIN would
+/// deny the whole subtree, and under RFC 8020 a resolver may stop asking about
+/// names below it for the negative TTL.
+pub async fn any_ptr_published_within(
+    txn: impl DbReader<'_>,
+    prefix: IpNetwork,
+) -> Result<bool, DatabaseError> {
+    let query = r#"
+    SELECT EXISTS (
+        SELECT 1
+        FROM machine_interface_addresses mia
+        JOIN machine_interfaces mi ON mi.id = mia.interface_id
+        JOIN domains d ON d.id = mi.domain_id
+        WHERE mia.address <<= $1::inet
+          AND (mi.primary_interface = TRUE OR mi.interface_type = 'Bmc')
+          AND d.deleted IS NULL
+    ) OR EXISTS (
+        SELECT 1
+        FROM dns_records_instance instance_records
+        JOIN domains d ON d.id = instance_records.domain_id
+        WHERE instance_records.resource_record <<= $1::inet
+          AND d.deleted IS NULL
+    )"#;
+    sqlx::query_scalar::<_, bool>(query)
+        .bind(prefix.to_string())
+        .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -622,6 +692,83 @@ mod tests {
         assert!(
             ptrs.is_empty(),
             "a non-publishing machine owner still makes an unscoped PTR answer ambiguous"
+        );
+    }
+
+    #[crate::sqlx_test]
+    async fn reverse_existence_follows_publishable_ptrs_not_owners(pool: sqlx::PgPool) {
+        // The prefix probe and find_ptr_record must agree on what counts: an
+        // owner that cannot publish a name must not make a reverse name exist.
+        let mut txn = pool.begin().await.unwrap();
+        let (instance_id, segment_id, vpc_id) =
+            seed_instance_segment(txn.as_mut(), "existence", "tenant.example.com", "tenant").await;
+        let prefix: ipnetwork::IpNetwork = "10.1.2.0/24".parse().unwrap();
+
+        assert!(
+            !super::any_ptr_published_within(txn.as_mut(), prefix)
+                .await
+                .unwrap(),
+            "no addresses at all"
+        );
+
+        // A Data interface owns an address but publishes no PTR.
+        let interface_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces (
+                 segment_id, mac_address, primary_interface, hostname, interface_type
+             )
+             VALUES ($1, '02:00:00:00:38:91', false, 'data-only', 'Data')
+             RETURNING id",
+        )
+        .bind(segment_id)
+        .fetch_one(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO machine_interface_addresses (interface_id, address)
+             VALUES ($1, '10.1.2.7'::inet)",
+        )
+        .bind(interface_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        // An instance address with no hostname owns an address but publishes nothing.
+        sqlx::query(
+            "INSERT INTO instance_addresses (instance_id, address, segment_id, prefix, vpc_id)
+             VALUES ($1::uuid, '10.1.2.8'::inet, $2::uuid, '10.1.2.0/24'::cidr, $3::uuid)",
+        )
+        .bind(instance_id)
+        .bind(segment_id)
+        .bind(vpc_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        assert!(
+            !super::any_ptr_published_within(txn.as_mut(), prefix)
+                .await
+                .unwrap(),
+            "owners without a publishable name do not make the range exist"
+        );
+
+        add_address(
+            txn.as_mut(),
+            instance_id,
+            segment_id,
+            vpc_id,
+            "10.1.2.3",
+            "10.1.2.0/24",
+        )
+        .await;
+        assert!(
+            super::any_ptr_published_within(txn.as_mut(), prefix)
+                .await
+                .unwrap(),
+            "a published instance PTR makes the range exist"
+        );
+        assert!(
+            !super::any_ptr_published_within(txn.as_mut(), "10.1.3.0/24".parse().unwrap())
+                .await
+                .unwrap(),
+            "a neighbouring range is unaffected"
         );
     }
 
