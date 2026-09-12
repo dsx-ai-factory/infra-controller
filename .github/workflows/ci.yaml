@@ -154,6 +154,14 @@ jobs:
       build_artifacts_container_aarch64_run: ${{ steps.base-container-gate.outputs.build_artifacts_container_aarch64_run }}
       build_artifacts_container_aarch64_version: ${{ steps.base-container-gate.outputs.build_artifacts_container_aarch64_version }}
       build_artifacts_container_aarch64_version_latest: ${{ steps.base-container-gate.outputs.build_artifacts_container_aarch64_version_latest }}
+      pxe_build_container_x86_64_run: ${{ steps.base-container-gate.outputs.pxe_build_container_x86_64_run }}
+      pxe_build_container_x86_64_version: ${{ steps.base-container-gate.outputs.pxe_build_container_x86_64_version }}
+      pxe_build_container_x86_64_version_latest: ${{ steps.base-container-gate.outputs.pxe_build_container_x86_64_version_latest }}
+      pxe_build_container_x86_64_ref: ${{ steps.base-container-gate.outputs.pxe_build_container_x86_64_ref }}
+      pxe_build_container_aarch64_run: ${{ steps.base-container-gate.outputs.pxe_build_container_aarch64_run }}
+      pxe_build_container_aarch64_version: ${{ steps.base-container-gate.outputs.pxe_build_container_aarch64_version }}
+      pxe_build_container_aarch64_version_latest: ${{ steps.base-container-gate.outputs.pxe_build_container_aarch64_version_latest }}
+      pxe_build_container_aarch64_ref: ${{ steps.base-container-gate.outputs.pxe_build_container_aarch64_ref }}
       runtime_container_aarch64_run: ${{ steps.base-container-gate.outputs.runtime_container_aarch64_run }}
       runtime_container_aarch64_version: ${{ steps.base-container-gate.outputs.runtime_container_aarch64_version }}
       runtime_container_aarch64_version_latest: ${{ steps.base-container-gate.outputs.runtime_container_aarch64_version_latest }}
@@ -195,6 +203,8 @@ jobs:
               - 'dev/docker/Dockerfile.build-artifacts-container-x86_64'
             build_artifacts_aarch64:
               - 'dev/docker/Dockerfile.build-artifacts-container-aarch64'
+            pxe_build_container:
+              - 'dev/docker/Dockerfile.pxe-build-container'
             proto_files:
               - '**/*.proto'
             core_rpc_proto_files:
@@ -391,6 +401,7 @@ jobs:
           BUILD_CONTAINER_AARCH64_DOCKERFILE_CHANGED: ${{ steps.build-container-changes.outputs.build_container_aarch64 }}
           BUILD_ARTIFACTS_X86_64_DOCKERFILE_CHANGED: ${{ steps.build-container-changes.outputs.build_artifacts_x86_64 }}
           BUILD_ARTIFACTS_AARCH64_DOCKERFILE_CHANGED: ${{ steps.build-container-changes.outputs.build_artifacts_aarch64 }}
+          PXE_BUILD_CONTAINER_DOCKERFILE_CHANGED: ${{ steps.build-container-changes.outputs.pxe_build_container }}
           PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.proto_files }}
           CORE_RPC_PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.core_rpc_proto_files }}
           SOURCE_FILES_CHANGED: ${{ steps.build-container-changes.outputs.source_files }}
@@ -401,6 +412,10 @@ jobs:
           runtime_container_aarch64_run=false
           build_artifacts_container_x86_64_run=false
           build_artifacts_container_aarch64_run=false
+          # One Dockerfile.pxe-build-container serves both arches, so a single
+          # change (or the force directive) rebuilds both.
+          pxe_build_container_x86_64_run=false
+          pxe_build_container_aarch64_run=false
           proto_files_changed=false
           core_rpc_proto_files_changed=false
           source_files_changed=false
@@ -412,8 +427,15 @@ jobs:
             runtime_container_aarch64_run=true
             build_artifacts_container_x86_64_run=true
             build_artifacts_container_aarch64_run=true
+            pxe_build_container_x86_64_run=true
+            pxe_build_container_aarch64_run=true
           elif [[ "${BUILD_CONTAINER_X86_64_DOCKERFILE_CHANGED}" == "true" ]]; then
             build_container_x86_64_run=true
+          fi
+
+          if [[ "${PXE_BUILD_CONTAINER_DOCKERFILE_CHANGED}" == "true" ]]; then
+            pxe_build_container_x86_64_run=true
+            pxe_build_container_aarch64_run=true
           fi
 
           if [[ "${PROTO_FILES_CHANGED}" == "true" ]]; then
@@ -454,6 +476,8 @@ jobs:
           echo "runtime_container_aarch64_run=${runtime_container_aarch64_run}" >> "$GITHUB_OUTPUT"
           echo "build_artifacts_container_x86_64_run=${build_artifacts_container_x86_64_run}" >> "$GITHUB_OUTPUT"
           echo "build_artifacts_container_aarch64_run=${build_artifacts_container_aarch64_run}" >> "$GITHUB_OUTPUT"
+          echo "pxe_build_container_x86_64_run=${pxe_build_container_x86_64_run}" >> "$GITHUB_OUTPUT"
+          echo "pxe_build_container_aarch64_run=${pxe_build_container_aarch64_run}" >> "$GITHUB_OUTPUT"
           echo "proto_files_changed=${proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "core_rpc_proto_files_changed=${core_rpc_proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "source_files_changed=${source_files_changed}" >> "$GITHUB_OUTPUT"
@@ -519,6 +543,26 @@ jobs:
             echo "build_artifacts_container_aarch64_version=latest" >> "$GITHUB_OUTPUT"
             echo "build_artifacts_container_aarch64_ref=${SOURCE_REGISTRY}/build-artifacts-container-aarch64:latest" >> "$GITHUB_OUTPUT"
             echo "build_artifacts_container_aarch64_version_latest=" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [[ "$pxe_build_container_x86_64_run" == "true" ]]; then
+            echo "pxe_build_container_x86_64_version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "pxe_build_container_x86_64_ref=${TARGET_REGISTRY}/pxe-build-container-x86_64:${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "pxe_build_container_x86_64_version_latest=${TARGET_REGISTRY}/pxe-build-container-x86_64:${MAJOR_MINOR}-latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "pxe_build_container_x86_64_version=latest" >> "$GITHUB_OUTPUT"
+            echo "pxe_build_container_x86_64_ref=${SOURCE_REGISTRY}/pxe-build-container-x86_64:latest" >> "$GITHUB_OUTPUT"
+            echo "pxe_build_container_x86_64_version_latest=" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [[ "$pxe_build_container_aarch64_run" == "true" ]]; then
+            echo "pxe_build_container_aarch64_version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "pxe_build_container_aarch64_ref=${TARGET_REGISTRY}/pxe-build-container-aarch64:${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "pxe_build_container_aarch64_version_latest=${TARGET_REGISTRY}/pxe-build-container-aarch64:${MAJOR_MINOR}-latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "pxe_build_container_aarch64_version=latest" >> "$GITHUB_OUTPUT"
+            echo "pxe_build_container_aarch64_ref=${SOURCE_REGISTRY}/pxe-build-container-aarch64:latest" >> "$GITHUB_OUTPUT"
+            echo "pxe_build_container_aarch64_version_latest=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Decide release container publish strategy
@@ -705,6 +749,46 @@ jobs:
       platforms: linux/arm64
       runner: linux-arm64-cpu4
       push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      load: false
+      tag_latest: ${{ github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  # The ephemeral (mkosi) image jobs run inside this container instead of
+  # apt-installing the mkosi toolchain on the runner every run (the flaky-mirror
+  # path from #5249). One Dockerfile.pxe-build-container serves both arches;
+  # the gate rebuilds it only when that file changes.
+  pxe-build-container-x86_64:
+    if: needs.prepare.outputs.pxe_build_container_x86_64_run == 'true'
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
+      dockerfile_path: dev/docker/Dockerfile.pxe-build-container
+      image_name: ${{ needs.prepare.outputs.image_registry }}/pxe-build-container-x86_64
+      image_tag: ${{ needs.prepare.outputs.pxe_build_container_x86_64_version }}
+      additional_tags: ${{ needs.prepare.outputs.pxe_build_container_x86_64_version_latest }}
+      platforms: linux/amd64
+      runner: linux-amd64-cpu4
+      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      load: true
+      tag_latest: ${{ github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  pxe-build-container-aarch64:
+    if: needs.prepare.outputs.pxe_build_container_aarch64_run == 'true'
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
+      dockerfile_path: dev/docker/Dockerfile.pxe-build-container
+      image_name: ${{ needs.prepare.outputs.image_registry }}/pxe-build-container-aarch64
+      image_tag: ${{ needs.prepare.outputs.pxe_build_container_aarch64_version }}
+      additional_tags: ${{ needs.prepare.outputs.pxe_build_container_aarch64_version_latest }}
+      platforms: linux/arm64
+      runner: linux-arm64-cpu4
+      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: false
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -1199,7 +1283,8 @@ jobs:
     needs:
       - prepare
       - build-boot-artifacts-x86
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-boot-artifacts-x86.result == 'success' }}
+      - pxe-build-container-x86_64
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-boot-artifacts-x86.result == 'success' && contains('success,skipped', needs.pxe-build-container-x86_64.result) }}
     uses: ./.github/workflows/build-boot-artifacts.yml
     with:
       target_login: ${{ needs.prepare.outputs.publish_images == 'true' }}
@@ -1208,7 +1293,10 @@ jobs:
       cargo_make_task: create-ephemeral-image-x86-host-ci
       version: ${{ needs.prepare.outputs.version }}
       runner: linux-amd64-cpu16
-      use_container: false
+      # Run mkosi inside pxe-build-container (privileged) instead of
+      # apt-installing the toolchain on the runner. See build-boot-artifacts.yml.
+      use_container: true
+      build_container: ${{ needs.prepare.outputs.pxe_build_container_x86_64_ref }}
       sa_enablement: true
       inject_extras: true
       extras_container: ${{ needs.prepare.outputs.extras_container_ref }}
@@ -1218,11 +1306,12 @@ jobs:
     needs:
       - prepare
       - build-package-scout-aarch64
+      - pxe-build-container-aarch64
     # Depends on the scout package, not the full bfb build: the forge-scout
     # `.deb` is the only boot-stage input the mkosi build reads. The
     # release-artifacts carrier downstream still requires bfb to have
     # succeeded, so a bfb failure fails the run exactly as before.
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-package-scout-aarch64.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-package-scout-aarch64.result == 'success' && contains('success,skipped', needs.pxe-build-container-aarch64.result) }}
     uses: ./.github/workflows/build-boot-artifacts.yml
     with:
       target_login: ${{ needs.prepare.outputs.publish_images == 'true' }}
@@ -1231,7 +1320,11 @@ jobs:
       cargo_make_task: create-ephemeral-image-arm-host-ci
       version: ${{ needs.prepare.outputs.version }}
       runner: linux-arm64-cpu16
-      use_container: false
+      # Run mkosi inside pxe-build-container (privileged) instead of
+      # apt-installing the toolchain on the runner (the flaky ports.ubuntu.com
+      # path from #5249). See build-boot-artifacts.yml.
+      use_container: true
+      build_container: ${{ needs.prepare.outputs.pxe_build_container_aarch64_ref }}
       sa_enablement: true
       inject_extras: true
       extras_container: ${{ needs.prepare.outputs.extras_container_ref }}

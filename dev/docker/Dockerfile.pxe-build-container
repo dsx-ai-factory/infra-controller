@@ -26,6 +26,14 @@ FROM ubuntu:24.04
 
 ARG RUST_VERSION=1.97.1
 
+# Fail faster and retry more against a flaky distro mirror rather than hanging
+# for minutes on one bad IP. Retries only re-ask the same host, but this image
+# is rebuilt only when this file changes, so its exposure to the mirror is
+# already rare; the full multi-mirror fallback in
+# .github/actions/setup-mkosi-environment is deliberately not duplicated here.
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\nAcquire::Languages "none";\n' \
+	> /etc/apt/apt.conf.d/99-nico-acquire
+
 RUN apt-get update && \
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 	# Rust install
