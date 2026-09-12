@@ -72,7 +72,7 @@ jobs:
         run: bash .github/ci/test-resolve-secret-scan-range.sh
 
       - name: Check Core CI final-gate inventory
-        run: python3 -B .github/ci/check_ci_gate.py inventory --policy core .github/workflows/ci.yaml
+        run: python3 -B .github/ci/check_ci_gate.py inventory --workflow core .github/workflows/ci.yaml
 
       - name: Detect non-rest changes
         id: non-rest-changes
@@ -2248,14 +2248,17 @@ jobs:
   # ============================================================================
   # FINAL CORE CI GATE
   # ============================================================================
-  # Passes only when every required job reports `success` or `skipped`.
-  # `skipped` counts as pass — that's how rest-only PRs unblock when the
-  # `changes` gate intentionally skips the core pipeline.
-  # Any other result, plus missing or malformed data, fails closed.
+  # This is the final required Core check. A skip passes only when `changes`,
+  # `prepare`, the current ref, or the repository says that job did not need to
+  # run. Failures, cancellations, malformed decisions, and other skips fail.
+  # A workflow-only change selects `lint-police` through `source_files`, and
+  # this gate rejects that job disappearing (#4324).
   # Every job that can determine Core CI health is listed so an upstream
   # failure cannot be hidden when its downstream jobs become `skipped`.
   # Reporting-only jobs are explicitly exempted, and the checker in `changes`
   # rejects every job that is neither gated nor exempted.
+  # When a gated Core job gains another condition, register its allowed skip in
+  # `.github/ci/check_ci_gate.py`. Tests cover the existing selectors.
   # The checker also protects `if: always()` so a failed dependency cannot skip
   # this required check.
   # Branch protection should require only this gate and `rest-ci-pass`.
@@ -2343,4 +2346,4 @@ jobs:
       - name: Decide pass/fail
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
-        run: python3 -B .github/ci/check_ci_gate.py results
+        run: python3 -B .github/ci/check_ci_gate.py results --workflow core
