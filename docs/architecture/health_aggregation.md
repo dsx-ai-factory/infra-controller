@@ -295,22 +295,23 @@ ranges or by interpreting the `health_ok` values provided by BMCs.
 
 Machine endpoints carry the inventory metadata needed to interpret hardware health in fleet context. This includes machine ID, primary Redfish system UUID, serial number, rack ID, rack placement, and NVLink domain UUID when present.
 
-Switch endpoints carry switch ID, serial number, rack ID, rack placement, and NVLink domain UUID when present. Power-shelf endpoints carry power-shelf ID, serial number, and rack ID when present.
+Switch endpoints carry switch ID, serial number, rack ID, rack placement, and NVLink domain UUID when present. Power-shelf endpoints carry power-shelf ID, serial number, rack ID, and NVLink domain UUID when present. The NICo API power shelf record has no domain field, so API discovery resolves a shelf's domain from the machines and switches that share its rack and logs a warning when none of them reports one.
 
 **For local and test deployments**, you can configure explicit machine, switch, or power-shelf identity with `[[endpoint_sources.static_bmc_endpoints]]`. Direct switch host endpoints can use `[[endpoint_sources.static_switch_host_endpoints]]` or `[[endpoint_sources.static_bmc_endpoints]]`. Note the following:
 
 - Static machine endpoints can include the same serial number, rack placement, and NVLink domain UUID metadata
 - Static switch endpoints can include serial number, rack placement, and NVLink domain UUID metadata
+- Static power-shelf endpoints can include serial number and NVLink domain UUID metadata
 - `static_switch_host_endpoints` requires switch metadata; `endpoint_role` defaults to `host`, and only the `host` role is accepted
 - All static endpoints can provide `rack_id` and validated custom telemetry `labels`
 - The primary Redfish system UUID remains BMC-derived and cannot be overridden by a custom label
 
 The publishing sinks expose that inventory context using the conventions of the target backend:
 
-- `[sinks.prometheus]` adds _machine_ metadata as metric labels named `machine_id`, `system_uuid`, `serial_number`, `rack_id`, `machine_slot_number`, `machine_tray_index`, and `nvlink_domain_uuid`. _Switch_ metadata labels are `switch_id`, `serial_number`, `rack_id`, `switch_slot_number`, `switch_tray_index`, and `nvlink_domain_uuid`. _Power-shelf_ metadata labels are `power_shelf_id`, `serial_number`, and `rack_id`; each is omitted when the corresponding metadata is unavailable. Static endpoint custom labels keep their configured names.
+- `[sinks.prometheus]` adds _machine_ metadata as metric labels named `machine_id`, `system_uuid`, `serial_number`, `rack_id`, `machine_slot_number`, `machine_tray_index`, and `nvlink_domain_uuid`. _Switch_ metadata labels are `switch_id`, `serial_number`, `rack_id`, `switch_slot_number`, `switch_tray_index`, and `nvlink_domain_uuid`. _Power-shelf_ metadata labels are `power_shelf_id`, `serial_number`, `rack_id`, and `nvlink_domain_uuid`; each is omitted when the corresponding metadata is unavailable. Static endpoint custom labels keep their configured names.
 - `[sinks.tracing]` adds `rack_id` to every collector-event log when the endpoint supplies one. Endpoint-source, collector diagnostic, lifecycle, cancellation, and failure logs use the same optional field when they have endpoint context.
 - `[sinks.log_file]` adds `rack_id` as a top-level JSONL string field when the endpoint supplies one.
-- `[sinks.otlp]` adds the string resource attributes `collector.type` and either `bmc.endpoint` and `bmc.ip`, or `switch.endpoint` and `switch.ip` for host-side switch collection. Typed inventory adds the strings `component.type` and, when present, `rack.id`. _Machine_ metadata attributes are the strings `machine.id`, `system.uuid`, `machine.serial`, `driver.version`, and `nvlink.domain.uuid`, plus the integers `machine.slot_number` and `machine.tray_index`. _Switch_ metadata attributes are the strings `switch.id`, `switch.serial_number`, `switch.endpoint_role`, and `nvlink.domain.uuid`, the boolean `switch.is_primary`, and the integers `switch.slot_number` and `switch.tray_index`. _Power-shelf_ metadata attributes are the strings `power_shelf.id` and `power_shelf.serial_number`; each is omitted when the corresponding metadata is unavailable. Static endpoint custom labels are string resource attributes and keep their configured names.
+- `[sinks.otlp]` adds the string resource attributes `collector.type` and either `bmc.endpoint` and `bmc.ip`, or `switch.endpoint` and `switch.ip` for host-side switch collection. Typed inventory adds the strings `component.type` and, when present, `rack.id`. _Machine_ metadata attributes are the strings `machine.id`, `system.uuid`, `machine.serial`, `driver.version`, and `nvlink.domain.uuid`, plus the integers `machine.slot_number` and `machine.tray_index`. _Switch_ metadata attributes are the strings `switch.id`, `switch.serial_number`, `switch.endpoint_role`, and `nvlink.domain.uuid`, the boolean `switch.is_primary`, and the integers `switch.slot_number` and `switch.tray_index`. _Power-shelf_ metadata attributes are the strings `power_shelf.id`, `power_shelf.serial_number`, and `nvlink.domain.uuid`; each is omitted when the corresponding metadata is unavailable. Static endpoint custom labels are string resource attributes and keep their configured names.
 - `[sinks.health_report]`, `[sinks.rack_health_report]`, `[sinks.switch_health_report]`, and `[sinks.power_shelf_health_report]` use the same event context when submitting assessed health reports back to NICo API. The persisted `HealthReport` and `HealthProbeAlert` schemas remain the probe success/alert model described above.
 
 Collector runtime metrics and gNMI stream metrics include a `rack_id` label when the endpoint supplies one. The label is omitted when discovery does not supply a rack ID. Existing `collector_type` and `endpoint_key` label semantics remain unchanged.
@@ -354,9 +355,12 @@ Every `health_report.successes` entry carries at least these fields:
 | --------- | --------- | -------- | ----- |
 | `probe_id` | string | Always | The probe that ran. See [Health probe IDs](health/health_probe_ids.md) for the supported IDs. |
 | `target` | string | Optional | The probed component, such as a sensor or leak-detector ID. Omitted when the probe ID fully describes what was tested. |
+| `powersupply_id` | string | Optional | For `Sensor` probes, the Redfish `PowerSupply` ID the sensor belongs to. Omitted for sensors outside a power supply and for other probes. |
+| `physical_context` | string | Optional | For `Sensor` probes, the sensor's Redfish `PhysicalContext` in snake case, for example `power_supply`. Omitted for other probes. |
 
 When `health_report.alerts` is present, every JSON object carries the same
-`probe_id` and optional `target` fields, plus at least these fields:
+`probe_id`, optional `target`, optional `powersupply_id`, and optional
+`physical_context` fields, plus at least these fields:
 
 | Field | JSON type | Presence | Value |
 | --------- | --------- | -------- | ----- |

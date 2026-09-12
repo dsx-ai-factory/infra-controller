@@ -306,7 +306,7 @@ Keep the following in mind when configuring health report records:
 
 - *The setting is per-target*. This means that, for example, a debugging destination can receive detail, while a long-term store receives the routing, count, and success evidence without needing to store free-form alert messages.
 
-- The JSON array in `health_report.alerts` contains the first 64 alerts in report order, each with `probe_id`, `message`, `classifications`, and `target` if the alert names one.
+- The JSON array in `health_report.alerts` contains the first 64 alerts in report order, each with `probe_id`, `message`, `classifications`, and `target` if the alert names one. Sensor alerts also carry `powersupply_id` and `physical_context` when the sensor reports them, so a consumer can attribute the alert to a power supply without parsing the sensor name.
 
 - `health_report.alerts.dropped` appears only when details are enabled *and* the report has more than 64 alerts. It contains the number of omitted alerts beyond those first 64.
 

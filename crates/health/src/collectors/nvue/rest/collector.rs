@@ -709,6 +709,7 @@ impl NvueRestCollector {
             observed_at: Some(chrono::Utc::now()),
             successes: Vec::new(),
             alerts: vec![HealthReportAlert {
+                attribution: None,
                 probe_id: Probe::NvueLeakage,
                 target: None,
                 message: "NVUE leakage data is unavailable".to_string(),
@@ -733,6 +734,7 @@ impl NvueRestCollector {
 
         if sensors.is_empty() {
             successes.push(HealthReportSuccess {
+                attribution: None,
                 probe_id: Probe::NvueLeakage,
                 target: None,
             });
@@ -742,16 +744,19 @@ impl NvueRestCollector {
             match leakage_state_to_state(sensor.as_ref().and_then(|sensor| sensor.state.as_deref()))
             {
                 "ok" => successes.push(HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::NvueLeakage,
                     target: Some((*sensor_name).clone()),
                 }),
                 "leak" => alerts.push(HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::NvueLeakage,
                     target: Some((*sensor_name).clone()),
                     message: format!("NVUE leakage sensor {sensor_name} reports leak"),
                     classifications: vec![Classification::Leak],
                 }),
                 _ => alerts.push(HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::NvueLeakage,
                     target: Some((*sensor_name).clone()),
                     message: format!("NVUE leakage sensor {sensor_name} state is unknown"),

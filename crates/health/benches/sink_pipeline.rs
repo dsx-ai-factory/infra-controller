@@ -198,6 +198,7 @@ fn health_report_with_alerts(alert_count: usize) -> HealthReport {
     for idx in 0..alert_count {
         report.alerts.push(carbide_health::sink::HealthReportAlert {
             probe_id: carbide_health::sink::Probe::Sensor,
+            attribution: None,
             target: Some(format!("target-{idx}")),
             message: format!("alert message #{idx}"),
             classifications: vec![Classification::SensorCritical],
@@ -230,6 +231,7 @@ impl HealthReportBenchState {
             successes: Vec::new(),
             alerts: vec![carbide_health::sink::HealthReportAlert {
                 probe_id: carbide_health::sink::Probe::LeakDetection,
+                attribution: None,
                 target: Some("leak-detector".to_string()),
                 message: "leak detected".to_string(),
                 classifications: vec![Classification::Leak],
@@ -464,12 +466,14 @@ fn make_sink_report(alert_count: usize, success_count: usize) -> HealthReport {
         successes: (0..success_count)
             .map(|i| HealthReportSuccess {
                 probe_id: carbide_health::sink::Probe::Sensor,
+                attribution: None,
                 target: Some(format!("target-{i}")),
             })
             .collect(),
         alerts: (0..alert_count)
             .map(|i| HealthReportAlert {
                 probe_id: carbide_health::sink::Probe::Sensor,
+                attribution: None,
                 target: Some(format!("target-{i}")),
                 message: format!("alert message for probe {i}"),
                 classifications: vec![Classification::SensorCritical],

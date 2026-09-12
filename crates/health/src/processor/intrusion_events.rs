@@ -125,6 +125,7 @@ impl EventProcessor for BmcIntrusionEventProcessor {
             IntrusionEventState::Alert => (
                 Vec::new(),
                 vec![HealthReportAlert {
+                    attribution: None,
                     probe_id: Probe::IntrusionSensorTriggered,
                     target: Some(HOST_BMC_TARGET.to_string()),
                     message: INTRUSION_ALERT_MESSAGE.to_string(),
@@ -136,6 +137,7 @@ impl EventProcessor for BmcIntrusionEventProcessor {
             ),
             IntrusionEventState::Clear => (
                 vec![HealthReportSuccess {
+                    attribution: None,
                     probe_id: Probe::IntrusionSensorTriggered,
                     target: Some(HOST_BMC_TARGET.to_string()),
                 }],

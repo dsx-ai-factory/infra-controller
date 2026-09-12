@@ -22,6 +22,7 @@ mod gpu_inventory;
 pub(crate) mod inventory;
 mod leak_detector;
 mod logs;
+mod manager;
 mod nmxc;
 mod nmxc_schema_override;
 mod nmxt;
@@ -44,6 +45,7 @@ pub use logs::{
     DowngradeEvent, DowngradeReason, LogDowngradeRegistry, LogsCollector, LogsCollectorConfig,
     SseLogCollector, SseLogCollectorConfig,
 };
+pub use manager::{ManagerCollector, ManagerCollectorConfig};
 pub use nmxc::{NmxcCollector, NmxcCollectorConfig};
 pub(crate) use nmxc_schema_override::{
     NmxcSchemaOverride, NmxcSchemaOverrideCollector, NmxcSchemaOverrideCollectorConfig,

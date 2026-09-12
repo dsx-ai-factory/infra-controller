@@ -123,8 +123,18 @@ impl StaticEndpointSource {
                     }
                 });
                 let serial = power_shelf.serial.clone();
+                let nvlink_domain_uuid = parse_static_nvlink_domain_uuid(
+                    power_shelf.nvlink_domain_uuid.as_deref(),
+                    "power_shelf",
+                    cfg.rack_id.as_deref(),
+                )
+                .filter(|domain_uuid| domain_uuid != &NvLinkDomainId::nil());
 
-                Some(EndpointMetadata::PowerShelf(PowerShelfData { id, serial }))
+                Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                    id,
+                    serial,
+                    nvlink_domain_uuid,
+                }))
             } else if let Some(switch) = &cfg.switch {
                 let id = switch.id.as_ref().and_then(|id| match id.parse() {
                     Ok(id) => Some(id),
@@ -474,6 +484,7 @@ mod tests {
     #[tokio::test]
     async fn test_static_endpoint_with_power_shelf_metadata() {
         let power_shelf_id = test_power_shelf_id("power-shelf-a");
+        let domain_uuid = NvLinkDomainId::new();
         let configs = vec![StaticBmcEndpoint {
             ip: ip("10.0.2.1"),
             port: Some(443),
@@ -484,6 +495,7 @@ mod tests {
             power_shelf: Some(StaticPowerShelfEndpoint {
                 id: Some(power_shelf_id.to_string()),
                 serial: Some("PS-001".to_string()),
+                nvlink_domain_uuid: Some(domain_uuid.to_string()),
             }),
             switch: None,
             rack_id: None,
@@ -498,6 +510,7 @@ mod tests {
             Some(EndpointMetadata::PowerShelf(power_shelf)) => {
                 assert_eq!(power_shelf.id, Some(power_shelf_id));
                 assert_eq!(power_shelf.serial.as_deref(), Some("PS-001"));
+                assert_eq!(power_shelf.nvlink_domain_uuid, Some(domain_uuid));
             }
             other => panic!("expected PowerShelf metadata, got {other:?}"),
         }
@@ -516,6 +529,7 @@ mod tests {
             power_shelf: Some(StaticPowerShelfEndpoint {
                 id: Some(power_shelf_id.to_string()),
                 serial: None,
+                nvlink_domain_uuid: Some(NvLinkDomainId::nil().to_string()),
             }),
             switch: None,
             rack_id: None,
@@ -530,6 +544,7 @@ mod tests {
             Some(EndpointMetadata::PowerShelf(power_shelf)) => {
                 assert_eq!(power_shelf.id, Some(power_shelf_id));
                 assert_eq!(power_shelf.serial, None);
+                assert_eq!(power_shelf.nvlink_domain_uuid, None);
             }
             other => panic!("expected PowerShelf metadata, got {other:?}"),
         }

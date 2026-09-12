@@ -303,6 +303,10 @@ pub struct StaticMachineEndpoint {
 pub struct StaticPowerShelfEndpoint {
     pub id: Option<String>,
     pub serial: Option<String>,
+
+    /// Optional non-nil NVLink domain UUID of the rack this shelf powers.
+    /// Invalid or nil values are omitted from telemetry.
+    pub nvlink_domain_uuid: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -3252,6 +3256,7 @@ username = "root"
                         power_shelf: Some(StaticPowerShelfEndpoint {
                             id: None,
                             serial: None,
+                            nvlink_domain_uuid: None,
                         }),
                         ..static_endpoint()
                     },
@@ -3266,6 +3271,7 @@ username = "root"
                         power_shelf: Some(StaticPowerShelfEndpoint {
                             id: Some("power-shelf-id".to_string()),
                             serial: None,
+                            nvlink_domain_uuid: None,
                         }),
                         ..static_endpoint()
                     },

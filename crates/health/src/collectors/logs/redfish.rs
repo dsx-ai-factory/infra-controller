@@ -76,6 +76,68 @@ pub(super) fn redfish_log_type(fields: RedfishLogFields<'_>) -> RedfishLogType {
     RedfishLogType::RedfishEvent
 }
 
+/// Pushes `message_id`, or the identity derived from the message text when
+/// the BMC leaves `MessageId` null or empty.
+///
+/// Periodic and SSE log paths share this so a LiteOn event carries the same
+/// `message_family` and `redfish.component` attributes over either path.
+pub(super) fn push_message_identity(
+    attributes: &mut Vec<MetricLabel>,
+    message_id: Option<&str>,
+    message: Option<&str>,
+) {
+    match message_id.filter(|message_id| !message_id.is_empty()) {
+        Some(message_id) => {
+            attributes.push((Cow::Borrowed("message_id"), message_id.to_string()));
+        }
+        None => {
+            let identity = message.map(message_identity).unwrap_or_default();
+            if let Some(family) = identity.family {
+                attributes.push((Cow::Borrowed("message_family"), family.to_string()));
+            }
+            if let Some(component) = identity.component {
+                attributes.push((Cow::Borrowed("redfish.component"), component.to_string()));
+            }
+        }
+    }
+}
+
+/// Identity recovered from a log entry `Message` when `MessageId` is null.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct MessageIdentity<'a> {
+    /// Leading token of the message, e.g. `PowerDevicePresence`.
+    pub family: Option<&'a str>,
+    /// First token inside the parenthesised detail, e.g. `powerdevice1`.
+    pub component: Option<&'a str>,
+}
+
+/// Parses the OpenBMC `Family` or `Family ( component detail... )` message shape.
+///
+/// Vendors that populate `MessageId` do not need this; the LiteOn power-shelf
+/// PMC leaves `MessageId` null on every entry and puts identity in the text.
+/// Prose messages (a second token that is not `(`) yield no identity, so a
+/// free-text message is never mistaken for an event family.
+pub(super) fn message_identity(message: &str) -> MessageIdentity<'_> {
+    let mut tokens = message.split_whitespace();
+    let family = tokens.next();
+    match tokens.next() {
+        None => MessageIdentity {
+            family,
+            component: None,
+        },
+        Some("(") => {
+            let component = tokens.next();
+            // The detail must be closed; an unterminated form is not the
+            // OpenBMC shape and yields no identity.
+            match tokens.last() {
+                Some(")") => MessageIdentity { family, component },
+                _ => MessageIdentity::default(),
+            }
+        }
+        Some(_) => MessageIdentity::default(),
+    }
+}
+
 pub(super) fn nvidia_error_id(oem: Option<&Oem>) -> Option<&str> {
     oem.and_then(|oem| {
         oem.additional_properties
@@ -242,6 +304,46 @@ mod tests {
             message_args: Some(&message_args),
             has_cper: input.has_cper,
         })
+    }
+
+    #[test]
+    fn message_identity_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "openbmc family and component",
+                    input: "PowerDevicePresence ( powerdevice1 chassis_SN: 613337RXX01X75101UG Assert )",
+                    expect: MessageIdentity {
+                        family: Some("PowerDevicePresence"),
+                        component: Some("powerdevice1"),
+                    },
+                },
+                Check {
+                    scenario: "family without detail",
+                    input: "BmcSystemBootComplete",
+                    expect: MessageIdentity {
+                        family: Some("BmcSystemBootComplete"),
+                        component: None,
+                    },
+                },
+                Check {
+                    scenario: "prose message yields no identity",
+                    input: "Platform event occurred",
+                    expect: MessageIdentity::default(),
+                },
+                Check {
+                    scenario: "unterminated detail yields no identity",
+                    input: "PowerDevicePresence ( powerdevice1",
+                    expect: MessageIdentity::default(),
+                },
+                Check {
+                    scenario: "empty message",
+                    input: "",
+                    expect: MessageIdentity::default(),
+                },
+            ],
+            message_identity,
+        );
     }
 
     fn classify(input: TestFields) -> RedfishLogType {
