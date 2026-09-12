@@ -320,6 +320,40 @@ func TestBMCFirmwareVersionExactIDWinsOverEarlierDescription(t *testing.T) {
 	assert.Equal(t, exactIDVersion, bmcFirmwareVersion(report))
 }
 
+func TestBMCFirmwareVersionHostIDWinsOverAcceleratorBMCs(t *testing.T) {
+	description := "BMC image"
+	hostVersion := "25.06-2_NV_WW_02"
+	hgxVersion := "GB200Nvl-25.06-A"
+	mgxVersion := "MGX-25.06-A"
+	host := &corev1.Inventory{Id: "FW_BMC_0", Description: &description, Version: &hostVersion}
+	hgx := &corev1.Inventory{Id: "HGX_FW_BMC_0", Description: &description, Version: &hgxVersion}
+	mgx := &corev1.Inventory{Id: "MGX_FW_BMC_0", Description: &description, Version: &mgxVersion}
+
+	testCases := []struct {
+		name        string
+		inventories []*corev1.Inventory
+	}{
+		{
+			name:        "host BMC follows accelerator BMCs",
+			inventories: []*corev1.Inventory{hgx, mgx, host},
+		},
+		{
+			name:        "host BMC precedes accelerator BMCs",
+			inventories: []*corev1.Inventory{host, hgx, mgx},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			report := &corev1.EndpointExplorationReport{
+				Service: []*corev1.Service{{Inventories: tc.inventories}},
+			}
+
+			assert.Equal(t, hostVersion, bmcFirmwareVersion(report))
+		})
+	}
+}
+
 // TestApplyInventoryToComponentsPreservesConcurrentFields verifies that the
 // shared switch and power-shelf projection updates only its owned columns.
 func TestApplyInventoryToComponentsPreservesConcurrentFields(t *testing.T) {

@@ -249,11 +249,10 @@ func successfulInventoryEntry(
 }
 
 // bmcFirmwareVersion resolves BMC firmware for compute, switch, and power-shelf
-// inventory. Precedence is Core's canonical "bmc" version, then the exact raw
-// inventory ID "BMC", then the legacy "BMC image" description. Retaining the
-// description match as a fallback lets an exact ID later in the report win
-// regardless of inventory ordering. Within each raw fallback tier, the first
-// nonblank match wins.
+// inventory. Precedence is Core's canonical "bmc" version, then a known host
+// BMC inventory ID, then the legacy "BMC image" description. Retaining the
+// description match as a fallback lets a host BMC ID later in the report win
+// over accelerator BMC entries regardless of inventory ordering.
 func bmcFirmwareVersion(report *corev1.EndpointExplorationReport) string {
 	if report == nil {
 		return ""
@@ -269,7 +268,8 @@ func bmcFirmwareVersion(report *corev1.EndpointExplorationReport) string {
 			if version == "" {
 				continue
 			}
-			if inv.GetId() == "BMC" {
+			switch inv.GetId() {
+			case "BMC", "FW_BMC_0", "HostBMC_0":
 				return version
 			}
 			if descriptionFallback == "" && inv.GetDescription() == "BMC image" {
