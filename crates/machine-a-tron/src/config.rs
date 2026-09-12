@@ -970,10 +970,58 @@ pub struct MachineATronContext {
     pub api_throttler: ApiThrottler,
     /// These are the firmware versions the server wants us to be on. If not configured for other
     /// firmware, DPU's can mock that they already have this installed.
-    pub desired_firmware_versions: Vec<DesiredFirmwareVersionEntry>,
+    /// API-fetched firmware targets; a background task refreshes them and
+    /// machines re-read on their api_refresh_interval tick (#4688).
+    pub desired_firmware_versions: std::sync::RwLock<Vec<DesiredFirmwareVersionEntry>>,
     pub forge_api_client: ForgeApiClient,
     pub dhcp_client: crate::dhcp_wrapper::DhcpClient,
     pub mac_address_pool: Arc<Mutex<MacAddressPool>>,
+}
+
+/// Spawn the background task that re-fetches desired firmware versions on the
+/// API refresh cadence (#4688). Machines pick changes up on their own tick.
+/// Empty responses and fetch errors keep the last known targets. Each RPC is
+/// bounded so a stalled peer cannot wedge the loop. Abort the returned handle
+/// to stop the task.
+pub fn spawn_desired_firmware_refresher(
+    app_context: std::sync::Arc<MachineATronContext>,
+) -> tokio::task::JoinHandle<()> {
+    const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(app_context.app_config.api_refresh_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await; // the startup fetch already populated the context
+        loop {
+            interval.tick().await;
+            let fetch = tokio::time::timeout(
+                RPC_TIMEOUT,
+                app_context.forge_api_client.get_desired_firmware_versions(),
+            );
+            match fetch.await {
+                Ok(Ok(response)) => {
+                    if response.entries.is_empty() {
+                        continue;
+                    }
+                    let mut current = app_context.desired_firmware_versions.write().unwrap();
+                    if *current != response.entries {
+                        tracing::info!(
+                            desired_firmware_versions = ?response.entries,
+                            "Desired firmware versions changed",
+                        );
+                        *current = response.entries;
+                    }
+                }
+                Ok(Err(error)) => tracing::warn!(
+                    %error,
+                    "Failed to refresh desired firmware versions; keeping last known",
+                ),
+                Err(_) => tracing::warn!(
+                    timeout = ?RPC_TIMEOUT,
+                    "Desired firmware version refresh timed out; keeping last known",
+                ),
+            }
+        }
+    })
 }
 
 impl MachineATronContext {

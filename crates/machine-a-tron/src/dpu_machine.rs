@@ -131,7 +131,9 @@ impl DpuMachine {
             .dpu_firmware_versions
             .clone()
             .unwrap_or_default()
-            .fill_missing_from_desired_firmware(&app_context.desired_firmware_versions);
+            .fill_missing_from_desired_firmware(
+                &app_context.desired_firmware_versions.read().unwrap(),
+            );
 
         let dpu_info = DpuMachineInfo::new(
             hw_type,

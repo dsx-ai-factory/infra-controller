@@ -49,7 +49,7 @@ pub use bmc_mock_wrapper::BmcMockRegistry;
 pub use config::{
     DhcpType, LenovoGb300RackConfig, LogFormat, MachineATronArgs, MachineATronConfig,
     MachineATronContext, MachineConfig, PersistedDevice, PersistedDpuMachine, RackConfig,
-    RackModelConfig, WiwynnGb200RackConfig,
+    RackModelConfig, WiwynnGb200RackConfig, spawn_desired_firmware_refresher,
 };
 pub use control_router::{ControlState, append as append_control_routes};
 pub use device_handle::DeviceHandle;

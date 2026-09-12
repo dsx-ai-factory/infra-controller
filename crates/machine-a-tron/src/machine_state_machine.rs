@@ -1040,6 +1040,32 @@ impl MachineStateMachine {
         }
     }
 
+    /// Apply refreshed desired host firmware targets to a live machine:
+    /// update the retained `machine_info` (a later BMC re-setup then derives
+    /// the same targets) and re-stage a running mock's pending upgrades.
+    pub(super) fn set_desired_host_firmware(
+        &mut self,
+        desired: Option<bmc_mock::HostFirmwareVersions>,
+    ) {
+        if let MachineInfo::Host(host) = &mut self.machine_info {
+            host.desired_host_firmware = desired.clone();
+        }
+        let Some(bmc_state) = self.bmc_state.as_ref() else {
+            return;
+        };
+        let update_service = &bmc_state.update_service_state;
+        let (bmc_target, uefi_target) = match &desired {
+            Some(fw) => (fw.bmc.as_deref(), fw.uefi.as_deref()),
+            None => (None, None),
+        };
+        if let Some(id) = update_service.host_bmc_inventory_id.as_deref() {
+            update_service.retarget_pending_upgrade(id, bmc_target);
+        }
+        if let Some(id) = update_service.host_uefi_inventory_id.as_deref() {
+            update_service.retarget_pending_upgrade(id, uefi_target);
+        }
+    }
+
     /// Stop relaying data-plane DHCP through the DPU. Once a DPU flips to NIC
     /// mode it is a plain NIC, so the host DHCPs directly on its own (former-DPU
     /// host) MAC -- the same MAC, so a retained boot interface still matches on

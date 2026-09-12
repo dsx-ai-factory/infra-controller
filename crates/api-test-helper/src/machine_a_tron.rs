@@ -23,7 +23,7 @@ use forge_tls::client_config::get_root_ca_path;
 use futures::future::try_join_all;
 use machine_a_tron::{
     BmcMockRegistry, DeviceHandle, DhcpClient, MachineATron, MachineATronConfig,
-    MachineATronContext, UdpDhcpService, api_throttler,
+    MachineATronContext, UdpDhcpService, api_throttler, spawn_desired_firmware_refresher,
 };
 use rpc::forge_api_client::FailOverOn;
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, RetryConfig};
@@ -89,11 +89,15 @@ pub async fn run_local(
         forge_client_config,
         bmc_mock_certs_dir: Some(repo_root.join("crates/bmc-mock")),
         api_throttler,
-        desired_firmware_versions: desired_firmware,
+        desired_firmware_versions: std::sync::RwLock::new(desired_firmware),
         forge_api_client,
         dhcp_client,
         mac_address_pool,
     });
+
+    // Same refresher as production main.rs, so integration suites exercise
+    // live target changes; aborted in shutdown so it cannot outlive the helper.
+    let firmware_refresher = spawn_desired_firmware_refresher(app_context.clone());
 
     let mat = MachineATron::new(app_context.clone());
     let simulators = mat.make_devices(false).await?;
@@ -125,6 +129,7 @@ pub async fn run_local(
         MachineATronHandle {
             _stop_tx: stop_tx,
             _join_handle: join_handle,
+            firmware_refresher,
             dhcp_service,
         },
     ))
@@ -133,6 +138,7 @@ pub async fn run_local(
 pub struct MachineATronHandle {
     _stop_tx: oneshot::Sender<()>,
     _join_handle: JoinHandle<eyre::Result<()>>,
+    firmware_refresher: JoinHandle<()>,
     dhcp_service: Option<UdpDhcpService>,
 }
 
@@ -140,6 +146,7 @@ impl MachineATronHandle {
     pub async fn shutdown(mut self) -> eyre::Result<()> {
         drop(self._stop_tx);
         let mat_result = self._join_handle.await?;
+        self.firmware_refresher.abort();
         if let Some(dhcp_service) = self.dhcp_service.take() {
             dhcp_service.shutdown().await?;
         }

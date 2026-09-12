@@ -146,11 +146,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         bmc_mock_certs_dir,
         bmc_registry,
         api_throttler,
-        desired_firmware_versions,
+        desired_firmware_versions: std::sync::RwLock::new(desired_firmware_versions),
         forge_api_client,
         dhcp_client,
         mac_address_pool: Mutex::new(mac_address_pool).into(),
     });
+
+    // Refreshes desired firmware targets for live machines (#4688); aborted
+    // at shutdown so it cannot outlive the simulators it feeds.
+    let firmware_refresher = machine_a_tron::spawn_desired_firmware_refresher(app_context.clone());
 
     let info = app_context.forge_api_client.version(false).await?;
     tracing::info!(
@@ -231,6 +235,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mat_result = mat.run(simulators, stop_rx).await;
 
+    firmware_refresher.abort();
     if let Some(hosted_ufm) = hosted_ufm {
         hosted_ufm.shutdown().await?;
     }
