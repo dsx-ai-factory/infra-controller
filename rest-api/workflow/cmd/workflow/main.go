@@ -14,8 +14,6 @@ import (
 	sentryZerolog "github.com/getsentry/sentry-go/zerolog"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	zlogadapter "logur.dev/adapter/zerolog"
-	"logur.dev/logur"
 
 	tsdkClient "go.temporal.io/sdk/client"
 	tsdkConverter "go.temporal.io/sdk/converter"
@@ -29,6 +27,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	clog "github.com/NVIDIA/infra-controller/rest-api/common/pkg/log"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
@@ -185,7 +184,10 @@ func main() {
 		}
 	}
 
-	tLogger := logur.LoggerToKV(zlogadapter.New(zerolog.New(os.Stderr)))
+	// Must stay below the Sentry setup above. The logger is a snapshot of the
+	// global zerolog logger, so building it any earlier leaves the Sentry writer
+	// off every workflow and activity log line.
+	tLogger := clog.TemporalClientLogger()
 	var tc tsdkClient.Client
 
 	tcfg, err := cfg.GetTemporalConfig()
