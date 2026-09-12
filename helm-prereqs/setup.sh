@@ -1030,8 +1030,9 @@ if "${INSTALL_DPF}"; then
     echo "DPF operator ready"
 
     # 5b.6 Operator-level CRs. carbide-api only reads/patches these — they must
-    #      be created here (its SDK creates BFB/DPUFlavor/DPUDeployment itself
-    #      at startup, but never DPFOperatorConfig or DPUCluster).
+    #      be created here (its SDK creates the provisioning source, DPUFlavor,
+    #      and DPUDeployment itself at startup, but never DPFOperatorConfig or
+    #      DPUCluster).
     if [[ -z "${NICO_DPF_K8S_API_VIP:-}" ]]; then
         NICO_DPF_K8S_API_VIP="$(kubectl get endpoints kubernetes -n default \
             -o jsonpath='{.subsets[0].addresses[0].ip}')"
@@ -1664,7 +1665,8 @@ else
             # nico-api pod template is unchanged, so it does NOT roll on its own
             # and carbide-api keeps its in-memory DPF-off config ([dpf] is read
             # at startup only). Force a restart so it re-reads [dpf].enabled=true
-            # and creates the DPF init objects (BFB, DPUFlavor, DPUDeployment).
+            # and creates the DPF initialization objects (provisioning source,
+            # DPUFlavor, and DPUDeployment).
             echo "Restarting carbide-api so it reads the DPF-enabled config..."
             kubectl rollout restart deployment/nico-api -n nico-system
             kubectl rollout status deployment/nico-api -n nico-system --timeout=300s

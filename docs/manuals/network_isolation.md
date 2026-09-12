@@ -57,19 +57,29 @@ See the **REST API Reference** tab and the
 | Establish VPC peering | Tenant | **REST** `…/nico/vpc-peering` · `nicocli vpc-peering create` |
 | Attach a Network Security Group to a VPC or instance | Tenant | **REST** (`update-vpc` / `update-instance`) · `nicocli` |
 
-See [Who configures what, and how](#who-configures-what-and-how) for the role
+Refer to [Who configures what, and how](#who-configures-what-and-how) for the role
 and interface model.
 
-A tenant's instance reaches a VPC by drawing addresses from one of the
-**VpcPrefixes** attached to that VPC. NICo carves a /31 link-net per
-interface from the prefix — one address to the instance, one to the
-DPU's SVI in the VPC's VRF. An instance may participate in several VPCs
-at once by having interfaces drawing from prefixes in different VPCs.
-On the DPU of the managed host backing the instance, each related VPC
-materialises as a Linux VRF; every host interface drawing from a prefix
-in that VPC lives in that VRF. The tenant overlay is a pure type-5 EVPN
-(IP-prefix) overlay — NICo does not stretch any tenant L2 segment across
-the fabric.
+A tenant's instance reaches a DPU-managed FNN VPC by drawing addresses from a
+**VpcPrefix** attached to that VPC. A caller can select a specific
+VpcPrefix or provide a VPC ID and let NICo select an IPv4 prefix and
+address. Automatic selection tries eligible prefixes in stable prefix-ID
+order and advances when a prefix has no remaining capacity. The selected
+prefix is reported by address family in interface status.
+
+NICo represents IPv6-only and dual-stack automatic-selection modes internally.
+The external API does not accept these modes because downstream DPU support is
+incomplete.
+
+### Automatic-selection compatibility
+
+Automatic VPC selection is part of the caller's desired configuration.
+Clients that read and replace a complete instance configuration must
+understand and preserve the VPC selector unless intentionally changing
+network intent. If a client discards the selector and resubmits only the
+retained `network_segment_id`, NICo treats it as an explicit segment
+selection rather than recovering the omitted intent. An allocation failure
+leaves the existing configuration and resources unchanged.
 
 Ethernet isolation has three independent layers:
 

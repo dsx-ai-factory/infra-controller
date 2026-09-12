@@ -33,23 +33,27 @@ environment.
 
    Fedora - `sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose`
 
-5. Install ISC kea using your system package manager
+5. Install ISC Kea using your system package manager:
 
    Arch - `sudo pacman -S kea`
 
-   Debian/Ubuntu
-    - Install required libraries
+   Debian/Ubuntu:
+    - Install the required libraries:
         - `sudo apt-get install -y libboost-dev`
-        - download libssl1 from [here](http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/) and install `sudo dpkg -i <downloaded-lib>`.  `libssl1.1_1.1.0g-2ubuntu4_amd64.deb` is known to work but there are newer versions that haven't been tested
+        - Download `libssl1` from the
+          [Ubuntu package archive](http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/)
+          and install it with `sudo dpkg -i <downloaded-lib>`.
+          `libssl1.1_1.1.0g-2ubuntu4_amd64.deb` is known to work, but newer
+          versions have not been tested.
 
-   - Install kea, but might be out of date:
-     ```
-     sudo apt-get update && sudo apt-get install -y isc-kea-dhcp4-server isc-kea-dev
-     ```
-   - Or, but has only been tested with Ubuntu 23.10, install kea:
-     ```
-     sudo apt-get update && sudo apt-get install -y kea-dev kea-dhcp4-server
-     ```
+    - Install the Kea version provided by the Ubuntu repositories:
+      ```bash
+      sudo apt-get update && sudo apt-get install -y isc-kea-dhcp4-server isc-kea-dhcp6-server isc-kea-dev
+      ```
+    - Alternatively, install the Kea packages tested with Ubuntu 23.10:
+      ```bash
+      sudo apt-get update && sudo apt-get install -y kea-dev kea-dhcp4-server kea-dhcp6-server
+      ```
 
    Fedora - `sudo dnf install -y kea kea-devel kea-libs`
 

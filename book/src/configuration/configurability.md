@@ -191,7 +191,7 @@ explicitly enabled in the TOML.
 | `[measured_boot_collector]` | TPM-based attestation metrics | |
 | `[machine_validation_config]` | Pre-ingestion validation tests | |
 | `[component_manager]` | Compute tray, NvLink switch, and power shelf management | RMS backends require rack profile data for node descriptors. |
-| `[vmaas_config]` | VM system integration / VM-aware traffic intercept | Requires `public_prefixes`. |
+| `[vmaas_config]` | HBN traffic intercept bridging | Presence configures HBN traffic intercept bridging. Refer to the topology contract below. |
 | `[rms]` | Rack Manager Service (mTLS connectivity to external RMS) | |
 | `[dpf]` | DPU Platform Framework — Kubernetes DPU workload deployment | Requires the DPF operator deployed in-cluster (`helm-prereqs/setup.sh` installs it by default; `--skip-dpf` to opt out). |
 
@@ -782,18 +782,51 @@ le        = 24
 
 See [`crates/api-core/src/cfg/README.md` → FnnConfig / FnnRoutingProfileConfig / PrefixFilterPolicyEntry](../../../crates/api-core/src/cfg/README.md#fnnconfig).
 
-### VMaaS traffic interception — `[vmaas_config]` sub-blocks
+### HBN traffic intercept bridging — `[vmaas_config]` sub-blocks
 
-When `[vmaas_config]` is enabled, two nested blocks tune the bridging
-between the VM tenant network and the bare-metal underlay:
+The presence of `[vmaas_config]` supplies HBN traffic intercept bridging
+settings. The configuration has no separate `enabled` field. Configure
+intercept topology under
+`[vmaas_config.bridging.host_representor_intercept_bridging.<name>]`:
 
-- `[vmaas_config.traffic_intercept_bridging]` — uplink-side intercept config (TrafficInterceptBridging).
-- `[vmaas_config.host_intercept_bridging]` — host-side intercept config (HostInterceptBridging).
+```toml
+[vmaas_config]
+allow_instance_vf = true
 
-The host-side block typically sets VLAN IDs and MAC ranges per intercept
-pool; the uplink-side block defines public prefixes and how they are
-advertised. Both are documented field-by-field in
-[`crates/api-core/src/cfg/README.md` → VmaasConfig](../../../crates/api-core/src/cfg/README.md#vmaasconfig).
+[vmaas_config.bridging]
+hbn_bridge = "br-hbn"
+
+[vmaas_config.bridging.host_representor_intercept_bridging.pf0hpf]
+bridge = "br-pf0"
+patch_port = "p-pf0"
+dpf_interface = { controller_id = 1, pf_id = 0 }
+
+[vmaas_config.bridging.host_representor_intercept_bridging.pf0vf0]
+bridge = "br-vf0"
+patch_port = "p-vf0"
+dpf_interface = { controller_id = 1, pf_id = 0, vf_id = 0 }
+```
+
+Outside DPF, `bridging` is optional, and `hbn_bridge` defaults to `"br-hbn"`.
+NICo ignores `dpf_interface` and continues to support `skip_create = true`.
+Without this topology, the legacy static inventory and instance-admission
+behavior remain unchanged.
+
+With DPF enabled, a present `vmaas_config` requires `bridging` and a non-empty
+map. The map defines the complete HBN traffic intercept inventory of PFs and
+VFs.
+`dpf_interface` is required on every entry, and `skip_create` must remain
+`false`. Configure exactly one PF and any selected VFs under the same controller
+and PF parent. Each selected VF must be VF15 or lower and less than
+`dpu_config.num_of_vfs`, whose maximum is 126.
+
+When `allow_instance_vf = false`, NICo rejects every instance VF. When it is
+`true`, instance creation and network updates admit only VF IDs selected by the
+topology. A PF-only topology therefore admits no instance VFs. DPF derives
+`br-sfc` internally and ignores `hbn_reps`.
+
+Refer to the [`VmaasConfig` field contract](../../../crates/api-core/src/cfg/README.md#vmaasconfig)
+for all fields.
 
 ### InfiniBand fabric definitions — `[ib_fabrics.<name>]`
 
