@@ -2311,6 +2311,7 @@ impl SiteExplorer {
         for suppression in suppressions
             .iter()
             .filter(|suppression| suppression.acknowledged_at.is_none())
+            .unique_by(|suppression| suppression.bmc_mac_address)
         {
             let bmc_ips = db::machine_interface::lookup_bmc_ip_by_mac_address(
                 &self.database_connection,

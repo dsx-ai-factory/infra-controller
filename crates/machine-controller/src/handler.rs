@@ -1399,7 +1399,7 @@ impl MachineStateHandler {
                     site_explorer_pause::gate_before_credential_change(
                         &ctx.services.db_pool,
                         &bmc_macs,
-                        site_explorer_pause::ROTATION_SUPPRESSION_REASON,
+                        model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation,
                     )
                     .await?,
                     GateDecision::Wait
@@ -1451,7 +1451,7 @@ impl MachineStateHandler {
                         site_explorer_pause::resume_after_credential_change(
                             &mut txn,
                             &bmc_macs,
-                            site_explorer_pause::ROTATION_SUPPRESSION_REASON,
+                            model::bmc_suppression::BmcSuppressionSource::BmcCredentialRotation,
                         )
                         .await?;
                         Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))

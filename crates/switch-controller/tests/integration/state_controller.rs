@@ -136,6 +136,7 @@ async fn decommission_request_enters_rms_workflow(
         &mut *connection,
         bmc_mac,
         model::bmc_suppression::BmcSuppressionSubsystem::SiteExplorer,
+        model::bmc_suppression::BmcSuppressionSource::Decommissioning,
     )
     .await?
     .expect("Site Explorer suppression should be requested");

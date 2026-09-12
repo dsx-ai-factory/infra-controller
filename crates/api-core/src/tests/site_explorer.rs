@@ -25,7 +25,7 @@ use common::api_fixtures::TestEnv;
 use db::{self};
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::hardware_info::HardwareInfo;
 use model::machine::ManagedHostStateSnapshot;
 use model::machine_boot_interface::MachineBootInterfaceTarget;
@@ -735,6 +735,7 @@ async fn test_manual_refreshes_reject_site_explorer_suppressed_bmc(
             bmc_mac_address: bmc_interface.mac_address,
             reason: "manual refresh rejection test".to_string(),
             subsystem: BmcSuppressionSubsystem::SiteExplorer,
+            source: BmcSuppressionSource::Decommissioning,
         },
     )
     .await?;

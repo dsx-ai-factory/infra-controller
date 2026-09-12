@@ -22,7 +22,7 @@ use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
 use libredfish::{EnabledDisabled, JobState, PowerState, RedfishError, SystemPowerControl};
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode};
 use model::machine::{
     DecommissioningState, DeconfiguringDpuState, DeconfiguringHostState, Machine, ManagedHostState,
@@ -78,6 +78,7 @@ pub(super) async fn handle_suppressing_site_explorer(
             &NewBmcSuppression {
                 bmc_mac_address,
                 subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                source: BmcSuppressionSource::Decommissioning,
                 reason: format!("managed host {machine_id} is being decommissioned"),
             },
         )
@@ -624,6 +625,7 @@ async fn unacknowledged_dhcp_suppression_macs(
             &ctx.services.db_pool,
             mac_address,
             BmcSuppressionSubsystem::Dhcp,
+            BmcSuppressionSource::Decommissioning,
         )
         .await?;
         if suppression.is_none_or(|suppression| suppression.acknowledged_at.is_none()) {
@@ -700,6 +702,7 @@ pub(super) async fn handle_suppressing_oob_dhcp(
             &NewBmcSuppression {
                 bmc_mac_address: mac_address,
                 subsystem: BmcSuppressionSubsystem::Dhcp,
+                source: BmcSuppressionSource::Decommissioning,
                 reason: format!(
                     "managed host {} is being decommissioned; suppressing OOB DHCP",
                     state.host_snapshot.id
@@ -841,6 +844,7 @@ pub(super) async fn handle_suppressing_bmc_dhcp(
             &NewBmcSuppression {
                 bmc_mac_address,
                 subsystem: BmcSuppressionSubsystem::Dhcp,
+                source: BmcSuppressionSource::Decommissioning,
                 reason: format!(
                     "managed host {} is being decommissioned; suppressing BMC DHCP",
                     state.host_snapshot.id

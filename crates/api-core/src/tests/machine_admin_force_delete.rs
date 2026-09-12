@@ -1702,7 +1702,9 @@ async fn test_admin_force_delete_retains_boot_interface_ids(pool: sqlx::PgPool) 
 /// matches a permanent removal that expects a clean rediscovery.
 #[crate::sqlx_test]
 async fn test_admin_force_delete_clears_suppressions_and_retained_boot(pool: sqlx::PgPool) {
-    use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+    use model::bmc_suppression::{
+        BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
+    };
 
     let env = create_test_env(pool).await;
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
@@ -1726,6 +1728,7 @@ async fn test_admin_force_delete_clears_suppressions_and_retained_boot(pool: sql
         &NewBmcSuppression {
             bmc_mac_address: bmc_mac,
             subsystem: BmcSuppressionSubsystem::SiteExplorer,
+            source: BmcSuppressionSource::Decommissioning,
             reason: "test".to_string(),
         },
     )
@@ -1736,6 +1739,7 @@ async fn test_admin_force_delete_clears_suppressions_and_retained_boot(pool: sql
         &NewBmcSuppression {
             bmc_mac_address: bmc_mac,
             subsystem: BmcSuppressionSubsystem::Dhcp,
+            source: BmcSuppressionSource::Decommissioning,
             reason: "test".to_string(),
         },
     )
@@ -1762,16 +1766,18 @@ async fn test_admin_force_delete_clears_suppressions_and_retained_boot(pool: sql
 
     let mut txn = env.pool.begin().await.unwrap();
     assert!(
-        db::bmc_suppression::find(txn.as_mut(), bmc_mac, BmcSuppressionSubsystem::SiteExplorer)
-            .await
-            .unwrap()
-            .is_none()
+        !db::bmc_suppression::is_suppressed(
+            txn.as_mut(),
+            bmc_mac,
+            BmcSuppressionSubsystem::SiteExplorer
+        )
+        .await
+        .unwrap()
     );
     assert!(
-        db::bmc_suppression::find(txn.as_mut(), bmc_mac, BmcSuppressionSubsystem::Dhcp)
+        !db::bmc_suppression::is_suppressed(txn.as_mut(), bmc_mac, BmcSuppressionSubsystem::Dhcp)
             .await
             .unwrap()
-            .is_none()
     );
     assert!(
         db::retained_boot_interface::find_by_mac(txn.as_mut(), boot_mac, None)

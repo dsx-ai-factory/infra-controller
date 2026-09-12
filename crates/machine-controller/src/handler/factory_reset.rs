@@ -92,12 +92,6 @@ use state_controller::state_handler::{
 
 use crate::context::MachineStateHandlerContextObjects;
 
-/// The `reason` this flow stamps on the site-explorer suppression it owns.
-/// Deletes in [`remove_suppression`] are scoped to it (via the shared
-/// [`site_explorer_pause`] module) so a factory reset never removes a
-/// rotation's or an operator's suppression for the same BMC, and vice versa.
-const FACTORY_RESET_SUPPRESSION_REASON: &str = "factory_reset_bmc";
-
 /// Small intra-tick delay between the two credential probes, mirroring
 /// site-explorer's `BMC_AUTH_RETRY_DURATION`, so a BMC that throttles after a
 /// failed auth has a moment to recover before the second probe.
@@ -408,8 +402,8 @@ async fn check_preconditions(
 /// [`check_preconditions`], so this state is purely the suppress/acknowledge/
 /// budget handshake, delegated to the shared [`site_explorer_pause`] module --
 /// the same barrier BMC credential rotation uses -- scoped to
-/// [`FACTORY_RESET_SUPPRESSION_REASON`]. It idempotently ensures the suppression
-/// row exists, returns [`GateDecision::Proceed`] once site-explorer has
+/// [`model::bmc_suppression::BmcSuppressionSource::FactoryResetBmc`]. It idempotently upserts the
+/// suppression row, returns [`GateDecision::Proceed`] once site-explorer has
 /// acknowledged it (or once the pause budget elapses, so a disabled/`listen_only`
 /// explorer that can never ack does not wedge us -- the row alone already makes
 /// the next sweep skip this BMC), and otherwise [`GateDecision::Wait`].
@@ -422,7 +416,7 @@ async fn suppress_exploration(
     match site_explorer_pause::gate_before_credential_change(
         &ctx.services.db_pool,
         &[host_bmc_mac],
-        FACTORY_RESET_SUPPRESSION_REASON,
+        model::bmc_suppression::BmcSuppressionSource::FactoryResetBmc,
     )
     .await?
     {
@@ -689,7 +683,7 @@ async fn remove_suppression(
     site_explorer_pause::resume_after_credential_change(
         &mut txn,
         &[host_bmc_mac],
-        FACTORY_RESET_SUPPRESSION_REASON,
+        model::bmc_suppression::BmcSuppressionSource::FactoryResetBmc,
     )
     .await?;
     Ok(power_cycle.with_txn(txn))

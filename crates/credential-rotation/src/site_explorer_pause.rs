@@ -39,9 +39,9 @@
 //! This module is state-machine-neutral so the machine-, switch-, and
 //! power-shelf-controllers' rotation flows and the machine-controller's
 //! host-BMC factory-reset flow share one implementation. Each caller passes its
-//! own suppression `reason` so deletes stay scoped to the rows that caller owns
-//! (a factory reset never removes a rotation's suppression, or vice versa). The
-//! whole gate is re-derived from the suppression row each tick (its
+//! own [`BmcSuppressionSource`] so deletes stay scoped to the rows that caller
+//! owns (a factory reset never removes a rotation's suppression, or vice versa).
+//! The whole gate is re-derived from the suppression row each tick (its
 //! `requested_at` is the wait-budget clock and its `acknowledged_at` is the
 //! barrier), so callers need no new persisted sub-state.
 
@@ -50,13 +50,8 @@ use std::time::Duration;
 use chrono::Utc;
 use db::DatabaseError;
 use mac_address::MacAddress;
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use sqlx::{PgConnection, PgPool};
-
-/// The `reason` rotation flows stamp on the suppressions they own. Deletes are
-/// scoped to a caller-supplied reason so a rotation never removes an operator's
-/// (differently-reasoned) suppression for the same BMC -- nor a factory reset's.
-pub const ROTATION_SUPPRESSION_REASON: &str = "bmc_credential_rotation";
 
 /// How long a controller waits for site-explorer to acknowledge the suppression
 /// before proceeding anyway.
@@ -79,18 +74,16 @@ pub enum GateDecision {
     Wait,
 }
 
-/// Ensure every in-scope BMC MAC is suppressed for site-explorer (under the
-/// caller-supplied `reason`) and report whether it is safe to change credentials
-/// this tick.
+/// Ensure every in-scope BMC MAC is suppressed for site-explorer under
+/// `source` and report whether it is safe to change credentials this tick.
 ///
-/// Idempotent: re-running each tick preserves an existing suppression (including
-/// an operator's, or another subsystem's, whose `reason` is never overwritten)
-/// and its timestamps. An empty `macs` (nothing addressable to change) is always
+/// Idempotent: re-running each tick preserves this source's timestamps. Other
+/// sources' rows are not overwritten. An empty `macs` is always
 /// [`GateDecision::Proceed`].
 pub async fn gate_before_credential_change(
     pool: &PgPool,
     macs: &[MacAddress],
-    reason: &str,
+    source: BmcSuppressionSource,
 ) -> Result<GateDecision, DatabaseError> {
     if macs.is_empty() {
         return Ok(GateDecision::Proceed);
@@ -101,19 +94,24 @@ pub async fn gate_before_credential_change(
         .await
         .map_err(|e| DatabaseError::query("begin site-explorer pause gate transaction", e))?;
     for mac in macs {
-        db::bmc_suppression::ensure_present(
+        db::bmc_suppression::upsert(
             &mut txn,
             &NewBmcSuppression {
                 bmc_mac_address: *mac,
                 subsystem: BmcSuppressionSubsystem::SiteExplorer,
-                reason: reason.to_string(),
+                source,
+                reason: "site explorer pause".to_string(),
             },
         )
         .await?;
     }
-    let rows =
-        db::bmc_suppression::find_many(&mut *txn, macs, BmcSuppressionSubsystem::SiteExplorer)
-            .await?;
+    let rows = db::bmc_suppression::find_many(
+        &mut *txn,
+        macs,
+        BmcSuppressionSubsystem::SiteExplorer,
+        source,
+    )
+    .await?;
     txn.commit()
         .await
         .map_err(|e| DatabaseError::query("commit site-explorer pause gate transaction", e))?;
@@ -130,9 +128,7 @@ pub async fn gate_before_credential_change(
     // acknowledge: proceed once every still-unacknowledged suppression has itself
     // outlived the pause budget. Measured as the *newest* unacknowledged
     // `requested_at` -- once that has aged past the budget, so has every older
-    // one. Acknowledged rows are excluded so an operator suppression with a
-    // days-old `requested_at` (already acknowledged) cannot short-circuit the
-    // wait for a freshly inserted, still-unacknowledged rotation suppression.
+    // one.
     let newest_unacknowledged = rows
         .iter()
         .filter(|row| row.acknowledged_at.is_none())
@@ -145,7 +141,7 @@ pub async fn gate_before_credential_change(
         if waited > budget {
             tracing::warn!(
                 waited_secs = waited.num_seconds(),
-                %reason,
+                ?source,
                 "proceeding with BMC credential change without site-explorer acknowledgement: \
                  pause budget exceeded (site-explorer disabled or unavailable?)"
             );
@@ -156,26 +152,24 @@ pub async fn gate_before_credential_change(
     Ok(GateDecision::Wait)
 }
 
-/// Delete the suppressions the caller created for `macs` (matching `reason`),
-/// releasing site-explorer to resume probing.
+/// Delete the suppressions `source` created for `macs`, releasing site-explorer
+/// to resume probing if no other source still holds a row.
 ///
-/// Reason-scoped, so an operator suppression -- or another subsystem's -- for
-/// the same BMC is left intact. The delete is issued on the caller's
-/// transaction so it commits atomically with the state transition that ends the
-/// credential change.
+/// The delete is issued on the caller's transaction so it commits atomically
+/// with the state transition that ends the credential change.
 pub async fn resume_after_credential_change(
     txn: &mut PgConnection,
     macs: &[MacAddress],
-    reason: &str,
+    source: BmcSuppressionSource,
 ) -> Result<(), DatabaseError> {
     if macs.is_empty() {
         return Ok(());
     }
-    db::bmc_suppression::delete_many_with_reason(
+    db::bmc_suppression::delete_many_for_source(
         txn,
         macs,
         BmcSuppressionSubsystem::SiteExplorer,
-        reason,
+        source,
     )
     .await?;
     Ok(())
@@ -184,13 +178,10 @@ pub async fn resume_after_credential_change(
 #[cfg(test)]
 mod tests {
     use mac_address::MacAddress;
-    use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+    use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
     use sqlx::PgPool;
 
-    use super::{
-        GateDecision, ROTATION_SUPPRESSION_REASON, gate_before_credential_change,
-        resume_after_credential_change,
-    };
+    use super::{GateDecision, gate_before_credential_change};
 
     fn mac(last: u8) -> MacAddress {
         MacAddress::new([0x02, 0, 0, 0, 0, last])
@@ -199,7 +190,7 @@ mod tests {
     #[carbide_macros::sqlx_test]
     async fn an_empty_scope_proceeds(pool: PgPool) {
         assert_eq!(
-            gate_before_credential_change(&pool, &[], ROTATION_SUPPRESSION_REASON)
+            gate_before_credential_change(&pool, &[], BmcSuppressionSource::BmcCredentialRotation,)
                 .await
                 .unwrap(),
             GateDecision::Proceed
@@ -212,9 +203,13 @@ mod tests {
 
         // First pass records the suppressions; nothing is acknowledged yet.
         assert_eq!(
-            gate_before_credential_change(&pool, &macs, ROTATION_SUPPRESSION_REASON)
-                .await
-                .unwrap(),
+            gate_before_credential_change(
+                &pool,
+                &macs,
+                BmcSuppressionSource::BmcCredentialRotation,
+            )
+            .await
+            .unwrap(),
             GateDecision::Wait
         );
 
@@ -231,9 +226,13 @@ mod tests {
         );
         txn.commit().await.unwrap();
         assert_eq!(
-            gate_before_credential_change(&pool, &macs, ROTATION_SUPPRESSION_REASON)
-                .await
-                .unwrap(),
+            gate_before_credential_change(
+                &pool,
+                &macs,
+                BmcSuppressionSource::BmcCredentialRotation,
+            )
+            .await
+            .unwrap(),
             GateDecision::Wait
         );
 
@@ -250,49 +249,14 @@ mod tests {
         );
         txn.commit().await.unwrap();
         assert_eq!(
-            gate_before_credential_change(&pool, &macs, ROTATION_SUPPRESSION_REASON)
-                .await
-                .unwrap(),
+            gate_before_credential_change(
+                &pool,
+                &macs,
+                BmcSuppressionSource::BmcCredentialRotation,
+            )
+            .await
+            .unwrap(),
             GateDecision::Proceed
-        );
-    }
-
-    #[carbide_macros::sqlx_test]
-    async fn resume_removes_only_reason_owned_suppressions(pool: PgPool) {
-        // Rotation owns mac(1); an operator owns mac(2).
-        gate_before_credential_change(&pool, &[mac(1)], ROTATION_SUPPRESSION_REASON)
-            .await
-            .unwrap();
-        let mut txn = pool.begin().await.unwrap();
-        db::bmc_suppression::upsert(
-            &mut txn,
-            &NewBmcSuppression {
-                bmc_mac_address: mac(2),
-                subsystem: BmcSuppressionSubsystem::SiteExplorer,
-                reason: "decommissioning".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-        txn.commit().await.unwrap();
-
-        let mut txn = pool.begin().await.unwrap();
-        resume_after_credential_change(&mut txn, &[mac(1), mac(2)], ROTATION_SUPPRESSION_REASON)
-            .await
-            .unwrap();
-        txn.commit().await.unwrap();
-
-        assert!(
-            db::bmc_suppression::find(&pool, mac(1), BmcSuppressionSubsystem::SiteExplorer)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            db::bmc_suppression::find(&pool, mac(2), BmcSuppressionSubsystem::SiteExplorer)
-                .await
-                .unwrap()
-                .is_some()
         );
     }
 }

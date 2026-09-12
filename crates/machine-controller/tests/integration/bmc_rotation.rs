@@ -34,7 +34,7 @@ use db::credential_rotation::{
     record_device_converged, set_next_target_version,
 };
 use mac_address::MacAddress;
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::machine::ManagedHostState;
 use model::test_support::ManagedHostConfig;
 
@@ -480,6 +480,7 @@ async fn rotation_preserves_an_operator_suppression(
             &NewBmcSuppression {
                 bmc_mac_address: host_mac,
                 subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                source: BmcSuppressionSource::Decommissioning,
                 reason: "decommissioning".to_string(),
             },
         )
@@ -506,10 +507,14 @@ async fn rotation_preserves_an_operator_suppression(
             .expect("device rotation row should exist");
         assert!(status.converged, "device should have rotated");
     }
-    let operator =
-        db::bmc_suppression::find(&pool, host_mac, BmcSuppressionSubsystem::SiteExplorer)
-            .await?
-            .expect("operator suppression must survive the rotation");
+    let operator = db::bmc_suppression::find(
+        &pool,
+        host_mac,
+        BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::Decommissioning,
+    )
+    .await?
+    .expect("operator suppression must survive the rotation");
     assert_eq!(
         operator.reason, "decommissioning",
         "the operator's suppression reason must be preserved"
