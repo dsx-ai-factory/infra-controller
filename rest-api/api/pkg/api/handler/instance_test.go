@@ -4301,6 +4301,11 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 	inst1 := testInstanceBuildInstance(t, dbSession, "test-instance-1", tn1.ID, ip.ID, st1.ID, &ist1.ID, vpc1.ID, cutil.GetPtr(mc1.ID), &os2.ID, nil, cdbm.InstanceStatusReady)
 	assert.NotNil(t, inst1)
+
+	sxp1 := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-1", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusReady)
+	sxpPending := testBuildSpectrumXPartition(t, dbSession, "test-spectrumx-partition-pending", tnOrg1, st1, tn1, nil, cdbm.SpectrumXPartitionStatusPending)
+	assert.NotNil(t, sxp1)
+
 	existingPowerProfile := "balanced"
 	_, updatePowerProfileErr := dbSession.DB.Exec("UPDATE instance SET power_profile = ? WHERE id = ?", existingPowerProfile, inst1.ID)
 	require.NoError(t, updatePowerProfileErr)
@@ -4877,6 +4882,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		expectedPropagationDetailedStatus     *string
 		expectedPropagationStatus             *string
 		expectedSitePowerProfile              *string
+		expectedSiteSpectrumXAttachmentCount  *int
 		// When true, only assert len(siteReq.Config.Nvlink.GpuConfigs) matches the request (e.g. NVLink no-op where workflow uses DB order).
 		nvLinkGpuConfigsVerifyCountOnly bool
 		// When non-nil, expected len(siteReq.Config.Nvlink.GpuConfigs) for verifySiteControllerRequest (default: len(reqData.NVLinkInterfaces)).
@@ -4937,10 +4943,10 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					IpxeScript: os2.IpxeScript,
 					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{
 						{
-							SpectrumXPartitionID: uuid.NewString(),
+							SpectrumXPartitionID: sxp1.ID.String(),
 							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 							DeviceInstance:       cutil.GetPtr(0),
-							AttachmentType:       model.SpectrumXAttachmentTypePhysical,
+							AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 						},
 					},
 				},
@@ -4951,6 +4957,103 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				respCode:              http.StatusOK,
 			},
 			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update carries existing SpectrumX Attachments when the request omits them",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				// Runs directly after the SpectrumX-only case, which left inst1 with one
+				// attachment. Omitting the list here must not clear it on the Site.
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+				},
+				reqInstance:                          inst1.ID.String(),
+				cleanInstanceToStatus:                inst1.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(1),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update omits SpectrumX Attachments marked Deleting from the Site config",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				// An empty list retires the attachment left by the cases above, so the next
+				// unrelated PATCH must not re-assert it to the Site.
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript:           os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{},
+				},
+				reqInstance:                          inst1.ID.String(),
+				cleanInstanceToStatus:                inst1.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(0),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update does not re-assert a Deleting SpectrumX Attachment",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				// Omitting the list carries the persisted set forward, but the row retired
+				// above is in Deleting and must stay out of the Site config.
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+				},
+				reqInstance:                          inst1.ID.String(),
+				cleanInstanceToStatus:                inst1.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(0),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
+			name: "test Instance update rejects a SpectrumX Attachment on a non-Ready Partition",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{
+						{
+							SpectrumXPartitionID: sxpPending.ID.String(),
+							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+							DeviceInstance:       cutil.GetPtr(0),
+							AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+						},
+					},
+				},
+				reqInstance:           inst1.ID.String(),
+				cleanInstanceToStatus: inst1.Status,
+				reqOrg:                tnOrg1,
+				reqUser:               tnu1,
+				respCode:              http.StatusBadRequest,
+			},
 		},
 		{
 			name: "test Instance update rejects power profile when DPS power management is disabled",
@@ -7843,6 +7946,14 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						}
 					}
 
+					// The Site config is a replacement rather than a merge, so it is always sent.
+					require.NotNil(t, siteReq.Config.Spxconfig)
+
+					if tt.args.expectedSiteSpectrumXAttachmentCount != nil {
+						assert.Len(t, siteReq.Config.Spxconfig.SpxAttachments, *tt.args.expectedSiteSpectrumXAttachmentCount,
+							"an update that omits spectrumXAttachments must still carry the persisted set")
+					}
+
 					// Verify the SpectrumX Attachments are in the Site Controller request
 					if len(tt.args.reqData.SpectrumXAttachments) > 0 {
 						require.NotNil(t, siteReq.Config.Spxconfig)
@@ -7852,6 +7963,16 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						for i := range siteReq.Config.Spxconfig.SpxAttachments {
 							assert.Equal(t, siteReq.Config.Spxconfig.SpxAttachments[i].SpxPartitionId.Value, tt.args.reqData.SpectrumXAttachments[i].SpectrumXPartitionID)
 							assert.Equal(t, siteReq.Config.Spxconfig.SpxAttachments[i].Device, tt.args.reqData.SpectrumXAttachments[i].Device)
+						}
+
+						// The Site request is built from persisted rows, so the response has to
+						// carry the same attachments back.
+						require.Len(t, rst.SpectrumXAttachments, len(tt.args.reqData.SpectrumXAttachments))
+						for i, apiSxA := range rst.SpectrumXAttachments {
+							assert.Equal(t, tt.args.reqData.SpectrumXAttachments[i].SpectrumXPartitionID, apiSxA.SpectrumXPartitionID)
+							assert.Equal(t, tt.args.reqData.SpectrumXAttachments[i].Device, apiSxA.Device)
+							assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, apiSxA.Status)
+							assert.Equal(t, rst.ID, apiSxA.InstanceID)
 						}
 					}
 

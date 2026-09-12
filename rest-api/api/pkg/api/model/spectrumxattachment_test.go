@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,7 +19,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 		spectrumXPartitionID string
 		device               string
 		deviceInstance       *int
-		attachmentType       SpectrumXAttachmentType
+		attachmentType       cdbm.SpectrumXAttachmentType
 		virtualFunctionID    *int
 	}
 	tests := []struct {
@@ -36,7 +36,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(0),
-				attachmentType:       SpectrumXAttachmentTypePhysical,
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 			},
 			wantErr: false,
 		},
@@ -48,17 +48,17 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(3),
-				attachmentType:       SpectrumXAttachmentTypeVirtual,
+				attachmentType:       cdbm.SpectrumXAttachmentTypeVirtual,
 			},
 			wantErr: true,
 		},
 		{
-			name: "test validation success, OVN attachment",
+			name: "test validation success, OVS attachment",
 			fields: fields{
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(0),
-				attachmentType:       SpectrumXAttachmentTypeOVN,
+				attachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
 			},
 			wantErr: false,
 		},
@@ -68,7 +68,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 				spectrumXPartitionID: "badid",
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(0),
-				attachmentType:       SpectrumXAttachmentTypePhysical,
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 			},
 			wantErr: true,
 		},
@@ -77,7 +77,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 			fields: fields{
 				spectrumXPartitionID: uuid.New().String(),
 				deviceInstance:       cutil.GetPtr(0),
-				attachmentType:       SpectrumXAttachmentTypePhysical,
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 			},
 			wantErr: true,
 		},
@@ -86,7 +86,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 			fields: fields{
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
-				attachmentType:       SpectrumXAttachmentTypePhysical,
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 			},
 			wantErr: true,
 		},
@@ -106,7 +106,7 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 				spectrumXPartitionID: uuid.New().String(),
 				device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 				deviceInstance:       cutil.GetPtr(0),
-				attachmentType:       SpectrumXAttachmentTypePhysical,
+				attachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
 				virtualFunctionID:    cutil.GetPtr(2),
 			},
 			wantErr: true,
@@ -146,62 +146,6 @@ func TestAPISpectrumXAttachmentCreateOrUpdateRequest_Validate(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
-		})
-	}
-}
-
-func TestAPISpectrumXAttachmentCreateOrUpdateRequest_ToProto(t *testing.T) {
-	partitionID := uuid.New().String()
-	tests := []struct {
-		name                  string
-		request               APISpectrumXAttachmentCreateOrUpdateRequest
-		wantAttachmentType    corev1.SpxAttachmentType
-		wantVirtualFunctionID *uint32
-	}{
-		{
-			name: "Physical attachment leaves virtualFunctionId unset",
-			request: APISpectrumXAttachmentCreateOrUpdateRequest{
-				SpectrumXPartitionID: partitionID,
-				Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
-				DeviceInstance:       cutil.GetPtr(0),
-				AttachmentType:       SpectrumXAttachmentTypePhysical,
-			},
-			wantAttachmentType: corev1.SpxAttachmentType_Physical,
-		},
-		{
-			name: "Virtual attachment carries virtualFunctionId",
-			request: APISpectrumXAttachmentCreateOrUpdateRequest{
-				SpectrumXPartitionID: partitionID,
-				Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
-				DeviceInstance:       cutil.GetPtr(3),
-				AttachmentType:       SpectrumXAttachmentTypeVirtual,
-				VirtualFunctionID:    cutil.GetPtr(2),
-			},
-			wantAttachmentType:    corev1.SpxAttachmentType_Virtual,
-			wantVirtualFunctionID: cutil.GetPtr(uint32(2)),
-		},
-		{
-			name: "OVN attachment maps to the Ovs enum",
-			request: APISpectrumXAttachmentCreateOrUpdateRequest{
-				SpectrumXPartitionID: partitionID,
-				Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
-				DeviceInstance:       cutil.GetPtr(1),
-				AttachmentType:       SpectrumXAttachmentTypeOVN,
-			},
-			wantAttachmentType: corev1.SpxAttachmentType_Ovn,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.request.ToProto()
-
-			require.NotNil(t, got)
-			require.NotNil(t, got.SpxPartitionId)
-			assert.Equal(t, tt.request.SpectrumXPartitionID, got.SpxPartitionId.Value)
-			assert.Equal(t, tt.request.Device, got.Device)
-			assert.Equal(t, uint32(*tt.request.DeviceInstance), got.DeviceInstance)
-			assert.Equal(t, tt.wantAttachmentType, got.AttachmentType)
-			assert.Equal(t, tt.wantVirtualFunctionID, got.VirtualFunctionId)
 		})
 	}
 }

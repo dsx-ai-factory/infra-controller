@@ -144,6 +144,12 @@ func TestSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create InfiniBandInterface table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.InfiniBandInterface)(nil))
 	assert.Nil(t, err)
+	// create SpectrumXPartition table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SpectrumXPartition)(nil))
+	assert.Nil(t, err)
+	// create SpectrumXAttachment table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SpectrumXAttachment)(nil))
+	assert.Nil(t, err)
 	// create DpuExtensionService table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.DpuExtensionService)(nil))
 	assert.Nil(t, err)
@@ -499,6 +505,43 @@ func TestBuildInfiniBandInterface(t *testing.T, dbSession *cdb.Session, instance
 	_, err := dbSession.DB.NewInsert().Model(ibi).Exec(context.Background())
 	assert.Nil(t, err)
 	return ibi
+}
+
+// TestBuildSpectrumXPartition builds and returns a SpectrumXPartition
+func TestBuildSpectrumXPartition(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, tenant *cdbm.Tenant, vni *int, status cdbm.SpectrumXPartitionStatus, isMissingOnSite bool) *cdbm.SpectrumXPartition {
+	sxp := &cdbm.SpectrumXPartition{
+		ID:              uuid.New(),
+		Name:            name,
+		Description:     cutil.GetPtr("Test SpectrumX Partition"),
+		Org:             tenant.Org,
+		SiteID:          site.ID,
+		TenantID:        tenant.ID,
+		VNI:             vni,
+		Status:          status,
+		IsMissingOnSite: isMissingOnSite,
+	}
+
+	_, err := dbSession.DB.NewInsert().Model(sxp).Exec(context.Background())
+	assert.Nil(t, err)
+	return sxp
+}
+
+// TestBuildSpectrumXAttachment builds and returns a SpectrumXAttachment
+func TestBuildSpectrumXAttachment(t *testing.T, dbSession *cdb.Session, instanceID, siteID, spectrumXPartitionID uuid.UUID, device string, deviceInstance int, attachmentType cdbm.SpectrumXAttachmentType, status string, isMissingOnSite bool) *cdbm.SpectrumXAttachment {
+	sxa := &cdbm.SpectrumXAttachment{
+		ID:                   uuid.New(),
+		InstanceID:           instanceID,
+		SiteID:               siteID,
+		SpectrumXPartitionID: spectrumXPartitionID,
+		Device:               device,
+		DeviceInstance:       deviceInstance,
+		AttachmentType:       attachmentType,
+		Status:               status,
+		IsMissingOnSite:      isMissingOnSite,
+	}
+	_, err := dbSession.DB.NewInsert().Model(sxa).Exec(context.Background())
+	assert.Nil(t, err)
+	return sxa
 }
 
 // TestBuildDpuExtensionService build DPU Extension Service

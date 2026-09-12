@@ -51,6 +51,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"interface":                 1,
 		"infiniband-interface":      2,
 		"infiniband-partition":      5,
+		"spectrumx-partition":       4,
 		"nvlink-interface":          2,
 		"nvlink-logical-partition":  4,
 		"expected-machine":          9,
@@ -133,6 +134,11 @@ func TestNewAPIRoutes(t *testing.T) {
 			credentialRotationPath := "/org/:orgName/" + cfg.GetAPIName() + "/credential/rotation"
 			assertRouteExists(t, got, http.MethodPost, credentialRotationPath)
 			assertRouteExists(t, got, http.MethodGet, credentialRotationPath)
+			spectrumXPartitionPath := "/org/:orgName/" + cfg.GetAPIName() + "/spectrumx-partition"
+			assertRouteExists(t, got, http.MethodPost, spectrumXPartitionPath)
+			assertRouteExists(t, got, http.MethodGet, spectrumXPartitionPath)
+			assertRouteExists(t, got, http.MethodGet, spectrumXPartitionPath+"/:id")
+			assertRouteExists(t, got, http.MethodDelete, spectrumXPartitionPath+"/:id")
 			taskPath := "/org/:orgName/" + cfg.GetAPIName() + "/task"
 			assertRouteExists(t, got, http.MethodGet, taskPath)
 			assertRouteBefore(t, got, http.MethodGet, taskPath, http.MethodGet, taskPath+"/:id")

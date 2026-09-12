@@ -197,6 +197,13 @@ tags:
     description: |-
       InfiniBand (IB) is a high-performance, low-latency networking standard designed for interconnecting servers and storage in HPC (High-Performance Computing) and AI systems,
       utilizing RDMA (Remote Direct Memory Access) to reduce CPU overhead. InfiniBand Partitions are used to group Machines into logical partitions for network isolation and load distribution.
+  - name: SpectrumX Partition
+    x-displayName: SpectrumX Partition
+    description: |-
+      NVIDIA Spectrum-X is an Ethernet networking platform for AI workloads, pairing Spectrum-X switches with SpectrumX SuperNICs to carry east-west GPU-to-GPU traffic.
+      SpectrumX Partitions are the network segments that Instances attach to over those SuperNICs, each identified on the wire by a VXLAN Network Identifier (VNI).
+
+      An Instance attaches to a Partition through a SpectrumX Attachment, which names the device and device instance to attach over. Attachments are managed as part of the Instance create and update requests rather than as their own endpoints.
   - name: NVLink Logical Partition
     x-displayName: NVLink Logical Partition
     description: |-
@@ -6126,6 +6133,275 @@ paths:
                     team: devops
       tags:
         - InfiniBand Partition
+  '/v2/org/{org}/nico/spectrumx-partition':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    get:
+      summary: Retrieve all SpectrumX Partitions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SpectrumXPartition'
+              examples:
+                Example 1:
+                  value:
+                    - id: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+                      name: east-west-net
+                      description: SpectrumX Partition for east-west training traffic
+                      siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+                      tenantId: f97df110-f4de-492e-8849-4a6af68026b0
+                      vni: 10200
+                      labels:
+                        environment: production
+                        team: devops
+                      status: Ready
+                      statusHistory:
+                        - status: Ready
+                          message: SpectrumX Partition is ready for use
+                          created: '2019-08-24T14:15:22Z'
+                          updated: '2019-08-24T14:15:22Z'
+                      created: '2019-08-24T14:15:22Z'
+                      updated: '2019-08-24T14:15:22Z'
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
+              description: Pagination result in JSON format
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      operationId: get-all-spectrumx-partition
+      description: |-
+        Retrieve all SpectrumX Partitions for the org
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: siteId
+          description: Filter Partitions by Site
+        - schema:
+            type: string
+            enum:
+              - Pending
+              - Provisioning
+              - Ready
+              - Error
+              - Deleting
+          in: query
+          name: status
+          description: Filter Partitions by Status
+        - schema:
+            type: string
+          in: query
+          name: query
+          description: 'Search for matches across all SpectrumX Partitions. Input will be matched against name, description, status and labels fields'
+        - schema:
+            type: string
+            enum:
+              - Site
+              - Tenant
+          in: query
+          name: includeRelation
+          description: Related entity to expand
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            example: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            example: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            default: CREATED_ASC
+            enum:
+              - NAME_ASC
+              - NAME_DESC
+              - STATUS_ASC
+              - STATUS_DESC
+              - CREATED_ASC
+              - CREATED_DESC
+              - UPDATED_ASC
+              - UPDATED_DESC
+          in: query
+          name: orderBy
+          description: 'Ordering for pagination query. Defaults to CREATED_ASC.'
+      tags:
+        - SpectrumX Partition
+    post:
+      summary: Create SpectrumX Partition
+      operationId: create-spectrumx-partition
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpectrumXPartition'
+              examples:
+                Example 1:
+                  value:
+                    id: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+                    name: east-west-net
+                    description: SpectrumX Partition for east-west training traffic
+                    siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+                    tenantId: f97df110-f4de-492e-8849-4a6af68026b0
+                    vni: 10200
+                    labels:
+                      environment: production
+                      team: devops
+                    status: Pending
+                    statusHistory:
+                      - status: Pending
+                        message: 'SpectrumX Partition request received, pending creation on Site'
+                        created: '2019-08-24T14:15:22Z'
+                        updated: '2019-08-24T14:15:22Z'
+                    created: '2019-08-24T14:15:22Z'
+                    updated: '2019-08-24T14:15:22Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: 'A SpectrumX Partition with the requested name already exists for the Tenant on the Site. The response data carries the conflicting Partition ID.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+      description: |-
+        Create a SpectrumX Partition for the org.
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+
+        The Tenant must be associated with the Site and hold an Allocation on it. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpectrumXPartitionCreateRequest'
+            examples:
+              Example 1:
+                value:
+                  name: east-west-net
+                  siteId: 69dae3c8-3554-4a1f-b391-858c6dc47fff
+                  labels:
+                    environment: production
+                    team: devops
+      tags:
+        - SpectrumX Partition
+  '/v2/org/{org}/nico/spectrumx-partition/{spectrumXPartitionId}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: spectrumXPartitionId
+        in: path
+        required: true
+        description: ID of the SpectrumX Partition
+    get:
+      summary: Retrieve SpectrumX Partition
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpectrumXPartition'
+              examples:
+                Example 1:
+                  value:
+                    id: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+                    name: east-west-net
+                    description: SpectrumX Partition for east-west training traffic
+                    siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+                    tenantId: f97df110-f4de-492e-8849-4a6af68026b0
+                    vni: 10200
+                    labels:
+                      environment: production
+                      team: devops
+                    status: Ready
+                    statusHistory:
+                      - status: Ready
+                        message: SpectrumX Partition is ready for use
+                        created: '2019-08-24T14:15:22Z'
+                        updated: '2019-08-24T14:15:22Z'
+                    created: '2019-08-24T14:15:22Z'
+                    updated: '2019-08-24T14:15:22Z'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+      operationId: get-spectrumx-partition
+      description: |-
+        Retrieve a specific SpectrumX Partition
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+
+        Tenant must own the Partition.
+      parameters:
+        - schema:
+            type: string
+            enum:
+              - Site
+              - Tenant
+          in: query
+          name: includeRelation
+          description: Related entity to expand
+      tags:
+        - SpectrumX Partition
+    delete:
+      summary: Delete SpectrumX Partition
+      operationId: delete-spectrumx-partition
+      responses:
+        '202':
+          description: Deletion request was accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                example-1:
+                  value:
+                    message: Deletion request was accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+      description: |-
+        Delete a specific SpectrumX Partition by ID.
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+
+        Tenant must own the Partition. The request is rejected while any Instance is still attached to the Partition. The Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
+      tags:
+        - SpectrumX Partition
   '/v2/org/{org}/nico/nvlink-logical-partition':
     parameters:
       - schema:
@@ -20447,6 +20723,261 @@ components:
           description: String key-value pairs describing Partition labels. Up to 10 key-value pairs can be specified
       required:
         - name
+    SpectrumXPartition:
+      title: SpectrumXPartition
+      type: object
+      description: SpectrumX Partitions are east-west network segments that Instances attach to over SpectrumX interfaces
+      examples:
+        - id: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+          name: east-west-net
+          description: SpectrumX Partition for east-west training traffic
+          siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+          tenantId: f97df110-f4de-492e-8849-4a6af68026b0
+          vni: 10200
+          labels:
+            environment: production
+            team: devops
+          status: Ready
+          statusHistory:
+            - status: Ready
+              message: SpectrumX Partition is ready for use
+              created: '2019-08-24T14:15:22Z'
+              updated: '2019-08-24T14:15:22Z'
+          created: '2019-08-24T14:15:22Z'
+          updated: '2019-08-24T14:15:22Z'
+      properties:
+        id:
+          type: string
+          description: 'Unique UUID v4 identifier for the SpectrumX Partition'
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          description: 'Name of the SpectrumX Partition'
+          minLength: 2
+          maxLength: 256
+        description:
+          type:
+            - string
+            - 'null'
+          description: 'Description of the SpectrumX Partition'
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site the Partition belongs to
+        site:
+          $ref: '#/components/schemas/SiteSummary'
+          description: Summary of the Site, present when requested through includeRelation
+        tenantId:
+          type: string
+          format: uuid
+          description: ID of the Tenant that owns the Partition
+        tenant:
+          $ref: '#/components/schemas/TenantSummary'
+          description: Summary of the Tenant, present when requested through includeRelation
+        vni:
+          type:
+            - integer
+            - 'null'
+          description: 'VXLAN Network Identifier for the Partition. Allocated by the Site when the create request omits it'
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: String key-value pairs describing Partition labels. Up to 10 key-value pairs can be specified
+        status:
+          type: string
+          enum:
+            - Pending
+            - Provisioning
+            - Ready
+            - Error
+            - Deleting
+          description: 'Status of the SpectrumX Partition. A Partition becomes Ready once the Site reports it in inventory'
+          readOnly: true
+        statusHistory:
+          type: array
+          description: Status detail records for the SpectrumX Partition over time
+          readOnly: true
+          items:
+            $ref: '#/components/schemas/StatusDetail'
+        created:
+          type: string
+          format: date-time
+          description: ISO datetime string for when the SpectrumX Partition was created
+          readOnly: true
+        updated:
+          type: string
+          format: date-time
+          description: ISO datetime string for when the SpectrumX Partition was last updated
+          readOnly: true
+      required:
+        - id
+        - name
+        - siteId
+        - tenantId
+        - status
+    SpectrumXPartitionCreateRequest:
+      title: SpectrumXPartitionCreateRequest
+      type: object
+      examples:
+        - name: east-west-net
+          siteId: 8c43e859-d301-4ecf-9d0e-46bf374473c4
+      description: Request data to create a SpectrumX Partition
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 256
+          description: Name of the Partition to create
+        description:
+          type:
+            - string
+            - 'null'
+          description: Optional description of the Partition
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site the Partition should belong to
+        vni:
+          type:
+            - integer
+            - 'null'
+          minimum: 0
+          maximum: 2147483647
+          description: 'Requested VXLAN Network Identifier. Omit it to let the Site allocate one from its pool. A requested value that is already allocated or outside that pool is rejected by the Site'
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: String key-value pairs describing Partition labels. Up to 10 key-value pairs can be specified
+      required:
+        - name
+        - siteId
+    SpectrumXPartitionSummary:
+      title: SpectrumXPartitionSummary
+      type: object
+      description: Summary of a SpectrumX Partition nested under another resource
+      examples:
+        - id: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+          name: east-west-net
+          siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+          vni: 10200
+          status: Ready
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: ID of the SpectrumX Partition
+        name:
+          type: string
+          description: Name of the SpectrumX Partition
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site the Partition belongs to
+        vni:
+          type:
+            - integer
+            - 'null'
+          description: VXLAN Network Identifier allocated for the Partition
+        status:
+          type: string
+          description: Status of the SpectrumX Partition
+      required:
+        - id
+        - name
+        - siteId
+        - status
+    SpectrumXAttachment:
+      title: SpectrumXAttachment
+      type: object
+      description: 'A SpectrumX Attachment binds one SpectrumX Partition to one device instance on an Instance. macAddress and ipAddress are allocated by the Site and reported through inventory, so they are absent until the attachment reaches Ready'
+      examples:
+        - id: 3f5a1b2c-8d4e-4f6a-9b7c-0d1e2f3a4b5c
+          instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          spectrumXPartitionId: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+          device: NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC
+          deviceInstance: 0
+          attachmentType: Physical
+          virtualFunctionId: null
+          macAddress: '00:11:22:33:44:55'
+          ipAddress: 192.0.2.15
+          status: Ready
+          created: '2019-08-24T14:15:22Z'
+          updated: '2019-08-24T14:15:22Z'
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique UUID v4 identifier for the SpectrumX Attachment
+          readOnly: true
+        instanceId:
+          type: string
+          format: uuid
+          description: ID of the associated Instance
+        spectrumXPartitionId:
+          type: string
+          format: uuid
+          description: ID of the associated SpectrumX Partition
+        spectrumXPartition:
+          $ref: '#/components/schemas/SpectrumXPartitionSummary'
+          description: Summary of the SpectrumX Partition
+        device:
+          type: string
+          description: 'SpectrumX device the Partition is attached over, matching the device description reported for the Machine''s SpectrumX interfaces'
+        deviceInstance:
+          type: integer
+          minimum: 0
+          description: 'Index of the device, identifying which interface card the Partition is attached to'
+        attachmentType:
+          type: string
+          enum:
+            - Physical
+            - Virtual
+            - OVS
+          description: 'Type of SpectrumX attachment. `Virtual` is not currently supported and is rejected'
+        virtualFunctionId:
+          type:
+            - integer
+            - 'null'
+          description: 'Virtual function the attachment uses. Not currently supported'
+        macAddress:
+          type:
+            - string
+            - 'null'
+          description: MAC address the Site allocated for the attachment
+          readOnly: true
+        ipAddress:
+          type:
+            - string
+            - 'null'
+          description: IP address the Site allocated for the attachment
+          readOnly: true
+        status:
+          type: string
+          enum:
+            - Pending
+            - Provisioning
+            - Ready
+            - Error
+            - Deleting
+          description: Status of the SpectrumX Attachment
+          readOnly: true
+        created:
+          type: string
+          format: date-time
+          description: ISO datetime string for when the SpectrumX Attachment was created
+          readOnly: true
+        updated:
+          type: string
+          format: date-time
+          description: ISO datetime string for when the SpectrumX Attachment was last updated
+          readOnly: true
+      required:
+        - id
+        - instanceId
+        - spectrumXPartitionId
+        - device
+        - deviceInstance
+        - attachmentType
+        - status
     NVLinkLogicalPartition:
       title: NVLinkLogicalPartition
       type: object
@@ -22007,6 +22538,11 @@ components:
           items:
             $ref: '#/components/schemas/InfiniBandInterface'
           description: 'InfiniBandInterfaces are list of the InfiniBandInterface associated with the Instance'
+        spectrumXAttachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/SpectrumXAttachment'
+          description: 'SpectrumXAttachments are list of the SpectrumXAttachment associated with the Instance'
         nvLinkInterfaces:
           type: array
           items:
@@ -23120,7 +23656,7 @@ components:
         - spectrumXPartitionId: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
           device: 'NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC'
           deviceInstance: 3
-          attachmentType: OVN
+          attachmentType: OVS
           virtualFunctionId: null
       description: Request data to attach a SpectrumX Partition to an Instance
       properties:
@@ -23140,7 +23676,7 @@ components:
           enum:
             - Physical
             - Virtual
-            - OVN
+            - OVS
           description: 'Type of SpectrumX attachment. `Virtual` is not currently supported and is rejected.'
         virtualFunctionId:
           type:

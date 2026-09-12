@@ -192,6 +192,8 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 	ifcDAO := cdbm.NewInterfaceDAO(mst.dbSession)
 	nvliDAO := cdbm.NewNVLinkInterfaceDAO(mst.dbSession)
 	ibiDAO := cdbm.NewInfiniBandInterfaceDAO(mst.dbSession)
+	sxpDAO := cdbm.NewSpectrumXPartitionDAO(mst.dbSession)
+	sxaDAO := cdbm.NewSpectrumXAttachmentDAO(mst.dbSession)
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(mst.dbSession)
 	skgiaDAO := cdbm.NewSSHKeyGroupInstanceAssociationDAO(mst.dbSession)
 	nsgDAO := cdbm.NewNetworkSecurityGroupDAO(mst.dbSession)
@@ -295,6 +297,13 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 	err = ibiDAO.DeleteAllBySiteID(ctx, nil, siteID)
 	if err != nil {
 		logger.Error().Err(err).Msg("error deleting InfiniBand Interfaces for Site from DB")
+		return err
+	}
+
+	// Delete SpectrumX attachments for site
+	err = sxaDAO.DeleteAllBySiteID(ctx, nil, siteID)
+	if err != nil {
+		logger.Error().Err(err).Msg("error deleting SpectrumX Attachments for Site from DB")
 		return err
 	}
 
@@ -446,6 +455,29 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 		serr := ibpDAO.Delete(ctx, nil, ibp.ID)
 		if serr != nil && serr != cdb.ErrDoesNotExist {
 			logger.Error().Err(serr).Str("IB Partition ID", ibp.ID.String()).Msg("error deleting IB Partition record in DB")
+			return serr
+		}
+	}
+
+	// Delete SpectrumX Partitions
+	sxps, _, err := sxpDAO.GetAll(
+		ctx,
+		nil,
+		cdbm.SpectrumXPartitionFilterInput{
+			SiteIDs: []uuid.UUID{siteID},
+		},
+		cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)},
+		nil,
+	)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve SpectrumX Partitions from DB by Site ID")
+		return err
+	}
+
+	for _, sxp := range sxps {
+		serr := sxpDAO.Delete(ctx, nil, sxp.ID)
+		if serr != nil && serr != cdb.ErrDoesNotExist {
+			logger.Error().Err(serr).Str("SpectrumX Partition ID", sxp.ID.String()).Msg("error deleting SpectrumX Partition record in DB")
 			return serr
 		}
 	}
