@@ -2,30 +2,33 @@
 
 ## Native Linux ARM64 Builds
 
-The repository's [Cargo configuration](../../.cargo/config.toml) requests mold
-when building the `aarch64-unknown-linux-gnu` target. On native Linux ARM64
-hosts, [`.envrc`](../../.envrc) selects Clang as the compiler driver. Before
-running Cargo directly, ensure that the `clang` and `mold` executables are on
-`PATH`. On Ubuntu 24.04 or Debian 12 (Bookworm) and newer, install both packages
-with:
+On native Linux ARM64 hosts, [`.envrc`](../../.envrc) selects the repository's
+[`clang-mold`](../../dev/linkers/clang-mold) driver for the
+`aarch64-unknown-linux-gnu` target. The driver invokes Clang with
+`-fuse-ld=mold`, avoiding the higher memory use of GNU ld without imposing that
+linker choice on CI images and cross-build environments. On other host
+architectures, `.envrc` does not change Cargo's ARM64 linker.
+
+Before running Cargo directly, ensure that the `clang` and `mold` executables
+are on `PATH`. On Ubuntu 24.04 or Debian 12 (Bookworm) and newer, install both
+packages with:
 
 ```bash
 sudo apt-get install -y clang mold
 ```
 
 Without either executable, Cargo fails during linking. If you do not use
-`direnv`, select Clang in the shell that runs Cargo:
+`direnv`, select the wrapper in the shell that runs Cargo from this checkout:
 
 ```bash
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=clang
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$(git rev-parse --show-toplevel)/dev/linkers/clang-mold"
 ```
 
 Debian 11 (Bullseye) does not package mold. Use the containerized ARM64 build
 path for Bullseye-compatible artifacts; its
 [build image](../../dev/docker/Dockerfile.build-artifacts-container-aarch64)
-installs a checksum-verified upstream ARM64 release. Other containerized ARM64
-build paths also install both tools in their build images and do not require
-them on the host.
+installs a checksum-verified upstream ARM64 release. Containerized ARM64 build
+paths select mold inside their build images and do not require it on the host.
 
 ## Updating Pinned Dependencies
 

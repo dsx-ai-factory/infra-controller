@@ -41,14 +41,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     libprotobuf-dev \
     && case "$(uname -m):${TARGETARCH}" in \
-         x86_64:amd64|aarch64:arm64) \
+         x86_64:amd64) \
            apt-get install -y --no-install-recommends gcc libc6-dev ;; \
+         aarch64:arm64) \
+           apt-get install -y --no-install-recommends \
+             clang gcc libc6-dev mold ;; \
          aarch64:amd64) \
            apt-get install -y --no-install-recommends \
              gcc-x86-64-linux-gnu libc6-dev-amd64-cross ;; \
          x86_64:arm64) \
            apt-get install -y --no-install-recommends \
-             gcc-aarch64-linux-gnu libc6-dev-arm64-cross ;; \
+             gcc-aarch64-linux-gnu libc6-dev-arm64-cross mold ;; \
          *) echo "unsupported build/target architecture: $(uname -m)/${TARGETARCH}" >&2; exit 1 ;; \
        esac \
     && rm -rf /var/lib/apt/lists/*
@@ -58,6 +61,30 @@ RUN case "${TARGETARCH}" in \
       arm64) rustup target add aarch64-unknown-linux-gnu ;; \
       *) echo "unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac
+
+COPY --chmod=0755 dev/linkers/clang-mold /usr/local/bin/clang-mold
+
+# Select mold only for ARM64 output. Native builds reuse the repository's
+# Clang wrapper. Cross-GCC retains sysroot selection and uses mold's -B
+# directory because collect2 does not search /usr/bin for ld.mold.
+RUN if [ "${TARGETARCH}" = arm64 ]; then \
+      case "$(uname -m)" in \
+        aarch64) \
+          linker=/usr/local/bin/clang-mold; \
+          reader=readelf ;; \
+        x86_64) \
+          printf '#!/bin/sh\nexec aarch64-linux-gnu-gcc -B/usr/libexec/mold "$@"\n' \
+            >/usr/local/bin/aarch64-linux-gnu-gcc-mold && \
+          chmod 0755 /usr/local/bin/aarch64-linux-gnu-gcc-mold && \
+          linker=/usr/local/bin/aarch64-linux-gnu-gcc-mold && \
+          reader=aarch64-linux-gnu-readelf ;; \
+        *) echo "unsupported ARM64 build architecture: $(uname -m)" >&2; exit 1 ;; \
+      esac && \
+      printf 'int main(void) { return 0; }\n' | \
+        "${linker}" -x c - -o /tmp/mold-smoke && \
+      "${reader}" -p .comment /tmp/mold-smoke | grep -q mold && \
+      rm /tmp/mold-smoke; \
+    fi
 
 ENV CARGO_HOME=/cargo-home
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
@@ -78,10 +105,13 @@ RUN --mount=type=cache,id=nico-bmc-mock-cross-cargo-home,target=/cargo-home,shar
         fi ;; \
       arm64) \
         rust_target=aarch64-unknown-linux-gnu; \
-        if [ "$(uname -m)" != aarch64 ]; then \
-          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-                 CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc; \
-        fi ;; \
+        case "$(uname -m)" in \
+          aarch64) \
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold ;; \
+          x86_64) \
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/aarch64-linux-gnu-gcc-mold \
+                   CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc ;; \
+        esac ;; \
       *) echo "unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
     cargo build -p bmc-mock --bin bmc-mock --locked --release \
