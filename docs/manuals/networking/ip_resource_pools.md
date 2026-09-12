@@ -100,7 +100,7 @@ lo-ip pool size = H × D
 
 For example, 100 hosts with 2 DPUs each require 200 addresses.
 
-`docs/manuals/networking_requirements.md` states the combined IPv4 prefix requirement as `(expected number of servers + expected number of DPUs) × 2 + 2`. The `lo-ip` pool supplies the per-DPU loopback portion of that allocation. The remainder of the formula covers admin and other infrastructure addresses.
+`docs/getting-started/prerequisites/network.md` states the combined IPv4 prefix requirement as `(expected number of servers + expected number of DPUs) × 2 + 2`. The `lo-ip` pool supplies the per-DPU loopback portion of that allocation. The remainder of the formula covers admin and other infrastructure addresses.
 
 ### `vpc-dpu-lo`
 
@@ -112,7 +112,7 @@ vpc-dpu-lo pool size (worst case) = number of VPCs × total number of DPUs
 
 In practice, consumption is typically lower because tenant workloads are not spread uniformly across the entire fleet. Plan for the worst case unless site-specific workload data supports a smaller estimate.
 
-`docs/manuals/networking_requirements.md` notes that a separate IPv4 prefix is required for these addresses, with a total allocation of `expected number of DPUs × 2` at minimum. Size the `vpc-dpu-lo` pool within that allocation, leaving headroom for VPC growth.
+`docs/getting-started/prerequisites/network.md` notes that a separate IPv4 prefix is required for these addresses, with a total allocation of `expected number of DPUs × 2` at minimum. Size the `vpc-dpu-lo` pool within that allocation, leaving headroom for VPC growth.
 
 ### Headroom recommendation
 
@@ -183,6 +183,6 @@ If the original pool was prefix-based, the grow file may also provide additional
 
 - `docs/manuals/vpc/vni_resource_pools.md` — companion page covering VNI and VLAN ID resource pools
 - `docs/manuals/vpc/vpc_network_virtualization.md` — end-to-end VPC network virtualization overview that ties VNI pools, IP pools, and routing profiles together
-- `docs/manuals/networking_requirements.md` — site-level networking requirements including IPv4 prefix sizing formulas
+- `docs/getting-started/prerequisites/network.md` — site-level networking requirements including IPv4 prefix sizing formulas
 - `docs/manuals/vpc/vpc_routing_profiles.md` — VPC routing profile configuration, which governs the VPC overlay network configuration and therefore drives `vpc-dpu-lo` consumption
 
