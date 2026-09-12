@@ -89,7 +89,7 @@ struct InventoryVersion {
 #[derive(Debug, Default)]
 struct RmsSnapshot {
     /// `(bmc_ip, host_ip)` per device, in registry order.
-    addresses: Vec<(Option<Ipv4Addr>, Option<Ipv4Addr>)>,
+    addresses: Vec<(Option<IpAddr>, Option<IpAddr>)>,
     nodes: Arc<[SimNode]>,
 }
 
@@ -215,7 +215,8 @@ impl RmsInventory for ControlState {
                 .zip(&cached.addresses)
                 .all(|(simulator, (bmc_ip, host_ip))| {
                     let handle = simulator.handle();
-                    handle.bmc_ip() == *bmc_ip && handle.host_ip() == *host_ip
+                    handle.bmc_ip().map(IpAddr::V4) == *bmc_ip
+                        && handle.host_ip().map(IpAddr::V4) == *host_ip
                 });
         if !unchanged {
             // Each address is read once and used for both the fingerprint
@@ -224,7 +225,11 @@ impl RmsInventory for ControlState {
                 .iter()
                 .map(|simulator| {
                     let handle = simulator.handle();
-                    let (bmc_ip, host_ip) = (handle.bmc_ip(), handle.host_ip());
+                    // machine-a-tron leases IPv4 today; the snapshot and the contract carry IpAddr.
+                    let (bmc_ip, host_ip) = (
+                        handle.bmc_ip().map(IpAddr::V4),
+                        handle.host_ip().map(IpAddr::V4),
+                    );
                     ((bmc_ip, host_ip), Self::sim_node(handle, bmc_ip, host_ip))
                 })
                 .unzip();
@@ -240,8 +245,8 @@ impl ControlState {
     /// address.
     fn sim_node(
         handle: &DeviceHandle,
-        bmc_ip: Option<Ipv4Addr>,
-        host_ip: Option<Ipv4Addr>,
+        bmc_ip: Option<IpAddr>,
+        host_ip: Option<IpAddr>,
     ) -> Option<SimNode> {
         let kind = match handle.kind() {
             DeviceKind::Machine => SimNodeKind::Compute,
@@ -269,9 +274,9 @@ impl ControlState {
         Some(SimNode {
             kind: Some(kind),
             bmc_mac: Some(info.bmc_mac_address),
-            bmc_ip: bmc_ip.map(IpAddr::V4),
+            bmc_ip,
             host_mac: info.nvos_mac_addresses.first().copied(),
-            host_ip: host_ip.map(IpAddr::V4),
+            host_ip,
             rack_id: None,
             slot_number,
             tray_index,
