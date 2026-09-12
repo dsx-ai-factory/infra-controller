@@ -60,6 +60,7 @@ impl InternalRBACRules {
 
         // Add additional permissions to the list below.
         x.perm("Version", vec![Anonymous]);
+        x.perm("StreamConsoleLogs", vec![ForgeAdminCLI]);
         x.perm("CreateDomain", vec![]);
         x.perm("CreateDomainLegacy", vec![]);
         x.perm("UpdateDomainLegacy", vec![]);
@@ -1179,6 +1180,22 @@ mod rbac_rule_tests {
                 "nico-admin-cli".to_string(),
                 None,
             ))],
+        ));
+    }
+
+    #[test]
+    fn console_logs_are_restricted_to_admin_cli() {
+        assert!(InternalRBACRules::allowed_from_static(
+            "StreamConsoleLogs",
+            &[Principal::ExternalUser(ExternalUserInfo::new(
+                None,
+                "nico-admin-cli".to_string(),
+                None,
+            ))],
+        ));
+        assert!(!InternalRBACRules::allowed_from_static(
+            "StreamConsoleLogs",
+            &[Principal::SpiffeServiceIdentifier("nico-dns".to_string())],
         ));
     }
 

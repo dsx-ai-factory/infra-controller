@@ -128,6 +128,7 @@ pub fn fully_populated() -> CarbideConfig {
             use_vpc_vrf_loopback: false,
         }),
         dsx_exchange_event_bus: Some(DsxExchangeEventBusConfig::default()),
+        ssh_console_url: Some("https://ssh-console.example:1079".parse().unwrap()),
         secrets: Some(SecretsConfig {
             kms: KmsConfig {
                 active: "local".to_string(),
@@ -192,6 +193,7 @@ pub fn get() -> CarbideConfig {
             identity_keyfile_path: "Not a real keyfile".to_string(),
             admin_root_cafile_path: "Not a real cafile".to_string(),
         }),
+        ssh_console_url: None,
         auth: None,
         pools: None,
         networks: None,

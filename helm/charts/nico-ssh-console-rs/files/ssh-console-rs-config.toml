@@ -1,6 +1,8 @@
 ## What address to listen on.
 listen_address = "[::]:22"
 metrics_address = "[::]:9009"
+api_listen_address = "[::]:1079"
+api_allowed_client_spiffe_id = "spiffe://nico.local/nico-system/sa/nico-api"
 
 ## Address for the API. Both `nico_url` (renamed binary) and `carbide_url` (carbide
 ## binary) are set so the chart works with either image; binary reads its expected key.

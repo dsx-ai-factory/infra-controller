@@ -121,6 +121,7 @@ pub(crate) async fn run_baseline_test_environment(
                                     MockBmcType::DpuSsh => PromptBehavior::Dpu,
                                     MockBmcType::Ipmi => unreachable!(),
                                 },
+                                false,
                             )
                             .await?,
                         ))

@@ -96,9 +96,15 @@ impl BmcMockWrapper {
             && (self.requires_ssh_console || self.bmc_mock_state.has_enabled_ssh_serial_console())
         {
             Some(
-                mock_ssh_server::spawn(None, self.hostname.clone(), None, self.ssh_prompt_behavior)
-                    .await
-                    .map_err(|error| MachineStateError::MockSshServer(error.to_string()))?,
+                mock_ssh_server::spawn(
+                    None,
+                    self.hostname.clone(),
+                    None,
+                    self.ssh_prompt_behavior,
+                    self.app_context.app_config.generate_console_logs,
+                )
+                .await
+                .map_err(|error| MachineStateError::MockSshServer(error.to_string()))?,
             )
         } else {
             None

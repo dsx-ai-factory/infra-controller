@@ -281,6 +281,11 @@ pub struct CarbideConfig {
     /// HTTP connections.
     pub tls: Option<TlsConfig>,
 
+    /// Private carbide-ssh-console gRPC endpoint. When omitted, console-log
+    /// streaming is unavailable.
+    #[serde(default)]
+    pub ssh_console_url: Option<url::Url>,
+
     /// Transport mode for the gRPC API server.
     /// Default is `Tls`.
     #[serde(default)]
@@ -6111,6 +6116,10 @@ path = "credentials.yaml"
             (
                 r#"{{ .Values.bmcProxy.address | default (printf "nico-bmc-proxy.%s.svc.cluster.local:1079" (include "nico-api.namespace" .)) }}"#,
                 "nico-bmc-proxy.nico-system.svc.cluster.local:1079",
+            ),
+            (
+                r#"{{ .Values.sshConsole.serviceName }}.{{ include "nico-api.namespace" . }}.svc.cluster.local:{{ .Values.sshConsole.port }}"#,
+                "ssh-console.nico-system.svc.cluster.local:1079",
             ),
             ("{{ . | quote }}", r#""/tmp/test.pem""#),
         ] {

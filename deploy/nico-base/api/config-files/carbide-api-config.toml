@@ -23,6 +23,7 @@
 listen = "[::]:1079"
 metrics_endpoint = "[::]:1080"
 database_url = "postgres://replaced-by-env-var"
+ssh_console_url = "https://nico-ssh-console-rs.nico-system.svc.cluster.local:1079"
 asn = 4294967000
 initial_dpu_agent_upgrade_policy = "up_only"
 max_concurrent_machine_updates = 10

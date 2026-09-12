@@ -24,6 +24,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	Forge_Version_FullMethodName                                            = "/forge.Forge/Version"
+	Forge_StreamConsoleLogs_FullMethodName                                  = "/forge.Forge/StreamConsoleLogs"
 	Forge_CreateDomain_FullMethodName                                       = "/forge.Forge/CreateDomain"
 	Forge_UpdateDomain_FullMethodName                                       = "/forge.Forge/UpdateDomain"
 	Forge_DeleteDomain_FullMethodName                                       = "/forge.Forge/DeleteDomain"
@@ -524,6 +525,8 @@ const (
 type ForgeClient interface {
 	// What version of NICo is this service running? Matches `--version` command line.
 	Version(ctx context.Context, in *VersionRequest, opts ...grpc.CallOption) (*BuildInfo, error)
+	// Stream recent and live machine console output.
+	StreamConsoleLogs(ctx context.Context, in *StreamConsoleLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConsoleLogLine], error)
 	// Domain
 	CreateDomain(ctx context.Context, in *CreateDomainRequest, opts ...grpc.CallOption) (*Domain, error)
 	UpdateDomain(ctx context.Context, in *UpdateDomainRequest, opts ...grpc.CallOption) (*Domain, error)
@@ -1444,6 +1447,25 @@ func (c *forgeClient) Version(ctx context.Context, in *VersionRequest, opts ...g
 	}
 	return out, nil
 }
+
+func (c *forgeClient) StreamConsoleLogs(ctx context.Context, in *StreamConsoleLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConsoleLogLine], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Forge_ServiceDesc.Streams[0], Forge_StreamConsoleLogs_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[StreamConsoleLogsRequest, ConsoleLogLine]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Forge_StreamConsoleLogsClient = grpc.ServerStreamingClient[ConsoleLogLine]
 
 func (c *forgeClient) CreateDomain(ctx context.Context, in *CreateDomainRequest, opts ...grpc.CallOption) (*Domain, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -5844,7 +5866,7 @@ func (c *forgeClient) GetOpenIDConfiguration(ctx context.Context, in *OpenIdConf
 
 func (c *forgeClient) ScoutStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ScoutStreamApiBoundMessage, ScoutStreamScoutBoundMessage], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Forge_ServiceDesc.Streams[0], Forge_ScoutStream_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Forge_ServiceDesc.Streams[1], Forge_ScoutStream_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6381,6 +6403,8 @@ func (c *forgeClient) ReWrapSecrets(ctx context.Context, in *ReWrapSecretsReques
 type ForgeServer interface {
 	// What version of NICo is this service running? Matches `--version` command line.
 	Version(context.Context, *VersionRequest) (*BuildInfo, error)
+	// Stream recent and live machine console output.
+	StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error
 	// Domain
 	CreateDomain(context.Context, *CreateDomainRequest) (*Domain, error)
 	UpdateDomain(context.Context, *UpdateDomainRequest) (*Domain, error)
@@ -7293,6 +7317,9 @@ type UnimplementedForgeServer struct{}
 
 func (UnimplementedForgeServer) Version(context.Context, *VersionRequest) (*BuildInfo, error) {
 	return nil, status.Error(codes.Unimplemented, "method Version not implemented")
+}
+func (UnimplementedForgeServer) StreamConsoleLogs(*StreamConsoleLogsRequest, grpc.ServerStreamingServer[ConsoleLogLine]) error {
+	return status.Error(codes.Unimplemented, "method StreamConsoleLogs not implemented")
 }
 func (UnimplementedForgeServer) CreateDomain(context.Context, *CreateDomainRequest) (*Domain, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateDomain not implemented")
@@ -8807,6 +8834,17 @@ func _Forge_Version_Handler(srv interface{}, ctx context.Context, dec func(inter
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _Forge_StreamConsoleLogs_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(StreamConsoleLogsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ForgeServer).StreamConsoleLogs(m, &grpc.GenericServerStream[StreamConsoleLogsRequest, ConsoleLogLine]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Forge_StreamConsoleLogsServer = grpc.ServerStreamingServer[ConsoleLogLine]
 
 func _Forge_CreateDomain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateDomainRequest)
@@ -19630,6 +19668,11 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamConsoleLogs",
+			Handler:       _Forge_StreamConsoleLogs_Handler,
+			ServerStreams: true,
+		},
 		{
 			StreamName:    "ScoutStream",
 			Handler:       _Forge_ScoutStream_Handler,

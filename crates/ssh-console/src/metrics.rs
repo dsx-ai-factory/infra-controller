@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -27,21 +27,23 @@ use hyper_util::server::conn::auto;
 use opentelemetry::metrics::{Meter, MeterProvider};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use prometheus::Encoder;
-use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::config::Config;
 use crate::shutdown_handle::ShutdownHandle;
-use crate::tcp_listener;
+use crate::{fork_cancel_token, tcp_listener};
 
 pub(crate) async fn spawn(
     config: Arc<Config>,
     metrics_state: Arc<MetricsState>,
+    cancel_token: CancellationToken,
 ) -> Result<MetricsHandle, SpawnError> {
-    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     let (listener, metrics_address) = tcp_listener::bind(config.metrics_address)
         .await
         .map_err(SpawnError::Listen)?;
+
+    let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
 
     tracing::info!(
         %metrics_address,
@@ -49,37 +51,34 @@ pub(crate) async fn spawn(
     );
 
     let join_handle = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = &mut shutdown_rx => {
-                    tracing::info!("metrics service shutting down");
-                    break;
+        while let Some(res) = cancel_token.run_until_cancelled(listener.accept()).await {
+            match res {
+                Ok((stream, addr)) => {
+                    tracing::info!(peer_address = %addr, "accepted metrics connection");
+                    tokio::task::spawn({
+                        let metrics_state = metrics_state.clone();
+                        async move {
+                            let io = TokioIo::new(stream);
+                            auto::Builder::new(TokioExecutor::new())
+                                .serve_connection(
+                                    io,
+                                    hyper::service::service_fn(move |req| {
+                                        let metrics_state = metrics_state.clone();
+                                        async move { serve_metrics(req, metrics_state) }
+                                    }),
+                                )
+                                .await
+                        }
+                    });
                 }
-
-                res = listener.accept() => match res {
-                    Ok((stream, addr)) => {
-                        tracing::info!(peer_address = %addr, "accepted metrics connection");
-                        tokio::task::spawn({
-                            let metrics_state = metrics_state.clone();
-                            async move {
-                                let io = TokioIo::new(stream);
-                                auto::Builder::new(TokioExecutor::new())
-                                    .serve_connection(
-                                        io,
-                                        hyper::service::service_fn(move |req| {
-                                            let metrics_state = metrics_state.clone();
-                                            async move {
-                                                serve_metrics(req, metrics_state)
-                                            }
-                                        }),
-                                    )
-                                    .await
-                            }
-                        });
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "error accepting metrics connection");
-                    }
+                Err(error) => {
+                    tracing::error!(%error, "error accepting metrics connection");
+                    // Avoid a hot loop when the listener keeps failing (e.g. file descriptor limits).
+                    cancel_token
+                        .run_until_cancelled(tokio::time::sleep(std::time::Duration::from_millis(
+                            100,
+                        )))
+                        .await;
                 }
             }
         }
@@ -87,8 +86,8 @@ pub(crate) async fn spawn(
 
     Ok(MetricsHandle {
         metrics_address,
-        shutdown_tx,
         join_handle,
+        drop_guard,
     })
 }
 
@@ -128,19 +127,19 @@ fn serve_metrics(
 
 pub(crate) struct MetricsHandle {
     metrics_address: std::net::SocketAddr,
-    shutdown_tx: oneshot::Sender<()>,
     join_handle: JoinHandle<()>,
+    drop_guard: DropGuard,
 }
 
 impl MetricsHandle {
-    pub(crate) fn metrics_address(&self) -> std::net::SocketAddr {
+    pub(crate) fn metrics_address(&self) -> SocketAddr {
         self.metrics_address
     }
 }
 
 impl ShutdownHandle<()> for MetricsHandle {
-    fn into_parts(self) -> (oneshot::Sender<()>, JoinHandle<()>) {
-        (self.shutdown_tx, self.join_handle)
+    fn into_parts(self) -> (DropGuard, JoinHandle<()>) {
+        (self.drop_guard, self.join_handle)
     }
 }
 

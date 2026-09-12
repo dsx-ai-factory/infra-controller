@@ -25,9 +25,10 @@ use futures_util::FutureExt;
 use opentelemetry::KeyValue;
 use russh::ChannelMsg;
 use tokio::net::TcpStream;
-use tokio::sync::{MutexGuard, broadcast, mpsc, oneshot};
+use tokio::sync::{MutexGuard, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::bmc::client_pool::BmcPoolMetrics;
 use crate::bmc::connection::{self, AtomicConnectionState, ConnectionDetails};
@@ -35,9 +36,9 @@ use crate::bmc::message_proxy::{
     ConnectionChangeMessage, ExecReply, ToBmcMessage, ToFrontendMessage,
 };
 use crate::config::Config;
-use crate::console_logger;
 use crate::shutdown_handle::ShutdownHandle;
 use crate::ssh_server::ServerMetrics;
+use crate::{console_logger, fork_cancel_token};
 
 /// Spawn a connection to the given BMC in the background, returning a handle. Connections will
 /// be retried indefinitely, with exponential backoff, until a shutdown is signaled (ie. by dropping
@@ -46,9 +47,10 @@ pub(super) fn spawn(
     connection_details: ConnectionDetails,
     config: Arc<Config>,
     metrics: Arc<BmcPoolMetrics>,
+    cancel_token: CancellationToken,
 ) -> ClientHandle {
-    // Shutdown handle for the retry loop that is retrying this connection
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
+
     // Channel frontends can use to send messages to the BMC
     let (to_bmc_msg_tx, to_bmc_msg_rx) = mpsc::channel::<ToBmcMessage>(1);
     // Channel that broadcasts messages to any subscribed frontends
@@ -61,6 +63,18 @@ pub(super) fn spawn(
     let connection_state = Arc::new(AtomicConnectionState::default());
     let machine_id = connection_details.machine_id();
     let kind = connection_details.kind();
+    let (logger_handle, console_log_client) = if config.console_logging_enabled {
+        let (handle, client) = console_logger::spawn(
+            machine_id,
+            connection_details.addr(),
+            broadcast_to_frontend_tx.subscribe(),
+            config.clone(),
+            cancel_token.clone(),
+        );
+        (Some(handle), Some(client))
+    } else {
+        (None, None)
+    };
 
     let metrics_attrs = vec![KeyValue::new("machine_id", machine_id.to_string())];
     metrics.bmc_recovery_attempts.record(0, &metrics_attrs);
@@ -73,9 +87,10 @@ pub(super) fn spawn(
         config,
         connection_state: connection_state.clone(),
         broadcast_to_frontend_tx: broadcast_to_frontend_tx.clone(),
-        shutdown_rx,
+        cancel_token,
         to_bmc_msg_rx,
         metrics,
+        logger_handle,
     };
 
     let join_handle = tokio::spawn(bmc_client.run());
@@ -84,10 +99,11 @@ pub(super) fn spawn(
         to_bmc_msg_tx,
         broadcast_to_frontend_tx,
         machine_id,
-        shutdown_tx,
+        drop_guard,
         join_handle,
         connection_state,
         kind,
+        console_log_client,
     }
 }
 
@@ -95,10 +111,11 @@ struct BmcClient {
     connection_details: ConnectionDetails,
     config: Arc<Config>,
     connection_state: Arc<AtomicConnectionState>,
-    shutdown_rx: oneshot::Receiver<()>,
+    cancel_token: CancellationToken,
     broadcast_to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
     to_bmc_msg_rx: mpsc::Receiver<ToBmcMessage>,
     metrics: Arc<BmcPoolMetrics>,
+    logger_handle: Option<console_logger::ConsoleLoggerHandle>,
 }
 
 impl BmcClient {
@@ -106,17 +123,7 @@ impl BmcClient {
         let machine_id = self.connection_details.machine_id();
         let metrics_attrs = vec![KeyValue::new("machine_id", machine_id.to_string())];
 
-        // Spawn a task to write logs for this console, if configured.
-        let logger_handle = if self.config.console_logging_enabled {
-            Some(console_logger::spawn(
-                machine_id,
-                self.connection_details.addr(),
-                self.broadcast_to_frontend_tx.subscribe(),
-                self.config.clone(),
-            ))
-        } else {
-            None
-        };
+        let logger_handle = self.logger_handle.take();
 
         // Keep track of when we were last disconnected, for relaying status
         let last_disconnect_time: Arc<RwLock<Option<DateTime<Utc>>>> = Default::default();
@@ -130,6 +137,7 @@ impl BmcClient {
             self.to_bmc_msg_rx,
             bmc_msg_tx_placeholder.clone(),
             last_disconnect_time.clone(),
+            self.cancel_token.clone(),
         );
 
         // Keep track of the instant we do the next retry, and not the duration to wait: This helps
@@ -143,6 +151,9 @@ impl BmcClient {
         let mut retries = 0;
         let mut previous_connection_close_was_sol_recovery = false;
         'retry: loop {
+            if self.cancel_token.is_cancelled() {
+                break 'retry;
+            }
             // Every retry after the first time, emit a disconnected message
             if was_disconnected {
                 self.broadcast_to_frontend_tx
@@ -172,7 +183,7 @@ impl BmcClient {
                 self.connection_details.addr(),
                 self.connection_details.kind(),
                 self.connection_details.machine_id(),
-                &mut self.shutdown_rx,
+                self.cancel_token.clone(),
             )
             .await
             {
@@ -202,6 +213,7 @@ impl BmcClient {
             let bmc_connection_handle = match connection::spawn(
                 self.connection_details.clone(),
                 self.broadcast_to_frontend_tx.clone(),
+                self.cancel_token.clone(),
                 self.metrics.clone(),
                 self.config.clone(),
             )
@@ -238,8 +250,6 @@ impl BmcClient {
                 ))
                 .ok();
 
-            // Turn the actual BMC connection JoinHandle into a shared future, so we can check
-            // the result from multiple select arms.
             let connection_result = async move {
                 bmc_connection_handle
                     .join_handle
@@ -250,10 +260,9 @@ impl BmcClient {
             .shared();
 
             tokio::select! {
-                // If we're shutting down, shut down this connection attempt
-                _ = &mut self.shutdown_rx => {
+                // Our cancel token propagates to bmc_connection_handle, so wait for it to finish
+                _ = self.cancel_token.cancelled() => {
                     tracing::info!(%machine_id, "shutting down BMC connection");
-                    bmc_connection_handle.shutdown_tx.send(()).ok();
                     if let Err(error) = connection_result.await {
                         tracing::error!(%machine_id, error = %error.as_ref(), "BMC connection failed while shutting down");
                     };
@@ -262,6 +271,9 @@ impl BmcClient {
 
                 // The connection should go forever, so if it doesn't, retry.
                 res = connection_result.clone() => {
+                    if self.cancel_token.is_cancelled() {
+                        break 'retry;
+                    }
                     let connection_time = try_start_time.elapsed();
                     let recovered_conflicting_sol_session = res
                         .as_ref()
@@ -315,7 +327,7 @@ async fn wait_until_host_is_up(
     addr: SocketAddr,
     kind: connection::Kind,
     machine_id: MachineId,
-    mut shutdown_rx: &mut oneshot::Receiver<()>,
+    cancel_token: CancellationToken,
 ) -> io::Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -325,18 +337,18 @@ async fn wait_until_host_is_up(
             _ = interval.tick() => {
                 match kind {
                     connection::Kind::Ssh => {
-                        if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr)).await {
+                        if let Some(Ok(Ok(_))) = cancel_token.run_until_cancelled(tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))).await {
                             break Ok(());
                         }
                     }
                     connection::Kind::Ipmi => {
-                        if check_ipmi_reachable(addr, Duration::from_secs(2)).await {
+                        if let Some(true) = cancel_token.run_until_cancelled(check_ipmi_reachable(addr, Duration::from_secs(2))).await {
                             break Ok(());
                         }
                     }
                 }
             }
-            _ = &mut shutdown_rx => {
+            _ = cancel_token.cancelled() => {
                 break Ok(());
             }
         }
@@ -364,53 +376,51 @@ fn relay_input_to_bmc(
     mut to_bmc_msg_rx: mpsc::Receiver<ToBmcMessage>,
     bmc_msg_tx_placeholder: BmcMessageTxPlaceholder,
     last_disconnect_time: Arc<RwLock<Option<DateTime<Utc>>>>,
+    cancel_token: CancellationToken,
 ) -> MessageRelayHandle {
-    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-
+    let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
     let join_handle = tokio::spawn({
         async move {
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_rx => {
-                        break;
-                    }
-                    Some(msg) = to_bmc_msg_rx.recv() => {
-                        let bmc_tx_guard =
-                            if let connection::State::Connected = connection_state.load() {
-                                Some(bmc_msg_tx_placeholder.lock().await)
-                            } else {
-                                None
-                            };
+            while let Some(msg) = cancel_token
+                .run_until_cancelled(to_bmc_msg_rx.recv())
+                .await
+                .flatten()
+            {
+                let bmc_tx_guard = if let connection::State::Connected = connection_state.load() {
+                    Some(bmc_msg_tx_placeholder.lock().await)
+                } else {
+                    None
+                };
 
-                        // If we're connected, relay the message
-                        if let Some(tx) =
-                            bmc_tx_guard.as_ref().and_then(|guard| guard.as_ref())
-                        {
-                            tx.send(msg).await.ok();
-                        } else {
-                            // Otherwise, when the user types a newline, inform them the BMC
-                            // is not connected
-                            let inform_disconnected = match msg {
-                                ToBmcMessage::ChannelMsg(ChannelMsg::Data { data }) => {
-                                    data.contains(&b'\r') || data.contains(&b'\n')
-                                }
-                                ToBmcMessage::EchoConnectionMessage { reply_tx: _ } => true,
-                                ToBmcMessage::Exec { reply_tx, .. } => {
-                                    reply_tx.send(ExecReply {
-                                        output: b"BMC console not connected\r\n".to_vec(),
-                                        exit_status: 1,
-                                    }).ok();
-                                    false
-                                }
-                                _ => false,
-                            };
-
-                            if inform_disconnected {
-                                broadcast_to_frontend_tx
-                                    .send(ToFrontendMessage::InformDisconnectedSince(*last_disconnect_time.read().expect("lock poisoned")))
-                                    .ok();
-                            }
+                // If we're connected, relay the message
+                if let Some(tx) = bmc_tx_guard.as_ref().and_then(|guard| guard.as_ref()) {
+                    tx.send(msg).await.ok();
+                } else {
+                    // Otherwise, when the user types a newline, inform them the BMC
+                    // is not connected
+                    let inform_disconnected = match msg {
+                        ToBmcMessage::ChannelMsg(ChannelMsg::Data { data }) => {
+                            data.contains(&b'\r') || data.contains(&b'\n')
                         }
+                        ToBmcMessage::EchoConnectionMessage { reply_tx: _ } => true,
+                        ToBmcMessage::Exec { reply_tx, .. } => {
+                            reply_tx
+                                .send(ExecReply {
+                                    output: b"BMC console not connected\r\n".to_vec(),
+                                    exit_status: 1,
+                                })
+                                .ok();
+                            false
+                        }
+                        _ => false,
+                    };
+
+                    if inform_disconnected {
+                        broadcast_to_frontend_tx
+                            .send(ToFrontendMessage::InformDisconnectedSince(
+                                *last_disconnect_time.read().expect("lock poisoned"),
+                            ))
+                            .ok();
                     }
                 }
             }
@@ -418,13 +428,13 @@ fn relay_input_to_bmc(
     });
 
     MessageRelayHandle {
-        shutdown_tx,
+        drop_guard,
         join_handle,
     }
 }
 
 struct MessageRelayHandle {
-    shutdown_tx: oneshot::Sender<()>,
+    drop_guard: DropGuard,
     join_handle: JoinHandle<()>,
 }
 
@@ -444,8 +454,8 @@ impl BmcMessageTxPlaceholder {
 }
 
 impl ShutdownHandle<()> for MessageRelayHandle {
-    fn into_parts(self) -> (oneshot::Sender<()>, JoinHandle<()>) {
-        (self.shutdown_tx, self.join_handle)
+    fn into_parts(self) -> (DropGuard, JoinHandle<()>) {
+        (self.drop_guard, self.join_handle)
     }
 }
 
@@ -506,19 +516,24 @@ pub(super) struct ClientHandle {
     // Hold a copy of the tx for broadcasting to frontends, so that we can subscribe to it multiple
     // times.
     broadcast_to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
-    shutdown_tx: oneshot::Sender<()>,
+    drop_guard: DropGuard,
     join_handle: JoinHandle<()>,
     // Read by the pool's observable-gauge callbacks.
     pub(super) connection_state: Arc<AtomicConnectionState>,
+    console_log_client: Option<console_logger::ConsoleLogClient>,
 }
 
 impl ShutdownHandle<()> for ClientHandle {
-    fn into_parts(self) -> (oneshot::Sender<()>, JoinHandle<()>) {
-        (self.shutdown_tx, self.join_handle)
+    fn into_parts(self) -> (DropGuard, JoinHandle<()>) {
+        (self.drop_guard, self.join_handle)
     }
 }
 
 impl ClientHandle {
+    pub(super) fn console_log_client(&self) -> Option<console_logger::ConsoleLogClient> {
+        self.console_log_client.clone()
+    }
+
     pub(super) fn subscribe(&self, metrics: Arc<ServerMetrics>) -> BmcConnectionSubscription {
         tracing::debug!("new bmc subscription");
         metrics.total_clients.add(1, &[]);

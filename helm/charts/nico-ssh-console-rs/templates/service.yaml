@@ -12,3 +12,7 @@ spec:
     - port: {{ .Values.service.port }}
       name: ssh
       protocol: TCP
+    - port: {{ .Values.service.grpcPort }}
+      targetPort: grpc
+      name: grpc
+      protocol: TCP

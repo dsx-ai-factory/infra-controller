@@ -42,6 +42,7 @@ imagePullSecrets: []
 
 service:
   port: 22
+  grpcPort: 1079
 
 metrics:
   port: 9009

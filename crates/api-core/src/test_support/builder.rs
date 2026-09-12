@@ -68,6 +68,7 @@ pub struct TestApiBuilder {
     component_manager: Option<Arc<component_manager::component_manager::ComponentManager>>,
     secrets_context: Option<crate::secrets::SecretsContext>,
     endpoint_explorer: Option<MockEndpointExplorer>,
+    console_log_source: Option<Arc<dyn crate::console_logs::ConsoleLogSource>>,
 }
 
 impl TestApiBuilder {
@@ -92,6 +93,7 @@ impl TestApiBuilder {
             component_manager: None,
             secrets_context: None,
             endpoint_explorer: None,
+            console_log_source: None,
         }
     }
 
@@ -186,6 +188,16 @@ impl TestApiBuilder {
     pub fn with_endpoint_explorer(self, endpoint_explorer: MockEndpointExplorer) -> Self {
         Self {
             endpoint_explorer: Some(endpoint_explorer),
+            ..self
+        }
+    }
+
+    pub fn with_console_log_source(
+        self,
+        console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
+    ) -> Self {
+        Self {
+            console_log_source: Some(console_log_source),
             ..self
         }
     }
@@ -315,6 +327,9 @@ impl TestApiBuilder {
             bms_client: std::sync::OnceLock::new(),
             secrets_context: self.secrets_context,
             node_jwt_validator: None,
+            console_log_source: self
+                .console_log_source
+                .unwrap_or_else(|| Arc::new(crate::console_logs::UnavailableSource)),
         }
     }
 }

@@ -577,6 +577,9 @@ pub struct MachineATronConfig {
     /// when its explicit `enabled` flag is set.
     #[serde(default)]
     pub ufm_mock: Option<UfmMockConfig>,
+
+    #[serde(default)]
+    pub generate_console_logs: bool,
 }
 
 impl MachineATronConfig {

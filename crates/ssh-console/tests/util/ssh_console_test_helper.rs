@@ -44,12 +44,15 @@ pub(crate) async fn spawn(
 ) -> eyre::Result<NewSshConsoleHandle> {
     let listen_address = "127.0.0.1:0".parse().expect("Invalid listen address");
     let metrics_address = "127.0.0.1:0".parse().expect("Invalid metrics address");
+    let api_listen_address = "127.0.0.1:0".parse().expect("Invalid API listen address");
 
     let logs_dir = TempDir::new().context("error creating temp dir for console logs")?;
 
     let config = ssh_console::config::Config {
         listen_address,
         metrics_address,
+        api_listen_address,
+        api_allowed_client_spiffe_id: Defaults::api_allowed_client_spiffe_id(),
         carbide_uri: format!("https://localhost:{carbide_port}")
             .try_into()
             .expect("Invalid URI?"),

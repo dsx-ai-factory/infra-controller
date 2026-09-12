@@ -34,11 +34,14 @@ path = "src/main.rs"
 
 # local dependencies
 carbide-rpc = { path = "../rpc" }
+carbide-authn = { path = "../authn" }
+carbide-instrument = { path = "../instrument" }
 carbide-uuid = { path = "../uuid" }
 carbide-tls = { path = "../tls" }
 bmc-vendor = { path = "../bmc-vendor" }
 
 bytes = { workspace = true }
+arc-swap = { workspace = true }
 ctor = { workspace = true }
 lazy_static = { workspace = true }
 tokio = { workspace = true, features = [
@@ -47,6 +50,11 @@ tokio = { workspace = true, features = [
   "sync",
   "macros",
 ] }
+tokio-stream = { workspace = true, features = ["net"] }
+tokio-rustls = { workspace = true }
+tokio-util = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { features = ["env-filter"], workspace = true }
 uuid = { features = ["v4"], workspace = true }
@@ -77,7 +85,6 @@ size = { features = ["serde"], workspace = true }
 
 [dev-dependencies]
 bmc-mock = { path = "../bmc-mock" }
-carbide-instrument = { path = "../instrument" }
 carbide-machine-a-tron = { path = "../machine-a-tron" }
 carbide-test-support = { path = "../test-support" }
 temp-dir = { workspace = true }

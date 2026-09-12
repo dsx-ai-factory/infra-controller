@@ -122,6 +122,12 @@ impl forge::BootInterfaceSelectionSource {
 // streaming interfaces are added, we just toss in type defs here, and
 // any users of DynForge don't need to worry about it.
 pub type DynForge = dyn forge::forge_server::Forge<
+        StreamConsoleLogsStream = Pin<
+            Box<
+                dyn Stream<Item = Result<protos::console_log::ConsoleLogLine, tonic::Status>>
+                    + Send,
+            >,
+        >,
         ScoutStreamStream = Pin<
             Box<
                 dyn Stream<Item = Result<forge::ScoutStreamScoutBoundMessage, tonic::Status>>

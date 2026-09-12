@@ -30,12 +30,14 @@ use tokio::sync::oneshot;
 use tokio::sync::oneshot::Receiver;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::bmc::client::{BmcConnectionSubscription, ClientHandle};
 use crate::bmc::client_pool::GetConnectionError::InvalidMachineId;
 use crate::bmc::connection::State;
 use crate::bmc::{client, connection};
 use crate::config::Config;
+use crate::fork_cancel_token;
 use crate::shutdown_handle::{ReadyHandle, ShutdownHandle};
 use crate::ssh_server::ServerMetrics;
 
@@ -44,14 +46,15 @@ pub(crate) fn spawn(
     config: Arc<Config>,
     forge_api_client: ForgeApiClient,
     meter: &Meter,
+    cancel_token: CancellationToken,
 ) -> Handle {
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
     let (ready_tx, ready_rx) = oneshot::channel();
     let members: Arc<RwLock<HashMap<MachineId, ClientHandle>>> = Default::default();
     let join_handle = tokio::spawn(
         BmcPool {
             members: members.clone(),
-            shutdown_rx,
+            cancel_token,
             config,
             forge_api_client,
             metrics: Arc::new(BmcPoolMetrics::new(meter, members.clone())),
@@ -60,10 +63,10 @@ pub(crate) fn spawn(
     );
 
     Handle {
-        shutdown_tx,
         connection_store: BmcConnectionStore(members),
         ready_rx: Some(ready_rx),
         join_handle,
+        drop_guard,
     }
 }
 
@@ -71,9 +74,9 @@ pub(crate) fn spawn(
 /// dropped.
 pub(crate) struct Handle {
     connection_store: BmcConnectionStore,
-    shutdown_tx: oneshot::Sender<()>,
     ready_rx: Option<oneshot::Receiver<()>>,
     join_handle: tokio::task::JoinHandle<()>,
+    drop_guard: DropGuard,
 }
 
 impl Handle {
@@ -83,8 +86,8 @@ impl Handle {
 }
 
 impl ShutdownHandle<()> for Handle {
-    fn into_parts(self) -> (oneshot::Sender<()>, JoinHandle<()>) {
-        (self.shutdown_tx, self.join_handle)
+    fn into_parts(self) -> (DropGuard, JoinHandle<()>) {
+        (self.drop_guard, self.join_handle)
     }
 }
 
@@ -99,6 +102,17 @@ impl ReadyHandle for Handle {
 pub(crate) struct BmcConnectionStore(Arc<RwLock<HashMap<MachineId, ClientHandle>>>);
 
 impl BmcConnectionStore {
+    pub(crate) fn console_log_client(
+        &self,
+        machine_id: &MachineId,
+    ) -> Option<Option<crate::console_logger::ConsoleLogClient>> {
+        self.0
+            .read()
+            .expect("lock poisoned")
+            .get(machine_id)
+            .map(ClientHandle::console_log_client)
+    }
+
     pub(crate) async fn get_connection(
         &self,
         machine_or_instance_id: &str,
@@ -191,7 +205,7 @@ pub(crate) enum GetConnectionError {
 /// BMC
 struct BmcPool {
     members: Arc<RwLock<HashMap<MachineId, ClientHandle>>>,
-    shutdown_rx: oneshot::Receiver<()>,
+    cancel_token: CancellationToken,
     config: Arc<Config>,
     forge_api_client: ForgeApiClient,
     metrics: Arc<BmcPoolMetrics>,
@@ -303,23 +317,22 @@ impl BmcPool {
         api_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut ready_tx = Some(ready_tx);
 
-        loop {
-            tokio::select! {
-                _ = &mut self.shutdown_rx => {
-                    tracing::info!("shutting down BmcPool");
-                    break;
-                }
-                _ = api_refresh.tick() => {
-                    if let Err(error) = self.refresh_bmcs().await {
-                        tracing::error!(%error, "error refreshing BMC list from API");
-                    }
-                    // Inform callers that we're ready once the first API refresh happens.
-                    ready_tx.take().map(|ch| ch.send(()).ok());
-                }
+        while self
+            .cancel_token
+            .run_until_cancelled(api_refresh.tick())
+            .await
+            .is_some()
+        {
+            if let Err(error) = self.refresh_bmcs().await {
+                tracing::error!(%error, "error refreshing BMC list from API");
             }
+            // Inform callers that we're ready once the first API refresh happens.
+            ready_tx.take().map(|ch| ch.send(()).ok());
         }
+        tracing::info!("shutting down BmcPool");
 
-        // Shutdown each BMC connection
+        // Wait for each BMC connection to shut down (their CancellationToken is cloned from ours,
+        // so they should be shutting down too.)
         let members = self
             .members
             .write()
@@ -425,6 +438,7 @@ impl BmcPool {
                     connection_details,
                     self.config.clone(),
                     self.metrics.clone(),
+                    self.cancel_token.clone(),
                 );
                 guard.insert(machine_id, bmc_session_handle);
             }
