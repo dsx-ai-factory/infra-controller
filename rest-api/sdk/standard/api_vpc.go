@@ -668,6 +668,417 @@ func (a *VPCAPIService) GetVpcExecute(r ApiGetVpcRequest) (*VPC, *http.Response,
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type ApiGetVpcRoutingProfileRequest struct {
+	ctx        context.Context
+	ApiService *VPCAPIService
+	org        string
+	vpcId      string
+}
+
+func (r ApiGetVpcRoutingProfileRequest) Execute() (*VpcRoutingState, *http.Response, error) {
+	return r.ApiService.GetVpcRoutingProfileExecute(r)
+}
+
+/*
+GetVpcRoutingProfile Retrieve VPC routing profile
+
+Read the VPC's persisted routing profile, active VNI, version, and any retained allocation directly from Core. This is not the effective routing profile or evidence of DPU or fabric convergence. The ordinary VPC GET uses inventory and may lag this response.
+
+Org must have an Infrastructure Provider entity that owns both the VPC and its Site. The VPC must belong to that Site, and the Site must be registered. User must have authorization role with `PROVIDER_ADMIN` suffix. Tenant administrator authorization alone is insufficient.
+
+Inspection supports VPCs with valid pool ownership even when no named profile is stored or their virtualization type cannot support profile changes. Missing or inconsistent allocation ownership returns 412. A Site-global VNI override is not reflected in this response.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Infrastructure Provider Org
+	@param vpcId REST ID of the VPC
+	@return ApiGetVpcRoutingProfileRequest
+*/
+func (a *VPCAPIService) GetVpcRoutingProfile(ctx context.Context, org string, vpcId string) ApiGetVpcRoutingProfileRequest {
+	return ApiGetVpcRoutingProfileRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		vpcId:      vpcId,
+	}
+}
+
+// Execute executes the request
+//
+//	@return VpcRoutingState
+func (a *VPCAPIService) GetVpcRoutingProfileExecute(r ApiGetVpcRoutingProfileRequest) (*VpcRoutingState, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue *VpcRoutingState
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.GetVpcRoutingProfile")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc/{vpcId}/routing-profile"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"vpcId"+"}", url.PathEscape(parameterValueToString(r.vpcId, "vpcId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 501 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type ApiReleaseVpcInactiveVniRequest struct {
+	ctx                          context.Context
+	ApiService                   *VPCAPIService
+	org                          string
+	vpcId                        string
+	vpcInactiveVniReleaseRequest *VpcInactiveVniReleaseRequest
+}
+
+func (r ApiReleaseVpcInactiveVniRequest) VpcInactiveVniReleaseRequest(vpcInactiveVniReleaseRequest VpcInactiveVniReleaseRequest) ApiReleaseVpcInactiveVniRequest {
+	r.vpcInactiveVniReleaseRequest = &vpcInactiveVniReleaseRequest
+	return r
+}
+
+func (r ApiReleaseVpcInactiveVniRequest) Execute() (*VpcInactiveVniReleaseResult, *http.Response, error) {
+	return r.ApiService.ReleaseVpcInactiveVniExecute(r)
+}
+
+/*
+ReleaseVpcInactiveVni Release inactive VPC VNI
+
+Release the allocation retained after a routing-profile change, leaving the active VNI and routing profile unchanged. Requires the same Provider ownership, registered Site, and `PROVIDER_ADMIN` authorization as [routing-state inspection](#tag/VPC/operation/get-vpc-routing-profile).
+
+Before release, independently verify that all attached and directly peered DPUs and fabric routes no longer use the inactive VNI. Keep the attachment, peering, deletion, and profile-definition hold described in [profile changes](#tag/VPC/operation/update-vpc-routing-profile) through release. Retain the allocation for unreachable consumers unless they have been isolated. REST and Core validate ownership, not dataplane convergence.
+
+Supply the exact `ifVersionMatch` and `expectedInactiveVni` from the authoritative state used for that decision. REST does not substitute a fresh version. The release advances the Core VPC version and makes the inactive VNI available for allocation to another VPC. It is never part of an automatic profile change or cleanup loop.
+
+A timeout, lost response, or invalid acknowledgement may follow a committed release. Inspect authoritative routing state before deciding what to do next; do not automatically retry or replace the original version. A stale-version error does not prove that a previous release failed. The ordinary VPC GET may lag the authoritative response.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Infrastructure Provider Org
+	@param vpcId REST ID of the VPC
+	@return ApiReleaseVpcInactiveVniRequest
+*/
+func (a *VPCAPIService) ReleaseVpcInactiveVni(ctx context.Context, org string, vpcId string) ApiReleaseVpcInactiveVniRequest {
+	return ApiReleaseVpcInactiveVniRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		vpcId:      vpcId,
+	}
+}
+
+// Execute executes the request
+//
+//	@return VpcInactiveVniReleaseResult
+func (a *VPCAPIService) ReleaseVpcInactiveVniExecute(r ApiReleaseVpcInactiveVniRequest) (*VpcInactiveVniReleaseResult, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodPost
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue *VpcInactiveVniReleaseResult
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.ReleaseVpcInactiveVni")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc/{vpcId}/routing-profile/release-inactive-vni"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"vpcId"+"}", url.PathEscape(parameterValueToString(r.vpcId, "vpcId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.vpcInactiveVniReleaseRequest == nil {
+		return localVarReturnValue, nil, reportError("vpcInactiveVniReleaseRequest is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	// body params
+	localVarPostBody = r.vpcInactiveVniReleaseRequest
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 501 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type ApiUpdateVpcRequest struct {
 	ctx              context.Context
 	ApiService       *VPCAPIService
@@ -807,6 +1218,229 @@ func (a *VPCAPIService) UpdateVpcExecute(r ApiUpdateVpcRequest) (*VPC, *http.Res
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
+type ApiUpdateVpcRoutingProfileRequest struct {
+	ctx                            context.Context
+	ApiService                     *VPCAPIService
+	org                            string
+	vpcId                          string
+	vpcRoutingProfileUpdateRequest *VpcRoutingProfileUpdateRequest
+}
+
+func (r ApiUpdateVpcRoutingProfileRequest) VpcRoutingProfileUpdateRequest(vpcRoutingProfileUpdateRequest VpcRoutingProfileUpdateRequest) ApiUpdateVpcRoutingProfileRequest {
+	r.vpcRoutingProfileUpdateRequest = &vpcRoutingProfileUpdateRequest
+	return r
+}
+
+func (r ApiUpdateVpcRoutingProfileRequest) Execute() (*VpcRoutingState, *http.Response, error) {
+	return r.ApiService.UpdateVpcRoutingProfileExecute(r)
+}
+
+/*
+UpdateVpcRoutingProfile Update VPC routing profile
+
+Change an existing FNN VPC to a configured routing profile with the opposite internal setting. Submit the destination `routingProfile` and optional exact `vni`; REST reads the current Core version internally and submits one change using that version. Core atomically changes the profile and active VNI, advances the version, and retains the old allocation. VPC identity, Instances, addresses, prefixes, NSGs, metadata, and the creation-time requested VNI are preserved.
+
+Requires the same Infrastructure Provider ownership, registered Site, and `PROVIDER_ADMIN` authorization as [routing-state inspection](#tag/VPC/operation/get-vpc-routing-profile). Core also enforces the Tenant's permitted access tier; Provider authorization does not permit broader Tenant routing access. Named source and destination profiles, nonoverlapping internal and external pools, and VNIs in 1..16777215 are required. Site-global VNIs, substantive VPC or interface routing overrides, and tenant-managed SitePrefix attachments are unsupported. Every serving Core must support the requested operation, including exact VNI selection; response validation cannot undo a change made by an older Core that ignores the exact VNI.
+
+REST makes no change if the initial read fails. A concurrent VPC update between the read and change returns 412 without rereading or retrying. Authorization, the read, and the change share one 50-second budget from handler entry within the HTTP request deadline. REST does not submit the change if its request context has expired before dispatch; a submitted workflow may outlive the caller. A timeout, lost response, or invalid acknowledgement after submission can leave a committed change; inspect the authoritative routing state before deciding on another request. Neither the mutation nor the full sequence is automatically retried. Each separate HTTP request is a new action, not a replay or deduplicated retry of a previous request.
+
+A 200 response confirms the Core configuration transaction, not restored traffic. Prevent attachment, peering, deletion, and profile-definition changes until all attached and directly peered DPUs and fabric routes have been independently verified and the inactive allocation released. Neither REST nor Core enforces this hold or verifies convergence. Release is a [separate operator action](#tag/VPC/operation/release-vpc-inactive-vni). A later change back must pass current validation; retaining the allocation does not guarantee reversal. External routing does not allocate public addresses or configure NAT, fabric routes, or NSGs.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Infrastructure Provider Org
+	@param vpcId REST ID of the VPC
+	@return ApiUpdateVpcRoutingProfileRequest
+*/
+func (a *VPCAPIService) UpdateVpcRoutingProfile(ctx context.Context, org string, vpcId string) ApiUpdateVpcRoutingProfileRequest {
+	return ApiUpdateVpcRoutingProfileRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		vpcId:      vpcId,
+	}
+}
+
+// Execute executes the request
+//
+//	@return VpcRoutingState
+func (a *VPCAPIService) UpdateVpcRoutingProfileExecute(r ApiUpdateVpcRoutingProfileRequest) (*VpcRoutingState, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodPatch
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue *VpcRoutingState
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "VPCAPIService.UpdateVpcRoutingProfile")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/vpc/{vpcId}/routing-profile"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"vpcId"+"}", url.PathEscape(parameterValueToString(r.vpcId, "vpcId")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.vpcRoutingProfileUpdateRequest == nil {
+		return localVarReturnValue, nil, reportError("vpcRoutingProfileUpdateRequest is required and must be specified")
+	}
+
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{"application/json"}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	// body params
+	localVarPostBody = r.vpcRoutingProfileUpdateRequest
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 429 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 501 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

@@ -3340,6 +3340,182 @@ paths:
                   labels:
                     region: us-west-1
                     env: dev
+  '/v2/org/{org}/nico/vpc/{vpcId}/routing-profile':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Infrastructure Provider Org
+      - schema:
+          type: string
+          format: uuid
+        name: vpcId
+        in: path
+        required: true
+        description: REST ID of the VPC
+    get:
+      summary: Retrieve VPC routing profile
+      operationId: get-vpc-routing-profile
+      tags:
+        - VPC
+      description: |-
+        Read the VPC's persisted routing profile, active VNI, version, and any retained allocation directly from Core. This is not the effective routing profile or evidence of DPU or fabric convergence. The ordinary VPC GET uses inventory and may lag this response.
+
+        Org must have an Infrastructure Provider entity that owns both the VPC and its Site. The VPC must belong to that Site, and the Site must be registered. User must have authorization role with `PROVIDER_ADMIN` suffix. Tenant administrator authorization alone is insufficient.
+
+        Inspection supports VPCs with valid pool ownership even when no named profile is stored or their virtualization type cannot support profile changes. Missing or inconsistent allocation ownership returns 412. A Site-global VNI override is not reflected in this response.
+      responses:
+        '200':
+          description: Authoritative persisted routing state and VNI allocations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VpcRoutingState'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The VPC's allocation ownership is missing or inconsistent.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: The routing state could not be retrieved or Core returned an invalid response.
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Core version does not implement routing-state inspection.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site Agent is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: The authoritative read exceeded the request's Site communication budget.
+          $ref: '#/components/responses/GenericHttpError'
+    patch:
+      summary: Update VPC routing profile
+      operationId: update-vpc-routing-profile
+      tags:
+        - VPC
+      description: |-
+        Change an existing FNN VPC to a configured routing profile with the opposite internal setting. Submit the destination `routingProfile` and optional exact `vni`; REST reads the current Core version internally and submits one change using that version. Core atomically changes the profile and active VNI, advances the version, and retains the old allocation. VPC identity, Instances, addresses, prefixes, NSGs, metadata, and the creation-time requested VNI are preserved.
+
+        Requires the same Infrastructure Provider ownership, registered Site, and `PROVIDER_ADMIN` authorization as [routing-state inspection](#tag/VPC/operation/get-vpc-routing-profile). Core also enforces the Tenant's permitted access tier; Provider authorization does not permit broader Tenant routing access. Named source and destination profiles, nonoverlapping internal and external pools, and VNIs in 1..16777215 are required. Site-global VNIs, substantive VPC or interface routing overrides, and tenant-managed SitePrefix attachments are unsupported. Every serving Core must support the requested operation, including exact VNI selection; response validation cannot undo a change made by an older Core that ignores the exact VNI.
+
+        REST makes no change if the initial read fails. A concurrent VPC update between the read and change returns 412 without rereading or retrying. Authorization, the read, and the change share one 50-second budget from handler entry within the HTTP request deadline. REST does not submit the change if its request context has expired before dispatch; a submitted workflow may outlive the caller. A timeout, lost response, or invalid acknowledgement after submission can leave a committed change; inspect the authoritative routing state before deciding on another request. Neither the mutation nor the full sequence is automatically retried. Each separate HTTP request is a new action, not a replay or deduplicated retry of a previous request.
+
+        A 200 response confirms the Core configuration transaction, not restored traffic. Prevent attachment, peering, deletion, and profile-definition changes until all attached and directly peered DPUs and fabric routes have been independently verified and the inactive allocation released. Neither REST nor Core enforces this hold or verifies convergence. Release is a [separate operator action](#tag/VPC/operation/release-vpc-inactive-vni). A later change back must pass current validation; retaining the allocation does not guarantee reversal. External routing does not allocate public addresses or configure NAT, fabric routes, or NSGs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VpcRoutingProfileUpdateRequest'
+            examples:
+              automatic-vni:
+                value:
+                  routingProfile: external
+              exact-vni:
+                value:
+                  routingProfile: external
+                  vni: 51000
+      responses:
+        '200':
+          description: Committed routing state, including the retained previous allocation; dataplane convergence is not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VpcRoutingState'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: Provider authorization or resource ownership failed.
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: The VPC or a required named routing profile was not found.
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Core rejected the change because the observed version is stale, the destination exceeds the Tenant's access tier, the configuration or allocations are unsupported or inconsistent, or the exact VNI is unavailable or does not match the retained allocation. The rejected request commits no changes.
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: No VNI is available for automatic allocation from the destination pool.
+          $ref: '#/components/responses/ResourceExhaustedError'
+        '500':
+          description: The request failed or Core returned an invalid acknowledgement. If the change was submitted, it may have committed; inspect authoritative routing state before another request.
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Core version does not implement a required routing operation.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site Agent is unavailable. If the change was submitted, inspect authoritative routing state before another request; the change may have committed.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: The read and change exceeded their shared request budget. A submitted change may still commit; inspect authoritative routing state before another request and do not retry automatically.
+          $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/vpc/{vpcId}/routing-profile/release-inactive-vni':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Infrastructure Provider Org
+      - schema:
+          type: string
+          format: uuid
+        name: vpcId
+        in: path
+        required: true
+        description: REST ID of the VPC
+    post:
+      summary: Release inactive VPC VNI
+      operationId: release-vpc-inactive-vni
+      tags:
+        - VPC
+      description: |-
+        Release the allocation retained after a routing-profile change, leaving the active VNI and routing profile unchanged. Requires the same Provider ownership, registered Site, and `PROVIDER_ADMIN` authorization as [routing-state inspection](#tag/VPC/operation/get-vpc-routing-profile).
+
+        Before release, independently verify that all attached and directly peered DPUs and fabric routes no longer use the inactive VNI. Keep the attachment, peering, deletion, and profile-definition hold described in [profile changes](#tag/VPC/operation/update-vpc-routing-profile) through release. Retain the allocation for unreachable consumers unless they have been isolated. REST and Core validate ownership, not dataplane convergence.
+
+        Supply the exact `ifVersionMatch` and `expectedInactiveVni` from the authoritative state used for that decision. REST does not substitute a fresh version. The release advances the Core VPC version and makes the inactive VNI available for allocation to another VPC. It is never part of an automatic profile change or cleanup loop.
+
+        A timeout, lost response, or invalid acknowledgement may follow a committed release. Inspect authoritative routing state before deciding what to do next; do not automatically retry or replace the original version. A stale-version error does not prove that a previous release failed. The ordinary VPC GET may lag the authoritative response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VpcInactiveVniReleaseRequest'
+      responses:
+        '200':
+          description: Authoritative acknowledgement of the released allocation and advanced VPC version
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VpcInactiveVniReleaseResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The observed version is stale, the exact inactive VNI does not match, or allocation ownership is missing or inconsistent. The rejected request commits no changes.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: The request failed or Core returned an invalid acknowledgement. A submitted release may have committed; inspect authoritative routing state before another request.
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Core version does not implement inactive VNI release.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site Agent is unavailable. A submitted release may have committed; inspect authoritative routing state before another request.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: The release exceeded the request's Site communication budget. It may still commit; inspect authoritative routing state and do not retry automatically or substitute a fresh version.
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/vpc/{vpcId}/virtualization':
     parameters:
       - schema:
@@ -19655,6 +19831,161 @@ components:
         labels:
           $ref: '#/components/schemas/Labels'
           description: 'Update labels of the VPC. Up to 10 key-value pairs can be specified. The labels will be replaced with the labels sent in the request. Any labels not included in the request will be removed. To retain existing labels, fetch them first and include them in this request.'
+    VpcRoutingProfileUpdateRequest:
+      title: VpcRoutingProfileUpdateRequest
+      type: object
+      description: Change a VPC's named routing profile with automatic or exact VNI selection. REST reads the Core version internally; the caller does not supply a version or manipulate resource pools.
+      examples:
+        - routingProfile: external
+        - routingProfile: external
+          vni: 51000
+      properties:
+        routingProfile:
+          type: string
+          minLength: 1
+          description: Required Site-configured destination profile with the opposite internal setting from the current profile. The REST aliases `external`, `internal`, and `privileged-internal` map to Core's `EXTERNAL`, `INTERNAL`, and `PRIVILEGED_INTERNAL` names. Other configured names are passed unchanged; this is not a closed enum.
+        vni:
+          type:
+            - integer
+            - 'null'
+          minimum: 1
+          maximum: 16777215
+          description: Optional exact destination VNI. Omission or null reuses an allocation retained in the destination pool, otherwise allocates automatically. An exact request must match a retained destination allocation if present; otherwise it must name a free materialized entry in the destination pool, regardless of that entry's automatic-allocation setting. A mismatched, occupied, missing, or already active VNI is rejected without fallback.
+      required:
+        - routingProfile
+    VpcRoutingState:
+      title: VpcRoutingState
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - routingProfile
+        - retainedAllocation
+      description: Authoritative persisted routing state read with the VPC's owned allocations. This is not the effective routing profile, a Site-global VNI override, or a convergence report. Every field is present; null means no stored profile or retained allocation, respectively.
+      examples:
+        - vpcId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          version: V2-T1789147200000000
+          routingProfile: external
+          activeVni: 51000
+          retainedAllocation:
+            poolName: vpc-vni
+            vni: 12001
+      properties:
+        vpcId:
+          type: string
+          format: uuid
+          description: REST ID of the VPC selected in the request, which may differ from its Site-local Core ID.
+        version:
+          type: string
+          description: Core VPC version observed with these allocations. Use this exact value when approving release of the observed inactive VNI; it is not a DPU-applied version.
+        routingProfile:
+          type:
+            - string
+            - 'null'
+          description: Persisted profile name, or null when no named profile is stored. Known Core names are returned as the REST aliases `external`, `internal`, and `privileged-internal`; other names are unchanged. The name can be returned even when its Site definition is unavailable.
+        activeVni:
+          type: integer
+          format: uint32
+          minimum: 0
+          maximum: 4294967295
+          description: Persisted active VNI verified against pool ownership. Inspection accepts nonnegative values, including zero and values outside the profile-change range; successful inspection does not imply a profile change is supported.
+        retainedAllocation:
+          oneOf:
+            - $ref: '#/components/schemas/VpcRetainedVniAllocation'
+            - type: 'null'
+          description: Allocation owned by this VPC in the other pool, or null when the valid active allocation is its only allocation. Inconsistent ownership is an error, not a null result.
+      required:
+        - vpcId
+        - version
+        - routingProfile
+        - activeVni
+        - retainedAllocation
+    VpcRetainedVniAllocation:
+      title: VpcRetainedVniAllocation
+      type: object
+      description: VNI still reserved for the VPC in the pool other than its active allocation. Retention alone does not guarantee that a reverse profile change passes current validation.
+      examples:
+        - poolName: vpc-vni
+          vni: 12001
+      properties:
+        poolName:
+          type: string
+          enum:
+            - vpc-vni
+            - external-vpc-vni
+          description: Resource pool containing the retained allocation.
+        vni:
+          type: integer
+          format: uint32
+          minimum: 0
+          maximum: 4294967295
+          description: Persisted nonnegative VNI, distinct from the active VNI. Inspection does not establish whether it is valid for a profile change or release.
+      required:
+        - poolName
+        - vni
+    VpcInactiveVniReleaseRequest:
+      title: VpcInactiveVniReleaseRequest
+      type: object
+      description: Release the exact inactive VNI from the operator's authoritative observation after independently verifying convergence. REST preserves the supplied version and does not look up a replacement.
+      examples:
+        - ifVersionMatch: V2-T1789147200000000
+          expectedInactiveVni: 12001
+      properties:
+        ifVersionMatch:
+          type: string
+          minLength: 1
+          description: Exact Core VPC version from routing-state inspection used for the release decision, in `V<counter>-T<microseconds>` format. Missing or malformed versions are rejected. A stale version returns 412; after an ambiguous release, that error does not prove whether the previous release committed.
+        expectedInactiveVni:
+          type: integer
+          minimum: 1
+          maximum: 16777215
+          description: Exact retained VNI observed with `ifVersionMatch`. It must match the VPC's inactive allocation and differ from its active VNI.
+      required:
+        - ifVersionMatch
+        - expectedInactiveVni
+    VpcInactiveVniReleaseResult:
+      title: VpcInactiveVniReleaseResult
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - routingProfile
+      description: Authoritative acknowledgement after releasing the inactive allocation. The active VNI and routing profile remain unchanged, and the Core VPC version advances. This is not evidence of dataplane convergence.
+      examples:
+        - vpcId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          version: V3-T1789147260000000
+          routingProfile: external
+          activeVni: 51000
+          releasedInactiveVni: 12001
+      properties:
+        vpcId:
+          type: string
+          format: uuid
+          description: REST ID of the VPC selected in the release request.
+        version:
+          type: string
+          description: Advanced Core VPC version after release committed.
+        routingProfile:
+          type:
+            - string
+            - 'null'
+          description: Unchanged persisted profile name, or null when none is stored. Known Core names use the REST aliases `external`, `internal`, and `privileged-internal`; custom names are unchanged.
+        activeVni:
+          type: integer
+          format: uint32
+          minimum: 0
+          maximum: 4294967295
+          description: Unchanged active VNI.
+        releasedInactiveVni:
+          type: integer
+          format: uint32
+          minimum: 1
+          maximum: 16777215
+          description: Exact inactive VNI released by this request and now available for allocation to another VPC.
+      required:
+        - vpcId
+        - version
+        - routingProfile
+        - activeVni
+        - releasedInactiveVni
     VpcVirtualizationUpdateRequest:
       title: VpcVirtualizationUpdateRequest
       type: object

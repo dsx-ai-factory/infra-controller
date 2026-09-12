@@ -43,7 +43,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"tenant":                    5,
 		"tenant-account":            5,
 		"site":                      6,
-		"vpc":                       6,
+		"vpc":                       9,
 		"vpcpeering":                4,
 		"vpcprefix":                 5,
 		"ip-block":                  6,
@@ -138,6 +138,10 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteBefore(t, got, http.MethodGet, taskPath, http.MethodGet, taskPath+"/:id")
 			tenantPath := "/org/:orgName/" + cfg.GetAPIName() + "/tenant"
 			assertRouteExists(t, got, http.MethodGet, tenantPath+"/current/routing-profile")
+			vpcRoutingProfilePath := "/org/:orgName/" + cfg.GetAPIName() + "/vpc/:id/routing-profile"
+			assertRouteExists(t, got, http.MethodGet, vpcRoutingProfilePath)
+			assertRouteExists(t, got, http.MethodPatch, vpcRoutingProfilePath)
+			assertRouteExists(t, got, http.MethodPost, vpcRoutingProfilePath+"/release-inactive-vni")
 
 			machineAdminPath := "/org/:orgName/" + cfg.GetAPIName() + "/machine/:id"
 			dpuPath := "/org/:orgName/" + cfg.GetAPIName() + "/dpu"
