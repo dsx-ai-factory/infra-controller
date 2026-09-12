@@ -365,3 +365,33 @@ message VpcPrefixInventory {
   // Inventory page information
   InventoryPage inventory_page = 5;
 }
+
+// SitePrefixInventory reports one message from a periodic SitePrefix inventory
+// run. Every SUCCESS message uses the same timestamp and repeats the complete
+// item_ids set in SitePrefix ID order. In a complete nonempty run, the
+// site_prefixes payloads are ordered, disjoint, and together contain exactly
+// one record matching each item_ids entry. Receipt of the final page and that
+// exact union make the run complete. total_pages on a non-final page is an
+// estimate and may increase if later messages must be smaller.
+//
+// An unpaged FAILED message represents a collection failure detected before
+// any SUCCESS message was published. A failure after partial publication emits
+// no FAILED message; the non-final SUCCESS messages remain an incomplete run.
+// An empty SUCCESS run is one message with current_page 1, zero total_pages and
+// total_items, page_size set to the effective configured publish page size, and
+// empty lists. Omitted repeated fields and empty lists have the same meaning.
+// Receivers must leave REST IP Block records unchanged for a FAILED message.
+// They may process SitePrefixes present on SUCCESS pages, but must not treat
+// any ID as missing until the run is complete.
+message SitePrefixInventory {
+  // SitePrefixes included in this page
+  repeated forge.SitePrefix site_prefixes = 1;
+  // Time this inventory run began. Every page from the same run uses this value.
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of inventory collection
+  InventoryStatus inventory_status = 3;
+  // Message describing the inventory status
+  string status_msg = 4;
+  // Page information, including every SitePrefix ID in a successful run
+  InventoryPage inventory_page = 5;
+}

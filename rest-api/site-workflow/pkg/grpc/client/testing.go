@@ -25,6 +25,64 @@ import (
 
 var runes = []rune("abcdefghijklmnopqrstuvwxyz0123456789")
 
+// mockSitePrefixContextKey prevents SitePrefix fixtures from colliding with
+// the string context keys used by other mock methods.
+type mockSitePrefixContextKey uint8
+
+const (
+	mockSitePrefixCountKey mockSitePrefixContextKey = iota
+	mockSitePrefixIDsKey
+	mockSitePrefixErrorKey
+	mockSitePrefixResponseKey
+	mockSitePrefixMaxFindByIDsKey
+	mockSitePrefixVersionErrorKey
+	mockSitePrefixFindByIDsErrorKey
+)
+
+// mockSitePrefixFindByIDsError selects one by-ID request that the mock rejects.
+type mockSitePrefixFindByIDsError struct {
+	id  string
+	err error
+}
+
+// Test-specific function that sets how many SitePrefix IDs the mock Core client returns.
+func WithMockSitePrefixCount(ctx context.Context, count int) context.Context {
+	return context.WithValue(ctx, mockSitePrefixCountKey, count)
+}
+
+// Test-specific function that sets the exact SitePrefix IDs the mock Core client returns.
+func WithMockSitePrefixIDs(ctx context.Context, ids []*corev1.SitePrefixId) context.Context {
+	return context.WithValue(ctx, mockSitePrefixIDsKey, ids)
+}
+
+// Test-specific function that makes the mock Core client return an error from its SitePrefix find APIs.
+func WithMockSitePrefixError(ctx context.Context, err error) context.Context {
+	return context.WithValue(ctx, mockSitePrefixErrorKey, err)
+}
+
+// Test-specific function that sets the SitePrefixes returned by the mock Core by-ID API.
+func WithMockSitePrefixResponse(ctx context.Context, sitePrefixes []*corev1.SitePrefix) context.Context {
+	return context.WithValue(ctx, mockSitePrefixResponseKey, sitePrefixes)
+}
+
+// Test-specific function that sets the Core limit enforced by SitePrefix by-ID requests.
+func WithMockSitePrefixMaxFindByIDs(ctx context.Context, limit uint32) context.Context {
+	return context.WithValue(ctx, mockSitePrefixMaxFindByIDsKey, limit)
+}
+
+// Test-specific function that makes the mock Core Version RPC return an error.
+func WithMockSitePrefixVersionError(ctx context.Context, err error) context.Context {
+	return context.WithValue(ctx, mockSitePrefixVersionErrorKey, err)
+}
+
+// Test-specific function that rejects the SitePrefix by-ID request containing id.
+func WithMockSitePrefixFindByIDsError(ctx context.Context, id string, err error) context.Context {
+	return context.WithValue(ctx, mockSitePrefixFindByIDsErrorKey, mockSitePrefixFindByIDsError{
+		id:  id,
+		err: err,
+	})
+}
+
 // Add utlity methods here
 // randSeq generates a random sequence of runes
 func randSeq(n int) string {
@@ -68,16 +126,23 @@ type MockCoreGrpcServiceClient struct {
 
 /* Version mock methods */
 func (mcgsc *MockCoreGrpcServiceClient) Version(ctx context.Context, in *corev1.VersionRequest, opts ...grpc.CallOption) (*corev1.BuildInfo, error) {
+	versionErr, ok := ctx.Value(mockSitePrefixVersionErrorKey).(error)
+	if ok {
+		return nil, versionErr
+	}
+
 	out := new(corev1.BuildInfo)
 	out.BuildVersion = "1.0.0"
 	out.Capabilities = mcgsc.BuildCapabilities
 	// Core reports the runtime config only when the request asks for it, so a
 	// caller that omits DisplayConfig gets BuildInfo with no RuntimeConfig.
 	if in.GetDisplayConfig() {
-		siteFabricPrefixes, ok := ctx.Value("siteFabricPrefixes").([]string)
-		if ok {
+		siteFabricPrefixes, hasSiteFabricPrefixes := ctx.Value("siteFabricPrefixes").([]string)
+		maxFindByIDs, hasMaxFindByIDs := ctx.Value(mockSitePrefixMaxFindByIDsKey).(uint32)
+		if hasSiteFabricPrefixes || hasMaxFindByIDs {
 			out.RuntimeConfig = &corev1.RuntimeConfig{
 				SiteFabricPrefixes: siteFabricPrefixes,
+				MaxFindByIds:       maxFindByIDs,
 			}
 		}
 	}
@@ -644,6 +709,64 @@ func (mcgsc *MockCoreGrpcServiceClient) FindInstanceTypesByIds(ctx context.Conte
 			out.InstanceTypes = append(out.InstanceTypes, &corev1.InstanceType{
 				Id: id,
 			})
+		}
+	}
+	return out, nil
+}
+
+// Test-specific function that returns either an exact SitePrefix ID fixture or a generated list.
+func (mcgsc *MockCoreGrpcServiceClient) FindSitePrefixIds(ctx context.Context, in *corev1.SitePrefixSearchFilter, opts ...grpc.CallOption) (*corev1.SitePrefixIdList, error) {
+	err, ok := ctx.Value(mockSitePrefixErrorKey).(error)
+	if ok {
+		return nil, status.Error(status.Code(err), "failed to retrieve SitePrefix IDs")
+	}
+
+	ids, ok := ctx.Value(mockSitePrefixIDsKey).([]*corev1.SitePrefixId)
+	if ok {
+		return &corev1.SitePrefixIdList{SitePrefixIds: slices.Clone(ids)}, nil
+	}
+
+	out := &corev1.SitePrefixIdList{}
+	count, ok := ctx.Value(mockSitePrefixCountKey).(int)
+	if ok {
+		for range count {
+			out.SitePrefixIds = append(out.SitePrefixIds, &corev1.SitePrefixId{Value: uuid.NewString()})
+		}
+		// Return generated IDs in reverse order so the activity test proves it sorts them.
+		slices.SortFunc(out.SitePrefixIds, func(left, right *corev1.SitePrefixId) int {
+			return strings.Compare(right.GetValue(), left.GetValue())
+		})
+	}
+	return out, nil
+}
+
+// Test-specific function that returns each requested SitePrefix unless a fixture overrides it.
+func (mcgsc *MockCoreGrpcServiceClient) FindSitePrefixesByIds(ctx context.Context, in *corev1.SitePrefixesByIdsRequest, opts ...grpc.CallOption) (*corev1.SitePrefixList, error) {
+	err, ok := ctx.Value(mockSitePrefixErrorKey).(error)
+	if ok {
+		return nil, status.Error(status.Code(err), "failed to retrieve SitePrefixes")
+	}
+	findErr, ok := ctx.Value(mockSitePrefixFindByIDsErrorKey).(mockSitePrefixFindByIDsError)
+	if ok {
+		for _, id := range in.GetSitePrefixIds() {
+			if id.GetValue() == findErr.id {
+				return nil, findErr.err
+			}
+		}
+	}
+	maxFindByIDs, ok := ctx.Value(mockSitePrefixMaxFindByIDsKey).(uint32)
+	if ok && uint32(len(in.GetSitePrefixIds())) > maxFindByIDs {
+		return nil, status.Error(codes.InvalidArgument, "too many SitePrefix IDs")
+	}
+	sitePrefixes, ok := ctx.Value(mockSitePrefixResponseKey).([]*corev1.SitePrefix)
+	if ok {
+		return &corev1.SitePrefixList{SitePrefixes: slices.Clone(sitePrefixes)}, nil
+	}
+
+	out := &corev1.SitePrefixList{}
+	if in != nil {
+		for _, id := range in.SitePrefixIds {
+			out.SitePrefixes = append(out.SitePrefixes, &corev1.SitePrefix{Id: id})
 		}
 	}
 	return out, nil
