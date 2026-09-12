@@ -84,8 +84,8 @@ use model::machine::{
     MachineLastRebootRequestedMode, MachineNextStateResolver, MachineState,
     MachineValidationContext, ManagedHostState, ManagedHostStateSnapshot, MeasuringState,
     NetworkConfigUpdateState, NextStateBFBSupport, PerformPowerOperation, PowerDrainState,
-    PowerState, ReadyBootConfigPostLockAction, ReadyBootConfigState, ReprovisionState, RetryInfo,
-    SecureEraseBossContext, SecureEraseBossState, SetBootOrderInfo, SetBootOrderState,
+    PowerState, ReadyBootConfigPostLockAction, ReadyBootConfigState, ReprovisionState, ResetState,
+    RetryInfo, SecureEraseBossContext, SecureEraseBossState, SetBootOrderInfo, SetBootOrderState,
     SetSecureBootState, SpdmMeasuringState, StateMachineArea, UefiSetupInfo, UefiSetupState,
     UnlockHostState, ValidationState, get_display_ids,
 };
@@ -138,6 +138,7 @@ mod machine_validation;
 mod maintenance;
 mod nic_lockdown_rotation;
 mod power;
+mod reset;
 mod rotation;
 mod sku;
 #[cfg(test)]
@@ -780,6 +781,28 @@ impl MachineStateHandler {
             return Ok(restart_transition);
         }
 
+        // A reset preempts the reprovision hinge below and the failure parking after it.
+        if managed_host_reset_needed(mh_snapshot) {
+            // Stamping `started_at` closes the reset to `clear` and stops the hinge re-firing.
+            let mut txn = ctx.services.db_pool.begin().await?;
+            db::machine::update_managed_host_reset_start_time(
+                &mut txn,
+                &mh_snapshot.host_snapshot.id,
+            )
+            .await?;
+
+            tracing::info!(
+                host_machine_id = %mh_snapshot.host_snapshot.id,
+                from_state = %mh_state,
+                "Managed host reset requested; tearing down the host for re-ingestion",
+            );
+
+            return Ok(StateHandlerOutcome::transition(ManagedHostState::Reset {
+                reset_state: ResetState::DeletingInstance,
+            })
+            .with_txn(txn));
+        }
+
         if dpu_reprovisioning_needed(&mh_snapshot.dpu_snapshots) {
             // Reprovision is started and user requested for restart of reprovision.
             let restart_reprov = can_restart_reprovision(
@@ -797,8 +820,11 @@ impl MachineStateHandler {
 
         // Don't update failed state failure cause everytime. Record first failure cause only,
         // otherwise first failure cause will be overwritten.
-        if !matches!(mh_state, ManagedHostState::Failed { .. })
-            && let Some((machine_id, details)) = get_failed_state(mh_snapshot)
+        // A reset is a deliberate teardown, so a failure record must not park it.
+        if !matches!(
+            mh_state,
+            ManagedHostState::Failed { .. } | ManagedHostState::Reset { .. }
+        ) && let Some((machine_id, details)) = get_failed_state(mh_snapshot)
         {
             let already_relocking_machine_failure = matches!(
                 &mh_state,
@@ -1021,6 +1047,17 @@ impl MachineStateHandler {
                 self.dpu_handler
                     .handle_object_state(host_machine_id, mh_snapshot, &mh_state, ctx)
                     .await
+            }
+
+            ManagedHostState::Reset { reset_state } => {
+                reset::handle_reset(
+                    reset_state,
+                    mh_snapshot,
+                    ctx,
+                    self.instance_handler.common_pools.as_deref(),
+                    self.dpu_handler.dpf_sdk.as_deref(),
+                )
+                .await
             }
 
             ManagedHostState::HostInit { .. } => {
@@ -2708,6 +2745,21 @@ fn dpu_reprovisioning_needed(dpu_snapshots: &[DpuMachine]) -> bool {
     dpu_snapshots
         .iter()
         .any(|x| x.reprovision_requested.is_some())
+}
+
+/// This function checks if an operator-requested reset is waiting to start.
+fn managed_host_reset_needed(state: &ManagedHostStateSnapshot) -> bool {
+    // A force-deleting host must not be resurrected.
+    if matches!(state.managed_state, ManagedHostState::ForceDeletion) {
+        return false;
+    }
+
+    // The API nulls `started_at` on every `set`, so a re-trigger restarts the reset.
+    state
+        .host_snapshot
+        .reset_requested
+        .as_ref()
+        .is_some_and(|request| request.started_at.is_none())
 }
 
 async fn handle_restart_verification(

@@ -61,6 +61,7 @@ pub(super) mod machine_quarantine;
 pub(super) mod machine_scout;
 pub(super) mod machine_validation;
 pub(super) mod managed_host;
+pub(super) mod managed_host_reset;
 pub(super) mod measured_boot;
 pub(super) mod mlx_admin;
 pub(super) mod network_devices;

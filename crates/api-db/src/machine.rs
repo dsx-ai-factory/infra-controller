@@ -57,7 +57,7 @@ use model::machine::{
     DpuOsOperationalState, DpuRepresentorStatus, FailureDetails, HostMachine, HostProfile, Machine,
     MachineInterfaceSnapshot, MachineLastRebootRequested, MachineLastRebootRequestedMode,
     MachineMaintenanceOperation, MachineValidationContext, ManagedHostState, ReprovisionRequest,
-    UpgradeDecision,
+    ResetRequest, UpgradeDecision,
 };
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::metadata::Metadata;
@@ -2174,6 +2174,90 @@ pub async fn list_machines_requested_for_host_reprovisioning(
     lazy_static! {
         static ref query: String = format!(
             "{} WHERE m.host_reprovisioning_requested IS NOT NULL",
+            JSON_MACHINE_SNAPSHOT_QUERY.deref()
+        );
+    }
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query.as_str(), e))
+}
+
+/// Records a reset request, replacing any previous one. Re-requesting is allowed and restarts
+/// the reset: the replacement clears `started_at`, so the controller hinge fires again.
+pub async fn trigger_managed_host_reset_request(
+    txn: &mut PgConnection,
+    initiator: &str,
+    machine_id: &MachineId,
+) -> Result<(), DatabaseError> {
+    let req = ResetRequest {
+        requested_at: chrono::Utc::now(),
+        initiator: initiator.to_string(),
+        started_at: None,
+    };
+
+    let query = "UPDATE machines SET reset_requested=$2 WHERE id=$1 RETURNING id";
+    let _id = sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
+        .bind(sqlx::types::Json(req))
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(())
+}
+
+/// Marks the reset as started, which closes it to `Clear` and stops the hinge re-firing.
+/// Guarded on `IS NOT NULL` because `jsonb_set` on a `NULL` column reports success unchanged.
+pub async fn update_managed_host_reset_start_time(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+) -> Result<(), DatabaseError> {
+    let query = r#"UPDATE machines
+                        SET reset_requested=
+                                    jsonb_set(reset_requested, '{started_at}', $2, true)
+                       WHERE id=$1 AND reset_requested IS NOT NULL RETURNING id"#;
+    let _id = sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
+        .bind(sqlx::types::Json(chrono::Utc::now()))
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(())
+}
+
+/// Clears a reset request. With `validate_started_time` the row is left alone once the reset
+/// has started, so a controller that starts concurrently wins over a late `Clear`.
+pub async fn clear_managed_host_reset_request(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    validate_started_time: bool,
+) -> Result<(), DatabaseError> {
+    let query = if validate_started_time {
+        "UPDATE machines SET reset_requested=NULL
+            WHERE id=$1 AND reset_requested->'started_at' = 'null'::jsonb RETURNING id"
+    } else {
+        "UPDATE machines SET reset_requested=NULL
+            WHERE id=$1 RETURNING id"
+    };
+
+    let _id = sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::new("clear reset_requested", e))?;
+
+    Ok(())
+}
+
+pub async fn list_machines_requested_for_reset(
+    txn: impl DbReader<'_>,
+) -> Result<Vec<HostMachine>, DatabaseError> {
+    lazy_static! {
+        static ref query: String = format!(
+            "{} WHERE m.reset_requested IS NOT NULL \
+             ORDER BY (m.reset_requested->>'requested_at')::timestamptz, m.id",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
