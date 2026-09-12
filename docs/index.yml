@@ -117,6 +117,8 @@ navigation:
           path: provisioning/ip-and-network-configuration.md
         - page: Ingesting Hosts
           path: provisioning/ingesting-hosts.md
+        - page: Discovery OS cloud-init (Scout)
+          path: provisioning/discovery-os-cloud-init.md
         - page: Ingesting Hosts (REST API)
           path: provisioning/ingesting-hosts-rest-api.md
         - page: Configure Expected Machine Interfaces

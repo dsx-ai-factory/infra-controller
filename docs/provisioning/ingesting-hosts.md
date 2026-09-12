@@ -2,6 +2,10 @@
 
 Once you have NVIDIA Infra Controller (NICo) up and running, you can begin ingesting machines.
 
+Hosts boot the discovery OS (Scout) as part of this flow. To run site-specific
+cloud-init configuration during discovery boots, see [Discovery OS cloud-init
+(Scout)](discovery-os-cloud-init.md).
+
 The preferred operator workflow uses the REST API and `nicocli`. Follow [Ingesting Hosts (REST API)](ingesting-hosts-rest-api.md) for credential setup, Expected Machine registration, ingestion verification, and table maintenance. The direct Core workflow below remains available for operations that do not yet have REST parity; see [Site Setup API Parity](site-setup-api-parity.md) for the current status and tracked gaps.
 
 ## Prerequisites
