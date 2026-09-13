@@ -3667,19 +3667,8 @@ pub async fn allocate_address_for_family(
 
     let mut allocated_addresses = Vec::new();
     if family == IpAddressFamily::Ipv6 {
-        // Use a family-only segment view so lease recovery allocates exactly one
-        // address from each IPv6 prefix and does not disturb IPv4 ordering.
-        let ipv6_segment = NetworkSegment {
-            prefixes: segment
-                .prefixes
-                .iter()
-                .filter(|prefix| prefix.prefix.is_ipv6())
-                .cloned()
-                .collect(),
-            ..segment.clone()
-        };
         allocated_addresses =
-            allocate_v6_addresses_via_ip_allocator(&mut fast_txn, &ipv6_segment).await?;
+            allocate_v6_addresses_via_ip_allocator(&mut fast_txn, segment).await?;
         for address in &allocated_addresses {
             crate::machine_interface_address::insert(
                 fast_txn.as_pgconn(),
