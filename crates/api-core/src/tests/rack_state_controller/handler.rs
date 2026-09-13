@@ -4590,7 +4590,10 @@ async fn assert_configure_nmx_cluster_v2_results(
 
     assert_eq!(
         certificate_request.services,
-        vec![rms::SwitchService::NvueApi as i32]
+        vec![
+            rms::SwitchService::NvueApi as i32,
+            rms::SwitchService::ScaleUpFabricManager as i32,
+        ]
     );
 
     assert_node_set_contains_switches(certificate_request.nodes.as_ref(), switch_ids);
@@ -5176,7 +5179,14 @@ async fn test_configure_nmx_cluster_certificate_submission_does_not_require_bmc_
     };
 
     assert_node_set_contains_switches(request.nodes.as_ref(), &switch_ids);
-    assert_eq!(request.services, vec![rms::SwitchService::NvueApi as i32]);
+
+    assert_eq!(
+        request.services,
+        vec![
+            rms::SwitchService::NvueApi as i32,
+            rms::SwitchService::ScaleUpFabricManager as i32,
+        ]
+    );
 
     assert!(
         request

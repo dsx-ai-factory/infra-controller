@@ -37,6 +37,7 @@ use carbide_secrets::credentials::{CredentialKey, CredentialManager, Credentials
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use component_manager::component_manager::ComponentManager;
+use component_manager::config::{SwitchMtlsService, switch_mtls_services_as_i32};
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{
     ScaleUpFabricManagerJobStatus, SwitchCertificateEndpoint, SwitchPasswordRotationState,
@@ -47,7 +48,6 @@ use db::{
     machine_topology as db_machine_topology, power_options as db_power_options,
     power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
 };
-use librms::protos::rack_manager as rms;
 use model::component_manager::ConfigureSwitchCertificateState;
 use model::machine::HostMachine;
 use model::rack::{
@@ -1347,7 +1347,10 @@ async fn start_configure_nmx_cluster(
         .await;
     }
 
-    let services = [rms::SwitchService::NvueApi as i32];
+    let services = switch_mtls_services_as_i32(&[
+        SwitchMtlsService::NvueApi,
+        SwitchMtlsService::ScaleUpFabricManager,
+    ]);
 
     let job_id = match component_manager
         .batch_configure_switch_certificate(&endpoints, None, Some(&services))
