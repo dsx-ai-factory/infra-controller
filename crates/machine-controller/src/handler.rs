@@ -9130,18 +9130,18 @@ impl StateHandler for InstanceStateHandler {
                     let mut host_netconf = mh_snapshot.host_snapshot.network_config.value.clone();
                     let old_use_admin_network = host_netconf.use_admin_network;
                     host_netconf.use_admin_network = Some(true);
-                    let updated = db::machine::try_update_network_config(
+                    db::machine::try_update_network_config(
                         &mut txn,
                         &mh_snapshot.host_snapshot.id,
                         host_version,
                         &host_netconf,
                     )
-                    .await?;
+                    .await?
+                    .check_applied()?;
 
                     // Set use_admin_network_changed if we want to reboot
                     // ovs on admin network change.
-                    if updated
-                        && old_use_admin_network != host_netconf.use_admin_network
+                    if old_use_admin_network != host_netconf.use_admin_network
                         && ctx
                             .services
                             .site_config
@@ -9480,18 +9480,18 @@ impl StateHandler for InstanceStateHandler {
                     let mut host_netconf = mh_snapshot.host_snapshot.network_config.value.clone();
                     let old_use_admin_network = host_netconf.use_admin_network;
                     host_netconf.use_admin_network = Some(false);
-                    let updated = db::machine::try_update_network_config(
+                    db::machine::try_update_network_config(
                         &mut txn,
                         &mh_snapshot.host_snapshot.id,
                         host_version,
                         &host_netconf,
                     )
-                    .await?;
+                    .await?
+                    .check_applied()?;
 
                     // Set use_admin_network_changed if we want to reboot
                     // ovs on admin network change.
-                    if updated
-                        && old_use_admin_network != host_netconf.use_admin_network
+                    if old_use_admin_network != host_netconf.use_admin_network
                         && ctx
                             .services
                             .site_config

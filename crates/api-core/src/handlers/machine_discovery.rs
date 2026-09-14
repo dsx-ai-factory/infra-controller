@@ -25,7 +25,8 @@ use carbide_uuid::machine::{
     HostMachineId, MachineId, MachineIdSource, MachineIdSubtype, StableHostMachineId,
 };
 use carbide_uuid::nvlink::NvLinkDomainId;
-use db::WithTransaction;
+use db::machine::MachineNetworkConfigNotCurrent;
+use db::{ConditionalWrite, WithTransaction};
 use futures_util::FutureExt;
 use model::hardware_info::{GpuPlatformInfo, HardwareInfo, MachineNvLinkInfo, NvLinkGpu};
 use model::machine::machine_id::{from_hardware_info, host_id_from_dpu_hardware_info};
@@ -387,15 +388,17 @@ pub(crate) async fn discover_machine(
         }
 
         if network_config_changed
-            && !db::machine::try_update_network_config(
-                &mut txn,
-                &stable_machine_id,
-                network_config_version,
-                &network_config,
-            )
-            .await?
+            && let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
+                db::machine::try_update_network_config(
+                    &mut txn,
+                    &stable_machine_id,
+                    network_config_version,
+                    &network_config,
+                )
+                .await?
         {
-            // The version error also rolls back the allocations above.
+            // Discovery uses the same rejection for missing and changed targets.
+            // Both cases abort discovery and roll back the allocations above.
             return Err(CarbideError::ConcurrentModificationError(
                 "machine",
                 network_config_version.to_string(),
@@ -515,13 +518,20 @@ pub(crate) async fn discover_machine(
                 db::machine::get_network_config(&mut txn, &host_machine_id)
                     .await?
                     .take();
-            db::machine::try_update_network_config(
-                &mut txn,
-                &host_machine_id,
-                network_config_version,
-                &network_config,
-            )
-            .await?;
+            if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
+                db::machine::try_update_network_config(
+                    &mut txn,
+                    &host_machine_id,
+                    network_config_version,
+                    &network_config,
+                )
+                .await?
+            {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "network configuration for machine {host_machine_id} changed or is no longer available"
+                ))
+                .into());
+            }
         }
     }
 

@@ -1513,6 +1513,12 @@ pub async fn force_cleanup(
     Ok(())
 }
 
+/// `MachineNetworkConfigNotCurrent` means the target is missing or its network
+/// version no longer matches. The guarded backfill also rejects force deletion;
+/// the write deliberately does not distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineNetworkConfigNotCurrent;
+
 /// Updates the `network_config` on the target machine row (host or
 /// DPU), and bumps the `network_config_version` on *every* machine
 /// row in the same "machine group" (host + every DPU attached to it)
@@ -1522,12 +1528,16 @@ pub async fn force_cleanup(
 /// computed by the `machine_group_member_ids` Postgres function, which
 /// walks `machine_interfaces`. For zero-DPU hosts, the group is just the
 /// target itself.
+///
+/// Returns `NotApplied(MachineNetworkConfigNotCurrent)` for a missing target or
+/// changed version. Database failures remain errors. The caller must commit
+/// both the target write and group version updates in the same transaction.
 pub async fn try_update_network_config(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     try_update_network_config_inner(txn, machine_id, expected_version, new_state, false).await
 }
 
@@ -1536,7 +1546,7 @@ async fn try_update_network_config_unless_force_deleting(
     machine_id: &MachineId,
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     try_update_network_config_inner(txn, machine_id, expected_version, new_state, true).await
 }
 
@@ -1560,7 +1570,7 @@ async fn try_update_network_config_inner(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
     reject_force_deletion: bool,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     let next_version = expected_version.increment();
 
     // First, do our usual "optimistic" lock update on the target row, which
@@ -1598,9 +1608,11 @@ async fn try_update_network_config_inner(
                 .execute(&mut *txn)
                 .await
                 .map_err(|e| DatabaseError::query(group_query, e))?;
-            Ok(true)
+            Ok(ConditionalWrite::Applied(()))
         }
-        Err(sqlx::Error::RowNotFound) => Ok(false),
+        Err(sqlx::Error::RowNotFound) => {
+            Ok(ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent))
+        }
         Err(e) => Err(DatabaseError::query(target_query, e)),
     }
 }
@@ -3161,7 +3173,7 @@ pub async fn update_dpu_loopback_ips_v6(
             })?;
             network_config.loopback_ip_v6 = Some(loopback_ip_v6);
 
-            if try_update_network_config_unless_force_deleting(
+            match try_update_network_config_unless_force_deleting(
                 txn.as_pgconn(),
                 &dpu_machine_id,
                 network_config_version,
@@ -3169,9 +3181,12 @@ pub async fn update_dpu_loopback_ips_v6(
             )
             .await?
             {
-                txn.commit().await?;
-                last_conflicting_version = None;
-                break;
+                ConditionalWrite::Applied(()) => {
+                    txn.commit().await?;
+                    last_conflicting_version = None;
+                    break;
+                }
+                ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) => {}
             }
 
             let force_deleting_or_deleted =
@@ -3373,6 +3388,9 @@ pub async fn get_quarantine_state(
     Ok(network_config.value.quarantine_state)
 }
 
+/// Sets quarantine and returns the previous state only after the conditional
+/// write applies. Returns an error if the network configuration is missing or
+/// changes before the write.
 pub async fn set_quarantine_state(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
@@ -3382,10 +3400,21 @@ pub async fn set_quarantine_state(
         get_network_config(&mut *txn, machine_id).await?.take();
     let old_quarantine_state = network_config.quarantine_state.clone();
     network_config.quarantine_state = Some(quarantine_state);
-    try_update_network_config(txn, machine_id, network_config_version, &network_config).await?;
-    Ok(old_quarantine_state)
+    match try_update_network_config(txn, machine_id, network_config_version, &network_config)
+        .await?
+    {
+        ConditionalWrite::Applied(()) => Ok(old_quarantine_state),
+        ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) => {
+            Err(DatabaseError::FailedPrecondition(format!(
+                "network configuration for machine {machine_id} changed or is no longer available"
+            )))
+        }
+    }
 }
 
+/// Clears quarantine and returns the previous state only after the conditional
+/// write applies. Returns an error if the network configuration is missing or
+/// changes before the write.
 pub async fn clear_quarantine_state(
     txn: &mut PgConnection,
     machine_id: &MachineId,
@@ -3394,8 +3423,16 @@ pub async fn clear_quarantine_state(
         get_network_config(&mut *txn, machine_id).await?.take();
     let old_quarantine_state = network_config.quarantine_state.clone();
     network_config.quarantine_state = None;
-    try_update_network_config(txn, machine_id, network_config_version, &network_config).await?;
-    Ok(old_quarantine_state)
+    match try_update_network_config(txn, machine_id, network_config_version, &network_config)
+        .await?
+    {
+        ConditionalWrite::Applied(()) => Ok(old_quarantine_state),
+        ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) => {
+            Err(DatabaseError::FailedPrecondition(format!(
+                "network configuration for machine {machine_id} changed or is no longer available"
+            )))
+        }
+    }
 }
 
 pub async fn modify_dpf_state(
@@ -4580,14 +4617,15 @@ mod test {
                 .await?
                 .take();
         network_config.use_admin_network = Some(false);
-        assert!(
+        assert_eq!(
             super::try_update_network_config(
                 txn.as_mut(),
                 &dpu_machine_id,
                 version,
                 &network_config,
             )
-            .await?
+            .await?,
+            crate::ConditionalWrite::Applied(())
         );
         txn.commit().await?;
         reservation_lock.commit().await?;
