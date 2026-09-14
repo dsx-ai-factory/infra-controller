@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use carbide_uuid::rack::RackId;
+use carbide_uuid::rack::{RackId, RackProfileId};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::expected_power_shelf::{
@@ -325,6 +325,51 @@ pub async fn create_missing_from(
     }
 
     Ok(())
+}
+
+/// RMS rack identity for a power shelf that does not yet have a `power_shelves`
+/// row, resolved from the expected inventory. Every power shelf is rack-scale
+/// (RMS-managed), so this serves the pre-ingestion power and firmware paths for
+/// any shelf.
+#[derive(Debug, sqlx::FromRow)]
+pub struct PreIngestionPowerShelfRmsIdentity {
+    pub bmc_mac_address: MacAddress,
+    pub rack_id: RackId,
+    pub rack_profile_id: Option<RackProfileId>,
+}
+
+/// Resolve RMS rack identities for pre-ingestion power shelves by PMC MAC.
+///
+/// Every power shelf is rack-scale (RMS-managed), so its expected record is
+/// expected to declare a `rack_id`; that rack is required to build the RMS node
+/// descriptor. The rack profile is taken from the live `racks` row when it
+/// exists and otherwise from the `expected_racks` declaration, so the descriptor
+/// resolves before the rack row is created. Rows missing a `rack_id` are a
+/// misconfiguration and are omitted (they cannot resolve an RMS identity).
+/// Mirrors `expected_switch::find_rms_identities_by_bmc_macs`.
+pub async fn find_rms_identities_by_bmc_macs(
+    db: impl crate::db_read::DbReader<'_>,
+    bmc_macs: &[MacAddress],
+) -> DatabaseResult<Vec<PreIngestionPowerShelfRmsIdentity>> {
+    let sql = r#"
+        SELECT
+            eps.bmc_mac_address AS bmc_mac_address,
+            eps.rack_id AS rack_id,
+            COALESCE(r.rack_profile_id, er.rack_profile_id) AS rack_profile_id
+        FROM expected_power_shelves eps
+        LEFT JOIN racks r ON r.id = eps.rack_id
+        LEFT JOIN expected_racks er ON er.rack_id = eps.rack_id
+        WHERE eps.bmc_mac_address = ANY($1)
+          AND eps.rack_id IS NOT NULL
+    "#;
+
+    sqlx::query_as(sql)
+        .bind(bmc_macs)
+        .fetch_all(db)
+        .await
+        .map_err(|err| {
+            DatabaseError::new("expected_power_shelf::find_rms_identities_by_bmc_macs", err)
+        })
 }
 
 #[cfg(test)]
