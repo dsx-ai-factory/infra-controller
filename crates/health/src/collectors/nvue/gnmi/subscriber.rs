@@ -537,6 +537,7 @@ pub(crate) fn spawn_gnmi_collector(
 
     let registry = collector_registry.registry();
     let prefix = collector_registry.prefix().clone();
+    let endpoint_key = endpoint.key();
     let collector_removed_sample_context = sample_event_context.clone();
     let mut collector_removed_on_change_context = None;
     let extended_event_context = EventContext::from_endpoint(endpoint, EXTENDED_GNMI_STREAM_ID);
@@ -544,11 +545,8 @@ pub(crate) fn spawn_gnmi_collector(
     let collector_removed_extended_context =
         (!gnmi_config.additional_subscriptions.is_empty()).then(|| extended_event_context.clone());
 
-    let sample_const_labels = collector_metric_labels(
-        NVUE_GNMI_SAMPLE_STREAM_ID,
-        endpoint.hash_key().into_owned(),
-        endpoint,
-    );
+    let sample_const_labels =
+        collector_metric_labels(NVUE_GNMI_SAMPLE_STREAM_ID, endpoint_key.clone(), endpoint);
 
     let sample_stream_metrics = GnmiStreamMetrics::new(registry, &prefix, "", sample_const_labels)?;
 
@@ -569,11 +567,8 @@ pub(crate) fn spawn_gnmi_collector(
     let mut extended_states = Vec::with_capacity(gnmi_config.additional_subscriptions.len());
 
     for subscription in &gnmi_config.additional_subscriptions {
-        let mut const_labels = collector_metric_labels(
-            EXTENDED_GNMI_STREAM_ID,
-            endpoint.hash_key().into_owned(),
-            endpoint,
-        );
+        let mut const_labels =
+            collector_metric_labels(EXTENDED_GNMI_STREAM_ID, endpoint_key.clone(), endpoint);
 
         const_labels.insert("subscription".to_string(), subscription.name.clone());
 
@@ -593,11 +588,8 @@ pub(crate) fn spawn_gnmi_collector(
     }
 
     let on_change_state = if gnmi_config.system_events_enabled {
-        let on_change_const_labels = collector_metric_labels(
-            ON_CHANGE_STREAM_ID_SYSTEM_EVENTS,
-            endpoint.hash_key().into_owned(),
-            endpoint,
-        );
+        let on_change_const_labels =
+            collector_metric_labels(ON_CHANGE_STREAM_ID_SYSTEM_EVENTS, endpoint_key, endpoint);
 
         let on_change_stream_metrics =
             GnmiStreamMetrics::new(registry, &prefix, "_events", on_change_const_labels.clone())?;
@@ -1089,11 +1081,14 @@ mod tests {
 
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases_async};
+    use carbide_uuid::rack::RackId;
     use mac_address::MacAddress;
 
     use super::*;
     use crate::bmc::{BoxFuture, CredentialProvider};
+    use crate::endpoint::test_support::test_endpoint as test_bmc_endpoint;
     use crate::endpoint::{BmcAddr, BmcCredentials};
+    use crate::metrics::MetricsManager;
 
     enum ProviderResponse {
         Credentials(BmcCredentials),
@@ -1166,6 +1161,62 @@ mod tests {
             .expect("extended connection metric should be registered");
 
         assert_eq!(connection.get_metric().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn gnmi_metric_labels_use_endpoint_identity_instead_of_rack_identity() {
+        let metrics_manager = MetricsManager::new("test")
+            .expect("metrics manager should initialize for the gNMI label test");
+
+        let credentials = BmcCredentials::UsernamePassword {
+            username: "admin".to_string(),
+            password: Some("password".to_string()),
+        };
+
+        let mut endpoint = test_bmc_endpoint(
+            "55:66:77:88:99:cc"
+                .parse()
+                .expect("test MAC address should parse"),
+        );
+
+        endpoint.rack_id = Some(RackId::new("rack-1"));
+
+        let collector_registry = Arc::new(
+            metrics_manager
+                .create_collector_registry("gnmi_test".to_string(), "test")
+                .expect("collector registry should initialize"),
+        );
+
+        let collector = spawn_gnmi_collector(
+            &endpoint,
+            &NvueGnmiConfig::default(),
+            RecordingProvider::new(credentials),
+            collector_registry,
+            None,
+            None,
+        )
+        .expect("gNMI collector should initialize");
+
+        let metric = metrics_manager
+            .global_registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "test_nvue_gnmi_connection_state")
+            .and_then(|family| family.get_metric().first().cloned())
+            .expect("gNMI connection metric should be registered");
+
+        assert!(metric.get_label().iter().any(|label| {
+            label.name() == "endpoint_key" && label.value() == "55:66:77:88:99:CC"
+        }));
+
+        assert!(
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "rack_id" && label.value() == "rack-1")
+        );
+
+        collector.stop().await;
     }
 
     fn test_addr() -> BmcAddr {
