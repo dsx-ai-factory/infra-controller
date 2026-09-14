@@ -36,7 +36,8 @@ use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::{
-    ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
+    ColumnInfo, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult,
+    FilterableQueryBuilder, ObjectColumnFilter,
 };
 
 #[cfg(test)]
@@ -333,13 +334,20 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Switch>>(
         .map_err(|e| DatabaseError::new(query.sql(), e))
 }
 
+/// `try_update_controller_state` writes the switch state and `new_version`
+/// when the version matches `expected_version`.
+///
+/// A missing switch or changed version returns
+/// `NotApplied(ControllerStateNotCurrent)`.
+/// `Applied(())` leaves the write in the caller's transaction; database failures
+/// remain errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     switch_id: SwitchId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &SwitchControllerState,
-) -> DatabaseResult<bool> {
+) -> DatabaseResult<ConditionalWrite<(), ControllerStateNotCurrent>> {
     let query_result = sqlx::query_as::<_, SwitchId>(
             "UPDATE switches SET controller_state = $1, controller_state_version = $2 WHERE id = $3 AND controller_state_version = $4 RETURNING id",
         )
@@ -351,7 +359,10 @@ pub async fn try_update_controller_state(
             .await
             .map_err(|e| DatabaseError::new( "try_update_controller_state", e))?;
 
-    Ok(query_result.is_some())
+    Ok(match query_result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 pub async fn update_controller_state_outcome(
@@ -1415,8 +1426,9 @@ mod tests {
                 &SwitchControllerState::Ready,
             )
             .await?;
-            assert!(
+            assert_eq!(
                 updated,
+                ConditionalWrite::Applied(()),
                 "setup should update switch controller state with the current version"
             );
 
@@ -1490,8 +1502,9 @@ mod tests {
                 &SwitchControllerState::Ready,
             )
             .await?;
-            assert!(
+            assert_eq!(
                 updated,
+                ConditionalWrite::Applied(()),
                 "setup should update switch controller state with the current version"
             );
 

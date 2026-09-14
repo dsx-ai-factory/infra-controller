@@ -486,7 +486,7 @@ async fn create_ready_rack_with_switches(
 
     let mut txn = pool.begin().await?;
     let rack = get_db_rack(txn.as_mut(), &rack_id).await;
-    db_rack::try_update_controller_state(
+    let updated = db_rack::try_update_controller_state(
         txn.as_mut(),
         &rack_id,
         rack.controller_state.version,
@@ -494,6 +494,7 @@ async fn create_ready_rack_with_switches(
         &RackState::Ready,
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     txn.commit().await?;
 
     Ok((rack_id, switch_ids))
@@ -762,7 +763,7 @@ async fn test_terminate_rack_maintenance_latches_request_and_cleans_access_token
 
     let mut txn = pool.begin().await?;
     let rack = get_db_rack(txn.as_mut(), &rack_id).await;
-    assert!(
+    assert_eq!(
         db_rack::try_update_controller_state(
             txn.as_mut(),
             &rack_id,
@@ -774,7 +775,8 @@ async fn test_terminate_rack_maintenance_latches_request_and_cleans_access_token
                 },
             },
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
     txn.commit().await?;
 
@@ -5765,7 +5767,7 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
         )
         .await;
         let rack = get_db_rack(txn.as_mut(), &rack_id).await;
-        db_rack::try_update_controller_state(
+        let updated = db_rack::try_update_controller_state(
             txn.as_mut(),
             &rack_id,
             rack.controller_state.version,
@@ -5773,6 +5775,7 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
             &RackState::Ready,
         )
         .await?;
+        assert_eq!(updated, db::ConditionalWrite::Applied(()));
         txn.commit().await?;
     }
 

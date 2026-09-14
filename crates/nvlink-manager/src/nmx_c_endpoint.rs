@@ -310,7 +310,7 @@ mod tests {
         let switch = db::switch::find_by_id(txn.as_mut(), &switch.id)
             .await?
             .expect("switch should exist");
-        assert!(
+        assert_eq!(
             db::switch::try_update_controller_state(
                 txn.as_mut(),
                 switch.id,
@@ -318,7 +318,8 @@ mod tests {
                 switch.controller_state.version.increment(),
                 &SwitchControllerState::Ready,
             )
-            .await?
+            .await?,
+            db::ConditionalWrite::Applied(())
         );
         db::switch::update_fabric_manager_status(
             txn.as_mut(),
@@ -399,7 +400,7 @@ mod tests {
         let switch = db::switch::find_by_id(txn.as_mut(), &switch.id)
             .await?
             .expect("switch should exist");
-        assert!(
+        assert_eq!(
             db::switch::try_update_controller_state(
                 txn.as_mut(),
                 switch.id,
@@ -407,7 +408,8 @@ mod tests {
                 switch.controller_state.version.increment(),
                 &SwitchControllerState::Ready,
             )
-            .await?
+            .await?,
+            db::ConditionalWrite::Applied(())
         );
         db::switch::update_fabric_manager_status(
             txn.as_mut(),

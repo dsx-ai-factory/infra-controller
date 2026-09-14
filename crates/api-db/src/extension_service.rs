@@ -28,7 +28,7 @@ use model::tenant::TenantOrganizationId;
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
-use crate::{DatabaseError, DatabaseResult};
+use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult};
 
 /// Creates a new extension service and creates its initial extension service version.
 /// It enforces a unique `(tenant_organization_id, name)` combination.
@@ -469,16 +469,20 @@ pub async fn request_dpf_helm_chart_deletion(
     Ok(())
 }
 
-/// Compares and swaps the controller-owned lifecycle state. A `false` result
-/// means another writer won the race; it is not an error and must not be
-/// followed by a history write.
+/// `try_update_controller_state` writes the lifecycle state and `new_version`
+/// when the version matches `expected_version`.
+///
+/// A missing service or changed version returns
+/// `NotApplied(ControllerStateNotCurrent)` and must not be followed by a history
+/// write. `Applied(())` leaves the write in the caller's transaction; database
+/// failures remain errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     service_id: ExtensionServiceId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &ExtensionServiceLifecycleState,
-) -> DatabaseResult<bool> {
+) -> DatabaseResult<ConditionalWrite<(), ControllerStateNotCurrent>> {
     let query = "UPDATE extension_services
                  SET controller_state_version = $1, controller_state = $2::jsonb
                  WHERE id = $3
@@ -493,7 +497,10 @@ pub async fn try_update_controller_state(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(updated.is_some())
+    Ok(match updated {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 /// Stores the most recent safe controller diagnostic without changing desired
@@ -1183,7 +1190,7 @@ mod test_batched_lookups {
         );
 
         let active_version = creating.status.controller_state.version.increment();
-        assert!(
+        assert_eq!(
             try_update_controller_state(
                 &mut txn,
                 service_id,
@@ -1192,7 +1199,8 @@ mod test_batched_lookups {
                 &ExtensionServiceLifecycleState::Ready,
             )
             .await
-            .expect("CAS state transition")
+            .expect("CAS state transition"),
+            ConditionalWrite::Applied(())
         );
         crate::state_history::persist(
             &mut txn,
@@ -1203,8 +1211,8 @@ mod test_batched_lookups {
         )
         .await
         .expect("persist state history");
-        assert!(
-            !try_update_controller_state(
+        assert_eq!(
+            try_update_controller_state(
                 &mut txn,
                 service_id,
                 creating.status.controller_state.version,
@@ -1212,7 +1220,8 @@ mod test_batched_lookups {
                 &ExtensionServiceLifecycleState::Failed,
             )
             .await
-            .expect("stale CAS is not a database error")
+            .expect("stale CAS is not a database error"),
+            ConditionalWrite::NotApplied(ControllerStateNotCurrent)
         );
 
         let outcome = PersistentStateHandlerOutcome::DoNothing { source_ref: None };

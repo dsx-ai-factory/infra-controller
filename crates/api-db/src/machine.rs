@@ -70,7 +70,7 @@ use sqlx::{FromRow, PgConnection, Pool, Postgres, Row};
 
 use super::{DatabaseError, ObjectFilter, Transaction, queries};
 use crate::db_read::DbReader;
-use crate::{ConditionalWrite, DatabaseResult};
+use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseResult};
 
 #[derive(Serialize)]
 struct ReprovisionRequestRestart {
@@ -2395,15 +2395,17 @@ where
 /// the host's controller-state version still matches `expected_version`.
 ///
 /// The caller supplies `new_version` for every machine and its history entry.
-/// `false` means the host is missing or its version changed; no state or
-/// history changes remain. Successful writes remain in the caller's transaction.
+/// `NotApplied(ControllerStateNotCurrent)` means the host is missing or its
+/// version changed; no state or history changes remain. Successful writes return
+/// `Applied(())` and remain in the caller's transaction. Database failures remain
+/// errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     host_id: &HostMachineId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &ManagedHostState,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     let mut inner_txn = Transaction::begin_inner(txn).await?;
 
     // `advance` takes the history retention lock before the machine row lock.
@@ -2434,7 +2436,7 @@ pub async fn try_update_controller_state(
         .map_err(|error| DatabaseError::query(query, error))?;
     if updated.is_none() {
         inner_txn.rollback().await?;
-        return Ok(false);
+        return Ok(ConditionalWrite::NotApplied(ControllerStateNotCurrent));
     }
 
     tracing::info!(machine_id = %host_id, next_state = ?new_state, "Updating host state");
@@ -2442,7 +2444,7 @@ pub async fn try_update_controller_state(
         advance(&dpu, inner_txn.as_pgconn(), new_state, Some(new_version)).await?;
     }
     inner_txn.commit().await?;
-    Ok(true)
+    Ok(ConditionalWrite::Applied(()))
 }
 
 pub async fn update_state(
@@ -3976,7 +3978,11 @@ mod test {
             tokio::try_join!(controller_write, legacy_write)
         })
         .await??;
-        assert!(!applied, "the controller must reject the earlier snapshot");
+        assert_eq!(
+            applied,
+            crate::ConditionalWrite::NotApplied(crate::ControllerStateNotCurrent),
+            "the controller must reject the earlier snapshot"
+        );
         Ok(())
     }
 

@@ -973,7 +973,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_waits_for_terminal_status
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -983,6 +983,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_waits_for_terminal_status
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_firmware_upgrade_status(
         txn.as_mut(),
         switch_id,
@@ -1036,7 +1037,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_transitions_to_waiting_fo
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1046,6 +1047,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_transitions_to_waiting_fo
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_firmware_upgrade_status(
         txn.as_mut(),
         switch_id,
@@ -1087,7 +1089,7 @@ async fn test_rack_error_unwinds_switch_waiting_for_nvos(
     let mut txn = pool.begin().await?;
     let rack = db_rack::create(txn.as_mut(), &rack_id, None, &RackConfig::default(), None).await?;
 
-    assert!(
+    assert_eq!(
         db_rack::try_update_controller_state(
             txn.as_mut(),
             &rack_id,
@@ -1097,7 +1099,8 @@ async fn test_rack_error_unwinds_switch_waiting_for_nvos(
                 cause: "profile SOT unavailable".to_string(),
             },
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
 
     set_switch_rack_id(txn.as_mut(), &switch_id, &rack_id).await?;
@@ -1209,7 +1212,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_next_state_by_activities(
             .as_ref()
             .expect("switch reprovision request should exist")
             .requested_at;
-        db_switch::try_update_controller_state(
+        let updated = db_switch::try_update_controller_state(
             txn.as_mut(),
             switch_id,
             switch.controller_state.version,
@@ -1219,6 +1222,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_next_state_by_activities(
             },
         )
         .await?;
+        assert_eq!(updated, db::ConditionalWrite::Applied(()));
         db_switch::update_firmware_upgrade_status(
             txn.as_mut(),
             switch_id,
@@ -1286,7 +1290,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_returns_ready_for_firmwar
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1296,6 +1300,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_returns_ready_for_firmwar
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_firmware_upgrade_status(
         txn.as_mut(),
         switch_id,
@@ -1347,7 +1352,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_accepts_completion_when_o
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1357,6 +1362,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_accepts_completion_when_o
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_firmware_upgrade_status(
         txn.as_mut(),
         switch_id,
@@ -1405,7 +1411,7 @@ async fn test_switch_ready_routes_rack_requests_to_waiting_for_rack_firmware_upg
     let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
         .await?
         .expect("switch should exist");
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1413,6 +1419,7 @@ async fn test_switch_ready_routes_rack_requests_to_waiting_for_rack_firmware_upg
         &SwitchControllerState::Ready,
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     txn.commit().await?;
 
     env.run_switch_controller_iteration().await;
@@ -1454,7 +1461,7 @@ async fn test_switch_waiting_for_nvos_upgrade_transitions_to_waiting_for_nmxc_on
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1464,6 +1471,7 @@ async fn test_switch_waiting_for_nvos_upgrade_transitions_to_waiting_for_nmxc_on
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_nvos_update_status(
         txn.as_mut(),
         switch_id,
@@ -1519,7 +1527,7 @@ async fn test_switch_waiting_for_nvos_upgrade_waits_for_current_cycle_status(
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1529,6 +1537,7 @@ async fn test_switch_waiting_for_nvos_upgrade_waits_for_current_cycle_status(
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_nvos_update_status(
         txn.as_mut(),
         switch_id,
@@ -1584,7 +1593,7 @@ async fn test_switch_waiting_for_nvos_upgrade_transitions_to_error_on_failure(
         .as_ref()
         .expect("switch reprovision request should exist")
         .requested_at;
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1594,6 +1603,7 @@ async fn test_switch_waiting_for_nvos_upgrade_transitions_to_error_on_failure(
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_nvos_update_status(
         txn.as_mut(),
         switch_id,
@@ -1644,7 +1654,7 @@ async fn test_switch_waiting_for_nmxc_configure_returns_ready_when_fm_is_running
     let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
         .await?
         .expect("switch should exist");
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn.as_mut(),
         switch_id,
         switch.controller_state.version,
@@ -1654,6 +1664,7 @@ async fn test_switch_waiting_for_nmxc_configure_returns_ready_when_fm_is_running
         },
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     db_switch::update_fabric_manager_status(
         txn.as_mut(),
         switch_id,

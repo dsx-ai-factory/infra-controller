@@ -298,7 +298,7 @@ pub(super) async fn transition_switch_controller_state(
     let switch = db_switch::find_by_id(txn, switch_id)
         .await?
         .expect("switch should exist");
-    db_switch::try_update_controller_state(
+    let updated = db_switch::try_update_controller_state(
         txn,
         *switch_id,
         switch.controller_state.version,
@@ -306,6 +306,7 @@ pub(super) async fn transition_switch_controller_state(
         &new_state,
     )
     .await?;
+    assert_eq!(updated, db::ConditionalWrite::Applied(()));
     Ok(())
 }
 

@@ -34,6 +34,7 @@ use sqlx::{FromRow, PgConnection, QueryBuilder, Row};
 
 use super::{ColumnInfo, DatabaseError, ObjectColumnFilter};
 use crate::vpc::increment_vpc_version;
+use crate::{ConditionalWrite, ControllerStateNotCurrent};
 
 async fn network_prefix_occupancy_by_vpc_prefix_id(
     vpc_prefix_ids: &[VpcPrefixId],
@@ -567,14 +568,20 @@ pub async fn final_delete(
     Ok(deleted_id)
 }
 
-/// Updates the controller-owned VPC prefix state if the version still matches.
+/// `try_update_controller_state` writes the VPC prefix state and `new_version`
+/// when the version matches `expected_version`.
+///
+/// A missing prefix or changed version returns
+/// `NotApplied(ControllerStateNotCurrent)`.
+/// `Applied(())` leaves the write in the caller's transaction; database failures
+/// remain errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     vpc_prefix_id: VpcPrefixId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &VpcPrefixControllerState,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     // Use optimistic locking so concurrent controller attempts cannot overwrite each other.
     let query = "UPDATE network_vpc_prefixes SET controller_state_version=$1, controller_state=$2::json WHERE id=$3 AND controller_state_version=$4 RETURNING id";
     let result = sqlx::query_as::<_, VpcPrefixId>(query)
@@ -586,7 +593,10 @@ pub async fn try_update_controller_state(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.is_some())
+    Ok(match result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 /// Stores the result of the most recent VPC prefix controller handling attempt.

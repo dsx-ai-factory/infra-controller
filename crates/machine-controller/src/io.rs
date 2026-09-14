@@ -19,7 +19,7 @@
 
 use carbide_uuid::machine::HostMachineId;
 use config_version::{ConfigVersion, Versioned};
-use db::{self, DatabaseError};
+use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpa_interface::DpaSearchConfig;
@@ -112,7 +112,7 @@ impl StateControllerIO for MachineStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         db::machine::try_update_controller_state(
             txn,
             object_id,

@@ -598,7 +598,11 @@ async fn test_rack_controller_state_version_increment(
         &RackState::Discovering,
     )
     .await?;
-    assert!(updated, "update with correct version should succeed");
+    assert_eq!(
+        updated,
+        db::ConditionalWrite::Applied(()),
+        "update with correct version should succeed"
+    );
 
     // Verify version was incremented
     let rack = get_db_rack(txn.as_mut(), &rack_id).await;
@@ -617,8 +621,9 @@ async fn test_rack_controller_state_version_increment(
         &RackState::Ready,
     )
     .await?;
-    assert!(
-        !stale_update,
+    assert_eq!(
+        stale_update,
+        db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
         "update with stale version should be rejected"
     );
 
@@ -632,7 +637,11 @@ async fn test_rack_controller_state_version_increment(
         &RackState::Ready,
     )
     .await?;
-    assert!(updated_again, "update with current version should succeed");
+    assert_eq!(
+        updated_again,
+        db::ConditionalWrite::Applied(()),
+        "update with current version should succeed"
+    );
 
     txn.rollback().await?;
 
@@ -655,7 +664,7 @@ async fn test_rack_maintenance_termination_latch_blocks_maintenance_transition_a
     .await?;
 
     let maintenance_version = rack.controller_state.version.increment();
-    assert!(
+    assert_eq!(
         db_rack::try_update_controller_state(
             txn.as_mut(),
             &rack_id,
@@ -667,7 +676,8 @@ async fn test_rack_maintenance_termination_latch_blocks_maintenance_transition_a
                 },
             },
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
 
     let termination_config = RackConfig {
@@ -677,8 +687,8 @@ async fn test_rack_maintenance_termination_latch_blocks_maintenance_transition_a
     };
     db_rack::update(txn.as_mut(), &rack_id, &termination_config).await?;
 
-    assert!(
-        !db_rack::try_update_controller_state(
+    assert_eq!(
+        db_rack::try_update_controller_state(
             txn.as_mut(),
             &rack_id,
             maintenance_version,
@@ -686,6 +696,7 @@ async fn test_rack_maintenance_termination_latch_blocks_maintenance_transition_a
             &RackState::Ready,
         )
         .await?,
+        db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
         "an accepted termination must block an in-flight state transition"
     );
 
@@ -702,7 +713,7 @@ async fn test_rack_maintenance_termination_latch_blocks_maintenance_transition_a
     let consumed = db_rack::consume_maintenance_termination_request(txn.as_mut(), &rack_id).await?;
     assert!(!consumed.config.maintenance_termination_requested);
     assert!(consumed.config.maintenance_requested.is_none());
-    assert!(
+    assert_eq!(
         db_rack::try_update_controller_state(
             txn.as_mut(),
             &rack_id,
@@ -711,6 +722,7 @@ async fn test_rack_maintenance_termination_latch_blocks_maintenance_transition_a
             &RackState::Ready,
         )
         .await?,
+        db::ConditionalWrite::Applied(()),
         "the rack controller can transition after consuming the termination latch"
     );
 
@@ -736,7 +748,7 @@ async fn test_stale_rack_maintenance_termination_latch_does_not_block_non_mainte
     )
     .await?;
 
-    assert!(
+    assert_eq!(
         db_rack::try_update_controller_state(
             txn.as_mut(),
             &rack_id,
@@ -745,6 +757,7 @@ async fn test_stale_rack_maintenance_termination_latch_does_not_block_non_mainte
             &RackState::Ready,
         )
         .await?,
+        db::ConditionalWrite::Applied(()),
         "a stale termination latch outside Maintenance must not freeze the rack state machine"
     );
 

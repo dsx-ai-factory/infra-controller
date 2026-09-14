@@ -87,20 +87,20 @@ async fn controller_state_rejects_stale_snapshots_without_changing_group_history
         scenario: &'static str,
         new_state: ManagedHostState,
         new_version: ConfigVersion,
-        applied: bool,
+        expected: db::ConditionalWrite<(), db::ControllerStateNotCurrent>,
     }
     for case in [
         Case {
             scenario: "current snapshot applies the supplied version",
             new_state: ManagedHostState::Ready,
             new_version: winner_version,
-            applied: true,
+            expected: db::ConditionalWrite::Applied(()),
         },
         Case {
             scenario: "earlier snapshot cannot replace the committed state",
             new_state: ManagedHostState::ForceDeletion,
             new_version: winner_version.increment(),
-            applied: false,
+            expected: db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
         },
     ] {
         let mut txn = pool.begin().await?;
@@ -113,7 +113,7 @@ async fn controller_state_rejects_stale_snapshots_without_changing_group_history
                 &case.new_state,
             )
             .await?,
-            case.applied,
+            case.expected,
             "{}",
             case.scenario,
         );
@@ -183,8 +183,8 @@ async fn controller_state_rejects_a_missing_host_without_recording_history(
     .try_into()?;
     let old_version = ConfigVersion::initial();
     let mut txn = pool.begin().await?;
-    assert!(
-        !MachineStateControllerIO::default()
+    assert_eq!(
+        MachineStateControllerIO::default()
             .persist_controller_state(
                 &mut txn,
                 &host_id,
@@ -192,7 +192,8 @@ async fn controller_state_rejects_a_missing_host_without_recording_history(
                 old_version.increment(),
                 &ManagedHostState::Ready,
             )
-            .await?
+            .await?,
+        db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent)
     );
     txn.commit().await?;
 

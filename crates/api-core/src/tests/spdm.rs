@@ -73,7 +73,7 @@ pub(in crate::tests) mod tests {
         // Another iteration commits before the stale transition is persisted.
         let current_version = old_version.increment();
         let mut txn = env.db_txn().await;
-        assert!(
+        assert_eq!(
             db::attestation::spdm::persist_controller_state(
                 &mut txn,
                 &object_id,
@@ -82,7 +82,8 @@ pub(in crate::tests) mod tests {
                 &SpdmAttestationState::FetchCertificate,
             )
             .await
-            .unwrap()
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
         );
         txn.commit().await.unwrap();
 
@@ -94,7 +95,7 @@ pub(in crate::tests) mod tests {
             device_id: &'static str,
             old_version: ConfigVersion,
             state: SpdmAttestationState,
-            applied: bool,
+            expected: db::ConditionalWrite<(), db::ControllerStateNotCurrent>,
             stored_state: Option<(SpdmAttestationState, ConfigVersion)>,
         }
         let io = SpdmStateControllerIO::default();
@@ -104,7 +105,7 @@ pub(in crate::tests) mod tests {
                 device_id: "HGX_IRoT_GPU_0",
                 old_version,
                 state: SpdmAttestationState::Passed,
-                applied: false,
+                expected: db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
                 stored_state: Some((SpdmAttestationState::FetchCertificate, current_version)),
             },
             Case {
@@ -112,7 +113,7 @@ pub(in crate::tests) mod tests {
                 device_id: "HGX_IRoT_GPU_0",
                 old_version: current_version,
                 state: SpdmAttestationState::FetchCertificate,
-                applied: true,
+                expected: db::ConditionalWrite::Applied(()),
                 stored_state: Some((SpdmAttestationState::FetchCertificate, replacement_version)),
             },
             Case {
@@ -120,12 +121,12 @@ pub(in crate::tests) mod tests {
                 device_id: "missing-device",
                 old_version: replacement_version,
                 state: SpdmAttestationState::Passed,
-                applied: false,
+                expected: db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
                 stored_state: None,
             },
         ] {
             let mut txn = env.db_txn().await;
-            let applied = io
+            let write = io
                 .persist_controller_state(
                     &mut txn,
                     &SpdmObjectId(machine_id, case.device_id.to_string()),
@@ -136,7 +137,7 @@ pub(in crate::tests) mod tests {
                 .await
                 .unwrap();
             txn.commit().await.unwrap();
-            assert_eq!(applied, case.applied, "{}", case.scenario);
+            assert_eq!(write, case.expected, "{}", case.scenario);
 
             let stored_state: Option<(sqlx::types::Json<SpdmAttestationState>, ConfigVersion)> =
                 sqlx::query_as(

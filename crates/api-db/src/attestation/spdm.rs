@@ -25,7 +25,7 @@ use model::attestation::spdm::{
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use sqlx::{PgConnection, Row};
 
-use crate::{DatabaseError, DatabaseResult};
+use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult};
 
 pub async fn insert_device_attestations(
     txn: &mut PgConnection,
@@ -476,16 +476,17 @@ pub async fn persist_outcome(
 /// `persist_controller_state` writes the state and supplied replacement version
 /// only when the device's state version matches `old_version`.
 ///
-/// Returns `false` for a missing device or changed version; database failures
-/// remain errors. An accepted write stores `new_version` even when the state
-/// itself is unchanged. The caller owns the transaction and its commit.
+/// Returns `NotApplied(ControllerStateNotCurrent)` for a missing device or changed
+/// version; database failures remain errors. An accepted write stores
+/// `new_version` even when the state itself is unchanged. The caller owns the
+/// transaction and its commit.
 pub async fn persist_controller_state(
     txn: &mut PgConnection,
     object_id: &SpdmObjectId,
     old_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &SpdmAttestationState,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     let query = r#"
             UPDATE 
                 spdm_machine_devices_attestation
@@ -503,7 +504,11 @@ pub async fn persist_controller_state(
         .map_err(|e| DatabaseError::query(query, e))?
         .rows_affected();
 
-    Ok(rows_affected > 0)
+    Ok(if rows_affected > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(ControllerStateNotCurrent)
+    })
 }
 
 pub async fn update_history(

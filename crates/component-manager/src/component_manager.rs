@@ -1075,7 +1075,7 @@ mod tests {
             .await
             .unwrap();
         if state != RackState::Created {
-            assert!(
+            assert_eq!(
                 db::rack::try_update_controller_state(
                     txn.as_mut(),
                     &rack_id,
@@ -1084,7 +1084,8 @@ mod tests {
                     &state,
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+                db::ConditionalWrite::Applied(())
             );
         }
         txn.commit().await.unwrap();
@@ -1147,7 +1148,7 @@ mod tests {
         // moved on. A different request is busy and cannot replace it.
         let rack = load_rack(&pool, &ready_rack).await;
         let mut txn = pool.begin().await.unwrap();
-        assert!(
+        assert_eq!(
             db::rack::try_update_controller_state(
                 txn.as_mut(),
                 &ready_rack,
@@ -1156,7 +1157,8 @@ mod tests {
                 &RackState::Discovering,
             )
             .await
-            .unwrap()
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
         );
         txn.commit().await.unwrap();
         assert_eq!(

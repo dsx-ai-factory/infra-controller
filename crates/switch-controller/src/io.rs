@@ -19,7 +19,10 @@
 
 use carbide_uuid::switch::SwitchId;
 use config_version::{ConfigVersion, Versioned};
-use db::{DatabaseError, ObjectColumnFilter, switch as db_switch};
+use db::{
+    ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter,
+    switch as db_switch,
+};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::switch::{
@@ -111,7 +114,7 @@ impl StateControllerIO for SwitchStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         db_switch::try_update_controller_state(txn, *object_id, old_version, new_version, new_state)
             .await
     }
