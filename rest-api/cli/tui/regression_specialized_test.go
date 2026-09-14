@@ -827,7 +827,7 @@ func TestCmdOSCreate(t *testing.T) {
 			}
 			assert.Equal(t, test.expectedSiteCalls, siteCalls.Load())
 			assert.Equal(t, test.expectedTemplateCalls, templateCalls.Load())
-			assert.Equal(t, int32(1), createCalls.Load())
+			require.Equal(t, int32(1), createCalls.Load())
 			assert.JSONEq(t, test.expectedBody, <-createdBodies)
 			assert.Contains(t, output, "Operating system created: created-os (os-1)")
 			for _, expected := range test.expectedOutput {
