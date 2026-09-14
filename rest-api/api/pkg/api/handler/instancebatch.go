@@ -560,7 +560,8 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		if sxpErr != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition ID: %s specified in spectrumXAttachments data in request is not valid", sac.SpectrumXPartitionID), nil)
 		}
-		if _, ok := seenSxpIDs[partitionID]; !ok {
+		_, seen := seenSxpIDs[partitionID]
+		if !seen {
 			seenSxpIDs[partitionID] = struct{}{}
 			requestedSxpIDs = append(requestedSxpIDs, partitionID)
 		}

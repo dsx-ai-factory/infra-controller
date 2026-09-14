@@ -636,7 +636,8 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		if sxpErr != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition ID: %s specified in spectrumXAttachments data in request is not valid", sac.SpectrumXPartitionID), nil)
 		}
-		if _, ok := seenSxpIDs[partitionID]; !ok {
+		_, seen := seenSxpIDs[partitionID]
+		if !seen {
 			seenSxpIDs[partitionID] = struct{}{}
 			requestedSxpIDs = append(requestedSxpIDs, partitionID)
 		}
@@ -2839,7 +2840,8 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		if sxpErr != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("SpectrumX Partition ID: %s specified in spectrumXAttachments data in request is not valid", sac.SpectrumXPartitionID), nil)
 		}
-		if _, ok := seenSxpIDs[partitionID]; !ok {
+		_, seen := seenSxpIDs[partitionID]
+		if !seen {
 			seenSxpIDs[partitionID] = struct{}{}
 			requestedSxpIDs = append(requestedSxpIDs, partitionID)
 		}
@@ -4013,7 +4015,8 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				// The attachment type is part of the key, so changing it retires the old row
 				// and creates a new one rather than silently keeping the previous type.
 				key := fmt.Sprintf("%s:%s:%d:%s", partitionID.String(), apiSxA.Device, *apiSxA.DeviceInstance, apiSxA.AttachmentType)
-				if existing, ok := existingSxAByKey[key]; ok {
+				existing, reusable := existingSxAByKey[key]
+				if reusable {
 					retainedSxAIDs[existing.ID] = true
 					newOrExistingSxAs = append(newOrExistingSxAs, existing)
 					continue

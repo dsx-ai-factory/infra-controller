@@ -409,6 +409,19 @@ func TestGetAllSpectrumXPartitionHandler_Handle(t *testing.T) {
 		assert.Len(t, list(t, "/?siteId="+fx.site.ID.String(), fx.user, fx.org), 2)
 	})
 
+	// Both filters are documented as repeatable, so a second value has to widen the match
+	// rather than being dropped.
+	t.Run("matches every repeated status", func(t *testing.T) {
+		assert.Len(t, list(t, "/?status=Ready&status=Pending", fx.user, fx.org), 2)
+	})
+
+	// A repeated siteId that is not read would let an unusable value through unreported.
+	t.Run("validates every repeated siteId", func(t *testing.T) {
+		ec, rec := fx.newContext(t, http.MethodGet, "/?siteId="+fx.site.ID.String()+"&siteId=Bogus", "", fx.user, fx.org, "")
+		require.NoError(t, handler.Handle(ec))
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
 	t.Run("rejects an unrecognized status", func(t *testing.T) {
 		ec, rec := fx.newContext(t, http.MethodGet, "/?status=Bogus", "", fx.user, fx.org, "")
 		require.NoError(t, handler.Handle(ec))

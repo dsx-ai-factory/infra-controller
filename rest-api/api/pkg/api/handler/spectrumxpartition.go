@@ -251,7 +251,8 @@ func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
 		// The Site allocates the VNI when the request omits one, so capture the
 		// response rather than discarding it.
 		coreResp := &corev1.SpxPartition{}
-		if proxyErr := common.ExecuteCoreGRPC(ctx, stc, createSpxPartitionMethod, apiRequest.ToProto(sxp), coreResp, ""); proxyErr != nil {
+		proxyErr := common.ExecuteCoreGRPC(ctx, stc, createSpxPartitionMethod, apiRequest.ToProto(sxp), coreResp, "")
+		if proxyErr != nil {
 			logAPIError(logger, proxyErr, "failed to create SpectrumX Partition on Site")
 			return cutil.NewAPIError(proxyErr.Code, proxyErr.Message, nil)
 		}
@@ -346,29 +347,35 @@ func (gasxph GetAllSpectrumXPartitionHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate pagination request data", err)
 	}
 
-	// Get Site ID from query param
+	qParams := c.QueryParams()
+
+	// Get Site IDs from query param. The parameter repeats to filter on more than one Site,
+	// and the Tenant has to have access to every one of them.
 	tsDAO := cdbm.NewTenantSiteDAO(gasxph.dbSession)
 	var siteIDs []uuid.UUID
-	siteIDStr := c.QueryParam("siteId")
-	if siteIDStr != "" {
-		site, err := common.GetSiteFromIDString(ctx, nil, siteIDStr, gasxph.dbSession)
-		if err != nil {
-			logger.Warn().Err(err).Msg("error getting Site in request")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Site specified in query param, invalid ID or DB error", nil)
-		}
-		siteIDs = append(siteIDs, site.ID)
-
-		_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, site.ID, nil)
-		if err != nil {
-			if err == cdb.ErrDoesNotExist {
-				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have access to this Site", nil)
+	siteIDStrs := qParams["siteId"]
+	if len(siteIDStrs) > 0 {
+		gasxph.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("siteId", siteIDStrs), logger)
+		for _, siteIDStr := range siteIDStrs {
+			site, err := common.GetSiteFromIDString(ctx, nil, siteIDStr, gasxph.dbSession)
+			if err != nil {
+				logger.Warn().Err(err).Msg("error getting Site in request")
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to retrieve Site %v specified in query param, invalid ID or DB error", siteIDStr), nil)
 			}
-			logger.Error().Err(err).Msg("error retrieving TenantSite from DB")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Site, DB error", nil)
+
+			_, err = tsDAO.GetByTenantIDAndSiteID(ctx, nil, tenant.ID, site.ID, nil)
+			if err != nil {
+				if err == cdb.ErrDoesNotExist {
+					return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Tenant does not have access to Site %v", siteIDStr), nil)
+				}
+				logger.Error().Err(err).Msg("error retrieving TenantSite from DB")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant access to Site, DB error", nil)
+			}
+
+			siteIDs = append(siteIDs, site.ID)
 		}
 	}
 
-	qParams := c.QueryParams()
 	qIncludeRelations, errMsg := common.GetAndValidateQueryRelations(qParams, cdbm.SpectrumXPartitionRelatedEntities)
 	if errMsg != "" {
 		logger.Warn().Msg(errMsg)
@@ -380,15 +387,18 @@ func (gasxph GetAllSpectrumXPartitionHandler) Handle(c echo.Context) error {
 		gasxph.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
 	}
 
+	// The status parameter repeats to match more than one Status.
 	var statuses []string
-	statusQuery := c.QueryParam("status")
-	if statusQuery != "" {
-		gasxph.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
-		if !cdbm.SpectrumXPartitionStatusMap[cdbm.SpectrumXPartitionStatus(statusQuery)] {
-			logger.Warn().Str("status", statusQuery).Msg("invalid value in status query")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
+	qStatuses := qParams["status"]
+	if len(qStatuses) > 0 {
+		gasxph.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", qStatuses), logger)
+		for _, status := range qStatuses {
+			if !cdbm.SpectrumXPartitionStatusMap[cdbm.SpectrumXPartitionStatus(status)] {
+				logger.Warn().Str("status", status).Msg("invalid value in status query")
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid Status value %v in query", status), nil)
+			}
+			statuses = append(statuses, status)
 		}
-		statuses = append(statuses, statusQuery)
 	}
 
 	sxpDAO := cdbm.NewSpectrumXPartitionDAO(gasxph.dbSession)
@@ -664,7 +674,8 @@ func (dsxph DeleteSpectrumXPartitionHandler) Handle(c echo.Context) error {
 
 		logger.Info().Str("SpectrumX Partition ID", sxp.ID.String()).Msg("deleting SpectrumX Partition via Core proxy")
 
-		if proxyErr := common.ExecuteCoreGRPC(ctx, stc, deleteSpxPartitionMethod, sxp.ToDeletionRequestProto(), nil, ""); proxyErr != nil {
+		proxyErr := common.ExecuteCoreGRPC(ctx, stc, deleteSpxPartitionMethod, sxp.ToDeletionRequestProto(), nil, "")
+		if proxyErr != nil {
 			// A Partition the Site no longer knows about is already in the state the
 			// caller asked for, so let the deletion proceed.
 			if proxyErr.Code == http.StatusNotFound {

@@ -330,13 +330,13 @@ type ApiGetAllSpectrumxPartitionRequest struct {
 	orderBy         *string
 }
 
-// Filter Partitions by Site
+// Filter Partitions by Site. Repeat the parameter to match multiple Sites.
 func (r ApiGetAllSpectrumxPartitionRequest) SiteId(siteId string) ApiGetAllSpectrumxPartitionRequest {
 	r.siteId = &siteId
 	return r
 }
 
-// Filter Partitions by Status
+// Filter Partitions by Status. Repeat the parameter to match multiple Statuses.
 func (r ApiGetAllSpectrumxPartitionRequest) Status(status string) ApiGetAllSpectrumxPartitionRequest {
 	r.status = &status
 	return r

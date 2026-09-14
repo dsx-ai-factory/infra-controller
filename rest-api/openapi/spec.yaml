@@ -6241,7 +6241,7 @@ paths:
             format: uuid
           in: query
           name: siteId
-          description: Filter Partitions by Site
+          description: Filter Partitions by Site. Repeat the parameter to match multiple Sites.
         - schema:
             type: string
             enum:
@@ -6252,7 +6252,7 @@ paths:
               - Deleting
           in: query
           name: status
-          description: Filter Partitions by Status
+          description: Filter Partitions by Status. Repeat the parameter to match multiple Statuses.
         - schema:
             type: string
           in: query

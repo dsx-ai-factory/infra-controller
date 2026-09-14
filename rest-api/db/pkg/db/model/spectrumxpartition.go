@@ -432,11 +432,12 @@ func (sxpsd SpectrumXPartitionSQLDAO) Create(ctx context.Context, tx *db.Tx, inp
 		CreatedBy:       input.CreatedBy,
 	}
 
-	if err := sxp.Validate(); err != nil {
+	err := sxp.Validate()
+	if err != nil {
 		return nil, err
 	}
 
-	_, err := db.GetIDB(tx, sxpsd.dbSession).NewInsert().Model(sxp).Exec(ctx)
+	_, err = db.GetIDB(tx, sxpsd.dbSession).NewInsert().Model(sxp).Exec(ctx)
 	if err != nil {
 		return nil, err
 	}
