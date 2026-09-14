@@ -70,8 +70,8 @@ use chrono::{DateTime, Duration, Utc};
 use mac_address::MacAddress;
 use sqlx::PgConnection;
 
-use crate::DatabaseError;
 use crate::db_read::DbReader;
+use crate::{ConditionalWrite, DatabaseError};
 
 /// Backoff floor: the first failed rotation attempt quarantines the device for
 /// this long before the engine will retry it. Set to 15 minutes so retries are
@@ -404,10 +404,17 @@ pub async fn record_device_rotation_started(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-/// Records the opaque backend job ID returned for a staged target.
+/// `RotationAttemptNotEligible` means the device row is missing or fails
+/// the writer's checks for the target, attempt, job, terminal error, or quarantine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RotationAttemptNotEligible;
+
+/// `record_device_rotation_submitted` attaches a backend job to a staged attempt.
 ///
-/// Target and attempt comparisons prevent a late response from attaching to a
-/// newer operation. Returns `false` when that operation is no longer active.
+/// Returns `NotApplied(RotationAttemptNotEligible)` if the row is missing,
+/// the target or attempt differs, another job is recorded, or the attempt
+/// has a terminal error. Recording the same job again returns `Applied(())`.
+/// An empty `job_id` returns `DatabaseError::InvalidArgument`.
 pub async fn record_device_rotation_submitted(
     conn: &mut PgConnection,
     device_mac: MacAddress,
@@ -415,7 +422,7 @@ pub async fn record_device_rotation_submitted(
     rotating_to_version: i32,
     expected_attempt: i32,
     job_id: &str,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), RotationAttemptNotEligible>, DatabaseError> {
     if job_id.is_empty() {
         return Err(DatabaseError::InvalidArgument(
             "rotation job ID must not be empty".to_string(),
@@ -440,12 +447,20 @@ pub async fn record_device_rotation_submitted(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(if result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(RotationAttemptNotEligible)
+    })
 }
 
-/// Starts another observation attempt for the same unresolved target.
+/// `record_device_rotation_retry_started` starts another observation attempt
+/// for the same unresolved target.
 ///
-/// The target never changes. Attempt and job comparisons fence late results.
+/// `Applied(attempt)` contains the new attempt number; the target never changes.
+/// Returns `NotApplied(RotationAttemptNotEligible)` if the row is missing,
+/// the target, attempt, or job differs, a terminal error is recorded, or
+/// quarantine is active.
 pub async fn record_device_rotation_retry_started(
     conn: &mut PgConnection,
     device_mac: MacAddress,
@@ -453,7 +468,7 @@ pub async fn record_device_rotation_retry_started(
     rotating_to_version: i32,
     expected_attempt: i32,
     expected_job_id: Option<&str>,
-) -> Result<Option<i32>, DatabaseError> {
+) -> Result<ConditionalWrite<i32, RotationAttemptNotEligible>, DatabaseError> {
     let query = "UPDATE device_credential_rotation \
                  SET rotate_job_id = NULL, \
                      rotate_attempts = rotate_attempts + 1, \
@@ -469,7 +484,7 @@ pub async fn record_device_rotation_retry_started(
                             OR rotate_quarantined_until <= now()) \
                  RETURNING rotate_attempts";
 
-    sqlx::query_scalar::<_, i32>(query)
+    let attempt = sqlx::query_scalar::<_, i32>(query)
         .bind(device_mac)
         .bind(credential_type)
         .bind(rotating_to_version)
@@ -477,13 +492,21 @@ pub async fn record_device_rotation_retry_started(
         .bind(expected_job_id)
         .fetch_optional(&mut *conn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(match attempt {
+        Some(attempt) => ConditionalWrite::Applied(attempt),
+        None => ConditionalWrite::NotApplied(RotationAttemptNotEligible),
+    })
 }
 
-/// Marks a definitive staged backend rejection without changing its target.
+/// `record_device_rotation_failed` marks a definitive backend rejection
+/// without changing the staged target.
 ///
 /// Use only when no mutation was accepted. A row with a backend job is retained
-/// because its password outcome may be unknown.
+/// because we may not know whether its password changed.
+/// Returns `NotApplied(RotationAttemptNotEligible)` if the row is missing,
+/// the target or attempt differs, or a job or terminal error is recorded.
 pub async fn record_device_rotation_failed(
     conn: &mut PgConnection,
     device_mac: MacAddress,
@@ -491,7 +514,7 @@ pub async fn record_device_rotation_failed(
     rotating_to_version: i32,
     expected_attempt: i32,
     error_redacted: &str,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), RotationAttemptNotEligible>, DatabaseError> {
     let query = "UPDATE device_credential_rotation \
                  SET rotate_last_error_redacted = $5 \
                  WHERE device_mac = $1 AND credential_type = $2 \
@@ -510,13 +533,20 @@ pub async fn record_device_rotation_failed(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(if result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(RotationAttemptNotEligible)
+    })
 }
 
-/// Promotes a target after its matching backend operation confirmed convergence.
+/// `record_device_rotation_succeeded` promotes a target after its matching
+/// backend operation confirmed convergence.
 ///
-/// The caller must first write and read back the per-device target. Target,
-/// attempt, and job comparisons fence stale completion.
+/// The caller must first write and read back the per-device target.
+/// Returns `NotApplied(RotationAttemptNotEligible)` if the row is missing,
+/// the target, attempt, or job differs, or a terminal error is recorded.
+/// An empty `expected_job_id` returns `DatabaseError::InvalidArgument`.
 pub async fn record_device_rotation_succeeded(
     conn: &mut PgConnection,
     device_mac: MacAddress,
@@ -524,7 +554,7 @@ pub async fn record_device_rotation_succeeded(
     rotating_to_version: i32,
     expected_attempt: i32,
     expected_job_id: &str,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), RotationAttemptNotEligible>, DatabaseError> {
     if expected_job_id.is_empty() {
         return Err(DatabaseError::InvalidArgument(
             "rotation job ID must not be empty".to_string(),
@@ -553,7 +583,11 @@ pub async fn record_device_rotation_succeeded(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(if result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(RotationAttemptNotEligible)
+    })
 }
 
 /// Deletes the convergence row for `(device_mac, credential_type)`, if present.
@@ -1090,14 +1124,15 @@ mod tests {
     use sqlx::{PgConnection, PgPool};
 
     use super::{
-        BACKOFF_CAP_SECS, CredentialRotationType, backoff_until, current_target_version,
-        delete_device_converged, device_rotation_operation_state, device_rotation_status,
-        increment_rotate_attempt, mark_device_rotating_to_version, promote_rotating_to_current,
-        record_device_converged, record_device_rotation_failed,
+        BACKOFF_CAP_SECS, CredentialRotationType, RotationAttemptNotEligible, backoff_until,
+        current_target_version, delete_device_converged, device_rotation_operation_state,
+        device_rotation_status, increment_rotate_attempt, mark_device_rotating_to_version,
+        promote_rotating_to_current, record_device_converged, record_device_rotation_failed,
         record_device_rotation_retry_started, record_device_rotation_started,
         record_device_rotation_submitted, record_device_rotation_succeeded, record_device_unlocked,
         rotation_status, set_initial_target_version, set_next_target_version,
     };
+    use crate::ConditionalWrite::{Applied, NotApplied};
 
     // Inserts a device convergence row with an explicit current_version (and no
     // quarantine) for the status-counting tests.
@@ -1571,7 +1606,7 @@ mod tests {
                 .unwrap()
                 .expect("the first attempt should be staged");
 
-        assert!(
+        assert_eq!(
             record_device_rotation_failed(
                 &mut conn,
                 mac,
@@ -1581,7 +1616,8 @@ mod tests {
                 "backend did not accept password rotation",
             )
             .await
-            .unwrap()
+            .unwrap(),
+            Applied(())
         );
 
         let blocked =
@@ -1619,7 +1655,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!stale_release);
+        assert_eq!(stale_release, NotApplied(RotationAttemptNotEligible));
 
         let state = device_rotation_operation_state(&mut *conn, CredentialRotationType::Nvos, mac)
             .await
@@ -1647,7 +1683,7 @@ mod tests {
                 .unwrap()
                 .expect("the first attempt should be staged");
 
-        assert!(
+        assert_eq!(
             record_device_rotation_submitted(
                 &mut conn,
                 mac,
@@ -1657,7 +1693,8 @@ mod tests {
                 "first-job",
             )
             .await
-            .unwrap()
+            .unwrap(),
+            Applied(())
         );
 
         set_next_target_version(
@@ -1670,7 +1707,7 @@ mod tests {
         .unwrap()
         .expect("operator should publish a later target");
 
-        let retry_attempt = record_device_rotation_retry_started(
+        let retry = record_device_rotation_retry_started(
             &mut conn,
             mac,
             CredentialRotationType::Nvos,
@@ -1679,10 +1716,51 @@ mod tests {
             Some("first-job"),
         )
         .await
-        .unwrap()
-        .expect("the original target should be retried");
+        .unwrap();
 
-        assert_eq!(retry_attempt, first_attempt + 1);
+        let retry_attempt = first_attempt + 1;
+        assert_eq!(retry, Applied(retry_attempt));
+
+        // Responses from the first attempt must leave the retry's state alone.
+        assert_eq!(
+            record_device_rotation_submitted(
+                &mut conn,
+                mac,
+                CredentialRotationType::Nvos,
+                1,
+                first_attempt,
+                "first-job",
+            )
+            .await
+            .unwrap(),
+            NotApplied(RotationAttemptNotEligible)
+        );
+        assert_eq!(
+            record_device_rotation_retry_started(
+                &mut conn,
+                mac,
+                CredentialRotationType::Nvos,
+                1,
+                first_attempt,
+                Some("first-job"),
+            )
+            .await
+            .unwrap(),
+            NotApplied(RotationAttemptNotEligible)
+        );
+        assert_eq!(
+            record_device_rotation_succeeded(
+                &mut conn,
+                mac,
+                CredentialRotationType::Nvos,
+                1,
+                first_attempt,
+                "first-job",
+            )
+            .await
+            .unwrap(),
+            NotApplied(RotationAttemptNotEligible)
+        );
 
         let state = device_rotation_operation_state(&mut *conn, CredentialRotationType::Nvos, mac)
             .await
@@ -1694,7 +1772,7 @@ mod tests {
         assert_eq!(state.rotate_job_id, None);
         assert_eq!(state.rotate_attempts, retry_attempt);
 
-        assert!(
+        assert_eq!(
             record_device_rotation_submitted(
                 &mut conn,
                 mac,
@@ -1704,10 +1782,11 @@ mod tests {
                 "retry-job",
             )
             .await
-            .unwrap()
+            .unwrap(),
+            Applied(())
         );
 
-        assert!(
+        assert_eq!(
             record_device_rotation_succeeded(
                 &mut conn,
                 mac,
@@ -1717,7 +1796,8 @@ mod tests {
                 "retry-job",
             )
             .await
-            .unwrap()
+            .unwrap(),
+            Applied(())
         );
 
         let converged =
@@ -1819,7 +1899,7 @@ mod tests {
                 .unwrap()
                 .expect("the first attempt should be staged");
 
-        assert!(
+        assert_eq!(
             record_device_rotation_submitted(
                 &mut conn,
                 mac,
@@ -1829,11 +1909,12 @@ mod tests {
                 "job-1",
             )
             .await
-            .unwrap()
+            .unwrap(),
+            Applied(())
         );
 
-        assert!(
-            !record_device_rotation_failed(
+        assert_eq!(
+            record_device_rotation_failed(
                 &mut conn,
                 mac,
                 CredentialRotationType::Nvos,
@@ -1842,7 +1923,8 @@ mod tests {
                 "backend reported failure",
             )
             .await
-            .unwrap()
+            .unwrap(),
+            NotApplied(RotationAttemptNotEligible)
         );
 
         let promoted = record_device_rotation_succeeded(
@@ -1856,7 +1938,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(promoted);
+        assert_eq!(promoted, Applied(()));
 
         let state = device_rotation_operation_state(&mut *conn, CredentialRotationType::Nvos, mac)
             .await
