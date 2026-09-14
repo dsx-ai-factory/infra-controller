@@ -30,7 +30,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Row};
 
 use crate::db_read::DbReader;
-use crate::{BIND_LIMIT, DatabaseError};
+use crate::{BIND_LIMIT, ConditionalWrite, DatabaseError};
 
 #[derive(Debug)]
 struct DbExploredEndpoint {
@@ -384,18 +384,26 @@ WHERE address=$4 AND version=$5";
     Ok(query_result.rows_affected() > 0)
 }
 
-/// Updates only the last exploration error and latency in an endpoint's report.
+/// `EndpointReportNotCurrent` means the endpoint is missing or its report version
+/// no longer matches the version supplied by the caller. The write does not
+/// distinguish these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndpointReportNotCurrent;
+
+/// `try_update_last_exploration_error` records a failure and its latency without
+/// replacing the last successful exploration report.
 ///
-/// This preserves the rest of the last successful exploration report while recording
-/// an exploration failure. Returns `Ok(false)` if the entry had been deleted in the
-/// meantime or otherwise modified. It will not fail for version mismatches.
+/// An applied write advances the report version, sets `waiting_for_explorer_refresh`,
+/// and clears `exploration_requested` in the caller's transaction. A missing
+/// endpoint or changed report version returns `NotApplied(EndpointReportNotCurrent)`;
+/// database failures remain errors.
 pub async fn try_update_last_exploration_error(
     address: IpAddr,
     old_version: ConfigVersion,
     error: &model::site_explorer::EndpointExplorationError,
     latency: std::time::Duration,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
     let query = "UPDATE explored_endpoints
 SET version=$1,
@@ -416,7 +424,11 @@ WHERE address=$4 AND version=$5";
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(query_result.rows_affected() > 0)
+    Ok(if query_result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent)
+    })
 }
 
 /// Clears the last known error in `explored_endpoints` for the BMC identified by IP.
