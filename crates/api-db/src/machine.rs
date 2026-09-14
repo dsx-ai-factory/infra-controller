@@ -1081,6 +1081,12 @@ pub async fn update_network_status_observation(
     Ok(())
 }
 
+/// `ExtensionServiceObservationNotCurrent` means the conditional observation
+/// update did not match, but the machine was present when rechecked. The
+/// rejected observation does not replace the stored service entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtensionServiceObservationNotCurrent;
+
 /// Updates the current extension-service observation for one service type.
 ///
 /// Writers own their type key, so the DPU agent's KubernetesPod observation
@@ -1088,16 +1094,16 @@ pub async fn update_network_status_observation(
 /// is a single JSONB update: PostgreSQL serializes concurrent row updates and
 /// `jsonb_set` retains every other service-type entry.
 ///
-/// Returns `false` when the machine exists but a newer observation for this
-/// same service type is already present, and [`DatabaseError::NotFoundError`]
-/// when the machine row is absent, so a superseded report is distinguishable
-/// from a machine that went away.
+/// Returns `Applied(())` when the observation is stored. A conditional miss
+/// returns `NotApplied` if the machine exists when rechecked, or
+/// [`DatabaseError::NotFoundError`] if it is absent. The identity recheck is
+/// a separate read, not part of the timestamp comparison's snapshot.
 pub async fn update_extension_service_status_observation(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     service_type: ExtensionServiceType,
     observation: &InstanceExtensionServiceStatusObservation,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ExtensionServiceObservationNotCurrent>, DatabaseError> {
     let query = r#"
         UPDATE machines
         SET extension_service_status_observations = jsonb_set(
@@ -1123,7 +1129,7 @@ pub async fn update_extension_service_status_observation(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     if updated.is_some() {
-        return Ok(true);
+        return Ok(ConditionalWrite::Applied(()));
     }
 
     // The update above matches on machine identity and observation freshness
@@ -1136,7 +1142,9 @@ pub async fn update_extension_service_status_observation(
         .await
         .map_err(|e| DatabaseError::query(identity_query, e))?;
     if machine_exists.is_some() {
-        return Ok(false);
+        return Ok(ConditionalWrite::NotApplied(
+            ExtensionServiceObservationNotCurrent,
+        ));
     }
 
     // Captures why the update failed in unit tests even though all prerequisite
@@ -3547,6 +3555,121 @@ mod test {
     use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
     use model::resource_pool::{ResourcePool, ValueType};
     use tokio::sync::oneshot;
+
+    #[crate::sqlx_test]
+    async fn extension_service_observations_preserve_per_service_timestamp_order(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use chrono::{DateTime, Utc};
+        use config_version::ConfigVersion;
+        use model::extension_service::ExtensionServiceType;
+        use model::instance::status::extension_service::{
+            InstanceExtensionServiceStatusObservation,
+            InstanceExtensionServiceStatusObservationByType,
+        };
+
+        use super::{
+            ExtensionServiceObservationNotCurrent, update_extension_service_status_observation,
+        };
+        use crate::ConditionalWrite::{self, Applied, NotApplied};
+
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
+        let observation = InstanceExtensionServiceStatusObservation {
+            config_version: ConfigVersion::initial(),
+            instance_config_version: None,
+            extension_service_statuses: Vec::new(),
+            observed_at: DateTime::from_timestamp(1_722_000_000, 0).unwrap(),
+        };
+        let mut txn = pool.begin().await?;
+        let missing = update_extension_service_status_observation(
+            txn.as_mut(),
+            &machine_id,
+            ExtensionServiceType::KubernetesPod,
+            &observation,
+        )
+        .await;
+        assert!(
+            matches!(missing, Err(crate::DatabaseError::NotFoundError { kind: "machine", id }) if id == machine_id.to_string())
+        );
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        struct Case {
+            scenario: &'static str,
+            service_type: ExtensionServiceType,
+            observed_at: DateTime<Utc>,
+            config_version: ConfigVersion,
+            expect: ConditionalWrite<(), ExtensionServiceObservationNotCurrent>,
+        }
+        let mut expected = InstanceExtensionServiceStatusObservationByType::default();
+        for case in [
+            Case {
+                scenario: "initial observation",
+                service_type: ExtensionServiceType::KubernetesPod,
+                observed_at: observation.observed_at,
+                config_version: observation.config_version,
+                expect: Applied(()),
+            },
+            Case {
+                scenario: "another service has an independent timestamp",
+                service_type: ExtensionServiceType::DpfHelmChart,
+                observed_at: observation.observed_at - chrono::Duration::seconds(1),
+                config_version: observation.config_version,
+                expect: Applied(()),
+            },
+            Case {
+                scenario: "older observation leaves both services unchanged",
+                service_type: ExtensionServiceType::KubernetesPod,
+                observed_at: observation.observed_at - chrono::Duration::seconds(1),
+                config_version: observation.config_version.increment(),
+                expect: NotApplied(ExtensionServiceObservationNotCurrent),
+            },
+            Case {
+                scenario: "equal timestamp can replace the payload",
+                service_type: ExtensionServiceType::KubernetesPod,
+                observed_at: observation.observed_at,
+                config_version: observation.config_version.increment(),
+                expect: Applied(()),
+            },
+        ] {
+            let incoming = InstanceExtensionServiceStatusObservation {
+                config_version: case.config_version,
+                observed_at: case.observed_at,
+                ..observation.clone()
+            };
+            let mut txn = pool.begin().await?;
+            let result = update_extension_service_status_observation(
+                txn.as_mut(),
+                &machine_id,
+                case.service_type.clone(),
+                &incoming,
+            )
+            .await?;
+            txn.commit().await?;
+            assert_eq!(result, case.expect, "{}", case.scenario);
+            if let Applied(()) = case.expect {
+                expected.set_for_service_type(case.service_type, incoming);
+            }
+            let persisted: sqlx::types::Json<InstanceExtensionServiceStatusObservationByType> =
+                sqlx::query_scalar(
+                    "SELECT extension_service_status_observations FROM machines WHERE id = $1",
+                )
+                .bind(machine_id)
+                .fetch_one(&pool)
+                .await?;
+            assert_eq!(persisted.0, expected, "{}", case.scenario);
+        }
+        Ok(())
+    }
 
     fn common_pools_without_seeded_values() -> CommonPools {
         let (stop_sender, _stop_receiver) = oneshot::channel();

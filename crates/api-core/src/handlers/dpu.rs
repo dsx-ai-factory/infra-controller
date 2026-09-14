@@ -29,7 +29,7 @@ use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials
 use carbide_utils::arch::CpuArchitecture;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtype};
-use db::machine::AdminNetworkChangeNotPending;
+use db::machine::{AdminNetworkChangeNotPending, ExtensionServiceObservationNotCurrent};
 use db::vpc_prefix::VpcId;
 use db::{
     ConditionalWrite, DatabaseError, ObjectColumnFilter, dpu_agent_upgrade_policy,
@@ -1073,13 +1073,18 @@ pub(crate) async fn record_dpu_network_status(
             observation
         });
     if let Some(extension_service_observation) = &extension_service_observation {
-        db::machine::update_extension_service_status_observation(
+        match db::machine::update_extension_service_status_observation(
             &mut txn,
             &dpu_machine_id,
             model::extension_service::ExtensionServiceType::KubernetesPod,
             extension_service_observation,
         )
-        .await?;
+        .await?
+        {
+            // A late observation must not fail the rest of this network status report.
+            ConditionalWrite::Applied(())
+            | ConditionalWrite::NotApplied(ExtensionServiceObservationNotCurrent) => {}
+        }
     }
 
     // Store the DPU submitted health-report
