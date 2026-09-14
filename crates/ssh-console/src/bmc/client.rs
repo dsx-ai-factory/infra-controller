@@ -571,28 +571,24 @@ async fn check_asf_reachable(addr: SocketAddr, timeout: Duration) -> bool {
         0x06, 0x00, 0xff, 0x06, 0x00, 0x00, 0x11, 0xbe, 0x80, 0x00, 0x00, 0x00,
     ];
 
-    let Ok(socket) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
-        tracing::debug!(%addr, "failed to bind UDP socket for IPMI reachability check");
-        return false;
+    let probe = async {
+        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+        socket.send_to(&ASF_PRESENCE_PING, addr).await?;
+        let mut recv_buf = [0u8; 32];
+        socket.recv_from(&mut recv_buf).await
     };
 
-    if let Err(e) = socket.send_to(&ASF_PRESENCE_PING, addr).await {
-        tracing::debug!(%addr, error = %e, "failed to send ASF Presence Ping");
-        return false;
-    }
-
-    let mut recv_buf = [0u8; 32];
-    match tokio::time::timeout(timeout, socket.recv_from(&mut recv_buf)).await {
+    match tokio::time::timeout(timeout, probe).await {
         Ok(Ok((len, _))) => {
             tracing::debug!(%addr, response_len = len, "IPMI endpoint responded to ASF Presence Ping");
             true
         }
         Ok(Err(e)) => {
-            tracing::debug!(%addr, error = %e, "error receiving ASF Presence Pong");
+            tracing::debug!(%addr, error = %e, "ASF Presence Ping failed");
             false
         }
         Err(_) => {
-            tracing::debug!(%addr, timeout_secs = ?timeout, "ASF Presence Ping timed out");
+            tracing::debug!(%addr, ?timeout, "ASF Presence Ping timed out");
             false
         }
     }
@@ -631,8 +627,9 @@ async fn check_icmp_reachable(addr: SocketAddr, timeout: Duration) -> bool {
 
 /// Race ASF Presence Ping and ICMP ping to check IPMI endpoint reachability.
 async fn check_ipmi_reachable_racing(addr: SocketAddr, timeout: Duration) -> bool {
-    use futures::future::{Either, select};
     use std::pin::pin;
+
+    use futures::future::{Either, select};
 
     let mut asf_fut = pin!(check_asf_reachable(addr, timeout));
     let mut icmp_fut = pin!(check_icmp_reachable(addr, timeout));
