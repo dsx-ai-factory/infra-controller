@@ -547,8 +547,17 @@ async fn test_get_machine_position_info(pool: PgPool) -> Result<(), Box<dyn std:
     report.compute_tray_index = Some(2);
     report.topology_id = Some(10);
     report.revision_id = Some(3);
-    db::explored_endpoints::try_update(bmc_ip, existing.report_version, &report, false, &mut txn)
-        .await?;
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            bmc_ip,
+            existing.report_version,
+            &report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
     txn.commit().await?;
 
     // Call the API
@@ -1038,7 +1047,7 @@ async fn test_refresh_endpoint_report_rejects_concurrent_report_update(
         evaluated_boot_interface: Some(concurrent_target.clone()),
     });
     let mut txn = env.pool.begin().await?;
-    assert!(
+    assert_eq!(
         db::explored_endpoints::try_update(
             bmc_ip,
             baseline.report_version,
@@ -1047,6 +1056,7 @@ async fn test_refresh_endpoint_report_rejects_concurrent_report_update(
             &mut txn,
         )
         .await?,
+        db::ConditionalWrite::Applied(()),
         "concurrent report update should succeed"
     );
     txn.commit().await?;
@@ -1094,7 +1104,7 @@ async fn test_refresh_endpoint_report_failure_persists_error_and_bumps_version(
         evaluated_boot_interface: Some(preserved_target.clone()),
     });
     let mut txn = env.pool.begin().await?;
-    assert!(
+    assert_eq!(
         db::explored_endpoints::try_update(
             bmc_ip,
             initial.report_version,
@@ -1102,7 +1112,8 @@ async fn test_refresh_endpoint_report_failure_persists_error_and_bumps_version(
             initial.waiting_for_explorer_refresh,
             &mut txn,
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
     txn.commit().await?;
     let initial_version = explored_endpoint(&env, bmc_ip).await?.report_version;

@@ -2941,6 +2941,9 @@ impl SiteExplorer {
         metrics.record_update_explored_endpoints_count("endpoint_error_update_attempts", 0);
         metrics.record_update_explored_endpoints_count("firmware_version_update_attempts", 0);
         metrics.record_update_explored_endpoints_count("redfish_remediation_candidates", 0);
+        // Commit the whole batch before dispatching remediation. A later write
+        // failure must roll back earlier reports and request clearing, since it
+        // also discards the remediation collected for them.
         let mut txn = self.txn_begin().await?;
 
         let mut redfish_errors = Vec::new();
@@ -2982,6 +2985,10 @@ impl SiteExplorer {
                 }
             }
 
+            // Keep topology writes ahead of endpoint writes to match machine deletion's
+            // lock order. A savepoint lets a rejected report undo only its own topology.
+            let mut txn = db::Transaction::begin_inner(txn.as_pgconn()).await?;
+
             // Update possible stale machine versions
             // Configured firmware versions remain the preferred source. Hosts
             // without firmware-management configuration, such as Lenovo GB300
@@ -3020,7 +3027,7 @@ impl SiteExplorer {
                                     "Initial exploration of endpoint"
                                 );
                             }
-                            db::explored_endpoints::try_update(
+                            let report_write = db::explored_endpoints::try_update(
                                 address,
                                 old_version,
                                 &report,
@@ -3029,6 +3036,15 @@ impl SiteExplorer {
                             )
                             .await?;
                             endpoint_report_update_attempts += 1;
+                            match report_write {
+                                ConditionalWrite::Applied(()) => {}
+                                ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+                                    // Skip transient remediation: it would use
+                                    // the rejected report's stale endpoint snapshot.
+                                    txn.rollback().await?;
+                                    continue;
+                                }
+                            }
                         }
                         Err(e) => {
                             // If an endpoint can not be explored we don't delete the known information, since it's
@@ -3103,6 +3119,8 @@ impl SiteExplorer {
                     }
                 }
             }
+
+            txn.commit().await?;
 
             // We wait until the end to add it to redfish_errors so we can move endpoint safely
             if let Some(e) = redfish_error {

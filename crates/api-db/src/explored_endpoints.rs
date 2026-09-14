@@ -356,17 +356,19 @@ pub async fn lookup_bmc_metadata_by_ip(
     ))
 }
 
-/// Updates the explored information about a node
+/// Replaces an endpoint's report if its version still matches.
 ///
-/// This operation will return `Ok(false)` if the entry had been deleted in
-/// the meantime or otherwise modified. It will not fail.
+/// An applied write advances the report version, stores the supplied
+/// `waiting_for_explorer_refresh`, and clears `exploration_requested` in the
+/// caller's transaction. A missing endpoint or changed report version returns
+/// `NotApplied(EndpointReportNotCurrent)`; database failures remain errors.
 pub async fn try_update(
     address: IpAddr,
     old_version: ConfigVersion,
     exploration_report: &EndpointExplorationReport,
     waiting_for_explorer_refresh: bool,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
     let query = "
 UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false
@@ -381,7 +383,11 @@ WHERE address=$4 AND version=$5";
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(query_result.rows_affected() > 0)
+    Ok(if query_result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent)
+    })
 }
 
 /// `EndpointReportNotCurrent` means the endpoint is missing or its report version
@@ -452,11 +458,14 @@ pub async fn clear_last_known_error(
 
     let mut report = row.report;
     report.last_exploration_error = None;
-    if !try_update(address, row.report_version, &report, true, txn).await? {
-        return Err(DatabaseError::ConcurrentModificationError(
-            "ExploredEndpoint",
-            row.report_version.version_string(),
-        ));
+    match try_update(address, row.report_version, &report, true, txn).await? {
+        ConditionalWrite::Applied(()) => {}
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+            return Err(DatabaseError::ConcurrentModificationError(
+                "ExploredEndpoint",
+                row.report_version.version_string(),
+            ));
+        }
     }
 
     Ok(())
