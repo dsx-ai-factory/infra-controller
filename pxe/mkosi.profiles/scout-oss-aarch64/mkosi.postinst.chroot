@@ -17,6 +17,7 @@ APT_SANDBOX_OPTS="-o APT::Sandbox::User=root"
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get ${APT_SANDBOX_OPTS} update
+apt-get ${APT_SANDBOX_OPTS} -y install nvidia-driver-pinning-615.71.09=615.71.09-1ubuntu1
 
 # Debug: Check what NVIDIA driver packages are actually available
 echo "=== Checking NVIDIA repository status ==="
