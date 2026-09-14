@@ -59,8 +59,8 @@ use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 use tracing::Instrument;
 
+use super::tenant_prefix_overlap;
 use crate::api::{Api, log_machine_id, log_request_data, log_tenant_organization_id};
-use crate::cfg::file::CarbideConfig;
 use crate::ethernet_virtualization::validate_instance_interface_routing_profiles;
 use crate::instance::{
     InstanceAllocationRequest, allocate_ib_port_guid, allocate_instance, allocate_network,
@@ -1357,7 +1357,7 @@ pub(crate) async fn update_instance_config(
     let mut txn = api.txn_begin().await?;
 
     let (machine_id, initial_config_version) = {
-        // Capture the Instance before any IB lock wait. If another request
+        // Capture the Instance before any overlap or IB lock wait. If another request
         // updates it while this request waits, this version remains the
         // implicit optimistic token rather than silently rebasing.
         let request_start_instance = db::instance::find_by_id(&mut txn, instance_id)
@@ -1382,10 +1382,9 @@ pub(crate) async fn update_instance_config(
         kind: "machine",
         id: machine_id.to_string(),
     })?;
-    // We assign `initial_instance` from this first snapshot as the baseline for
-    // request validation and resource updates. An IB change later locks the
-    // Instance and Machine, reloads the snapshot, and uses the refreshed
-    // `instance` below.
+    // This first snapshot establishes the request's comparison baseline.
+    // An overlap wait reloads it before resource validation; an IB change
+    // later rereads it after locking the Instance and Machine.
     let initial_instance = mh_snapshot
         .instance
         .as_ref()
@@ -1442,12 +1441,57 @@ pub(crate) async fn update_instance_config(
         .verify_update_allowed_to(&config)
         .map_err(CarbideError::from)?;
 
-    validate_os_definition_usable(&mut txn, &config.os).await?;
-
     let expected_version = match request.if_version_match {
         Some(version) => version.parse().map_err(CarbideError::from)?,
         None => initial_config_version,
     };
+    let network_expands = !tenant_prefix_overlap::instance_network_is_nonexpanding(
+        &initial_instance.config.network,
+        &config.network,
+    );
+    let needs_overlap_check = mh_snapshot.has_managed_dpus()
+        && (initial_instance.config.network_security_group_id != config.network_security_group_id
+            || network_expands);
+    if needs_overlap_check {
+        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        // No resource locks precede this wait. Reload the retained networks,
+        // but keep the request's original version rather than rebasing it.
+        mh_snapshot = db::managed_host::load_snapshot(
+            &mut txn,
+            &machine_id,
+            LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
+        )
+        .await?
+        .ok_or(CarbideError::NotFoundError {
+            kind: "machine",
+            id: machine_id.to_string(),
+        })?;
+    }
+    let initial_instance = mh_snapshot
+        .instance
+        .as_ref()
+        .filter(|instance| instance.id == instance_id)
+        .ok_or(CarbideError::NotFoundError {
+            kind: "instance",
+            id: instance_id.to_string(),
+        })?;
+    if needs_overlap_check {
+        if initial_instance.config_version != expected_version {
+            return Err(CarbideError::ConcurrentModificationError(
+                "instance",
+                expected_version.to_string(),
+            )
+            .into());
+        }
+        if initial_instance.deleted.is_some() {
+            return Err(CarbideError::InvalidArgument(
+                "configuration for a terminating instance can not be changed".to_string(),
+            )
+            .into());
+        }
+    }
+
+    validate_os_definition_usable(&mut txn, &config.os).await?;
 
     // If an NSG is applied, we need to do a little more validation.
     if let InstanceConfig {
@@ -1490,11 +1534,13 @@ pub(crate) async fn update_instance_config(
     .await?;
 
     update_instance_network_config(
-        &api.runtime_config,
+        api,
         initial_instance,
-        &mut config.network,
+        &mut config,
         &mh_snapshot,
         &mut txn,
+        needs_overlap_check,
+        network_expands,
     )
     .await?;
 
@@ -1600,23 +1646,23 @@ pub(crate) async fn update_instance_config(
     Ok(Response::new(instance))
 }
 
-/// This function checks if network config update is requested and update db to initiate the
-/// process.
-///
-/// If it is requested, validate if update is allowed or not. If update is allowed, copy existing
-/// resources to avoid re-allocation, allocate resources for new interfaces and update the db to
-/// indicate the state machine to start updating network on DPUs. This function also increments
-/// network_config_version.
+/// Validate a requested network change, reuse existing resources, and allocate
+/// resources for new interfaces before queuing the update. The Instance state
+/// machine promotes that configuration and advances `network_config_version`.
 async fn update_instance_network_config(
-    runtime_config: &CarbideConfig,
+    api: &Api,
     instance: &InstanceSnapshot,
-    network: &mut InstanceNetworkConfig,
+    config: &mut InstanceConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    needs_overlap_check: bool,
+    network_expands: bool,
 ) -> Result<(), CarbideError> {
     if instance.update_network_config_request.is_some() {
         return Err(ConfigValidationError::InstanceNetworkConfigUpdateAlreadyInProgress.into());
     }
+    let runtime_config = &api.runtime_config;
+    let network = &mut config.network;
 
     // Auto-ness can't change for an existing instance. If a tenant has created
     // an instance with auto, it must remain auto until it is released. Maybe
@@ -1683,6 +1729,19 @@ async fn update_instance_network_config(
         .network
         .is_network_config_update_requested(network)
     {
+        if needs_overlap_check {
+            config
+                .network
+                .copy_existing_resources(&instance.config.network);
+            tenant_prefix_overlap::validate_instance_network(
+                api,
+                txn,
+                config,
+                Some(instance),
+                network_expands,
+            )
+            .await?;
+        }
         return Ok(());
     }
 
@@ -1727,6 +1786,18 @@ async fn update_instance_network_config(
         .map_err(CarbideError::from)?;
     validate_instance_vfs_against_dpf_topology(network, runtime_config)?;
     validate_instance_interface_routing_profiles(txn, network, runtime_config.fnn.as_ref()).await?;
+
+    if needs_overlap_check {
+        tenant_prefix_overlap::validate_instance_network(
+            api,
+            txn,
+            config,
+            Some(instance),
+            network_expands,
+        )
+        .await?;
+    }
+    let network = &mut config.network;
 
     // Allocate IPs and add them to the network config
     let updated_network_config = db::instance_network_config::with_allocated_ips(

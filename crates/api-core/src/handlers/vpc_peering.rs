@@ -26,6 +26,7 @@ use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use super::tenant_prefix_overlap::{prefixes_overlap_across_vpcs, receiver_sources};
 use crate::api::{Api, log_request_data};
 use crate::cfg::file::VpcPeeringPolicy;
 use crate::{CarbideError, CarbideResult};
@@ -172,13 +173,14 @@ async fn validate_receiver_prefixes(
     receiver_ids: &[VpcId],
     candidate: Option<(VpcId, IpNetwork)>,
 ) -> CarbideResult<()> {
-    let Some(policy) = api
+    if api
         .runtime_config
         .vpc_peering_policy_on_existing
         .or(api.runtime_config.vpc_peering_policy)
-    else {
+        .is_none()
+    {
         return Ok(());
-    };
+    }
     for receiver_id in receiver_ids {
         let receiver = vpc::find_by(
             &mut *txn,
@@ -187,38 +189,7 @@ async fn validate_receiver_prefixes(
         .await?
         .pop()
         .ok_or_else(super::tenant_prefix_overlap::overlap_error)?;
-        let receiver_type = receiver.config.network_virtualization_type;
-        let mut sources = match policy {
-            VpcPeeringPolicy::Exclusive => db::get_vpc_peer_vnis(
-                txn,
-                *receiver_id,
-                receiver_type.capabilities().peers_with.to_vec(),
-            )
-            .await?
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>(),
-            VpcPeeringPolicy::Mixed => db::get_vpc_peer_ids(txn, *receiver_id).await?,
-            VpcPeeringPolicy::None => Vec::new(),
-        };
-        // Match `ethernet_virtualization`: VNI imports are independent of
-        // prefix imports, including `Some(VpcPeeringPolicy::None)`.
-        if receiver_type.imports_peer_vnis_into_overlay() {
-            let peer_types = ALL_VPC_VIRTUALIZATION_TYPES
-                .iter()
-                .copied()
-                .filter(|peer_type| peer_type.vni_advertised_to_peers())
-                .collect();
-            sources.extend(
-                db::get_vpc_peer_vnis(txn, *receiver_id, peer_types)
-                    .await?
-                    .into_iter()
-                    .map(|(id, _)| id),
-            );
-        }
-        sources.push(*receiver_id);
-        sources.sort_unstable();
-        sources.dedup();
+        let sources = receiver_sources(&api.runtime_config, txn, &receiver).await?;
         let mut prefixes = db::get_retained_prefixes_by_vpcs(&mut *txn, &sources).await?;
         if let Some((vpc_id, prefix)) = candidate
             && sources.contains(&vpc_id)
@@ -230,19 +201,6 @@ async fn validate_receiver_prefixes(
         }
     }
     Ok(())
-}
-
-fn prefixes_overlap_across_vpcs(prefixes: &[(VpcId, IpNetwork)]) -> bool {
-    prefixes
-        .iter()
-        .enumerate()
-        .any(|(index, (vpc_id, prefix))| {
-            prefixes[index + 1..].iter().any(|(other_vpc_id, other)| {
-                vpc_id != other_vpc_id
-                    && (super::tenant_prefix_overlap::contains_prefix(*prefix, *other)
-                        || super::tenant_prefix_overlap::contains_prefix(*other, *prefix))
-            })
-        })
 }
 
 pub(crate) async fn find_ids(

@@ -835,8 +835,9 @@ are true:
   leakage, and tenant leak communities; and has no accepted underlay leaks or
   allowed anycast prefixes.
 
-The FNN renderer falls back to `anycast_site_prefixes` when the profile's
-`allowed_anycast_prefixes` is empty. The [chart's default configuration](../../../../helm/charts/nico-api/files/carbide-api-config.toml)
+The FNN renderer falls back to `anycast_site_prefixes` for IPv4 when the profile
+has no IPv4 `allowed_anycast_prefixes`. The IPv6 list has no such fallback.
+The [chart's default configuration](../../../../helm/charts/nico-api/files/carbide-api-config.toml)
 sets `anycast_site_prefixes = ["0.0.0.0/0"]`; a site using that default must
 override it with `[]` to meet the overlap requirements.
 
@@ -872,12 +873,32 @@ and `UpdateNetworkSecurityGroup` return `FailedPrecondition` if a VPC or NSG
 used in a policy check changes or is deleted between the initial read and the
 row lock. Both cases invalidate the earlier check.
 
+Instance allocation and network expansion check all VPCs used by the requested,
+current, and pending networks together, including their direct peer imports.
+An Instance must not connect to overlapping address space from different VPCs,
+even when those VPCs are otherwise isolated. Core returns `InvalidArgument`
+for that conflict. With overlap enabled, allocation, network expansion, and
+NSG changes also check the effective FNN policy before duplicate CIDRs exist.
+Effective NSG rules must be deny-only, and `stateful_egress` must be disabled
+when `stateful_acls_enabled` is enabled; unsafe policy returns
+`FailedPrecondition`. Network expansion also requires an eligible resolved
+routing profile and safe site-wide policy.
+
+When `tenant_prefix_overlap_enabled = false` but another VPC still uses the
+same addresses, Instance allocation and network expansion return
+`InvalidArgument`; unsafe NSG changes return `FailedPrecondition`. Prefixes
+being deleted still count. Metadata edits, removal of unchanged interfaces,
+and safe NSG replacements remain available. A request cannot replace a pending
+network update. Requests that need admission take the overlap transaction lock
+before resource locks, including when the gate is off. A waiting Instance
+update reloads its dependencies but keeps its original configuration version;
+if that version changed, the request returns `FailedPrecondition`.
+
 The [peering and policy checks](https://github.com/dsx-ai-factory/infra-controller/issues/5114)
-do not replace admission for Instance changes
-([#5115](https://github.com/dsx-ai-factory/infra-controller/issues/5115)), startup
-checks, or the complete writer audit
-([#5116](https://github.com/dsx-ai-factory/infra-controller/issues/5116)). Those
-checks must land before the database cutover in
+and [Instance admission](https://github.com/dsx-ai-factory/infra-controller/issues/5115)
+do not replace the startup checks and complete writer audit in
+[#5116](https://github.com/dsx-ai-factory/infra-controller/issues/5116). Those
+remaining checks must land before the database cutover in
 [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892).
 
 Even when the application accepts an eligible pair, the existing `VpcPrefix`

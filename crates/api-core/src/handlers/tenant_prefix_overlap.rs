@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! Tenant prefix reuse checks shared by prefix, peering, VPC, and NSG handlers.
+//! Tenant prefix overlap checks shared by prefix, peering, VPC, NSG, and Instance writers.
 
 use std::collections::HashSet;
 
@@ -26,6 +26,9 @@ use carbide_uuid::vpc::VpcId;
 use db::ObjectColumnFilter;
 use ipnetwork::IpNetwork;
 use model::instance::InstanceSearchFilter;
+use model::instance::config::InstanceConfig;
+use model::instance::config::network::InstanceNetworkConfig;
+use model::instance::snapshot::InstanceSnapshot;
 use model::machine::{
     InstanceState, LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot,
 };
@@ -35,11 +38,13 @@ use model::network_security_group::{
 use model::site_prefix::{
     SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState, SitePrefixRoutingScope,
 };
-use model::vpc::Vpc;
+use model::vpc::{ALL_VPC_VIRTUALIZATION_TYPES, Vpc, VpcVirtualizationTypeCapabilities};
 use sqlx::PgConnection;
 
 use crate::api::Api;
-use crate::cfg::file::{CarbideConfig, FnnRoutingProfileConfig, VpcIsolationBehaviorType};
+use crate::cfg::file::{
+    CarbideConfig, FnnRoutingProfileConfig, VpcIsolationBehaviorType, VpcPeeringPolicy,
+};
 use crate::{CarbideError, CarbideResult};
 
 const INELIGIBLE_OVERLAP: &str =
@@ -284,6 +289,231 @@ fn policy_error() -> CarbideError {
     )
 }
 
+/// Returns the direct source VPCs whose prefixes or VNIs the receiver imports,
+/// including the receiver itself. This follows the renderer's directional rules.
+pub(super) async fn receiver_sources(
+    runtime_config: &CarbideConfig,
+    txn: &mut PgConnection,
+    receiver: &Vpc,
+) -> CarbideResult<Vec<VpcId>> {
+    let Some(policy) = runtime_config
+        .vpc_peering_policy_on_existing
+        .or(runtime_config.vpc_peering_policy)
+    else {
+        return Ok(vec![receiver.id]);
+    };
+    let receiver_type = receiver.config.network_virtualization_type;
+    let mut sources = match policy {
+        VpcPeeringPolicy::Exclusive => db::vpc_peering::get_vpc_peer_vnis(
+            txn,
+            receiver.id,
+            receiver_type.capabilities().peers_with.to_vec(),
+        )
+        .await?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>(),
+        VpcPeeringPolicy::Mixed => db::vpc_peering::get_vpc_peer_ids(txn, receiver.id).await?,
+        VpcPeeringPolicy::None => Vec::new(),
+    };
+    // VNI imports are independent of prefix imports, including an explicit
+    // `VpcPeeringPolicy::None`.
+    if receiver_type.imports_peer_vnis_into_overlay() {
+        let peer_types = ALL_VPC_VIRTUALIZATION_TYPES
+            .iter()
+            .copied()
+            .filter(|peer_type| peer_type.vni_advertised_to_peers())
+            .collect();
+        sources.extend(
+            db::vpc_peering::get_vpc_peer_vnis(txn, receiver.id, peer_types)
+                .await?
+                .into_iter()
+                .map(|(id, _)| id),
+        );
+    }
+    sources.push(receiver.id);
+    sources.sort_unstable();
+    sources.dedup();
+    Ok(sources)
+}
+
+/// Repeated paths to one source do not create a collision. Distinct source
+/// VPCs must not contribute overlapping address space to the same receiver.
+pub(super) fn prefixes_overlap_across_vpcs(prefixes: &[(VpcId, IpNetwork)]) -> bool {
+    prefixes
+        .iter()
+        .enumerate()
+        .any(|(index, (vpc_id, prefix))| {
+            prefixes[index + 1..].iter().any(|(other_vpc_id, other)| {
+                vpc_id != other_vpc_id
+                    && (contains_prefix(*prefix, *other) || contains_prefix(*other, *prefix))
+            })
+        })
+}
+
+/// Accepts an unchanged network or removal of interfaces without changing the
+/// retained interfaces. Use the model's intent comparison so generated addresses
+/// and omitted resolved VPC IDs do not turn metadata edits into routing changes.
+pub(super) fn instance_network_is_nonexpanding(
+    previous: &InstanceNetworkConfig,
+    candidate: &InstanceNetworkConfig,
+) -> bool {
+    if previous.auto_config != candidate.auto_config
+        || candidate.interfaces.len() > previous.interfaces.len()
+    {
+        return false;
+    }
+    candidate.interfaces.iter().all(|requested| {
+        previous.interfaces.iter().any(|retained| {
+            let previous_interface = InstanceNetworkConfig {
+                interfaces: vec![retained.clone()],
+                auto_config: previous.auto_config,
+            };
+            let requested_interface = InstanceNetworkConfig {
+                interfaces: vec![requested.clone()],
+                auto_config: candidate.auto_config,
+            };
+            !previous_interface.is_network_config_update_requested(&requested_interface)
+        })
+    })
+}
+
+/// Checks the resolved candidate together with every network configuration
+/// retained by the Instance. The caller holds the overlap lock before reading
+/// dependencies and keeps it through the Instance write. Allocation deliberately
+/// does not use the policy writers' active-host filter: this configuration has
+/// not started serving tenant traffic yet.
+/// `network_expands` is classified from caller intent before resource resolution;
+/// false permits a safe NSG replacement without requiring retained routes to drain.
+pub(crate) async fn validate_instance_network(
+    api: &Api,
+    txn: &mut PgConnection,
+    candidate: &InstanceConfig,
+    retained: Option<&InstanceSnapshot>,
+    network_expands: bool,
+) -> CarbideResult<()> {
+    let mut networks = vec![&candidate.network];
+    if let Some(instance) = retained {
+        networks.push(&instance.config.network);
+        if let Some(update) = &instance.update_network_config_request {
+            networks.extend([&update.old_config, &update.new_config]);
+        }
+    }
+    let mut sources = HashSet::new();
+    let mut checked_vpcs = HashSet::new();
+    let mut vpcs = Vec::new();
+    for network in networks {
+        if network_expands {
+            crate::ethernet_virtualization::validate_instance_interface_routing_profiles(
+                txn,
+                network,
+                api.runtime_config.fnn.as_ref(),
+            )
+            .await?;
+        }
+        for interface in &network.interfaces {
+            let segment_id = interface.network_segment_id.ok_or_else(policy_error)?;
+            let vpc = db::vpc::find_by_segment(&mut *txn, segment_id)
+                .await?
+                .ok_or_else(policy_error)?;
+            if interface.vpc_id.is_some_and(|id| id != vpc.id) {
+                return Err(policy_error());
+            }
+            if !checked_vpcs.insert(vpc.id) {
+                continue;
+            }
+            sources.extend(receiver_sources(&api.runtime_config, txn, &vpc).await?);
+            vpcs.push(vpc);
+        }
+    }
+    let sources = sources.into_iter().collect::<Vec<_>>();
+    let prefixes = db::vpc_peering::get_retained_prefixes_by_vpcs(&mut *txn, &sources).await?;
+    if network_expands && prefixes_overlap_across_vpcs(&prefixes) {
+        return Err(overlap_error());
+    }
+
+    // Turning the gate off freezes expansion where another VPC still uses
+    // the same addresses, even when that VPC is isolated from this receiver.
+    // Both probes retain deleting rows; no site inventory scan is needed.
+    if !api.runtime_config.tenant_prefix_overlap_enabled {
+        let mut duplicate_space = false;
+        for (source_vpc_id, prefix) in &prefixes {
+            if db::vpc_prefix::probe(*prefix, txn)
+                .await?
+                .iter()
+                .any(|other| other.vpc_id != *source_vpc_id)
+                || db::vpc_prefix::probe_segment_prefixes(*prefix, txn)
+                    .await?
+                    .iter()
+                    .any(|other| other.vpc_id != *source_vpc_id)
+            {
+                duplicate_space = true;
+                break;
+            }
+        }
+        if !duplicate_space {
+            return Ok(());
+        }
+        if network_expands {
+            return Err(overlap_error());
+        }
+    }
+
+    for vpc in vpcs {
+        if vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn {
+            continue;
+        }
+        // An Instance attachment replaces the VPC default. Apply the
+        // requested attachment to old interfaces too: they can remain active
+        // until the network update is acknowledged.
+        if let Some(nsg_id) = candidate
+            .network_security_group_id
+            .as_ref()
+            .or(vpc.config.network_security_group_id.as_ref())
+        {
+            let nsg = db::network_security_group::find_by_ids(
+                txn,
+                std::slice::from_ref(nsg_id),
+                None,
+                false,
+            )
+            .await?
+            .pop()
+            .ok_or_else(policy_error)?;
+            if !nsg_policy_is_safe(
+                &nsg.rules,
+                nsg.stateful_egress,
+                api.runtime_config
+                    .network_security_group
+                    .stateful_acls_enabled,
+            ) {
+                return Err(policy_error());
+            }
+        }
+        // A safe NSG replacement cannot add routing visibility. It remains
+        // available to restrict a retained configuration, including gate-off.
+        if !network_expands {
+            continue;
+        }
+        let fnn = api.runtime_config.fnn.as_ref().ok_or_else(policy_error)?;
+        if !fnn
+            .resolve_vpc_routing_profile(&vpc.config)?
+            .is_eligible_for_tenant_prefix_overlap()
+            || !api.runtime_config.anycast_site_prefixes.is_empty()
+            || !nsg_policy_is_safe(
+                &api.runtime_config.network_security_group.policy_overrides,
+                false,
+                api.runtime_config
+                    .network_security_group
+                    .stateful_acls_enabled,
+            )
+        {
+            return Err(policy_error());
+        }
+    }
+    Ok(())
+}
+
 /// `validate_vpc_policy` checks a changed VPC policy against the tenant
 /// interfaces that use it. Each flag identifies a policy change not proven
 /// safe or nonexpanding. The caller holds the overlap lock before locking
@@ -484,6 +714,7 @@ mod tests {
 
     use carbide_network::virtualization::VpcVirtualizationType;
     use carbide_test_support::{Check, check_values};
+    use carbide_uuid::network::NetworkSegmentId;
     use carbide_uuid::site_prefix::SitePrefixId;
     use carbide_uuid::vpc::VpcId;
     use chrono::Utc;
@@ -500,6 +731,45 @@ mod tests {
     use crate::cfg::file::{
         FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry, RouteTargetConfig,
     };
+
+    #[test]
+    fn instance_network_contraction_keeps_retained_interface_intent() {
+        let segment_ids = [NetworkSegmentId::new(), NetworkSegmentId::new()];
+        let current = InstanceNetworkConfig::for_segment_ids(&segment_ids, &[], &[]);
+        let mut removed = current.clone();
+        removed.interfaces.clear();
+        let mut changed = current.clone();
+        changed.interfaces[0].network_segment_id = Some(segment_ids[1]);
+        changed.interfaces[0].network_details = None;
+        let mut expanded = current.clone();
+        expanded.interfaces.push(current.interfaces[0].clone());
+
+        check_values(
+            [
+                Check {
+                    scenario: "unchanged",
+                    input: current.clone(),
+                    expect: true,
+                },
+                Check {
+                    scenario: "removed interface",
+                    input: removed,
+                    expect: true,
+                },
+                Check {
+                    scenario: "changed network",
+                    input: changed,
+                    expect: false,
+                },
+                Check {
+                    scenario: "duplicated interface is not contraction",
+                    input: expanded,
+                    expect: false,
+                },
+            ],
+            |candidate| instance_network_is_nonexpanding(&current, &candidate),
+        );
+    }
 
     /// Test-specific enum that selects one eligibility rule to vary.
     #[derive(Clone, Copy, Debug)]

@@ -92,7 +92,7 @@ pub(super) mod switch;
 pub(super) mod tenant;
 pub(super) mod tenant_identity_config;
 pub(super) mod tenant_keyset;
-mod tenant_prefix_overlap;
+pub(super) mod tenant_prefix_overlap;
 pub(super) mod tpm_ca;
 pub(super) mod uefi;
 pub(super) mod uefi_credential_rotation;
