@@ -47,6 +47,9 @@ async fn explore_dgx_gb300() {
         .unwrap();
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Nvidia));
+    // The recorded class names the resolved hardware, so it distinguishes a
+    // DGX GB300 from a GB200 where the report vendor cannot.
+    assert_eq!(report.hardware_class.as_deref(), Some("DgxGb300"));
     assert!(!report.systems.is_empty(), "systems must be present");
     assert!(!report.chassis.is_empty(), "chassis must be present");
 }

@@ -23,8 +23,8 @@ use mac_address::MacAddress;
 use model::firmware::FirmwareComponentType;
 use model::machine_boot_interface::MachineBootInterface;
 use model::site_explorer::{
-    EndpointExplorationReport, ExploredEndpoint, InitialBmcResetPhase, InitialResetPhase,
-    PowerDrainState, PreingestionState, TimeSyncResetPhase,
+    EndpointExplorationReport, ExploredEndpoint, HardwareClassCount, InitialBmcResetPhase,
+    InitialResetPhase, PowerDrainState, PreingestionState, TimeSyncResetPhase,
 };
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Row};
@@ -356,6 +356,47 @@ pub async fn lookup_bmc_metadata_by_ip(
     ))
 }
 
+/// Reads the hardware class recorded for an endpoint, distinguishing a class
+/// that was recorded from one that never was.
+///
+/// The outer `Option` is absence of the endpoint row, the inner one a row whose
+/// column is still `NULL`. Both mean no exploration has recorded a class, so
+/// callers treat them alike; keeping them apart here costs nothing and leaves
+/// the query honest about what it read.
+pub async fn lookup_hardware_class_by_ip(
+    address: IpAddr,
+    db_reader: impl DbReader<'_>,
+) -> Result<Option<Option<String>>, DatabaseError> {
+    let query = "SELECT hardware_class FROM explored_endpoints WHERE address = $1";
+
+    sqlx::query_scalar(query)
+        .bind(address)
+        .fetch_optional(db_reader)
+        .await
+        .map_err(|e| DatabaseError::new("explored_endpoints lookup_hardware_class_by_ip", e))
+}
+
+/// Counts the explored endpoints under each hardware class, so a caller can
+/// see which classes a site actually has before deciding what to profile.
+///
+/// The endpoints carrying no class come last, since `NULL` sorts last
+/// ascending, and they are the ones no profile can cover.
+pub async fn hardware_class_counts(
+    db_reader: impl DbReader<'_>,
+) -> Result<Vec<HardwareClassCount>, DatabaseError> {
+    let query = r#"
+        SELECT hardware_class, COUNT(*) AS endpoints
+        FROM explored_endpoints
+        GROUP BY hardware_class
+        ORDER BY hardware_class
+    "#;
+
+    sqlx::query_as(query)
+        .fetch_all(db_reader)
+        .await
+        .map_err(|e| DatabaseError::new("explored_endpoints hardware_class_counts", e))
+}
+
 /// Updates the explored information about a node
 ///
 /// This operation will return `Ok(false)` if the entry had been deleted in
@@ -369,12 +410,13 @@ pub async fn try_update(
 ) -> Result<bool, DatabaseError> {
     let new_version = old_version.increment();
     let query = "
-UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false
-WHERE address=$4 AND version=$5";
+UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false, hardware_class=$4
+WHERE address=$5 AND version=$6";
     let query_result = sqlx::query(query)
         .bind(new_version)
         .bind(sqlx::types::Json(exploration_report))
         .bind(waiting_for_explorer_refresh)
+        .bind(exploration_report.hardware_class.as_deref())
         .bind(address)
         .bind(old_version)
         .execute(txn)
@@ -770,14 +812,15 @@ pub async fn insert(
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let query = "
-        INSERT INTO explored_endpoints (address, exploration_report, version, exploration_requested, preingestion_state, pause_ingestion_and_poweron)
-        VALUES ($1, $2::json, $3, false, '{\"state\":\"initial\"}', $4)
+        INSERT INTO explored_endpoints (address, exploration_report, version, exploration_requested, preingestion_state, pause_ingestion_and_poweron, hardware_class)
+        VALUES ($1, $2::json, $3, false, '{\"state\":\"initial\"}', $4, $5)
         ON CONFLICT DO NOTHING";
     sqlx::query(query)
         .bind(address)
         .bind(sqlx::types::Json(&exploration_report))
         .bind(ConfigVersion::initial())
         .bind(pause_ingestion_and_poweron)
+        .bind(exploration_report.hardware_class.as_deref())
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -943,7 +986,7 @@ pub async fn set_pause_ingestion_and_poweron(
 
 #[cfg(test)]
 mod tests {
-    use model::site_explorer::{Chassis, NetworkAdapter};
+    use model::site_explorer::{Chassis, NetworkAdapter, UNRECOGNIZED_HARDWARE_CLASS};
 
     use super::*;
 
@@ -1027,6 +1070,125 @@ mod tests {
         assert_eq!(rows.len(), 2, "two endpoints are installing firmware");
         assert_eq!(count, 2, "count agrees with the row count");
         assert_eq!(count, rows.len() as i64);
+    }
+
+    async fn read_hardware_class(txn: &mut PgConnection, address: IpAddr) -> Option<String> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT hardware_class FROM explored_endpoints WHERE address = $1",
+        )
+        .bind(address)
+        .fetch_one(txn)
+        .await
+        .expect("read hardware_class")
+    }
+
+    async fn read_version(txn: &mut PgConnection, address: IpAddr) -> ConfigVersion {
+        sqlx::query_scalar::<_, ConfigVersion>(
+            "SELECT version FROM explored_endpoints WHERE address = $1",
+        )
+        .bind(address)
+        .fetch_one(txn)
+        .await
+        .expect("read version")
+    }
+
+    fn report_with_class(hardware_class: Option<&str>) -> EndpointExplorationReport {
+        EndpointExplorationReport {
+            hardware_class: hardware_class.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// The column has to carry the class from the report on both write paths,
+    /// and hold no class where exploration determined none — absent is what
+    /// tells an unclassified endpoint apart from one classified as
+    /// unrecognised.
+    #[crate::sqlx_test]
+    async fn hardware_class_is_written_from_the_report(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        let classified: IpAddr = "10.0.2.1".parse().unwrap();
+        let unclassified: IpAddr = "10.0.2.2".parse().unwrap();
+
+        insert(
+            classified,
+            &report_with_class(Some("Gb200")),
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_hardware_class(&mut txn, classified).await.as_deref(),
+            Some("Gb200"),
+        );
+
+        // Re-exploring the endpoint as different hardware replaces the class.
+        let version = read_version(&mut txn, classified).await;
+        assert!(
+            try_update(
+                classified,
+                version,
+                &report_with_class(Some("DgxGb300")),
+                false,
+                &mut txn,
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            read_hardware_class(&mut txn, classified).await.as_deref(),
+            Some("DgxGb300"),
+        );
+
+        insert(unclassified, &report_with_class(None), false, &mut txn)
+            .await
+            .unwrap();
+        assert_eq!(read_hardware_class(&mut txn, unclassified).await, None);
+    }
+
+    /// An operator reads this to decide what to profile, so every class the
+    /// site has must arrive with an exact tally. The two kinds of endpoint
+    /// without usable hardware have to stay apart: the `unrecognized` marker is
+    /// a recorded class and groups like any other, while an absent class is its
+    /// own entry and sorts last.
+    #[crate::sqlx_test]
+    async fn hardware_class_counts_tally_each_class_and_the_endpoints_without_one(
+        pool: sqlx::PgPool,
+    ) {
+        let mut txn = pool.begin().await.unwrap();
+        for (address, class) in [
+            ("10.0.3.1", Some("Gb200")),
+            ("10.0.3.2", Some("Gb200")),
+            ("10.0.3.3", Some("DgxGb300")),
+            ("10.0.3.4", Some(UNRECOGNIZED_HARDWARE_CLASS)),
+            ("10.0.3.5", None),
+            ("10.0.3.6", None),
+        ] {
+            insert(
+                address.parse().unwrap(),
+                &report_with_class(class),
+                false,
+                &mut txn,
+            )
+            .await
+            .unwrap();
+        }
+
+        let counts = hardware_class_counts(&mut *txn).await.unwrap();
+
+        let tallied: Vec<_> = counts
+            .iter()
+            .map(|count| (count.hardware_class.as_deref(), count.endpoints))
+            .collect();
+        assert_eq!(
+            tallied,
+            [
+                (Some("DgxGb300"), 1),
+                (Some("Gb200"), 2),
+                (Some(UNRECOGNIZED_HARDWARE_CLASS), 1),
+                (None, 2),
+            ]
+        );
     }
 
     #[crate::sqlx_test]

@@ -38,7 +38,7 @@ use mac_address::MacAddress;
 use manager::ExploredManager;
 use model::site_explorer::{
     EndpointExplorationReport, EndpointType, InternalLockdownStatus, LockdownStatus,
-    MachineSetupDiff, MachineSetupStatus,
+    MachineSetupDiff, MachineSetupStatus, UNRECOGNIZED_HARDWARE_CLASS,
 };
 use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
@@ -326,6 +326,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         chassis: explored_chassis.to_model(),
         service,
         vendor: hw_type.and_then(|hw_type| hw_type.bmc_vendor()),
+        hardware_class: Some(hardware_class(hw_type)),
         versions: HashMap::default(),
         model: None,
         power_shelf_id: None,
@@ -402,6 +403,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
         chassis: explored_chassis.to_model(),
         service: explored_inventories.to_model(Some(hw_type)),
         vendor: hw_type.bmc_vendor(),
+        hardware_class: Some(hardware_class(Some(hw_type))),
         versions: HashMap::default(),
         model: None,
         power_shelf_id: None,
@@ -419,6 +421,15 @@ async fn build_delta_powershelf_report<B: Bmc>(
         revision_id: None,
         remediation_error: None,
     })
+}
+
+/// The hardware class recorded for an endpoint: the name of the hardware
+/// [`hw_type`] recognised, or the marker for having recognised none.
+fn hardware_class(hw_type: Option<hw::HwType>) -> String {
+    hw_type.map_or_else(
+        || UNRECOGNIZED_HARDWARE_CLASS.to_string(),
+        |hw_type| hw_type.to_string(),
+    )
 }
 
 pub(crate) fn hw_type<B: Bmc>(
@@ -1212,9 +1223,18 @@ mod tests {
 
     use super::hw::HwType;
     use super::{
-        Product, is_bf4_product, should_fetch_bf4_chassis_except_irot_nic,
+        Product, hardware_class, is_bf4_product, should_fetch_bf4_chassis_except_irot_nic,
         should_fetch_supplemental_network_adapter_ports, should_use_network_adapter_port_fallback,
     };
+
+    /// Recognising nothing has to be recorded as the marker rather than left
+    /// absent, since an absent class means the endpoint has not been explored
+    /// since the class was introduced.
+    #[test]
+    fn unrecognised_hardware_gets_the_unrecognised_class() {
+        assert_eq!(hardware_class(None), "unrecognized");
+        assert_eq!(hardware_class(Some(HwType::Gb200)), "Gb200");
+    }
 
     #[test]
     fn is_bf4_product_matches_bf4_service_root_products() {
