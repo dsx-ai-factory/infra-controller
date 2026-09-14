@@ -31,7 +31,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::crds::bfbs_generated::{BFB, BfbSpec};
-use crate::crds::bluefieldsoftwares_generated::{BlueFieldSoftware, BlueFieldSoftwareSpec};
+use crate::crds::bluefieldsoftwares_generated::BlueFieldSoftware;
 use crate::crds::dpudeployments_generated::{
     DPUDeployment, DpuDeploymentDpus, DpuDeploymentDpusDpuSetStrategy,
     DpuDeploymentDpusDpuSetStrategyType, DpuDeploymentDpusDpuSets,
@@ -644,37 +644,98 @@ async fn create_bluefield_software<R: BlueFieldSoftwareRepository>(
     namespace: &str,
     params: &BlueFieldSoftwareParams,
 ) -> Result<String, DpfError> {
+    let current = bluefield_software_resource(namespace, params, PldmFwBundleWireFormat::Map)?;
+    match create_or_reuse_bluefield_software(repo, &current).await {
+        Err(current_error) if is_invalid_kubernetes_resource(&current_error) => {
+            if params.pldm_fw_bundle.as_ref().map(BTreeMap::len) != Some(1) {
+                return Err(current_error);
+            }
+
+            tracing::debug!(
+                error = %current_error,
+                "BlueFieldSoftware map was rejected; retrying the legacy string format"
+            );
+            let legacy = bluefield_software_resource(
+                namespace,
+                params,
+                PldmFwBundleWireFormat::LegacyString,
+            )?;
+            match create_or_reuse_bluefield_software(repo, &legacy).await {
+                Err(legacy_error) if is_invalid_kubernetes_resource(&legacy_error) => {
+                    Err(current_error)
+                }
+                result => result,
+            }
+        }
+        result => result,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PldmFwBundleWireFormat {
+    Map,
+    LegacyString,
+}
+
+fn bluefield_software_resource(
+    namespace: &str,
+    params: &BlueFieldSoftwareParams,
+    format: PldmFwBundleWireFormat,
+) -> Result<BlueFieldSoftware, DpfError> {
     let mut hasher = Sha256::new();
     hasher.update(params.os_iso.as_bytes());
-    if let Some(pldm_fw_bundle) = params.pldm_fw_bundle.as_ref() {
-        for (key, pldm) in pldm_fw_bundle.iter() {
-            hasher.update(b"\0");
-            hasher.update(key.as_bytes());
-            hasher.update(b"\0");
-            hasher.update(pldm.as_bytes());
+    let pldm_fw_bundle = match (params.pldm_fw_bundle.as_ref(), format) {
+        (None, _) => None,
+        (Some(bundle), PldmFwBundleWireFormat::Map) => {
+            for (psid, url) in bundle {
+                hasher.update(b"\0");
+                hasher.update(psid.as_bytes());
+                hasher.update(b"\0");
+                hasher.update(url.as_bytes());
+            }
+            Some(serde_json::to_value(bundle)?)
         }
-    }
+        (Some(bundle), PldmFwBundleWireFormat::LegacyString) => {
+            let url = bundle.values().next().ok_or_else(|| {
+                DpfError::ConfigError(
+                    "the legacy DPF API requires one PLDM firmware bundle".to_string(),
+                )
+            })?;
+            hasher.update(b"\0");
+            hasher.update(url.as_bytes());
+            Some(json!(url))
+        }
+    };
     let name = format!(
         "{}-{}",
         BLUEFIELD_SOFTWARE_NAME_PREFIX,
         hex::encode(hasher.finalize())
     );
 
-    let bfs = BlueFieldSoftware {
+    let spec = serde_json::from_value(json!({
+        "osIso": params.os_iso,
+        "pldmFwBundle": pldm_fw_bundle,
+    }))?;
+    Ok(BlueFieldSoftware {
         metadata: ObjectMeta {
-            name: Some(name.clone()),
+            name: Some(name),
             namespace: Some(namespace.to_string()),
             ..Default::default()
         },
-        spec: BlueFieldSoftwareSpec {
-            os_iso: params.os_iso.clone(),
-            pldm_fw_bundle: params.pldm_fw_bundle.clone(),
-            nic_fw: None,
-            platform_pldm_fw_bundle: None,
-        },
+        spec,
         status: None,
-    };
-    match BlueFieldSoftwareRepository::create(repo, &bfs).await {
+    })
+}
+
+async fn create_or_reuse_bluefield_software<R: BlueFieldSoftwareRepository>(
+    repo: &R,
+    bfs: &BlueFieldSoftware,
+) -> Result<String, DpfError> {
+    let name = bfs.metadata.name.clone().ok_or_else(|| {
+        DpfError::InvalidState("BlueFieldSoftware has no metadata.name".to_string())
+    })?;
+    let namespace = bfs.metadata.namespace.as_deref().unwrap_or("default");
+    match BlueFieldSoftwareRepository::create(repo, bfs).await {
         Ok(_) => Ok(name),
         Err(DpfError::KubeError(kube::Error::Api(ref err)))
             if err.is_already_exists() || err.is_conflict() =>
@@ -696,6 +757,10 @@ async fn create_bluefield_software<R: BlueFieldSoftwareRepository>(
         }
         Err(e) => Err(e),
     }
+}
+
+fn is_invalid_kubernetes_resource(error: &DpfError) -> bool {
+    matches!(error, DpfError::KubeError(kube::Error::Api(status)) if status.is_invalid())
 }
 
 /// Creates a DPUFlavor with a hash-derived name (`{default_flavor_name}-{spec_hash}`).
@@ -3928,6 +3993,116 @@ mod tests {
         DetachedHelmChart, DpfInterceptBridge, DpfInterceptBridging, DpfInterfaceIdentity,
         DpfProxyDetails, DpuDeviceInfo, DpuNodeInfo,
     };
+
+    #[derive(Clone, Default)]
+    struct LegacyBlueFieldSoftwareRepository {
+        create_attempts: Arc<RwLock<Vec<BlueFieldSoftware>>>,
+    }
+
+    #[async_trait]
+    impl BlueFieldSoftwareRepository for LegacyBlueFieldSoftwareRepository {
+        async fn get(
+            &self,
+            _name: &str,
+            _namespace: &str,
+        ) -> Result<Option<BlueFieldSoftware>, DpfError> {
+            Ok(None)
+        }
+
+        async fn list(&self, _namespace: &str) -> Result<Vec<BlueFieldSoftware>, DpfError> {
+            Ok(Vec::new())
+        }
+
+        async fn create(&self, bfs: &BlueFieldSoftware) -> Result<BlueFieldSoftware, DpfError> {
+            self.create_attempts.write().unwrap().push(bfs.clone());
+            if bfs
+                .spec
+                .pldm_fw_bundle
+                .as_ref()
+                .is_some_and(serde_json::Value::is_object)
+            {
+                return Err(DpfError::KubeError(kube::Error::Api(
+                    kube::core::Status::failure(
+                        "spec.pldmFwBundle must be of type string",
+                        "Invalid",
+                    )
+                    .with_code(422)
+                    .boxed(),
+                )));
+            }
+            Ok(bfs.clone())
+        }
+
+        async fn delete(&self, _name: &str, _namespace: &str) -> Result<(), DpfError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn bluefield_software_falls_back_to_the_legacy_pldm_wire_format() {
+        let repo = LegacyBlueFieldSoftwareRepository::default();
+        let params = BlueFieldSoftwareParams {
+            os_iso: "http://example.com/os.iso".to_string(),
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "pldmid001".to_string(),
+                "http://example.com/astra.pldm".to_string(),
+            )])),
+        };
+
+        let name = create_bluefield_software(&repo, "test", &params)
+            .await
+            .expect("the legacy string format should be accepted");
+
+        assert_eq!(
+            name,
+            "bf-software-aaa364c320bfb2c8e634a6dc5d0a5cd06a84a9853d6e929dec68cb5c974ac7d1"
+        );
+        let attempts = repo.create_attempts.read().unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert!(
+            attempts[0]
+                .spec
+                .pldm_fw_bundle
+                .as_ref()
+                .is_some_and(serde_json::Value::is_object)
+        );
+        assert_eq!(
+            attempts[1].spec.pldm_fw_bundle,
+            Some(json!("http://example.com/astra.pldm"))
+        );
+    }
+
+    #[test]
+    fn bluefield_software_deserializes_legacy_pldm_fields() {
+        let resource: BlueFieldSoftware = serde_json::from_value(json!({
+            "apiVersion": "provisioning.dpu.nvidia.com/v1alpha1",
+            "kind": "BlueFieldSoftware",
+            "metadata": { "name": "legacy" },
+            "spec": {
+                "osIso": "http://example.com/os.iso",
+                "pldmFwBundle": "http://example.com/astra.pldm"
+            },
+            "status": {
+                "phase": "Ready",
+                "downloadedComponents": {
+                    "pldmFwBundle": "http://example.com/astra.pldm"
+                }
+            }
+        }))
+        .expect("legacy BlueFieldSoftware should deserialize");
+
+        assert_eq!(
+            resource.spec.pldm_fw_bundle,
+            Some(json!("http://example.com/astra.pldm"))
+        );
+        assert_eq!(
+            resource
+                .status
+                .and_then(|status| status.downloaded_components)
+                .and_then(|components| components.pldm_fw_bundle),
+            Some(json!("http://example.com/astra.pldm"))
+        );
+    }
 
     /// Verifies scoped ServiceInterface names distinguish every deployment class.
     #[test]

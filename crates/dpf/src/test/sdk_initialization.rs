@@ -831,8 +831,10 @@ async fn test_create_initialization_objects_bluefield_software() {
     assert_eq!(bfsw.len(), 1);
     assert_eq!(bfsw[0].spec.os_iso, "http://example.com/os.iso");
     assert_eq!(
-        bfsw[0].spec.pldm_fw_bundle.clone().unwrap().values().last(),
-        Some(&"http://example.com/astra.pldm".to_string())
+        bfsw[0].spec.pldm_fw_bundle,
+        Some(serde_json::json!({
+            "pldmid001": "http://example.com/astra.pldm"
+        }))
     );
 
     // The DPUDeployment references the BlueFieldSoftware CR, not a BFB.
