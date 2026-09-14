@@ -410,16 +410,25 @@ pub unsafe extern "C" fn hook_set_config_provisioning_server_ipv6(
     }
 }
 
-/// Set whether DHCPv6 rapid-commit rendering is enabled.
-///
-/// Rapid commit stays disabled by default for this milestone; the setter is
-/// present so the Kea parameter is validated and ready for the later gate.
+/// Set whether DHCPv6 rapid commit is enabled.
 #[unsafe(no_mangle)]
 pub extern "C" fn hook_set_config_rapid_commit_v6(enabled: bool) {
-    if enabled {
-        log::warn!("DHCPv6 rapid-commit is configured but remains disabled for this milestone");
+    match CONFIG.write() {
+        Ok(mut config) => config.rapid_commit_v6 = enabled,
+        Err(error) => log::error!("failed to set DHCPv6 rapid-commit configuration: {error}"),
     }
-    CONFIG.write().unwrap().rapid_commit_v6 = false;
+}
+
+/// Return whether DHCPv6 rapid commit is enabled.
+#[unsafe(no_mangle)]
+pub extern "C" fn hook_get_config_rapid_commit_v6() -> bool {
+    CONFIG
+        .read()
+        .map(|config| config.rapid_commit_v6)
+        .unwrap_or_else(|error| {
+            log::error!("failed to read DHCPv6 rapid-commit configuration: {error}");
+            false
+        })
 }
 
 /// Take the config parameter from Kea and configure it as our metrics endpoint.
