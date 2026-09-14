@@ -90,12 +90,12 @@ use carbide_secrets::credentials::{
 };
 use carbide_uuid::machine::MachineIdSubtypeTrait;
 use chrono::{DateTime, Utc};
-use db::DatabaseError;
 use db::credential_rotation::{
-    CredentialRotationType, DeviceRotationStatus, backoff_until, device_rotation_status,
-    increment_rotate_attempt, mark_device_rotating_to_version, promote_rotating_to_current,
-    rotation_status,
+    CredentialRotationType, DeviceRotationStatus, NoStagedCredentialRotation, backoff_until,
+    device_rotation_status, increment_rotate_attempt, mark_device_rotating_to_version,
+    promote_rotating_to_current, rotation_status,
 };
+use db::{ConditionalWrite, DatabaseError};
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
 use model::bmc_info::BmcInfo;
@@ -926,6 +926,10 @@ async fn enter_device_rotation(
 /// [`RotateOutcome::Quarantined`] when an attempt failed (backoff recorded), or
 /// [`RotateOutcome::NoWork`] when there is no rotation row.
 ///
+/// Returns [`RotateOutcome::Converged`] without counting another persisted
+/// rotation result when the credential converges but no staged version
+/// remains to promote.
+///
 /// `credential_manager` both *reads* the per-device and site-wide secrets and
 /// *writes* the per-device secret on success -- the same store
 /// `RotateCredential` staged the target into. (The Redfish pool's
@@ -960,7 +964,18 @@ pub async fn rotate_bmc(
             // Flush cached BMC sessions so the next login re-authenticates with
             // the freshly-written credential rather than a now-stale token.
             db::bmc_redfish_session::delete_by_mac(&mut conn, mac).await?;
-            promote_rotating_to_current(&mut conn, mac, BMC).await?;
+            if let ConditionalWrite::NotApplied(NoStagedCredentialRotation) =
+                promote_rotating_to_current(&mut conn, mac, BMC).await?
+            {
+                // Hardware and the stored secret have converged, but there is
+                // no new bookkeeping result to count.
+                tracing::info!(
+                    %mac,
+                    target_version,
+                    "BMC credential converged without a staged rotation to promote",
+                );
+                return Ok(RotateOutcome::Converged);
+            }
             match convergence {
                 CredentialConvergence::Changed => {
                     emit(BmcCredentialRotationConverged::new(mac, target_version));
@@ -1019,6 +1034,10 @@ pub async fn rotate_bmc(
 /// Converge one BF4 DPU BMC's `service` account password to the staged
 /// site-wide target.
 ///
+/// Returns [`RotateOutcome::Converged`] without counting another persisted
+/// rotation result when the credential converges but no staged version
+/// remains to promote.
+///
 /// `redfish_pool` is the direct pool's credential-operations handle
 /// ([`BmcCredentialOps`]): rotation authenticates to the BMC itself to
 /// change and verify passwords.
@@ -1046,7 +1065,18 @@ pub async fn rotate_dpu_bmc_service(
     {
         Ok(convergence) => {
             let mut conn = db_pool.acquire().await?;
-            promote_rotating_to_current(&mut conn, mac, DPU_BMC_SERVICE).await?;
+            if let ConditionalWrite::NotApplied(NoStagedCredentialRotation) =
+                promote_rotating_to_current(&mut conn, mac, DPU_BMC_SERVICE).await?
+            {
+                // The service credential reached its target; only persisted
+                // promotion results belong in the rotation counter.
+                tracing::info!(
+                    %mac,
+                    target_version,
+                    "DPU BMC service credential converged without a staged rotation to promote",
+                );
+                return Ok(RotateOutcome::Converged);
+            }
             match convergence {
                 CredentialConvergence::Changed => {
                     emit(DpuBmcServiceCredentialRotationConverged::new(
@@ -1414,6 +1444,7 @@ fn redact(message: String, secrets: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration as StdDuration;
 
     use carbide_instrument::emit;
@@ -1421,14 +1452,16 @@ mod tests {
     use carbide_redfish::libredfish::BmcCredentialOps;
     use carbide_redfish::libredfish::test_support::RedfishSim;
     use carbide_secrets::credentials::{
-        BmcCredentialType, CredentialKey, CredentialReader, CredentialWriter, Credentials,
+        BmcCredentialType, CompositeCredentialManager, CredentialKey, CredentialReader,
+        CredentialWriter, Credentials,
     };
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::{Check, check_values};
     use chrono::{Duration, Utc};
     use db::credential_rotation::{
-        DeviceRotationStatus, device_rotation_status, increment_rotate_attempt,
-        mark_device_rotating_to_version, record_device_converged, set_next_target_version,
+        CredentialRotationType, DeviceRotationStatus, device_rotation_status,
+        increment_rotate_attempt, mark_device_rotating_to_version, record_device_converged,
+        set_next_target_version,
     };
     use libredfish::model::service_root::RedfishVendor;
     use mac_address::MacAddress;
@@ -1436,9 +1469,10 @@ mod tests {
 
     use super::{
         BMC, BmcCredentialRotationConverged, BmcCredentialRotationQuarantined,
-        BmcCredentialRotationRecovered, BmcEndpoint, BmcRotationTarget, CredentialConvergence,
-        DPU_BMC_SERVICE, DispatchVendor, RotateOutcome, RotationGate, change_or_recover,
-        needs_rotation, redact, resolve_dispatch_vendor, rotate_bmc, rotate_dpu_bmc_service,
+        BmcCredentialRotationRecovered, BmcEndpoint, BmcRotationTarget, ConditionalWrite,
+        CredentialConvergence, DPU_BMC_SERVICE, DispatchVendor, RotateOutcome, RotationGate,
+        change_or_recover, needs_rotation, promote_rotating_to_current, redact,
+        resolve_dispatch_vendor, rotate_bmc, rotate_dpu_bmc_service,
     };
 
     const BMC_ROTATION_RESULTS_METRIC: &str = "carbide_bmc_credential_rotation_results_total";
@@ -1514,6 +1548,150 @@ mod tests {
             .await
             .unwrap()
             .expect("device row must exist")
+    }
+
+    struct PromotingCredentialReader {
+        credentials: Arc<TestCredentialManager>,
+        pool: PgPool,
+        credential_type: CredentialRotationType,
+    }
+
+    #[async_trait::async_trait]
+    impl CredentialReader for PromotingCredentialReader {
+        async fn get_credentials(
+            &self,
+            key: &CredentialKey,
+        ) -> Result<Option<Credentials>, carbide_secrets::SecretsError> {
+            if matches!(
+                key,
+                CredentialKey::BmcCredentials {
+                    credential_type: BmcCredentialType::BmcRoot { .. }
+                }
+            ) {
+                // The engine has staged its attempt but has not called Redfish.
+                // Complete another worker's bookkeeping before this one resumes.
+                let mut conn = self.pool.acquire().await.unwrap();
+                assert_eq!(
+                    promote_rotating_to_current(&mut conn, test_mac(), self.credential_type,)
+                        .await
+                        .unwrap(),
+                    ConditionalWrite::Applied(()),
+                    "{:?}: competing promotion should apply",
+                    self.credential_type,
+                );
+            }
+            self.credentials.get_credentials(key).await
+        }
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn rotation_does_not_count_promotion_already_completed_by_another_worker(pool: PgPool) {
+        struct Case {
+            scenario: &'static str,
+            credential_type: CredentialRotationType,
+            account: &'static str,
+            password: &'static str,
+            site_key: CredentialKey,
+        }
+        for Case {
+            scenario,
+            credential_type,
+            account,
+            password,
+            site_key,
+        } in [
+            Case {
+                scenario: "BMC root recovery after competing promotion",
+                credential_type: BMC,
+                account: "root",
+                password: "new",
+                site_key: rotate_to_key(1),
+            },
+            Case {
+                scenario: "DPU BMC service reapplication after competing promotion",
+                credential_type: DPU_BMC_SERVICE,
+                account: "service",
+                password: "new-service-pw",
+                site_key: dpu_service_rotate_to_key(1),
+            },
+        ] {
+            if credential_type == BMC {
+                seed_device_behind_target(&pool, 1).await;
+            } else {
+                seed_dpu_service_behind_target(&pool, 1).await;
+            }
+            let credentials = Arc::new(TestCredentialManager::default());
+            credentials
+                .set_credentials(&per_device_key(), &creds("root", "old"))
+                .await
+                .unwrap();
+            credentials
+                .set_credentials(&site_key, &creds(account, password))
+                .await
+                .unwrap();
+            let credential_manager = CompositeCredentialManager::new(
+                PromotingCredentialReader {
+                    credentials: credentials.clone(),
+                    pool: pool.clone(),
+                    credential_type,
+                },
+                credentials.clone(),
+            );
+            // Hardware already reached the target before another worker
+            // records that result. This attempt confirms the same credential:
+            // BMC root recovers, while the service account reapplies it.
+            let redfish = if credential_type == BMC {
+                bmc_on_password(password)
+            } else {
+                dpu_bmc("old", password)
+            };
+            let metrics = MetricsCapture::start();
+            let result = if credential_type == BMC {
+                rotate_bmc(&pool, &credential_manager, &redfish, &target(), false).await
+            } else {
+                rotate_dpu_bmc_service(
+                    &pool,
+                    &credential_manager,
+                    &redfish,
+                    &dpu_service_endpoint(),
+                    false,
+                )
+                .await
+            };
+            assert_eq!(result.unwrap(), RotateOutcome::Converged, "{scenario}");
+            assert_eq!(rotation_result_deltas(&metrics), [0.0; 3], "{scenario}");
+            assert_eq!(dpu_service_result_deltas(&metrics), [0.0; 3], "{scenario}");
+            drop(metrics);
+            assert_eq!(
+                redfish.user_password(account).as_deref(),
+                Some(password),
+                "{scenario}"
+            );
+            assert_eq!(
+                credentials
+                    .get_credentials(&per_device_key())
+                    .await
+                    .unwrap(),
+                Some(creds(
+                    "root",
+                    if credential_type == BMC {
+                        password
+                    } else {
+                        "old"
+                    }
+                )),
+                "{scenario}"
+            );
+            let mut conn = pool.acquire().await.unwrap();
+            let status = device_rotation_status(&mut conn, credential_type, test_mac())
+                .await
+                .unwrap()
+                .expect("the other worker's bookkeeping remains");
+            assert!(status.converged, "{scenario}");
+            assert_eq!(status.current_version, Some(1), "{scenario}");
+            assert_eq!(status.rotating_to_version, None, "{scenario}");
+            assert_eq!(status.rotate_attempts, 0, "{scenario}");
+        }
     }
 
     /// A [`RedfishSim`] modeling a BMC whose `root` account currently holds

@@ -225,10 +225,16 @@ pub async fn mark_device_rotating_to_version(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// `NoStagedCredentialRotation` means the device row is missing or has no
+/// `rotating_to_version` to promote. Both cases share the caller's fallback
+/// policy; this does not describe the hardware's credential state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoStagedCredentialRotation;
+
 /// Completes an in-flight rotation: promotes a staged `rotating_to_version` to
 /// `current_version` for `(device_mac, credential_type)` and clears the in-flight
-/// marker. Returns `true` if a staged rotation was promoted, `false` if there was
-/// nothing to promote (no row, or `rotating_to_version` already NULL).
+/// marker. Returns `Applied(())` if a staged rotation was promoted, or
+/// `NotApplied(NoStagedCredentialRotation)` if there was nothing to promote.
 ///
 /// Phase two of the flow started by [`mark_device_rotating_to_version`]: called
 /// when the hardware confirms the new credential. Because the promoted value is
@@ -237,8 +243,10 @@ pub async fn mark_device_rotating_to_version(
 ///
 /// Idempotent: a second call (e.g. a re-observed lock) finds `rotating_to_version`
 /// already cleared and is a no-op, leaving the promoted `current_version` intact.
-/// A `false` return lets the caller fall back to [`record_device_converged`] for
-/// devices that were converged before this staged flow shipped (no marker).
+/// A `NotApplied` return lets the caller fall back to [`record_device_converged`]
+/// for devices that were converged before this staged flow shipped (no marker).
+/// The query does not compare the staged value against the completed external
+/// operation's target; callers must not interpret promotion as that check.
 ///
 /// Promotion also clears the failure bookkeeping ([`increment_rotate_attempt`]
 /// writes `rotate_attempts`, `rotate_quarantined_until`, and
@@ -250,7 +258,7 @@ pub async fn promote_rotating_to_current(
     conn: &mut PgConnection,
     device_mac: MacAddress,
     credential_type: CredentialRotationType,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), NoStagedCredentialRotation>, DatabaseError> {
     let query = "UPDATE device_credential_rotation \
                  SET current_version = rotating_to_version, \
                      rotating_to_version = NULL, \
@@ -266,7 +274,11 @@ pub async fn promote_rotating_to_current(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(if result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(NoStagedCredentialRotation)
+    })
 }
 
 /// Records that `device_mac` is now *unlocked* for `credential_type`: NULLs
@@ -1152,14 +1164,15 @@ mod tests {
     use sqlx::{PgConnection, PgPool};
 
     use super::{
-        BACKOFF_CAP_SECS, CredentialRotationType, RotationAttemptNotEligible,
-        RotationStartNotEligible, RotationTargetNotCurrent, backoff_until, current_target_version,
-        delete_device_converged, device_rotation_operation_state, device_rotation_status,
-        increment_rotate_attempt, mark_device_rotating_to_version, promote_rotating_to_current,
-        record_device_converged, record_device_rotation_failed,
-        record_device_rotation_retry_started, record_device_rotation_started,
-        record_device_rotation_submitted, record_device_rotation_succeeded, record_device_unlocked,
-        rotation_status, set_initial_target_version, set_next_target_version,
+        BACKOFF_CAP_SECS, CredentialRotationType, NoStagedCredentialRotation,
+        RotationAttemptNotEligible, RotationStartNotEligible, RotationTargetNotCurrent,
+        backoff_until, current_target_version, delete_device_converged,
+        device_rotation_operation_state, device_rotation_status, increment_rotate_attempt,
+        mark_device_rotating_to_version, promote_rotating_to_current, record_device_converged,
+        record_device_rotation_failed, record_device_rotation_retry_started,
+        record_device_rotation_started, record_device_rotation_submitted,
+        record_device_rotation_succeeded, record_device_unlocked, rotation_status,
+        set_initial_target_version, set_next_target_version,
     };
     use crate::ConditionalWrite::{Applied, NotApplied};
 
@@ -1361,7 +1374,11 @@ mod tests {
             promote_rotating_to_current(&mut conn, mac, CredentialRotationType::LockdownIkm)
                 .await
                 .unwrap();
-        assert!(promoted, "a staged rotation must report as promoted");
+        assert_eq!(
+            promoted,
+            Applied(()),
+            "a staged rotation must report as promoted"
+        );
         assert_eq!(
             version_of(&mut conn, "02:00:00:00:00:0a", "lockdown_ikm").await,
             Some(2),
@@ -1379,8 +1396,9 @@ mod tests {
             promote_rotating_to_current(&mut conn, mac, CredentialRotationType::LockdownIkm)
                 .await
                 .unwrap();
-        assert!(
-            !promoted_again,
+        assert_eq!(
+            promoted_again,
+            NotApplied(NoStagedCredentialRotation),
             "a second promotion with nothing staged must report no-op"
         );
         assert_eq!(
@@ -1533,7 +1551,11 @@ mod tests {
         let promoted = promote_rotating_to_current(&mut conn, mac, CredentialRotationType::Bmc)
             .await
             .unwrap();
-        assert!(promoted, "a staged rotation must report as promoted");
+        assert_eq!(
+            promoted,
+            Applied(()),
+            "a staged rotation must report as promoted"
+        );
 
         let status = device_rotation_status(
             &mut conn,

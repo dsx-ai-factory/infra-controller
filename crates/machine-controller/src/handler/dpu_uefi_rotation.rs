@@ -44,6 +44,7 @@ use bmc_vendor::DpuModel;
 use carbide_redfish::libredfish::CredentialOpError;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialType, Credentials};
 use carbide_uuid::machine::DpuMachineId;
+use db::credential_rotation::NoStagedCredentialRotation;
 use eyre::eyre;
 use model::machine::{DpuMachine, ManagedHostState, ManagedHostStateSnapshot};
 use state_controller::state_handler::{
@@ -296,7 +297,7 @@ pub(crate) async fn handle_rotating_dpu_uefi(
             .map_err(|e| {
                 StateHandlerError::GenericError(eyre!("promote dpu uefi rotating_to_version: {e}"))
             })?;
-            if !promoted {
+            if let db::ConditionalWrite::NotApplied(NoStagedCredentialRotation) = promoted {
                 db::credential_rotation::record_device_converged(&mut txn, dpu_bmc_mac, DpuUefi)
                     .await
                     .map_err(|e| {
