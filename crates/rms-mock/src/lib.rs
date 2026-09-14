@@ -30,13 +30,16 @@
 //! fan-out inventory instead of a local one.
 
 mod config;
+mod envelope;
+mod fabric;
 mod inventory;
+mod jobs;
 mod resolve;
 mod router;
 mod service_v1;
 mod service_v2;
 
-pub use config::RmsMockConfig;
+pub use config::{JobPacing, RmsMockConfig, UnknownJobPolicy};
 pub use inventory::{RmsInventory, SimNode, SimNodeKind};
 /// The V1 protobuf module. Aliased because both service impls refer to it
 /// constantly, and because `rack_manager_v2` defines same-named messages that
@@ -46,18 +49,38 @@ pub(crate) use librms::protos::rack_manager as rms;
 pub(crate) use librms::protos::rack_manager_v2 as rms_v2;
 pub use router::router;
 
+/// Lock a mutex, recovering it if a panicking holder poisoned it.
+///
+/// A poisoned map is still a usable map; recover it rather than fail every
+/// later RPC.
+pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A simulated RMS instance.
 ///
 /// One mock serves both `RackManager` and `RackManagerV2`; the two are
 /// separate gRPC services with separate wire paths, so both must be mounted.
 pub struct RmsMock {
     inventory: std::sync::Arc<dyn RmsInventory>,
+    jobs: jobs::JobStore,
+    fabric: fabric::FabricState,
     config: RmsMockConfig,
 }
 
 impl RmsMock {
     pub fn new(inventory: std::sync::Arc<dyn RmsInventory>, config: RmsMockConfig) -> Self {
-        Self { inventory, config }
+        let jobs = jobs::JobStore::new(
+            config.job_id_prefix.clone(),
+            config.job_pacing,
+            config.unknown_job_policy,
+        );
+        Self {
+            inventory,
+            jobs,
+            fabric: fabric::FabricState::new(),
+            config,
+        }
     }
 }
 

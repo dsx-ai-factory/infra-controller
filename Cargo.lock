@@ -2959,10 +2959,13 @@ name = "carbide-rms-mock"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "carbide-test-support",
  "librms",
  "mac_address",
  "serde",
+ "serde_json",
  "tokio",
+ "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tracing",
 ]
