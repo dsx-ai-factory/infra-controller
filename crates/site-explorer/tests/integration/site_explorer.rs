@@ -736,13 +736,14 @@ async fn test_rejected_exploration_error_skips_only_its_remediation(
     // loop sorts by IP, so rejecting the first write must still allow the
     // sibling's update.
     let mut txn = env.pool.begin().await?;
-    assert!(
+    assert_eq!(
         db::explored_endpoints::re_explore_if_version_matches(
             stale_endpoint.address,
             stale_endpoint.report_version,
             &mut txn,
         )
-        .await?
+        .await?,
+        ConditionalWrite::Applied(())
     );
     txn.commit().await?;
 

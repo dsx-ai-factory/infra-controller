@@ -21,6 +21,8 @@ use async_trait::async_trait;
 use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId};
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
+use db::ConditionalWrite::{Applied, NotApplied};
+use db::explored_endpoints::EndpointReportNotCurrent;
 use health_report::{HealthReport, HealthReportApplyMode};
 use model::machine::{MachineLastRebootRequested, MachineLastRebootRequestedMode};
 use sqlx::PgTransaction;
@@ -203,8 +205,13 @@ impl WriteOp for MachineWriteOp {
                     .await?
             }
             ReExploreIfVersionMatches { address, version } => {
-                db::explored_endpoints::re_explore_if_version_matches(address, version, txn)
-                    .await?;
+                // A changed report version or removed endpoint makes this queued
+                // request unnecessary, but must not discard the other queued writes.
+                match db::explored_endpoints::re_explore_if_version_matches(address, version, txn)
+                    .await?
+                {
+                    Applied(()) | NotApplied(EndpointReportNotCurrent) => {}
+                }
             }
             UseCustomIpxeOnNextBoot {
                 machine_id,

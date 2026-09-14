@@ -43,7 +43,9 @@ use carbide_uuid::machine::{
 use carbide_uuid::vpc::VpcId;
 use chrono::{DateTime, Duration, Utc};
 use config_version::{ConfigVersion, Versioned};
+use db::ConditionalWrite::{Applied, NotApplied};
 use db::db_read::PgPoolReader;
+use db::explored_endpoints::EndpointReportNotCurrent;
 use db::machine_desired_boot_interface::BootInterfaceObservationNotApplicable;
 use db::{ConditionalWrite, DatabaseError};
 use eyre::eyre;
@@ -11996,12 +11998,17 @@ impl HostUpgradeState {
             );
 
             let mut txn = ctx.services.db_pool.begin().await?;
-            db::explored_endpoints::re_explore_if_version_matches(
+            // A rejected request does not finish the firmware wait. The next
+            // controller pass reads the endpoint again.
+            match db::explored_endpoints::re_explore_if_version_matches(
                 endpoint.address,
                 endpoint.report_version,
                 &mut txn,
             )
-            .await?;
+            .await?
+            {
+                Applied(()) | NotApplied(EndpointReportNotCurrent) => {}
+            }
             Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
         }
     }
