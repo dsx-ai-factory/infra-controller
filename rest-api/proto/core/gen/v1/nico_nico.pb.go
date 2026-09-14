@@ -104,6 +104,9 @@ const (
 	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_NO_PROFILE SpdmSchedulingOutcome = 6
 	// Classification matched no hardware class, and no `any` profile is stored.
 	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_CLASS_UNRECOGNIZED SpdmSchedulingOutcome = 7
+	// Work rows were written, but an allowlist pattern matched no eligible
+	// attester, so less than the profile asked for is being attested.
+	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED SpdmSchedulingOutcome = 8
 )
 
 // Enum value maps for SpdmSchedulingOutcome.
@@ -117,6 +120,7 @@ var (
 		5: "SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED",
 		6: "SPDM_SCHEDULING_OUTCOME_NO_PROFILE",
 		7: "SPDM_SCHEDULING_OUTCOME_CLASS_UNRECOGNIZED",
+		8: "SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED",
 	}
 	SpdmSchedulingOutcome_value = map[string]int32{
 		"SPDM_SCHEDULING_OUTCOME_UNSPECIFIED":            0,
@@ -127,6 +131,7 @@ var (
 		"SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED":     5,
 		"SPDM_SCHEDULING_OUTCOME_NO_PROFILE":             6,
 		"SPDM_SCHEDULING_OUTCOME_CLASS_UNRECOGNIZED":     7,
+		"SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED":    8,
 	}
 )
 
@@ -72690,7 +72695,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x14SPDM_ATT_IN_PROGRESS\x10\x00\x12\x16\n" +
 	"\x12SPDM_ATT_CANCELLED\x10\x01\x12\x13\n" +
 	"\x0fSPDM_ATT_PASSED\x10\x02\x12\x13\n" +
-	"\x0fSPDM_ATT_FAILED\x10\x03*\x85\x03\n" +
+	"\x0fSPDM_ATT_FAILED\x10\x03*\xb6\x03\n" +
 	"\x15SpdmSchedulingOutcome\x12'\n" +
 	"#SPDM_SCHEDULING_OUTCOME_UNSPECIFIED\x10\x00\x12%\n" +
 	"!SPDM_SCHEDULING_OUTCOME_SCHEDULED\x10\x01\x120\n" +
@@ -72699,7 +72704,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	".SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING\x10\x04\x12.\n" +
 	"*SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED\x10\x05\x12&\n" +
 	"\"SPDM_SCHEDULING_OUTCOME_NO_PROFILE\x10\x06\x12.\n" +
-	"*SPDM_SCHEDULING_OUTCOME_CLASS_UNRECOGNIZED\x10\a*c\n" +
+	"*SPDM_SCHEDULING_OUTCOME_CLASS_UNRECOGNIZED\x10\a\x12/\n" +
+	"+SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED\x10\b*c\n" +
 	"*SpdmListAttestationMachinesRequestSelector\x12\x19\n" +
 	"\x15SPDM_LIST_IN_PROGRESS\x10\x00\x12\x1a\n" +
 	"\x16SPDM_LIST_UNSUCCESSFUL\x10\x01*\xd0\x01\n" +

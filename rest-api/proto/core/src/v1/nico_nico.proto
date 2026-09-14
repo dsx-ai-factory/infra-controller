@@ -1156,6 +1156,9 @@ enum SpdmSchedulingOutcome {
   SPDM_SCHEDULING_OUTCOME_NO_PROFILE = 6;
   // Classification matched no hardware class, and no `any` profile is stored.
   SPDM_SCHEDULING_OUTCOME_CLASS_UNRECOGNIZED = 7;
+  // Work rows were written, but an allowlist pattern matched no eligible
+  // attester, so less than the profile asked for is being attested.
+  SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED = 8;
 }
 
 message SpdmMachineAttestationTriggerResponse {
