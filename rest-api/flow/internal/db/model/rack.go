@@ -12,7 +12,9 @@ import (
 
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
 var defaultRackPagination = dbquery.Pagination{
@@ -342,4 +344,49 @@ func GetRacksByIDsIncludingDeleted(
 	}
 
 	return racks, nil
+}
+
+// GetRackOperationStatuses derives each requested rack's operability phase
+// from its active Compute, NVSwitch, and PowerShelf components. Racks with no
+// supported active components, or with any missing/unrecognized participating
+// component status, fail closed as Unknown.
+func GetRackOperationStatuses(
+	ctx context.Context,
+	idb bun.IDB,
+	rackIDs []uuid.UUID,
+) (map[uuid.UUID]types.Phase, error) {
+	result := make(map[uuid.UUID]types.Phase, len(rackIDs))
+	statusesByRack := make(map[uuid.UUID][]*types.ComponentOperationStatus, len(rackIDs))
+	for _, rackID := range rackIDs {
+		result[rackID] = types.PhaseUnknown
+	}
+	if len(rackIDs) == 0 {
+		return result, nil
+	}
+
+	var components []Component
+	supportedTypes := []string{
+		devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),
+		devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch),
+		devicetypes.ComponentTypeToString(devicetypes.ComponentTypePowerShelf),
+	}
+	err := idb.NewSelect().
+		Model(&components).
+		Column("rack_id", "status").
+		Where("rack_id IN (?)", bun.In(rackIDs)).
+		Where("type IN (?)", bun.In(supportedTypes)).
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range components {
+		component := &components[i]
+		statusesByRack[component.RackID] = append(statusesByRack[component.RackID], component.Status)
+	}
+	for rackID, statuses := range statusesByRack {
+		result[rackID] = types.AggregateComponentOperationStatus(statuses)
+	}
+
+	return result, nil
 }

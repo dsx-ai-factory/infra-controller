@@ -2651,20 +2651,6 @@ impl ApiClient {
             .await?)
     }
 
-    pub(crate) async fn update_machine_nvlink_info(
-        &self,
-        machine_id: MachineId,
-        nvlink_info: rpc::MachineNvLinkInfo,
-    ) -> CarbideCliResult<()> {
-        Ok(self
-            .0
-            .update_machine_nv_link_info(rpc::UpdateMachineNvLinkInfoRequest {
-                machine_id: Some(machine_id),
-                nvlink_info: Some(nvlink_info),
-            })
-            .await?)
-    }
-
     pub(crate) async fn get_all_instance_types(
         &self,
         page_size: usize,

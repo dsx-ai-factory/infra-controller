@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::extract::{Json, Path, State};
+use axum::extract::{Json, Path, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -31,8 +31,8 @@ use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch, json_patch};
 use crate::redfish::Builder;
 use crate::{
-    BootOptionKind, Callbacks, LogServices, MachineRouterOptions, MockPowerState,
-    POWER_CYCLE_DELAY, SetSystemPowerError, http, redfish,
+    BootOptionKind, Callbacks, MachineRouterOptions, MockPowerState, POWER_CYCLE_DELAY,
+    SetSystemPowerError, http, redfish,
 };
 
 pub(super) fn collection() -> redfish::Collection<'static> {
@@ -137,6 +137,10 @@ pub(crate) fn add_routes(
             get(get_log_service),
         )
         .route(
+            &redfish::log_service::system_clear_log_target(SYSTEM_ID, LOG_SERVICE_ID),
+            post(post_clear_log),
+        )
+        .route(
             &redfish::log_service::system_entries_collection(SYSTEM_ID, LOG_SERVICE_ID).odata_id,
             get(get_log_service_entries),
         )
@@ -212,7 +216,7 @@ pub(crate) struct SingleSystemConfig {
     pub(crate) boot_options: Option<Vec<redfish::boot_option::BootOption>>,
     pub(crate) bios_mode: BiosMode,
     pub(crate) base_bios: Option<serde_json::Value>,
-    pub(crate) log_services: Option<Arc<dyn LogServices>>,
+    pub(crate) log_services: Option<redfish::log_service::LogServices>,
     pub(crate) storage: Option<Vec<redfish::storage::Storage>>,
     pub(crate) processors: Option<Vec<redfish::processor::Processor>>,
     pub(crate) memory: Option<Vec<redfish::memory::Memory>>,
@@ -282,6 +286,32 @@ impl SystemState {
         self.systems
             .iter()
             .find(|system| system.config.id.as_ref() == system_id)
+    }
+
+    /// `@odata.id` of the controllable host system: the one wired to power
+    /// callbacks, else the first system.
+    pub(crate) fn primary_system_odata_id(&self) -> Option<String> {
+        self.systems
+            .iter()
+            .find(|system| system.config.callbacks.is_some())
+            .or(self.systems.first())
+            .map(|system| resource(&system.config.id).odata_id.into_owned())
+    }
+
+    /// Append a lifecycle entry to the first system event log. Returns the new
+    /// LogEntry's `@odata.id`, or `None` when no system has a log service.
+    pub(crate) fn record_log(
+        &self,
+        draft: redfish::log_service::LogEntryDraft,
+        created: &str,
+    ) -> Option<String> {
+        self.systems.iter().find_map(|system| {
+            let log = system.config.log_services.as_ref()?.primary()?;
+            let id = log.append(draft.clone(), created);
+            let collection =
+                redfish::log_service::system_entries_collection(&system.config.id, log.id());
+            Some(format!("{}/{id}", collection.odata_id))
+        })
     }
 
     fn from_configs(
@@ -633,7 +663,7 @@ async fn get_system(State(state): State<BmcState>, Path(system_id): Path<String>
         .as_ref()
         .map(|callbacks| callbacks.get_power_state())
     {
-        b = b.power_state(state)
+        b = b.power_state(state).reset_action(&system_id)
     }
 
     if config.boot_options.is_some() {
@@ -887,7 +917,13 @@ async fn post_reset_system(
     // while issuing a redfish call, and MachineStateMachine is blocked waiting for the row lock
     // to be released.
     match callbacks.set_power_state(reset_type) {
-        Ok(_) => json!({}).into_ok_response(),
+        Ok(_) => {
+            state.record_event(redfish::log_service::LogEntryDraft::reset_requested(
+                &resource(&system_id).odata_id,
+                reset_type,
+            ));
+            json!({}).into_ok_response()
+        }
         Err(SetSystemPowerError::BadRequest(_)) => StatusCode::BAD_REQUEST.into_response(),
         Err(SetSystemPowerError::CommandSendError(_)) => {
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -1030,12 +1066,12 @@ async fn get_log_services_collection(
         .map(|log_services| {
             let members = log_services
                 .services()
-                .into_iter()
+                .iter()
                 .map(|service| {
                     redfish::log_service::system_resource(&system_id, service.id()).entity_ref()
                 })
                 .collect::<Vec<_>>();
-            redfish::boot_option::collection(&system_id)
+            redfish::log_service::system_collection(&system_id)
                 .with_members(&members)
                 .into_ok_response()
         })
@@ -1051,7 +1087,7 @@ async fn get_log_service(
         .find(&system_id)
         .and_then(|system_state| system_state.config.log_services.as_ref())
         .and_then(|log_services| log_services.find(&log_service_id))
-        .map(|_log_service| {
+        .map(|log_service| {
             redfish::log_service::builder(&redfish::log_service::system_resource(
                 &system_id,
                 &log_service_id,
@@ -1060,13 +1096,17 @@ async fn get_log_service(
                 &system_id,
                 &log_service_id,
             ))
+            .capacity(
+                log_service.capacity(),
+                &redfish::log_service::system_clear_log_target(&system_id, &log_service_id),
+            )
             .build()
             .into_ok_response()
         })
         .unwrap_or_else(http::not_found)
 }
 
-async fn get_log_service_entries(
+async fn post_clear_log(
     State(state): State<BmcState>,
     Path((system_id, log_service_id)): Path<(String, String)>,
 ) -> Response {
@@ -1076,13 +1116,65 @@ async fn get_log_service_entries(
         .and_then(|system_state| system_state.config.log_services.as_ref())
         .and_then(|log_services| log_services.find(&log_service_id))
         .map(|log_service| {
+            log_service.clear();
+            http::ok_no_content()
+        })
+        .unwrap_or_else(http::not_found)
+}
+
+/// `$skip` and `$top` of an entries collection request. Other query options
+/// are ignored, as the Redfish specification allows for non-`$` parameters
+/// and as this mock does for the `$` ones it does not implement.
+fn entry_paging(query: Option<&str>) -> Result<(usize, Option<usize>), String> {
+    let mut skip = 0;
+    let mut top = None;
+    for (key, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        let parsed = match key.as_ref() {
+            "$skip" | "$top" => value
+                .parse::<usize>()
+                .map_err(|_| format!("{key} must be a non-negative integer"))?,
+            _ => continue,
+        };
+        if key == "$skip" {
+            skip = parsed;
+        } else if parsed == 0 {
+            // A zero-member page makes no progress, so its continuation would point at itself.
+            return Err("$top must be a positive integer".to_owned());
+        } else {
+            top = Some(parsed);
+        }
+    }
+    Ok((skip, top))
+}
+
+async fn get_log_service_entries(
+    State(state): State<BmcState>,
+    Path((system_id, log_service_id)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let (skip, top) = match entry_paging(query.as_deref()) {
+        Ok(paging) => paging,
+        Err(message) => return http::bad_request(&message),
+    };
+    state
+        .system_state
+        .find(&system_id)
+        .and_then(|system_state| system_state.config.log_services.as_ref())
+        .and_then(|log_services| log_services.find(&log_service_id))
+        .map(|log_service| {
             let collection =
                 redfish::log_service::system_entries_collection(&system_id, &log_service_id);
-            let members = log_service.entries(&collection);
-            collection
-                .with_members(&members)
-                .patch(json!({"Description": "Log services collection"})) // Required by libredfish
-                .into_ok_response()
+            let page = log_service.page(&collection, skip, top);
+            let mut document = collection.with_members(&page.members).patch(json!({
+                "Members@odata.count": page.total,
+                "Description": "Log services collection", // Required by libredfish
+            }));
+            if let Some(next_skip) = page.next_skip {
+                document = document.patch(json!({
+                    "Members@odata.nextLink": format!("{}?$skip={next_skip}", collection.odata_id),
+                }));
+            }
+            document.into_ok_response()
         })
         .unwrap_or_else(http::not_found)
 }
@@ -1099,12 +1191,7 @@ async fn get_log_service_entry(
         .and_then(|log_service| {
             let collection =
                 redfish::log_service::system_entries_collection(&system_id, &log_service_id);
-            log_service.entries(&collection).into_iter().find(|entry| {
-                entry
-                    .get("Id")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|id| id == entry_id)
-            })
+            log_service.entry(&collection, &entry_id)
         })
         .map(|entry| entry.into_ok_response())
         .unwrap_or_else(http::not_found)
@@ -1125,7 +1212,7 @@ async fn get_storage_collection(
                     redfish::storage::system_resource(&system_id, &storage.id).entity_ref()
                 })
                 .collect::<Vec<_>>();
-            redfish::boot_option::collection(&system_id)
+            redfish::storage::system_collection(&system_id)
                 .with_members(&members)
                 .into_ok_response()
         })
@@ -1380,6 +1467,18 @@ impl SystemBuilder {
         self.apply_patch(log_services.nav_property("LogServices"))
     }
 
+    /// `#ComputerSystem.Reset`, so a client discovers the action instead of
+    /// assuming its path; the values are what `post_reset_system` accepts.
+    fn reset_action(self, system_id: &str) -> Self {
+        self.apply_patch(json!({"Actions": {"#ComputerSystem.Reset": {
+            "target": reset_target(system_id),
+            "ResetType@Redfish.AllowableValues": [
+                "On", "ForceOn", "GracefulShutdown", "ForceOff",
+                "GracefulRestart", "ForceRestart", "PowerCycle",
+            ],
+        }}}))
+    }
+
     fn storage(self, storage: &redfish::Collection<'_>) -> Self {
         self.apply_patch(storage.nav_property("Storage"))
     }
@@ -1432,6 +1531,189 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn log_services_discovery_names_the_log_collection() {
+        let (router, _) = machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            Arc::new(NoopCallbacks),
+            String::new(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let path = "/redfish/v1/Systems/System.Embedded.1/LogServices";
+        let collection = get_json(&router, path).await;
+        assert_eq!(collection["@odata.id"], path);
+        assert_eq!(
+            collection["@odata.type"],
+            "#LogServiceCollection.LogServiceCollection"
+        );
+        assert_eq!(collection["Members@odata.count"], 1);
+        let member = collection["Members"][0]["@odata.id"].as_str().unwrap();
+        assert_eq!(member, format!("{path}/EventLog"));
+        let service = get_json(&router, member).await;
+        assert_eq!(service["Id"], "EventLog");
+    }
+
+    /// One POST to the in-process mock router with an empty JSON body.
+    async fn post_empty(router: &Router, path: &str) -> StatusCode {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn dell_router() -> (Router, BmcState) {
+        machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            Arc::new(NoopCallbacks),
+            String::new(),
+            false,
+            MachineRouterOptions::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_system_advertises_its_reset_action() {
+        let (router, _) = dell_router();
+        let system_id = "System.Embedded.1";
+        let system = get_json(&router, &resource(system_id).odata_id).await;
+        let action = &system["Actions"]["#ComputerSystem.Reset"];
+        assert_eq!(action["target"], reset_target(system_id));
+        assert!(
+            action["ResetType@Redfish.AllowableValues"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("ForceOff"))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_log_service_states_its_bound_and_clears_on_request() {
+        let (router, state) = dell_router();
+        let service_path = "/redfish/v1/Systems/System.Embedded.1/LogServices/EventLog";
+        let service = get_json(&router, service_path).await;
+        assert_eq!(service["OverWritePolicy"], "WrapsWhenFull");
+        assert_eq!(
+            service["MaxNumberOfRecords"],
+            redfish::log_service::DEFAULT_MAX_RECORDS
+        );
+        let target = service["Actions"]["#LogService.ClearLog"]["target"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            target,
+            format!("{service_path}/Actions/LogService.ClearLog")
+        );
+
+        let entries_path = format!("{service_path}/Entries");
+        let system = "/redfish/v1/Systems/System.Embedded.1";
+        state.record_log(redfish::log_service::LogEntryDraft::powered_on(system));
+        assert_eq!(
+            get_json(&router, &entries_path).await["Members@odata.count"],
+            2
+        );
+
+        assert_eq!(post_empty(&router, &target).await, StatusCode::NO_CONTENT);
+        assert_eq!(
+            get_json(&router, &entries_path).await["Members@odata.count"],
+            0
+        );
+        let (_, reused) = state.record_log(redfish::log_service::LogEntryDraft::powered_on(system));
+        assert_eq!(
+            reused.as_deref(),
+            Some(format!("{entries_path}/0").as_str()),
+            "a cleared log numbers from zero again"
+        );
+        assert_eq!(
+            post_empty(
+                &router,
+                "/redfish/v1/Systems/System.Embedded.1/LogServices/Missing/Actions/LogService.ClearLog"
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn the_entries_collection_pages_with_a_next_link() {
+        let (router, state) = dell_router();
+        let entries_path = "/redfish/v1/Systems/System.Embedded.1/LogServices/EventLog/Entries";
+        let system = "/redfish/v1/Systems/System.Embedded.1";
+        // One seed entry plus 59 lifecycle entries: 60 in a log paged by 50.
+        for _ in 0..59 {
+            state.record_log(redfish::log_service::LogEntryDraft::powered_on(system));
+        }
+        let first = get_json(&router, entries_path).await;
+        assert_eq!(first["Members"].as_array().unwrap().len(), 50);
+        assert_eq!(first["Members@odata.count"], 60);
+        assert_eq!(
+            first["Members@odata.nextLink"],
+            format!("{entries_path}?$skip=50")
+        );
+        assert_eq!(first["Members"][0]["Id"], "0");
+
+        let last = get_json(&router, first["Members@odata.nextLink"].as_str().unwrap()).await;
+        assert_eq!(last["Members"].as_array().unwrap().len(), 10);
+        assert_eq!(last["Members"][9]["Id"], "59");
+        assert!(last.get("Members@odata.nextLink").is_none());
+
+        let capped = get_json(&router, &format!("{entries_path}?$top=5&$skip=2")).await;
+        assert_eq!(capped["Members"].as_array().unwrap().len(), 5);
+        assert_eq!(capped["Members"][0]["Id"], "2");
+        assert_eq!(
+            capped["Members@odata.nextLink"],
+            format!("{entries_path}?$skip=7")
+        );
+
+        for query in ["$skip=many", "$top=0"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{entries_path}?{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_discovery_names_the_storage_collection() {
+        let (router, _) = machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            Arc::new(NoopCallbacks),
+            String::new(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let path = "/redfish/v1/Systems/System.Embedded.1/Storage";
+        let collection = get_json(&router, path).await;
+        assert_eq!(collection["@odata.id"], path);
+        assert_eq!(
+            collection["@odata.type"],
+            "#StorageCollection.StorageCollection"
+        );
+        let members = collection["Members"].as_array().unwrap();
+        assert!(
+            members.is_empty(),
+            "the fixture advertises an empty Storage collection"
+        );
+        assert_eq!(collection["Members@odata.count"], 0);
     }
 
     /// HPE OEM ordering round-trips without corrupting standard BootOption IDs.

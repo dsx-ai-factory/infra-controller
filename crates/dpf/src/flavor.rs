@@ -608,8 +608,8 @@ fn flavor_bf4_with_topology(
             // rawConfigScript sets the value during provisioning. Retain this ordered oneshot so
             // DPF versions with systemdServices support also enforce it after network readiness.
             systemd_services: Some(vec![ovn_encap_systemd_service()]),
-            host_os_init: None,
-            scalable_functions: None,
+            dma: None,
+            service_readiness: None,
         },
     })
 }
@@ -650,8 +650,8 @@ pub fn flavor_bf4_astra(
         }),
         system_reserved_resources: None,
         systemd_services: Some(vec![]),
-        host_os_init: None,
-        scalable_functions: None,
+        dma: None,
+        service_readiness: None,
     };
 
     let flavor = DPUFlavor {
@@ -880,8 +880,8 @@ fn default_flavor_with_topology(
             // rawConfigScript sets the value during provisioning. Retain this ordered oneshot so
             // DPF versions with systemdServices support also enforce it after network readiness.
             systemd_services: Some(vec![ovn_encap_systemd_service()]),
-            host_os_init: None,
-            scalable_functions: None,
+            dma: None,
+            service_readiness: None,
         },
     })
 }
@@ -1195,6 +1195,7 @@ fn get_bf4_nvconfig(num_of_vfs: u32, pf_total_sf: u32) -> DpuFlavorNvconfig {
         // DPF does not allow anyother wild card. It takes only '*'
         device: Some(DpuFlavorNvconfigDevice::KopiumVariant0), //"*"
         parameters: Some(parameters),
+        force: None,
     }
 }
 
@@ -1627,6 +1628,7 @@ fn get_nvconfig(
         // DPF does not allow anyother wild card. It takes only '*'
         device: Some(DpuFlavorNvconfigDevice::KopiumVariant0), //"*"
         parameters: Some(parameters),
+        force: None,
     }
 }
 
@@ -1658,6 +1660,7 @@ fn get_bf4_astra_nvconfig(pf_total_sf: u32) -> DpuFlavorNvconfig {
         // DPF does not allow anyother wild card. It takes only '*'
         device: Some(DpuFlavorNvconfigDevice::KopiumVariant0), //"*"
         parameters: Some(parameters),
+        force: None,
     }
 }
 

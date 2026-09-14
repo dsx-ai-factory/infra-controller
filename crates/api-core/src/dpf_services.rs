@@ -70,7 +70,8 @@ pub(crate) const DHCP_SERVER_SERVICE_IMAGE_NAME: &str = "forge-dhcp-server";
 /// DTS service definitions
 /// (DTS_SERVICE_NAME lives in carbide_dpf::types so the DPF SDK can wire its dependencies.)
 pub(crate) const DTS_SERVICE_HELM_NAME: &str = "doca-telemetry";
-pub(crate) const DTS_SERVICE_HELM_VERSION: &str = "1.25.5";
+pub(crate) const DTS_SERVICE_HELM_VERSION: &str = "1.25.32";
+pub(crate) const DTS_SERVICE_IMAGE_TAG: &str = "1.25.32-vr0.8-doca3.3.1";
 
 // DPU Agent Service Definitions
 pub(crate) const DPU_AGENT_SERVICE_HELM_NAME: &str = "nico-dpu-agent";
@@ -208,7 +209,7 @@ pub(crate) fn default_dts_service() -> DpfServiceConfig {
         helm_chart: DTS_SERVICE_HELM_NAME.to_string(),
         helm_version: DTS_SERVICE_HELM_VERSION.to_string(),
         docker_repo_url: String::new(),
-        docker_image_tag: String::new(),
+        docker_image_tag: DTS_SERVICE_IMAGE_TAG.to_string(),
         docker_image_pull_secret: None,
         extra_helm_values: None,
     }
@@ -500,8 +501,16 @@ pub(crate) fn doca_hbn_service(
 /// DTS (DOCA Telemetry Service) service definition.
 pub(crate) fn dts_service(cfg: &DpfServiceConfig) -> ServiceDefinition {
     let mut helm_values = serde_json::json!({
+        // DTS uses the chart's default image repository. The image tag
+        // is set and can be updated via the carbide-api-site-config.toml
+        "image": {
+            "tag": cfg.docker_image_tag,
+        },
         "exposedPorts": { "ports": { "httpserverport": true } }
     });
+    if !cfg.docker_repo_url.is_empty() {
+        helm_values["image"]["repository"] = serde_json::Value::String(cfg.docker_repo_url.clone());
+    }
     apply_helm_values(&mut helm_values, cfg);
     ServiceDefinition {
         helm_values: Some(helm_values),
@@ -1147,6 +1156,20 @@ mod tests {
         assert_eq!(
             dts_service(&dts_cfg).helm_values.unwrap()["imagePullSecrets"],
             expected
+        );
+    }
+
+    #[test]
+    fn dts_service_uses_configured_image_version() {
+        let mut config = default_dts_service();
+        config.docker_image_tag = "configured-dts-tag".to_string();
+        config.docker_repo_url = "registry.example.test/doca/doca_telemetry".to_string();
+
+        let helm_values = dts_service(&config).helm_values.unwrap();
+        assert_eq!(helm_values["image"]["tag"], "configured-dts-tag");
+        assert_eq!(
+            helm_values["image"]["repository"],
+            "registry.example.test/doca/doca_telemetry"
         );
     }
 

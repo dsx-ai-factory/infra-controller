@@ -23,6 +23,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
 // --- Minimal mock for inventorymanager.Manager ---
@@ -202,8 +203,9 @@ func TestGetRackInfoByIDPrefersExternalID(t *testing.T) {
 	mgr := newMockManager()
 	internalID := uuid.New()
 	mgr.racks[internalID] = &rack.Rack{
-		Info:       deviceinfo.DeviceInfo{ID: internalID, Name: "rack-1"},
-		ExternalID: "core-rack-01",
+		Info:            deviceinfo.DeviceInfo{ID: internalID, Name: "rack-1"},
+		ExternalID:      "core-rack-01",
+		OperationStatus: types.PhaseError,
 	}
 
 	response, err := (&FlowServerImpl{inventoryManager: mgr}).GetRackInfoByID(
@@ -214,6 +216,7 @@ func TestGetRackInfoByIDPrefersExternalID(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, response.GetRack())
 	assert.Equal(t, "core-rack-01", response.GetRack().GetExternalId())
+	assert.Equal(t, pb.Phase_PHASE_ERROR, response.GetRack().GetOperationStatus())
 }
 
 func TestGetRackInfoByIDDoesNotResolveFlowUUID(t *testing.T) {

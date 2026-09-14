@@ -408,14 +408,6 @@ pub extern "C" fn machine_get_client_fqdn_ipv6(ctx: *mut Machine) -> DhcpByteBuf
     }
 }
 
-/// Return whether DHCPv6 rapid commit option rendering is enabled.
-#[unsafe(no_mangle)]
-pub extern "C" fn machine_get_rapid_commit_v6(ctx: *mut Machine) -> bool {
-    assert!(!ctx.is_null());
-
-    CONFIG.read().unwrap().rapid_commit_v6
-}
-
 /// Write the configured DHCPv6 provisioning-server address into a caller-provided 16-byte buffer.
 ///
 /// Returns false when the hook parameter is unset.

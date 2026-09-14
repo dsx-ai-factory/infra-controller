@@ -31,6 +31,7 @@ use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
     NetworkSegmentControllerState, NetworkSegmentType, NewNetworkSegment,
 };
+use model::resource_pool::OwnerType;
 use model::site_prefix::{
     NewTenantManagedSitePrefix, RetireTenantManagedSitePrefix, SitePrefixAuthority,
     SitePrefixLifecycleState, SitePrefixRoutingScope,
@@ -528,6 +529,8 @@ async fn eligible_exact_overlap_reaches_legacy_database_exclusion(
     create_overlap_tenant(&env, tenant_b).await?;
     let vpc_a = create_fnn_vpc_for_tenant(&env, tenant_a, "overlap VPC A", Some("OVERLAP")).await;
     let vpc_b = create_fnn_vpc_for_tenant(&env, tenant_b, "overlap VPC B", Some("OVERLAP")).await;
+    let same_tenant_vpc =
+        create_fnn_vpc_for_tenant(&env, tenant_a, "same tenant VPC", Some("OVERLAP")).await;
     let root_a = seed_tenant_managed_site_prefix(
         &env,
         tenant_a,
@@ -551,24 +554,329 @@ async fn eligible_exact_overlap_reaches_legacy_database_exclusion(
             "10.100.1.0/24",
         )))
         .await?;
-    let error = env
-        .api
+    for (scenario, vpc_id, site_prefix_id) in [
+        ("different tenants", vpc_b, root_b),
+        ("same tenant and SitePrefix", same_tenant_vpc, root_a),
+    ] {
+        let prefix_id = VpcPrefixId::new();
+        let error = env
+            .api
+            .create_vpc_prefix(Request::new(site_prefix_child_request(
+                prefix_id,
+                vpc_id,
+                Some(site_prefix_id),
+                "10.100.1.0/24",
+            )))
+            .await
+            .expect_err("the legacy database exclusion should still block exact reuse");
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{scenario}");
+        assert!(
+            error
+                .message()
+                .contains("overlaps an existing or deleting VPC prefix"),
+            "{scenario}: the pair check should accept the pair before persistence: {error}"
+        );
+        assert_eq!(
+            stored_vpc_prefix_count(&env, prefix_id).await,
+            0,
+            "{scenario}"
+        );
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn exact_overlap_requires_one_matching_vni_allocation_per_vpc(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    enum AllocationChange {
+        MissingCandidate,
+        MismatchedCandidate,
+        RetainedExisting,
+        DuplicateExisting,
+    }
+    struct TestCase {
+        scenario: &'static str,
+        change: AllocationChange,
+        prefix: &'static str,
+        candidate_vpc: VpcId,
+        existing_vpc: VpcId,
+    }
+
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let candidate_tenant = "overlap-allocation-candidate";
+    let existing_tenant = "overlap-allocation-existing";
+    // Eight VPCs plus duplicate and replacement allocations need ten VNIs.
+    // The shared fixture provides four; keep each case independent of releases.
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        &env.common_pools.ethernet.pool_vpc_vni,
+        &mut txn,
+        (20_005..=20_010).collect(),
+        true,
+    )
+    .await?;
+    txn.commit().await?;
+    create_overlap_tenant(&env, candidate_tenant).await?;
+    create_overlap_tenant(&env, existing_tenant).await?;
+    let candidate_root = seed_tenant_managed_site_prefix(
+        &env,
+        candidate_tenant,
+        "10.106.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    let existing_root = seed_tenant_managed_site_prefix(
+        &env,
+        existing_tenant,
+        "10.106.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+
+    // Create every VPC before releasing any allocation. Otherwise a later
+    // fixture could allocate a freed VNI still recorded in another VPC's status.
+    let mut cases = Vec::new();
+    for (scenario, change, prefix) in [
+        (
+            "existing VPC has duplicate owned allocations",
+            AllocationChange::DuplicateExisting,
+            "10.106.4.0/24",
+        ),
+        (
+            "candidate allocation differs from status",
+            AllocationChange::MismatchedCandidate,
+            "10.106.2.0/24",
+        ),
+        (
+            "existing VPC retains a second allocation",
+            AllocationChange::RetainedExisting,
+            "10.106.3.0/24",
+        ),
+        (
+            "candidate allocation is missing",
+            AllocationChange::MissingCandidate,
+            "10.106.1.0/24",
+        ),
+    ] {
+        let candidate_vpc =
+            create_fnn_vpc_for_tenant(&env, candidate_tenant, scenario, Some("OVERLAP")).await;
+        let existing_vpc =
+            create_fnn_vpc_for_tenant(&env, existing_tenant, scenario, Some("OVERLAP")).await;
+        cases.push(TestCase {
+            scenario,
+            change,
+            prefix,
+            candidate_vpc,
+            existing_vpc,
+        });
+    }
+    for TestCase {
+        scenario,
+        change,
+        prefix,
+        candidate_vpc,
+        existing_vpc,
+    } in cases
+    {
+        env.api
+            .create_vpc_prefix(Request::new(site_prefix_child_request(
+                VpcPrefixId::new(),
+                existing_vpc,
+                Some(existing_root),
+                prefix,
+            )))
+            .await?;
+
+        let mut txn = env.pool.begin().await?;
+        let internal_pool = &env.common_pools.ethernet.pool_vpc_vni;
+        match change {
+            AllocationChange::MissingCandidate | AllocationChange::MismatchedCandidate => {
+                let active_vni = db::resource_pool::find_owned_allocation(
+                    internal_pool,
+                    &mut txn,
+                    OwnerType::Vpc,
+                    &candidate_vpc.to_string(),
+                )
+                .await?
+                .expect("candidate VPC owns its active VNI");
+                if matches!(change, AllocationChange::MismatchedCandidate) {
+                    // Allocate before releasing so the replacement cannot be
+                    // the VNI still recorded in `status.vni`.
+                    db::resource_pool::allocate(
+                        internal_pool,
+                        &mut txn,
+                        OwnerType::Vpc,
+                        &candidate_vpc.to_string(),
+                        None,
+                    )
+                    .await?;
+                }
+                db::resource_pool::release(internal_pool, &mut txn, active_vni).await?;
+            }
+            AllocationChange::RetainedExisting | AllocationChange::DuplicateExisting => {
+                let extra_pool = match change {
+                    AllocationChange::RetainedExisting => {
+                        &env.common_pools.ethernet.pool_external_vpc_vni
+                    }
+                    _ => internal_pool,
+                };
+                db::resource_pool::allocate(
+                    extra_pool,
+                    &mut txn,
+                    OwnerType::Vpc,
+                    &existing_vpc.to_string(),
+                    None,
+                )
+                .await?;
+            }
+        }
+        txn.commit().await?;
+
+        let prefix_id = VpcPrefixId::new();
+        let error = env
+            .api
+            .create_vpc_prefix(Request::new(site_prefix_child_request(
+                prefix_id,
+                candidate_vpc,
+                Some(candidate_root),
+                prefix,
+            )))
+            .await
+            .expect_err(scenario);
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{scenario}");
+        assert_eq!(
+            error.message(),
+            "the requested prefix overlaps address space that is not eligible for reuse",
+            "{scenario}"
+        );
+        assert_eq!(
+            stored_vpc_prefix_count(&env, prefix_id).await,
+            0,
+            "{scenario}"
+        );
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn exact_overlap_waits_for_existing_vpc_allocation_cleanup(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let tenant = "overlap-allocation-cleanup";
+    create_overlap_tenant(&env, tenant).await?;
+    let candidate_vpc =
+        create_fnn_vpc_for_tenant(&env, tenant, "candidate VPC", Some("OVERLAP")).await;
+    let existing_vpc =
+        create_fnn_vpc_for_tenant(&env, tenant, "existing VPC", Some("OVERLAP")).await;
+    let root = seed_tenant_managed_site_prefix(
+        &env,
+        tenant,
+        "10.107.0.0/16",
+        SitePrefixLifecycleState::Ready,
+    )
+    .await;
+    env.api
         .create_vpc_prefix(Request::new(site_prefix_child_request(
             VpcPrefixId::new(),
-            vpc_b,
-            Some(root_b),
-            "10.100.1.0/24",
+            existing_vpc,
+            Some(root),
+            "10.107.1.0/24",
         )))
-        .await
-        .expect_err("the legacy database exclusion should still block exact reuse");
+        .await?;
 
+    let mut txn = env.pool.begin().await?;
+    let retained_vni = db::resource_pool::allocate(
+        &env.common_pools.ethernet.pool_external_vpc_vni,
+        &mut txn,
+        OwnerType::Vpc,
+        &existing_vpc.to_string(),
+        None,
+    )
+    .await?;
+    txn.commit().await?;
+    let routing_state = env
+        .api
+        .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+            id: Some(existing_vpc),
+        }))
+        .await?
+        .into_inner();
+    let active_vni = routing_state.active_vni;
+
+    // Hold the allocation row so cleanup pauses after locking its VPC.
+    // The overlapping create must wait for that VPC, not skip to its allocations.
+    let mut allocation_lock = env.pool.begin().await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(allocation_lock.as_mut())
+        .await?;
+    assert_eq!(
+        db::resource_pool::find_owned_allocation(
+            &env.common_pools.ethernet.pool_vpc_vni,
+            allocation_lock.as_mut(),
+            OwnerType::Vpc,
+            &existing_vpc.to_string(),
+        )
+        .await?,
+        Some(i32::try_from(active_vni)?)
+    );
+    let cleanup =
+        env.api
+            .release_vpc_inactive_vni(Request::new(rpc::forge::VpcReleaseInactiveVniRequest {
+                id: Some(existing_vpc),
+                if_version_match: Some(routing_state.version),
+                expected_inactive_vni: Some(u32::try_from(retained_vni)?),
+            }));
+    tokio::pin!(cleanup);
+    let cleanup_pid = tokio::select! {
+        result = &mut cleanup => panic!("cleanup passed a locked allocation: {result:?}"),
+        pid = wait_for_blocked_query(&env.pool, blocker_pid, "resource_pool") => pid,
+    };
+
+    let prefix_id = VpcPrefixId::new();
+    let create = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            prefix_id,
+            candidate_vpc,
+            Some(root),
+            "10.107.1.0/24",
+        )));
+    tokio::pin!(create);
+    tokio::select! {
+        result = &mut cleanup => panic!("cleanup passed a locked allocation: {result:?}"),
+        result = &mut create => panic!("create passed the existing VPC lock: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, cleanup_pid, "vpcs") => {}
+    }
+    allocation_lock.commit().await?;
+    let (cleanup, create) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(cleanup, create)
+    })
+    .await?;
+    assert_eq!(
+        cleanup?.into_inner().released_inactive_vni,
+        u32::try_from(retained_vni)?
+    );
+    let error = create.expect_err("the legacy database exclusion still prevents persistence");
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
     assert!(
         error
             .message()
             .contains("overlaps an existing or deleting VPC prefix"),
-        "the pair check should accept the pair before persistence: {error}"
+        "the create should see the completed allocation cleanup: {error}"
     );
+    assert_eq!(stored_vpc_prefix_count(&env, prefix_id).await, 0);
+    let after_cleanup = env
+        .api
+        .get_vpc_routing_state(Request::new(rpc::forge::VpcRoutingStateRequest {
+            id: Some(existing_vpc),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(after_cleanup.active_vni, active_vni);
+    assert_eq!(after_cleanup.retained_allocation, None);
     Ok(())
 }
 

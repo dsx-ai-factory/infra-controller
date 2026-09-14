@@ -49,9 +49,10 @@ type DpuExtensionServiceDeploymentRequest struct {
 
 // InstanceFilter encapsulates instance list filter parameters
 type InstanceFilter struct {
-	Name  *string
-	Query *string
-	VpcID *string
+	Name      *string
+	Query     *string
+	VpcID     *string
+	IPAddress *string
 }
 
 // InstanceUpdateRequest represents a simplified request to update an Instance
@@ -253,6 +254,9 @@ func (im InstanceManager) GetInstances(ctx context.Context, instanceFilter *Inst
 		}
 		if instanceFilter.VpcID != nil {
 			gir = gir.VpcId(*instanceFilter.VpcID)
+		}
+		if instanceFilter.IPAddress != nil {
+			gir = gir.IpAddress(*instanceFilter.IPAddress)
 		}
 	}
 	// If no explicit VPC filter was provided, fall back to the client's default VPC (if set).

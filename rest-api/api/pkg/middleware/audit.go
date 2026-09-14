@@ -71,6 +71,8 @@ var obfuscateFields = []string{
 	"defaultBmcUsername",
 	"defaultBmcPassword",
 	"authenticationData",
+	"password",
+	"nvOsPassword",
 }
 
 const auditObfuscatedValue = "*******************"

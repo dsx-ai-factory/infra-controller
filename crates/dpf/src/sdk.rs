@@ -646,9 +646,13 @@ async fn create_bluefield_software<R: BlueFieldSoftwareRepository>(
 ) -> Result<String, DpfError> {
     let mut hasher = Sha256::new();
     hasher.update(params.os_iso.as_bytes());
-    if let Some(pldm) = params.pldm_fw_bundle.as_deref() {
-        hasher.update(b"\0");
-        hasher.update(pldm.as_bytes());
+    if let Some(pldm_fw_bundle) = params.pldm_fw_bundle.as_ref() {
+        for (key, pldm) in pldm_fw_bundle.iter() {
+            hasher.update(b"\0");
+            hasher.update(key.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(pldm.as_bytes());
+        }
     }
     let name = format!(
         "{}-{}",
@@ -667,7 +671,6 @@ async fn create_bluefield_software<R: BlueFieldSoftwareRepository>(
             pldm_fw_bundle: params.pldm_fw_bundle.clone(),
             nic_fw: None,
             platform_pldm_fw_bundle: None,
-            force_fw_update: None,
         },
         status: None,
     };
@@ -2323,6 +2326,7 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
             paused: None,
             security: Some(DpuServiceSecurity {
                 privileged: Some(service.security_privileged),
+                spiffe: None,
             }),
             service_daemon_set: Some(DpuServiceServiceDaemonSet {
                 annotations: None,
@@ -2509,6 +2513,7 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
                 cluster: None,
                 nic_device_count: None,
                 values,
+                bmc_factory_reset_policy: None,
             },
             status: None,
         };
@@ -6037,6 +6042,7 @@ mod tests {
                 }),
                 nic_device_count: None,
                 values: None,
+                bmc_factory_reset_policy: None,
             },
             status: None,
         };
@@ -6447,6 +6453,7 @@ mod tests {
                 cluster: None,
                 nic_device_count: None,
                 values: None,
+                bmc_factory_reset_policy: None,
             },
             status: None,
         };
@@ -6496,6 +6503,7 @@ mod tests {
                 cluster: None,
                 nic_device_count: None,
                 values: Some(BTreeMap::new()),
+                bmc_factory_reset_policy: None,
             },
             status: None,
         };

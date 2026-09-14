@@ -817,8 +817,7 @@ node_label_key  = "carbide.nvidia.com/controlled.node.bf4"
 # Shared across all PSIDs
 os_iso = "https://artifacts.example.com/bfb.3.3.x.iso"
  
-# PSID -> PLDM firmware bundle URL.
-# Currently exactly one PSID entry is supported.
+# PSID -> PLDM firmware bundle URLs. Include one entry for each DPU model.
 [dpf.deployments.bf4_generic.bluefield_software.pldm_fw_bundle]
 "MT_000000xxxx" = "https://artifacts.example.com/bf4/mt_000000xxxx.pldm"
 ```
@@ -829,7 +828,7 @@ Per-deployment field reference:
 | --- | :---: | --- | --- |
 | `bfb_url` | no | BF3 bf-bundle URL | BlueField firmware bundle (BFB) used to provision the DPU. Mutually exclusive with `bluefield_software`. |
 | `bluefield_software.os_iso` | BF4 only | — | OS ISO URL used by BF4 deployments in place of a BFB. Required when `bluefield_software` is set. |
-| `bluefield_software.pldm_fw_bundle` | BF4 only | — | Map of PSID → PLDM firmware bundle URL. Currently exactly one entry is supported. |
+| `bluefield_software.pldm_fw_bundle` | BF4 only | — | Non-empty map of PSID → PLDM firmware bundle URL. Include one entry for each DPU model served by the deployment. |
 | `flavor_name` | yes | `carbide-dpu-flavor` | Base name for the generated `DPUFlavor` (BF3/generic BF4) or `DPUFlavorTemplate` (Astra) CR. |
 | `deployment_name` | yes | `nico-deployment-v2` | `DPUDeployment` CR name. |
 | `node_label_key` | yes | `carbide.nvidia.com/controlled.node.v2` | Node-selector label key applied to this deployment's DPUNodes. |

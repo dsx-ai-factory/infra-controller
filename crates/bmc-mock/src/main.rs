@@ -35,6 +35,7 @@ use bmc_mock::{
     BmcCommand, BmcState, Callbacks, DpuFirmwareVersions, DpuMachineInfo, DpuSettings,
     HardwareType, HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions,
     MockPowerState, SetSystemPowerError, SystemPowerControl, VirtualMediaDeviceConfig,
+    redfish_error_envelope,
 };
 use command_line::{MachineRole, StateBackend};
 use mac_address::MacAddress;
@@ -226,6 +227,8 @@ struct GeneratedMockConfig {
     dpu_firmware: DpuFirmwareVersions,
     libvirt_config: Option<bmc_mock::libvirt::Config>,
     use_channel_callbacks: bool,
+    redfish_auth: bool,
+    bmc_reset_duration: Option<std::time::Duration>,
 }
 
 fn generated_mock_config(args: &command_line::Args) -> Result<GeneratedMockConfig, String> {
@@ -250,6 +253,8 @@ fn generated_mock_config(args: &command_line::Args) -> Result<GeneratedMockConfi
             dpu_firmware: DpuFirmwareVersions::default(),
             libvirt_config: None,
             use_channel_callbacks: true,
+            redfish_auth: args.redfish_auth,
+            bmc_reset_duration: bmc_reset_duration(args),
         });
     }
 
@@ -336,7 +341,16 @@ fn generated_mock_config(args: &command_line::Args) -> Result<GeneratedMockConfi
         dpu_firmware: args.dpu_firmware.clone().into(),
         libvirt_config,
         use_channel_callbacks: false,
+        redfish_auth: args.redfish_auth,
+        bmc_reset_duration: bmc_reset_duration(args),
     })
+}
+
+/// The standalone reset window; zero and absence both mean instantaneous.
+fn bmc_reset_duration(args: &command_line::Args) -> Option<std::time::Duration> {
+    args.bmc_reset_duration
+        .filter(|seconds| *seconds > 0)
+        .map(std::time::Duration::from_secs)
 }
 
 fn generated_mock(config: GeneratedMockConfig) -> (Router, BmcState) {
@@ -360,9 +374,10 @@ fn generated_mock(config: GeneratedMockConfig) -> (Router, BmcState) {
             &machine_info,
             callbacks,
             String::default(),
-            false,
+            config.redfish_auth,
             MachineRouterOptions {
-                bmc_reset_duration: None,
+                bmc_reset_duration: config.bmc_reset_duration,
+                event_service: bmc_mock::EventServiceOverride::Profile,
                 virtual_media_devices: Some(vec![
                     VirtualMediaDeviceConfig {
                         id: Cow::Borrowed("Cd"),
@@ -382,8 +397,11 @@ fn generated_mock(config: GeneratedMockConfig) -> (Router, BmcState) {
             &machine_info,
             callbacks,
             String::default(),
-            false,
-            MachineRouterOptions::default(),
+            config.redfish_auth,
+            MachineRouterOptions {
+                bmc_reset_duration: config.bmc_reset_duration,
+                ..MachineRouterOptions::default()
+            },
         )
     };
     if let Some(callbacks) = libvirt_callbacks {
@@ -477,6 +495,46 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn generated_auth_flag_reaches_the_router() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        for enabled in [false, true] {
+            let mut arguments = vec![
+                "bmc-mock",
+                "--machine-role",
+                "host",
+                "--state-backend",
+                "internal",
+                "--hardware-profile",
+                "dell_poweredge_r750",
+            ];
+            if enabled {
+                arguments.push("--redfish-auth");
+            }
+            let (router, _) = generated_mock(config(&arguments).unwrap());
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .uri("/redfish/v1/Systems/System.Embedded.1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if enabled {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::OK
+                }
+            );
+        }
+    }
+
     fn config(arguments: &[&str]) -> Result<GeneratedMockConfig, String> {
         let args = command_line::Args::try_parse_from(arguments).unwrap();
         generated_mock_config(&args)
@@ -489,6 +547,48 @@ mod tests {
         assert_eq!(config.state_backend, StateBackend::Internal);
         assert!(matches!(config.hardware_type, HardwareType::WiwynnGB200Nvl));
         assert!(config.use_channel_callbacks);
+    }
+
+    #[tokio::test]
+    async fn hardware_profile_enables_event_service() {
+        let config = config(&[
+            "bmc-mock",
+            "--machine-role",
+            "host",
+            "--state-backend",
+            "internal",
+            "--hardware-profile",
+            "dell_poweredge_r750",
+        ])
+        .unwrap();
+        let (_router, state) = generated_mock(config);
+        assert!(state.event_service.is_some());
+        assert!(state.availability.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_reset_window_flag_enables_the_offline_simulation() {
+        let windowed = config(&[
+            "bmc-mock",
+            "--machine-role",
+            "host",
+            "--state-backend",
+            "internal",
+            "--hardware-profile",
+            "dell_poweredge_r750",
+            "--bmc-reset-duration",
+            "5",
+        ])
+        .unwrap();
+        assert_eq!(
+            windowed.bmc_reset_duration,
+            Some(std::time::Duration::from_secs(5))
+        );
+        let (_router, state) = generated_mock(windowed);
+        assert!(state.availability.is_some());
+
+        let instantaneous = config(&["bmc-mock", "--bmc-reset-duration", "0"]).unwrap();
+        assert!(instantaneous.bmc_reset_duration.is_none());
     }
 
     #[test]

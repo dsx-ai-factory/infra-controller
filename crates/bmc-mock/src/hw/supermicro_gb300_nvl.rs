@@ -46,6 +46,10 @@ pub(crate) struct SupermicroGB300Nvl<'a> {
 }
 
 impl SupermicroGB300Nvl<'_> {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "BMC_0";
         let bmc_eth_builder = |eth| {

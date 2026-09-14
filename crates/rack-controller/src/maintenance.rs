@@ -52,11 +52,11 @@ use db::{
 use librms::protos::rack_manager as rms;
 use model::machine::HostMachine;
 use model::rack::{
-    ConfigureNmxClusterState, FirmwareUpgradeDeviceInfo, FirmwareUpgradeDeviceStatus,
-    FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosUpdateState,
-    NvosUpdateSwitchStatus, Rack, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus,
-    RackMaintenanceState, RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState,
-    SwitchNvosUpdateStatus,
+    ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceInfo,
+    FirmwareUpgradeDeviceStatus, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
+    NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackFirmwareUpgradeState,
+    RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState, RackState,
+    RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
 };
 use model::rack_type::RackProfile;
 use state_controller::state_handler::{
@@ -271,7 +271,7 @@ async fn terminate_active_rack_maintenance(
             if matches!(rack_firmware_upgrade, FirmwareUpgradeState::WaitForComplete)
                 && let Some(mut job) = state.firmware_upgrade_job.clone()
             {
-                job.status = Some("failed".into());
+                job.status = Some(FirmwareProgressState::Failed);
                 job.completed_at.get_or_insert(now);
                 db_rack::update_firmware_upgrade_job(txn.as_mut(), rack_id, Some(&job)).await?;
                 state.firmware_upgrade_job = Some(job);
@@ -759,7 +759,7 @@ async fn transition_to_rack_error_with_firmware_job(
     let now = chrono::Utc::now();
     let job = model::rack::FirmwareUpgradeJob {
         firmware_id: Some(firmware_id.into()),
-        status: Some("failed".into()),
+        status: Some(FirmwareProgressState::Failed),
         started_at: Some(now),
         completed_at: Some(now),
         ..Default::default()
@@ -1097,19 +1097,19 @@ fn firmware_device_status(
         node_id: device.node_id.clone(),
         mac: device.mac,
         bmc_ip: device.bmc_ip,
-        status: "in_progress".into(),
+        status: FirmwareProgressState::InProgress,
         job_id: None,
         parent_job_id,
         error_message: None,
     };
 
     if let Some(error_message) = node_errors.get(&device.node_id) {
-        status.status = "failed".into();
+        status.status = FirmwareProgressState::Failed;
         status.error_message = Some(error_message.clone());
     } else if let Some(job_id) = child_jobs.get(&device.node_id) {
         status.job_id = Some(job_id.clone());
     } else {
-        status.status = "failed".into();
+        status.status = FirmwareProgressState::Failed;
         status.error_message = Some(
             batch_error
                 .unwrap_or("RMS did not return a child firmware job for this device")
@@ -1313,25 +1313,22 @@ async fn rms_start_firmware_upgrade_from_json(
     let all_devices: Vec<_> = job.all_devices().collect();
     let failed = all_devices
         .iter()
-        .filter(|device| device.status == "failed")
+        .filter(|device| device.status == FirmwareProgressState::Failed)
         .count();
     let completed = all_devices
         .iter()
-        .filter(|device| device.status == "completed")
+        .filter(|device| device.status == FirmwareProgressState::Completed)
         .count();
     let total = all_devices.len();
     let terminal = completed + failed;
 
-    job.status = Some(
-        if total > 0 && terminal < total {
-            "in_progress"
-        } else if failed > 0 {
-            "failed"
-        } else {
-            "completed"
-        }
-        .into(),
-    );
+    job.status = Some(if total > 0 && terminal < total {
+        FirmwareProgressState::InProgress
+    } else if failed > 0 {
+        FirmwareProgressState::Failed
+    } else {
+        FirmwareProgressState::Completed
+    });
     if total > 0 && terminal == total {
         job.completed_at = Some(chrono::Utc::now());
     }
@@ -1347,12 +1344,12 @@ async fn rms_get_firmware_upgrade_status(
 ) -> Result<model::rack::FirmwareUpgradeJob, StateHandlerError> {
     let mut updated = job.clone();
     for device in updated.all_devices_mut() {
-        if matches!(device.status.as_str(), "completed" | "failed") {
+        if device.status.is_terminal() {
             continue;
         }
 
         let Some(job_id) = device.job_id.clone() else {
-            device.status = "failed".into();
+            device.status = FirmwareProgressState::Failed;
             if device.error_message.is_none() {
                 device.error_message = Some("Device has no firmware job ID to poll".into());
             }
@@ -1374,19 +1371,19 @@ async fn rms_get_firmware_upgrade_status(
                 }
                 match rms::FirmwareJobState::try_from(response.job_state) {
                     Ok(rms::FirmwareJobState::Queued) => {
-                        device.status = "pending".into();
+                        device.status = FirmwareProgressState::Pending;
                         device.error_message = None;
                     }
                     Ok(rms::FirmwareJobState::Running) => {
-                        device.status = "in_progress".into();
+                        device.status = FirmwareProgressState::InProgress;
                         device.error_message = None;
                     }
                     Ok(rms::FirmwareJobState::Completed) => {
-                        device.status = "completed".into();
+                        device.status = FirmwareProgressState::Completed;
                         device.error_message = None;
                     }
                     Ok(rms::FirmwareJobState::Failed) => {
-                        device.status = "failed".into();
+                        device.status = FirmwareProgressState::Failed;
                         device.error_message = Some(if response.error_message.is_empty() {
                             response.state_description
                         } else {
@@ -1439,25 +1436,22 @@ async fn rms_get_firmware_upgrade_status(
     let all_devices: Vec<_> = updated.all_devices().collect();
     let failed = all_devices
         .iter()
-        .filter(|device| device.status == "failed")
+        .filter(|device| device.status == FirmwareProgressState::Failed)
         .count();
     let completed = all_devices
         .iter()
-        .filter(|device| device.status == "completed")
+        .filter(|device| device.status == FirmwareProgressState::Completed)
         .count();
     let total = all_devices.len();
     let terminal = completed + failed;
 
-    updated.status = Some(
-        if total > 0 && terminal < total {
-            "in_progress"
-        } else if failed > 0 {
-            "failed"
-        } else {
-            "completed"
-        }
-        .into(),
-    );
+    updated.status = Some(if total > 0 && terminal < total {
+        FirmwareProgressState::InProgress
+    } else if failed > 0 {
+        FirmwareProgressState::Failed
+    } else {
+        FirmwareProgressState::Completed
+    });
     updated.completed_at = if total > 0 && terminal == total {
         Some(chrono::Utc::now())
     } else {
@@ -2227,7 +2221,7 @@ pub async fn handle_maintenance(
                 if !power_blocked_machine_ids.is_empty() {
                     let now = chrono::Utc::now();
                     let mut job = state.firmware_upgrade_job.clone().unwrap();
-                    job.status = Some("failed".into());
+                    job.status = Some(FirmwareProgressState::Failed);
                     if job.completed_at.is_none() {
                         job.completed_at = Some(now);
                     }
@@ -2287,13 +2281,23 @@ pub async fn handle_maintenance(
 
                 let build_status =
                     |device: &FirmwareUpgradeDeviceStatus| -> RackFirmwareUpgradeStatus {
-                        let state = match device.status.as_str() {
-                            "completed" => RackFirmwareUpgradeState::Completed,
-                            "failed" => RackFirmwareUpgradeState::Failed {
-                                cause: format!("RMS reported failure for {}", device.mac),
+                        let state = match &device.status {
+                            FirmwareProgressState::Completed => RackFirmwareUpgradeState::Completed,
+                            FirmwareProgressState::Failed => RackFirmwareUpgradeState::Failed {
+                                cause: device
+                                    .error_message
+                                    .clone()
+                                    .filter(|message| !message.trim().is_empty())
+                                    .unwrap_or_else(|| {
+                                        format!("RMS reported failure for {}", device.mac)
+                                    }),
                             },
-                            "in_progress" => RackFirmwareUpgradeState::InProgress,
-                            _ => RackFirmwareUpgradeState::Started,
+                            FirmwareProgressState::InProgress => {
+                                RackFirmwareUpgradeState::InProgress
+                            }
+                            FirmwareProgressState::Pending | FirmwareProgressState::Unknown(_) => {
+                                RackFirmwareUpgradeState::Started
+                            }
                         };
                         RackFirmwareUpgradeStatus {
                             task_id: device
@@ -2304,7 +2308,7 @@ pub async fn handle_maintenance(
                                 .unwrap_or_else(|| "unknown".to_string()),
                             status: state,
                             started_at: job.started_at,
-                            ended_at: if device.status == "completed" || device.status == "failed" {
+                            ended_at: if device.status.is_terminal() {
                                 job.completed_at.or(Some(chrono::Utc::now()))
                             } else {
                                 None
@@ -2414,7 +2418,7 @@ pub async fn handle_maintenance(
                     DeviceFirmwareProgress::Failed { failed, total } => {
                         let should_cleanup_token = requested_nvos_config_json(scope).is_some();
                         let now = chrono::Utc::now();
-                        job.status = Some("failed".into());
+                        job.status = Some(FirmwareProgressState::Failed);
                         if job.completed_at.is_none() {
                             job.completed_at = Some(now);
                         }
@@ -2448,7 +2452,7 @@ pub async fn handle_maintenance(
                     }
                     DeviceFirmwareProgress::Completed { completed, total } => {
                         let now = chrono::Utc::now();
-                        job.status = Some("completed".into());
+                        job.status = Some(FirmwareProgressState::Completed);
                         if job.completed_at.is_none() {
                             job.completed_at = Some(now);
                         }
@@ -2888,9 +2892,9 @@ mod tests {
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
     use model::rack::{
-        ConfigureNmxClusterState, FirmwareUpgradeDeviceInfo, FirmwareUpgradeState,
-        MaintenanceActivity, MaintenanceScope, NvosUpdateState, RackMaintenanceState,
-        RackPowerState,
+        ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceInfo,
+        FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosUpdateState,
+        RackMaintenanceState, RackPowerState,
     };
     use model::rack_type::{RackHardwareType, RackProfile};
 
@@ -3198,7 +3202,7 @@ mod tests {
             Some("invalid SOT JSON"),
         );
 
-        assert_eq!(status.status, "failed");
+        assert_eq!(status.status, FirmwareProgressState::Failed);
         assert_eq!(status.error_message.as_deref(), Some("invalid SOT JSON"));
     }
 

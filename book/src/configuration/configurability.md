@@ -194,7 +194,6 @@ explicitly enabled in the TOML.
 | `[vmaas_config]` | VM system integration / VM-aware traffic intercept | Requires `public_prefixes`. |
 | `[rms]` | Rack Manager Service (mTLS connectivity to external RMS) | |
 | `[dpf]` | DPU Platform Framework — Kubernetes DPU workload deployment | Requires the DPF operator deployed in-cluster (`helm-prereqs/setup.sh` installs it by default; `--skip-dpf` to opt out). |
-| `rack_management_enabled` | Standalone infrastructure manager mode (GB200/GB300/VR144) | Top-level boolean, not a sub-section. |
 
 For RMS component-manager backends, NICo builds RMS node descriptors from rack
 profiles. Each descriptor contains three attributes:
@@ -1470,7 +1469,6 @@ on or off.
 | Machine Identity (SPIFFE JWT-SVID) | siteConfig | `[machine_identity].enabled` | off | Per-org JWT signing for machine identity tokens. See [Day 0](../../../docs/getting-started/installation-options/day0-machine-identity.md) and [Day 1](../../../docs/configuration/machine_identity.md) docs. |
 | Machine Validation | siteConfig | `[machine_validation_config].enabled` | off | Pre-ingestion validation tests. |
 | SPDM | siteConfig | `[spdm].enabled` | off | Hardware attestation via NRAS. |
-| Rack Management | siteConfig | `rack_management_enabled = true` | off | Standalone infrastructure manager mode (GB200/GB300/VR144). |
 | Site Explorer machine auto-creation | siteConfig | `[site_explorer].create_machines` | on | Disable for manual-onboarding environments. |
 | Site Explorer switch / power shelf auto-creation | siteConfig | `[site_explorer].create_switches` / `[site_explorer].create_power_shelves` | on | Ingests only declared hardware (`expected_switches` / `expected_power_shelves` records). Disable to pause switch or power shelf ingestion site-wide. |
 | Firmware autoupdate | siteConfig | `[firmware_global].autoupdate` | off | Enable once the fleet's firmware baseline is stable. |

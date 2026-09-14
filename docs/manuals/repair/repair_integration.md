@@ -72,7 +72,7 @@ Repair tenants or repair automation use targeted provisioning to claim machines 
 - The original tenant releases the instance with `machineHealthIssue`.
 - The repair tenant releases the repair instance after investigation or repair.
 - Repair tenant releases should set `isRepairTenant: true`.
-- `isRepairTenant: true` requires the tenant to have the targeted instance creation capability.
+- `isRepairTenant: true` requires effective targeted instance creation for the tenant, granted by a Provider Admin on the tenant account. See [Granting Targeted Instance Creation](../../configuration/tenant_management.md#granting-targeted-instance-creation) for what makes it effective.
 - The repair tenant should set the machine label `repair_status: InProgress` after claiming the machine, then set the final `repair_status` before releasing the repair instance. This prevents stale completion labels from older repair attempts.
 - A final `repair_status: Completed` with no new issue returns the machine toward the ready pool; failed, incomplete, missing, or unknown status keeps the machine blocked for repair-failed or manual handling.
 

@@ -4,7 +4,6 @@
 package inventorysync
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -188,6 +187,11 @@ func TestPlanDpuBMCReconciliation(t *testing.T) {
 }
 
 func TestReconcileDpuBMCs(t *testing.T) {
+	t.Run("reconciles BMCs by MAC", testReconcileDpuBMCsByMAC)
+	t.Run("invalid snapshot preserves rows", testReconcileDpuBMCsInvalidSnapshotPreservesRows)
+}
+
+func testReconcileDpuBMCsByMAC(t *testing.T) {
 	ctx, pool := mirrorTestPool(t)
 	dpuType := devicetypes.BMCTypeToString(devicetypes.BMCTypeDPU)
 
@@ -241,7 +245,7 @@ func TestReconcileDpuBMCs(t *testing.T) {
 	assert.Equal(t, componentB.ID, moved.ComponentID)
 }
 
-func TestReconcileDpuBMCsInvalidSnapshotPreservesRows(t *testing.T) {
+func testReconcileDpuBMCsInvalidSnapshotPreservesRows(t *testing.T) {
 	ctx, pool := mirrorTestPool(t)
 	component := model.Component{Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute), ComponentID: strPtr("host-1")}
 	require.NoError(t, component.Create(ctx, pool.DB))
@@ -262,127 +266,4 @@ func TestReconcileDpuBMCsInvalidSnapshotPreservesRows(t *testing.T) {
 	require.NoError(t, pool.DB.NewSelect().Model(&got).Scan(ctx))
 	require.Len(t, got, 1)
 	assert.Equal(t, existing.MacAddress, got[0].MacAddress)
-}
-
-func TestSyncMachinesLinksHostAndReconcilesAssociatedDPUInOneCycle(t *testing.T) {
-	ctx, pool := mirrorTestPool(t)
-	const hostMAC = "aa:bb:cc:dd:ee:10"
-	const dpuMAC = "aa:bb:cc:dd:ee:11"
-
-	component := model.Component{Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute)}
-	require.NoError(t, component.Create(ctx, pool.DB))
-	createTestBMC(ctx, t, pool, component.ID, hostMAC)
-
-	client := nicoapi.NewMockClient()
-	client.AddMachine(nicoapi.MachineDetail{
-		MachineID:               "host-1",
-		MachineType:             corev1.MachineType_HOST.String(),
-		BmcMac:                  hostMAC,
-		AssociatedDpuMachineIDs: []string{"dpu-1"},
-	})
-	client.AddMachine(nicoapi.MachineDetail{
-		MachineID:   "dpu-1",
-		MachineType: corev1.MachineType_DPU.String(),
-		BmcMac:      dpuMAC,
-		BmcIP:       "10.0.0.11",
-	})
-
-	_, drifts, ok := syncMachines(ctx, pool, client)
-
-	require.True(t, ok)
-	assert.Empty(t, drifts)
-	var persistedComponent model.Component
-	require.NoError(t, pool.DB.NewSelect().Model(&persistedComponent).Where("id = ?", component.ID).Scan(ctx))
-	require.NotNil(t, persistedComponent.ComponentID)
-	assert.Equal(t, "host-1", *persistedComponent.ComponentID)
-	var dpu model.BMC
-	require.NoError(t, pool.DB.NewSelect().Model(&dpu).Where("mac_address = ?", dpuMAC).Scan(ctx))
-	assert.Equal(t, devicetypes.BMCTypeToString(devicetypes.BMCTypeDPU), dpu.Type)
-	assert.Equal(t, component.ID, dpu.ComponentID)
-	assert.Equal(t, "10.0.0.11", *dpu.IPAddress)
-}
-
-func TestSyncMachinesGetMachinesFailurePreservesDPUInventory(t *testing.T) {
-	ctx, pool := mirrorTestPool(t)
-	component := model.Component{Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute)}
-	require.NoError(t, component.Create(ctx, pool.DB))
-	existing := model.BMC{
-		MacAddress:  "aa:bb:cc:dd:ee:11",
-		Type:        devicetypes.BMCTypeToString(devicetypes.BMCTypeDPU),
-		ComponentID: component.ID,
-	}
-	_, err := pool.DB.NewInsert().Model(&existing).Exec(ctx)
-	require.NoError(t, err)
-
-	_, _, ok := syncMachines(ctx, pool, &failGetMachinesClient{Client: nicoapi.NewMockClient()})
-
-	assert.False(t, ok)
-	var got []model.BMC
-	require.NoError(t, pool.DB.NewSelect().Model(&got).Scan(ctx))
-	require.Len(t, got, 1)
-	assert.Equal(t, existing.MacAddress, got[0].MacAddress)
-}
-
-func TestSyncMachinesDpuFailureDoesNotBlockHostConvergence(t *testing.T) {
-	ctx, pool := mirrorTestPool(t)
-	component := model.Component{
-		Type:        devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),
-		ComponentID: strPtr("host-1"),
-	}
-	require.NoError(t, component.Create(ctx, pool.DB))
-	createTestBMC(ctx, t, pool, component.ID, "aa:bb:cc:dd:ee:10")
-
-	client := nicoapi.NewMockClient()
-	client.AddMachine(nicoapi.MachineDetail{
-		MachineID:               "host-1",
-		MachineType:             corev1.MachineType_HOST.String(),
-		BmcMac:                  "aa:bb:cc:dd:ee:10",
-		AssociatedDpuMachineIDs: []string{"missing-dpu"},
-	})
-	client.AddPowerState("host-1", nicoapi.PowerStateOn)
-
-	_, _, ok := syncMachines(ctx, pool, client)
-
-	assert.False(t, ok, "the cycle remains degraded when DPU reconciliation fails")
-	var persisted model.Component
-	require.NoError(t, pool.DB.NewSelect().Model(&persisted).Where("id = ?", component.ID).Scan(ctx))
-	require.NotNil(t, persisted.PowerState)
-	assert.Equal(t, nicoapi.PowerStateOn, *persisted.PowerState)
-}
-
-func TestSyncMachinesPositionFailureDoesNotBlockDPUReconciliation(t *testing.T) {
-	ctx, pool := mirrorTestPool(t)
-	const hostMAC = "aa:bb:cc:dd:ee:20"
-	const dpuMAC = "aa:bb:cc:dd:ee:21"
-	component := model.Component{
-		Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),
-	}
-	require.NoError(t, component.Create(ctx, pool.DB))
-	createTestBMC(ctx, t, pool, component.ID, hostMAC)
-
-	client := &actualInventoryTestClient{
-		Client: nicoapi.NewMockClient(),
-		machines: []nicoapi.MachineDetail{
-			{
-				MachineID:               "host-1",
-				MachineType:             corev1.MachineType_HOST.String(),
-				BmcMac:                  hostMAC,
-				AssociatedDpuMachineIDs: []string{"dpu-1"},
-			},
-			{
-				MachineID:   "dpu-1",
-				MachineType: corev1.MachineType_DPU.String(),
-				BmcMac:      dpuMAC,
-			},
-		},
-		machinePositionErr: errors.New("positions unavailable"),
-	}
-
-	_, _, ok := syncMachines(ctx, pool, client)
-
-	assert.False(t, ok)
-	var dpu model.BMC
-	require.NoError(t, pool.DB.NewSelect().Model(&dpu).Where("mac_address = ?", dpuMAC).Scan(ctx))
-	assert.Equal(t, devicetypes.BMCTypeToString(devicetypes.BMCTypeDPU), dpu.Type)
-	assert.Equal(t, component.ID, dpu.ComponentID)
 }

@@ -20,7 +20,7 @@
 #![cfg_attr(not(test), deny(dead_code_pub_in_binary))]
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge_api_client::ForgeApiClient;
@@ -146,6 +146,34 @@ async fn main() -> color_eyre::Result<()> {
         println!("{}", carbide_version::version!());
         return Ok(());
     }
+    if config.format == OutputFormat::Csv
+        && matches!(
+            config.commands.as_ref(),
+            Some(CliCommand::Vpc(
+                vpc::Cmd::RoutingState(_)
+                    | vpc::Cmd::ChangeRoutingProfile(_)
+                    | vpc::Cmd::ReleaseInactiveVni(_)
+            ))
+        )
+    {
+        CliOptions::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--format csv is not supported for VPC routing commands; use ascii-table, json, or yaml",
+            )
+            .exit();
+    }
+    if let Some(CliCommand::Vpc(command)) = &config.commands
+        && command.requires_interactive_confirmation()
+        && !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal())
+    {
+        CliOptions::command()
+            .error(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "--if-version-match is required unless stdin and stderr are terminals; supply the original observed version for scripts or repeated requests",
+            )
+            .exit();
+    }
     let file_config = get_config_from_file();
 
     // Log level is set from, in order of preference:
@@ -216,6 +244,7 @@ async fn main() -> color_eyre::Result<()> {
         api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(&url, &client_config))),
         config: RuntimeConfig {
             format: config.format,
+            request_timeout: client_config.request_timeout,
             page_size: config.internal_page_size,
             extended: config.extended,
             cloud_unsafe_op: config.cloud_unsafe_op,

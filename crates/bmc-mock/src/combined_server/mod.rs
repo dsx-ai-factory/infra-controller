@@ -27,6 +27,11 @@ use tower_http::normalize_path::NormalizePathLayer;
 
 use crate::combined_router;
 
+mod progress;
+mod transport;
+
+pub(crate) use transport::OutputStallTimeout;
+
 pub enum ListenerOrAddress {
     Listener(TcpListener),
     Address(SocketAddr),
@@ -85,6 +90,9 @@ impl CombinedServer {
         )
     }
 
+    /// Serve a router over TLS. A response carrying an [`OutputStallTimeout`]
+    /// extension has its body bounded: if an emitted frame is not followed by
+    /// transport progress within that duration, the whole connection is closed.
     pub fn run_router(
         name: &str,
         router: Router,
@@ -117,6 +125,7 @@ impl CombinedServer {
                 )
             }
         };
+        let server = server.map(transport::Acceptor::new);
         tracing::info!(
             listen_address = %addr,
             "BMC mock listening",

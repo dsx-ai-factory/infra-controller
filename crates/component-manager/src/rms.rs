@@ -2387,12 +2387,6 @@ impl NvSwitchManager for RmsBackend {
             };
 
             if jobs.is_empty() {
-                statuses.push(SwitchFirmwareUpdateStatus {
-                    bmc_mac: *bmc_mac,
-                    state: FirmwareState::Unknown,
-                    target_version: String::new(),
-                    error: Some("no firmware job tracked for this switch".into()),
-                });
                 continue;
             }
 
@@ -6875,14 +6869,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(statuses[0].state, FirmwareState::Unknown);
-        assert!(
-            statuses[0]
-                .error
-                .as_ref()
-                .unwrap()
-                .contains("no firmware job")
-        );
+        assert!(statuses.is_empty());
     }
 
     #[carbide_macros::sqlx_test]

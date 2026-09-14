@@ -188,6 +188,7 @@ func TestFilterOutIDs(t *testing.T) {
 
 func TestInstanceManager_GetInstances(t *testing.T) {
 	instanceName := "host-1"
+	ipAddress := "10.0.0.5"
 	query := "02c241b7-d2e3-4bf5-8384-07137f4f3410"
 	explicitVpcID := "vpc-2"
 	pageNumber := 2
@@ -216,9 +217,10 @@ func TestInstanceManager_GetInstances(t *testing.T) {
 			name:         "query composes with filters and pagination",
 			defaultVpcID: "vpc-1",
 			filter: &InstanceFilter{
-				Name:  &instanceName,
-				Query: &query,
-				VpcID: &explicitVpcID,
+				Name:      &instanceName,
+				Query:     &query,
+				VpcID:     &explicitVpcID,
+				IPAddress: &ipAddress,
 			},
 			pagination: &PaginationFilter{
 				PageNumber: &pageNumber,
@@ -226,6 +228,7 @@ func TestInstanceManager_GetInstances(t *testing.T) {
 				OrderBy:    &orderBy,
 			},
 			wantQuery: url.Values{
+				"ipAddress":  {ipAddress},
 				"name":       {instanceName},
 				"orderBy":    {orderBy},
 				"pageNumber": {"2"},

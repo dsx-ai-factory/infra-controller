@@ -37,6 +37,10 @@ impl DgxVrNvl<'_> {
     const BLUEFIELD_NIC_ID: &'static str = "BlueField_NIC_0";
     const BLUEFIELD_PCIE_DEVICE_ID: &'static str = "BlueField_0";
 
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "BMC_0";
         let bmc_eth_builder = |eth| {

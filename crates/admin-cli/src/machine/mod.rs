@@ -85,7 +85,7 @@ pub(crate) enum Cmd {
             - Power shelf ID: Associated power shelf"
     )]
     Positions(positions::Args),
-    #[clap(subcommand, about = "Update/show NVLink info for an MNNVL machine")]
+    #[clap(subcommand, about = "Show NVLink info for an MNNVL machine")]
     NvlinkInfo(nvlink_info::Args),
     #[clap(about = "Show machine health history")]
     HealthHistory(health_history::Args),

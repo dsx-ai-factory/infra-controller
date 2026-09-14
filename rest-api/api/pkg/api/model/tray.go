@@ -31,9 +31,9 @@ var ProtoToAPIComponentTypeName = map[flowv1.ComponentType]string{
 	flowv1.ComponentType_COMPONENT_TYPE_POWERSHELF: "PowerShelf",
 }
 
-// ProtoToAPIPhaseName maps a component's protobuf operation-status Phase to the
-// string surfaced as `operationStatus`. A component with no computed status
-// (nil) resolves to "Unknown" via enumOr.
+// ProtoToAPIPhaseName maps Flow's protobuf operability Phase to the string
+// surfaced as `operationStatus`. A component with no computed status (nil), or
+// a Rack without an aggregate status, resolves to "Unknown" via enumOr.
 var ProtoToAPIPhaseName = map[flowv1.Phase]string{
 	flowv1.Phase_PHASE_UNKNOWN:      "Unknown",
 	flowv1.Phase_PHASE_INITIALIZING: "Initializing",

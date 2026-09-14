@@ -35,6 +35,9 @@ use crate::config::{
     NvueGnmiSubscriptionMode,
 };
 
+const GNMI_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(300);
+const GNMI_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub(super) fn nvue_subscribe_paths(paths_config: &NvueGnmiPaths) -> Vec<Path> {
     let mut paths = Vec::with_capacity(5);
 
@@ -166,7 +169,7 @@ pub(super) struct GnmiClientConfig {
     /// Optional password sent as gNMI `password` metadata.
     pub password: Option<String>,
 
-    /// Timeout applied to gNMI connection and RPC operations.
+    /// Timeout applied independently to connection establishment and RPC opening.
     pub request_timeout: Duration,
 
     /// Whether legacy non-mTLS connections accept invalid switch certificates.
@@ -246,7 +249,12 @@ impl GnmiClient {
         )
         .await?
         .connect_timeout(self.request_timeout)
-        .timeout(self.request_timeout);
+        .timeout(self.request_timeout)
+        // Periodic HTTP/2 PINGs make transport loss observable when a peer
+        // stops acknowledging frames without closing the Subscribe stream.
+        .http2_keep_alive_interval(GNMI_HTTP2_KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(GNMI_HTTP2_KEEPALIVE_TIMEOUT)
+        .keep_alive_while_idle(true);
 
         let channel = endpoint.connect().await.map_err(|e| {
             HealthError::GnmiError(format!(

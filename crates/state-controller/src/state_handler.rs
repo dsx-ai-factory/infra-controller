@@ -308,6 +308,14 @@ impl<S> std::fmt::Display for StateHandlerOutcome<S> {
 /// Error type for handling a Machine State
 #[derive(Debug, thiserror::Error)]
 pub enum StateHandlerError {
+    /// A conditional write rejected the snapshot used by this iteration.
+    /// The processor discards uncommitted writes and queues a fresh pass without
+    /// recording a transition or an operational error.
+    #[error("controller iteration invalidated at {source_ref}")]
+    IterationInvalidated {
+        /// The call site that required the rejected write to apply.
+        source_ref: &'static std::panic::Location<'static>,
+    },
     #[error("unable to perform database transaction: {0}")]
     TransactionError(#[source] Box<sqlx::Error>),
     #[error("failed to advance state: {0}")]
@@ -386,6 +394,7 @@ impl StateHandlerError {
     /// many metric dimensions.
     pub fn metric_label(&self) -> &'static str {
         match self {
+            StateHandlerError::IterationInvalidated { .. } => "iteration_invalidated",
             StateHandlerError::TransactionError(_) => "transaction_error",
             StateHandlerError::GenericError(_) => "generic_error",
             StateHandlerError::FirmwareUpdateError(_) => "firware_update_error",

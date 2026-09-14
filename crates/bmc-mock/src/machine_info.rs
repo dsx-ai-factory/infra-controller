@@ -351,6 +351,13 @@ impl DpuMachineInfo {
         }
     }
 
+    fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        match self.dpu_type() {
+            DpuType::Bluefield3 => self.bluefield3().event_service_config(),
+            DpuType::Bluefield4 => self.bluefield4().event_service_config(),
+        }
+    }
+
     fn update_service_config(&self) -> UpdateServiceConfig {
         let mut config = match self.dpu_type() {
             DpuType::Bluefield3 => self.bluefield3().update_service_config(),
@@ -648,6 +655,35 @@ impl HostMachineInfo {
             }
             HardwareType::GenericAmi | HardwareType::GenericSupermicro => {
                 self.generic_server().chassis_config()
+            }
+        }
+    }
+
+    fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        match self.hw_type {
+            HardwareType::DellPowerEdgeR750 => self.dell_poweredge_r750().event_service_config(),
+            HardwareType::DellPowerEdgeR760Bf4 => {
+                self.dell_poweredge_r760_bf4().event_service_config()
+            }
+            HardwareType::WiwynnGB200Nvl => self.wiwynn_gb200_nvl().event_service_config(),
+            HardwareType::LenovoGB300Nvl => self.lenovo_gb300_nvl().event_service_config(),
+            HardwareType::NvidiaDgxGb300 => self.dgx_gb300_nvl().event_service_config(),
+            HardwareType::SupermicroGb300Nvl => self.supermicro_gb300_nvl().event_service_config(),
+            HardwareType::NvidiaDgxVr => self.dgx_vr_nvl().event_service_config(),
+            HardwareType::LiteOnPowerShelf => self.liteon_power_shelf().event_service_config(),
+            HardwareType::DeltaPowerShelf => self.delta_power_shelf().event_service_config(),
+            HardwareType::NvidiaSwitchNd5200Ld => {
+                self.nvidia_switch_nd5200_ld().event_service_config()
+            }
+            HardwareType::NvidiaSwitchN5700Ld => {
+                self.nvidia_switch_n5700_ld().event_service_config()
+            }
+            HardwareType::NvidiaDgxH100 => self.nvidia_dgx_h100().event_service_config(),
+            HardwareType::HpeProliantDl380aGen11 => {
+                self.hpe_proliant_dl380a_gen11().event_service_config()
+            }
+            HardwareType::GenericAmi | HardwareType::GenericSupermicro => {
+                self.generic_server().event_service_config()
             }
         }
     }
@@ -1186,6 +1222,13 @@ impl MachineInfo {
         match self {
             Self::Host(h) => h.chassis_config(),
             Self::Dpu(dpu) => dpu.chassis_config(),
+        }
+    }
+
+    pub(super) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        match self {
+            Self::Host(h) => h.event_service_config(),
+            Self::Dpu(dpu) => dpu.event_service_config(),
         }
     }
 

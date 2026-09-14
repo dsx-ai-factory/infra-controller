@@ -731,11 +731,12 @@ fn preserve_omitted_rpc_role_and_allocation(
 /// behavior shared by the single and batch APIs.
 ///
 /// The lower-level helpers create a missing reservation or fill an addressless
-/// row, but leave existing addresses alone. An associated row may receive its
-/// configured fixed address, but its role-derived type and primary setting
-/// remain managed state. Operators still use the machine-interface address APIs
-/// to replace a live address. The effective Host BMC is applied separately so
-/// legacy-only rows use the same path without storing a nested declaration.
+/// row before that family's first stateful allocation, but leave existing
+/// addresses alone. An associated row may receive its configured fixed address,
+/// but its role-derived type and primary setting remain managed state.
+/// Operators still use the machine-interface address APIs to replace a live
+/// address. The effective Host BMC is applied separately so legacy-only rows
+/// use the same path without storing a nested declaration.
 async fn update_preallocated_interfaces(
     txn: &mut sqlx::PgConnection,
     machine: &ExpectedMachine,

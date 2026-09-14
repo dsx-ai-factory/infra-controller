@@ -166,7 +166,8 @@ impl SessionServiceState {
     }
 }
 
-fn generate_token() -> String {
+/// 32 lowercase hex characters from 128 random bits.
+pub(super) fn generate_token() -> String {
     let mut rng = rand::rng();
     let bytes: [u8; 16] = rng.random();
     bytes.iter().fold(String::with_capacity(32), |mut acc, b| {

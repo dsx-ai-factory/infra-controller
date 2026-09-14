@@ -15,7 +15,7 @@ compatibility with the previous versions. Any breaking changes are announced usi
 
 Depending on the auth configuration used, the NICo REST API may be configured in Service Account mode. In this mode, API users can act as both Provider and Tenant as part of the same organization.
 If this is the case, the user must first retrieve the Service Account by making a call to the [Retrieve Service Account endpoint](/infra-controller/rest-api-reference/api-reference/service-account/get-current-service-account).
-For service accounts, the Tenant entity is initialized as a privileged Tenant with `targetedInstanceCreation` capability enabled.
+For service accounts, the Tenant entity is initialized as a privileged Tenant when a Ready Tenant Account has `siteCapabilities` with `targetedInstanceCreation` enabled.
 
 ## Provider or Tenant Mode
 

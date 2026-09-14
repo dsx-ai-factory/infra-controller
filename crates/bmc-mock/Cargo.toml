@@ -42,7 +42,7 @@ indexmap = { workspace = true }
 itertools = { workspace = true }
 lazy_static = { workspace = true }
 mac_address = { features = ["serde"], workspace = true }
-nv-redfish = { workspace = true, features = ["bmc-http"] }
+nv-redfish = { workspace = true, features = ["bmc-http", "event-service"] }
 nix = { features = ["fs"], workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
@@ -55,6 +55,7 @@ tar = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tower = { workspace = true }
 tower-http = { features = ["normalize-path"], workspace = true }
 tracing = { workspace = true }
@@ -63,7 +64,11 @@ url = { workspace = true }
 
 [dev-dependencies]
 carbide-test-support = { path = "../test-support" }
+carbide-tls = { path = "../tls" }
+hyper = { workspace = true, features = ["client", "http2"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 tokio = { features = ["test-util"], workspace = true }
+tokio-rustls = { workspace = true }
 
 [lints]
 workspace = true

@@ -46,3 +46,31 @@ func TestComponentOperationStatus_Equal(t *testing.T) {
 	assert.False(t, base.Equal(diffOpsLen))
 	assert.False(t, base.Equal(diffOpsOrder))
 }
+
+func TestAggregateComponentOperationStatus(t *testing.T) {
+	status := func(phase Phase) *ComponentOperationStatus {
+		return &ComponentOperationStatus{Phase: phase}
+	}
+
+	tests := []struct {
+		name     string
+		statuses []*ComponentOperationStatus
+		want     Phase
+	}{
+		{name: "all ready", statuses: []*ComponentOperationStatus{status(PhaseReady), status(PhaseReady)}, want: PhaseReady},
+		{name: "in use precedes ready", statuses: []*ComponentOperationStatus{status(PhaseReady), status(PhaseInUse)}, want: PhaseInUse},
+		{name: "deleting precedes in use", statuses: []*ComponentOperationStatus{status(PhaseInUse), status(PhaseDeleting)}, want: PhaseDeleting},
+		{name: "initializing precedes deleting", statuses: []*ComponentOperationStatus{status(PhaseDeleting), status(PhaseInitializing)}, want: PhaseInitializing},
+		{name: "error precedes initializing", statuses: []*ComponentOperationStatus{status(PhaseInitializing), status(PhaseError)}, want: PhaseError},
+		{name: "unknown precedes error", statuses: []*ComponentOperationStatus{status(PhaseError), status(PhaseUnknown)}, want: PhaseUnknown},
+		{name: "missing status is unknown", statuses: []*ComponentOperationStatus{status(PhaseError), nil}, want: PhaseUnknown},
+		{name: "unrecognized phase is unknown", statuses: []*ComponentOperationStatus{status(Phase("STALE")), status(PhaseError)}, want: PhaseUnknown},
+		{name: "empty rack is unknown", want: PhaseUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, AggregateComponentOperationStatus(tt.statuses))
+		})
+	}
+}

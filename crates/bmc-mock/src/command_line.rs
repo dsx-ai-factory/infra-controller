@@ -167,6 +167,21 @@ pub(super) struct Args {
     )]
     pub(super) ip_router: Option<Vec<IpRouterPair>>,
 
+    #[clap(
+        long,
+        conflicts_with_all = ["targz", "ip_router"],
+        help = "Require Redfish authentication on generated routers (disabled by default); use the profile credentials to rotate its factory password through AccountService before ordinary reads"
+    )]
+    pub(super) redfish_auth: bool,
+
+    #[clap(
+        long,
+        value_name = "SECONDS",
+        conflicts_with_all = ["targz", "ip_router"],
+        help = "Keep the generated BMC offline, answering 503, for this many seconds after Manager.Reset or the /ipmi mock action bmc_cold_reset; omitted or 0 makes a reset instantaneous"
+    )]
+    pub(super) bmc_reset_duration: Option<u64>,
+
     #[clap(long, help = "Start an IPMI/SOL simulator for the generated BMC mock")]
     pub(super) enable_ipmi_simulation: bool,
 
@@ -230,6 +245,35 @@ mod tests {
     use clap::error::ErrorKind;
 
     use super::*;
+
+    #[test]
+    fn generated_router_auth_rejects_archives() {
+        carbide_test_support::value_scenarios!(run = |(feature, archive, value)|
+            Args::try_parse_from(["bmc-mock", feature, archive, value]).unwrap_err().kind();
+            "generated-router options conflict with archives" {
+                ("--redfish-auth", "--targz", "fixture.tar.gz") => ErrorKind::ArgumentConflict,
+                ("--redfish-auth", "--ip-router", "127.0.0.1,fixture.tar.gz") => ErrorKind::ArgumentConflict,
+            }
+        );
+    }
+
+    #[test]
+    fn the_reset_window_is_a_generated_router_option() {
+        let args = Args::try_parse_from(["bmc-mock", "--bmc-reset-duration", "15"]).unwrap();
+        assert_eq!(args.bmc_reset_duration, Some(15));
+        assert_eq!(
+            Args::try_parse_from([
+                "bmc-mock",
+                "--bmc-reset-duration",
+                "15",
+                "--targz",
+                "x.tar.gz"
+            ])
+            .unwrap_err()
+            .kind(),
+            ErrorKind::ArgumentConflict
+        );
+    }
 
     #[test]
     fn parses_supported_hardware_profiles() {

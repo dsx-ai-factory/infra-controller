@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+use carbide_instrument::emit;
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
@@ -31,6 +32,7 @@ use model::network_segment::{
 };
 use sqlx::{PgConnection, PgTransaction};
 
+use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
 use crate::db_read::DbReader;
 use crate::instance_address::UsedOverlayNetworkIpResolver;
 use crate::ip_allocator::{IpAllocator, UsedIpResolver};
@@ -530,12 +532,13 @@ pub async fn reconcile_network_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed; warn and leave both in place.
             (Some(stored_def), true) => {
-                tracing::warn!(
-                    network_name = name,
-                    stored = ?stored_def,
-                    declared = ?def,
-                    "NetworkDefinition has changed since it was seeded; not re-applying"
-                );
+                emit(ConfigDefinitionDrifted {
+                    resource_kind: ConfigResourceKind::NetworkDefinition,
+                    drift_kind: ConfigDriftKind::Changed,
+                    name: name.clone(),
+                    stored: Some(format!("{stored_def:?}")),
+                    declared: Some(format!("{def:?}")),
+                });
             }
             // Network segment exists, but has no snapshot yet.
             // Pre-migration deployment or a network was re-added after a
@@ -582,10 +585,13 @@ pub async fn reconcile_network_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            tracing::warn!(
-                network_name = name,
-                "Network segment exists in database but is no longer declared in any config file"
-            );
+            emit(ConfigDefinitionDrifted {
+                resource_kind: ConfigResourceKind::NetworkDefinition,
+                drift_kind: ConfigDriftKind::Dropped,
+                name: name.clone(),
+                stored: None,
+                declared: None,
+            });
         }
     }
 

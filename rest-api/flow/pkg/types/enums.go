@@ -126,9 +126,10 @@ const (
 	LeakStatusNotDetected LeakStatus = "NOT_DETECTED"
 )
 
-// Phase is the coarse lifecycle bucket a component is in. Shared across
-// compute, nvswitch, and power shelf; map new core sub-states onto an
-// existing phase rather than adding new ones.
+// Phase is Flow's coarse operability bucket. Component phases are shared across
+// compute, nvswitch, and power shelf; map new Core sub-states onto an existing
+// phase rather than adding new ones. Rack operation status aggregates these
+// phases according to AggregateComponentOperationStatus.
 type Phase string
 
 const (
