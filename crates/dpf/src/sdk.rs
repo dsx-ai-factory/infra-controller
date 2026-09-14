@@ -758,12 +758,15 @@ fn is_legacy_pldm_bundle_type_rejection(error: &DpfError) -> bool {
     matches!(error, DpfError::KubeError(kube::Error::Api(status))
     if status.is_invalid()
         && status.details.as_ref().is_some_and(|details| {
-            details.causes.iter().any(|cause| {
-                cause.field == "spec.pldmFwBundle"
-                    && cause.reason == "FieldValueInvalid"
-                    && cause.message.contains("must be of type string")
-            })
-        }))
+                details.causes.iter().any(|cause| {
+                    cause.field == "spec.pldmFwBundle"
+                        && matches!(
+                            cause.reason.as_str(),
+                            "FieldValueInvalid" | "FieldValueTypeInvalid"
+                        )
+                        && cause.message.contains("must be of type string")
+                })
+            }))
 }
 
 /// Creates a DPUFlavor with a hash-derived name (`{default_flavor_name}-{spec_hash}`).
@@ -4014,14 +4017,14 @@ mod tests {
         }
     }
 
-    fn invalid_field_error(field: &str, message: &str) -> DpfError {
+    fn invalid_field_error(reason: &str, field: &str, message: &str) -> DpfError {
         let details = kube::core::response::StatusDetails {
             name: String::new(),
             group: String::new(),
             kind: String::new(),
             uid: String::new(),
             causes: vec![kube::core::response::StatusCause {
-                reason: "FieldValueInvalid".to_string(),
+                reason: reason.to_string(),
                 message: message.to_string(),
                 field: field.to_string(),
             }],
@@ -4054,12 +4057,14 @@ mod tests {
             match bfs.spec.pldm_fw_bundle.as_ref() {
                 Some(value) if value.is_object() => {
                     return Err(invalid_field_error(
+                        "FieldValueTypeInvalid",
                         self.map_rejection_field,
                         "Invalid value: \"object\": must be of type string",
                     ));
                 }
                 Some(value) if value.is_string() && self.reject_legacy => {
                     return Err(invalid_field_error(
+                        "FieldValueInvalid",
                         "spec.pldmFwBundle",
                         "legacy PLDM bundle rejected",
                     ));
@@ -4072,6 +4077,21 @@ mod tests {
         async fn delete(&self, _name: &str, _namespace: &str) -> Result<(), DpfError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn legacy_pldm_bundle_type_rejection_accepts_kubernetes_reason_variants() {
+        value_scenarios!(
+            run = |reason| is_legacy_pldm_bundle_type_rejection(&invalid_field_error(
+                reason,
+                "spec.pldmFwBundle",
+                "Invalid value: \"object\": must be of type string",
+            ));
+            "type rejection reasons" {
+                "FieldValueInvalid" => true,
+                "FieldValueTypeInvalid" => true,
+            }
+        );
     }
 
     #[tokio::test]
