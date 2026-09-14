@@ -96,6 +96,7 @@ use model::resource_pool::common::CommonPools;
 use model::site_explorer::ExploredEndpoint;
 use sku::{handle_bom_validation_requested, handle_bom_validation_state};
 use sqlx::PgConnection;
+use state_controller::CheckApplied as _;
 use state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -9154,7 +9155,8 @@ impl StateHandler for InstanceStateHandler {
                             version,
                             &netconf,
                         )
-                        .await?;
+                        .await?
+                        .check_applied()?;
                     }
 
                     let next_state = ManagedHostState::Assigned {
@@ -9438,7 +9440,8 @@ impl StateHandler for InstanceStateHandler {
                                 version,
                                 &netconf,
                             )
-                            .await?;
+                            .await?
+                            .check_applied()?;
                         }
                     }
                     let next_state = ManagedHostState::Assigned {

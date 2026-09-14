@@ -35,7 +35,10 @@ use carbide_uuid::machine::MachineType;
 use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
 use chrono::Utc;
 use config::SiteExplorerConfig;
-use db::{self, DatabaseError, Transaction, machine, power_shelf as db_power_shelf};
+use db::explored_endpoints::EndpointReportNotCurrent;
+use db::{
+    self, ConditionalWrite, DatabaseError, Transaction, machine, power_shelf as db_power_shelf,
+};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
@@ -3030,14 +3033,24 @@ impl SiteExplorer {
                         Err(e) => {
                             // If an endpoint can not be explored we don't delete the known information, since it's
                             // still helpful. The failure might just be intermittent.
-                            db::explored_endpoints::try_update_last_exploration_error(
-                                address,
-                                old_version,
-                                &e,
-                                exploration_duration,
-                                &mut txn,
-                            )
-                            .await?;
+                            let error_write =
+                                db::explored_endpoints::try_update_last_exploration_error(
+                                    address,
+                                    old_version,
+                                    &e,
+                                    exploration_duration,
+                                    &mut txn,
+                                )
+                                .await?;
+                            match error_write {
+                                ConditionalWrite::Applied(()) => {}
+                                ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+                                    // The endpoint disappeared or its report changed
+                                    // while we were probing. Don't remediate an error
+                                    // the database didn't accept.
+                                    redfish_error = None;
+                                }
+                            }
                             endpoint_error_update_attempts += 1;
                         }
                     }

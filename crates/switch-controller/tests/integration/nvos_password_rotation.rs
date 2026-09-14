@@ -30,7 +30,7 @@ use carbide_switch_controller::nvos_password_rotation::{
 use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
 use component_manager::mock::MockNvSwitchManager;
 use component_manager::nv_switch_manager::SwitchPasswordRotationState;
-use db::switch as db_switch;
+use db::{ConditionalWrite, switch as db_switch};
 use model::switch::{ConfiguringState, Switch, SwitchControllerState};
 use state_controller::db_write_batch::DbWriteBatch;
 use state_controller::state_handler::StateHandlerContext;
@@ -170,7 +170,7 @@ async fn stage_submitted_rotation(
     .await?;
 
     txn.commit().await?;
-    assert!(submitted);
+    assert_eq!(submitted, ConditionalWrite::Applied(()));
     Ok(attempt)
 }
 
