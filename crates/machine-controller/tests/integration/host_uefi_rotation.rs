@@ -111,9 +111,13 @@ async fn stage_lagging_host_uefi(
     {
         let mut conn = pool.acquire().await?;
         record_device_converged(&mut conn, host_mac, HOST_UEFI).await?;
-        set_next_target_version(&mut conn, HOST_UEFI, 0, serde_json::json!({}))
-            .await?
-            .expect("target must advance from version 0");
+        assert!(
+            matches!(
+                set_next_target_version(&mut conn, HOST_UEFI, 0, serde_json::json!({})).await?,
+                db::ConditionalWrite::Applied(_)
+            ),
+            "target must advance from version 0"
+        );
     }
     // The controller resolves the site-wide UEFI credential through the Redfish
     // pool's own store, so seed it there rather than in the API credential store.

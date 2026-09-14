@@ -1496,10 +1496,15 @@ mod tests {
             .await
             .unwrap();
         for expected in 0..steps {
-            set_next_target_version(&mut conn, BMC, expected, serde_json::json!({}))
-                .await
-                .unwrap()
-                .expect("target must advance from the expected current version");
+            assert!(
+                matches!(
+                    set_next_target_version(&mut conn, BMC, expected, serde_json::json!({}))
+                        .await
+                        .unwrap(),
+                    db::ConditionalWrite::Applied(_)
+                ),
+                "target must advance from the expected current version"
+            );
         }
     }
 
@@ -2428,10 +2433,20 @@ mod tests {
             .await
             .unwrap();
         for expected in 0..steps {
-            set_next_target_version(&mut conn, DPU_BMC_SERVICE, expected, serde_json::json!({}))
-                .await
-                .unwrap()
-                .expect("target must advance from the expected current version");
+            assert!(
+                matches!(
+                    set_next_target_version(
+                        &mut conn,
+                        DPU_BMC_SERVICE,
+                        expected,
+                        serde_json::json!({})
+                    )
+                    .await
+                    .unwrap(),
+                    db::ConditionalWrite::Applied(_)
+                ),
+                "target must advance from the expected current version"
+            );
         }
     }
 
