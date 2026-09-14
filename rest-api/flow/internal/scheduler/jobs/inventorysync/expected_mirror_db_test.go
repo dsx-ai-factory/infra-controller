@@ -36,8 +36,25 @@ func mirrorTestPool(t *testing.T) (context.Context, *cdb.Session) {
 	dbConf, err := cdb.ConfigFromEnv()
 	require.NoError(t, err)
 	pool, err := utils.UnitTestDB(ctx, t, dbConf)
+	t.Cleanup(pool.Close)
 	require.NoError(t, err)
 	return ctx, pool
+}
+
+func TestMirrorTestPool(t *testing.T) {
+	var pool *cdb.Session
+	if !t.Run("session", func(t *testing.T) {
+		ctx, session := mirrorTestPool(t)
+		pool = session
+		require.NoError(t, pool.DB.PingContext(ctx))
+	}) {
+		return
+	}
+	if pool == nil {
+		t.Skip("database fixture was skipped")
+	}
+	defer pool.Close()
+	assert.EqualError(t, pool.DB.PingContext(context.Background()), "sql: database is closed")
 }
 
 func strPtr(s string) *string { return &s }
