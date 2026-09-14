@@ -1068,11 +1068,12 @@ this request timeout, although the parser accepts other duration units such as
 milliseconds (`ms`), minutes (`m`), and hours (`h`). Without the block, NICo
 skips compute-tray pre-ingestion updates and both automatic rack maintenance
 update phases. An explicit maintenance request can supply a firmware object
-instead. If no firmware object is available while a switch in the maintenance
-scope is already waiting for an NVOS update, the rack transitions to `Error`
-instead of skipping the NVOS phase. The optional `access_token_credential`
-names a stored firmware artifact access token used by compute-tray
-pre-ingestion. When omitted, NICo sends the RMS no-auth sentinel.
+instead. If no firmware object is available while a selected switch is in
+`WaitingForNVOSUpgrade` for a reprovision request whose initiator is
+`rack-{rack_id}`, the rack transitions to `Error` instead of skipping the NVOS
+phase. The optional `access_token_credential` names a stored firmware artifact
+access token used by compute-tray pre-ingestion. When omitted, NICo sends the
+RMS no-auth sentinel.
 
 ---
 

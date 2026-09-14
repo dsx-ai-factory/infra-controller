@@ -48,7 +48,11 @@ RMS runs as its own Deployment in its own namespace, alongside NICo rather than 
 
 - **`rms-api-server`** runs in the **`rack-manager`** namespace and is reached through a
   ClusterIP Service of the same name. Port `8801` serves the gRPC API and port `8802` serves
-  Prometheus metrics.
+  Prometheus metrics at `/metrics`. The RMS chart's `ServiceMonitor` is disabled by the NICo
+  site values and enabled by `setup.sh` only with `--with-observability`. Sites can instead
+  configure an OpenTelemetry Collector to scrape the endpoint. When collectors run as a
+  DaemonSet, shard the target so only one collector scrapes it and duplicate samples are not
+  produced. The RMS API Deployment does not define Kubernetes liveness or readiness probes.
 - **Replica count is one.** RMS does not yet share state between replicas, so a load-balanced
   deployment can return inconsistent results.
 - **Runtime configuration** is a single TOML file the container reads at startup from
@@ -114,7 +118,10 @@ to RMS in four steps:
    not firmware binaries. NICo does not verify the manifest with a signature or digest.
 4. NICo sends the document body **inline** to RMS as the `config_json` field of
    `apply_firmware_object`, alongside the rack identifier, the resolved node set, the firmware
-   and hardware types, and an artifact access token.
+   and hardware types. Automatic profile-driven maintenance has no caller token: rack firmware
+   submits no token and the backend substitutes the `NOAUTH` value, while the NVOS path sends
+   `NOAUTH` directly. An explicit maintenance request instead loads and sends its stored
+   artifact access token.
 
 RMS then reads the artifact URLs from the manifest body that NICo forwarded and downloads the
 artifact payloads itself. The payloads do not pass through NICo. The artifact host must
