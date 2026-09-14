@@ -3288,6 +3288,7 @@ dependencies = [
  "serde",
  "size",
  "strip-ansi-escapes",
+ "surge-ping",
  "temp-dir",
  "thiserror 2.0.18",
  "tokio",
