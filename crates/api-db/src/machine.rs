@@ -2379,6 +2379,60 @@ where
         .collect::<Result<Vec<ID>, _>>()?)
 }
 
+/// `try_update_controller_state` updates a host and its attached DPUs only if
+/// the host's controller-state version still matches `expected_version`.
+///
+/// The caller supplies `new_version` for every machine and its history entry.
+/// `false` means the host is missing or its version changed; no state or
+/// history changes remain. Successful writes remain in the caller's transaction.
+pub async fn try_update_controller_state(
+    txn: &mut PgConnection,
+    host_id: &HostMachineId,
+    expected_version: ConfigVersion,
+    new_version: ConfigVersion,
+    new_state: &ManagedHostState,
+) -> Result<bool, DatabaseError> {
+    let mut inner_txn = Transaction::begin_inner(txn).await?;
+
+    // `advance` takes the history retention lock before the machine row lock.
+    // Reversing that order can deadlock. Roll back the history if the host
+    // version changed.
+    crate::state_history::persist(
+        inner_txn.as_pgconn(),
+        crate::state_history::StateHistoryTableId::Machine,
+        host_id,
+        new_state,
+        new_version,
+    )
+    .await?;
+
+    let query = r#"
+        UPDATE machines
+        SET controller_state_version = $1, controller_state = $2
+        WHERE id = $3 AND controller_state_version = $4
+        RETURNING id
+    "#;
+    let updated: Option<HostMachineId> = sqlx::query_scalar(query)
+        .bind(new_version)
+        .bind(sqlx::types::Json(new_state))
+        .bind(host_id)
+        .bind(expected_version)
+        .fetch_optional(inner_txn.as_pgconn())
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if updated.is_none() {
+        inner_txn.rollback().await?;
+        return Ok(false);
+    }
+
+    tracing::info!(machine_id = %host_id, next_state = ?new_state, "Updating host state");
+    for dpu in find_dpus_by_host_machine_id(inner_txn.as_pgconn(), host_id).await? {
+        advance(&dpu, inner_txn.as_pgconn(), new_state, Some(new_version)).await?;
+    }
+    inner_txn.commit().await?;
+    Ok(true)
+}
+
 pub async fn update_state(
     txn: &mut PgConnection,
     host_id: &HostMachineId,
@@ -3784,6 +3838,108 @@ mod test {
             "both dpa_interfaces rows should cascade to the stable id",
         );
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn controller_state_persistence_preserves_advance_lock_order(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id =
+            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
+        let host_id = HostMachineId::try_from(machine_id)?;
+        let mut setup_txn = pool.begin().await?;
+        super::create(
+            setup_txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        setup_txn.commit().await?;
+
+        let mut legacy_txn = pool.begin().await?;
+        let machine = super::find_one(
+            legacy_txn.as_mut(),
+            &host_id,
+            MachineSearchConfig::default(),
+        )
+        .await?
+        .expect("fixture host");
+        let expected_version = machine.state.version;
+        let new_version = expected_version.increment();
+        let legacy_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(legacy_txn.as_mut())
+            .await?;
+
+        // Pause the legacy writer at the retention lock taken by `advance`.
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(\
+                hashtextextended($1, 'machine_state_history'::regclass::bigint)\
+            )",
+        )
+        .bind(host_id.to_string())
+        .execute(legacy_txn.as_mut())
+        .await?;
+
+        let mut controller_txn = pool.begin().await?;
+        let controller_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(controller_txn.as_mut())
+            .await?;
+        let controller_write = async {
+            let applied = super::try_update_controller_state(
+                controller_txn.as_mut(),
+                &host_id,
+                expected_version,
+                new_version,
+                &ManagedHostState::Ready,
+            )
+            .await?;
+            controller_txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(applied)
+        };
+        let legacy_write = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM pg_locks
+                        WHERE pid = $1 AND locktype = 'advisory' AND NOT granted
+                          AND $2 = ANY(pg_blocking_pids(pid))
+                    )",
+                )
+                .bind(controller_pid)
+                .bind(legacy_pid)
+                .fetch_one(&pool)
+                .await?;
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+
+            // Waiting for history must not hold the host row. NOWAIT catches
+            // the reversed order without relying on a deadlock victim.
+            sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT")
+                .bind(host_id)
+                .fetch_one(legacy_txn.as_mut())
+                .await?;
+            super::advance(
+                &machine,
+                legacy_txn.as_mut(),
+                &ManagedHostState::ForceDeletion,
+                Some(new_version),
+            )
+            .await?;
+            legacy_txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (applied, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::try_join!(controller_write, legacy_write)
+        })
+        .await??;
+        assert!(!applied, "the controller must reject the earlier snapshot");
         Ok(())
     }
 

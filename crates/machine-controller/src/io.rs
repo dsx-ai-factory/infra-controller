@@ -109,18 +109,22 @@ impl StateControllerIO for MachineStateControllerIO {
         &self,
         txn: &mut PgConnection,
         object_id: &Self::ObjectId,
-        _old_version: ConfigVersion,
-        _new_version: ConfigVersion,
+        old_version: ConfigVersion,
+        new_version: ConfigVersion,
         new_state: &Self::ControllerState,
     ) -> Result<bool, DatabaseError> {
-        db::machine::update_state(txn, object_id, new_state).await?;
-        Ok(true)
+        db::machine::try_update_controller_state(
+            txn,
+            object_id,
+            old_version,
+            new_version,
+            new_state,
+        )
+        .await
     }
 
-    /// State history for machines (including DPUs) is persisted internally by
-    /// `db::machine::advance()` inside `update_state`, so this is actually a
-    /// no-op for now.
-    // TODO(chet): Pull this in as well.
+    /// Machine persistence writes history before updating each machine, matching
+    /// `advance`'s lock order. Moving history here could deadlock with `advance`.
     async fn persist_state_history(
         &self,
         _txn: &mut PgConnection,
