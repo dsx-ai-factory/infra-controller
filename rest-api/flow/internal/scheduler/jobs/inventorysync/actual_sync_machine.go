@@ -42,11 +42,11 @@ func filterHostMachineDetails(machineDetails []nicoapi.MachineDetail) []nicoapi.
 // syncMachines: sync machine components against NICo
 // ---------------------------------------------------------------------------
 //
-// NICo API calls (3 round-trips):
+// NICo API calls (4 round-trips):
 //   - GetMachines (FindMachineIds + FindMachinesByIds): BMC-MAC linking,
-//     firmware_version and controller_state direct-write, plus
-//     missing_in_expected detection
+//     controller_state direct-write, plus missing_in_expected detection
 //   - GetPowerStates: power_state direct-write
+//   - GetComponentInventory: firmware_version direct-write
 //   - GetMachinePositionInfo: position validation fields for drift comparison
 //
 // Flow:
@@ -56,8 +56,9 @@ func filterHostMachineDetails(machineDetails []nicoapi.MachineDetail) []nicoapi.
 //  3. Link by BMC MAC (from step 2 data) → direct-write external_id
 //  4. Reconcile associated DPU BMC children by MAC from the same snapshot
 //  5. NICo GetPowerStates: direct-write power_state
-//  6. Direct-write firmware_version (from step 2 data)
-//  7. NICo GetMachinePositionInfo: compare validation fields, return drifts
+//  6. NICo GetComponentInventory: direct-write firmware_version
+//  7. Direct-write controller status (from step 2 data)
+//  8. NICo GetMachinePositionInfo: compare validation fields, return drifts
 //
 // Correlation/identity key: BMC MAC address (serial number is not used).
 // Validation fields (compared for drift): slot_id, tray_index, host_id
@@ -80,8 +81,8 @@ func syncMachines(
 	// compute components. The empty expected set still needs an authoritative
 	// Core query so discovered hosts become missing_in_expected drift, while an
 	// RPC failure remains distinguishable from a successful empty inventory.
-	// This is also the single source for BMC-MAC linking, firmware_version,
-	// controller_state, and missing_in_expected detection — a failure here means
+	// This is also the single source for BMC-MAC linking, controller_state, and
+	// missing_in_expected detection — a failure here means
 	// we can't trust this cycle, so preserve prior state rather than writing a
 	// partial view.
 	allMachineDetails, err := nicoClient.GetMachines(ctx)
@@ -142,13 +143,36 @@ func syncMachines(
 	// Step 5: Direct-write power_state (requires separate NICo API)
 	syncPowerStates(ctx, pool, nicoClient, machineIDs, componentsByExternalID)
 
-	// Step 6: Direct-write firmware_version (from pre-fetched details, no extra API call)
-	syncFirmwareVersions(ctx, pool, detailByID, componentsByExternalID)
+	// Step 6: Direct-write firmware_version from the same component inventory
+	// contract used by switch and power-shelf synchronization. Inventory is
+	// best-effort: a failed call preserves the previously stored version without
+	// making the independently computed drift snapshot partial.
+	componentMachineIDs := make([]*corev1.MachineId, 0, len(machineIDs))
+	inventoryComponents := make(map[string]*model.Component, len(machineIDs))
+	for _, machineID := range machineIDs {
+		if _, matched := detailByID[machineID]; !matched {
+			continue
+		}
+		componentMachineIDs = append(componentMachineIDs, &corev1.MachineId{Id: machineID})
+		inventoryComponents[machineID] = componentsByExternalID[machineID]
+	}
+	if len(componentMachineIDs) > 0 {
+		invResp, err := nicoClient.GetComponentInventory(ctx, &corev1.GetComponentInventoryRequest{
+			Target: &corev1.GetComponentInventoryRequest_MachineIds{
+				MachineIds: &corev1.MachineIdList{MachineIds: componentMachineIDs},
+			},
+		})
+		if err != nil {
+			log.Error().Msgf("Unable to retrieve compute inventory from NICo: %v", err)
+		} else {
+			applyFirmwareInventoryToComponents(ctx, pool, invResp, inventoryComponents)
+		}
+	}
 
-	// Step 6b: Direct-write derived ComponentOperationStatus (from pre-fetched detail.State).
+	// Step 7: Direct-write derived ComponentOperationStatus (from pre-fetched detail.State).
 	syncMachineStatuses(ctx, pool, detailByID, componentsByExternalID)
 
-	// Step 7: Fetch positions and build drift records (requires separate NICo API)
+	// Step 8: Fetch positions and build drift records (requires separate NICo API)
 	machinePositions, err := nicoClient.GetMachinePositionInfo(ctx, machineIDs)
 	if err != nil {
 		log.Error().Msgf("Unable to retrieve machine positions from NICo: %v", err)
@@ -323,7 +347,7 @@ func syncMachineIDs(
 		if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
 			for _, cur := range toUpdate {
 				if err := cur.Patch(ctx, tx); err != nil {
-					return fmt.Errorf("Unable to update machine ID: %w", err)
+					return fmt.Errorf("unable to update machine ID: %w", err)
 				}
 			}
 			return nil
@@ -365,43 +389,12 @@ func syncPowerStates(
 		if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
 			for _, cur := range toUpdate {
 				if err := cur.SetPowerStateByComponentID(ctx, tx); err != nil {
-					return fmt.Errorf("Unable to update power state: %w", err)
+					return fmt.Errorf("unable to update power state: %w", err)
 				}
 			}
 			return nil
 		}); err != nil {
 			log.Error().Msgf("Unable to update components with power state: %v", err)
-		}
-	}
-}
-
-// syncFirmwareVersions direct-writes firmware_version from NICo machine details to component table.
-func syncFirmwareVersions(
-	ctx context.Context,
-	pool *cdb.Session,
-	detailByID map[string]nicoapi.MachineDetail,
-	componentsByExternalID map[string]*model.Component,
-) {
-	var toUpdate []model.Component
-	for machineID, detail := range detailByID {
-		if comp, ok := componentsByExternalID[machineID]; ok {
-			if detail.FirmwareVersion != "" && comp.FirmwareVersion != detail.FirmwareVersion {
-				comp.FirmwareVersion = detail.FirmwareVersion
-				toUpdate = append(toUpdate, *comp)
-			}
-		}
-	}
-
-	if len(toUpdate) > 0 {
-		if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
-			for _, cur := range toUpdate {
-				if err := cur.SetFirmwareVersionByComponentID(ctx, tx); err != nil {
-					return fmt.Errorf("unable to update firmware version: %w", err)
-				}
-			}
-			return nil
-		}); err != nil {
-			log.Error().Msgf("Unable to update components with firmware version: %v", err)
 		}
 	}
 }

@@ -13,6 +13,8 @@ Authorization is role based. NICo supports two roles:
 
 The organization and role that NICo derives from the token determine which API flows are available to the caller. After authentication is configured, API users normally start by retrieving their current Service Account, Infrastructure Provider, or Tenant as described in the [Getting Started](/infra-controller/rest-api-reference/getting-started) section.
 
+Configuring authentication is a Day 0 task. Once it is in place, the Day 1 operator workflow for creating tenants, linking them to an infrastructure provider, and allocating capacity is [Tenant Management](https://docs.nvidia.com/infra-controller/documentation/configuration-day-1/tenant-management).
+
 The sequence diagram below illustrates the typical authentication and authorization flow when using issuer config.
 
 ```mermaid

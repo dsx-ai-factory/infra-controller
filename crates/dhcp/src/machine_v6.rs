@@ -69,6 +69,19 @@ pub extern "C" fn carbide_v6_hook_result_as_str(result: V6HookResult) -> *const 
 
 /// Build the Carbide DHCP discovery request for a decoded DHCPv6 packet.
 fn build_discovery(v6: &V6Discovery) -> rpc::DhcpDiscovery {
+    let rapid_commit_enabled = crate::hook_get_config_rapid_commit_v6();
+    // An opted-in stateful SOLICIT completes allocation in one exchange, so
+    // the API must apply request semantics before Kea persists the lease.
+    let message_kind = if rapid_commit_enabled
+        && v6.message_type == MessageType::Solicit
+        && v6.has_ia_na
+        && v6.rapid_commit_requested
+    {
+        Some(rpc::MessageKind::V6Request)
+    } else {
+        message_kind_for(v6.message_type, v6.has_ia_na)
+    };
+
     rpc::DhcpDiscovery {
         mac_address: v6.selected_mac.to_string(),
         relay_address: v6
@@ -81,7 +94,7 @@ fn build_discovery(v6: &V6Discovery) -> rpc::DhcpDiscovery {
         remote_id: v6.remote_id.as_deref().map(hex_encode),
         desired_address: v6.desired_addr.map(|addr| addr.to_string()),
         address_family: Some(rpc::AddressFamily::V6 as i32),
-        message_kind: message_kind_for(v6.message_type, v6.has_ia_na).map(|kind| kind as i32),
+        message_kind: message_kind.map(|kind| kind as i32),
         duid: Some(v6.duid.clone()),
     }
 }
@@ -602,6 +615,7 @@ mod tests {
             desired_addr: Some("2001:db8::42".parse().unwrap()),
             ia_addrs: vec!["2001:db8::42".parse().unwrap()],
             has_ia_na,
+            rapid_commit_requested: false,
             client_link_layer: None,
         }
     }

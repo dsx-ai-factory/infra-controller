@@ -22,14 +22,32 @@ use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge as forgerpc;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::vpc::VpcId;
-use prettytable::{Table, row};
+use prettytable::{Cell, Row, Table};
 use rpc::Machine;
+use tracing::warn;
 
 use super::args::Args;
 use crate::cfg::cli_options::SortField;
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
+use crate::table_utils::{ColumnSelection, ColumnWidths};
 use crate::{async_write, async_write_table_as_csv, async_writeln};
+
+const HEADERS: [&str; 13] = [
+    "",
+    "Id",
+    "State",
+    "State Version",
+    "Attached DPUs",
+    "Primary Interface",
+    "IP Address",
+    "MAC Address",
+    "Type",
+    "Vendor",
+    "Slot",
+    "Tray",
+    "Labels",
+];
 
 #[allow(deprecated)]
 fn convert_machine_to_nice_format(
@@ -219,24 +237,21 @@ fn get_machine_type(machine_id: Option<MachineId>) -> String {
 }
 
 #[allow(deprecated)]
-fn convert_machines_to_nice_table(machines: forgerpc::MachineList) -> Box<Table> {
+fn convert_machines_to_nice_table(
+    machines: forgerpc::MachineList,
+    widths: Option<&ColumnWidths>,
+    columns: &ColumnSelection,
+) -> Box<Table> {
     let mut table = Box::new(Table::new());
 
-    table.set_titles(row![
-        "",
-        "Id",
-        "State",
-        "State Version",
-        "Attached DPUs",
-        "Primary Interface",
-        "IP Address",
-        "MAC Address",
-        "Type",
-        "Vendor",
-        "Slot",
-        "Tray",
-        "Labels",
-    ]);
+    let ordered_headers = columns.ordered_headers(&HEADERS);
+
+    table.set_titles(Row::new(
+        ordered_headers
+            .iter()
+            .map(|h| Cell::new(h))
+            .collect::<Vec<Cell>>(),
+    ));
 
     for machine in machines.machines {
         let machine_id_string = machine.id.map(|id| id.to_string()).unwrap_or_default();
@@ -305,7 +320,7 @@ fn convert_machines_to_nice_table(machines: forgerpc::MachineList) -> Box<Table>
             .map(|x| !x.alerts.is_empty())
             .unwrap_or_default();
 
-        table.add_row(row![
+        let row_data = vec![
             String::from(if is_unhealthy { "U" } else { "H" }),
             machine_id_string,
             machine.state.to_uppercase(),
@@ -318,8 +333,25 @@ fn convert_machines_to_nice_table(machines: forgerpc::MachineList) -> Box<Table>
             vendor,
             slot_number,
             tray_index,
-            labels.join(", ")
-        ]);
+            labels.join(", "),
+        ];
+
+        let values_by_header: std::collections::HashMap<&str, String> =
+            HEADERS.into_iter().zip(row_data).collect();
+
+        table.add_row(Row::new(
+            ordered_headers
+                .iter()
+                .map(|header| {
+                    let v = values_by_header.get(header).cloned().unwrap_or_default();
+                    let v = match widths {
+                        Some(widths) => widths.truncate(header, &v),
+                        None => v,
+                    };
+                    Cell::new(&v)
+                })
+                .collect(),
+        ));
     }
 
     table
@@ -344,6 +376,11 @@ fn rehydrate_machine_memory_devices(machine: &mut rpc::Machine) -> CarbideCliRes
     Ok(())
 }
 
+struct TableDisplayOptions<'a> {
+    widths: &'a ColumnWidths,
+    columns: &'a ColumnSelection,
+}
+
 #[allow(deprecated)]
 async fn show_all_machines(
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
@@ -352,6 +389,7 @@ async fn show_all_machines(
     search_config: rpc::forge::MachineSearchConfig,
     page_size: usize,
     sort_by: &SortField,
+    display: &TableDisplayOptions<'_>,
 ) -> CarbideCliResult<()> {
     let mut machines = api_client
         .get_all_machines(search_config, page_size)
@@ -385,11 +423,12 @@ async fn show_all_machines(
             async_writeln!(output_file, "{}", serde_json::to_string_pretty(&machines)?)?;
         }
         OutputFormat::AsciiTable => {
-            let table = convert_machines_to_nice_table(machines);
+            let table =
+                convert_machines_to_nice_table(machines, Some(display.widths), display.columns);
             async_write!(output_file, "{}", table)?;
         }
         OutputFormat::Csv => {
-            let table = convert_machines_to_nice_table(machines);
+            let table = convert_machines_to_nice_table(machines, None, display.columns);
             async_write_table_as_csv!(output_file, table)?;
         }
         OutputFormat::Yaml => {
@@ -453,6 +492,14 @@ pub(crate) async fn handle_show(
             include_predicted_host: args.hosts || show_all_types,
             ..Default::default()
         };
+        let widths = args.width.widths();
+        if let Some(message) = widths.describe_unmatched_columns(&HEADERS) {
+            warn!("{message}");
+        }
+        let columns = args.columns.selection();
+        if let Some(message) = columns.describe_unmatched_columns(&HEADERS) {
+            warn!("{message}");
+        }
         show_all_machines(
             output_file,
             output_format,
@@ -460,6 +507,10 @@ pub(crate) async fn handle_show(
             search_config,
             page_size,
             sort_by,
+            &TableDisplayOptions {
+                widths: &widths,
+                columns: &columns,
+            },
         )
         .await?;
     }
@@ -732,5 +783,46 @@ mod tests {
         assert!(json.contains("DDR5"));
         assert!(json.contains("DDR4"));
         assert!(!json.contains("memory_device_groups"));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn max_width_narrower_than_header_floors_at_header_length() {
+        let machines = forgerpc::MachineList {
+            machines: vec![forgerpc::Machine {
+                state: "a very long error message".to_string(),
+                ..Default::default()
+            }],
+        };
+        // "State" is 5 characters; requesting width 1 must not truncate
+        // values below what's already needed to fit the header, since the
+        // column can't render narrower than its header anyway.
+        let widths = ColumnWidths::new(&[crate::table_utils::MaxWidthSpec::Column(
+            "State".to_string(),
+            1,
+        )]);
+        let columns = ColumnSelection::default();
+
+        let table = convert_machines_to_nice_table(machines, Some(&widths), &columns);
+
+        assert!(
+            table.to_string().contains("State"),
+            "header should render in full"
+        );
+
+        let row = table.get_row(0).expect("one data row");
+        let state_idx = HEADERS.iter().position(|h| *h == "State").unwrap();
+        let vendor_idx = HEADERS.iter().position(|h| *h == "Vendor").unwrap();
+
+        assert_eq!(
+            row.get_cell(state_idx).unwrap().get_content(),
+            "A ...",
+            "populated value should truncate to the header's length (5), not the requested width (1)"
+        );
+        assert_eq!(
+            row.get_cell(vendor_idx).unwrap().get_content(),
+            "",
+            "a column with no data should render as an empty cell"
+        );
     }
 }

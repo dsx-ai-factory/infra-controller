@@ -157,10 +157,14 @@ The API allocates from these pools when creating instances, VPCs, etc.
 
 ### Networks
 
-`[networks.<name>]` — one block per L3 segment. Fields: `type` (`admin` |
-`underlay`), `prefix`, `gateway`, `mtu`, `reserve_first`. The `admin` network
-is mandatory and must have a non-empty `prefix` and `gateway` — `nico-api`
-crashes at startup if either is missing.
+Each `[networks.<name>]` block defines one L3 segment to create at startup, with
+`type` (`admin`, `underlay`, or `hostinband`), `prefix`, `mtu`, and `reserve_first`.
+Definitions support IPv4-only, IPv6-only, or both address families (dual-stack).
+A gateway is required whenever an IPv4 prefix is present. DPU provisioning
+requires an admin segment with an IPv4 prefix and gateway. Editing the
+configuration does not update an existing segment. Refer to
+[Initial Network Configuration](../../../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration)
+for `prefix_v6`, `dhcpv6_link_address`, examples, and compatibility requirements.
 
 ### Tenant traffic policy
 
@@ -194,7 +198,6 @@ explicitly enabled in the TOML.
 | `[vmaas_config]` | VM system integration / VM-aware traffic intercept | Requires `public_prefixes`. |
 | `[rms]` | Rack Manager Service (mTLS connectivity to external RMS) | |
 | `[dpf]` | DPU Platform Framework — Kubernetes DPU workload deployment | Requires the DPF operator deployed in-cluster (`helm-prereqs/setup.sh` installs it by default; `--skip-dpf` to opt out). |
-| `rack_management_enabled` | Standalone infrastructure manager mode (GB200/GB300/VR144) | Top-level boolean, not a sub-section. |
 
 For RMS component-manager backends, NICo builds RMS node descriptors from rack
 profiles. Each descriptor contains three attributes:
@@ -1470,7 +1473,6 @@ on or off.
 | Machine Identity (SPIFFE JWT-SVID) | siteConfig | `[machine_identity].enabled` | off | Per-org JWT signing for machine identity tokens. See [Day 0](../../../docs/getting-started/installation-options/day0-machine-identity.md) and [Day 1](../../../docs/configuration/machine_identity.md) docs. |
 | Machine Validation | siteConfig | `[machine_validation_config].enabled` | off | Pre-ingestion validation tests. |
 | SPDM | siteConfig | `[spdm].enabled` | off | Hardware attestation via NRAS. |
-| Rack Management | siteConfig | `rack_management_enabled = true` | off | Standalone infrastructure manager mode (GB200/GB300/VR144). |
 | Site Explorer machine auto-creation | siteConfig | `[site_explorer].create_machines` | on | Disable for manual-onboarding environments. |
 | Site Explorer switch / power shelf auto-creation | siteConfig | `[site_explorer].create_switches` / `[site_explorer].create_power_shelves` | on | Ingests only declared hardware (`expected_switches` / `expected_power_shelves` records). Disable to pause switch or power shelf ingestion site-wide. |
 | Firmware autoupdate | siteConfig | `[firmware_global].autoupdate` | off | Enable once the fleet's firmware baseline is stable. |

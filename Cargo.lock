@@ -837,6 +837,7 @@ dependencies = [
  "bytes",
  "carbide-axum-utils",
  "carbide-test-support",
+ "carbide-tls",
  "chrono",
  "clap",
  "eyre",
@@ -845,6 +846,7 @@ dependencies = [
  "futures",
  "http-body-util",
  "hyper",
+ "hyper-util",
  "indexmap 2.14.0",
  "itertools 0.14.0",
  "lazy_static",
@@ -862,6 +864,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http 0.7.0",
  "tracing",
@@ -1530,6 +1534,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "axum",
+ "carbide-test-support",
  "duration-str",
  "glob",
  "rand 0.10.1",
@@ -1747,16 +1752,23 @@ dependencies = [
  "clap",
  "dns-record",
  "eyre",
+ "futures",
  "hickory-resolver",
  "hickory-server",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "logfmt",
  "lru",
  "metrics-endpoint",
  "opentelemetry 0.32.0",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "prost",
  "serde",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tracing",
@@ -2895,7 +2907,6 @@ dependencies = [
  "config-version",
  "duration-str",
  "eyre",
- "librms",
  "mac_address",
  "opentelemetry 0.32.0",
  "reqwest 0.13.4",
@@ -7419,16 +7430,21 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "color-eyre",
+ "config-version",
  "csv",
  "eyre",
  "futures",
  "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ipnet",
  "libredfish",
  "librms",
  "mac_address",
  "pandoc",
  "prettytable-rs",
+ "prost",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -11810,16 +11826,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-serde"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
-dependencies = [
- "serde",
- "tracing-core",
-]
-
-[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11829,8 +11835,6 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
- "serde",
- "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
@@ -11838,7 +11842,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
- "tracing-serde",
 ]
 
 [[package]]

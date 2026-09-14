@@ -167,7 +167,7 @@ Normal tenants should omit `isRepairTenant` or set it to `false`.
 }
 ```
 
-`isRepairTenant: true` is for repair tenants that are releasing a machine after investigation or repair. It requires the tenant to have the targeted instance creation capability. Do not set this flag for the original tenant's release-for-repair request.
+`isRepairTenant: true` is for repair tenants that are releasing a machine after investigation or repair. It requires effective targeted instance creation for the tenant, which a Provider Admin grants on the tenant account; see [Granting Targeted Instance Creation](../../configuration/tenant_management.md#granting-targeted-instance-creation) for what makes it effective. Do not set this flag for the original tenant's release-for-repair request.
 
 ## After Release
 

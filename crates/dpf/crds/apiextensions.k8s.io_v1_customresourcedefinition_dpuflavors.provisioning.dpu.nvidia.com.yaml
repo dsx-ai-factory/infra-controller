@@ -138,6 +138,21 @@ spec:
                       registry.
                     type: string
                 type: object
+              dma:
+                description: |-
+                  DMA configures the DMA SF that e.g. SNAP DOCA service uses to DMA host
+                  memory over the second Grace PCI link on BlueField-4 socket-direct
+                  systems.
+                properties:
+                  enabled:
+                    description: |-
+                      Enabled controls whether the dpu-agent creates the DMA SF. Defaults to
+                      false when unset, so the presence of the dma struct alone does not enable
+                      creation. Only takes effect on BlueField-4 socket-direct systems. The
+                      created Scalable Function always uses sfnum 8000, the SNAP discovery ABI
+                      value.
+                    type: boolean
+                type: object
               dpuMode:
                 description: |-
                   DpuMode is deprecated and no longer used by provisioning workflows.
@@ -193,9 +208,9 @@ spec:
                       properties:
                         conf:
                           description: |-
-                            Conf is the <conf_name> argument passed to `mlxconfig set_system_conf`.
-                            The per-ASIC index is appended automatically by the daemon based on the
-                            device's detected Network Bay ASIC index, e.g. set_system_conf <conf>[0].
+                            Conf is the mlxconfig system configuration profile name. The daemon resolves
+                            the profile parameters for the device's detected Network Bay ASIC and manages
+                            them through the regular mlxconfig validation and apply flow.
                           type: string
                       required:
                       - conf
@@ -340,6 +355,15 @@ spec:
                           - P0
                           - P1
                           type: string
+                        force:
+                          description: |-
+                            force applies the parameters with `mlxconfig --force` and skips the `mlxconfig q` filter,
+                            so parameters firmware does not yet expose are applied now instead of deferred to a later
+                            reboot. Required when a parameter is gated behind another parameter in the same batch.
+                            Requires DOCA 3.5.0 or later; on an older DOCA version the operation fails.
+                            `--force` skips validation for the whole batch, so an invalid value is applied silently.
+                            Ignored under `spec.hostNetworkInterfaceConfigs[].nvconfig`.
+                          type: boolean
                         parameters:
                           description: |-
                             Parameters are the parameters to be set for the device.
@@ -349,7 +373,7 @@ spec:
                             maxLength: 200
                             pattern: ^[^=\s]+=[^\s]*$
                             type: string
-                          maxItems: 32
+                          maxItems: 64
                           minItems: 1
                           type: array
                           x-kubernetes-list-type: atomic
@@ -365,32 +389,6 @@ spec:
                   - portNumber
                   type: object
                 type: array
-              hostOSInit:
-                description: |-
-                  hostOSInit configures when the DPU agent releases host OS init after DELAY_HOST_OS_INIT=0x3
-                  (ENABLE_USER) is set in nvconfig. Omitted releaseAfter defaults to dpuServiceCriticalPodsReady
-                  at agent runtime. Has no effect unless nvconfig requests that hold.
-                properties:
-                  releaseAfter:
-                    description: |-
-                      releaseAfter selects which operational readiness gate must be True before the agent
-                      calls mlxreg to release the host. When omitted, dpuServiceCriticalPodsReady is used.
-                    properties:
-                      dpuServiceCriticalPodsReady:
-                        description: dpuServiceCriticalPodsReady waits for DPU.status.operationalConditions[DPUServiceCriticalPodsReady]
-                          == True.
-                        type: object
-                      operationalReady:
-                        description: operationalReady waits for DPU.status.operationalConditions[OperationalReady]
-                          == True.
-                        type: object
-                    type: object
-                    x-kubernetes-validations:
-                    - message: exactly one of operationalReady or dpuServiceCriticalPodsReady
-                        must be set
-                      rule: '(has(self.operationalReady) ? 1 : 0) + (has(self.dpuServiceCriticalPodsReady)
-                        ? 1 : 0) == 1'
-                type: object
               nvconfig:
                 description: |-
                   NVConfig contains the device-specific configuration (firmware settings, device parameters).
@@ -411,6 +409,15 @@ spec:
                       - P0
                       - P1
                       type: string
+                    force:
+                      description: |-
+                        force applies the parameters with `mlxconfig --force` and skips the `mlxconfig q` filter,
+                        so parameters firmware does not yet expose are applied now instead of deferred to a later
+                        reboot. Required when a parameter is gated behind another parameter in the same batch.
+                        Requires DOCA 3.5.0 or later; on an older DOCA version the operation fails.
+                        `--force` skips validation for the whole batch, so an invalid value is applied silently.
+                        Ignored under `spec.hostNetworkInterfaceConfigs[].nvconfig`.
+                      type: boolean
                     parameters:
                       description: |-
                         Parameters are the parameters to be set for the device.
@@ -420,7 +427,7 @@ spec:
                         maxLength: 200
                         pattern: ^[^=\s]+=[^\s]*$
                         type: string
-                      maxItems: 32
+                      maxItems: 64
                       minItems: 1
                       type: array
                       x-kubernetes-list-type: atomic
@@ -444,8 +451,10 @@ spec:
                 description: OVS contains the OVS configuration for the DPUFlavor.
                 properties:
                   rawConfigScript:
-                    description: RawConfigScript is the raw configuration script for
-                      OVS.
+                    description: |-
+                      RawConfigScript is the raw configuration script for OVS.
+                      The DPU agent runs this script once per boot. A restart of the agent in the
+                      same boot does not re-run it; a reboot or power cycle does.
                     type: string
                 type: object
               packages:
@@ -494,39 +503,18 @@ spec:
                 x-kubernetes-validations:
                 - message: package names must be unique
                   rule: self.all(x, self.exists_one(y, x.name == y.name))
-              scalableFunctions:
-                description: ScalableFunctions configures Scalable Functions (SFs)
-                  created on the DPU.
+              serviceReadiness:
+                description: serviceReadiness configures the Service Readiness phase.
                 properties:
-                  dma:
+                  gate:
                     description: |-
-                      DMA configures the DMA SF that e.g. SNAP DOCA service uses to DMA host
-                      memory over the second Grace PCI link on BlueField-4 socket-direct
-                      systems.
-                    properties:
-                      enabled:
-                        description: |-
-                          Enabled controls whether the dpu-agent creates the DMA SF. The presence of
-                          the dma struct alone does not enable creation; enabled must be set
-                          explicitly. Only takes effect on BlueField-4 socket-direct systems.
-                        type: boolean
-                      macAddress:
-                        description: |-
-                          MACAddress pins the DMA SF's MAC address (canonical colon-separated
-                          48-bit form, e.g. "02:40:51:7c:e3:0f"). Defaults to a deterministic,
-                          vendor-compatible derivation when unset.
-                        pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
-                        type: string
-                      sfNum:
-                        description: |-
-                          SFNum is the number of the DMA Scalable Function. Defaults to 8000 when
-                          unset. Only takes effect on BlueField-4 socket-direct systems.
-                        format: int32
-                        minimum: 1
-                        type: integer
-                    required:
-                    - enabled
-                    type: object
+                      gate is the DPU.status.operationalConditions entry that must be True before the DPU leaves
+                      the Service Readiness phase. When unset the phase does not wait, and a host hold requested
+                      via DELAY_HOST_OS_INIT is released on DPUServiceCriticalPodsReady.
+                    enum:
+                    - DPUServiceCriticalPodsReady
+                    - OperationalReady
+                    type: string
                 type: object
               sysctl:
                 description: Sysctl contains the sysctl configuration for the DPUFlavor.

@@ -17,7 +17,7 @@
 #       prefix = "10.96.64.0/18"
 #       gateway = "10.96.64.1"
 #       mtu = 1500
-#   - oobDhcpRelayAddress must be within Kubernetes ServiceCIDR
+#   - bmcDhcpRelayAddress must be within Kubernetes ServiceCIDR
 # =============================================================================
 
 image:
@@ -128,8 +128,8 @@ pods:
         runIntervalWorking: "5s"
         runIntervalIdle: "60s"
         networkStatusRunInterval: "120s"
-        oobDhcpRelayAddress: "10.96.64.1"  # Must be within K8s ServiceCIDR
-        adminDhcpRelayAddress: "192.168.176.1"
+        bmcDhcpRelayAddress: "10.96.64.1"  # Must be within K8s ServiceCIDR
+        underlayDhcpRelayAddress: "10.104.0.1"  # simulated-underlay gateway (SCALE_UNDERLAY_GW)
         dpusInNicMode: false
 
 extraEnv:

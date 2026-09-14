@@ -47,6 +47,9 @@ macro_rules! test_assert {
     };
 }
 
+mod conditional_write;
+pub use conditional_write::CheckApplied;
+
 pub mod config;
 pub mod controller;
 pub mod db_write_batch;

@@ -8,7 +8,7 @@ Make sure the following are in place before you begin:
 
 1. NICo is deployed and the REST API service is reachable at a known URL.
 1. You have `nicocli` installed (`make nico-cli` from the infra-controller repo) and a working config under `~/.nico/`. For setup, authentication, and config conventions, see the [Quick Start Guide](../getting-started/quick-start.md) and the nicocli reference guide.
-1. You hold the `PROVIDER_ADMIN` role in the org you are operating in. Tenant Admins with `targetedInstanceCreation` capability can also register Expected Machines, but the canonical path is provider-side.
+1. You hold the `PROVIDER_ADMIN` role in the org you are operating in. Tenant Admins with [effective targeted instance creation](../configuration/tenant_management.md#granting-targeted-instance-creation) at the site can also register Expected Machines, but the canonical path is provider-side.
 1. DHCP requests from all managed host BMC networks have been forwarded to the NICo DHCP service.
 1. For every host you plan to register, you have:
    - The MAC address of the host BMC
@@ -28,7 +28,7 @@ nicocli user get
 
 An Expected Machine pre-registers a physical machine so NICo can authenticate to it on discovery and accept it for ingestion. Each Expected Machine carries the factory default BMC credentials NICo uses for first contact, plus identifying information (chassis serial, optional rack/SKU metadata).
 
-The Expected Machine endpoints are scoped per-org per-site. All requests require `PROVIDER_ADMIN` (or `TENANT_ADMIN` with `targetedInstanceCreation`).
+The Expected Machine endpoints are scoped per-org per-site. All requests require `PROVIDER_ADMIN`, or `TENANT_ADMIN` with [effective targeted instance creation](../configuration/tenant_management.md#granting-targeted-instance-creation) at that site.
 
 ### Single Machine
 
@@ -181,7 +181,13 @@ A `Ready` machine has `status: Ready` and `isUsableByTenant: true`. Once at leas
 
 With machines ingested and `Ready`, follow the relevant API flow in the REST API Getting Started reference:
 
-- **Service Account**: create Network Allocations against each Site IP Block, create a VPC, create a VPC Prefix or Subnet, create an Operating System, create an Instance.
+- **Service Account**: create Network Allocations against each Site IP Block,
+  create a VPC, wait until it is `Ready`, and create the matching tenant
+  network resource. `FNN` VPCs use VPC Prefixes; `ETHERNET_VIRTUALIZER` VPCs
+  use IPv4 Subnets from a `Ready` tenant-allocated IPv4 IP Block at the VPC's
+  Site; `FLAT` VPCs use neither resource. For a `FLAT` VPC, set `autoNetwork`
+  to `true` and omit `interfaces` when creating the Instance. Then create an
+  Operating System and an Instance.
 - **Provider**: create Tenant Accounts, create Instance Types, associate machines with Instance Types, create Compute and Network Allocations for tenants.
 
 Both flows assume hardware ingestion is complete -- which this page covers.

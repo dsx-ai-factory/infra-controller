@@ -23,12 +23,14 @@ use std::time::Duration;
 use ::rpc::forge_tls_client::ForgeClientConfig;
 use ::rpc::{Instance, forge as rpc};
 use arc_swap::ArcSwapOption;
+use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineInterfaceId};
 use config_version::ConfigVersion;
 use eyre::Context;
 use forge_dpu_agent_utils::utils::create_forge_client;
+use ipnetwork::IpNetwork;
 use tracing::{trace, warn};
 
 use crate::instrumentation::ConfigFetch;
@@ -281,7 +283,8 @@ async fn fetch(
     Ok(response)
 }
 
-/// Projects the family-neutral address list into the compatibility fields used by the agent.
+/// Validates the family-neutral address list and copies it into the compatibility fields used by
+/// the agent.
 fn normalize_network_config_addresses(
     response: &mut rpc::ManagedHostNetworkConfigResponse,
 ) -> Result<(), eyre::Report> {
@@ -306,7 +309,8 @@ fn normalize_network_config_addresses(
     Ok(())
 }
 
-/// Preserves a legacy payload, or projects a populated `addresses` list into legacy fields.
+/// Preserves a legacy payload, or validates a populated `addresses` list and copies it into legacy
+/// fields.
 #[allow(deprecated)]
 fn normalize_interface_addresses(
     interface: &mut rpc::FlatInterfaceConfig,
@@ -325,12 +329,10 @@ fn normalize_interface_addresses(
     for address in &interface.addresses {
         let family = rpc::AddressFamily::try_from(address.address_family)
             .wrap_err_with(|| format!("unknown address family value {}", address.address_family))?;
-        let slot = match family {
-            rpc::AddressFamily::V4 => &mut ipv4,
-            rpc::AddressFamily::V6 => &mut ipv6,
-            rpc::AddressFamily::Unspecified => {
-                return Err(eyre::eyre!("address family must be V4 or V6"));
-            }
+        let declared_family = validate_interface_address(address, family)?;
+        let slot = match declared_family {
+            IpAddressFamily::Ipv4 => &mut ipv4,
+            IpAddressFamily::Ipv6 => &mut ipv6,
         };
 
         if slot.replace(address.clone()).is_some() {
@@ -390,6 +392,76 @@ fn normalize_interface_addresses(
         .or(prefixless_legacy_ipv6);
 
     Ok(())
+}
+
+fn validate_interface_address(
+    address: &rpc::InterfaceAddressConfig,
+    family: rpc::AddressFamily,
+) -> Result<IpAddressFamily, eyre::Report> {
+    let declared_family = match family {
+        rpc::AddressFamily::V4 => IpAddressFamily::Ipv4,
+        rpc::AddressFamily::V6 => {
+            if let Some(gateway) = address.gateway.as_deref() {
+                return Err(eyre::eyre!(
+                    "address configuration declared as V6 includes unsupported `gateway` value `{gateway}`"
+                ));
+            }
+            IpAddressFamily::Ipv6
+        }
+        rpc::AddressFamily::Unspecified => {
+            return Err(eyre::eyre!("address family must be V4 or V6"));
+        }
+    };
+
+    for (field, value) in [
+        (
+            "ip",
+            (!address.ip.is_empty()).then_some(address.ip.as_str()),
+        ),
+        (
+            "tenant_vrf_loopback_ip",
+            address.tenant_vrf_loopback_ip.as_deref(),
+        ),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        value
+            .parse::<IpAddr>()
+            .wrap_err_with(|| format!("invalid `{field}` value `{value}`"))?
+            .require_address_family_or_else(declared_family, |_| {
+                eyre::eyre!(
+                    "value `{value}` for `{field}` does not match declared {family:?} family"
+                )
+            })?;
+    }
+
+    for (field, value) in [
+        ("gateway", address.gateway.as_deref()),
+        (
+            "interface_prefix",
+            (!address.interface_prefix.is_empty()).then_some(address.interface_prefix.as_str()),
+        ),
+        (
+            "prefix",
+            (!address.prefix.is_empty()).then_some(address.prefix.as_str()),
+        ),
+        ("svi_ip", address.svi_ip.as_deref()),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        value
+            .parse::<IpNetwork>()
+            .wrap_err_with(|| format!("invalid `{field}` value `{value}`"))?
+            .require_address_family_or_else(declared_family, |_| {
+                eyre::eyre!(
+                    "value `{value}` for `{field}` does not match declared {family:?} family"
+                )
+            })?;
+    }
+
+    Ok(declared_family)
 }
 
 /// Picks the lowest address in each family across physical interfaces because HostInband status
@@ -678,6 +750,17 @@ mod tests {
         });
         expected_with_prefixless_ipv6.addresses = vec![ipv4_address(), prefixless_ipv6.clone()];
 
+        let mut slaac_ipv6 = ipv6_address();
+        slaac_ipv6.ip.clear();
+        let mut expected_slaac_ipv6 = expected_ipv6_interface();
+        expected_slaac_ipv6
+            .ipv6_interface_config
+            .as_mut()
+            .expect("IPv6 test fixture must include its compatibility fields")
+            .ip
+            .clear();
+        expected_slaac_ipv6.addresses = vec![slaac_ipv6.clone()];
+
         let ipv4_loopback = rpc::InterfaceAddressConfig {
             address_family: rpc::AddressFamily::V4.into(),
             tenant_vrf_loopback_ip: Some("192.0.2.3".to_string()),
@@ -732,6 +815,9 @@ mod tests {
             "prefixless V6 address reconstructs the legacy sidecar" {
                 legacy_interface(vec![ipv4_address(), prefixless_ipv6]) => Yields(expected_with_prefixless_ipv6),
             }
+            "empty SLAAC host address remains empty" {
+                legacy_interface(vec![slaac_ipv6]) => Yields(expected_slaac_ipv6),
+            }
             "IPv4 loopback-only and IPv6 interface entries project by family" {
                 legacy_interface(vec![ipv4_loopback, ipv6_address()]) => Yields(expected_ipv6_with_ipv4_loopback),
             }
@@ -772,6 +858,137 @@ mod tests {
                 legacy_interface(vec![ipv4_loopback, ipv6_loopback]) => Fails,
             }
         );
+    }
+
+    #[test]
+    fn family_neutral_addresses_reject_invalid_values() {
+        struct Case {
+            scenario: &'static str,
+            address: rpc::InterfaceAddressConfig,
+            expected_messages: &'static [&'static str],
+        }
+
+        let mut ipv4_gateway = ipv4_address();
+        ipv4_gateway.gateway = Some("2001:db8::1/64".to_string());
+        let mut ipv6_ip = ipv6_address();
+        ipv6_ip.ip = "192.0.2.10".to_string();
+        let mut ipv4_interface_prefix = ipv4_address();
+        ipv4_interface_prefix.interface_prefix = "2001:db8::10/128".to_string();
+        let mut ipv4_prefix = ipv4_address();
+        ipv4_prefix.prefix = "2001:db8::/64".to_string();
+        let mut ipv4_svi = ipv4_address();
+        ipv4_svi.svi_ip = Some("2001:db8::2/64".to_string());
+        let mut ipv4_loopback = ipv4_address();
+        ipv4_loopback.tenant_vrf_loopback_ip = Some("2001:db8::3".to_string());
+        let mut malformed_ip = ipv4_address();
+        malformed_ip.ip = "not-an-ip".to_string();
+        let mut malformed_prefix = ipv4_address();
+        malformed_prefix.prefix = "not-a-prefix".to_string();
+        let mut empty_ipv4_gateway = ipv4_address();
+        empty_ipv4_gateway.gateway = Some(String::new());
+        let mut empty_svi = ipv4_address();
+        empty_svi.svi_ip = Some(String::new());
+        let mut empty_loopback = ipv4_address();
+        empty_loopback.tenant_vrf_loopback_ip = Some(String::new());
+        let mut ipv6_gateway = ipv6_address();
+        ipv6_gateway.gateway = Some("2001:db8::1/64".to_string());
+        let mut empty_ipv6_gateway = ipv6_address();
+        empty_ipv6_gateway.gateway = Some(String::new());
+
+        let cases = [
+            Case {
+                scenario: "IPv4 gateway with IPv6 value",
+                address: ipv4_gateway,
+                expected_messages: &["`gateway`", "`2001:db8::1/64`", "declared V4 family"],
+            },
+            Case {
+                scenario: "IPv6 host IP with IPv4 value",
+                address: ipv6_ip,
+                expected_messages: &["`ip`", "`192.0.2.10`", "declared V6 family"],
+            },
+            Case {
+                scenario: "IPv4 interface prefix with IPv6 value",
+                address: ipv4_interface_prefix,
+                expected_messages: &[
+                    "`interface_prefix`",
+                    "`2001:db8::10/128`",
+                    "declared V4 family",
+                ],
+            },
+            Case {
+                scenario: "IPv4 network prefix with IPv6 value",
+                address: ipv4_prefix,
+                expected_messages: &["`prefix`", "`2001:db8::/64`", "declared V4 family"],
+            },
+            Case {
+                scenario: "IPv4 SVI with IPv6 value",
+                address: ipv4_svi,
+                expected_messages: &["`svi_ip`", "`2001:db8::2/64`", "declared V4 family"],
+            },
+            Case {
+                scenario: "IPv4 loopback with IPv6 value",
+                address: ipv4_loopback,
+                expected_messages: &[
+                    "`tenant_vrf_loopback_ip`",
+                    "`2001:db8::3`",
+                    "declared V4 family",
+                ],
+            },
+            Case {
+                scenario: "malformed host IP",
+                address: malformed_ip,
+                expected_messages: &["invalid `ip` value `not-an-ip`"],
+            },
+            Case {
+                scenario: "malformed network prefix",
+                address: malformed_prefix,
+                expected_messages: &["invalid `prefix` value `not-a-prefix`"],
+            },
+            Case {
+                scenario: "empty IPv4 gateway",
+                address: empty_ipv4_gateway,
+                expected_messages: &["invalid `gateway` value ``"],
+            },
+            Case {
+                scenario: "empty SVI address",
+                address: empty_svi,
+                expected_messages: &["invalid `svi_ip` value ``"],
+            },
+            Case {
+                scenario: "empty tenant VRF loopback",
+                address: empty_loopback,
+                expected_messages: &["invalid `tenant_vrf_loopback_ip` value ``"],
+            },
+            Case {
+                scenario: "IPv6 gateway",
+                address: ipv6_gateway,
+                expected_messages: &["declared as V6", "`gateway`", "`2001:db8::1/64`"],
+            },
+            Case {
+                scenario: "empty IPv6 gateway",
+                address: empty_ipv6_gateway,
+                expected_messages: &["declared as V6", "unsupported `gateway` value ``"],
+            },
+        ];
+
+        for Case {
+            scenario,
+            address,
+            expected_messages,
+        } in cases
+        {
+            let mut interface = legacy_interface(vec![address]);
+            let error = normalize_interface_addresses(&mut interface)
+                .expect_err("invalid address value must be rejected");
+            let message = format!("{error:#}");
+
+            for expected in expected_messages {
+                assert!(
+                    message.contains(expected),
+                    "{scenario}: expected `{expected}` in `{message}`"
+                );
+            }
+        }
     }
 
     #[test]

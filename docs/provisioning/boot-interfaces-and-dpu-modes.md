@@ -58,17 +58,14 @@ Boot and DPU configuration is **declarative**: you describe the host in the Expe
 **Most hosts with DPU hardware need zero boot/DPU configuration.** Outside rack-manager deployments, when neither the host nor the site sets `dpu_policy`, and the host has no `interfaces` declaration:
 
 - The effective `dpu_policy` resolves to **`manage`** — NICo ingests and manages the host's DPUs, and the host boots through its primary DPU on the **Admin** network.
-- Site-explorer **auto-selects the boot interface**: it uses the lowest UEFI PCI path when every matching DPU host interface in the Redfish report has one. Otherwise, it orders the DPUs by their Redfish serial numbers without regard to case and uses the first interface in that order.
+- Site-explorer **auto-selects the boot interface**: it uses the lowest UEFI PCI path when every matching DPU host interface in the Redfish report has one. Otherwise, on a host with multiple DPUs, it orders them by the host BMC chassis ID associated with each DPU's pairing serial number when every ID is usable and unique. If chassis ordering cannot choose an interface, it orders the DPUs by their Redfish serial numbers without regard to case and uses the first interface.
 - The host's IP comes from whichever segment its DHCP relay lands in (see [IP and Network Configuration](ip-and-network-configuration.md)).
 
 So a standard DPU host is handled entirely by defaults. A host without DPU hardware must instead use `dpu_policy: ignore` and declare a primary HostInband NIC as described in [3.2](#32-zero-dpu-host-no-dpu-hardware). The knobs below exist for the hosts that *don't* fit the standard-DPU mold.
 
-`rack_management_enabled` is a separate deployment-mode setting, not another
-DPU policy, and it does not override this resolution. Rack-manager deployments
-that operate DPUs as NICs must also set the site-wide `dpu_policy` (or each
-host's policy) to `nic`. If rack management is enabled while both policy
-levels remain unset, the effective policy is still `manage` and the Admin-network
-default above still applies.
+Rack management does not override this resolution. Rack-manager deployments
+that operate DPUs as NICs must set the site-wide `dpu_policy` (or each host's
+policy) to `nic`.
 
 ### `dpu_policy`
 
@@ -269,10 +266,16 @@ The admin CLI and web UI use the following display labels:
 | `ExpectedMachine` | `BOOT_INTERFACE_SELECTION_SOURCE_EXPECTED_MACHINE` | An `ExpectedMachine` declaration selected the interface. |
 | `Operator` | `BOOT_INTERFACE_SELECTION_SOURCE_OPERATOR` | An operator selected the interface through an administrative write. |
 | `RedfishUefiPci` | `BOOT_INTERFACE_SELECTION_SOURCE_REDFISH_UEFI_PCI` | Redfish UEFI PCI path ordering selected the interface. |
-| `RedfishChassisId` | `BOOT_INTERFACE_SELECTION_SOURCE_REDFISH_CHASSIS_ID` | Reserved for [selection from Redfish chassis identity](https://github.com/dsx-ai-factory/infra-controller/issues/5080). |
+| `RedfishChassisId` | `BOOT_INTERFACE_SELECTION_SOURCE_REDFISH_CHASSIS_ID` | NICo selected the interface by [ordering DPUs using the host BMC chassis ID associated with each DPU's pairing serial number](https://github.com/dsx-ai-factory/infra-controller/issues/5080). |
 | `RedfishSerialNumber` | `BOOT_INTERFACE_SELECTION_SOURCE_REDFISH_SERIAL_NUMBER` | NICo selected the interface after ordering DPUs by their Redfish serial numbers. Comparison ignores case. A missing serial number is an empty key and sorts before a populated value; equal keys preserve discovery order. |
-| `ScoutReportPci` | `BOOT_INTERFACE_SELECTION_SOURCE_SCOUT_REPORT_PCI` | Reserved for [selection from host PCI data reported by Scout](https://github.com/dsx-ai-factory/infra-controller/issues/5083). |
+| `ScoutReportPci` | `BOOT_INTERFACE_SELECTION_SOURCE_SCOUT_REPORT_PCI` | NICo used [`domain:bus:device.function` PCI addresses in a host scout report](https://github.com/dsx-ai-factory/infra-controller/issues/5083) to confirm or change a selection previously recorded as `RedfishChassisId` or `RedfishSerialNumber`. |
 | `LegacyUnknown` | `BOOT_INTERFACE_SELECTION_SOURCE_LEGACY_UNKNOWN` | NICo cannot recover why the interface was selected, including migrated rows and compatibility baselines for an existing Ready or Assigned host. |
+
+`RedfishChassisId` ordering applies only to a host with multiple DPUs after neither a declared primary nor complete UEFI PCI paths choose the interface. It requires every DPU to resolve to one nonblank host BMC chassis ID and the normalized IDs to be unique. Comparison ignores case and treats decimal runs numerically, so `Slot2` sorts before `Slot10`. If an ID is missing or ambiguous, two IDs normalize equally, or the first DPU in chassis order has no host PF MAC, NICo falls back to `RedfishSerialNumber` ordering.
+
+`scout_boot_interface_correction_enabled` is a top-level Boolean setting in the nico-api TOML configuration. NICo reads it at startup, and it defaults to `false`. The `CARBIDE_API_SCOUT_BOOT_INTERFACE_CORRECTION_ENABLED` environment variable overrides site TOML, which overrides base TOML. The umbrella Helm chart has no dedicated value: add the TOML field to `nico-api.siteConfig.nicoApiSiteConfig`, or provide the environment variable through `nico-api.extraEnv`. NICo records available scout PCI comparisons in structured logs and increments `carbide_scout_pci_evaluations_total` regardless of this setting. When `false`, NICo does not change the stored selection.
+
+When `true`, automatic reconciliation requires a selection recorded as `RedfishChassisId` or `RedfishSerialNumber`, at least two DPU-attached Admin interfaces, a complete comparison with one unique, valid `domain:bus:device.function` candidate, a host at `HostInit`/`Discovered` or unassigned `Ready`, no `Instance` or primary interface prediction, and no conflicting or integrated-NIC primary. Missing, malformed, or colliding report data, protected sources, and other ineligible states leave the stored selection unchanged. For an eligible candidate, a matching desired target and current primary interface change only the selection source to `ScoutReportPci`; otherwise, NICo updates the desired target and primary interface together and queues the existing boot configuration flow. An unassigned `Ready` host enters `BootConfiguring` directly; a host at `HostInit`/`Discovered` preserves its reboot-completion handshake before entering `BootConfiguring`.
 
 `selection_updated_at` records when the selected MAC or its selection source last changed. Enriching the same MAC
 with a Redfish interface ID preserves this time. It is omitted when NICo cannot recover the decision time, including
@@ -423,10 +426,10 @@ The persisted desired target is authoritative for desired-state and `Ready` conv
 
 | Function | Operates on | Precedence |
 |---|---|---|
-| `desired_boot_interface_update` | durable-target initialization/enrichment | complete desired pair stays; a MAC-only target may gain the same MAC's ID; otherwise declared-primary prediction → owned pick → unambiguous prediction → none |
+| `desired_boot_interface_update` | durable-target initialization/enrichment | complete desired pair stays; a MAC-only target may gain the same MAC's ID; otherwise declared-primary prediction → owned pick → sole non-underlay prediction → none |
 | `pick_boot_interface` | owned `machine_interfaces` | declared primary → lowest-MAC non-underlay → none |
 | `pick_boot_prediction` | predictions | declared primary → the sole non-underlay prediction → none |
-| `select_host_primary_interface` and Site Explorer fallback | the explored report (**Store A**, the default before ownership) | declared primary → lowest UEFI PCI path when every matching DPU host interface in the Redfish report has one → stable Redfish serial ordering → none |
+| `select_host_primary_interface` and Site Explorer fallback | the explored report (**Store A**, the default before ownership) | declared primary → lowest UEFI PCI path when every matching DPU host interface in the Redfish report has one → Redfish chassis ID ordering when a multi-DPU host has one usable, unique associated host BMC chassis ID per DPU → stable Redfish serial ordering → none |
 
 **Store A vs. Store B:** before a host is owned, Site Explorer records a boot default on the explored endpoint (`explored_endpoints.boot_interface_mac`/`_id`, using `select_host_primary_interface`). Once owned, `machine_interfaces` (Store B) supplies current candidates. A declared `primary` wins in **both** stores, while `machine_boot_interfaces` preserves the selected desired target across the ownership handoff.
 

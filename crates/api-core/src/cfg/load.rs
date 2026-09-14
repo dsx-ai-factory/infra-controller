@@ -264,6 +264,21 @@ pub fn parse_carbide_config(
         );
     }
 
+    if config.deprecated_rack_management_enabled.is_some() {
+        let path = "rack_management_enabled";
+        let source = config
+            .config_ctx
+            .as_ref()
+            .and_then(|figment| figment.find_metadata(path))
+            .map(super::provenance::source_label)
+            .unwrap_or_else(|| "configuration".to_string());
+        tracing::warn!(
+            config_key = path,
+            config_source = %source,
+            "Ignoring deprecated configuration key"
+        );
+    }
+
     for (label, _) in config
         .host_models
         .iter()
@@ -368,7 +383,49 @@ pub fn parse_carbide_config(
 
 #[cfg(test)]
 mod tests {
+    use tracing_subscriber::prelude::*;
+
     use super::*;
+    use crate::logging::stream::{LogStream, LogStreamLayer};
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn legacy_rack_management_key_is_accepted_warned_and_omitted() {
+        figment::Jail::expect_with(|jail| {
+            let config_text = format!(
+                "{}\ndeny_unknown_fields = true\nrack_management_enabled = true\n",
+                include_str!("test_data/min_config.toml")
+            );
+            jail.create_file("config.toml", &config_text)?;
+
+            let stream = LogStream::new(16, 64 * 1024);
+            let mut logs = stream.subscribe();
+            let subscriber = tracing_subscriber::registry().with(LogStreamLayer::new(stream));
+            let config = tracing::subscriber::with_default(subscriber, || {
+                parse_carbide_config(Path::new("config.toml"), None)
+            })
+            .expect("strict configuration with the deprecated key must load");
+
+            assert_eq!(config.deprecated_rack_management_enabled, Some(true));
+            let serialized =
+                toml::to_string(config.as_ref()).expect("loaded configuration must serialize");
+            assert!(!serialized.contains("rack_management_enabled"));
+
+            let warning = std::iter::from_fn(|| logs.try_recv().ok())
+                .find(|line| line.message == "Ignoring deprecated configuration key")
+                .expect("deprecated key warning");
+            assert_eq!(warning.level, "WARN");
+            assert_eq!(
+                warning.fields.get("config_key").map(String::as_str),
+                Some("rack_management_enabled")
+            );
+            assert_eq!(
+                warning.fields.get("config_source").map(String::as_str),
+                Some("config.toml")
+            );
+            Ok(())
+        })
+    }
 
     #[test]
     #[allow(clippy::result_large_err)]

@@ -197,6 +197,20 @@ impl Forge for Api {
         crate::handlers::vpc::update(self, request).await
     }
 
+    async fn change_vpc_routing_profile(
+        &self,
+        request: Request<rpc::VpcChangeRoutingProfileRequest>,
+    ) -> Result<Response<rpc::VpcRoutingState>, Status> {
+        crate::handlers::vpc::change_routing_profile(self, request).await
+    }
+
+    async fn release_vpc_inactive_vni(
+        &self,
+        request: Request<rpc::VpcReleaseInactiveVniRequest>,
+    ) -> Result<Response<rpc::VpcReleaseInactiveVniResult>, Status> {
+        crate::handlers::vpc::release_inactive_vni(self, request).await
+    }
+
     async fn update_vpc_virtualization(
         &self,
         request: Request<rpc::VpcUpdateVirtualizationRequest>,
@@ -223,6 +237,13 @@ impl Forge for Api {
         request: Request<rpc::VpcsByIdsRequest>,
     ) -> Result<Response<rpc::VpcList>, Status> {
         crate::handlers::vpc::find_by_ids(self, request).await
+    }
+
+    async fn get_vpc_routing_state(
+        &self,
+        request: Request<rpc::VpcRoutingStateRequest>,
+    ) -> Result<Response<rpc::VpcRoutingState>, Status> {
+        crate::handlers::vpc::get_routing_state(self, request).await
     }
 
     async fn find_site_prefix_ids(
@@ -3405,7 +3426,7 @@ impl Forge for Api {
     async fn find_pending_dpu_service_sync_ids(
         &self,
         request: Request<rpc::FindPendingDpuServiceSyncIdsRequest>,
-    ) -> Result<Response<::rpc::common::StableHostMachineIdList>, Status> {
+    ) -> Result<Response<::rpc::common::HostMachineIdList>, Status> {
         crate::handlers::dpu_service_sync::find_pending_dpu_service_sync_ids(self, request).await
     }
 

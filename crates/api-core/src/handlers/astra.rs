@@ -156,7 +156,7 @@ pub(super) async fn get_astra_config(
 
             // Now we can create the Astra attachment and add it to the Astra config.
             let astra_attachment = AstraAttachment {
-                mac_address: dpa_interface.mac_address.to_string(),
+                mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
                 vni: dpa_vni as u32,
                 subnet_ipv4: subnet_ip.to_string(),
                 subnet_mask,
@@ -169,7 +169,7 @@ pub(super) async fn get_astra_config(
             astra_attachments.push(astra_attachment);
         } else {
             let astra_attachment = AstraAttachment {
-                mac_address: dpa_interface.mac_address.to_string(),
+                mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
                 vni: 0,
                 subnet_ipv4: subnet_ip.to_string(),
                 subnet_mask,

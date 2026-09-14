@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 
+use ::db::resource_pool::ResourcePoolDatabaseError;
 use ::db::{ObjectColumnFilter, vpc_prefix as db};
 use ::rpc::forge as rpc;
 use ::rpc::forge::PrefixMatchType;
@@ -25,6 +26,7 @@ use carbide_uuid::vpc::VpcId;
 use ipnetwork::IpNetwork;
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::NetworkSegmentType;
+use model::resource_pool::{OwnerType, ResourcePoolError};
 use model::site_prefix::{
     SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState, SitePrefixRoutingScope,
 };
@@ -34,7 +36,6 @@ use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use crate::api::{Api, log_request_data};
-use crate::cfg::file::CarbideConfig;
 use crate::{CarbideError, CarbideResult};
 
 fn validate_site_prefix_attachment(
@@ -89,13 +90,14 @@ fn validate_site_prefix_attachment(
 }
 
 /// `validate_vpc_prefix_overlaps` rejects `candidate` unless every existing
-/// overlap passes `pair_is_eligible`.
+/// overlap passes `pair_is_eligible` and every participating VPC owns exactly
+/// one allocation matching its VNI.
 ///
 /// The caller acquires the overlap lock before reading the candidate `Vpc` and
 /// any selected `SitePrefix`, so a waiting create sees every competing prefix
 /// that committed first.
 async fn validate_vpc_prefix_overlaps(
-    runtime_config: &CarbideConfig,
+    api: &Api,
     txn: &mut PgConnection,
     candidate: &vpc_prefix::NewVpcPrefix,
     candidate_vpc: &Vpc,
@@ -113,9 +115,12 @@ async fn validate_vpc_prefix_overlaps(
         .iter()
         .map(|prefix| prefix.vpc_id)
         .collect::<Vec<_>>();
-    let vpcs = ::db::vpc::find_by(
+    // VNI changes take this parent lock before updating status or allocations.
+    // Allocation row locks alone cannot prevent a second allocation appearing.
+    let vpcs = ::db::vpc::find_by_with_lock(
         &mut *txn,
         ObjectColumnFilter::List(::db::vpc::IdColumn, &vpc_ids),
+        ::db::vpc::VpcRowLock::Mutation,
     )
     .await?
     .into_iter()
@@ -145,7 +150,7 @@ async fn validate_vpc_prefix_overlaps(
             return Err(super::tenant_prefix_overlap::overlap_error());
         };
         if !super::tenant_prefix_overlap::pair_is_eligible(
-            runtime_config,
+            &api.runtime_config,
             super::tenant_prefix_overlap::VpcPrefixParticipant {
                 prefix: candidate.config.prefix,
                 is_deleted: false,
@@ -163,6 +168,49 @@ async fn validate_vpc_prefix_overlaps(
         }
     }
 
+    for vpc in std::iter::once(candidate_vpc).chain(vpcs.values()) {
+        validate_overlap_vni(api, txn, vpc).await?;
+    }
+
+    Ok(())
+}
+
+/// A retained VNI may still carry routes from a previous profile. Overlap
+/// admission requires one owned allocation, not just a matching active VNI.
+/// The caller holds the VPC mutation lock until the prefix write completes.
+async fn validate_overlap_vni(api: &Api, txn: &mut PgConnection, vpc: &Vpc) -> CarbideResult<()> {
+    let owner_id = vpc.id.to_string();
+    let mut allocation = None;
+    for pool in [
+        &api.common_pools.ethernet.pool_vpc_vni,
+        &api.common_pools.ethernet.pool_external_vpc_vni,
+    ] {
+        let owned = ::db::resource_pool::find_owned_allocation(pool, txn, OwnerType::Vpc, &owner_id)
+            .await
+            .map_err(|error| {
+                let invalid_allocation = match &error {
+                    ResourcePoolDatabaseError::ResourcePool(ResourcePoolError::Parse { .. }) => true,
+                    ResourcePoolDatabaseError::Database(error) => {
+                        matches!(error.as_ref(), ::db::DatabaseError::FailedPrecondition(_))
+                    }
+                    _ => false,
+                };
+                if invalid_allocation {
+                    tracing::warn!(vpc_id = %vpc.id, %error, "invalid VNI allocation for prefix overlap");
+                    super::tenant_prefix_overlap::overlap_error()
+                } else {
+                    error.into()
+                }
+            })?;
+        if let Some(owned) = owned
+            && allocation.replace(owned).is_some()
+        {
+            return Err(super::tenant_prefix_overlap::overlap_error());
+        }
+    }
+    if allocation.is_none() || allocation != vpc.status.vni {
+        return Err(super::tenant_prefix_overlap::overlap_error());
+    }
     Ok(())
 }
 
@@ -319,7 +367,7 @@ pub(crate) async fn create(
 
     let conflicting_vpc_prefixes = db::probe(new_prefix.config.prefix, &mut txn).await?;
     validate_vpc_prefix_overlaps(
-        &api.runtime_config,
+        api,
         &mut txn,
         &new_prefix,
         vpc,

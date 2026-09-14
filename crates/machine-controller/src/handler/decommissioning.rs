@@ -30,6 +30,7 @@ use model::machine::{
 };
 use model::machine_interface::InterfaceType;
 use model::network_segment::NetworkSegmentType;
+use state_controller::CheckApplied as _;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -363,7 +364,8 @@ pub(super) async fn handle_deconfiguring_host(
                     interface.controller_state.version.increment(),
                     &DpaInterfaceControllerState::Unlocking,
                 )
-                .await?;
+                .await?
+                .check_applied()?;
             }
             Ok(
                 StateHandlerOutcome::transition(ManagedHostState::Decommissioning {

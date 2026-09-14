@@ -520,8 +520,9 @@ func (c *Config) GetOrInitTokenOriginConfig() *cauth.TokenOriginConfig {
 			} else {
 				jwksConfig, err := keycloakConfig.GetJwksConfig()
 				if err != nil {
-					log.Warn().Err(err).Msg("Failed to get Keycloak JWKS config, skipping Keycloak JWT origin")
-				} else {
+					log.Warn().Err(err).Msg("Failed to initialize Keycloak JWKS; continuing with an empty key cache")
+				}
+				if jwksConfig != nil {
 					c.TokenOriginConfig.AddJwksConfig(jwksConfig)
 				}
 			}
@@ -530,7 +531,6 @@ func (c *Config) GetOrInitTokenOriginConfig() *cauth.TokenOriginConfig {
 		// Initialize JWKS data
 		if err := c.TokenOriginConfig.UpdateAllJWKS(); err != nil {
 			log.Warn().Err(err).Msg("Failed to update JWKS data")
-			return nil
 		} else {
 			log.Info().Msg("Successfully updated JWKS data")
 		}

@@ -101,6 +101,14 @@ fn machine_creator_config() -> SiteExplorerConfig {
 }
 
 fn machine_creator(env: &Env, config: SiteExplorerConfig) -> MachineCreator {
+    machine_creator_with_dpf(env, config, false)
+}
+
+fn machine_creator_with_dpf(
+    env: &Env,
+    config: SiteExplorerConfig,
+    dpf_enabled_at_site: bool,
+) -> MachineCreator {
     MachineCreator::new(
         env.pool.clone(),
         config,
@@ -108,6 +116,7 @@ fn machine_creator(env: &Env, config: SiteExplorerConfig) -> MachineCreator {
         Arc::new(env.api().runtime_config.rack_profiles.clone()),
         None,
         env.api().credential_manager().clone(),
+        dpf_enabled_at_site,
     )
 }
 
@@ -159,6 +168,7 @@ fn machine_creator_with_rms(env: &Env, rms_sim: &RmsSim) -> MachineCreator {
         Arc::new(rack_profiles),
         rms_sim.as_rms_client(),
         env.api().credential_manager().clone(),
+        false,
     )
 }
 
@@ -767,7 +777,7 @@ async fn test_machine_creator_creates_managed_host_with_dpf_enabled(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = Env::new(pool).await;
-    let creator = machine_creator(&env, machine_creator_config());
+    let creator = machine_creator_with_dpf(&env, machine_creator_config(), true);
 
     let mock_dpu = DpuConfig::with_serial("MT2328XZ185R".to_string());
     let mock_host = ManagedHostConfig {
@@ -803,6 +813,9 @@ async fn test_machine_creator_creates_managed_host_with_dpf_enabled(
     assert_eq!(machines.len(), 2);
     for machine in machines {
         assert!(machine.config.dpf.enabled);
+        if !machine.is_dpu() {
+            assert!(machine.config.dpf.used_for_ingestion);
+        }
     }
 
     Ok(())

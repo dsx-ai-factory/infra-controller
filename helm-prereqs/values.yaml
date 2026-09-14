@@ -83,18 +83,19 @@ vault:
         UsernamePassword:
           username: "root"
           password: "0penBmc"
-    ## Per-model DPU BMC factory-default OVERRIDES (optional).
+    ## Per-model DPU BMC factory-default entries.
     ##
-    ## Not seeded by default: site-explorer already falls back to each model's
-    ## publicly-documented factory default in code (DpuModel::default_factory_credentials
-    ## — BlueField-4 = admin/0penBmc, earlier generations = root/0penBmc, matching the
-    ## "root" catch-all above). Only add a per-model entry here to override that default
-    ## for a site whose DPUs ship with a non-standard factory password.
+    ## site-explorer checks a model-specific entry, then the catch-all above,
+    ## then its per-model code fallback. A standard BF4 site therefore needs
+    ## the `bf4` entry below; uncomment this block to seed it with the shown
+    ## factory credentials.
+    ## Change the values only when a site's BF4 DPUs ship with non-standard
+    ## factory credentials.
     # - path: "machines/all_dpus/factory_default/bmc-metadata-items/bf4"
     #   data:
     #     UsernamePassword:
     #       username: "admin"
-    #       password: ""          # SITE SECRET: this site's BF4 factory password
+    #       password: "0penBmc"
     - path: "machines/all_dpus/factory_default/uefi-metadata-items/auth"
       data:
         UsernamePassword:

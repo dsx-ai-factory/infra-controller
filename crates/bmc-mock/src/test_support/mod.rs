@@ -31,8 +31,9 @@ use crate::mac_address_pool::{
 };
 use crate::machine_info::DpuSettings;
 use crate::{
-    BmcState, Callbacks, DpuMachineInfo, HardwareType, HostMachineInfo, MachineInfo,
-    MachineRouterOptions, MockPowerState, SetSystemPowerError, SystemPowerControl, machine_router,
+    BmcState, Callbacks, CombinedServer, DpuMachineInfo, HardwareType, HostMachineInfo,
+    ListenerOrAddress, MachineInfo, MachineRouterOptions, MockPowerState, SetSystemPowerError,
+    SystemPowerControl, machine_router,
 };
 
 pub mod axum_http_client;
@@ -85,6 +86,21 @@ async fn test_bmc((router, state): (axum::Router, BmcState)) -> TestBmcHandle {
         service_root: nv_redfish::ServiceRoot::new(bmc).await.unwrap().into(),
         state,
     }
+}
+
+/// Serve `router` over HTTPS on an ephemeral loopback port with the mock's
+/// bundled certificate. Returns the running server and its base URL. Use this
+/// where the in-process `TestBmcHandle` cannot: real TLS, HTTP/2, and SSE.
+pub fn serve_https(name: &str, router: Router) -> (CombinedServer, Url) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+    let server = CombinedServer::run_router(
+        name,
+        router,
+        Some(ListenerOrAddress::Listener(listener)),
+        crate::tls::server_config(None::<&str>).expect("bundled mock TLS certificate"),
+    );
+    let base = Url::parse(&format!("https://{}", server.address)).expect("valid URL");
+    (server, base)
 }
 
 pub async fn bmc_for_machine(machine_info: MachineInfo) -> TestBmcHandle {

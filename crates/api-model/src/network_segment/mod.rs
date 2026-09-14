@@ -86,8 +86,10 @@ pub struct NetworkDefinition {
     /// Optional IPv6 CIDR for dual-stack config-seeded segments.
     #[serde(default)]
     pub prefix_v6: Option<IpNetwork>,
-    /// Usually the first IP in the prefix range
-    pub gateway: IpAddr,
+    /// Required for IPv4 prefixes, usually the first IP in the prefix range.
+    /// IPv6-only definitions may omit it. Supplied values are ignored but remain
+    /// accepted for compatibility with older configurations.
+    pub gateway: Option<IpAddr>,
     /// DHCPv6 relay link-address used to identify this segment. It may
     /// be outside `prefix_v6`, so it is modeled separately from gateway.
     #[serde(default)]
@@ -127,6 +129,11 @@ impl NetworkDefinition {
             return Err(crate::ConfigValidationError::InvalidValue(format!(
                 "network \"{name}\": mtu {} is out of range ({MTU_MIN}-{MTU_MAX})",
                 self.mtu
+            )));
+        }
+        if self.prefix.is_ipv4() && self.gateway.is_none() {
+            return Err(crate::ConfigValidationError::InvalidValue(format!(
+                "network \"{name}\": gateway is required for an IPv4 prefix"
             )));
         }
         Ok(())
@@ -410,6 +417,10 @@ impl NewNetworkSegment {
         domain_id: DomainId,
         value: &NetworkDefinition,
     ) -> Result<Self, ModelError> {
+        value
+            .validate(name)
+            .map_err(|err| ModelError::InvalidArgument(err.to_string()))?;
+
         // Validate the optional IPv6-specific config before expanding it
         // into persisted prefix rows.
         if let Some(prefix_v6) = value.prefix_v6
@@ -454,7 +465,7 @@ impl NewNetworkSegment {
         // an optional second row for the dual-stack IPv6 prefix.
         let mut prefixes = vec![NewNetworkPrefix {
             prefix: value.prefix,
-            gateway: value.prefix.is_ipv4().then_some(value.gateway),
+            gateway: value.gateway.filter(|_| value.prefix.is_ipv4()),
             dhcpv6_link_address: if value.prefix.is_ipv6() {
                 value.dhcpv6_link_address
             } else {
@@ -814,7 +825,7 @@ mod tests {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix: prefix.parse().unwrap(),
             prefix_v6: prefix_v6.map(|prefix| prefix.parse().unwrap()),
-            gateway: prefix.parse::<IpNetwork>().unwrap().network(),
+            gateway: Some(prefix.parse::<IpNetwork>().unwrap().network()),
             dhcpv6_link_address: dhcpv6_link_address.map(|addr| addr.parse().unwrap()),
             mtu: 1500,
             reserve_first: 5,
@@ -934,6 +945,35 @@ mod tests {
     }
 
     #[test]
+    fn network_definition_requires_gateway_when_ipv4_is_present() {
+        scenarios!(
+            run = |prefix_v6| {
+                let mut definition = definition("192.0.2.0/24", prefix_v6, None);
+                definition.gateway = None;
+                definition.validate("test-net").map_err(|err| err.to_string())
+            };
+            "IPv4-only requires a gateway" {
+                None => FailsWith("invalid value: network \"test-net\": gateway is required for an IPv4 prefix".to_string()),
+            }
+            "an additional IPv6 prefix does not make the IPv4 gateway optional" {
+                Some("2001:db8::/64") => FailsWith("invalid value: network \"test-net\": gateway is required for an IPv4 prefix".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn build_from_network_definition_rejects_missing_ipv4_gateway() {
+        let mut definition = definition("192.0.2.0/24", None, None);
+        definition.gateway = None;
+
+        let err = build_definition_prefixes(definition).unwrap_err();
+        assert!(
+            err.contains("gateway is required for an IPv4 prefix"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn allocation_strategy_round_trips_through_json() {
         scenarios!(
             run = |s| serde_json::to_string(&s).map_err(drop);
@@ -977,7 +1017,7 @@ mod tests {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix: "10.0.0.0/24".parse().unwrap(),
             prefix_v6: None,
-            gateway: "10.0.0.1".parse().unwrap(),
+            gateway: Some("10.0.0.1".parse().unwrap()),
             dhcpv6_link_address: None,
             mtu,
             reserve_first: 0,

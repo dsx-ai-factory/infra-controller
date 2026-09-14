@@ -36,7 +36,11 @@ use nv_redfish::{Error as NvError, ServiceRoot as NvServiceRoot};
 use reqwest::header::HeaderMap;
 use url::Url;
 
-pub type RedfishBmc = HttpBmc<RedfishReqwestClient>;
+mod span_isolated_http_client;
+
+use span_isolated_http_client::SpanIsolatedHttpClient;
+
+pub type RedfishBmc = HttpBmc<SpanIsolatedHttpClient>;
 pub type ServiceRoot = NvServiceRoot<RedfishBmc>;
 pub type Error = NvError<RedfishBmc>;
 
@@ -524,7 +528,7 @@ impl NvRedfishClientPool {
             }
         };
         Ok(Arc::new(RedfishBmc::with_custom_headers(
-            client,
+            SpanIsolatedHttpClient::new(client),
             bmc_url,
             credentials,
             CacheSettings::with_capacity(10),

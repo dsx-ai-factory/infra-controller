@@ -1949,6 +1949,7 @@ mod tests {
         let bmc_client = Arc::new(AuthenticatedBmcClient::new(
             sim,
             Arc::new(NvRedfishClientPool::new(proxy_address)),
+            None,
             carbide_ipmi::test_support(),
             Arc::new(TestCredentialManager::default()),
         ));

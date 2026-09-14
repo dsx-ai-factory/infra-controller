@@ -1846,7 +1846,12 @@ pub struct NvueGnmiConfig {
     #[serde(with = "humantime_serde")]
     pub sample_interval: Duration,
 
-    /// Timeout for gRPC connection attempts.
+    /// Timeout applied independently to connection establishment, opening the
+    /// Subscribe RPC, and initial stream synchronization.
+    ///
+    /// One attempt may take nearly three times this duration before reconnect
+    /// backoff. Updates before `sync_response=true` do not extend the
+    /// synchronization timeout.
     #[serde(with = "humantime_serde")]
     pub request_timeout: Duration,
 

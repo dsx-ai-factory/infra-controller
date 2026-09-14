@@ -324,9 +324,10 @@ async fn test_site_explorer_fixtures_zerodpu_site_explorer_before_host_dhcp(
         ..ManagedHostConfig::default()
     };
     api_fixtures::site_explorer::register_expected_machine(&env, &mock_host, None).await;
+    let inband_mac = *mock_host.non_dpu_macs.first().unwrap();
     let mock_explored_host = MockExploredHost::new(&env, mock_host);
 
-    let snapshot: ManagedHostStateSnapshot = mock_explored_host
+    let mock_explored_host = mock_explored_host
         // Run host BMC DHCP first
         .discover_dhcp_host_bmc(|result, _| {
             let response = result.unwrap().into_inner();
@@ -341,14 +342,28 @@ async fn test_site_explorer_fixtures_zerodpu_site_explorer_before_host_dhcp(
         .mark_preingestion_complete()
         .await?
         .run_site_explorer_iteration()
-        .await
-        // Get DHCP on the host in-band NIC
+        .await;
+
+    let mut txn = pool.begin().await?;
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+        .await?
+        .expect("the host should have a pending interface prediction");
+    assert!(
+        db::machine_interface::find_by_mac_address(&mut *txn, inband_mac)
+            .await?
+            .is_empty()
+    );
+    txn.commit().await?;
+
+    let mock_explored_host = mock_explored_host
         .discover_dhcp_host_primary_iface(|result, _| {
             let response = result.unwrap().into_inner();
-            assert!(response.machine_id.is_some());
+            assert_eq!(response.machine_id, Some(predicted.machine_id));
             Ok(())
         })
-        .await?
+        .await?;
+
+    let snapshot: ManagedHostStateSnapshot = mock_explored_host
         // Run discovery
         .discover_machine(|result, _| {
             assert!(result.is_ok());

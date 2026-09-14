@@ -1076,9 +1076,10 @@ impl MainLoop {
                         .await
                     };
 
-                    let astra_config_status =
-                        astra_weave::update_weave_ew_vpc_astra_config(conf.astra_config.as_ref())
-                            .await;
+                    let astra_config_status = astra_weave::build_notify_weave_ew_vpc_astra_config(
+                        conf.astra_config.as_ref(),
+                    )
+                    .await;
 
                     let joined_result = match (update_result, dhcp_result, astra_config_status) {
                         (Ok(hbn_changed), Ok(dhcp_changed), Ok(spx_net_status)) => {

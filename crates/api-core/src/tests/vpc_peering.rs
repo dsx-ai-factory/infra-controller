@@ -525,20 +525,27 @@ async fn test_vpc_peering_network_config(
     Ok(())
 }
 
+/// Verifies FNN and ETV VPCs reach and fail the virtualization compatibility boundary.
 #[crate::sqlx_test]
 async fn test_vpc_peering_network_config_mixed(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = api_fixtures::create_test_env(pool).await;
+    // Enable FNN so the helper creates the required tenants and valid FNN routing state.
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
 
-    let response = create_vpc_peering(
+    let error = create_vpc_peering(
         &env,
         VpcVirtualizationType::Fnn,
         VpcVirtualizationType::EthernetVirtualizer,
     )
-    .await;
-
-    assert!(response.is_err());
+    .await
+    .expect_err("mixed virtualization types cannot be peered");
+    assert!(
+        error.to_string().contains("cannot be peered"),
+        "unexpected error: {error}"
+    );
 
     Ok(())
 }
@@ -786,7 +793,12 @@ async fn flat_vpc_can_peer_with_fnn_under_exclusive_policy(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Same short-circuit as the ETV case, but on the FNN side: Flat VPCs are
     // peer-policy-neutral.
-    let env = api_fixtures::create_test_env(pool).await;
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+
+    // Register the tenant required by the FNN side of the peering.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
 
     let fnn_vpc = env
         .api

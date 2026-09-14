@@ -241,6 +241,9 @@ spec:
               path "{{ .Values.vault.kvMount }}/data/*" {
                 capabilities = ["read", "list"]
               }
+              path "{{ .Values.vault.kvMount }}/metadata/*" {
+                capabilities = ["list"]
+              }
               path "{{ .Values.vault.kvMount }}/data/machines*" {
                 capabilities = ["create", "read", "patch", "list", "update", "delete"]
               }
@@ -248,7 +251,7 @@ spec:
                 capabilities = ["create", "read", "patch", "list", "update", "delete"]
               }
               path "{{ .Values.vault.kvMount }}/metadata/machines/*" {
-                capabilities = ["delete"]
+                capabilities = ["list", "delete"]
               }
               path "{{ .Values.vault.kvMount }}/destroy/machines/*" {
                 capabilities = ["delete"]

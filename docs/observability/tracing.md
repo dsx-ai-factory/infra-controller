@@ -7,7 +7,7 @@ How NICo component tracing works, what it covers, how to turn it on and off and 
 ## TL;DR
 
 - **nico-api** (the `carbide-api` binary) is NICo's primary tracing source and the subject of this
-  document. **nico-dns** also emits traces, but with a separate simpler always-on setup.
+  document. **nico-dns** also emits traces, but with a separate simpler opt-in setup.
   **nico-bmc-proxy** emits traces for each proxied BMC request when configured (see
   [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)).
 - **nico-api traces are off by default**; two things must both be true before any spans are emitted:
@@ -48,7 +48,7 @@ The following binaries build an OTLP span exporter:
 
 - **nico-api** (`crates/api-core/src/logging/setup.rs`) - the rich, control-plane tracing this
   document is mostly about, off by default behind endpoint plus enabled-flag configuration
-- **nico-dns** (`crates/dns/src/main.rs`) - a separate, much simpler **always-on** setup.
+- **nico-dns** (`crates/dns/src/main.rs`) - a separate, much simpler **opt-in** setup.
 - **nico-bmc-proxy** (`crates/bmc-proxy/src/setup.rs`) - one span per proxied BMC request, off by
   default behind endpoint plus `[tracing] enabled` (see
   [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)).
@@ -58,7 +58,7 @@ nico-dsx-exchange-consumer) carry the OpenTelemetry crates in the workspace but 
 exporter, so they do not emit traces.
 
 Unless noted otherwise, the rest of this document describes **nico-api** tracing.
-nico-dns differs as described in [NICO DNS tracing](#nico-dns-tracing-separate-and-always-on).
+nico-dns differs as described in [nico-dns tracing](#nico-dns-tracing-separate-opt-in).
 
 ### What operations are covered
 
@@ -104,21 +104,24 @@ discover or get injected with anything - it simply connects out to the endpoint 
 `[tracing] otlp_endpoint` or, if set, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. The environment
 variable overrides the TOML value. The transport details: gRPC-only, plaintext.
 
-### nico-dns tracing (separate and always-on)
+### nico-dns tracing (separate, opt-in)
 
 nico-dns has its own tracing setup (`crates/dns/src/main.rs`), independent of and simpler than
 nico-api's:
 
-- **Always on.** nico-dns builds the span exporter unconditionally at startup - there is no
-  endpoint env-var check and no `tracing-enabled` switch. If the process runs, it is exporting.
-- **Endpoint from config, with a default.** The target is the `otlp_endpoint` config field
-  (`crates/dns/src/config.rs`), which defaults to
-  `http://opentelemetry-collector.otel.svc.cluster.local:4317`. Because of that default, nico-dns
-  tries to export out of the box
+- **Off by default.** nico-dns builds the span exporter only when an OTLP endpoint is configured
+  - via `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, the `--otlp-endpoint` CLI flag, or the `otlp_endpoint`
+  config field (`crates/dns/src/config.rs`). With none of those set, no exporter is built and no
+  traces are sent. The env var takes precedence over the CLI flag/config file.
+- **No hardcoded default endpoint.** Earlier versions defaulted to
+  `http://opentelemetry-collector.otel.svc.cluster.local:4317` and exported unconditionally, which
+  meant every deployment silently exported traces to that address whether or not a collector was
+  listening there for OTLP/gRPC (see NVBUG 6717563). That default has been removed; set the
+  endpoint explicitly to enable tracing.
 - **Default sampler.** It uses the OpenTelemetry SDK's default sampler (no `CarbideSpanSampler`),
   so it records broadly, filtered only by the log-level directives in its `EnvFilter`. It
   instruments `retrieve_records`, among others.
-- **Resource / output:** `service.name = carbide-dns`; logs are JSON on stdout (not logfmt).
+- **Resource / output:** `service.name = nico-dns`; logs are logfmt on stdout, matching nico-api.
 - **Same transport constraints:** OTLP/gRPC, plaintext (`with_tonic`, no `tls` feature)
 
 ### nico-bmc-proxy tracing

@@ -417,6 +417,15 @@ pub struct DpuFirmwareVersions {
     pub cec: Option<String>,
     pub uefi: Option<String>,
     pub nic: Option<String>,
+    /// Optional opaque DPU BSP firmware version.
+    ///
+    /// Any string is accepted verbatim, including an empty string. The default,
+    /// `None`, omits `DPU_BSP` from generated firmware inventory; `Some("")`
+    /// explicitly configures that inventory entry with an empty version. This is
+    /// supported for generated BlueField-3 and BlueField-4 DPU profiles; profiles
+    /// without a generated DPU do not expose the entry.
+    #[serde(default)]
+    pub bsp: Option<String>,
 }
 
 /// BMC-mock has its own version of this data structure to avoid cyclic dependencies
@@ -427,6 +436,7 @@ impl From<DpuFirmwareVersions> for bmc_mock::DpuFirmwareVersions {
             cec: value.cec,
             uefi: value.uefi,
             nic: value.nic,
+            bsp: value.bsp,
         }
     }
 }
@@ -436,7 +446,11 @@ impl DpuFirmwareVersions {
         self,
         desired_firmware: &[DesiredFirmwareVersionEntry],
     ) -> Self {
-        // We emulate bf3 DPU's, find those from the desired firmware.
+        // TODO: Pass the emulated DPU generation into this lookup and select the
+        // matching desired-firmware model. This currently always uses BlueField-3,
+        // so missing BF4 values can be filled from the BF3 entry; explicit overrides
+        // still take precedence. BF4 BMC version strings use the `BF4-` convention:
+        // https://github.com/NVIDIA/infra-controller/pull/3477
         let Some(bf3_firmware_map) = desired_firmware
             .iter()
             .find(|entry| {
@@ -457,6 +471,7 @@ impl DpuFirmwareVersions {
             cec: self.cec.or_else(|| bf3_firmware_map.get("cec").cloned()),
             uefi: self.uefi.or_else(|| bf3_firmware_map.get("uefi").cloned()),
             nic: self.nic.or_else(|| bf3_firmware_map.get("nic").cloned()),
+            bsp: self.bsp,
         }
     }
 }

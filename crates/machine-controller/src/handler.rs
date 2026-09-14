@@ -87,7 +87,7 @@ use model::machine::{
     PowerState, ReadyBootConfigPostLockAction, ReadyBootConfigState, ReprovisionState, RetryInfo,
     SecureEraseBossContext, SecureEraseBossState, SetBootOrderInfo, SetBootOrderState,
     SetSecureBootState, SpdmMeasuringState, StateMachineArea, UefiSetupInfo, UefiSetupState,
-    UnlockHostState, ValidationState, dpf_based_dpu_provisioning_possible, get_display_ids,
+    UnlockHostState, ValidationState, get_display_ids,
 };
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::power_manager::PowerHandlingOutcome;
@@ -2720,22 +2720,6 @@ async fn handle_restart_verification(
     if let Some(last_reboot) = &mh_snapshot.host_snapshot.status.last_reboot_requested
         && last_reboot.restart_verified == Some(false)
     {
-        if mh_snapshot
-            .host_snapshot
-            .status
-            .last_reboot_time
-            .is_some_and(|completed| completed > last_reboot.time)
-        {
-            ctx.pending_db_writes
-                .push(MachineWriteOp::UpdateRestartVerificationStatus {
-                    machine_id: mh_snapshot.host_snapshot.id.into(),
-                    current_reboot: *last_reboot,
-                    verified: Some(true),
-                    attempts: 0,
-                });
-            return Ok(None);
-        }
-
         let verification_attempts = last_reboot.verification_attempts.unwrap_or(0);
 
         let host_redfish_client = match ctx
@@ -2750,7 +2734,14 @@ async fn handle_restart_verification(
                     error = %err,
                     "Failed to create Redfish client for host during force-restart verification",
                 );
-                return Ok(None);
+                ctx.pending_db_writes
+                    .push(MachineWriteOp::UpdateRestartVerificationStatus {
+                        machine_id: mh_snapshot.host_snapshot.id.into(),
+                        current_reboot: *last_reboot,
+                        verified: None,
+                        attempts: 0,
+                    });
+                return Ok(None); // Skip verification, continue with state transition
             }
         };
 
@@ -2763,7 +2754,14 @@ async fn handle_restart_verification(
                         error = %err,
                         "Failed to fetch BMC logs for host during force-restart verification",
                     );
-                    return Ok(None);
+                    ctx.pending_db_writes
+                        .push(MachineWriteOp::UpdateRestartVerificationStatus {
+                            machine_id: mh_snapshot.host_snapshot.id.into(),
+                            current_reboot: *last_reboot,
+                            verified: None,
+                            attempts: 0,
+                        });
+                    return Ok(None); // Skip verification, continue with state transition
                 }
             };
 
@@ -2780,25 +2778,6 @@ async fn handle_restart_verification(
         }
 
         if verification_attempts >= MAX_VERIFICATION_ATTEMPTS {
-            if matches!(
-                &mh_snapshot.managed_state,
-                ManagedHostState::Assigned {
-                    instance_state: InstanceState::WaitingForRebootToReady,
-                }
-            ) {
-                ctx.pending_db_writes
-                    .push(MachineWriteOp::UpdateRestartVerificationStatus {
-                        machine_id: mh_snapshot.host_snapshot.id.into(),
-                        current_reboot: *last_reboot,
-                        verified: None,
-                        attempts: 0,
-                    });
-                return Ok(Some(StateHandlerOutcome::wait(
-                    "Waiting for host restart completion after BMC verification attempts were exhausted."
-                        .to_string(),
-                )));
-            }
-
             host_redfish_client
                 .power(SystemPowerControl::ForceRestart)
                 .await
@@ -4745,7 +4724,7 @@ impl DpuMachineStateHandler {
                     DpuDiscoveringState::next_substate_based_on_bfb_support(
                         self.enable_secure_boot,
                         state,
-                        ctx.services.site_config.dpf_enabled,
+                        ctx.services.site_config.dpf_enabled && self.dpf_sdk.is_some(),
                     );
 
                 tracing::info!(
@@ -4820,20 +4799,13 @@ impl DpuMachineStateHandler {
                     ));
                 }
 
-                if dpf_based_dpu_provisioning_possible(state, self.dpf_sdk.is_some(), false) {
-                    let mut txn = ctx.services.db_pool.begin().await?;
-                    db::machine::mark_machine_ingestion_done_with_dpf(
-                        &mut txn,
-                        &state.host_snapshot.id,
-                    )
-                    .await?;
-
+                if state.host_snapshot.config.dpf.used_for_ingestion {
                     let next_state = DpuInitState::DpfStates {
                         state: model::machine::DpfState::Provisioning,
                     }
                     .next_state_with_all_dpus_updated(&state.managed_state)?;
 
-                    return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn));
+                    return Ok(StateHandlerOutcome::transition(next_state));
                 }
 
                 for dpu_snapshot in &state.dpu_snapshots {
@@ -8651,38 +8623,17 @@ impl StateHandler for InstanceStateHandler {
                             });
                     }
 
-                    let host = &mh_snapshot.host_snapshot;
-                    if let Some(restart) =
-                        host.status
-                            .last_reboot_requested
-                            .as_ref()
-                            .filter(|restart| {
-                                restart.mode == MachineLastRebootRequestedMode::Reboot
-                                    && restart.time > host.state.version.timestamp()
-                            })
-                    {
-                        let restart_completed = host
-                            .status
-                            .last_reboot_time
-                            .is_some_and(|completed| completed > restart.time);
-                        if restart_completed || restart.restart_verified == Some(true) {
-                            return Ok(StateHandlerOutcome::transition(
-                                ManagedHostState::Assigned {
-                                    instance_state: InstanceState::Ready,
-                                },
-                            ));
-                        }
-
-                        return Ok(StateHandlerOutcome::wait(
-                            "Waiting for host restart completion or verification.".to_string(),
-                        ));
-                    }
-
+                    // Reboot host
                     handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart)
                         .await?;
-                    Ok(StateHandlerOutcome::wait(
-                        "Waiting for host restart completion or verification.".to_string(),
-                    ))
+
+                    // Instance is ready.
+                    // We can not determine if machine is rebooted successfully or not. Just leave
+                    // it like this and declare Instance Ready.
+                    let next_state = ManagedHostState::Assigned {
+                        instance_state: InstanceState::Ready,
+                    };
+                    Ok(StateHandlerOutcome::transition(next_state))
                 }
                 InstanceState::Ready => {
                     // Machine is up after reboot. Hurray. Instance is up.

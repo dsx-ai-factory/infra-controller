@@ -90,10 +90,14 @@ pub async fn find_by_address(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// `delete` removes all addresses during interface teardown. The caller must
+/// delete the interface in the same transaction; use a scoped deletion helper
+/// when the interface remains so its allocation removal is recorded.
 pub async fn delete(
     txn: &mut PgConnection,
     interface_id: &MachineInterfaceId,
 ) -> Result<(), DatabaseError> {
+    lock_interface_for_deletion(&mut *txn, *interface_id).await?;
     let query = "DELETE FROM machine_interface_addresses WHERE interface_id = $1";
     sqlx::query(query)
         .bind(interface_id)
@@ -101,6 +105,22 @@ pub async fn delete(
         .await
         .map(|_| ())
         .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Lock the parent before touching its address rows. Unlike assignment,
+/// deletion still succeeds when the interface has already disappeared.
+/// Must run inside a transaction that remains open through the following address delete.
+async fn lock_interface_for_deletion(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+) -> Result<(), DatabaseError> {
+    let query = "SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE";
+    sqlx::query(query)
+        .bind(interface_id)
+        .execute(txn)
+        .await
+        .map(|_| ())
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// Find all addresses for an interface, including their allocation type.
@@ -136,21 +156,27 @@ pub async fn find_allocation_type_for_family(
 
 /// Delete the address for a given interface, address family, and
 /// allocation type. Returns true if a row was deleted.
+/// Locks the interface before deleting its address and recording the removal.
 pub async fn delete_by_interface_family(
     txn: &mut PgConnection,
     interface_id: MachineInterfaceId,
     family: IpAddressFamily,
     allocation_type: AllocationType,
 ) -> Result<bool, DatabaseError> {
+    lock_interface_for_deletion(txn, interface_id).await?;
     let query = "DELETE FROM machine_interface_addresses WHERE interface_id = $1 AND family(address) = $2 AND allocation_type = $3";
-    sqlx::query(query)
+    let removed = sqlx::query(query)
         .bind(interface_id)
         .bind(family.pg_family())
         .bind(allocation_type)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
         .map(|r| r.rows_affected() > 0)
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if removed && allocation_type != AllocationType::Slaac {
+        crate::machine_interface::record_allocation_removal(txn, interface_id, family).await?;
+    }
+    Ok(removed)
 }
 
 /// Delete a specific address from a specific interface. Returns true if a
@@ -163,15 +189,25 @@ pub async fn delete_by_interface_and_address(
     address: IpAddr,
     allocation_type: AllocationType,
 ) -> Result<bool, DatabaseError> {
+    lock_interface_for_deletion(&mut *txn, interface_id).await?;
     let query = "DELETE FROM machine_interface_addresses WHERE interface_id = $1 AND address = $2::inet AND allocation_type = $3";
-    sqlx::query(query)
+    let removed = sqlx::query(query)
         .bind(interface_id)
         .bind(address)
         .bind(allocation_type)
-        .execute(txn)
+        .execute(&mut *txn)
         .await
         .map(|r| r.rows_affected() > 0)
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if removed && allocation_type != AllocationType::Slaac {
+        crate::machine_interface::record_allocation_removal(
+            txn,
+            interface_id,
+            address.address_family(),
+        )
+        .await?;
+    }
+    Ok(removed)
 }
 
 /// `insert` assigns an unowned address to an interface.
@@ -244,11 +280,16 @@ pub async fn insert(
 /// - `Static`: the old static address is replaced.
 /// - `Dhcp` or `Slaac`: the managed allocation is removed and
 ///   replaced with the static assignment.
+///
+/// Must run inside a transaction. This locks the interface before selecting an
+/// address. Callers with their own address-dependent skip or conflict rules must
+/// acquire that lock before reading the state used by those rules.
 pub async fn assign_static(
     txn: &mut PgConnection,
     interface_id: MachineInterfaceId,
     address: IpAddr,
 ) -> Result<AssignStaticResult, DatabaseError> {
+    crate::machine_interface::lock_for_address_assignment(&mut *txn, interface_id).await?;
     let family = address.address_family();
 
     let existing = find_allocation_type_for_family(&mut *txn, interface_id, family).await?;
@@ -274,18 +315,15 @@ pub async fn assign_static(
 /// Delete an address allocation of the given type. Returns at most one owning
 /// interface in a vector so callers can share the hostname-resync path with
 /// MAC-scoped deletion.
+///
+/// If the matching allocation moves to another interface while this waits for
+/// its original owner, leave it allocated and return an empty vector.
 pub async fn delete_by_address(
     txn: &mut PgConnection,
     address: IpAddr,
     allocation_type: AllocationType,
 ) -> Result<Vec<MachineInterfaceId>, DatabaseError> {
-    let query = "DELETE FROM machine_interface_addresses WHERE address = $1::inet AND allocation_type = $2 RETURNING interface_id";
-    sqlx::query_scalar(query)
-        .bind(address)
-        .bind(allocation_type)
-        .fetch_all(txn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))
+    delete_address_allocation(txn, address, None, allocation_type).await
 }
 
 /// Delete an address allocation for a given (ip, mac) pair, which
@@ -294,26 +332,46 @@ pub async fn delete_by_address(
 /// Returns the interfaces that owned the deleted allocations (normally one,
 /// empty if the pair matched nothing) so callers can resync each one's hostname
 /// against the authoritative deleted rows rather than a separate lookup.
+/// A matching allocation moved to another interface while waiting for its
+/// original owner is left allocated, returning an empty vector.
 pub async fn delete_by_address_and_mac(
     txn: &mut PgConnection,
     address: IpAddr,
     mac_address: mac_address::MacAddress,
     allocation_type: AllocationType,
 ) -> Result<Vec<MachineInterfaceId>, DatabaseError> {
-    let query = "DELETE FROM machine_interface_addresses mia
-        USING machine_interfaces mi
-        WHERE mia.interface_id = mi.id
-          AND mia.address = $1::inet
+    delete_address_allocation(txn, address, Some(mac_address), allocation_type).await
+}
+
+async fn delete_address_allocation(
+    txn: &mut PgConnection,
+    address: IpAddr,
+    mac_address: Option<MacAddress>,
+    allocation_type: AllocationType,
+) -> Result<Vec<MachineInterfaceId>, DatabaseError> {
+    let query = "SELECT mi.id
+        FROM machine_interfaces mi
+        JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
+        WHERE mia.address = $1::inet
           AND mia.allocation_type = $2
-          AND mi.mac_address = $3::macaddr
-        RETURNING mia.interface_id";
-    sqlx::query_scalar(query)
+          AND ($3::macaddr IS NULL OR mi.mac_address = $3::macaddr)
+        FOR UPDATE OF mi";
+    let Some(interface_id) = sqlx::query_scalar::<_, MachineInterfaceId>(query)
         .bind(address)
         .bind(allocation_type)
         .bind(mac_address)
-        .fetch_all(txn)
+        .fetch_optional(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|error| DatabaseError::query(query, error))?
+    else {
+        return Ok(Vec::new());
+    };
+
+    // Read again after the parent lock, but keep the selected owner. An
+    // address moved to another interface while we waited must survive.
+    let removed =
+        delete_by_interface_and_address(txn, interface_id, address, allocation_type).await?;
+    Ok(removed.then_some(interface_id).into_iter().collect())
 }
 
 /// Check whether an interface has any address assigned for the
@@ -355,6 +413,7 @@ pub struct MachineInterfaceSearchResult {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
 
@@ -398,6 +457,32 @@ mod tests {
         }
     }
 
+    async fn wait_for_interface_lock(
+        pool: &sqlx::PgPool,
+        holder_pid: i32,
+        waiter_pid: i32,
+    ) -> Result<(), sqlx::Error> {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE pid = $2
+                      AND $1 = ANY(pg_blocking_pids(pid))
+                      AND strpos(lower(query), 'from machine_interfaces') > 0
+                      AND strpos(lower(query), 'for update') > 0
+                )",
+            )
+            .bind(holder_pid)
+            .bind(waiter_pid)
+            .fetch_one(pool)
+            .await?;
+            if blocked {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Verifies the new SLAAC allocation type survives a database round trip.
     #[crate::sqlx_test]
     async fn slaac_allocation_type_round_trips(
@@ -436,6 +521,242 @@ mod tests {
         assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);
 
         txn.rollback().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn static_assignment_rechecks_slaac_after_waiting(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('static-after-slaac', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *setup)
+        .await?;
+        let interface_id = create_test_interface(
+            &mut setup,
+            segment_id,
+            "02:00:00:00:00:15".parse()?,
+            "static-after-slaac",
+        )
+        .await?;
+        setup.commit().await?;
+
+        let mut holder = pool.begin().await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+            .bind(interface_id)
+            .fetch_one(&mut *holder)
+            .await?;
+        insert(
+            &mut holder,
+            interface_id,
+            "2001:db8::15".parse()?,
+            AllocationType::Slaac,
+        )
+        .await?;
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await?;
+        let mut waiter = pool.begin().await?;
+        let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *waiter)
+            .await?;
+        let static_address: IpAddr = "2001:db8::16".parse()?;
+
+        // The SLAAC row is uncommitted when static assignment starts. Wait for
+        // PostgreSQL to confirm the blocked writer before making it visible.
+        let assign_address = async {
+            let result = assign_static(&mut waiter, interface_id, static_address).await?;
+            waiter.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(result)
+        };
+        let commit_observation = async {
+            wait_for_interface_lock(&pool, holder_pid, waiter_pid).await?;
+            holder.commit().await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let (assignment, observation) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(assign_address, commit_observation)
+        })
+        .await?;
+        observation?;
+        assert_eq!(assignment?, AssignStaticResult::ReplacedDhcp);
+
+        let mut connection = pool.acquire().await?;
+        let addresses = find_for_interface(&mut connection, interface_id).await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, static_address);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn address_deletion_preserves_owner_changed_while_waiting(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('expiry-after-owner-move', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *setup)
+        .await?;
+        let source_interface_id = create_test_interface(
+            &mut setup,
+            segment_id,
+            "02:00:00:00:00:16".parse()?,
+            "expiry-source",
+        )
+        .await?;
+        let destination_interface_id = create_test_interface(
+            &mut setup,
+            segment_id,
+            "02:00:00:00:00:17".parse()?,
+            "expiry-destination",
+        )
+        .await?;
+        let address: IpAddr = "2001:db8::20".parse()?;
+        insert(
+            &mut setup,
+            source_interface_id,
+            address,
+            AllocationType::Dhcp,
+        )
+        .await?;
+        setup.commit().await?;
+
+        let mut holder = pool.begin().await?;
+        let mut interface_ids = [source_interface_id, destination_interface_id];
+        interface_ids.sort();
+        for interface_id in interface_ids {
+            sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+                .bind(interface_id)
+                .fetch_one(&mut *holder)
+                .await?;
+        }
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await?;
+        let mut waiter = pool.begin().await?;
+        let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *waiter)
+            .await?;
+
+        let expire_address = async {
+            let deleted = delete_by_address(&mut waiter, address, AllocationType::Dhcp).await?;
+            waiter.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(deleted)
+        };
+        let move_address = async {
+            wait_for_interface_lock(&pool, holder_pid, waiter_pid).await?;
+            // Admin reconciliation can move an existing DHCP row between
+            // interfaces. Expiry must not follow it to its new owner.
+            let moved = sqlx::query(
+                "UPDATE machine_interface_addresses SET interface_id = $1
+                 WHERE interface_id = $2 AND address = $3::inet AND allocation_type = 'dhcp'",
+            )
+            .bind(destination_interface_id)
+            .bind(source_interface_id)
+            .bind(address)
+            .execute(&mut *holder)
+            .await?;
+            assert_eq!(moved.rows_affected(), 1);
+            holder.commit().await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let (deletion, movement) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(expire_address, move_address)
+        })
+        .await?;
+        movement?;
+        assert!(deletion?.is_empty());
+
+        let mut connection = pool.acquire().await?;
+        assert!(
+            find_for_interface(&mut connection, source_interface_id)
+                .await?
+                .is_empty()
+        );
+        let addresses = find_for_interface(&mut connection, destination_interface_id).await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, address);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn static_removal_preserves_replacement_after_waiting(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('static-removal-after-replacement', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *setup)
+        .await?;
+        let interface_id = create_test_interface(
+            &mut setup,
+            segment_id,
+            "02:00:00:00:00:18".parse()?,
+            "static-removal-after-replacement",
+        )
+        .await?;
+        let original_address: IpAddr = "2001:db8::30".parse()?;
+        let replacement_address: IpAddr = "2001:db8::31".parse()?;
+        insert(
+            &mut setup,
+            interface_id,
+            original_address,
+            AllocationType::Static,
+        )
+        .await?;
+        setup.commit().await?;
+
+        let mut holder = pool.begin().await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+            .bind(interface_id)
+            .fetch_one(&mut *holder)
+            .await?;
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await?;
+        let mut waiter = pool.begin().await?;
+        let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *waiter)
+            .await?;
+
+        let remove_address = async {
+            let deleted = delete_by_interface_and_address(
+                &mut waiter,
+                interface_id,
+                original_address,
+                AllocationType::Static,
+            )
+            .await?;
+            waiter.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(deleted)
+        };
+        let replace_address = async {
+            wait_for_interface_lock(&pool, holder_pid, waiter_pid).await?;
+            let result = assign_static(&mut holder, interface_id, replacement_address).await?;
+            holder.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(result)
+        };
+        let (removal, replacement) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(remove_address, replace_address)
+        })
+        .await?;
+        assert_eq!(replacement?, AssignStaticResult::ReplacedStatic);
+        assert!(!removal?);
+
+        let mut connection = pool.acquire().await?;
+        let addresses = find_for_interface(&mut connection, interface_id).await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, replacement_address);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Static);
         Ok(())
     }
 

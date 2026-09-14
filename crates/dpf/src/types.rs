@@ -160,9 +160,9 @@ pub struct InitDpfResourcesConfig {
 pub struct BlueFieldSoftwareParams {
     /// OS ISO URL used by the DPU OS installation flow (`spec.osIso`).
     pub os_iso: String,
-    /// Optional PLDM firmware bundle URL for baseline firmware updates
+    /// Optional PLDM firmware bundle URLs for baseline firmware updates
     /// (`spec.pldmFwBundle`).
-    pub pldm_fw_bundle: Option<String>,
+    pub pldm_fw_bundle: Option<BTreeMap<String, String>>,
 }
 
 impl Default for InitDpfResourcesConfig {
@@ -845,7 +845,7 @@ impl From<DpuStatusPhase> for DpuPhase {
                 Self::Provisioning("PerformArmForceRestart".into())
             }
             DpuStatusPhase::UpdateFirmware => Self::Provisioning("UpdateFirmware".into()),
-            DpuStatusPhase::HostOsInitRelease => Self::Provisioning("HostOsInitRelease".into()),
+            DpuStatusPhase::ServiceReadiness => Self::Provisioning("ServiceReadiness".into()),
         }
     }
 }

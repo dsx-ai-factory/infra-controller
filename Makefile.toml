@@ -27,6 +27,9 @@ CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
 REPO_ROOT = { script = [
   "dirname $(cargo locate-project --message-format plain --workspace)",
 ] }
+KEA_VERSION = { script = [
+  "cat $(dirname $(cargo locate-project --message-format plain --workspace))/dev/docker/kea.version",
+], condition = { env_not_set = ["KEA_VERSION"] } }
 CARBIDE_ENVIRONMENT = { value = "local", condition = { env_not_set = [
   "CARBIDE_ENVIRONMENT",
 ] } }
@@ -198,7 +201,7 @@ workspace = false
 script = '''
 set -e
 if [ -z "$CARGO_HOME" ]; then CARGO_HOME="$HOME/.cargo"; fi
-docker build -f ${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64 -t carbide-build-x86_64 ${REPO_ROOT}/dev/docker
+docker build --build-arg KEA_VERSION=${KEA_VERSION} -f ${REPO_ROOT}/dev/docker/Dockerfile.build-container-x86_64 -t carbide-build-x86_64 ${REPO_ROOT}/dev/docker
 echo "Image carbide-build-x86_64 built. Run: cargo make cargo-docker -- build -p nico-admin-cli --release"
 '''
 
@@ -287,6 +290,16 @@ docker run --rm \
   -e CARGO_HOME=/cargo \
   carbide-build-x86_64 \
   cargo ${CARGO_ARGS}
+'''
+
+[tasks.test-dhcp-docker]
+category = "Test"
+description = "Run DHCP integration tests in the pinned Bookworm/Kea build environment."
+workspace = false
+dependencies = ["build-cargo-docker-image"]
+script = '''
+set -e
+cargo make cargo-docker -- test --locked -p carbide-dhcp --tests
 '''
 
 [tasks.fix-target-permissions]
@@ -416,6 +429,8 @@ workspace = false
 command = "docker"
 args = [
   "build",
+  "--build-arg",
+  "KEA_VERSION=${KEA_VERSION}",
   "-t",
   "${BUILD_CONTAINER_X86_URL}",
   "-f",
@@ -438,6 +453,8 @@ workspace = false
 command = "docker"
 args = [
   "build",
+  "--build-arg",
+  "KEA_VERSION=${KEA_VERSION}",
   "-t",
   "${BUILD_CONTAINER_AARCH64_URL}",
   "-f",
@@ -453,6 +470,8 @@ workspace = false
 command = "docker"
 args = [
   "build",
+  "--build-arg",
+  "KEA_VERSION=${KEA_VERSION}",
   "-t",
   "carbide-runtime:latest",
   ".",

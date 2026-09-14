@@ -7,7 +7,7 @@
    "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
    "siteId": "bd4692bd-da95-410e-911a-d492fe2d35f8",
    "instanceTypeId": "9c4aaa6a-3934-4274-b0a9-5143b253039e",
-   "vpcId": "0b1c53a0-a27e-4714-98d7-0cd3bc579db2",
+   "vpcId": "f466a2d5-5820-4824-a845-3218fdff801b",
    "machineId": "fm100hthvos96dbmmai84gsok0dn967v9fap8ublgp34kaknd9tq7pddim0",
    "operatingSystemId": "0865029e-3979-432d-985e-2de396ecce32",
    "ipxeScript": "#!ipxe\nkernel https://github.com/netbootxyz/ubuntu-squash/releases/download/20.04.6-a1b16d57/vmlinuz ip=dhcp fb=false interface=ens5f0 url=https://releases.ubuntu.com/20.04.6/ubuntu-20.04.6-live-server-amd64.iso autoinstall ds=nocloud-net;s=${tenant-cloudinit-url} initrd=initrd.magic\ninitrd https://github.com/netbootxyz/ubuntu-squash/releases/download/20.04.6-a1b16d57/initrd\nboot\n",

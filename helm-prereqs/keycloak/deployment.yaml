@@ -16,6 +16,10 @@ spec:
     spec:
       containers:
         - name: keycloak
+          # Keycloak 24 enables the declarative user profile with
+          # unmanagedAttributePolicy DISABLED, so the oidc_id attribute NICo keys human
+          # users on is discarded unless a realm raises that policy to ADMIN_EDIT.
+          # Re-check that path when bumping this tag.
           image: quay.io/keycloak/keycloak:24.0
           args:
             - start-dev

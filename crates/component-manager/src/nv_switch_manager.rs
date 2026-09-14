@@ -254,6 +254,9 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
         options: &FirmwareUpdateOptions,
     ) -> Result<Vec<SwitchComponentResult>, ComponentManagerError>;
 
+    /// Returns status for firmware jobs known to the backend.
+    ///
+    /// An endpoint may be omitted when the backend does not track a firmware job for it.
     async fn get_firmware_status(
         &self,
         endpoints: &[SwitchEndpoint],

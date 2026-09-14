@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -206,6 +208,24 @@ func (m *ManagerImpl) SubmitTask(
 		return nil, err
 	}
 
+	// A caller may retry after task submission succeeded but persisting the
+	// returned task ID failed. Once the task is scheduled, its idempotency key
+	// owns the outcome; mutable inventory and rule state must not turn that
+	// retry into a failure.
+	if req.HasIdempotencyKey() {
+		existing, err := m.taskStore.GetTaskByIdempotencyKey(ctx, req.IdempotencyKey)
+		if err != nil {
+			return nil, fmt.Errorf("look up idempotent task: %w", err)
+		}
+		if err := validateIdempotentTaskRack(req, existing); err != nil {
+			return nil, err
+		}
+		if existing != nil && (existing.IsScheduled() ||
+			existing.Status == taskcommon.TaskStatusWaiting) {
+			return []uuid.UUID{existing.ID}, nil
+		}
+	}
+
 	// Fail-fast: verify the requested rule exists before creating any tasks.
 	// The resolver will check again at execution time (defense-in-depth for
 	// queued tasks whose rule may be deleted while waiting).
@@ -248,6 +268,11 @@ func (m *ManagerImpl) SubmitTask(
 		}
 	}
 
+	err = m.validateSubmissionRackTargets(ctx, req.Operation, rackMap)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create and execute task for each rack.
 	var taskIDs []uuid.UUID
 	for _, targetRack := range rackMap {
@@ -274,6 +299,134 @@ func (m *ManagerImpl) SubmitTask(
 	}
 
 	return taskIDs, nil
+}
+
+// validateSubmissionRackTargets resolves the effective ingest rule for each
+// rack before deciding whether unlinked expected components are safe targets.
+func (m *ManagerImpl) validateSubmissionRackTargets(
+	ctx context.Context,
+	op operation.Wrapper,
+	rackMap map[uuid.UUID]*rack.Rack,
+) error {
+	if op.Type != taskcommon.TaskTypeBringUp || op.Code != taskcommon.OpCodeIngest {
+		if err := validateResolvedRackTargets(op, nil, rackMap); err != nil {
+			return fmt.Errorf("operation cannot be submitted: %w", err)
+		}
+		return nil
+	}
+
+	rackIDs := make([]uuid.UUID, 0, len(rackMap))
+	for rackID := range rackMap {
+		rackIDs = append(rackIDs, rackID)
+	}
+	slices.SortFunc(rackIDs, func(a, b uuid.UUID) int {
+		return strings.Compare(a.String(), b.String())
+	})
+
+	for _, rackID := range rackIDs {
+		rule, err := m.resolveOperationRule(ctx, op, rackID)
+		if err != nil {
+			return err
+		}
+		if err := validateResolvedRackTargets(
+			op,
+			&rule.RuleDefinition,
+			map[uuid.UUID]*rack.Rack{rackID: rackMap[rackID]},
+		); err != nil {
+			return fmt.Errorf("operation cannot be submitted: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// validateResolvedRackTargets enforces the boundary between expected
+// inventory and actionable actual devices. Expectation-only operations are
+// the exception: they intentionally operate on expected components that may
+// not have an external ID yet.
+func validateResolvedRackTargets(
+	op operation.Wrapper,
+	ruleDef *operationrules.RuleDefinition,
+	rackMap map[uuid.UUID]*rack.Rack,
+) error {
+	var emptyRacks []string
+	var unlinkedComponents []string
+	expectationOnly := (op.Type == taskcommon.TaskTypeInjectExpectation &&
+		op.Code == taskcommon.OpCodeInjectExpectation) ||
+		(op.Type == taskcommon.TaskTypeBringUp &&
+			op.Code == taskcommon.OpCodeIngest &&
+			ruleUsesOnlyExpectedInventory(ruleDef))
+
+	for rackID, resolvedRack := range rackMap {
+		if resolvedRack == nil || len(resolvedRack.Components) == 0 {
+			emptyRacks = append(emptyRacks, rackID.String())
+			continue
+		}
+		if expectationOnly {
+			continue
+		}
+		for _, comp := range resolvedRack.Components {
+			if comp.ComponentID == "" {
+				unlinkedComponents = append(
+					unlinkedComponents,
+					fmt.Sprintf(
+						"rack %s %s/%s",
+						rackID,
+						devicetypes.ComponentTypeToString(comp.Type),
+						comp.Info.ID,
+					),
+				)
+			}
+		}
+	}
+
+	if len(emptyRacks) > 0 {
+		slices.Sort(emptyRacks)
+		return fmt.Errorf(
+			"racks have no selected components: %s",
+			strings.Join(emptyRacks, ", "),
+		)
+	}
+	if len(unlinkedComponents) > 0 {
+		slices.Sort(unlinkedComponents)
+		return &unlinkedTargetsError{components: unlinkedComponents}
+	}
+
+	return nil
+}
+
+type unlinkedTargetsError struct {
+	components []string
+}
+
+func (e *unlinkedTargetsError) Error() string {
+	return fmt.Sprintf(
+		"selected components not linked to actual inventory (%d): %s",
+		len(e.components),
+		strings.Join(e.components, ", "),
+	)
+}
+
+func ruleUsesOnlyExpectedInventory(ruleDef *operationrules.RuleDefinition) bool {
+	if ruleDef == nil {
+		return false
+	}
+
+	foundInjectExpectation := false
+	for _, step := range ruleDef.Steps {
+		for _, action := range step.OrderedActions() {
+			switch action.Name {
+			case operationrules.ActionInjectExpectation:
+				foundInjectExpectation = true
+			case operationrules.ActionSleep:
+				// Sleep has no inventory target side effect.
+			default:
+				return false
+			}
+		}
+	}
+
+	return foundInjectExpectation
 }
 
 // createAndExecuteTask creates a task for a single rack and executes it.
@@ -344,17 +497,12 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 			}
 
 			if persistedTask != nil {
+				if err := validateIdempotentTaskRack(req, persistedTask); err != nil {
+					return err
+				}
 				// There are existing tasks with this idempotency key, reuse it.
 				task = *persistedTask
 
-				if task.IsScheduled() {
-					// The task is already scheduled, so we can return it.
-					log.Info().
-						Str("task_id", task.ID.String()).
-						Str("idempotency_key", task.IdempotencyKey).
-						Msg("idempotent duplicate: returning existing scheduled task")
-					return nil
-				}
 			} else {
 				// No existing tasks with this idempotency key, create a new one.
 				task = newTaskForRack(req, targetRack)
@@ -367,8 +515,14 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 				}
 			}
 
+			if task.IsScheduled() {
+				log.Info().
+					Str("task_id", task.ID.String()).
+					Str("idempotency_key", task.IdempotencyKey).
+					Msg("idempotent duplicate: returning existing scheduled task")
+				return nil
+			}
 			if task.Status == taskcommon.TaskStatusWaiting {
-				// The task has conflict and is waiting, so we can return it.
 				log.Info().
 					Str("task_id", task.ID.String()).
 					Str("rack_id", targetRack.Info.ID.String()).
@@ -376,16 +530,29 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 				return nil
 			}
 
-			// Resolve and execute the task.
-			return m.resolveAndExecuteTask(txCtx, &task, targetRack)
+			// Keep the idempotency lock until the execution ID or deferred
+			// status is persisted so a concurrent retry cannot execute the
+			// same pending task.
+			return m.resolveAndExecuteTaskInTransaction(txCtx, &task, targetRack)
 		},
 	)
 
 	if txErr != nil {
 		return uuid.Nil, txErr
 	}
-
 	return task.ID, nil
+}
+
+func validateIdempotentTaskRack(req *operation.Request, existing *taskdef.Task) error {
+	if existing == nil || existing.RackID == req.RequiredRackID {
+		return nil
+	}
+	return fmt.Errorf(
+		"idempotency key %q belongs to rack %s, not requested rack %s",
+		req.IdempotencyKey,
+		existing.RackID,
+		req.RequiredRackID,
+	)
 }
 
 func newTaskForRack(req *operation.Request, targetRack *rack.Rack) taskdef.Task {
@@ -496,11 +663,24 @@ func (m *ManagerImpl) resolveAndExecuteTask(
 	task *taskdef.Task,
 	targetRack *rack.Rack,
 ) error {
-	ruleID := operations.ExtractRuleID(task.Operation.Info)
+	return m.resolveAndExecuteTaskWithTransaction(ctx, task, targetRack, false)
+}
 
-	rule, err := m.ruleResolver.ResolveRule(
-		ctx, task.Operation.Type, task.Operation.Code, task.RackID, ruleID,
-	)
+func (m *ManagerImpl) resolveAndExecuteTaskInTransaction(
+	ctx context.Context,
+	task *taskdef.Task,
+	targetRack *rack.Rack,
+) error {
+	return m.resolveAndExecuteTaskWithTransaction(ctx, task, targetRack, true)
+}
+
+func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
+	ctx context.Context,
+	task *taskdef.Task,
+	targetRack *rack.Rack,
+	transactionActive bool,
+) error {
+	rule, err := m.resolveOperationRule(ctx, task.Operation, task.RackID)
 	if err != nil {
 		return fmt.Errorf("failed to resolve operation rule: %w", err)
 	}
@@ -528,6 +708,10 @@ func (m *ManagerImpl) resolveAndExecuteTask(
 
 	resp, err := m.executeTask(ctx, task, targetRack, &rule.RuleDefinition)
 	if err != nil {
+		deferred, deferErr := m.deferUnlinkedTask(ctx, task, err, transactionActive)
+		if deferred {
+			return deferErr
+		}
 		if uerr := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
 			ID:      task.ID,
 			Status:  taskcommon.TaskStatusFailed,
@@ -546,6 +730,106 @@ func (m *ManagerImpl) resolveAndExecuteTask(
 			Msgf("failed to update scheduled task %s", task.ID)
 	}
 	return nil
+}
+
+func (m *ManagerImpl) deferUnlinkedTask(
+	ctx context.Context,
+	task *taskdef.Task,
+	executionErr error,
+	transactionActive bool,
+) (bool, error) {
+	var unlinkedErr *unlinkedTargetsError
+	if !errors.As(executionErr, &unlinkedErr) {
+		return false, nil
+	}
+
+	deadline := task.QueueExpiresAt
+	if deadline == nil {
+		timeout := m.defaultQueueTimeout
+		if timeout <= 0 {
+			timeout = defaultQueueTimeout
+		}
+		fallback := time.Now().Add(timeout)
+		deadline = &fallback
+	}
+
+	status := taskcommon.TaskStatusWaiting
+	statusMessage := fmt.Sprintf("Waiting for target linkage: %v", unlinkedErr)
+	if !time.Now().Before(*deadline) {
+		status = taskcommon.TaskStatusTerminated
+		statusMessage = fmt.Sprintf(
+			"Expired: target linkage unavailable before queue timeout: %v",
+			unlinkedErr,
+		)
+		if err := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
+			ID:      task.ID,
+			Status:  status,
+			Message: statusMessage,
+		}); err != nil {
+			return true, fmt.Errorf("expire task awaiting target linkage: %w", err)
+		}
+	} else {
+		limit := m.maxWaitingPerRack
+		if limit <= 0 {
+			limit = defaultMaxWaitingPerRack
+		}
+		persistWaiting := func(txCtx context.Context) error {
+			if err := m.taskStore.LockRack(txCtx, task.RackID); err != nil {
+				return err
+			}
+			count, err := m.taskStore.CountWaitingTasksForRack(txCtx, task.RackID)
+			if err != nil {
+				return err
+			}
+			if count >= limit {
+				status = taskcommon.TaskStatusTerminated
+				statusMessage = fmt.Sprintf(
+					"Terminated: rack waiting queue is full while target linkage is unavailable (%d/%d tasks): %v",
+					count,
+					limit,
+					unlinkedErr,
+				)
+			}
+
+			update := &taskdef.TaskStatusUpdate{
+				ID:      task.ID,
+				Status:  status,
+				Message: statusMessage,
+			}
+			if status == taskcommon.TaskStatusWaiting {
+				update.QueueExpiresAt = deadline
+			}
+			return m.taskStore.UpdateTaskStatus(txCtx, update)
+		}
+
+		var err error
+		if transactionActive {
+			err = persistWaiting(ctx)
+		} else {
+			err = m.taskStore.RunInTransaction(ctx, persistWaiting)
+		}
+		if err != nil {
+			return true, fmt.Errorf("defer task awaiting target linkage: %w", err)
+		}
+	}
+
+	task.Status = status
+	task.Message = statusMessage
+	if status == taskcommon.TaskStatusWaiting {
+		task.QueueExpiresAt = deadline
+	} else {
+		task.QueueExpiresAt = nil
+	}
+	return true, nil
+}
+
+func (m *ManagerImpl) resolveOperationRule(
+	ctx context.Context,
+	op operation.Wrapper,
+	rackID uuid.UUID,
+) (*operationrules.OperationRule, error) {
+	ruleID := operations.ExtractRuleID(op.Info)
+	return m.ruleResolver.ResolveRule(ctx, op.Type, op.Code, rackID, ruleID)
 }
 
 // CancelTask cancels a task by its ID.
@@ -648,6 +932,15 @@ func (m *ManagerImpl) executeTask(
 ) (*taskdef.ExecutionResponse, error) {
 	if task == nil {
 		return nil, fmt.Errorf("task is nil")
+	}
+
+	err := validateResolvedRackTargets(
+		task.Operation,
+		ruleDef,
+		map[uuid.UUID]*rack.Rack{task.RackID: targetRack},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("operation cannot be executed: %w", err)
 	}
 
 	req := taskdef.ExecutionRequest{

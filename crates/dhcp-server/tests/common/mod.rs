@@ -19,8 +19,9 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use carbide_dhcp_server::cache::{self, CacheEntry};
 use carbide_dhcp_server::{Config, packet_handler_v6};
@@ -30,9 +31,21 @@ use dhcproto::v6::{
     DhcpOption, DhcpOptions, IAAddr, IANA, Message, MessageType, OptionCode, Status,
 };
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
+use futures::stream;
+use http_body_util::combinators::UnsyncBoxBody;
+use http_body_util::{BodyExt, StreamBody};
+use hyper::body::{Bytes, Frame, Incoming};
+use hyper::server::conn::http2;
+use hyper::service::service_fn;
+use hyper::{Request, Response, header};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use lru::LruCache;
+use prost::Message as _;
+use rpc::forge::{BuildInfo, DhcpDiscovery, DhcpRecord};
 use rpc::forge_tls_client::ForgeClientConfig;
-use tokio::sync::Mutex;
+use tokio::net::TcpListener;
+use tokio::sync::{Mutex, oneshot};
+use tokio::task::JoinHandle;
 
 pub(super) const DUID_LL: &[u8] = &[0, 3, 0, 1, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
 pub(super) const DUID_UUID: &[u8] = &[0, 4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
@@ -269,4 +282,160 @@ pub(super) fn relay_option(packet: &[u8], code: OptionCode) -> &[u8] {
         options = rest;
     }
     panic!("relay option {code:?} is absent")
+}
+
+/// Minimal Forge mock supporting client initialization and `DiscoverDhcp`.
+///
+/// Controller-mode packet tests need a real tonic transport boundary while
+/// retaining the family-aware request for assertions.
+pub(super) struct MockDiscoverDhcpApi {
+    url: String,
+    discoveries: Arc<StdMutex<Vec<DhcpDiscovery>>>,
+    shutdown: Option<oneshot::Sender<()>>,
+    server: Option<JoinHandle<()>>,
+}
+
+impl MockDiscoverDhcpApi {
+    /// Start an isolated HTTP/2 gRPC endpoint without linking the Kea hook crate.
+    ///
+    /// Binding before return guarantees the production Forge client can connect
+    /// immediately in controller-mode tests.
+    pub(super) async fn start() -> Self {
+        // Bind before spawning so the returned URL is immediately usable.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock Forge listener binds");
+        let address = listener.local_addr().expect("mock listener has an address");
+        let discoveries = Arc::new(StdMutex::new(Vec::new()));
+        let server_discoveries = discoveries.clone();
+        let (shutdown, shutdown_rx) = oneshot::channel();
+
+        // One connection serves the Version probe and test DiscoverDhcp call.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("mock accepts a client");
+            let connection = http2::Builder::new(TokioExecutor::new()).serve_connection(
+                TokioIo::new(stream),
+                service_fn(move |request| mock_forge_request(request, server_discoveries.clone())),
+            );
+            tokio::pin!(connection);
+            tokio::select! {
+                result = connection.as_mut() => {
+                    result.expect("mock serves the gRPC connection");
+                }
+                _ = shutdown_rx => {
+                    connection.as_mut().graceful_shutdown();
+                    connection
+                        .await
+                        .expect("mock gracefully closes the gRPC connection");
+                }
+            }
+        });
+
+        Self {
+            url: format!("http://{address}"),
+            discoveries,
+            shutdown: Some(shutdown),
+            server: Some(server),
+        }
+    }
+
+    /// Return the loopback URL consumed by the production Forge client.
+    pub(super) fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Stop the mock, surface task failures, and return its observed requests.
+    ///
+    /// Explicit shutdown proves every expected request completed before tests
+    /// inspect the captured API contract.
+    pub(super) async fn shutdown(mut self) -> Vec<DhcpDiscovery> {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        self.server
+            .take()
+            .expect("mock server task is present")
+            .await
+            .expect("mock server task did not panic");
+        self.discoveries
+            .lock()
+            .expect("mock discoveries lock is available")
+            .clone()
+    }
+}
+
+impl Drop for MockDiscoverDhcpApi {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            server.abort();
+        }
+    }
+}
+
+/// Handle the two Forge methods used by controller-mode discovery.
+async fn mock_forge_request(
+    request: Request<Incoming>,
+    discoveries: Arc<StdMutex<Vec<DhcpDiscovery>>>,
+) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, Infallible> {
+    let response = match request.uri().path() {
+        path if path == rpc::service_path!("Version") => grpc_response(BuildInfo::default()),
+        path if path == rpc::service_path!("DiscoverDhcp") => {
+            // Strip the gRPC frame and retain the request for contract assertions.
+            let body = request
+                .into_body()
+                .collect()
+                .await
+                .expect("DiscoverDhcp request body is readable")
+                .to_bytes();
+            let payload = body.get(5..).expect("DiscoverDhcp has a gRPC frame");
+            let discovery = DhcpDiscovery::decode(payload).expect("DiscoverDhcp request decodes");
+            discoveries
+                .lock()
+                .expect("mock discoveries lock is available")
+                .push(discovery.clone());
+
+            // Return only the fields consumed by the DHCPv6 response encoder.
+            grpc_response(DhcpRecord {
+                fqdn: "host.example.com".to_string(),
+                mac_address: discovery.mac_address,
+                address: "2001:db8::ee".to_string(),
+                prefix: "2001:db8::/64".to_string(),
+                ..Default::default()
+            })
+        }
+        path => panic!("unexpected mock Forge method: {path}"),
+    };
+    Ok(response)
+}
+
+/// Encode one protobuf response with the gRPC data and status frames tonic expects.
+fn grpc_response(message: impl prost::Message) -> Response<UnsyncBoxBody<Bytes, Infallible>> {
+    // Prefix the protobuf with the standard uncompressed gRPC frame header.
+    let mut data = Vec::with_capacity(5 + message.encoded_len());
+    data.push(0);
+    data.extend_from_slice(
+        &u32::try_from(message.encoded_len())
+            .expect("test response fits in a gRPC frame")
+            .to_be_bytes(),
+    );
+    message
+        .encode(&mut data)
+        .expect("mock gRPC response encodes");
+
+    // Complete the response with an OK status trailer.
+    let mut trailers = hyper::HeaderMap::new();
+    trailers.insert(
+        header::HeaderName::from_static("grpc-status"),
+        header::HeaderValue::from_static("0"),
+    );
+    let body = StreamBody::new(stream::iter([
+        Ok::<_, Infallible>(Frame::data(Bytes::from(data))),
+        Ok(Frame::trailers(trailers)),
+    ]))
+    .boxed_unsync();
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/grpc+tonic")
+        .body(body)
+        .expect("mock gRPC response is valid")
 }

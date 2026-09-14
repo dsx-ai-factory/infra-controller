@@ -13,9 +13,14 @@ the invalid key's full section path and source. Names inside intentionally
 dynamic maps, such as pool names and rack-profile IDs, remain user-defined;
 fields within each map value must still match the documented schema.
 
-The removed `force_dpu_nic_mode` key is explicitly recognized at the top level
-and under `[site_explorer]`, ignored, and reported as a deprecation warning.
-Use `site_explorer.dpu_policy` instead.
+The removed `force_dpu_nic_mode` and `rack_management_enabled` keys are
+explicitly recognized, ignored, and reported as deprecation warnings. Use
+`site_explorer.dpu_policy` instead of `force_dpu_nic_mode`.
+`rack_management_enabled` lost its last runtime consumer when
+[PR #1583](https://github.com/NVIDIA/infra-controller/pull/1583) made Expected
+Machine lookup during DHCP discovery unconditional. Remove both deprecated keys
+from site configuration; compatibility parsing does not restore their former
+behavior.
 
 ---
 
@@ -53,7 +58,7 @@ Use `site_explorer.dpu_policy` instead.
 | `listen_mode` | `ListenMode` | `Tls` | `server` | Transport mode: `plaintext_http1`, `plaintext_http2`, or `tls`. |
 | `auth` | `Option<AuthConfig>` | — | `server` | Authentication/authorization settings (see [AuthConfig](#authconfig)). |
 | `pools` | `Option<HashMap<String, ResourcePoolDef>>` | — | `networking` | Resource pools that allocate IPs, VNIs, etc. Required but `Option` for partial-config merging. |
-| `networks` | `Option<HashMap<String, NetworkDefinition>>` | — | `networking` | Networks created at startup. Alternative: `CreateNetworkSegment` gRPC. `NetworkDefinition` supports dual-stack seed-time segments with optional `prefix_v6` and `dhcpv6_link_address`; config edits do not retrofit prefixes onto an already-seeded segment because seed definitions are snapshotted on first create. |
+| `networks` | `Option<HashMap<String, NetworkDefinition>>` | — | `networking` | Networks to create at startup. Alternative: `CreateNetworkSegment` gRPC. `NetworkDefinition` supports IPv4-only, IPv6-only, and dual-stack segments with optional `prefix_v6` and `dhcpv6_link_address`. NICo saves the complete initial definition when it creates a segment. Later configuration edits do not update the existing segment or its saved definition. Refer to [Initial Network Configuration](../../../../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration) for all prefix combinations, gateway requirements, examples, and compatibility. |
 | `dpu_ipmi_tool_impl` | `Option<String>` | — | `machines` | IPMI tool implementation for DPU power control (`"prod"` or `"fake"`). |
 | `dpu_ipmi_reboot_attempts` | `Option<u32>` | — | `machines` | Retry count when IPMI errors during DPU reboot. |
 | `bmc_session_lockout_threshold` | `u32` | `3` | `security` | Consecutive BMC HTTP 401/403 responses before session-token login attempts stop for that BMC. |
@@ -111,7 +116,6 @@ Use `site_explorer.dpu_policy` instead.
 | `auto_machine_repair_plugin` | `AutoMachineRepairPluginConfig` | *(default)* | `machines` | Auto-repair configuration for failed machines. |
 | `vmaas_config` | `Option<VmaasConfig>` | — | `integrations` | VMaaS configuration for VM system integration (see [VmaasConfig](#vmaasconfig)). |
 | `mlxconfig_profiles` | `Option<HashMap<String, MlxConfigProfile>>` | — | `machines` | Named Mellanox NIC register configuration profiles for superNIC firmware flashing. TOML key: `mlx-config-profiles`. |
-| `rack_management_enabled` | `bool` | `false` | `hardware` | Standalone infrastructure manager mode for GB200/GB300/VR144. See doc comment for full behavioral changes. |
 | `rms` | `RmsConfig` | *(see below)* | `hardware` | Rack Manager Service configuration for API connectivity and mTLS (see [RmsConfig](#rmsconfig)). |
 | `rack_profiles` | `RackProfileConfig` | *(default)* | `hardware` | Rack profile definitions referenced by expected racks. |
 | `spdm` | `SpdmConfig` | *(see below)* | `security` | SPDM hardware attestation (see [SpdmConfig](#spdmconfig)). |
@@ -812,9 +816,11 @@ An overlapping `VpcPrefix` pair is eligible only when all of these conditions
 are true:
 
 - The requested and existing CIDRs are identical, the existing `VpcPrefix` is
-  not deleted, and the `VpcPrefix` records belong to different VPCs and tenant
-  organizations.
-- Both VPCs use FNN and have assigned, distinct status VNIs.
+  not deleted, and the `VpcPrefix` records belong to different VPCs. The VPCs
+  may belong to the same tenant and share one tenant-managed `SitePrefix`.
+- Both VPCs use FNN and have distinct `status.vni` values. Each VPC owns exactly
+  one VNI allocation across the internal and external pools, matching
+  `status.vni`. A retained previous allocation makes the VPC ineligible.
 - Each `VpcPrefix` is linked to a tenant-managed, `DatacenterOnly` `SitePrefix`
   owned by its VPC tenant and containing the `VpcPrefix` CIDR. The requested
   `SitePrefix` must be `Ready`; the existing `SitePrefix` may be `Ready` or
@@ -822,11 +828,21 @@ are true:
 - Site-wide `vpc_isolation_behavior` is `"mutual_isolation"`.
 - `site_global_vpc_vni` and `common_internal_route_target` are unset, and
   `additional_route_target_imports` is empty, so they cannot bridge the VPCs.
+- The deprecated site-wide `anycast_site_prefixes` list is empty.
 - Each resolved FNN profile, after applying its VPC overrides, has
   `tenant_prefix_overlap_eligible = true` and `internal = true`; has no import
   or export route targets; disables default-route leakage, tenant-host-route
   leakage, and tenant leak communities; and has no accepted underlay leaks or
   allowed anycast prefixes.
+
+The FNN renderer falls back to `anycast_site_prefixes` when the profile's
+`allowed_anycast_prefixes` is empty. The [chart's default configuration](../../../../helm/charts/nico-api/files/carbide-api-config.toml)
+sets `anycast_site_prefixes = ["0.0.0.0/0"]`; a site using that default must
+override it with `[]` to meet the overlap requirements.
+
+For an overlapping prefix, `CreateVpcPrefix` locks the participating VPCs
+until its transaction ends. Concurrent VNI changes or VPC deletion must wait,
+including for a VPC owned by another tenant.
 
 The gRPC `CreateNetworkSegment` and `AttachNetworkSegmentToVpc` handlers reject
 any direct prefix that overlaps a `VpcPrefix`, regardless of the site gate. The
@@ -948,7 +964,7 @@ events, so consumers handle them identically.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `bfb_url` | `Option<String>` | BF3 bf-bundle URL | BlueField firmware bundle used for BF3 provisioning. Mutually exclusive with `bluefield_software`; BF4 requires `bluefield_software` instead. |
-| `bluefield_software` | `Option<BlueFieldSoftwareConfig>` | — | BF4 OS ISO and PSID-to-PLDM firmware source. BF4 requires this field with exactly one `pldm_fw_bundle` entry. |
+| `bluefield_software` | `Option<BlueFieldSoftwareConfig>` | — | BF4 OS ISO and PSID-to-PLDM firmware source. BF4 requires this field with at least one `pldm_fw_bundle` entry. |
 | `flavor_name` | `String` | `carbide-dpu-flavor` | Base name for the generated BF3/generic-BF4 `DPUFlavor` or Astra `DPUFlavorTemplate`. |
 | `deployment_name` | `String` | `nico-deployment-v2` | Name of the generated `DPUDeployment`. |
 | `node_label_key` | `String` | `carbide.nvidia.com/controlled.node.v2` | Label key used to select DPU nodes for this deployment. |

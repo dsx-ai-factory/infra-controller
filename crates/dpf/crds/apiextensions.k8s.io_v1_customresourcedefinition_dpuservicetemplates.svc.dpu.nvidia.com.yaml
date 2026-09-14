@@ -139,6 +139,26 @@ spec:
                           resource will be admitted but the child Pods will be denied at
                           Pod admission time.
                     type: boolean
+                  spiffe:
+                    description: |-
+                      SPIFFE opts this DPUService into SPIFFE workload identity. When set, one SPIRE
+                      ClusterStaticEntry is registered per targeted DPU, parented to that DPU's SPIRE
+                      agent, so the service's pods can obtain an SVID. The identity defaults to
+                      `spiffe://<trustDomain>/dpu/<serial>/service/<namespace>/<serviceID>` and is
+                      configurable through `DPFOperatorConfig.spec.security.spiffe`.
+                      The namespace qualifies the service ID, which is only unique within one.
+
+                      Presence-gated: `spiffe: {}` enables it. It has no sub-fields yet.
+
+                      Requires `DPFOperatorConfig.spec.security.spiffe`, and only covers DPUs in SPIFFE
+                      identity mode (`DPU.status.identityMode: Spiffe`); bootstrap-token DPUs are skipped.
+                      Both are reported on the SPIFFEEntriesReady condition rather than rejected at
+                      admission. Must not be set when deployInCluster is true, since in-cluster
+                      DPUServices run on the host and have no per-DPU SPIRE agent to parent to.
+
+                      When set on a DPUServiceTemplate, the DPUDeployment controller propagates it to
+                      generated DPUServices that target DPUClusters.
+                    type: object
                 type: object
             required:
             - deploymentServiceName

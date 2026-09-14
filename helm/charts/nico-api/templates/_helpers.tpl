@@ -45,6 +45,16 @@ Global image reference
 {{ .Values.global.image.repository }}:{{ .Values.global.image.tag }}
 {{- end }}
 
+{{/* Emit startup shell that brackets IPv6 database hosts before building the URL. */}}
+{{- define "nico-api.databaseUrlScript" -}}
+DATASTORE_URL_HOST="$DATASTORE_HOST"
+case "$DATASTORE_URL_HOST" in
+  \[*\]) ;;
+  *:*) DATASTORE_URL_HOST="[$DATASTORE_URL_HOST]" ;;
+esac
+DATASTORE_URL="postgres://${DATASTORE_USER}:${DATASTORE_PASSWORD}@${DATASTORE_URL_HOST}:${DATASTORE_PORT}/${DATASTORE_NAME}"
+{{- end -}}
+
 {{/* Validate and return the configured WebUI authentication mode. */}}
 {{- define "nico-api.webAuth.configuredMode" -}}
 {{- $mode := default "basic" .Values.webAuth.mode -}}

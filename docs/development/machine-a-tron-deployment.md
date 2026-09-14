@@ -199,14 +199,24 @@ which fails the check (`vault does not have a valid password entry`) — they
 must be re-seeded with any non-empty password. `machines/bmc/site/root` is not
 seeded at all; without it every run aborts with `MissingCredentials`.
 
-Beyond the preconditions, the **credential rotation flow** requires this exact
-chain (all handled by `setup-machine-a-tron.sh` Phase 4):
+For the default BlueField-3 simulation, the **credential rotation flow**
+requires this exact chain, which `setup-machine-a-tron.sh` Phase 4 handles:
 
 | Vault path | Value | Why |
 |------------|-------|-----|
 | `machines/all_hosts/factory_default/bmc-metadata-items/dell` | `root`/`factory_password` | Host BMC factory default (mock's `DUMMY_FACTORY_PASSWORD`). Path segment is **lowercase** `dell` — `BMCVendor`'s `Display` impl lowercases. |
-| `machines/all_dpus/factory_default/bmc-metadata-items/root` | `root`/`0penBmc` | DPU BMC factory default (mock's `DUMMY_FACTORY_DPU_PASSWORD`) — note it differs from the host factory password. |
+| `machines/all_dpus/factory_default/bmc-metadata-items/root` | `root`/`0penBmc` | Legacy DPU BMC catch-all (`DpuModel::Unknown`). Matches `DpuModel::default_factory_credentials()` for BF2, BF3, and unidentified models. `bmc-mock` uses that source for the BF3 account it creates; site-explorer uses it for its final fallback. It differs from the host factory password. |
 | `machines/bmc/site/root` | `root`/&lt;distinct&gt; | Rotation target. **Must differ from both factory passwords**, or the rotation is a no-op and the mock rejects with `403 Factory-default password must be changed` forever. |
+
+<Note title="BlueField-4 factory credentials">
+The machine-a-tron hardware types `dell_poweredge_r760_bf4` and `nvidia_dgx_vr`
+use BlueField-4 DPUs with `admin`/`0penBmc` factory credentials. site-explorer
+checks the model-specific entry, then the `root` catch-all, then the built-in
+per-model default. Because Phase 4 seeds the catch-all but not the model entry,
+seed `machines/all_dpus/factory_default/bmc-metadata-items/bf4` with the BF4
+credentials before using either type. Otherwise, site-explorer attempts the
+`root` username and a `401 Unauthorized` latches `AvoidLockout`.
+</Note>
 
 site-explorer logs into each BMC with its factory default, rotates the password
 to the site root value, then proceeds — using the wrong factory password (or a
@@ -223,8 +233,8 @@ Copy `helm-prereqs/values/machine-a-tron.yaml` and fill in the site-specific val
 | Field | Description |
 |-------|-------------|
 | `image.tag` | Tag produced by [building the container image](#building-the-container-image) (e.g. `8c35783af-amd64`) |
-| `machines.dell-hosts.oobDhcpRelayAddress` | Gateway of the OOB/underlay network from nico-core site config |
-| `machines.dell-hosts.adminDhcpRelayAddress` | Gateway of the admin network from nico-core site config |
+| `machines.dell-hosts.bmcDhcpRelayAddress` | Gateway of the BMC (OOB) network from nico-core site config; relay for BMC DHCP (previously `oobDhcpRelayAddress`, still accepted) |
+| `machines.dell-hosts.underlayDhcpRelayAddress` | Gateway of the underlay segment that serves DPU OOB and switch NVOS DHCP (previously `adminDhcpRelayAddress`, still accepted) |
 | `machines.dell-hosts.hostCount` | Must not exceed available OOB DHCP addresses (`hostCount + hostCount×dpuPerHostCount`) |
 
 ### SPIFFE URI override
@@ -333,7 +343,7 @@ with ClusterIP = BMC IP assigned by NICo DHCP. NICo dials each BMC IP directly
 Everything single-pod mode needs still applies (namespaces, CA copy, Vault
 seeds, SPIFFE URI). Multi-pod with controller adds the following requirements:
 
-1. **`oobDhcpRelayAddress` must be within Kubernetes ServiceCIDR.** All pods
+1. **`bmcDhcpRelayAddress` must be within Kubernetes ServiceCIDR.** All pods
    can share the same relay address — NICo assigns unique IPs from the network.
    Default ServiceCIDR ranges:
    - `10.96.0.0/12` - vanilla Kubernetes (kubeadm)
@@ -379,16 +389,16 @@ seeds, SPIFFE URI). Multi-pod with controller adds the following requirements:
             hwType: wiwynn_gb200_nvl
             hostCount: 100
             dpuPerHostCount: 2
-            oobDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
-            adminDhcpRelayAddress: "192.168.176.1"
+            bmcDhcpRelayAddress: "10.96.64.1"  # All pods share same relay
+            underlayDhcpRelayAddress: "10.104.0.1"
       mat-1:
         machines:
           compute:
             hwType: wiwynn_gb200_nvl
             hostCount: 100
             dpuPerHostCount: 2
-            oobDhcpRelayAddress: "10.96.64.1"  # NICo assigns unique IPs
-            adminDhcpRelayAddress: "192.168.176.1"
+            bmcDhcpRelayAddress: "10.96.64.1"  # NICo assigns unique IPs
+            underlayDhcpRelayAddress: "10.104.0.1"
 
     macAddressPool:
       enabled: true

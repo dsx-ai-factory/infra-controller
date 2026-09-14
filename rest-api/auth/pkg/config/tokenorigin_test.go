@@ -89,6 +89,45 @@ func TestNewTokenOriginConfig(t *testing.T) {
 	}
 }
 
+func TestTokenOriginConfig_UpdateAllJWKS(t *testing.T) {
+	t.Run("all issuers unavailable", func(t *testing.T) {
+		testServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+			res.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer testServer.Close()
+
+		config := NewTokenOriginConfig()
+		config.AddConfig("keycloak", "test-issuer", testServer.URL, TokenOriginKeycloak, false, nil, nil)
+
+		err := config.UpdateAllJWKS()
+		require.EqualError(t, err, "all JWKS updates failed (1 issuers)")
+		assert.NotNil(t, config.GetConfig("test-issuer"))
+		assert.Nil(t, config.GetConfig("test-issuer").GetJWKS())
+	})
+
+	t.Run("partial failure keeps healthy issuer available", func(t *testing.T) {
+		testServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+			if req.URL.Path == "/healthy" {
+				res.Header().Set("Content-Type", "application/json")
+				res.WriteHeader(http.StatusOK)
+				_, err := res.Write([]byte(ssaJwks))
+				assert.NoError(t, err)
+				return
+			}
+			res.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer testServer.Close()
+
+		config := NewTokenOriginConfig()
+		config.AddConfig("healthy", "healthy-issuer", testServer.URL+"/healthy", TokenOriginKasSsa, false, nil, nil)
+		config.AddConfig("unavailable", "unavailable-issuer", testServer.URL+"/unavailable", TokenOriginKeycloak, false, nil, nil)
+
+		require.NoError(t, config.UpdateAllJWKS())
+		assert.NotNil(t, config.GetConfig("healthy-issuer").GetJWKS())
+		assert.Nil(t, config.GetConfig("unavailable-issuer").GetJWKS())
+	})
+}
+
 // TestJWTOptionalKID_GoJose tests JWT validation with tokens created using the actual go-jose library
 func TestJWTOptionalKID_GoJose(t *testing.T) {
 	// Generate RSA key pair for signing

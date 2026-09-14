@@ -120,7 +120,6 @@ pub async fn request_rack_maintenance_via_state_controller(
     maintenance_access_token: Option<RackMaintenanceAccessToken<'_>>,
 ) -> Result<RackMaintenanceRequestOutcome, ComponentManagerError> {
     let rack_id = rack_id.clone();
-    let scheduled_scope = scope.clone();
     let transaction_rack_id = rack_id.clone();
 
     let result = db_pool
@@ -147,11 +146,14 @@ pub async fn request_rack_maintenance_via_state_controller(
                 })?;
 
                 if let Some(existing_scope) = rack.config.maintenance_requested.as_ref() {
-                    return Ok(if existing_scope == &scope {
-                        RackMaintenanceRequestOutcome::AlreadyPending
-                    } else {
-                        RackMaintenanceRequestOutcome::Busy
-                    });
+                    return Ok((
+                        if existing_scope.same_request(&scope) {
+                            RackMaintenanceRequestOutcome::AlreadyPending
+                        } else {
+                            RackMaintenanceRequestOutcome::Busy
+                        },
+                        None,
+                    ));
                 }
 
                 let state = rack.controller_state.value.clone();
@@ -162,7 +164,7 @@ pub async fn request_rack_maintenance_via_state_controller(
                     }
                 };
                 if !eligible {
-                    return Ok(RackMaintenanceRequestOutcome::Deferred { state });
+                    return Ok((RackMaintenanceRequestOutcome::Deferred { state }, None));
                 }
 
                 let reset_firmware_upgrade_job =
@@ -171,8 +173,10 @@ pub async fn request_rack_maintenance_via_state_controller(
                         components: vec![],
                         force_update: false,
                     });
+                let mut accepted_scope = scope;
+                accepted_scope.requested_at = Some(chrono::Utc::now());
                 let mut config = rack.config;
-                config.maintenance_requested = Some(scope);
+                config.maintenance_requested = Some(accepted_scope.clone());
                 db::rack::update(txn.as_mut(), &transaction_rack_id, &config)
                     .await
                     .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
@@ -185,18 +189,22 @@ pub async fn request_rack_maintenance_via_state_controller(
                         .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
                 }
 
-                Ok(RackMaintenanceRequestOutcome::Scheduled)
+                Ok((
+                    RackMaintenanceRequestOutcome::Scheduled,
+                    Some(accepted_scope),
+                ))
             })
         })
         .await;
 
-    let outcome = match result {
-        Ok(Ok(outcome)) => outcome,
+    let (outcome, accepted_scope) = match result {
+        Ok(Ok(accepted)) => accepted,
         Ok(Err(error)) => return Err(error),
         Err(error) => return Err(ComponentManagerError::Internal(error.to_string())),
     };
 
     if outcome == RackMaintenanceRequestOutcome::Scheduled
+        && let Some(accepted_scope) = accepted_scope.as_ref()
         && let Some(RackMaintenanceAccessToken {
             credential_manager,
             token,
@@ -212,7 +220,7 @@ pub async fn request_rack_maintenance_via_state_controller(
             .await
     {
         let recovery =
-            recover_rack_maintenance_after_credential_failure(db_pool, &rack_id, &scheduled_scope)
+            recover_rack_maintenance_after_credential_failure(db_pool, &rack_id, accepted_scope)
                 .await;
         return Err(ComponentManagerError::Internal(match recovery {
             Ok(recovery) => format!(
@@ -773,6 +781,7 @@ pub async fn build_component_manager(
 
 #[cfg(test)]
 mod tests {
+    use api_test_helper::mock_rms::MockRmsApi;
     use async_trait::async_trait;
     use carbide_secrets::SecretsError;
     use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialWriter};
@@ -1093,12 +1102,20 @@ mod tests {
             .unwrap(),
             RackMaintenanceRequestOutcome::Scheduled,
         );
+        let scheduled = load_rack(&pool, &ready_rack)
+            .await
+            .config
+            .maintenance_requested
+            .expect("the accepted request is persisted");
+        let requested_at = scheduled
+            .requested_at
+            .expect("acceptance stamps the request time");
         assert_eq!(
-            load_rack(&pool, &ready_rack)
-                .await
-                .config
-                .maintenance_requested,
-            Some(scope.clone()),
+            scheduled,
+            MaintenanceScope {
+                requested_at: Some(requested_at),
+                ..scope.clone()
+            },
         );
 
         // Exact retries are idempotent, including after the rack state has
@@ -1151,7 +1168,11 @@ mod tests {
                 .await
                 .config
                 .maintenance_requested,
-            Some(scope),
+            Some(MaintenanceScope {
+                requested_at: Some(requested_at),
+                ..scope
+            }),
+            "the pending request, timestamp included, survives both retries",
         );
 
         // Automatic callers defer non-Ready racks; operator callers may
@@ -1394,6 +1415,34 @@ mod tests {
         assert_eq!(cm.nv_switch.name(), "mock-nsm");
         assert_eq!(cm.power_shelf.name(), "mock-psm");
         assert_eq!(cm.compute_tray.name(), "mock-ctm");
+    }
+
+    #[tokio::test]
+    async fn rms_password_rotation_support_ignores_legacy_config() {
+        let config = ComponentManagerConfig {
+            nv_switch_backend: NvSwitchBackend::Rms,
+            power_shelf_backend: PowerShelfBackend::Mock,
+            compute_tray_backend: ComputeBackend::Mock,
+            nvos_password_rotation_enabled: false,
+            ..Default::default()
+        };
+
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://postgres:postgres@localhost/test")
+            .expect("test database URL should be valid");
+
+        let cm = build_component_manager(
+            &config,
+            rms_rack_profiles(rms_rack_profile()),
+            Some(Arc::new(MockRmsApi::new())),
+            None,
+            Some(db),
+            None,
+        )
+        .await
+        .expect("RMS switch backend should build");
+
+        assert!(cm.nv_switch.supports_password_rotation());
     }
 
     #[test]

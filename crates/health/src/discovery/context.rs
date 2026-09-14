@@ -94,12 +94,32 @@ pub(super) struct CollectorState {
     gpu_inventory: HashMap<Cow<'static, str>, Collector>,
     reachability: HashMap<Cow<'static, str>, Collector>,
     inventories: HashMap<Cow<'static, str>, SharedInventory<BmcClient>>,
+    machine_domain_uuids: HashMap<Cow<'static, str>, Option<NvLinkDomainId>>,
     switch_domain_uuids: HashMap<Cow<'static, str>, Option<NvLinkDomainId>>,
     power_shelf_ids: HashMap<Cow<'static, str>, Option<PowerShelfId>>,
     pub(super) reachability_specs: HashMap<Cow<'static, str>, ReachabilitySpec>,
 }
 
 impl CollectorState {
+    /// Stores the first value as a baseline and reports subsequent changes.
+    fn observe_value<T: PartialEq>(
+        values: &mut HashMap<Cow<'static, str>, Option<T>>,
+        key: &str,
+        value: Option<T>,
+    ) -> bool {
+        match values.get_mut(key) {
+            Some(previous) if previous != &value => {
+                *previous = value;
+                true
+            }
+            Some(_) => false,
+            None => {
+                values.insert(Cow::Owned(key.to_string()), value);
+                false
+            }
+        }
+    }
+
     fn new() -> Self {
         Self {
             discovery: HashMap::new(),
@@ -116,6 +136,7 @@ impl CollectorState {
             gpu_inventory: HashMap::new(),
             reachability: HashMap::new(),
             inventories: HashMap::new(),
+            machine_domain_uuids: HashMap::new(),
             switch_domain_uuids: HashMap::new(),
             power_shelf_ids: HashMap::new(),
             reachability_specs: HashMap::new(),
@@ -176,6 +197,25 @@ impl CollectorState {
         self.inventories.remove(key);
     }
 
+    /// Records the latest machine domain and reports whether it changed.
+    ///
+    /// The first observation establishes a baseline without forcing a restart.
+    /// Later transitions between absent and present values, or between two UUIDs,
+    /// require a restart because running collectors retain their startup metadata.
+    pub(super) fn observe_machine_domain(
+        &mut self,
+        key: &str,
+        domain_uuid: Option<NvLinkDomainId>,
+    ) -> bool {
+        Self::observe_value(&mut self.machine_domain_uuids, key, domain_uuid)
+    }
+
+    /// Removes baselines for machines absent from the discovery pass.
+    pub(super) fn retain_machine_domains(&mut self, active_endpoints: &HashSet<Cow<'static, str>>) {
+        self.machine_domain_uuids
+            .retain(|key, _| active_endpoints.contains(key));
+    }
+
     /// Records the latest switch domain and reports whether it changed.
     ///
     /// The first observation establishes a baseline without forcing a restart.
@@ -186,18 +226,7 @@ impl CollectorState {
         key: &str,
         domain_uuid: Option<NvLinkDomainId>,
     ) -> bool {
-        match self.switch_domain_uuids.get_mut(key) {
-            Some(previous) if *previous != domain_uuid => {
-                *previous = domain_uuid;
-                true
-            }
-            Some(_) => false,
-            None => {
-                self.switch_domain_uuids
-                    .insert(Cow::Owned(key.to_string()), domain_uuid);
-                false
-            }
-        }
+        Self::observe_value(&mut self.switch_domain_uuids, key, domain_uuid)
     }
 
     pub(super) fn retain_switch_domains(
@@ -217,18 +246,7 @@ impl CollectorState {
         key: &str,
         power_shelf_id: Option<PowerShelfId>,
     ) -> bool {
-        match self.power_shelf_ids.get_mut(key) {
-            Some(previous) if *previous != power_shelf_id => {
-                *previous = power_shelf_id;
-                true
-            }
-            Some(_) => false,
-            None => {
-                self.power_shelf_ids
-                    .insert(Cow::Owned(key.to_string()), power_shelf_id);
-                false
-            }
-        }
+        Self::observe_value(&mut self.power_shelf_ids, key, power_shelf_id)
     }
 
     /// Removes saved PowerShelf IDs for endpoints absent from the discovery pass.

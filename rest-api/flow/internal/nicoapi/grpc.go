@@ -225,7 +225,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 // (FindMachineIds + FindMachinesByIds).
 func (c *grpcClient) GetMachines(ctx context.Context) ([]MachineDetail, error) {
 	idsCtx, idsCancel := context.WithTimeout(ctx, c.grpcTimeout)
-	machineIDs, err := c.gclient.FindMachineIds(idsCtx, &corev1.MachineSearchConfig{})
+	machineIDs, err := c.gclient.FindMachineIds(idsCtx, &corev1.MachineSearchConfig{IncludeDpus: true})
 	idsCancel()
 	if err != nil {
 		return nil, err

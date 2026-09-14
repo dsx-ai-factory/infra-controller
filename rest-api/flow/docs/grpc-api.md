@@ -572,14 +572,13 @@ selection criteria, not the concrete components selected after planning.
 <a name="v1-ComponentOperationStatus"></a>
 
 ### ComponentOperationStatus
-ComponentOperationStatus is Flow&#39;s view of a component&#39;s operability. The
-inventory loop computes it on every sync from core&#39;s controller_state.
+ComponentOperationStatus is Flow&#39;s view of a component&#39;s operability.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | phase | [Phase](#v1-Phase) |  |  |
-| reason | [string](#string) |  | Human-readable detail (typically the raw core state string). |
+| reason | [string](#string) |  | Human-readable source status detail. |
 | blocked_operations | [OperationType](#v1-OperationType) | repeated | Operations Flow will reject while the component is in this status. Empty when phase is READY. |
 
 
@@ -2981,6 +2980,7 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | nvl_domain_ids | [UUID](#v1-UUID) | repeated | NVLink Domains containing this rack; empty when unassigned |
 | task_stats | [TaskStats](#v1-TaskStats) |  | All active Tasks on this rack, including component-scoped Tasks. |
 | external_id | [string](#string) |  |  |
+| operation_status | [Phase](#v1-Phase) |  | Operability phase aggregated from component phases. |
 
 
 
@@ -3832,9 +3832,7 @@ execution for the same scope is still active.
 <a name="v1-Phase"></a>
 
 ### Phase
-Phase is the coarse lifecycle bucket a component is in, derived from
-core&#39;s per-component state machine. Shared across compute, nvswitch,
-and power shelf.
+Phase is Flow&#39;s coarse operability bucket.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |

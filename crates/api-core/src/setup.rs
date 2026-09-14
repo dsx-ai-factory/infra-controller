@@ -846,8 +846,7 @@ async fn initialize_dpf_sdk(
     let deployment_type_labels = build_deployment_type_labels(carbide_config);
 
     // Builds the SDK init config for one DPUDeployment. BF4 uses a single
-    // `BlueFieldSoftware` source (the CR itself carries the PSID→PLDM mapping);
-    // config validation guarantees exactly one PSID entry.
+    // `BlueFieldSoftware` source whose CR carries the complete PSID→PLDM mapping.
     let make_init_config =
         |deployment: &crate::cfg::file::DpfDeploymentConfig,
          deployment_type: DpuDeploymentType,
@@ -923,18 +922,13 @@ async fn initialize_dpf_sdk(
     ];
 
     if let Some(bf4) = &carbide_config.dpf.deployments.bf4_generic {
-        // Validation guarantees `bluefield_software` is set with exactly one PSID
-        // entry for a BF4 deployment.
+        // Validation guarantees `bluefield_software` has at least one PSID entry.
         let bfs = bf4.bluefield_software.as_ref().ok_or_else(|| {
             eyre::eyre!("bf4_generic DPF deployment is missing bluefield_software")
         })?;
-        let pldm_url =
-            bfs.pldm_fw_bundle.values().next().ok_or_else(|| {
-                eyre::eyre!("bf4_generic DPF deployment has an empty pldm_fw_bundle")
-            })?;
         let params = carbide_dpf::BlueFieldSoftwareParams {
             os_iso: bfs.os_iso.clone(),
-            pldm_fw_bundle: Some(pldm_url.clone()),
+            pldm_fw_bundle: Some(bfs.pldm_fw_bundle.clone()),
         };
         init_configs.push((
             "bf4_generic",
@@ -947,13 +941,9 @@ async fn initialize_dpf_sdk(
             .bluefield_software
             .as_ref()
             .ok_or_else(|| eyre::eyre!("bf4_astra DPF deployment is missing bluefield_software"))?;
-        let pldm_url =
-            bfs.pldm_fw_bundle.values().next().ok_or_else(|| {
-                eyre::eyre!("bf4_astra DPF deployment has an empty pldm_fw_bundle")
-            })?;
         let params = carbide_dpf::BlueFieldSoftwareParams {
             os_iso: bfs.os_iso.clone(),
-            pldm_fw_bundle: Some(pldm_url.clone()),
+            pldm_fw_bundle: Some(bfs.pldm_fw_bundle.clone()),
         };
         init_configs.push((
             "bf4_astra",
@@ -1251,6 +1241,12 @@ async fn initialize_and_start_controllers<'a>(
     let nvos_update_manager = rms_client.clone().map(|client| {
         Arc::new(component_manager::rms::rms_nvos_update_manager(client))
             as Arc<dyn component_manager::NvosUpdateManager>
+    });
+
+    let rack_firmware_update_manager = rms_client.clone().map(|client| {
+        Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
+            client,
+        )) as Arc<dyn component_manager::RackFirmwareUpdateManager>
     });
 
     // As soon as we get the database up, observe this version of forge so that we know when it was
@@ -1874,7 +1870,6 @@ async fn initialize_and_start_controllers<'a>(
         .services(
             RackStateHandlerServices {
                 db_pool: db_pool.clone(),
-                rms_client: rms_client.clone(),
                 site_config: RackConfig {
                     rms: carbide_config.rms.clone(),
                     rack_validation_config: carbide_config.rack_validation_config.clone(),
@@ -1882,6 +1877,7 @@ async fn initialize_and_start_controllers<'a>(
                 }
                 .into(),
                 nvos_update_manager: nvos_update_manager.clone(),
+                rack_firmware_update_manager: rack_firmware_update_manager.clone(),
                 credential_manager: credential_manager.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
                 nmx_cluster_switch_mtls_services: carbide_config
@@ -2029,6 +2025,7 @@ async fn initialize_and_start_controllers<'a>(
         carbide_config.rack_profiles.clone(),
         rms_client.clone(),
         credential_manager.clone(),
+        carbide_config.dpf.enabled && dpf_sdk.is_some(),
     )
     .start(join_set, cancel_token.clone())?;
 
@@ -2430,7 +2427,7 @@ mod tests {
             segment_type: NetworkDefinitionSegmentType::Admin,
             prefix,
             prefix_v6: None,
-            gateway: prefix.network(),
+            gateway: Some(prefix.network()),
             dhcpv6_link_address: None,
             mtu,
             reserve_first: 0,

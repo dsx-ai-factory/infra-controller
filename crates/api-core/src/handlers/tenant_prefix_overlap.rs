@@ -96,8 +96,9 @@ fn site_prefix_is_eligible(
 ///
 /// The pair eligibility checks ownership, FNN isolation, distinct VNIs,
 /// `SitePrefix` state, and each VPC's resolved routing profile. Callers still
-/// need `db::tenant_prefix_overlap::lock_checks` and must reject every
-/// ineligible overlap.
+/// need `db::tenant_prefix_overlap::lock_checks`, must verify each VPC owns
+/// exactly one allocation matching its VNI, and must reject every ineligible
+/// overlap.
 pub(super) fn pair_is_eligible(
     runtime_config: &crate::cfg::file::CarbideConfig,
     candidate: VpcPrefixParticipant<'_>,
@@ -109,10 +110,11 @@ pub(super) fn pair_is_eligible(
             VpcIsolationBehaviorType::MutualIsolation
         )
         || runtime_config.site_global_vpc_vni.is_some()
+        // The renderer falls back to this list when profile anycast is empty.
+        || !runtime_config.anycast_site_prefixes.is_empty()
         || existing.is_deleted
         || candidate.prefix != existing.prefix
         || candidate.vpc.id == existing.vpc.id
-        || candidate.vpc.config.tenant_organization_id == existing.vpc.config.tenant_organization_id
         || candidate.vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn
         || existing.vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn
         || !site_prefix_is_eligible(
@@ -173,6 +175,7 @@ mod tests {
         SiteGateDisabled,
         OpenIsolation,
         SiteGlobalVpcVni,
+        LegacyAnycastSitePrefixes,
         CommonInternalRouteTarget,
         AdditionalRouteTargetImport,
         NestedPrefix,
@@ -299,6 +302,11 @@ mod tests {
                     expect: false,
                 },
                 Check {
+                    scenario: "site uses deprecated anycast prefixes",
+                    input: Variation::LegacyAnycastSitePrefixes,
+                    expect: false,
+                },
+                Check {
                     scenario: "site uses a common internal route target",
                     input: Variation::CommonInternalRouteTarget,
                     expect: false,
@@ -319,9 +327,9 @@ mod tests {
                     expect: false,
                 },
                 Check {
-                    scenario: "prefixes belong to the same tenant",
+                    scenario: "distinct VPCs share one tenant SitePrefix",
                     input: Variation::SameTenant,
-                    expect: false,
+                    expect: true,
                 },
                 Check {
                     scenario: "existing VPC does not use FNN",
@@ -396,6 +404,9 @@ mod tests {
                         config.vpc_isolation_behavior = VpcIsolationBehaviorType::Open;
                     }
                     Variation::SiteGlobalVpcVni => config.site_global_vpc_vni = Some(5_000),
+                    Variation::LegacyAnycastSitePrefixes => {
+                        config.anycast_site_prefixes = vec!["10.0.0.0/16".parse().unwrap()];
+                    }
                     Variation::CommonInternalRouteTarget => {
                         config.fnn.as_mut().unwrap().common_internal_route_target =
                             Some(crate::cfg::file::RouteTargetConfig { asn: 1, vni: 2 });
@@ -410,8 +421,7 @@ mod tests {
                     Variation::SameVpc => existing_vpc.id = candidate_vpc.id,
                     Variation::SameTenant => {
                         existing_vpc.config.tenant_organization_id = "tenant-a".to_string();
-                        existing_site_prefix.config.tenant_organization_id =
-                            Some("tenant-a".parse().unwrap());
+                        existing_site_prefix = candidate_site_prefix.clone();
                     }
                     Variation::ExistingNotFnn => {
                         existing_vpc.config.network_virtualization_type =
