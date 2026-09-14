@@ -3911,7 +3911,7 @@ async fn rms_get_configure_switch_certificate_job_status(
             response.error_message
         };
 
-        return Err(ComponentManagerError::OperationOutcomeUnknown(format!(
+        return Err(ComponentManagerError::NotFound(format!(
             "RMS could not report status for switch certificate job {job_id}: {detail}"
         )));
     }
@@ -5403,7 +5403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switch_certificate_job_not_found_has_unknown_outcome() {
+    async fn switch_certificate_job_not_found_is_reported() {
         let mock = MockRmsApi::new();
 
         mock.enqueue_get_configure_switch_certificate_job_status(Ok(
@@ -5417,11 +5417,11 @@ mod tests {
 
         let error = rms_get_configure_switch_certificate_job_status(&mock, "cert-job-1")
             .await
-            .expect_err("a missing RMS job is not a terminal certificate result");
+            .expect_err("a missing RMS job must be reported");
 
         assert!(matches!(
             error,
-            ComponentManagerError::OperationOutcomeUnknown(message)
+            ComponentManagerError::NotFound(message)
                 if message.contains("cert-job-1") && message.contains("job not found")
         ));
     }

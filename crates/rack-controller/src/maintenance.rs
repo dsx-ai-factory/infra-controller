@@ -1400,6 +1400,9 @@ async fn wait_for_switch_certificate_job(
         .await
     {
         Ok(status) => status,
+        Err(error @ ComponentManagerError::NotFound(_)) => {
+            return transition_to_rack_error(id, state, error.to_string(), ctx).await;
+        }
         Err(error) => {
             tracing::warn!(
                 rack_id = %id,

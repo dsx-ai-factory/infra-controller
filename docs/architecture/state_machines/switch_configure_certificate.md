@@ -112,7 +112,8 @@ underlying service. The target switch build must support each selected binding.
 | `bmc_mac_address` is `None` | Transition to `Error`. |
 | Missing NVOS MAC/IP, credentials, or endpoint row | Transition to `Error` with a descriptive cause (no `0.0.0.0` placeholder). |
 | CM returns error on `configure_switch_certificate` | `StateHandlerError`; remain in `Start` and retry on the next iteration. |
-| CM returns error on `get_configure_switch_certificate_job_status` | `StateHandlerError`; remain in `WaitForComplete` and retry on the next iteration. |
+| CM returns `NotFound` on `get_configure_switch_certificate_job_status` | Transition to `Error` because the persisted job can no longer be observed. |
+| CM returns another error on `get_configure_switch_certificate_job_status` | `StateHandlerError`; remain in `WaitForComplete` and retry on the next iteration. |
 | RMS job status is `Started` or `InProgress` | Wait; poll again on the next iteration. |
 | RMS job status is `Failed` | Transition to `Error` with the job error message. |
 | Component manager not configured while polling | Transition to `Error` (no job ID to resume). |

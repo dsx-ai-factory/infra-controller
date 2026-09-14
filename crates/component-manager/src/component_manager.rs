@@ -481,7 +481,9 @@ impl ComponentManager {
     ///
     /// # Errors
     ///
-    /// Returns the selected backend's error unchanged.
+    /// Returns the selected backend's error unchanged. A
+    /// [`ComponentManagerError::NotFound`] result means the submitted job can no
+    /// longer be observed.
     pub async fn get_configure_switch_certificate_job_status(
         &self,
         job_id: &str,

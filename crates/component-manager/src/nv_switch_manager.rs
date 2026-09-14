@@ -361,6 +361,8 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     /// [`ConfigureSwitchCertificateState::Completed`] and
     /// [`ConfigureSwitchCertificateState::Failed`] are terminal. Observation
     /// errors do not establish that resubmitting the certificate batch is safe.
+    /// [`ComponentManagerError::NotFound`] means the submitted job can no longer
+    /// be observed and the current workflow cannot continue.
     async fn get_configure_switch_certificate_job_status(
         &self,
         job_id: &str,

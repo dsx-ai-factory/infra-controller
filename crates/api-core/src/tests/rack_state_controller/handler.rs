@@ -34,6 +34,7 @@ use db::db_read::DbReader;
 use db::{
     ObjectColumnFilter, expected_rack as db_expected_rack, rack as db_rack, switch as db_switch,
 };
+use librms::RackManagerError;
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::expected_machine::ExpectedMachineData;
@@ -4898,6 +4899,59 @@ async fn test_configure_nmx_cluster_retries_certificate_batch_rejected_before_di
 }
 
 #[crate::sqlx_test]
+async fn test_configure_nmx_cluster_stops_when_certificate_job_is_missing(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (env, rack_id, _) =
+        create_configure_nmx_cluster_test_rack(&pool, TestEnvOverrides::default()).await?;
+
+    env.rms_sim
+        .queue_configure_switch_certificate_response(Ok(rms::ConfigureSwitchCertificateResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "configure-switch-certificate-job".to_string(),
+                ..Default::default()
+            }),
+            jobs: Vec::new(),
+        }))
+        .await;
+
+    env.run_rack_controller_iteration().await;
+
+    assert_persisted_switch_certificate_job(&env, &rack_id).await;
+
+    env.rms_sim
+        .queue_get_configure_switch_certificate_job_status_response(Ok(
+            rms::GetConfigureSwitchCertificateJobStatusResponse {
+                status: rms::ReturnCode::Failure as i32,
+                message: "job not found".to_string(),
+                ..Default::default()
+            },
+        ))
+        .await;
+
+    env.run_rack_controller_iteration().await;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Error { ref cause }
+            if cause.contains("configure-switch-certificate-job")
+                && cause.contains("job not found")
+    ));
+
+    assert!(
+        env.rms_sim
+            .submitted_configure_scale_up_fabric_manager_v2_requests()
+            .await
+            .is_empty()
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_configure_nmx_cluster_waits_for_certificate_job_and_stops_on_failure(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -4934,12 +4988,10 @@ async fn test_configure_nmx_cluster_waits_for_certificate_job_and_stops_on_failu
     assert_persisted_switch_certificate_job(&env, &rack_id).await;
 
     env.rms_sim
-        .queue_get_configure_switch_certificate_job_status_response(Ok(
-            rms::GetConfigureSwitchCertificateJobStatusResponse {
-                status: rms::ReturnCode::Failure as i32,
-                message: "certificate job status temporarily unavailable".to_string(),
-                ..Default::default()
-            },
+        .queue_get_configure_switch_certificate_job_status_response(Err(
+            RackManagerError::ApiInvocationError(tonic::Status::unavailable(
+                "certificate job status temporarily unavailable",
+            )),
         ))
         .await;
 

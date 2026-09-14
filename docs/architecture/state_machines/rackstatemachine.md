@@ -214,7 +214,7 @@ stateDiagram-v2
     WaitForSwitchCertificateJob --> WaitForSwitchCertificateJob : running, poll error, or restart
     WaitForSwitchCertificateJob --> WaitForScaleUpFabricManagerJob : certificate complete and V2 accepted; persist job_id
     WaitForSwitchCertificateJob --> NextActivity : V2 has no switches requested or discovered
-    WaitForSwitchCertificateJob --> Error : certificate failed or V2 validation failed
+    WaitForSwitchCertificateJob --> Error : certificate failed, job missing, or V2 validation failed
     WaitForScaleUpFabricManagerJob --> WaitForScaleUpFabricManagerJob : pending, poll or verification retry, restart, or V2 resubmission
     WaitForScaleUpFabricManagerJob --> NextActivity : V2 complete and observed primary persisted
     WaitForScaleUpFabricManagerJob --> Error : V2 failed or returned invalid state
@@ -235,7 +235,8 @@ observed primary after the job completes.
 | `Start` | Inventory loading fails, or certificate preparation returns `RejectedBeforeDispatch` | Retain `Start` and retry on the next iteration because RMS did not receive the request. Database-backed RMS node lookup failures use this path. |
 | `Start` | Certificate submission returns `OperationOutcomeUnknown` or any other post-dispatch error | Transition to `Error` without automatically resubmitting because RMS may have accepted all or part of the batch. A failed aggregate parent job covers only accepted targets and cannot prove the complete rack was updated. Any returned RMS job ID is retained in the error for operator reconciliation. |
 | `Start` | RMS accepts the certificate batch | Persist its parent job ID in `WaitForSwitchCertificateJob`. |
-| `WaitForSwitchCertificateJob` | Component Manager is absent, polling fails, RMS cannot find the job, or the job is `Started` or `InProgress` | Retain the same parent job ID and poll again. A controller restart resumes from this persisted state. |
+| `WaitForSwitchCertificateJob` | Component Manager is absent, polling fails, or the job is `Started` or `InProgress` | Retain the same parent job ID and poll again. A controller restart resumes from this persisted state. |
+| `WaitForSwitchCertificateJob` | RMS cannot find the persisted job | Transition to `Error` with the job ID in the cause. Do not resubmit the non-idempotent certificate batch. |
 | `WaitForSwitchCertificateJob` | Certificate job is `Failed` | Transition to `Error`. |
 | `WaitForSwitchCertificateJob` | Certificate job is `Completed` | Submit RMS V2. Retryable inventory or submission errors retain the certificate wait state; skip and terminal conditions match the `Start` outcomes above. A successful submission persists `WaitForScaleUpFabricManagerJob`. |
 | `WaitForScaleUpFabricManagerJob` | Job is pending, polling or observed-status verification fails, or a restart occurs | Retain the V2 job ID and retry. If RMS no longer has the job, resubmit the idempotent V2 desired state. |
