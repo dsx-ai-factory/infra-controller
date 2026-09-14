@@ -30,6 +30,9 @@ use common::api_fixtures::network_segment::{
     FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, create_tenant_network_segment,
 };
 use common::api_fixtures::{self, create_managed_host, dpu, network_configured_with_health};
+use config_version::ConfigVersion;
+use db::ConditionalWrite;
+use db::machine::AdminNetworkChangeNotPending;
 use model::machine::network::ManagedHostQuarantineMode;
 use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
@@ -119,7 +122,7 @@ async fn record_dpu_network_status(
 }
 
 #[crate::sqlx_test]
-async fn test_clear_use_admin_network_changed_keeps_newer_version_flag(pool: sqlx::PgPool) {
+async fn test_clear_use_admin_network_changed_requires_pending_version(pool: sqlx::PgPool) {
     let env = api_fixtures::create_test_env(pool).await;
     let mh = create_managed_host(&env).await;
     let dpu_machine_id = mh.dpu().id;
@@ -136,21 +139,68 @@ async fn test_clear_use_admin_network_changed_keeps_newer_version_flag(pool: sql
 
     bump_dpu_network_config_version(&env, dpu_machine_id).await;
 
-    let mut txn = env.db_txn().await;
-    let cleared = db::machine::clear_use_admin_network_changed_if_version_matches(
-        txn.deref_mut(),
-        &dpu_machine_id,
-        &stale_version,
-    )
-    .await
-    .unwrap();
-    txn.commit().await.unwrap();
+    let current_version =
+        db::machine::find_one(&mut env.db_reader(), &dpu_machine_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap()
+            .network_config
+            .version;
 
-    assert!(!cleared);
-    assert_eq!(
-        use_admin_network_changed(&env, dpu_machine_id).await,
-        Some(true)
-    );
+    struct Case {
+        scenario: &'static str,
+        acknowledged_version: ConfigVersion,
+        expected: ConditionalWrite<(), AdminNetworkChangeNotPending>,
+        flag_after: bool,
+    }
+    // Each step uses the previous step's committed flag.
+    for case in [
+        Case {
+            scenario: "stale acknowledgment keeps the newer flag",
+            acknowledged_version: stale_version,
+            expected: ConditionalWrite::NotApplied(AdminNetworkChangeNotPending),
+            flag_after: true,
+        },
+        Case {
+            scenario: "matching acknowledgment clears the flag",
+            acknowledged_version: current_version,
+            expected: ConditionalWrite::Applied(()),
+            flag_after: false,
+        },
+        Case {
+            scenario: "repeated acknowledgment has nothing to clear",
+            acknowledged_version: current_version,
+            expected: ConditionalWrite::NotApplied(AdminNetworkChangeNotPending),
+            flag_after: false,
+        },
+    ] {
+        let mut txn = env.db_txn().await;
+        let result = db::machine::clear_use_admin_network_changed_if_version_matches(
+            txn.deref_mut(),
+            &dpu_machine_id,
+            &case.acknowledged_version,
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+        assert_eq!(result, case.expected, "{}", case.scenario);
+
+        let dpu = db::machine::find_one(&mut env.db_reader(), &dpu_machine_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            dpu.network_config.value.use_admin_network_changed,
+            Some(case.flag_after),
+            "{}",
+            case.scenario
+        );
+        assert_eq!(
+            dpu.network_config.version, current_version,
+            "{}",
+            case.scenario
+        );
+    }
 }
 
 #[crate::sqlx_test]

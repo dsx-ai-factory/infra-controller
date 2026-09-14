@@ -69,8 +69,8 @@ use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Pool, Postgres, Row};
 
 use super::{DatabaseError, ObjectFilter, Transaction, queries};
-use crate::DatabaseResult;
 use crate::db_read::DbReader;
+use crate::{ConditionalWrite, DatabaseResult};
 
 #[derive(Serialize)]
 struct ReprovisionRequestRestart {
@@ -1624,13 +1624,21 @@ pub async fn set_use_admin_network_changed(
     Ok(())
 }
 
-/// Clears the `use_admin_network_changed` flag only if the machine is still at
-/// the expected network config version.
+/// `AdminNetworkChangeNotPending` means no pending flag matches the acknowledged
+/// version. The machine may be missing, its network config version may differ,
+/// or `use_admin_network_changed` may already be false or unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdminNetworkChangeNotPending;
+
+/// Clears the pending `use_admin_network_changed` flag only if the machine is
+/// still at the expected network config version, without advancing that version.
+/// Returns `NotApplied(AdminNetworkChangeNotPending)` when no pending flag matches;
+/// database failures remain errors.
 pub async fn clear_use_admin_network_changed_if_version_matches(
     txn: &mut PgConnection,
     machine_id: &DpuMachineId,
     expected_version: &ConfigVersion,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), AdminNetworkChangeNotPending>, DatabaseError> {
     let query = r#"
         UPDATE machines
         SET network_config = jsonb_set(COALESCE(network_config, '{}'::jsonb), '{use_admin_network_changed}', 'false'::jsonb)
@@ -1645,7 +1653,11 @@ pub async fn clear_use_admin_network_changed_if_version_matches(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(if result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(AdminNetworkChangeNotPending)
+    })
 }
 
 /// Replaces predicted host id with stable host id.
