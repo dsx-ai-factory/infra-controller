@@ -217,7 +217,7 @@ type APIExpectedPowerShelf struct {
 	// HostID is the optional host identifier
 	HostID *int32 `json:"hostId"`
 	// Labels is the labels of the expected power shelf
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// Created indicates the ISO datetime string for when the ExpectedPowerShelf was created
 	Created time.Time `json:"created"`
 	// Updated indicates the ISO datetime string for when the ExpectedPowerShelf was last updated
@@ -240,7 +240,7 @@ func NewAPIExpectedPowerShelf(dbModel *cdbm.ExpectedPowerShelf) *APIExpectedPowe
 		SlotID:            dbModel.SlotID,
 		TrayIdx:           dbModel.TrayIdx,
 		HostID:            dbModel.HostID,
-		Labels:            dbModel.Labels,
+		Labels:            APILabels(dbModel.Labels),
 		Created:           dbModel.Created,
 		Updated:           dbModel.Updated,
 	}

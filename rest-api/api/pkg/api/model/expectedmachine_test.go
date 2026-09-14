@@ -16,6 +16,7 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
@@ -323,37 +324,60 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 }
 
 func TestNewAPIExpectedMachine(t *testing.T) {
-	dbEM := &cdbm.ExpectedMachine{
-		BmcMacAddress:            "00:11:22:33:44:55",
-		ChassisSerialNumber:      "CHASSIS123",
-		FallbackDpuSerialNumbers: []string{"DPU001", "DPU002"},
-		Labels:                   map[string]string{"env": "test", "zone": "us-west-1"},
-		Created:                  cdb.GetCurTime(),
-		Updated:                  cdb.GetCurTime(),
-	}
-
 	tests := []struct {
-		desc  string
-		dbObj *cdbm.ExpectedMachine
+		desc            string
+		labels          cdbm.Labels
+		dpuSerials      []string
+		wantLabelsJSON  string
+		wantSerialsJSON string
 	}{
 		{
-			desc:  "test creating API ExpectedMachine",
-			dbObj: dbEM,
+			desc:            "nil collections serialize as empty",
+			wantLabelsJSON:  `{}`,
+			wantSerialsJSON: `[]`,
+		},
+		{
+			desc:            "empty collections remain empty",
+			labels:          cdbm.Labels{},
+			dpuSerials:      []string{},
+			wantLabelsJSON:  `{}`,
+			wantSerialsJSON: `[]`,
+		},
+		{
+			desc:            "populated collections preserve values and order",
+			labels:          cdbm.Labels{"env": "test", "zone": "us-west-1"},
+			dpuSerials:      []string{"DPU002", "DPU001"},
+			wantLabelsJSON:  `{"env":"test","zone":"us-west-1"}`,
+			wantSerialsJSON: `["DPU002","DPU001"]`,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got := NewAPIExpectedMachine(tc.dbObj)
+			dbEM := &cdbm.ExpectedMachine{
+				BmcMacAddress:            "00:11:22:33:44:55",
+				ChassisSerialNumber:      "CHASSIS123",
+				FallbackDpuSerialNumbers: tc.dpuSerials,
+				Labels:                   tc.labels,
+				Created:                  cdb.GetCurTime(),
+				Updated:                  cdb.GetCurTime(),
+			}
+			stored := *dbEM
 
-			// Verify all fields are properly mapped
-			// Note: BmcUsername and BmcPassword are not included as they're not stored in DB
-			assert.Equal(t, tc.dbObj.BmcMacAddress, got.BmcMacAddress)
-			assert.Equal(t, tc.dbObj.ChassisSerialNumber, got.ChassisSerialNumber)
-			assert.Equal(t, tc.dbObj.FallbackDpuSerialNumbers, got.FallbackDPUSerialNumbers)
-			assert.Equal(t, map[string]string(tc.dbObj.Labels), got.Labels)
-			assert.Equal(t, tc.dbObj.Created, got.Created)
-			assert.Equal(t, tc.dbObj.Updated, got.Updated)
+			got := NewAPIExpectedMachine(dbEM)
+
+			assert.Equal(t, dbEM.BmcMacAddress, got.BmcMacAddress)
+			assert.Equal(t, dbEM.ChassisSerialNumber, got.ChassisSerialNumber)
+			assert.Equal(t, dbEM.Created, got.Created)
+			assert.Equal(t, dbEM.Updated, got.Updated)
+			assert.Equal(t, stored, *dbEM, "response conversion must preserve stored nil values")
+
+			raw, err := json.Marshal(got)
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(raw, &fields))
+			assert.JSONEq(t, tc.wantLabelsJSON, string(fields["labels"]))
+			assert.JSONEq(t, tc.wantSerialsJSON, string(fields["fallbackDPUSerialNumbers"]))
 		})
 	}
 }
@@ -479,25 +503,6 @@ func TestNewAPIExpectedMachine_DpfEnabled(t *testing.T) {
 		assert.True(t, *got.IsDpfEnabled)
 
 	})
-}
-
-func TestNewAPIExpectedMachineWithNilFields(t *testing.T) {
-	dbEM := &cdbm.ExpectedMachine{
-		BmcMacAddress:            "00:11:22:33:44:55",
-		ChassisSerialNumber:      "CHASSIS123",
-		FallbackDpuSerialNumbers: nil,
-		Labels:                   nil,
-		Created:                  time.Now(),
-		Updated:                  time.Now(),
-	}
-
-	got := NewAPIExpectedMachine(dbEM)
-
-	// Verify fields are properly handled when empty or nil
-	assert.Equal(t, dbEM.BmcMacAddress, got.BmcMacAddress)
-	assert.Equal(t, dbEM.ChassisSerialNumber, got.ChassisSerialNumber)
-	assert.Nil(t, got.FallbackDPUSerialNumbers)
-	assert.Nil(t, got.Labels)
 }
 
 func TestAPIExpectedMachineUpdateRequest_BmcIpAddressJSONSemantics(t *testing.T) {
@@ -879,7 +884,7 @@ func TestNewAPIExpectedMachineEdgeCases(t *testing.T) {
 
 		got := NewAPIExpectedMachine(dbEM)
 		assert.NotNil(t, got)
-		assert.Equal(t, map[string]string(dbEM.Labels), got.Labels)
+		assert.Equal(t, APILabels(dbEM.Labels), got.Labels)
 		assert.Equal(t, "nico-rest-api", got.Labels["app.kubernetes.io/name"])
 	})
 

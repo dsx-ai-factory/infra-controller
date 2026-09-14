@@ -393,7 +393,7 @@ func TestNewAPIInstance(t *testing.T) {
 			}
 
 			if got.Labels != nil {
-				assert.Equal(t, tt.args.dbic.Labels, got.Labels)
+				assert.Equal(t, tt.args.dbic.Labels, map[string]string(got.Labels))
 			}
 
 			if tt.args.expectedSecondaryVpcIDs != nil {

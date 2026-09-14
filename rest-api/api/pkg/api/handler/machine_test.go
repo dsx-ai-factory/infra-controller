@@ -2833,7 +2833,7 @@ func TestMachineHandler_Update(t *testing.T) {
 
 				// Verify that Machine labels are updated
 				if tt.args.reqLabels != nil {
-					assert.Equal(t, rst.Labels, tt.args.reqLabels)
+					assert.Equal(t, map[string]string(rst.Labels), tt.args.reqLabels)
 				}
 
 				if tt.args.verifyOnlineRepair != nil {

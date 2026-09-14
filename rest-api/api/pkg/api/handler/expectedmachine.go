@@ -1235,8 +1235,11 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 		Int("SuccessCount", len(createdExpectedMachines)).
 		Msg("finishing CreateExpectedMachines API handler")
 
-	// Return only successful machines
-	return c.JSON(http.StatusCreated, createdExpectedMachines)
+	apiExpectedMachines := make([]*model.APIExpectedMachine, 0, len(createdExpectedMachines))
+	for i := range createdExpectedMachines {
+		apiExpectedMachines = append(apiExpectedMachines, model.NewAPIExpectedMachine(&createdExpectedMachines[i]))
+	}
+	return c.JSON(http.StatusCreated, apiExpectedMachines)
 }
 
 // ~~~~~ Batch Update Handler ~~~~~ //
@@ -1760,6 +1763,9 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		Int("SuccessCount", len(updatedExpectedMachines)).
 		Msg("finishing UpdateExpectedMachines API handler")
 
-	// Return only successful machines
-	return c.JSON(http.StatusOK, updatedExpectedMachines)
+	apiExpectedMachines := make([]*model.APIExpectedMachine, 0, len(updatedExpectedMachines))
+	for i := range updatedExpectedMachines {
+		apiExpectedMachines = append(apiExpectedMachines, model.NewAPIExpectedMachine(&updatedExpectedMachines[i]))
+	}
+	return c.JSON(http.StatusOK, apiExpectedMachines)
 }

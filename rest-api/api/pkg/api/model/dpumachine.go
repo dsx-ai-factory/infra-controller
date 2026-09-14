@@ -445,7 +445,7 @@ type APIDpuMachine struct {
 	// Health is the health information for the DPU
 	Health *APIMachineHealth `json:"health"`
 	// Labels are the labels associated with the DPU
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// State is the lifecycle state of the DPU as reported by NICo Core
 	State string `json:"state"`
 	// DpuNetworkConfig contains the network configuration fields exposed by the REST API for the DPU.
@@ -546,7 +546,7 @@ func (apd *APIDpuMachine) FromProto(protoDpuMachine *corev1.DpuMachine, ctx APID
 
 	var labels cdbm.Labels
 	labels.FromProto(protoMachine.GetMetadata().GetLabels())
-	apd.Labels = labels
+	apd.Labels = APILabels(labels)
 
 	apd.State = protoMachine.State
 

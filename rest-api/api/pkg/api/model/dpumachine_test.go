@@ -361,7 +361,7 @@ func TestAPIDpuMachine_ZeroValueJSON(t *testing.T) {
 		"interfaces":               nil,
 		"softwareComponents":       nil,
 		"health":                   nil,
-		"labels":                   nil,
+		"labels":                   map[string]interface{}{},
 		"state":                    "",
 		"dpuNetworkConfig":         nil,
 		"lastRebooted":             nil,

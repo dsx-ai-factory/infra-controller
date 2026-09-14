@@ -589,9 +589,9 @@ func TestCreateInstanceTypeHandler_Handle(t *testing.T) {
 			assert.Equal(t, tt.args.reqData.SiteID, rst.SiteID)
 
 			if tt.args.reqData.Labels != nil {
-				assert.Equal(t, tt.args.reqData.Labels, rst.Labels)
+				assert.Equal(t, tt.args.reqData.Labels, map[string]string(rst.Labels))
 			} else {
-				assert.Equal(t, map[string]string{}, rst.Labels)
+				assert.Equal(t, model.APILabels{}, rst.Labels)
 			}
 			assert.Equal(t, cdbm.InstanceTypeStatusReady, rst.Status)
 			assert.Equal(t, len(rst.StatusHistory), 1)
@@ -2492,7 +2492,7 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 			}
 
 			if tt.args.reqData.Labels != nil {
-				assert.Equal(t, tt.args.reqData.Labels, rst.Labels)
+				assert.Equal(t, tt.args.reqData.Labels, map[string]string(rst.Labels))
 			}
 
 			assert.NotEqual(t, rst.Updated.String(), it.Updated.String())

@@ -2022,7 +2022,7 @@ type APIInstance struct {
 	// UserData is inherited from Operating System or specified by user if allowed
 	UserData *string `json:"userData"`
 	// Labels is Instace labels specified by user
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// IsUpdatePending is an attribute suggest if instance update pending or not
 	IsUpdatePending bool `json:"isUpdatePending"`
 	// SerialConsoleURL is the ssh serial console URL associated with the instance
@@ -2121,7 +2121,7 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 		PhoneHomeEnabled:                       dbinst.PhoneHomeEnabled,
 		UserData:                               dbinst.UserData,
 		AutoNetwork:                            dbinst.AutoNetwork,
-		Labels:                                 dbinst.Labels,
+		Labels:                                 APILabels(dbinst.Labels),
 		IsUpdatePending:                        dbinst.IsUpdatePending,
 		PowerProfile:                           dbinst.PowerProfile,
 		Created:                                dbinst.Created,
