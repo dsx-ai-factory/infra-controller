@@ -105,11 +105,11 @@ impl ServiceRootBuilder {
         self.add_str_field("RedfishVersion", v)
     }
 
-    /// The query options a client may rely on. `$filter` is served by the
-    /// log entries collections (`Created ge|gt <instant>`); `$expand` is left
-    /// unadvertised, since nv-redfish reads the advertisement literally and
-    /// the expander's `$levels` grammar has been served to clients that ask
-    /// for it on their own terms.
+    /// The query options a client may rely on. `$filter` is served on every
+    /// collection by `query_router`; `$expand` is left unadvertised, since
+    /// nv-redfish reads the advertisement literally and the expander's
+    /// `$levels` grammar has been served to clients that ask for it on their
+    /// own terms.
     fn protocol_features(self) -> Self {
         self.apply_patch(json!({"ProtocolFeaturesSupported": {"FilterQuery": true}}))
     }

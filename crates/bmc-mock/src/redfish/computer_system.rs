@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::extract::{Json, Path, RawQuery, State};
+use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -280,6 +280,25 @@ impl SystemState {
 
     pub(crate) fn systems(&self) -> &[SingleSystemState] {
         &self.systems
+    }
+
+    /// The collections under the systems that page, by `@odata.id`, with
+    /// their page size.
+    pub(crate) fn page_sizes(&self) -> impl Iterator<Item = (String, usize)> + '_ {
+        self.systems().iter().flat_map(|system| {
+            system
+                .config
+                .log_services
+                .iter()
+                .flat_map(|services| services.services())
+                .filter_map(|log| {
+                    let collection = redfish::log_service::system_entries_collection(
+                        &system.config.id,
+                        log.id(),
+                    );
+                    Some((collection.odata_id.into_owned(), log.page_size()?))
+                })
+        })
     }
 
     pub(crate) fn find(&self, system_id: &str) -> Option<&SingleSystemState> {
@@ -1122,60 +1141,10 @@ async fn post_clear_log(
         .unwrap_or_else(http::not_found)
 }
 
-/// The query options of an entries collection request: `$skip`, `$top`, and
-/// the `$filter` the collection serves (see
-/// [`CreatedFilter`](redfish::log_service::CreatedFilter)), the last kept as
-/// written so a continuation link can carry it. Other options are ignored,
-/// as the Redfish specification allows for non-`$` parameters and as this
-/// mock does for the `$` ones it does not implement.
-struct EntryQuery {
-    skip: usize,
-    top: Option<usize>,
-    filter: Option<(String, redfish::log_service::CreatedFilter)>,
-}
-
-fn entry_query(query: Option<&str>) -> Result<EntryQuery, String> {
-    let mut parsed = EntryQuery {
-        skip: 0,
-        top: None,
-        filter: None,
-    };
-    for (key, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
-        match key.as_ref() {
-            "$skip" => {
-                parsed.skip = value
-                    .parse()
-                    .map_err(|_| "$skip must be a non-negative integer".to_owned())?;
-            }
-            "$top" => {
-                let top: usize = value
-                    .parse()
-                    .map_err(|_| "$top must be a non-negative integer".to_owned())?;
-                if top == 0 {
-                    // A zero-member page makes no progress, so its continuation would point at itself.
-                    return Err("$top must be a positive integer".to_owned());
-                }
-                parsed.top = Some(top);
-            }
-            "$filter" => {
-                let filter = redfish::log_service::CreatedFilter::parse(&value)?;
-                parsed.filter = Some((value.into_owned(), filter));
-            }
-            _ => {}
-        }
-    }
-    Ok(parsed)
-}
-
 async fn get_log_service_entries(
     State(state): State<BmcState>,
     Path((system_id, log_service_id)): Path<(String, String)>,
-    RawQuery(query): RawQuery,
 ) -> Response {
-    let query = match entry_query(query.as_deref()) {
-        Ok(query) => query,
-        Err(message) => return http::bad_request(&message),
-    };
     state
         .system_state
         .find(&system_id)
@@ -1184,32 +1153,11 @@ async fn get_log_service_entries(
         .map(|log_service| {
             let collection =
                 redfish::log_service::system_entries_collection(&system_id, &log_service_id);
-            let page = log_service.page(
-                &collection,
-                query.skip,
-                query.top,
-                query.filter.as_ref().map(|(_, filter)| filter),
-            );
-            let mut document = collection.with_members(&page.members).patch(json!({
-                "Members@odata.count": page.total,
-                "Description": "Log services collection", // Required by libredfish
-            }));
-            if let Some(next_skip) = page.next_skip {
-                // The continuation keeps the filter, so its pages are pages
-                // of the same answer.
-                let filter = query
-                    .filter
-                    .as_ref()
-                    .map_or_else(String::new, |(expression, _)| {
-                        let encoded: String =
-                            form_urlencoded::byte_serialize(expression.as_bytes()).collect();
-                        format!("&$filter={encoded}")
-                    });
-                document = document.patch(json!({
-                    "Members@odata.nextLink":
-                        format!("{}?$skip={next_skip}{filter}", collection.odata_id),
+            let document = collection
+                .with_members(&log_service.entries(&collection))
+                .patch(json!({
+                    "Description": "Log services collection", // Required by libredfish
                 }));
-            }
             document.into_ok_response()
         })
         .unwrap_or_else(http::not_found)
@@ -1710,7 +1658,8 @@ mod tests {
         assert_eq!(capped["Members"][0]["Id"], "2");
         assert_eq!(
             capped["Members@odata.nextLink"],
-            format!("{entries_path}?$skip=7")
+            format!("{entries_path}?$skip=7&$top=5"),
+            "the continuation keeps the client's page size"
         );
 
         for query in ["$skip=many", "$top=0"] {
@@ -1725,80 +1674,6 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
-        }
-    }
-
-    #[tokio::test]
-    async fn the_entries_collection_serves_a_created_filter() {
-        let (router, state) = dell_router();
-        let root = get_json(&router, "/redfish/v1").await;
-        assert_eq!(root["ProtocolFeaturesSupported"]["FilterQuery"], true);
-
-        let entries_path = "/redfish/v1/Systems/System.Embedded.1/LogServices/EventLog/Entries";
-        let system = "/redfish/v1/Systems/System.Embedded.1";
-        // The seed is stamped 2026-02-12; the three lifecycle entries now.
-        for _ in 0..3 {
-            state.record_log(redfish::log_service::LogEntryDraft::powered_on(system));
-        }
-        let after_seed = get_json(
-            &router,
-            &format!("{entries_path}?$filter=Created%20gt%20'2026-02-12T02:06:58Z'"),
-        )
-        .await;
-        assert_eq!(
-            after_seed["Members@odata.count"], 3,
-            "the count is of what matched"
-        );
-        assert_eq!(after_seed["Members"][0]["Id"], "1");
-        let from_seed = get_json(
-            &router,
-            &format!("{entries_path}?$filter=Created%20ge%202026-02-12T02:06:58%2B00:00"),
-        )
-        .await;
-        assert_eq!(
-            from_seed["Members@odata.count"], 4,
-            "bare literal, inclusive, offset kept"
-        );
-        // A `+` a client left unencoded decodes as a space and is still an offset.
-        let bare_plus = get_json(
-            &router,
-            &format!("{entries_path}?$filter=Created%20ge%20'2026-02-12T02:06:58+00:00'"),
-        )
-        .await;
-        assert_eq!(bare_plus["Members@odata.count"], 4);
-
-        // A filtered page continues under the same filter.
-        let paged = get_json(
-            &router,
-            &format!("{entries_path}?$top=2&$filter=Created%20gt%20'2026-02-12T02:06:58Z'"),
-        )
-        .await;
-        assert_eq!(paged["Members"].as_array().unwrap().len(), 2);
-        let next = paged["Members@odata.nextLink"].as_str().unwrap();
-        assert!(
-            next.starts_with(&format!("{entries_path}?$skip=2&$filter=")),
-            "{next}"
-        );
-        let rest = get_json(&router, next).await;
-        assert_eq!(rest["Members"].as_array().unwrap().len(), 1);
-        assert!(rest.get("Members@odata.nextLink").is_none());
-
-        for bad in [
-            "$filter=Severity%20eq%20'OK'",
-            "$filter=Created%20lt%20'2026-02-12T02:06:58Z'",
-            "$filter=Created%20ge%20'yesterday'",
-        ] {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(format!("{entries_path}?{bad}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{bad}");
         }
     }
 

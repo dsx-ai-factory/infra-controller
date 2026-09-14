@@ -215,7 +215,7 @@ struct Expander {
     inner: Router,
 }
 
-enum BufferError {
+pub(super) enum BufferError {
     /// The response does not declare JSON; it is returned untouched.
     NotJson(Response),
     Read(axum::Error),
@@ -223,7 +223,7 @@ enum BufferError {
 
 /// Buffer a JSON response body. Streaming and other non-JSON bodies are never
 /// read to their end, which for an open event stream would be never.
-async fn json_bytes(
+pub(super) async fn json_bytes(
     response: Response,
 ) -> Result<(axum::http::response::Parts, bytes::Bytes), BufferError> {
     if !carbide_axum_utils::is_json_response(&response) {

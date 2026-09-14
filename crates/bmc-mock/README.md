@@ -221,19 +221,42 @@ than an append-only list:
   .../LogServices/EventLog/Actions/LogService.ClearLog` empties the log and
   numbers the next entry `0` again, so a consumer keyed on `Id` alone sees new
   records under old ids, as it would on hardware.
-- The Dell R750 profile pages its entries fifty at a time, with
-  `Members@odata.count` giving the whole log and `Members@odata.nextLink`
-  carrying `$skip` to the next page; `$top` may shrink a page but not grow it.
-  A client that reads only the first page sees only the oldest entries.
-  BlueField profiles serve their logs unpaged.
+- The Dell R750 profile pages its entries fifty at a time (see
+  [Query parameters](#query-parameters)); a client that reads only the first
+  page sees only the oldest entries. BlueField profiles serve their logs
+  unpaged.
 - Lifecycle entries carry `Created` at one-second resolution, `MessageId`,
   `Severity`, and `Links.OriginOfCondition`, matching the Event published for
-  them.
-- The entries collections serve `$filter=Created ge <instant>` and
-  `Created gt <instant>`, the instant in RFC 3339 with or without quotes, so
-  a client resuming from the newest entry it holds asks for that second
-  onward; `Members@odata.count` is then the count of what matched, and a
-  paged answer's `nextLink` keeps the filter. Any other expression is a 400.
-  The service root advertises `ProtocolFeaturesSupported.FilterQuery` for it;
-  other collections still ignore `$filter`, which is the gap a client that
-  trusts the advertisement will notice first.
+  them. A client resuming from the newest entry it holds asks for
+  `$filter=Created gt <that instant>`.
+
+## Query parameters
+
+One layer serves the collection query parameters of DSP0266 section 7.3 on
+every resource collection, in the order the specification gives: `$filter`,
+then `$skip` and `$top`, then `$expand`.
+
+- `$filter` compares a member's properties (`Severity`, `Status/Health`,
+  `Links/OriginOfCondition/@odata.id`) with `eq`, `ne`, `gt`, `ge`, `lt`, or
+  `le` against a `'quoted string'`, a number, `true`, `false`, `null`, or a
+  bare RFC 3339 instant, combined with `and`, `or`, `not`, and parentheses.
+  Two strings that are both RFC 3339 instants compare as instants, whatever
+  their offsets. Members served as references are judged by the resource they
+  point at and stay references. The service root advertises
+  `ProtocolFeaturesSupported.FilterQuery`.
+- `Members@odata.count` is the number of members after `$filter`. `$skip`
+  and `$top` page those; a collection with a page size of its own (the Dell
+  R750 event log) pages at that size even without `$top`, and `$top` may
+  shrink such a page but not grow it. `Members@odata.nextLink` repeats every
+  option of the request with `$skip` advanced.
+- `$expand=.($levels=N)` and `$expand=*` inline the members of the page.
+  `$expand` is not advertised in `ProtocolFeaturesSupported`.
+
+Misuse is answered with the Base registry messages the specification names,
+in the error envelope's `code` and `@Message.ExtendedInfo`: any other `$`
+parameter is a 501 `QueryParameterUnsupported`; a collection option on a
+resource that is not a collection is a 400 `QueryNotSupportedOnResource`; a
+`$skip` or `$top` that is not an integer, or a `$filter` the grammar does not
+cover, is a 400 `QueryParameterValueFormatError`; a negative `$skip` or a
+`$top` below 1 is a 400 `QueryParameterOutOfRange`. Parameters without a `$`
+are ignored.
