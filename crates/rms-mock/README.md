@@ -20,9 +20,11 @@ agrees with it, and elects one fabric-manager primary per rack: the requested
 primary when it is one of the rack's simulated switches, otherwise the one
 lowest in the rack, with node id breaking ties. A node the request names but
 no simulated device answers for is a per-node failure: the batch fails, the
-node's result says why, and no job is issued for it. Jobs advance each time
-they are polled rather than with time, and a poll for a job id this process
-never issued follows `unknown_job_policy`.
+node's result says why, and no job is issued for it.
+`ConfigureScaleUpFabricManager` has no per-node results, so when none of its
+switches match, the job it returns fails and names them. Jobs advance each
+time they are polled rather than with time, and a poll for a job id this
+process never issued follows `unknown_job_policy`.
 
 ## Pointing NICo at the mock
 

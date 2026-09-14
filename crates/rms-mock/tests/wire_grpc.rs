@@ -690,6 +690,123 @@ async fn fabric_jobs_are_pollable_and_reach_completed() {
     );
 }
 
+/// A fabric request whose switches all miss the inventory is accepted and its
+/// job fails naming them; one matched switch is enough to complete.
+#[tokio::test]
+async fn a_fabric_request_matching_no_switch_returns_a_job_that_fails() {
+    use librms::protos::rack_manager::JobExecutionState;
+
+    struct Case {
+        scenario: &'static str,
+        nodes: Vec<librms::protos::rack_manager::NodeInfo>,
+        terminal: JobExecutionState,
+        /// Node ids the failure must name; empty for a job that completes.
+        named: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            scenario: "no switch matched",
+            nodes: vec![
+                node_info("switch-1", "02:00:00:00:00:98"),
+                node_info("switch-2", "02:00:00:00:00:99"),
+            ],
+            terminal: JobExecutionState::Failed,
+            named: &["switch-1", "switch-2"],
+        },
+        Case {
+            scenario: "one switch matched",
+            nodes: vec![
+                node_info("switch-1", "02:00:00:00:00:98"),
+                node_info("switch-7", "02:00:11:11:22:22"),
+            ],
+            terminal: JobExecutionState::Completed,
+            named: &[],
+        },
+    ];
+
+    for case in cases {
+        let url = serve_with_config(
+            vec![a_switch()],
+            RmsMockConfig {
+                job_pacing: JobPacing {
+                    running_after_observations: 1,
+                    terminal_after_observations: 2,
+                },
+                ..RmsMockConfig::default()
+            },
+        )
+        .await;
+        let mut v2 = RackManagerV2Client::connect(url.clone()).await.unwrap();
+        let mut v1 = RackManagerClient::connect(url).await.unwrap();
+
+        let job_id = v2
+            .configure_scale_up_fabric_manager(
+                librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+                    nodes: Some(librms::protos::rack_manager::NodeSet { nodes: case.nodes }),
+                    primary_switch_node_id: None,
+                    domain: None,
+                    config: Some(fabric_config()),
+                },
+            )
+            .await
+            .expect(case.scenario)
+            .into_inner()
+            .job_id;
+        assert!(!job_id.is_empty(), "{}", case.scenario);
+
+        let mut polls = Vec::new();
+        for _ in 0..3 {
+            let response = v1
+                .get_job_status(librms::protos::rack_manager::GetJobStatusRequest {
+                    job_id: job_id.clone(),
+                    include_child_job_states: false,
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            let job = response
+                .job_states
+                .into_iter()
+                .find(|j| j.job_id == job_id)
+                .expect(case.scenario);
+            polls.push((job.execution_state, job.error_message));
+        }
+
+        // Paced like a completing job; the reason appears only once failed.
+        let states: Vec<i32> = polls.iter().map(|(state, _)| *state).collect();
+        assert_eq!(
+            states,
+            [
+                JobExecutionState::Running as i32,
+                case.terminal as i32,
+                case.terminal as i32,
+            ],
+            "{}",
+            case.scenario
+        );
+        assert!(
+            polls[0].1.is_empty(),
+            "{}: a job that has not ended has no error",
+            case.scenario
+        );
+        for (_, error) in &polls[1..] {
+            assert_eq!(
+                error.is_empty(),
+                case.named.is_empty(),
+                "{}: {error:?}",
+                case.scenario
+            );
+            for name in case.named {
+                assert!(
+                    error.contains(name),
+                    "{}: {error:?} does not name {name}",
+                    case.scenario
+                );
+            }
+        }
+    }
+}
+
 /// Reading the fabric back after configuration finds exactly one enabled
 /// switch per rack.
 #[tokio::test]

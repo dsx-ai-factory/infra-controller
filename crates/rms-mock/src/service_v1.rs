@@ -125,11 +125,10 @@ rack_manager_impl! {
             }))
         }
 
-        /// Report the state of a job, and of its children when asked.
+        /// Report the state of a job.
         ///
-        /// The caller looks for its own job id in `job_states` and gives up if
-        /// it is absent, so the requested id is always echoed even when the
-        /// job is unknown to this process.
+        /// The requested id is always echoed, even for a job unknown to this
+        /// process; a failed job carries its reason in `error_message`.
         async fn get_job_status(
             &self,
             request: tonic::Request<rms::GetJobStatusRequest>,
@@ -147,7 +146,7 @@ rack_manager_impl! {
                     child_job_ids: Vec::new(),
                     // Never the proto3 default, which callers read as unknown.
                     execution_state: status.state.as_execution_state(),
-                    error_message: String::new(),
+                    error_message: status.error_message,
                     error_code: 0,
                     result_json: String::new(),
                     state_description: status.state.as_wire_str().to_owned(),
@@ -337,7 +336,7 @@ rack_manager_impl! {
                     message: String::new(),
                     rack_id: status.rack_id,
                     node_id: status.node_id,
-                    error_message: String::new(),
+                    error_message: status.error_message,
                     result_json: String::new(),
                     created_at: None,
                     updated_at: None,
