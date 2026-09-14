@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -74,18 +75,22 @@ type options struct {
 }
 
 // parseOptions parses args (without the program name) with environment
-// variables as defaults and validates the values that must be positive. A
-// command line the flag package rejects returns an error wrapping errUsage;
-// the flag package has already reported it together with the usage text.
-func parseOptions(args []string, getenv func(string) string) (*options, error) {
+// variables as flag defaults and validates the parsed values. lookupEnv has
+// the contract of os.LookupEnv: a variable that is set is the flag's default
+// even when its value is empty, which is how SOURCE_LIST_ADDR and HEALTH_ADDR
+// disable their listeners, while an unset variable leaves the built-in
+// default. A command line the flag package rejects returns an error wrapping
+// errUsage; the flag package has already reported it together with the usage
+// text.
+func parseOptions(args []string, lookupEnv func(string) (string, bool)) (*options, error) {
 	envOrDefault := func(key, defaultValue string) string {
-		if v := getenv(key); v != "" {
+		if v, ok := lookupEnv(key); ok {
 			return v
 		}
 		return defaultValue
 	}
 	envBoolOrDefault := func(key string, defaultValue bool) bool {
-		if v := getenv(key); v != "" {
+		if v, ok := lookupEnv(key); ok {
 			if b, err := strconv.ParseBool(v); err == nil {
 				return b
 			}
@@ -93,7 +98,7 @@ func parseOptions(args []string, getenv func(string) string) (*options, error) {
 		return defaultValue
 	}
 	durationOrDefault := func(key string, defaultValue time.Duration) time.Duration {
-		if v := getenv(key); v != "" {
+		if v, ok := lookupEnv(key); ok {
 			if d, err := time.ParseDuration(v); err == nil {
 				return d
 			}
@@ -109,7 +114,7 @@ func parseOptions(args []string, getenv func(string) string) (*options, error) {
 		"Label selector for discovering machine-a-tron bmc-mock Services")
 	fs.DurationVar(&opts.syncInterval, "sync-interval", durationOrDefault("SYNC_INTERVAL", 30*time.Second),
 		"Interval between reconciliation passes")
-	fs.StringVar(&opts.kubeconfig, "kubeconfig", getenv("KUBECONFIG"),
+	fs.StringVar(&opts.kubeconfig, "kubeconfig", envOrDefault("KUBECONFIG", ""),
 		"Path to kubeconfig file (uses in-cluster config if empty, development only)")
 	fs.StringVar(&opts.targetSelector, "target-selector", envOrDefault("TARGET_SELECTOR", "app.kubernetes.io/name=nico-machine-a-tron"),
 		"Pod selector for Services (comma-separated key=value pairs)")
@@ -118,7 +123,7 @@ func parseOptions(args []string, getenv func(string) string) (*options, error) {
 	fs.StringVar(&opts.logLevel, "log-level", envOrDefault("LOG_LEVEL", "info"),
 		"Log level (debug, info, warn, error)")
 	fs.StringVar(&opts.sourceListAddr, "source-list-addr", envOrDefault("SOURCE_LIST_ADDR", sourcelist.DefaultAddr),
-		"Listen address for the pod-local, unauthenticated source list endpoint (empty disables it)")
+		"Listen address for the pod-local, unauthenticated source list endpoint; must be a loopback IP address (empty disables it)")
 	fs.DurationVar(&opts.sourceListDebounce, "source-list-debounce", durationOrDefault("SOURCE_LIST_DEBOUNCE", sourcelist.DefaultDebounce),
 		"Minimum age of a changed source set before a later discovery pass publishes it (0 publishes changes at once)")
 	fs.StringVar(&opts.healthAddr, "health-addr", envOrDefault("HEALTH_ADDR", defaultHealthAddr),
@@ -141,11 +146,22 @@ func parseOptions(args []string, getenv func(string) string) (*options, error) {
 	if opts.healthStaleAfter < 0 {
 		return nil, fmt.Errorf("health-stale-after must not be negative, got %v", opts.healthStaleAfter)
 	}
+	if opts.sourceListAddr != "" && !isLoopbackAddr(opts.sourceListAddr) {
+		return nil, fmt.Errorf("source-list-addr must be a loopback IP address such as %s, got %q", sourcelist.DefaultAddr, opts.sourceListAddr)
+	}
 	return opts, nil
 }
 
+// isLoopbackAddr reports whether addr is an ip:port whose IP literal is a
+// loopback address. The source list endpoint is unauthenticated, so a host
+// name or an address that other containers or pods can reach is refused.
+func isLoopbackAddr(addr string) bool {
+	ap, err := netip.ParseAddrPort(addr)
+	return err == nil && ap.Addr().IsLoopback()
+}
+
 func main() {
-	opts, err := parseOptions(os.Args[1:], os.Getenv)
+	opts, err := parseOptions(os.Args[1:], os.LookupEnv)
 	if err != nil {
 		switch {
 		case errors.Is(err, flag.ErrHelp):

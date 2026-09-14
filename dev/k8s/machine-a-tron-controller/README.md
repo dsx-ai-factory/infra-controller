@@ -35,10 +35,14 @@ kind load docker-image mat-k8s-controller:latest --name <cluster>
 | `--insecure-skip-verify` | `INSECURE_SKIP_VERIFY` | `false` | Skip TLS verification (dev only) |
 | `--log-level` | `LOG_LEVEL` | `info` | Log level |
 | `--kubeconfig` | `KUBECONFIG` | (empty) | Path to kubeconfig (dev only, uses in-cluster config if empty) |
-| `--source-list-addr` | `SOURCE_LIST_ADDR` | `127.0.0.1:8090` | Listen address for the source list endpoint (empty disables it) |
+| `--source-list-addr` | `SOURCE_LIST_ADDR` | `127.0.0.1:8090` | Listen address for the source list endpoint; must be a loopback IP address (empty disables it) |
 | `--source-list-debounce` | `SOURCE_LIST_DEBOUNCE` | `5s` | Minimum age of a changed source set before a later discovery pass publishes it with a new `generation` (`0` publishes at once) |
 | `--health-addr` | `HEALTH_ADDR` | `:8091` | Listen address for the liveness endpoint `GET /healthz` on the pod network (empty disables it) |
 | `--health-stale-after` | `HEALTH_STALE_AFTER` | `10m` | How long the reconcile loop may go without completing a pass before `/healthz` reports a stall (`0` disables the check) |
+
+An environment variable that is set is the flag's default, an empty value
+included: `SOURCE_LIST_ADDR=""` disables the source list endpoint just like
+`--source-list-addr=`. A flag on the command line overrides the variable.
 
 ### Owner References
 
@@ -68,9 +72,9 @@ learn about the instances through a small HTTP endpoint instead of talking to
 the API server themselves.
 
 The endpoint is **pod-local and unauthenticated**: it binds to `127.0.0.1`
-by default and must not be exposed through a Service or a non-loopback
-address. It is served for the lifetime of the controller and shuts down
-gracefully with it.
+by default, the controller refuses to start when `--source-list-addr` is not
+a loopback IP address, and it must not be exposed through a Service. It is
+served for the lifetime of the controller and shuts down gracefully with it.
 
 ### Contract (v1)
 

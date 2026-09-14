@@ -16,13 +16,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRun_ServesAndShutsDown(t *testing.T) {
-	// Pick a free loopback port, then hand the address to the server.
+// freeLoopbackAddr picks a free loopback port and returns its address for
+// the server to bind.
+func freeLoopbackAddr(t *testing.T) string {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	addr := ln.Addr().String()
 	require.NoError(t, ln.Close())
+	return addr
+}
 
+func TestRun_ServesAndShutsDown(t *testing.T) {
+	addr := freeLoopbackAddr(t)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("served\n"))
 	})
@@ -32,6 +38,7 @@ func TestRun_ServesAndShutsDown(t *testing.T) {
 	go func() { done <- Run(ctx, addr, handler, zerolog.Nop(), "test endpoint") }()
 
 	var resp *http.Response
+	var err error
 	require.Eventually(t, func() bool {
 		resp, err = http.Get("http://" + addr + "/")
 		return err == nil
@@ -52,6 +59,45 @@ func TestRun_ServesAndShutsDown(t *testing.T) {
 
 	_, err = http.Get("http://" + addr + "/")
 	assert.Error(t, err, "listener must be closed after shutdown")
+}
+
+func TestRun_ClosesConnectionWhoseBodyNeverArrives(t *testing.T) {
+	addr := freeLoopbackAddr(t)
+	short := defaultTimeouts
+	short.read = 100 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, addr, http.NotFoundHandler(), zerolog.Nop(), "test endpoint", short) }()
+
+	var conn net.Conn
+	require.Eventually(t, func() bool {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			return false
+		}
+		conn = c
+		return true
+	}, 5*time.Second, 10*time.Millisecond)
+	defer conn.Close()
+
+	// Declare a body and never send it. The handler does not read bodies, so
+	// the server drains the declared body before it responds and must give
+	// up at the read timeout instead of waiting for the client.
+	_, err := io.WriteString(conn, "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n")
+	require.NoError(t, err)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	raw, err := io.ReadAll(conn)
+	require.NoError(t, err, "the server must close the connection; a client-side deadline means it kept waiting for the body")
+	assert.Contains(t, string(raw), "HTTP/1.1 404")
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not shut down")
+	}
 }
 
 func TestRun_ListenError(t *testing.T) {
