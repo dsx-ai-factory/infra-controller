@@ -33,7 +33,7 @@ server:
   ## -------------------------------------------------------------------------
   readinessProbe:
     enabled: true
-    path: "/v1/sys/health?standbyok=true"
+    path: "/v1/sys/health?standbyok=true&uninitcode=204"
   livenessProbe:
     enabled: true
     path: "/v1/sys/health?sealedcode=204&uninitcode=204&standbyok=true"

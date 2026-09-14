@@ -44,7 +44,7 @@ configMapGenerator:
       - SECRET_REF=nico-system.nico.nico-pg-cluster.credentials.postgresql.acid.zalan.do
   - name: vault-cluster-info
     literals:
-      - VAULT_SERVICE=https://vault.vault.svc.cluster.local:8200
+      - VAULT_SERVICE=https://vault.vault:8200
       - NICO_VAULT_MOUNT=secrets
       - NICO_VAULT_PKI_MOUNT=nicoca
 

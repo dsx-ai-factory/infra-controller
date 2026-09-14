@@ -209,8 +209,16 @@ docker build --file dev/docker/Dockerfile.runtime-container-x86_64 -t nico-runti
 
 ### Building the boot artifact containers
 
+Build the PXE builder container and run the x86_64 artifact workflow inside
+it. The builder runs natively on either an AMD64 or ARM64 build host. On ARM64,
+Rust, C/C++, and iPXE are cross-compiled for x86_64 instead of running an
+x86_64 compiler through QEMU user-mode emulation. The workflow also installs a
+pinned amd64 binfmt handler on ARM64 hosts for the x86_64 package scripts that
+mkosi must execute while assembling the Scout images.
+
 ```sh
-cargo make --cwd pxe --env SA_ENABLEMENT=1 build-boot-artifacts-x86-host-sa
+cargo make build-pxe-build-container
+cargo make pxe-docker-x86
 docker build --build-arg "CONTAINER_RUNTIME_X86_64=alpine:latest" -t boot-artifacts-x86_64 -f dev/docker/Dockerfile.release-artifacts-x86_64 .
 ```
 

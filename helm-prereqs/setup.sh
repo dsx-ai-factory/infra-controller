@@ -455,6 +455,8 @@ if ! command -v helmfile &>/dev/null; then
     if command -v brew &>/dev/null; then
         brew install helmfile
     else
+        HELMFILE_INSTALL_DIR="${HELMFILE_INSTALL_DIR:-${HOME}/.local/bin}"
+        mkdir -p "${HELMFILE_INSTALL_DIR}"
         # Download the latest release binary for Linux
         HELMFILE_VERSION="$(curl -fsSL https://api.github.com/repos/helmfile/helmfile/releases/latest \
             | grep '"tag_name"' | sed 's/.*"tag_name": *"v\([^"]*\)".*/\1/')"
@@ -462,11 +464,51 @@ if ! command -v helmfile &>/dev/null; then
         [[ "${ARCH}" == "x86_64" ]] && ARCH="amd64"
         [[ "${ARCH}" == "aarch64" ]] && ARCH="arm64"
         curl -fsSL "https://github.com/helmfile/helmfile/releases/download/v${HELMFILE_VERSION}/helmfile_${HELMFILE_VERSION}_linux_${ARCH}.tar.gz" \
-            | tar -xz -C /usr/local/bin helmfile
-        chmod +x /usr/local/bin/helmfile
+            | tar -xz -C "${HELMFILE_INSTALL_DIR}" helmfile
+        chmod +x "${HELMFILE_INSTALL_DIR}/helmfile"
+        export PATH="${HELMFILE_INSTALL_DIR}:${PATH}"
     fi
     echo "helmfile $(helmfile --version) installed"
 fi
+
+# Recover only interrupted Helm transactions owned by this installer. A normal
+# deployed release is left untouched. This makes setup rerunnable after its SSH
+# client or local automation process is interrupted during a Helm upgrade.
+recover_pending_helm_release() {
+    local release_name="$1"
+    local release_namespace="$2"
+    local release_status
+    local deployed_revision
+
+    release_status="$(helm status "${release_name}" --namespace "${release_namespace}" \
+        --output json 2>/dev/null | jq -r '.info.status // empty' || true)"
+    case "${release_status}" in
+        pending-upgrade|pending-rollback)
+            deployed_revision="$(helm history "${release_name}" --namespace "${release_namespace}" \
+                --output json 2>/dev/null \
+                | jq -r '[.[] | select(.status == "deployed")][-1].revision // empty' || true)"
+            if [[ -z "${deployed_revision}" ]]; then
+                echo "ERROR: ${release_namespace}/${release_name} is ${release_status} with no deployed revision to restore" >&2
+                exit 1
+            fi
+            echo "Recovering ${release_namespace}/${release_name} from ${release_status} to deployed revision ${deployed_revision}"
+            helm rollback "${release_name}" "${deployed_revision}" \
+                --namespace "${release_namespace}" --wait --timeout 600s
+            ;;
+        pending-install)
+            deployed_revision="$(helm history "${release_name}" --namespace "${release_namespace}" \
+                --output json 2>/dev/null \
+                | jq -r '[.[] | select(.status == "deployed")][-1].revision // empty' || true)"
+            if [[ -n "${deployed_revision}" ]]; then
+                echo "ERROR: ${release_namespace}/${release_name} is pending-install but has deployed revision ${deployed_revision}" >&2
+                exit 1
+            fi
+            echo "Removing interrupted first install ${release_namespace}/${release_name}"
+            helm uninstall "${release_name}" --namespace "${release_namespace}" \
+                --wait --timeout 600s
+            ;;
+    esac
+}
 
 # ---------------------------------------------------------------------------
 # DNS check — verify cluster DNS is working before proceeding.
@@ -576,6 +618,38 @@ fi
 # ---------------------------------------------------------------------------
 _SETUP_PHASE="[1b] postgres-operator"
 echo "=== [1b] postgres-operator ==="
+_existing_postgres_instances="$(kubectl get postgresql nico-pg-cluster -n postgres \
+    -o jsonpath='{.spec.numberOfInstances}' 2>/dev/null || true)"
+_existing_synchronous_mode="$(kubectl get postgresql nico-pg-cluster -n postgres \
+    -o jsonpath='{.spec.patroni.synchronous_mode}' 2>/dev/null || true)"
+_existing_sync_waiters=0
+if [[ "${_existing_postgres_instances}" == "1" ]]; then
+    _existing_postgres_primary="$(kubectl get pods -n postgres \
+        -l application=spilo,cluster-name=nico-pg-cluster,spilo-role=master \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    if [[ -n "${_existing_postgres_primary}" ]]; then
+        _existing_sync_waiters="$(kubectl exec -n postgres -c postgres "${_existing_postgres_primary}" -- \
+            su postgres -c "psql -X -d postgres -tAc \"SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'SyncRep'\"" \
+            2>/dev/null | tr -d '[:space:]' || true)"
+        _existing_sync_waiters="${_existing_sync_waiters:-0}"
+    fi
+fi
+if [[ "${_existing_postgres_instances}" == "1" && \
+      ( "${_existing_synchronous_mode}" == "true" || "${_existing_sync_waiters}" != "0" ) ]]; then
+    echo "Recovering existing single-instance PostgreSQL cluster from synchronous replication"
+    kubectl patch postgresql nico-pg-cluster -n postgres --type=merge \
+        -p '{"spec":{"patroni":{"synchronous_mode":false,"synchronous_mode_strict":false}}}'
+    if [[ -n "${_existing_postgres_primary:-}" && "${_existing_sync_waiters}" != "0" ]]; then
+        echo "Terminating ${_existing_sync_waiters} stale SyncRep backend(s)"
+        kubectl exec -n postgres -c postgres "${_existing_postgres_primary}" -- \
+            su postgres -c "psql -X -d postgres -v ON_ERROR_STOP=1 -c \
+                \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                 WHERE pid <> pg_backend_pid() AND wait_event = 'SyncRep';\""
+    fi
+    kubectl rollout restart deployment/postgres-operator -n postgres
+    kubectl rollout status deployment/postgres-operator -n postgres --timeout=120s
+fi
+recover_pending_helm_release postgres-operator postgres
 helmfile sync -l name=postgres-operator
 
 # ---------------------------------------------------------------------------
@@ -610,12 +684,24 @@ echo "=== [1c] MetalLB ==="
 #   3. On sync failure, attempt CRD restoration before returning the error.
 #   4. Wait for CRDs to reach Established=True before applying site objects.
 #
-# Single source of truth for the chart version is the metallb release in
-# helmfile.yaml — read it from there so this bootstrap and the helm release
-# cannot drift when the version is bumped.
-METALLB_CHART_VERSION="$(awk '/chart: metallb\/metallb/{found=1} found && /^[[:space:]]*version:/{gsub(/"/,"",$2); print $2; exit}' helmfile.yaml)"
-if [[ -z "${METALLB_CHART_VERSION}" ]]; then
-    echo "ERROR: could not read the metallb chart version from helmfile.yaml" >&2
+# Single source of truth for the chart source and version is the metallb
+# release in helmfile.yaml. Read both from that release block so HTTP, OCI,
+# repository-qualified, and local chart coordinates all work consistently.
+METALLB_CHART="$(awk '
+    /^  - name:[[:space:]]*metallb[[:space:]]*$/ { release=1; next }
+    release && /^  - name:/ { exit }
+    release && /^    chart:/ {
+        sub(/^[^:]*:[[:space:]]*/, "")
+        gsub(/^"|"$/, "")
+        print
+        exit
+    }' helmfile.yaml)"
+METALLB_CHART_VERSION="$(awk '
+    /^  - name:[[:space:]]*metallb[[:space:]]*$/ { release=1; next }
+    release && /^  - name:/ { exit }
+    release && /^    version:/ { gsub(/"/, "", $2); print $2; exit }' helmfile.yaml)"
+if [[ -z "${METALLB_CHART}" || -z "${METALLB_CHART_VERSION}" ]]; then
+    echo "ERROR: could not read the metallb chart source and version from helmfile.yaml" >&2
     exit 1
 fi
 
@@ -626,7 +712,7 @@ fi
 # stderr is left attached so a repo/render failure says what actually broke
 # instead of surfacing as a confusing kubectl parse error downstream.
 _apply_metallb_crds() {
-    helm template metallb metallb/metallb --version "${METALLB_CHART_VERSION}" -n metallb-system --include-crds \
+    helm template metallb "${METALLB_CHART}" --version "${METALLB_CHART_VERSION}" -n metallb-system --include-crds \
         | awk '
             /^---[[:space:]]*$/ { if (doc ~ /kind: CustomResourceDefinition/) printf "%s---\n", doc; doc = ""; next }
             { doc = doc $0 "\n" }
@@ -660,6 +746,7 @@ _apply_metallb_crds
 
 # Capture helmfile sync exit code so CRDs can be restored even on failure.
 # With set -e active, the || construct is required to prevent immediate exit.
+recover_pending_helm_release metallb metallb-system
 _metallb_sync_rc=0
 helmfile sync -l name=metallb || _metallb_sync_rc=$?
 
@@ -710,6 +797,7 @@ echo "MetalLB ready"
 # ---------------------------------------------------------------------------
 _SETUP_PHASE="[2/6] cert-manager + Vault TLS bootstrap"
 echo "=== [2/6] cert-manager + Vault TLS bootstrap ==="
+recover_pending_helm_release cert-manager cert-manager
 helmfile sync -l name=cert-manager
 
 kubectl apply --server-side -f operators/crds/ \
@@ -721,7 +809,7 @@ helm template nico-prereqs . \
     --set imagePullSecrets.ngcNicoPull="${REGISTRY_PULL_SECRET:-}" \
     --show-only templates/site-root-certificate.yaml \
     --show-only templates/vault-tls-certs.yaml \
-    | kubectl apply --server-side --field-manager=helm -f -
+    | kubectl apply --server-side --field-manager=helm --force-conflicts -f -
 
 kubectl wait --for=condition=Ready certificate/site-root \
     -n "${CERT_MANAGER_NS}" --timeout=120s
@@ -736,6 +824,7 @@ echo "Vault TLS bootstrap complete"
 # ---------------------------------------------------------------------------
 _SETUP_PHASE="[3/6] vault install"
 echo "=== [3/6] vault ==="
+recover_pending_helm_release vault vault
 helmfile sync -l name=vault \
     --set server.dataStorage.storageClass="${NICO_STORAGE_CLASS}" \
     --set server.auditStorage.storageClass="${NICO_STORAGE_CLASS}"
@@ -755,7 +844,9 @@ echo "=== [4/6] unseal vault ==="
 # ---------------------------------------------------------------------------
 _SETUP_PHASE="[5/6] external-secrets + NICo prereqs"
 echo "=== [5/6] external-secrets + NICo prereqs ==="
+recover_pending_helm_release external-secrets external-secrets
 helmfile sync -l name=external-secrets
+recover_pending_helm_release nico-prereqs nico-system
 helmfile sync -l name=nico-prereqs
 
 # ---------------------------------------------------------------------------
@@ -763,43 +854,107 @@ helmfile sync -l name=nico-prereqs
 # before NICo Core starts (the NICo Core API needs the DB credentials Secret).
 # ---------------------------------------------------------------------------
 echo "Waiting for nico-pg-cluster to reach Running state..."
-until kubectl get postgresql nico-pg-cluster -n postgres \
-    -o jsonpath='{.status.PostgresClusterStatus}' 2>/dev/null | grep -q "Running"; do
+_pg_cluster_ready=false
+for _pg_wait_i in $(seq 1 60); do
     STATUS="$(kubectl get postgresql nico-pg-cluster -n postgres \
-        -o jsonpath='{.status.PostgresClusterStatus}' 2>/dev/null || echo 'unknown')"
-    echo "  nico-pg-cluster status: ${STATUS} — retrying in 10s..."
+        -o jsonpath='{.status.PostgresClusterStatus}{.status.status}' 2>/dev/null || true)"
+    _PG_PRIMARY_READY="$(kubectl get pods -n postgres \
+        -l application=spilo,cluster-name=nico-pg-cluster,spilo-role=master \
+        -o jsonpath='{range .items[*]}{.status.containerStatuses[?(@.name=="postgres")].ready}{"\n"}{end}' \
+        2>/dev/null || true)"
+    if [[ "${STATUS}" == *"Running"* ]] || grep -qx "true" <<<"${_PG_PRIMARY_READY}"; then
+        _pg_cluster_ready=true
+        break
+    fi
+    echo "  nico-pg-cluster status: ${STATUS:-unknown}; primary ready: ${_PG_PRIMARY_READY:-false} (${_pg_wait_i}/60) — retrying in 10s..."
     sleep 10
 done
+if [[ "${_pg_cluster_ready}" != "true" ]]; then
+    echo "ERROR: nico-pg-cluster did not become ready within 600s" >&2
+    kubectl get postgresql nico-pg-cluster -n postgres -o yaml >&2 || true
+    kubectl get pods -n postgres -l application=spilo,cluster-name=nico-pg-cluster -o wide >&2 || true
+    exit 1
+fi
 echo "nico-pg-cluster is Running"
 
-# Install pg_trgm on nico_rest (needed by the nico-rest-db GIN index migration).
+# Reconcile the databases declared on the Zalando PostgreSQL resource before
+# any NICo migration jobs run. The operator creates these asynchronously and a
+# cluster can report Running before every database has been created. This is
+# also needed when an existing PostgreSQL data volume is reused with an updated
+# database list.
+_PG_PRIMARY="$(kubectl get pods -n postgres -l application=spilo \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.labels.spilo-role}{"\n"}{end}' \
+    2>/dev/null | awk '$2=="master"{print $1}' | head -1)"
+if [[ -z "${_PG_PRIMARY}" ]]; then
+    echo "ERROR: nico-pg-cluster has no Patroni primary pod" >&2
+    exit 1
+fi
+
+echo "Reconciling declared PostgreSQL databases..."
+while IFS='=' read -r _db_name _db_owner; do
+    [[ -n "${_db_name}" && -n "${_db_owner}" ]] || continue
+    if [[ ! "${_db_name}" =~ ^[A-Za-z0-9_.-]+$ || ! "${_db_owner}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+        echo "ERROR: invalid PostgreSQL database or owner in nico-pg-cluster: ${_db_name}=${_db_owner}" >&2
+        exit 1
+    fi
+    _db_ready=false
+    for _db_attempt in $(seq 1 12); do
+        if kubectl exec -n postgres "${_PG_PRIMARY}" -- \
+            su postgres -c "psql -d postgres -tAc \"SELECT 1 FROM pg_database WHERE datname = '${_db_name}'\"" \
+            2>/dev/null | grep -qx '1'; then
+            echo "  database ${_db_name} already exists"
+            _db_ready=true
+            break
+        fi
+        if kubectl exec -n postgres "${_PG_PRIMARY}" -- \
+            su postgres -c "PGOPTIONS='-c lock_timeout=5s' psql -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE \"${_db_name}\" OWNER \"${_db_owner}\"'"; then
+            echo "  database ${_db_name} created"
+            _db_ready=true
+            break
+        fi
+        echo "  database ${_db_name} is still being reconciled (${_db_attempt}/12) — retrying in 5s..."
+        sleep 5
+    done
+    if [[ "${_db_ready}" != "true" ]]; then
+        echo "ERROR: failed to create PostgreSQL database ${_db_name} owned by ${_db_owner}" >&2
+        exit 1
+    fi
+done < <(kubectl get postgresql nico-pg-cluster -n postgres \
+    -o go-template='{{range $database, $owner := .spec.databases}}{{$database}}={{$owner}}{{"\n"}}{{end}}')
+
+# Install PostgreSQL extensions on nico_rest (needed by REST DB migrations).
 # Zalando's preparedDatabases conflicts with the databases section, so we install
 # the extension directly after the cluster is ready. Idempotent: IF NOT EXISTS.
 # Wait up to 120s for the Zalando operator to create the nico_rest database.
-_pg_trgm_installed=false
-for _pg_i in $(seq 1 24); do
-    _PG_PRIMARY="$(kubectl get pods -n postgres -l application=spilo \
-        -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.labels.spilo-role}{"\n"}{end}' \
-        2>/dev/null | awk '$2=="master"{print $1}' | head -1)"
-    if [[ -z "${_PG_PRIMARY}" ]]; then
-        echo "  pg_trgm: no Patroni primary yet (${_pg_i}/24) — retrying in 5s..."
+if "${SKIP_REST}"; then
+    echo "PostgreSQL REST extensions skipped (--skip-rest flag set)"
+else
+    _rest_extensions_installed=false
+    for _pg_i in $(seq 1 24); do
+        _PG_PRIMARY="$(kubectl get pods -n postgres -l application=spilo \
+            -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.labels.spilo-role}{"\n"}{end}' \
+            2>/dev/null | awk '$2=="master"{print $1}' | head -1)"
+        if [[ -z "${_PG_PRIMARY}" ]]; then
+            echo "  pg_trgm: no Patroni primary yet (${_pg_i}/24) — retrying in 5s..."
+            sleep 5
+            continue
+        fi
+        if kubectl exec -n postgres "${_PG_PRIMARY}" -- \
+            su postgres -c "psql -d nico_rest -v ON_ERROR_STOP=1 \
+                -c 'CREATE EXTENSION IF NOT EXISTS btree_gin;' \
+                -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm;'" \
+            2>/dev/null; then
+            echo "PostgreSQL REST extensions ready"
+            _rest_extensions_installed=true
+            break
+        fi
+        echo "  PostgreSQL REST extensions: nico_rest not yet available (${_pg_i}/24) — retrying in 5s..."
         sleep 5
-        continue
+    done
+    if [[ "${_rest_extensions_installed}" == "false" ]]; then
+        echo "ERROR: failed to install PostgreSQL extensions in nico_rest after 120s" >&2
+        exit 1
     fi
-    if kubectl exec -n postgres "${_PG_PRIMARY}" -- \
-        su postgres -c "psql -d nico_rest -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm;'" \
-        2>/dev/null; then
-        echo "pg_trgm ready"
-        _pg_trgm_installed=true
-        break
-    fi
-    echo "  pg_trgm: nico_rest not yet created by operator (${_pg_i}/24) — retrying in 5s..."
-    sleep 5
-done
-if [[ "${_pg_trgm_installed}" == "false" ]]; then
-    echo "  pg_trgm: nico_rest unavailable after 120s."
-    echo "    → If rest.enabled=false in nico-prereqs, the nico_rest database is not created — this is expected."
-    echo "    → If rest.enabled=true, the nico-rest-db migration will fail on the GIN index step."
 fi
 
 echo "Waiting for DB credentials to be synced by ESO..."

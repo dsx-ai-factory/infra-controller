@@ -62,6 +62,9 @@ spec:
     - vault-0.vault-internal
     - vault-1.vault-internal
     - vault-2.vault-internal
+    - vault-0.vault-internal.{{ .Values.vaultNamespace }}.svc.cluster.local
+    - vault-1.vault-internal.{{ .Values.vaultNamespace }}.svc.cluster.local
+    - vault-2.vault-internal.{{ .Values.vaultNamespace }}.svc.cluster.local
   {{- if .Values.vaultServiceIP }}
   ipAddresses:
     - {{ .Values.vaultServiceIP }}
@@ -94,6 +97,9 @@ spec:
     - vault-0.vault-internal
     - vault-1.vault-internal
     - vault-2.vault-internal
+    - vault-0.vault-internal.{{ .Values.vaultNamespace }}.svc.cluster.local
+    - vault-1.vault-internal.{{ .Values.vaultNamespace }}.svc.cluster.local
+    - vault-2.vault-internal.{{ .Values.vaultNamespace }}.svc.cluster.local
   issuerRef:
     name: site-issuer
     kind: ClusterIssuer

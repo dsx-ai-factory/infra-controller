@@ -135,6 +135,7 @@ To tune PostgreSQL resources for your node capacity (the defaults are conservati
 ```yaml
 postgresql:
   instances: 3
+  synchronousMode: null  # automatic: false for one instance, true for multiple instances
   volumeSize: "10Gi"
   resources:
     limits:

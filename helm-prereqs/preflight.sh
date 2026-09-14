@@ -687,7 +687,7 @@ fi
 # MetalLB: a pool declared with no CIDR/range entries
 if [[ -f "${_METALLB_CFG}" && ! -d "${_METALLB_CFG}" ]]; then
     if _strip_comments "${_METALLB_CFG}" | grep -qE '^kind:[[:space:]]*IPAddressPool' && \
-       ! _strip_comments "${_METALLB_CFG}" | grep -qE '^[[:space:]]*-[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+       ! _strip_comments "${_METALLB_CFG}" | grep -qE '^[[:space:]]*-[[:space:]]*"?[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
         ERRORS+=("${_METALLB_CFG_LABEL}: IPAddressPool has no addresses — add your VIP CIDR(s)/range(s)")
     fi
 fi
