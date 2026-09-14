@@ -3,7 +3,7 @@
 **Implements:** [NVIDIA/infra-controller#4772](https://github.com/NVIDIA/infra-controller/issues/4772)
 — *SPEC-AS-12: Attestation Profiles*. Milestone v2.3.
 
-**Status:** WIP
+**Status:** Implemented
 
 ## Revision History
 
@@ -21,7 +21,9 @@ background worker collects and verifies the evidence.
 
 `spdm_enabled` defaults to `false` and no deployment has set it to `true`, so the
 attestation tables are empty everywhere. Nothing below has to preserve current
-behaviour.
+behaviour. A site that had enabled it would attest nothing until profiles exist
+and its endpoints have been explored again (§7.1), reporting `ClassNotRecorded`
+in the meantime.
 
 ### 1.1 Feature requirements
 
@@ -201,11 +203,14 @@ list attesters before collecting.
   the matching failure from §5.3.
 5. If the policy is `mode: NONE`, stop and report `AttestationDisabled`. The BMC
   is not contacted.
-6. Connect to the BMC and list its `ComponentIntegrity` resources.
+6. Connect to the BMC. If its service root advertises no `ComponentIntegrity`
+  collection, stop and report `NoAttestersFound`. Otherwise list its
+  `ComponentIntegrity` resources.
 7. Keep the eligible ones: `ComponentIntegrityEnabled` true and type `SPDM`.
    Eligibility comes before patterns because an ID says nothing about whether
-   the component can be attested. `ComponentIntegrityTypeVersion` is recorded,
-   not filtered on, which drops the `1.1.0` check in today's `get_supported_components()`.
+   the component can be attested. `ComponentIntegrityTypeVersion` is not
+   filtered on, which drops the `1.1.0` check in today's
+   `get_supported_components()`. The version is not persisted.
 8. Apply the selection's patterns to what remains and take the outcome from
   §5.3.
 9. On success, write one `spdm_machine_devices_attestation` row per selected
@@ -241,7 +246,7 @@ only `ALL` or `NONE`:
 Expect `any` to cover most of a site's inventory at first.
 
 A nullable `hardware_class` column on `explored_endpoints` holds it, written by
-the same two statements that write the report (§7.2). The column's three states
+the same two statements that write the report (§7.1). The column's three states
 are exactly the three the lookup needs to tell apart:
 
 | Value          | Meaning                                | Lookup                  |
@@ -305,21 +310,32 @@ flowchart TD
     P["A profile applies"] --> Q1{"Is the mode NONE?"}
 
     Q1 -->|"Yes"| O1["AttestationDisabled.<br/>Nothing scheduled, and the<br/>BMC is never contacted"]
-    Q1 -->|"No"| S0["Connect to the BMC and list<br/>its ComponentIntegrity resources"]
+    Q1 -->|"No"| S0["Connect to the BMC"]
 
-    S0 --> S1["Keep only the eligible ones:<br/>enabled, type SPDM"]
+    S0 --> Q2{"Does the service root advertise<br/>a ComponentIntegrity collection?"}
+    Q2 -->|"No"| O4["NoAttestersFound.<br/>Nothing scheduled"]
+    Q2 -->|"Yes"| S1["List it and keep only the eligible<br/>ones: enabled, type SPDM"]
 
-    S1 --> S2["Apply the patterns to<br/>what remains"]
-    S2 --> Q3{"How many attesters<br/>were selected?"}
+    S1 --> Q3{"Which mode?"}
 
-    Q3 -->|"One or more"| O3["Scheduled.<br/>One row written per attester"]
-    Q3 -->|"None"| Q4{"Was anything eligible<br/>to begin with?"}
+    Q3 -->|"ALL or DENYLIST"| Q4{"Was anything eligible?"}
+    Q4 -->|"No"| O4
+    Q4 -->|"Yes"| S2["Apply the patterns to<br/>what remains"]
+    S2 --> Q5{"Anything left?"}
+    Q5 -->|"One or more"| O3["Scheduled.<br/>One row written per attester"]
+    Q5 -->|"None: the denylist<br/>excluded everything"| O5["PolicyMatchedNothing"]
 
-    Q4 -->|"No"| O4["NoAttestersFound.<br/>Nothing scheduled"]
-    Q4 -->|"Yes, and the policy<br/>removed all of it"| O5["PolicyMatchedNothing"]
+    Q3 -->|"ALLOWLIST"| Q6{"Did every pattern match<br/>an eligible attester?"}
+    Q6 -->|"Yes"| O3
+    Q6 -->|"No, but some did"| O6["PartiallySatisfied.<br/>One row per matched attester"]
+    Q6 -->|"No, and none did"| O5
 ```
 
-A pattern matching no eligible attester fails the selection before anything is counted.
+An allowlist pattern matching no eligible attester is reported, but whatever the
+other patterns matched is still attested. No outcome holds the machine back, so
+discarding a selection would lose the evidence it had already found without
+gaining a gate. `PartiallySatisfied` carries the patterns that missed, and
+`PolicyMatchedNothing` is reached only when no pattern matched at all.
 
 `mode: NONE` never contacts the BMC, and eligibility is applied before the
 patterns, both for the reasons in §5 steps 5 and 7.
@@ -327,16 +343,18 @@ patterns, both for the reasons in §5 steps 5 and 7.
 A BMC that cannot be reached produces no outcome at all. It stays the retried
 error it is today.
 
-`PolicyMatchedNothing` means an operator-authored requirement went unsatisfied:
-an allowlist pattern matching no eligible attester, or a denylist excluding
-everything. The error names what went unsatisfied, including components that
-matched but failed eligibility — diagnostic detail, not a separate outcome.
+`PolicyMatchedNothing` means an operator-authored requirement went unsatisfied
+and left nothing to attest: no allowlist pattern matched, or a denylist excluded
+everything. It names the unsatisfied patterns, or that the denylist excluded
+everything — diagnostic detail, not a separate outcome.
 
 `NoAttestersFound` is not a verdict. It records that the BMC had nothing
 attestable to offer, which is what such hardware already does today. `ALL` and a
 denylist both report it, since neither asserts that a component must be there
-and neither caused the emptiness; an allowlist does assert that, so it fails
-instead.
+and neither caused the emptiness; an allowlist does assert that, so it reports
+`PolicyMatchedNothing` instead. A BMC whose service root advertises no
+collection reports `NoAttestersFound` under every mode, because the selection is
+never evaluated (§5 step 6).
 
 There are three switches and no others: `spdm_enabled` for the site, `mode: NONE`
 on a real class for one platform, and `any` for everything unprofiled.
@@ -403,6 +421,15 @@ message DeleteAttestationProfileRequest {
 }
 
 message DeleteAttestationProfileResponse {}
+
+message GetAttestationProfileRequest {
+  string hardware_class = 1;
+}
+
+message ListAttestationProfilesResponse {
+  // Ordered by hardware class.
+  repeated AttestationProfile profiles = 1;
+}
 ```
 
 The coverage read (§6.4) reports the §5.3 rule applied to each class the site
@@ -434,7 +461,7 @@ message GetAttestationCoverageResponse {
 }
 ```
 
-`updated_by` is a response field only; the server derives it (§7.1).
+`updated_by` is a response field only; the server derives it (§7.2).
 
 ### 6.2 Validation rules
 
@@ -443,6 +470,10 @@ on its `mode`.
 - `unrecognized` is rejected as a `hardware_class`. It is the explorer's marker
 (§5.1), and §5.3 covers that hardware through `any`, so a profile keyed to it
 would never be read.
+- **Create** additionally requires a class the `HwType` rendering produces
+(§5.1), or `any`; the error names every accepted class. Update and delete do not
+apply this rule, so a profile orphaned by an `HwType` rename stays editable and
+removable.
 - `mode` must be set. There is no safe default.
 - `component_ids` must be non-empty for `ALLOWLIST` and `DENYLIST`, and empty for
 `ALL` and `NONE`. An allowlist of nothing can never be satisfied; a denylist of
@@ -531,11 +562,11 @@ $ nico-admin-cli attestation spdm coverage
 +---------------------+--------------------+-------------+-----------------------------------------------------------+
 | HARDWARE CLASS      | EXPLORED ENDPOINTS | OWN PROFILE | WOULD USE                                                 |
 +=====================+====================+=============+===========================================================+
+| Dell                | 4                  | yes         | its own profile (none)                                    |
++---------------------+--------------------+-------------+-----------------------------------------------------------+
 | Gb200               | 72                 | yes         | its own profile (allowlist)                               |
 +---------------------+--------------------+-------------+-----------------------------------------------------------+
 | LenovoGb300         | 18                 | no          | any (all)                                                 |
-+---------------------+--------------------+-------------+-----------------------------------------------------------+
-| Dell                | 4                  | yes         | its own profile (none)                                    |
 +---------------------+--------------------+-------------+-----------------------------------------------------------+
 | unrecognized        | 2                  | no          | any (all)                                                 |
 +---------------------+--------------------+-------------+-----------------------------------------------------------+
@@ -547,15 +578,18 @@ $ nico-admin-cli attestation spdm coverage
 
 Eighteen Lenovo GB300 trays would be attested by the fallback rather than by a
 profile describing their real components, two endpoints are outside the taxonomy,
-and one needs re-exploring. The `any` row is listed so the site's posture is
-visible rather than inferred, and the unparenthesised rows are values actually
-stored in `hardware_class`.
+and one needs re-exploring. Rows are ordered by `hardware_class`, with the
+parenthesised row standing in for the endpoints storing none. The `any` row is
+listed so the site's posture is visible rather than inferred, and is appended
+last because it is not a stored class.
 
 `EXPLORED ENDPOINTS` counts rows of `explored_endpoints` rather than machines,
 because `hardware_class` is recorded per endpoint and a machine can present more
 than one. Hardware nobody has explored has no row at all.
-`OWN PROFILE` is `n/a` where no profile may be keyed to the row at all,
-which is the `unrecognized` marker (§6.2) and the endpoints carrying no class.
+`OWN PROFILE` is `n/a` where nothing supplies a policy and no profile could be
+keyed to the row: the endpoints carrying no class, and the `unrecognized` marker
+(§6.2) while no `any` profile is stored. With `any` stored, the marker's cell
+reads `no`.
 The `any` row carries no count, because `any` is never recorded on an endpoint.
 
 `WOULD USE` is the §5.3 rule applied per group, not a second implementation of
@@ -563,9 +597,11 @@ it: the server reports which profile would supply the policy, and the CLI only
 spells it. The view contacts no BMC, so it cannot say whether a policy matches
 real components (§12).
 
-`--format json` and `--format yaml` report the same rows, with the class absent
-rather than labelled for the endpoints carrying none, and the count absent on
-the `any` row. `--format csv` is refused.
+`--format json` and `--format yaml` report the same rows, with the class `null`
+rather than labelled for the endpoints carrying none, and the count `null` on
+the `any` row; both keys are present. `--format` is a root-level flag
+and must precede the command path:
+`nico-admin-cli --format json attestation spdm coverage`.
 
 ### 6.5 What editing a profile does not do
 
@@ -748,13 +784,29 @@ message SpdmMachineAttestationTriggerResponse {
 ```
 
 `outcome` is an enum of the §5.3 values rather than a string, so the schema
-carries them and a client switching on it is exhaustive. `used_any_fallback` is
-needed separately because
+carries them and a client switching on it is exhaustive:
 
-`resolved_hardware_class` reports the machine's class either way, so without it the
-response cannot distinguish a policy written for this hardware from a default
-written for everything else. Without all three, an operator testing a profile has
-to infer from a count whether it was applied.
+```protobuf
+enum SpdmSchedulingOutcome {
+  // Unset sentinel. The server always reports a real outcome, so this only
+  // appears to a client newer than the server it is talking to.
+  SPDM_SCHEDULING_OUTCOME_UNSPECIFIED = 0;
+  SPDM_SCHEDULING_OUTCOME_SCHEDULED = 1;
+  SPDM_SCHEDULING_OUTCOME_ATTESTATION_DISABLED = 2;
+  SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND = 3;
+  SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING = 4;
+  SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED = 5;
+  SPDM_SCHEDULING_OUTCOME_NO_PROFILE = 6;
+  SPDM_SCHEDULING_OUTCOME_CLASS_UNRECOGNIZED = 7;
+  SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED = 8;
+}
+```
+
+`used_any_fallback` is needed separately because `resolved_hardware_class`
+reports the machine's class either way, so without it the response cannot
+distinguish a policy written for this hardware from a default written for
+everything else. Without all three, an operator testing a profile has to infer
+from a count whether it was applied.
 
 `profile_version` names the revision that decided. Reading the profile
 separately does not answer this: profiles are editable, so the one an operator
@@ -861,8 +913,11 @@ asserting only "no rows" also passes for `PolicyMatchedNothing`.
 seeded to `ALL`. A precedence bug there silently attests hardware an operator
 switched off.
 - `ALL` selecting nothing gives `NoAttestersFound` and is not a failure, while an
-unsatisfied allowlist on the same hardware gives `PolicyMatchedNothing`. The two
-reasons for selecting nothing have to stay distinguishable.
+allowlist matching nothing on the same hardware gives `PolicyMatchedNothing`. The
+two reasons for selecting nothing have to stay distinguishable.
+- An allowlist with one pattern that matches and one that does not must still
+write a row per matched attester and report `PartiallySatisfied`. Asserting only
+the outcome would pass if the selection were discarded.
 - `ClassUnrecognized` and `ClassNotRecorded` must be reached separately, since
 `any` covers the first while the second still fails. Drive the first through the
 explorer against a mock it cannot classify, so it proves `hw_type()` returned

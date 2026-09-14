@@ -319,8 +319,9 @@ impl RedfishSim {
             .unwrap_or_default()
     }
 
-    /// Model a BMC that exposes no `ComponentIntegrity` collection, so nothing
-    /// is eligible for SPDM attestation.
+    /// Model a BMC whose `ComponentIntegrity` collection is empty, so nothing
+    /// is eligible for SPDM attestation. The service root still advertises the
+    /// collection.
     pub fn set_no_component_integrities(&self, no_component_integrities: bool) {
         self.state.lock().unwrap().no_component_integrities = no_component_integrities;
     }

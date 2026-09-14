@@ -60,7 +60,8 @@ impl From<Mode> for AttesterSelectionMode {
     }
 }
 
-/// The patterns of one selection, in the order they were given. `ALLOWLIST` and
+/// The patterns of one selection. `selection()` sends every `--exact` first,
+/// then every `--prefix`, each in the order given. `ALLOWLIST` and
 /// `DENYLIST` require at least one; `ALL` and `NONE` take none. The server
 /// enforces that, so these flags stay free of inter-flag rules that would have
 /// to agree with it.
