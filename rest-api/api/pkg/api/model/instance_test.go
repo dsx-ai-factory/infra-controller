@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -1140,6 +1141,23 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "test valid Instance create request with userData at max length",
+			fields: fields{
+				Name:              "test-name",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    uuid.NewString(),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				UserData:          cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes)),
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{
+						SubnetID: cutil.GetPtr(uuid.NewString()),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "test Instance create request failed, invalid SpectrumX attachment type",
 			fields: fields{
 				Name:              "test-name",
@@ -1162,6 +1180,24 @@ func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			name: "test invalid Instance create request with userData exceeding max length",
+			fields: fields{
+				Name:              "test-name",
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    uuid.NewString(),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				UserData:          cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1)),
+				Interfaces: []APIInterfaceCreateOrUpdateRequest{
+					{
+						SubnetID: cutil.GetPtr(uuid.NewString()),
+					},
+				},
+			},
+			wantErr:          true,
+			wantErrorMessage: "userData: " + validationErrorUserDataLength,
 		},
 	}
 	for _, tt := range tests {
@@ -1337,6 +1373,21 @@ func TestAPIBatchInstanceCreateRequest_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			name: "fails with userData exceeding max length",
+			req: APIBatchInstanceCreateRequest{
+				NamePrefix:     "test-batch",
+				Count:          2,
+				TenantID:       uuid.NewString(),
+				InstanceTypeID: uuid.NewString(),
+				VpcID:          uuid.NewString(),
+				IpxeScript:     cutil.GetPtr("test ipxe"),
+				UserData:       cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1)),
+				Interfaces:     []APIInterfaceCreateOrUpdateRequest{{SubnetID: cutil.GetPtr(uuid.NewString())}},
+			},
+			wantErr:          true,
+			wantErrorMessage: "userData: " + validationErrorUserDataLength,
 		},
 	}
 
@@ -1667,6 +1718,32 @@ phone_home:
 			os:      osNoOverride,
 			cfg:     cfg1,
 			wantErr: false,
+		},
+		{
+			name: "ipxe os selected, os user-data over max length, user-data not specified, should fail",
+			fields: fields{
+				Name:              "test-name",
+				Description:       cutil.GetPtr("Test description"),
+				TenantID:          uuid.NewString(),
+				InstanceTypeID:    uuid.NewString(),
+				VpcID:             uuid.NewString(),
+				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
+				UserData:          nil,
+			},
+			os: &cdbm.OperatingSystem{
+				ID:               uuid.New(),
+				Name:             "ab",
+				IpxeScript:       cutil.GetPtr("original ipxe"),
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+				PhoneHomeEnabled: false,
+				IsActive:         true,
+				Status:           cdbm.OperatingSystemStatusReady,
+				AllowOverride:    true,
+				Type:             cdbm.OperatingSystemTypeIPXE,
+				CreatedBy:        uuid.New(),
+			},
+			cfg:     cfg1,
+			wantErr: true,
 		},
 		{
 			name: "image os selected, iPXE specified, should fail",
@@ -2114,6 +2191,26 @@ phone_home:
 			userDataNegativeSearches: []string{"169.254.169.254"},
 		},
 		{
+			name: "os user-data over max length inherited fails",
+			request: &APIBatchInstanceCreateRequest{
+				NamePrefix:     "worker",
+				Count:          2,
+				TenantID:       uuid.NewString(),
+				InstanceTypeID: uuid.NewString(),
+				VpcID:          uuid.NewString(),
+			},
+			os: &cdbm.OperatingSystem{
+				ID:            uuid.New(),
+				Name:          "ab",
+				Type:          cdbm.OperatingSystemTypeIPXE,
+				IpxeScript:    cutil.GetPtr("original ipxe"),
+				UserData:      cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+				IsActive:      true,
+				AllowOverride: true,
+			},
+			wantErr: true,
+		},
+		{
 			name: "no OS and no iPXE script fails",
 			request: &APIBatchInstanceCreateRequest{
 				NamePrefix:     "worker",
@@ -2380,6 +2477,14 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 						AttachmentType:       SpectrumXAttachmentTypePhysical,
 					},
 				},
+			},
+			wantErr:           true,
+			wantUpdateRequest: cutil.GetPtr(true),
+		},
+		{
+			name: "test invalid Instance update request, userData exceeding max length",
+			fields: fields{
+				UserData: cutil.GetPtr(strings.Repeat("a", util.MaxUserDataBytes+1)),
 			},
 			wantErr:           true,
 			wantUpdateRequest: cutil.GetPtr(true),
@@ -2736,6 +2841,41 @@ func TestAPIInstanceUpdateRequest_ValidateAndSetOperatingSystemData(t *testing.T
 			os:       osPxe,
 			instance: instanceNoVals,
 			wantErr:  false,
+		},
+		{
+			name: "os nil, instance user-data over max length inherited, expect failure",
+			request: &APIInstanceUpdateRequest{
+				Name:        cutil.GetPtr("test-name"),
+				Description: cutil.GetPtr("Test description"),
+			},
+			cfg: cfg1,
+			os:  nil,
+			instance: &cdbm.Instance{
+				ID:               uuid.New(),
+				IpxeScript:       cutil.GetPtr("#!ipxe"),
+				PhoneHomeEnabled: false,
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+			},
+			wantErr: true,
+		},
+		{
+			// Same request as the case above, but the Instance has a base OS,
+			// which takes the merge branch that leaves the request's user-data
+			// nil. The stored blob still reaches the Site either way.
+			name: "os nonnil, no OS change, instance user-data over max length inherited, expect failure",
+			request: &APIInstanceUpdateRequest{
+				Name:        cutil.GetPtr("test-name"),
+				Description: cutil.GetPtr("Test description"),
+			},
+			cfg: cfg1,
+			os:  osPxe,
+			instance: &cdbm.Instance{
+				ID:               uuid.New(),
+				IpxeScript:       cutil.GetPtr("#!ipxe"),
+				PhoneHomeEnabled: false,
+				UserData:         cutil.GetPtr("a: " + strings.Repeat("b", util.MaxUserDataBytes)),
+			},
+			wantErr: true,
 		},
 	}
 	for _, tt := range tests {

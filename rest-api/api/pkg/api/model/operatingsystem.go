@@ -291,6 +291,10 @@ func (oscr *APIOperatingSystemCreateRequest) Validate() error {
 		validation.Field(&oscr.InfrastructureProviderID,
 			// infrastructure provider id must be nil
 			validation.Nil.Error(validationErrorInfrastructureProviderIDExpectNil)),
+		validation.Field(&oscr.UserData,
+			validation.When(oscr.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
+		),
 	)
 	if err != nil {
 		return err
@@ -467,7 +471,7 @@ func (oscr *APIOperatingSystemCreateRequest) ValidateAndSetUserData(phonehomeUrl
 		}
 	}
 
-	byteUserData, err := yaml.Marshal(userDataMap)
+	byteUserData, err := util.MarshalUserData(userDataMap)
 	if err != nil {
 		return validation.Errors{
 			"userData": errors.New("failed to re-construct userData after processing phone home config"),
@@ -477,7 +481,7 @@ func (oscr *APIOperatingSystemCreateRequest) ValidateAndSetUserData(phonehomeUrl
 	// Render it back out.
 	oscr.UserData = cutil.GetPtr(string(byteUserData))
 
-	return nil
+	return util.ValidateEffectiveUserData(oscr.UserData)
 }
 
 // ToImageProto builds the workflow request that asks a Site to create the
@@ -548,6 +552,10 @@ func (osur *APIOperatingSystemUpdateRequest) Validate(existingOS *cdbm.Operating
 			validation.When(osur.Name != nil, validation.Required.Error(validationErrorStringLength)),
 			validation.When(osur.Name != nil, validation.By(util.ValidateNameCharacters)),
 			validation.When(osur.Name != nil, validation.Length(2, 256).Error(validationErrorStringLength))),
+		validation.Field(&osur.UserData,
+			validation.When(osur.UserData != nil,
+				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
+		),
 	)
 	if err != nil {
 		return err
@@ -771,9 +779,10 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 
 		// If phone-home has never been enabled, then
 		// any user-data content was always acceptable,
-		// so do nothing and return.
+		// so there is nothing to rewrite. The stored blob still reaches the
+		// Site, so its size is checked before returning.
 		if !*mergedPhoneHomeEnabled {
-			return nil
+			return util.ValidateEffectiveUserData(mergedUserData)
 		}
 	}
 
@@ -847,8 +856,9 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 	} else {
 		// If we've arrived here, then phone-home is being disabled,
 		// and the user-data is NOT valid YAML,
-		// but we don't care, so don't touch user-data and just return.
-		return nil
+		// but we don't care, so don't touch user-data.
+		// Its size still applies, valid YAML or not.
+		return util.ValidateEffectiveUserData(mergedUserData)
 	}
 
 	if len(documentRoot.Content) == 0 {
@@ -861,7 +871,7 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 	}
 
 	// Render any data that still exists.
-	byteUserData, err := yaml.Marshal(userDataMap)
+	byteUserData, err := util.MarshalUserData(userDataMap)
 	if err != nil {
 		return validation.Errors{
 			"userData": errors.New("failed to re-construct userData after processing phone home config"),
@@ -871,7 +881,7 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 	// Set it in the request.
 	osur.UserData = cutil.GetPtr(string(byteUserData))
 
-	return nil
+	return util.ValidateEffectiveUserData(osur.UserData)
 }
 
 // ToImageProto builds the workflow request that asks a Site to update the

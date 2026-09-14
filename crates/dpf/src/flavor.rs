@@ -769,10 +769,6 @@ fn bf4_astra_ew_nic_configurations() -> Vec<DpuFlavorEwNicConfigurations> {
                 name: "LINK_TYPE_P1".to_string(),
                 value: "2".to_string(),
             },
-            DpuFlavorEwNicConfigurationsRawNvConfig {
-                name: "HIDE_PORT2_PF".to_string(),
-                value: "1".to_string(),
-            },
         ]),
         spectrum_x_optimized: Some(DpuFlavorEwNicConfigurationsSpectrumXOptimized {
             enabled: true,

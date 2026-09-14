@@ -20895,7 +20895,7 @@ components:
           type:
             - string
             - 'null'
-          description: User data for the Operating System
+          description: User data for the Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
         isCloudInit:
           type: boolean
           deprecated: true
@@ -21008,7 +21008,7 @@ components:
           type:
             - string
             - 'null'
-          description: User data for the Operating System
+          description: User data for the Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
         isCloudInit:
           type:
             - boolean
@@ -21933,7 +21933,7 @@ components:
           type:
             - string
             - 'null'
-          description: Can only be specified if allowOverride is set to true in Operating System
+          description: Can only be specified if allowOverride is set to true in Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
         operatingSystemId:
           type:
             - string
@@ -22108,7 +22108,7 @@ components:
           type:
             - string
             - 'null'
-          description: User data applied to all instances. Can only be specified if allowOverride is set to true in Operating System
+          description: User data applied to all instances. Can only be specified if allowOverride is set to true in Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
         operatingSystemId:
           type:
             - string
@@ -22319,7 +22319,7 @@ components:
           type:
             - string
             - 'null'
-          description: 'Any user-data to be sent to the booting OS.  For example, cloud-init data.'
+          description: 'Any user-data to be sent to the booting OS.  For example, cloud-init data. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.'
         alwaysBootWithCustomIpxe:
           type:
             - boolean

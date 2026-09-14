@@ -4,6 +4,8 @@
 package util
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -154,6 +156,77 @@ autoinstall:
 				assert.NotNil(t, rootPhoneHome)
 				assert.NotNil(t, targetPhoneHome)
 			}
+		})
+	}
+}
+
+func TestMarshalUserData(t *testing.T) {
+	const phoneHomeURL = "http://169.254.169.254/latest/meta-data/phone_home"
+
+	// A nested document at the 2-space indent cloud-config is conventionally
+	// written with. Every retained size case submits a flat single-key string,
+	// which no encoder re-indents, so nothing else catches inflation here.
+	const nested = `#cloud-config
+package_update: true
+users:
+  - name: svc
+    groups:
+      - wheel
+      - docker
+write_files:
+  - path: /etc/app.conf
+    content: |
+      listen = 0.0.0.0:8080
+      workers = 8
+`
+
+	var nearCap strings.Builder
+	nearCap.WriteString("#cloud-config\nwrite_files:\n")
+	for i := 0; nearCap.Len() < MaxUserDataBytes-1024; i++ {
+		fmt.Fprintf(&nearCap, `  - path: /etc/app.d/%d.conf
+    owner: root:root
+    content: |
+      workers = 8
+`, i)
+	}
+
+	tests := []struct {
+		name     string
+		userData string
+		insert   bool
+		check    func(t *testing.T, out string)
+	}{
+		{
+			name:     "nested document round-trips byte for byte",
+			userData: nested,
+			check: func(t *testing.T, out string) {
+				assert.Equal(t, nested, out)
+			},
+		},
+		{
+			name:     "document near the cap still fits once phone-home is inserted",
+			userData: nearCap.String(),
+			insert:   true,
+			check: func(t *testing.T, out string) {
+				assert.LessOrEqual(t, len(out), MaxUserDataBytes)
+				assert.NoError(t, ValidateEffectiveUserData(&out))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			document := &yaml.Node{}
+			require.NoError(t, yaml.Unmarshal([]byte(tt.userData), document))
+
+			if tt.insert {
+				require.NoError(t, InsertPhoneHomeIntoUserData(document.Content[0], phoneHomeURL))
+			}
+
+			out, err := MarshalUserData(document)
+			require.NoError(t, err)
+
+			tt.check(t, string(out))
 		})
 	}
 }
