@@ -58,10 +58,10 @@ The end-to-end service path for NICo rack-level administration goes in the follo
 NICo Core supports NVSwitch Manager (NSM) and PowerShelf Manager (PSM)
 backends for switch and power-shelf access. NVIDIA Rack Manager Service (RMS)
 can serve compute, switch, and power-shelf roles and provides rack-level power
-and firmware operations. See
+and firmware operations. Refer to
 [RMS Configuration](../configuration/rms.md)
-for RMS configuration requirements and the documented GB200, GB300, and VRNVL72
-role/vendor support matrix.
+for RMS configuration requirements and a link to the RMS compatibility
+reference. Confirm hardware support against the deployed RMS release.
 
 ## Rack-Level Operations
 

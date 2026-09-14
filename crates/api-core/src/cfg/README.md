@@ -191,7 +191,9 @@ both to be non-empty. It does not validate either value against a fixed list.
 RMS determines whether each role/vendor/product-family combination is supported
 when a request is made. Refer to the
 [Hardware Compatibility List](https://docs.nvidia.com/rms/documentation/reference/hardware-compatibility-list)
-for the combinations the deployed RMS version accepts.
+as a compatibility reference. The list includes hardware under development, and
+inclusion does not imply qualification, certification, or support. Confirm
+support for each combination against the deployed RMS release.
 
 For product families other than `gb200` and `gb300`, the `GetRackProfile`
 `product_family` enum is `UNSPECIFIED`. The configured string remains available
@@ -260,7 +262,7 @@ firmware artifact access token. NICo reads the secret when compute-tray
 pre-ingestion starts. When the field is omitted, NICo sends the RMS no-auth
 sentinel.
 
-Example: GB300 rack with Lenovo compute trays and Delta power shelves:
+Example: GB300 rack with NVIDIA compute trays and Delta power shelves:
 
 ```toml
 [component_manager]
@@ -273,7 +275,7 @@ product_family = "gb300"
 rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
 
 [rack_profiles.NVL72_GB300.rack_capabilities.compute]
-vendor = "Lenovo"
+vendor = "NVIDIA"
 count = 18
 
 [rack_profiles.NVL72_GB300.rack_capabilities.switch]

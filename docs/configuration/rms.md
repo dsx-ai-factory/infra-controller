@@ -30,7 +30,7 @@ Canonical field reference for all NICo settings:
 
 ---
 
-## `[rms]` — RMS client connection
+## `[rms]` — RMS Client Connection
 
 Controls whether NICo builds an RMS client, and the mutual TLS material it presents.
 
@@ -44,16 +44,17 @@ The RMS gRPC endpoint.
 | Required | Yes, to enable any RMS-backed workflow |
 | Default | None |
 
-When this field is unset or empty, NICo does not construct an RMS client and every RMS-backed
-operation reports a clean error. NICo Core still starts and runs healthy, so enabling the
-setting before RMS is deployed is safe.
+When this field is unset or empty, NICo does not construct an RMS client. NICo Core still
+starts, but `build_component_manager` fails if any backend selects `rms`. The Component
+Manager remains uninitialized, and its RPCs return configuration errors. Select non-RMS
+backends for all three roles when RMS is disabled.
 
 The NICo chart renders `https://rms-api-server.rack-manager.svc.cluster.local:8801`, which
 matches the `rack-manager` chart's Service in its default namespace.
 
 ### `enforce_tls`
 
-Requires TLS on connections to RMS.
+Requests TLS enforcement on connections to RMS.
 
 | Property | Value |
 | --- | --- |
@@ -61,8 +62,12 @@ Requires TLS on connections to RMS.
 | Required | No |
 | Default | `true` |
 
-Keep this enabled in production. Disable it only against an RMS instance deliberately started
-in its insecure development mode.
+Keep this enabled in production. The RMS client library can enforce it only when it finds both
+a root CA and a complete client certificate and key pair. If either is unavailable, the
+library warns that TLS enforcement is disabled and changes the effective value to `false`.
+The resulting client can connect to an HTTP endpoint or use a dummy certificate verifier.
+Treat that warning as a configuration error in production. Disable this setting only against
+an RMS instance deliberately started in its insecure development mode.
 
 ### `root_ca_path`, `client_cert`, `client_key`
 
@@ -99,7 +104,7 @@ configuration load.
 
 ---
 
-## `[component_manager]` — backend selection
+## `[component_manager]` — Backend Selection
 
 Selects which backend handles each hardware role. **All three backend fields default to
 `rms`**, so a deployment that enables RMS for one role must explicitly set the others to
@@ -114,7 +119,7 @@ non-RMS values.
 The `nsm` and `psm` values require externally managed services. The NICo deployment charts do
 not install NSM or PSM.
 
-### State controller routing
+### State Controller Routing
 
 | Field | Type | Default |
 | --- | --- | --- |
@@ -128,7 +133,7 @@ reads still pass through to the direct backend. The NICo chart sets all three to
 
 ---
 
-## `[rack_profiles]` — node descriptors and firmware source
+## `[rack_profiles]` — Node Descriptors and Firmware Source
 
 For RMS backends, NICo builds a node descriptor from the rack profile containing three
 attributes:
@@ -150,11 +155,13 @@ values are compared in full rather than by prefix, so `NVIDIACorp` does not matc
 RMS resolves a fixed set of role, vendor, and product-family combinations, and that set
 changes as platforms are added. Check the
 [Hardware Compatibility List](https://docs.nvidia.com/rms/documentation/reference/hardware-compatibility-list)
-for the combinations the deployed RMS version accepts, rather than assuming a vendor is
-supported because NICo accepted the string at startup.
+as a compatibility reference. The list includes hardware under development, and inclusion
+does not imply qualification, certification, or support. Confirm support for each combination
+against the deployed RMS release rather than assuming a vendor is supported because NICo
+accepted the string at startup.
 </Note>
 
-### Field reference
+### Field Reference
 
 | Field | Accepted values | Required |
 | --- | --- | --- |
@@ -171,10 +178,10 @@ least `count` devices in `Ready` state.
 Each rack that uses an RMS-backed operation must have a `rack_profile_id` matching a key under
 `[rack_profiles]`.
 
-### `firmware_object` — rack firmware manifest source
+### `firmware_object` — Rack Firmware Manifest Source
 
-Declares where the rack's source-of-truth firmware manifest is fetched from during rack
-ingestion and maintenance.
+Declares where NICo fetches the rack's standardized firmware manifest during rack ingestion
+and maintenance.
 
 | Field | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -188,13 +195,13 @@ body is capped at 16 MiB.
 
 ```toml
 [rack_profiles.NVL72.firmware_object]
-url = "https://artifacts.example.internal/sot/vr-nvl72-0.6-build14.json"
+url = "https://artifacts.example.internal/manifests/vr-nvl72-0.6-build14.json"
 fetch_timeout = "60s"
 ```
 
 ---
 
-## `[switch_state_controller]` — switch mTLS services
+## `[switch_state_controller]` — Switch mTLS Services
 
 ### `switch_mtls_services`
 
@@ -225,7 +232,7 @@ certificates and never reads it. Use `switch_mtls_services` instead.
 
 ---
 
-## Startup validation
+## Startup Validation
 
 NICo validates rack profiles at startup **when any Component Manager backend is set to
 `rms`**. Validation checks the product family and the vendor fields for the roles that use an
@@ -240,14 +247,15 @@ RMS backend.
 | Per-rack `rack_profile_id` missing or unknown | Surfaces at runtime, not startup |
 
 Startup validation does not scan rack database rows, so per-rack profile assignment errors
-appear when an RMS operation runs. Unknown keys in `[rms]` and `[component_manager]` fail
-configuration load, so a misspelled field is caught at startup rather than ignored.
+appear when an RMS operation runs. When `deny_unknown_fields = false` (the default), unknown
+keys in `[rms]` and `[component_manager]` produce warnings, are ignored, and configuration
+loading continues. When `deny_unknown_fields = true`, unknown keys fail configuration loading.
 
 ---
 
 ## Examples
 
-### GB200 rack using RMS for all three roles
+### GB200 Rack Using RMS for All Three Roles
 
 ```toml
 [component_manager]
@@ -276,7 +284,7 @@ vendor = "LiteOn"
 count = 8
 ```
 
-### GB300 rack with Lenovo compute trays and Delta power shelves
+### GB300 Rack With NVIDIA Compute Trays and Delta Power Shelves
 
 ```toml
 [component_manager]
@@ -284,12 +292,15 @@ compute_tray_backend = "rms"
 nv_switch_backend = "rms"
 power_shelf_backend = "rms"
 
+[rms]
+api_url = "https://rms-api-server.rack-manager.svc.cluster.local:8801"
+
 [rack_profiles.NVL72_GB300]
 product_family = "gb300"
 rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
 
 [rack_profiles.NVL72_GB300.rack_capabilities.compute]
-vendor = "Lenovo"
+vendor = "NVIDIA"
 count = 18
 
 [rack_profiles.NVL72_GB300.rack_capabilities.switch]
@@ -301,7 +312,7 @@ vendor = "delta"
 count = 6
 ```
 
-### Power shelves use RMS; compute and switch do not
+### Power Shelves Use RMS; Compute and Switch Do Not
 
 The compute and switch backends are set to non-RMS values, so startup validation requires the
 power shelf vendor field and no others:
@@ -311,6 +322,9 @@ power shelf vendor field and no others:
 compute_tray_backend = "core"
 nv_switch_backend = "nsm"
 power_shelf_backend = "rms"
+
+[rms]
+api_url = "https://rms-api-server.rack-manager.svc.cluster.local:8801"
 
 [component_manager.nsm]
 url = "http://nsm.example.internal:50052"
@@ -332,10 +346,11 @@ count = 8
 
 ---
 
-## Machine ingestion requirement
+## Machine Slot and Tray Enrichment
 
-The site-explorer machine-ingestion path performs an RMS slot and tray lookup, and uses the
-rack profile to build a compute node descriptor. This path runs when **both** conditions hold:
+During machine ingestion, site-explorer uses `batch_get_node_device_info` only to enrich the
+machine with RMS slot and tray data. It uses the rack profile to build a compute node
+descriptor. This path runs when **both** conditions hold:
 
 1. An RMS client is configured, meaning `[rms] api_url` is set.
 2. The machine has a `rack_id`.
@@ -345,12 +360,12 @@ Setting `compute_tray_backend` to a non-RMS value does not remove this requireme
 
 ---
 
-## RMS server-side configuration
+## RMS Server-Side Configuration
 
 Settings on this page configure **NICo's side** of the integration. RMS has its own runtime
-configuration, delivered as a TOML file the container reads from `/etc/rms/config.toml` at
-startup, covering its listening ports, TLS material, switch certificate roots, firmware
-directory, job retention, and database connection.
+configuration in `/etc/rms/config.toml`, which the container reads at startup. It covers
+listening ports, TLS material, switch certificate roots, the firmware directory, job
+retention, and the database connection.
 
 The RMS documentation is the source of truth for those settings:
 
@@ -368,7 +383,7 @@ Two RMS settings have to agree with the NICo values on this page:
 The RMS API server certificate also has to carry a subject alternative name matching the DNS
 name in `[rms] api_url`.
 
-## See also
+## Related
 
 - [RMS Backend](../architecture/backends/rms.md) — how the integration works
-- [Hardware Compatibility List](https://docs.nvidia.com/rms/documentation/reference/hardware-compatibility-list) — the hardware RMS supports
+- [Hardware Compatibility List](https://docs.nvidia.com/rms/documentation/reference/hardware-compatibility-list) — supported and under-development hardware; confirm support for the deployed RMS release
