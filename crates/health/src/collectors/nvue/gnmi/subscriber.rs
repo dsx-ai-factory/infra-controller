@@ -1168,55 +1168,72 @@ mod tests {
         let metrics_manager = MetricsManager::new("test")
             .expect("metrics manager should initialize for the gNMI label test");
 
-        let credentials = BmcCredentials::UsernamePassword {
-            username: "admin".to_string(),
-            password: Some("password".to_string()),
-        };
+        let mut collectors = Vec::new();
 
-        let mut endpoint = test_bmc_endpoint(
-            "55:66:77:88:99:cc"
-                .parse()
-                .expect("test MAC address should parse"),
-        );
+        for (index, mac) in ["55:66:77:88:99:cc", "55:66:77:88:99:dd"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut endpoint =
+                test_bmc_endpoint(mac.parse().expect("test MAC address should parse"));
 
-        endpoint.rack_id = Some(RackId::new("rack-1"));
+            endpoint.rack_id = Some(RackId::new("rack-1"));
 
-        let collector_registry = Arc::new(
-            metrics_manager
-                .create_collector_registry("gnmi_test".to_string(), "test")
-                .expect("collector registry should initialize"),
-        );
+            let collector_registry = Arc::new(
+                metrics_manager
+                    .create_collector_registry(format!("gnmi_test_{index}"), "test")
+                    .expect("collector registry should initialize"),
+            );
 
-        let collector = spawn_gnmi_collector(
-            &endpoint,
-            &NvueGnmiConfig::default(),
-            RecordingProvider::new(credentials),
-            collector_registry,
-            None,
-            None,
-        )
-        .expect("gNMI collector should initialize");
+            let credentials = BmcCredentials::UsernamePassword {
+                username: "admin".to_string(),
+                password: Some("password".to_string()),
+            };
 
-        let metric = metrics_manager
+            let collector = spawn_gnmi_collector(
+                &endpoint,
+                &NvueGnmiConfig::default(),
+                RecordingProvider::new(credentials),
+                collector_registry,
+                None,
+                None,
+            )
+            .expect("gNMI collector should initialize");
+
+            collectors.push(collector);
+        }
+
+        let family = metrics_manager
             .global_registry()
             .gather()
             .into_iter()
             .find(|family| family.name() == "test_nvue_gnmi_connection_state")
-            .and_then(|family| family.get_metric().first().cloned())
-            .expect("gNMI connection metric should be registered");
+            .expect("gNMI connection metrics should be registered");
 
-        assert!(metric.get_label().iter().any(|label| {
-            label.name() == "endpoint_key" && label.value() == "55:66:77:88:99:CC"
-        }));
+        let metrics = family.get_metric();
 
-        assert!(
+        let mut endpoint_keys = metrics
+            .iter()
+            .flat_map(|metric| metric.get_label())
+            .filter(|label| label.name() == "endpoint_key")
+            .map(|label| label.value())
+            .collect::<Vec<_>>();
+
+        endpoint_keys.sort_unstable();
+
+        assert_eq!(metrics.len(), 2);
+        assert_eq!(endpoint_keys, ["55:66:77:88:99:CC", "55:66:77:88:99:DD"]);
+
+        assert!(metrics.iter().all(|metric| {
             metric
                 .get_label()
                 .iter()
                 .any(|label| label.name() == "rack_id" && label.value() == "rack-1")
-        );
+        }));
 
-        collector.stop().await;
+        for collector in collectors {
+            collector.stop().await;
+        }
     }
 
     fn test_addr() -> BmcAddr {
