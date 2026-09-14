@@ -24,6 +24,8 @@
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use chrono::{DateTime, Duration, Utc};
 use config_version::Versioned;
+use db::ConditionalWrite;
+use db::machine_desired_boot_interface::BootInterfaceObservationNotApplicable;
 use model::machine::{DpuMachine, HostMachine, ManagedHostState, ManagedHostStateSnapshot};
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use state_controller::state_handler::{
@@ -155,25 +157,26 @@ pub(super) async fn observe_verified_boot_interface(
     let mut observation_txn = ctx.services.db_pool.begin().await?;
     match boot_config_decision {
         HostBootConfigDecision::Complete => {
-            let observation_recorded = db::machine_desired_boot_interface::mark_verified(
+            let observation_write = db::machine_desired_boot_interface::mark_verified(
                 observation_txn.as_mut(),
                 &host.id,
                 desired_boot_interface.version,
                 Utc::now(),
             )
             .await?;
-            if observation_recorded {
-                tracing::debug!(
+            match observation_write {
+                ConditionalWrite::Applied(()) => tracing::debug!(
                     machine_id = %host.id,
                     desired_version = %desired_boot_interface.version,
                     "Verified periodic host boot configuration observation",
-                );
-            } else {
-                tracing::debug!(
-                    machine_id = %host.id,
-                    desired_version = %desired_boot_interface.version,
-                    "Discarded stale host boot configuration observation",
-                );
+                ),
+                ConditionalWrite::NotApplied(BootInterfaceObservationNotApplicable) => {
+                    tracing::debug!(
+                        machine_id = %host.id,
+                        desired_version = %desired_boot_interface.version,
+                        "Discarded stale host boot configuration observation",
+                    )
+                }
             }
         }
         required_action @ (HostBootConfigDecision::ConfigureBios
@@ -188,8 +191,8 @@ pub(super) async fn observe_verified_boot_interface(
                     desired_boot_interface,
                 )
                 .await?;
-            if let Some(pending_boot_interface) = pending_boot_interface {
-                tracing::warn!(
+            match pending_boot_interface {
+                ConditionalWrite::Applied(pending_boot_interface) => tracing::warn!(
                     machine_id = %host.id,
                     desired_version = %pending_boot_interface.version,
                     ?required_action,
@@ -198,13 +201,14 @@ pub(super) async fn observe_verified_boot_interface(
                         ManagedHostState::Assigned { .. }
                     ),
                     "Host boot configuration drift detected",
-                );
-            } else {
-                tracing::debug!(
-                    machine_id = %host.id,
-                    desired_version = %desired_boot_interface.version,
-                    "Discarded stale host boot configuration drift observation",
-                );
+                ),
+                ConditionalWrite::NotApplied(BootInterfaceObservationNotApplicable) => {
+                    tracing::debug!(
+                        machine_id = %host.id,
+                        desired_version = %desired_boot_interface.version,
+                        "Discarded stale host boot configuration drift observation",
+                    )
+                }
             }
         }
     }
