@@ -25,6 +25,7 @@
 
 use librms::protos::rack_manager_v2::rack_manager_v2_server::RackManagerV2;
 
+use crate::envelope::BatchOutcome;
 use crate::fabric::Candidate;
 use crate::{RmsMock, rms_v2};
 
@@ -41,6 +42,12 @@ impl RackManagerV2 for RmsMock {
     /// as the proto specifies: no configuration, an empty topology type, or
     /// no switches to configure is `INVALID_ARGUMENT`. NICo always sends the
     /// topology of the rack profile and the rack's switches.
+    ///
+    /// A request whose switches are all unknown to the mock is accepted, since
+    /// the proto rejects only a malformed request synchronously, but its job
+    /// fails and names them. Completing it instead would send the caller to
+    /// read back a fabric in which no primary can be elected, and it waits on
+    /// that indefinitely.
     ///
     /// The call also elects the rack's primary switch. After the job completes
     /// the caller reads the fabric back and requires exactly one enabled
@@ -76,20 +83,25 @@ impl RackManagerV2 for RmsMock {
         // The fabric is configured per rack rather than per node, so this is
         // one job however many nodes the request names. Only a switch the
         // inventory has is a candidate, so the elected primary is one the
-        // caller can reach. A request in which no switch matched elects
-        // nobody, and the rack has no primary until a read names a switch the
-        // mock has.
+        // caller can reach.
         let rack_id = first.rack_id;
         let candidates: Vec<Candidate<'_>> = refs.iter().filter_map(Candidate::of).collect();
         let primary =
             self.fabric
                 .elect_primary(rack_id, &candidates, req.primary_switch_node_id.as_deref());
-        let node_id = primary.unwrap_or_default();
+        let job_id = match primary {
+            Some(primary) => self.jobs.start(primary, rack_id),
+            // No switch matched, so there is no primary to name and nothing
+            // to run the fabric manager on. The job fails naming the switches
+            // rather than completing, which would have the caller wait for a
+            // primary that cannot exist.
+            None => self
+                .jobs
+                .start_failing("", rack_id, BatchOutcome::of(&refs).message),
+        };
 
         Ok(tonic::Response::new(
-            rms_v2::ConfigureScaleUpFabricManagerResponse {
-                job_id: self.jobs.start(node_id, rack_id),
-            },
+            rms_v2::ConfigureScaleUpFabricManagerResponse { job_id },
         ))
     }
 }

@@ -77,6 +77,8 @@ impl JobState {
 struct Job {
     node_id: String,
     rack_id: String,
+    /// Why the job is to end in failure rather than completion, when it is.
+    failure: Option<String>,
     observations: u32,
 }
 
@@ -94,6 +96,8 @@ pub(crate) struct JobStatus {
     pub(crate) state: JobState,
     pub(crate) node_id: String,
     pub(crate) rack_id: String,
+    /// Why the job failed; empty unless `state` is [`JobState::Failed`].
+    pub(crate) error_message: String,
 }
 
 impl JobStore {
@@ -107,11 +111,24 @@ impl JobStore {
         }
     }
 
-    /// Start a job and return its id.
+    /// Start a job that will complete, and return its id.
     ///
     /// Ids are sequential rather than random so that a failing test names the
     /// same job every run.
     pub(crate) fn start(&self, node_id: &str, rack_id: &str) -> String {
+        self.insert(node_id, rack_id, None)
+    }
+
+    /// Start a job that will fail with `error`, and return its id.
+    ///
+    /// It is paced like any other job, so the caller's polling loop sees it
+    /// queued and running before it reports [`JobState::Failed`] where a
+    /// completing job reports [`JobState::Completed`].
+    pub(crate) fn start_failing(&self, node_id: &str, rack_id: &str, error: String) -> String {
+        self.insert(node_id, rack_id, Some(error))
+    }
+
+    fn insert(&self, node_id: &str, rack_id: &str, failure: Option<String>) -> String {
         let id = format!(
             "{}-{}",
             self.prefix,
@@ -122,6 +139,7 @@ impl JobStore {
             Job {
                 node_id: node_id.to_owned(),
                 rack_id: rack_id.to_owned(),
+                failure,
                 observations: 0,
             },
         );
@@ -139,18 +157,23 @@ impl JobStore {
         };
 
         job.observations += 1;
-        let state = if job.observations >= self.pacing.terminal_after_observations {
-            JobState::Completed
+        let (state, error_message) = if job.observations >= self.pacing.terminal_after_observations
+        {
+            match &job.failure {
+                Some(error) => (JobState::Failed, error.clone()),
+                None => (JobState::Completed, String::new()),
+            }
         } else if job.observations >= self.pacing.running_after_observations {
-            JobState::Running
+            (JobState::Running, String::new())
         } else {
-            JobState::Queued
+            (JobState::Queued, String::new())
         };
 
         Some(JobStatus {
             state,
             node_id: job.node_id.clone(),
             rack_id: job.rack_id.clone(),
+            error_message,
         })
     }
 
@@ -170,12 +193,14 @@ impl JobStore {
                     state: JobState::Completed,
                     node_id: String::new(),
                     rack_id: String::new(),
+                    error_message: String::new(),
                 })
             }
             UnknownJobPolicy::Fail => Some(JobStatus {
                 state: JobState::Failed,
                 node_id: String::new(),
                 rack_id: String::new(),
+                error_message: String::new(),
             }),
             UnknownJobPolicy::NotFound => None,
         }

@@ -129,7 +129,8 @@ rack_manager_impl! {
         ///
         /// The caller looks for its own job id in `job_states` and gives up if
         /// it is absent, so the requested id is always echoed even when the
-        /// job is unknown to this process.
+        /// job is unknown to this process. A failed job carries its reason in
+        /// `error_message`, which the caller records as the rack's error.
         async fn get_job_status(
             &self,
             request: tonic::Request<rms::GetJobStatusRequest>,
@@ -150,7 +151,7 @@ rack_manager_impl! {
                     // distinguish an unset state from a real one and reports
                     // the outcome as unknown.
                     execution_state: status.state.as_execution_state(),
-                    error_message: String::new(),
+                    error_message: status.error_message,
                     error_code: 0,
                     result_json: String::new(),
                     state_description: status.state.as_wire_str().to_owned(),
@@ -363,7 +364,7 @@ rack_manager_impl! {
                     message: String::new(),
                     rack_id: status.rack_id,
                     node_id: status.node_id,
-                    error_message: String::new(),
+                    error_message: status.error_message,
                     result_json: String::new(),
                     // No clock: the mock has no wall-clock behaviour to model,
                     // and nothing in NICo reads these.
