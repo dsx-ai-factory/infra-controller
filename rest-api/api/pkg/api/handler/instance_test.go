@@ -4883,6 +4883,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		expectedPropagationStatus             *string
 		expectedSitePowerProfile              *string
 		expectedSiteSpectrumXAttachmentCount  *int
+		expectedRespSpectrumXAttachmentCount  *int
 		// When true, only assert len(siteReq.Config.Nvlink.GpuConfigs) matches the request (e.g. NVLink no-op where workflow uses DB order).
 		nvLinkGpuConfigsVerifyCountOnly bool
 		// When non-nil, expected len(siteReq.Config.Nvlink.GpuConfigs) for verifySiteControllerRequest (default: len(reqData.NVLinkInterfaces)).
@@ -5002,6 +5003,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqUser:                              tnu1,
 				respCode:                             http.StatusOK,
 				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(0),
+				expectedRespSpectrumXAttachmentCount: cutil.GetPtr(1),
 			},
 			verifySiteControllerRequest: true,
 		},
@@ -7948,6 +7950,14 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 					// The Site config is a replacement rather than a merge, so it is always sent.
 					require.NotNil(t, siteReq.Config.Spxconfig)
+
+					if tt.args.expectedRespSpectrumXAttachmentCount != nil {
+						require.Len(t, rst.SpectrumXAttachments, *tt.args.expectedRespSpectrumXAttachmentCount,
+							"a retiring attachment must still appear in the response, as a following GET reports it")
+						for _, apiSxA := range rst.SpectrumXAttachments {
+							assert.Equal(t, cdbm.SpectrumXAttachmentStatusDeleting, apiSxA.Status)
+						}
+					}
 
 					if tt.args.expectedSiteSpectrumXAttachmentCount != nil {
 						assert.Len(t, siteReq.Config.Spxconfig.SpxAttachments, *tt.args.expectedSiteSpectrumXAttachmentCount,

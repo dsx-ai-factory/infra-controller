@@ -4042,17 +4042,25 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			// Anything no longer requested moves to Deleting. Instance inventory removes the
 			// row once the Site stops reporting the attachment.
 			for i := range existingSxAs {
-				if retainedSxAIDs[existingSxAs[i].ID] || existingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
+				if retainedSxAIDs[existingSxAs[i].ID] {
 					continue
 				}
-				_, derr := sxaDAO.Update(ctx, tx, cdbm.SpectrumXAttachmentUpdateInput{
-					SpectrumXAttachmentID: existingSxAs[i].ID,
-					Status:                cutil.GetPtr(cdbm.SpectrumXAttachmentStatusDeleting),
-				})
-				if derr != nil {
-					logger.Error().Err(derr).Msg("failed to update SpectrumX Attachment record in DB")
-					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+				if existingSxAs[i].Status != cdbm.SpectrumXAttachmentStatusDeleting {
+					existingSxAs[i].Status = cdbm.SpectrumXAttachmentStatusDeleting
+					_, derr := sxaDAO.Update(ctx, tx, cdbm.SpectrumXAttachmentUpdateInput{
+						SpectrumXAttachmentID: existingSxAs[i].ID,
+						Status:                cutil.GetPtr(cdbm.SpectrumXAttachmentStatusDeleting),
+					})
+					if derr != nil {
+						logger.Error().Err(derr).Msg("failed to update SpectrumX Attachment record in DB")
+						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+					}
 				}
+
+				// Carried into the response so a retiring attachment still appears with its
+				// Deleting status, matching what a following GET reports. The Site config
+				// build below filters these out.
+				newOrExistingSxAs = append(newOrExistingSxAs, existingSxAs[i])
 			}
 		}
 
