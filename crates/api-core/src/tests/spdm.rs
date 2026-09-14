@@ -158,6 +158,27 @@ pub(in crate::tests) mod tests {
                 expect_devices: 0,
                 expect_fallback: false,
             },
+            Case {
+                // The absent pattern is reported without costing the GPUs the
+                // present one matched, which is the whole point of keeping this
+                // apart from PolicyMatchedNothing.
+                scenario: "one absent pattern does not stop the attesters that are there",
+                reprofile: || {
+                    vec![(
+                        MOCK_HOST_HARDWARE_CLASS.to_string(),
+                        AttesterSelection {
+                            mode: AttesterSelectionMode::Allowlist,
+                            component_ids: vec![
+                                ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string()),
+                                ComponentIdMatch::Exact("NOT_PRESENT".to_string()),
+                            ],
+                        },
+                    )]
+                },
+                expect_outcome: SpdmSchedulingOutcome::PartiallySatisfied,
+                expect_devices: 3,
+                expect_fallback: false,
+            },
         ];
 
         // One host, reused: the fixture attests it during init, which needs

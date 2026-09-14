@@ -47,12 +47,16 @@ use crate::handler::MachineStateHandlerServices;
 pub enum SchedulingOutcome {
     /// One work row was written per selected attester.
     Scheduled,
+    /// Work rows were written, but an allowlist pattern matched no eligible
+    /// attester. Attesting is under way for less than the profile asked for.
+    PartiallySatisfied,
     /// The profile's mode is `NONE`. The BMC is not contacted.
     AttestationDisabled,
     /// The BMC offered nothing eligible, under a policy that asserted nothing
     /// about what must be there. Points at the hardware, not the profile.
     NoAttestersFound,
-    /// An operator-authored requirement went unsatisfied.
+    /// An operator-authored requirement went unsatisfied, and nothing was left
+    /// to attest.
     PolicyMatchedNothing,
     /// No exploration has recorded a hardware class for this machine's BMC.
     ClassNotRecorded,
@@ -259,8 +263,21 @@ async fn schedule(
     let eligible = eligible_attesters(&component_integrities);
     let eligible_ids = eligible.iter().map(|c| c.id.as_str()).collect_vec();
 
-    let selected = match selection.evaluate(&eligible_ids) {
-        SelectionOutcome::Scheduled(selected) => selected,
+    let (selected, outcome) = match selection.evaluate(&eligible_ids) {
+        SelectionOutcome::Scheduled(selected) => (selected, SchedulingOutcome::Scheduled),
+        SelectionOutcome::PartiallySatisfied {
+            selected,
+            unsatisfied,
+        } => {
+            tracing::warn!(
+                %machine_id,
+                %hardware_class,
+                ?unsatisfied,
+                reported = ?eligible_ids,
+                "allowlist patterns matched no eligible attester; attesting what matched"
+            );
+            (selected, SchedulingOutcome::PartiallySatisfied)
+        }
         SelectionOutcome::AttestationDisabled => {
             return Ok(settled(SchedulingOutcome::AttestationDisabled));
         }
@@ -306,7 +323,7 @@ async fn schedule(
     txn.commit().await?;
 
     Ok(SchedulingResult {
-        outcome: SchedulingOutcome::Scheduled,
+        outcome,
         hardware_class,
         used_any_fallback,
         profile_version: Some(profile_version),
@@ -318,8 +335,9 @@ async fn schedule(
 /// The attesters a profile's patterns may select: those the BMC reports as
 /// enabled and as speaking SPDM.
 ///
-/// `ComponentIntegrityTypeVersion` is recorded rather than filtered on, so a
-/// BMC reporting a newer version than this build knew about still attests.
+/// `ComponentIntegrityTypeVersion` is not filtered on, so a BMC reporting a
+/// newer version than this build knew about still attests. The version is not
+/// persisted.
 fn eligible_attesters(integrities: &ComponentIntegrities) -> Vec<&ComponentIntegrity> {
     integrities
         .members
@@ -441,11 +459,14 @@ pub(crate) async fn handle_spdm_trigger_state(
     )
     .await?;
 
-    // Every outcome other than Scheduled left no work to poll for, whether
-    // because the operator asked for none or because none could be selected.
+    // The remaining outcomes left no work to poll for, whether because the
+    // operator asked for none or because none could be selected.
     // `trigger_attestation` has already reported which, so the machine
     // proceeds rather than waiting on results that will never arrive.
-    if result.outcome == SchedulingOutcome::Scheduled {
+    if matches!(
+        result.outcome,
+        SchedulingOutcome::Scheduled | SchedulingOutcome::PartiallySatisfied
+    ) {
         Ok(StateHandlerOutcome::transition(next_spdm_state))
     } else {
         Ok(StateHandlerOutcome::transition(next_skip_state))

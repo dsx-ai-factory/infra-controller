@@ -423,7 +423,16 @@ pub mod profile {
         /// nothing about what must be there. Not a failure, and it points at
         /// the hardware rather than the profile.
         NoAttestersFound,
-        /// An operator-authored requirement went unsatisfied.
+        /// Attest these, but some allowlist pattern matched no eligible
+        /// attester. Scheduling what matched keeps the evidence an unsatisfied
+        /// pattern would otherwise discard, since a failed selection does not
+        /// hold the machine back.
+        PartiallySatisfied {
+            selected: Vec<String>,
+            unsatisfied: Vec<ComponentIdMatch>,
+        },
+        /// An operator-authored requirement went unsatisfied, and nothing was
+        /// left to attest.
         PolicyMatchedNothing(UnsatisfiedRequirement),
     }
 
@@ -497,7 +506,9 @@ pub mod profile {
 
                 AttesterSelectionMode::Allowlist => {
                     // Every pattern is its own requirement, so one that matches
-                    // nothing fails the selection rather than attesting less.
+                    // nothing is reported. What the others matched is still
+                    // attested: the caller proceeds either way, so discarding
+                    // the selection would only lose evidence.
                     let unsatisfied: Vec<_> = self
                         .component_ids
                         .iter()
@@ -509,14 +520,20 @@ pub mod profile {
                         .filter(|id| self.matches_any(id))
                         .map(|id| id.to_string())
                         .collect();
-                    // A validated allowlist holds at least one pattern, so a
-                    // satisfied one always selects something. The second test
-                    // covers a selection built without `validate`, which would
-                    // otherwise schedule nothing and report success.
-                    if !unsatisfied.is_empty() || selected.is_empty() {
+                    // An empty selection covers both an allowlist none of whose
+                    // patterns matched, and one built without `validate`, which
+                    // holds no patterns and would otherwise schedule nothing
+                    // and report success.
+                    if selected.is_empty() {
                         return SelectionOutcome::PolicyMatchedNothing(
                             UnsatisfiedRequirement::AllowlistPatterns(unsatisfied),
                         );
+                    }
+                    if !unsatisfied.is_empty() {
+                        return SelectionOutcome::PartiallySatisfied {
+                            selected,
+                            unsatisfied,
+                        };
                     }
                     SelectionOutcome::Scheduled(selected)
                 }
@@ -723,6 +740,13 @@ mod profile_test {
         ))
     }
 
+    fn partial(attester_ids: &[&str], patterns: &[ComponentIdMatch]) -> SelectionOutcome {
+        SelectionOutcome::PartiallySatisfied {
+            selected: attester_ids.iter().map(|id| id.to_string()).collect(),
+            unsatisfied: patterns.to_vec(),
+        }
+    }
+
     #[test]
     fn selection_validation() {
         scenarios!(
@@ -822,14 +846,15 @@ mod profile_test {
                     => unsatisfied(&[prefix("hgx_irot_gpu_")]),
             }
 
-            // An unsatisfied allowlist pattern would attest less than intended,
-            // so it fails the selection; a dead denylist pattern excludes
-            // nothing and attests exactly what was asked for.
-            "an allowlist names what must be there" {
+            // An unsatisfied allowlist pattern is reported without discarding
+            // what the others matched, since a failed selection would not hold
+            // the machine back and the GPUs would go unattested for nothing. A
+            // dead denylist pattern excludes nothing and needs no report.
+            "an unsatisfied allowlist pattern still attests what matched" {
                 selection(
                     AttesterSelectionMode::Allowlist,
                     &[prefix("HGX_IRoT_GPU_"), exact("VERA_CPU_0")],
-                ) => unsatisfied(&[exact("VERA_CPU_0")]),
+                ) => partial(&GPUS, &[exact("VERA_CPU_0")]),
             }
 
             "a denylist pattern matching nothing excludes nothing" {

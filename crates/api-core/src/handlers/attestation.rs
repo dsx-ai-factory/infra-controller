@@ -131,6 +131,7 @@ pub(crate) async fn trigger_machine_attestation(
 fn reported_outcome(outcome: SchedulingOutcome) -> rpc::SpdmSchedulingOutcome {
     match outcome {
         SchedulingOutcome::Scheduled => rpc::SpdmSchedulingOutcome::Scheduled,
+        SchedulingOutcome::PartiallySatisfied => rpc::SpdmSchedulingOutcome::PartiallySatisfied,
         SchedulingOutcome::AttestationDisabled => rpc::SpdmSchedulingOutcome::AttestationDisabled,
         SchedulingOutcome::NoAttestersFound => rpc::SpdmSchedulingOutcome::NoAttestersFound,
         SchedulingOutcome::PolicyMatchedNothing => rpc::SpdmSchedulingOutcome::PolicyMatchedNothing,
@@ -431,6 +432,7 @@ mod tests {
 
         let covered = [
             SchedulingOutcome::Scheduled,
+            SchedulingOutcome::PartiallySatisfied,
             SchedulingOutcome::AttestationDisabled,
             SchedulingOutcome::NoAttestersFound,
             SchedulingOutcome::PolicyMatchedNothing,
