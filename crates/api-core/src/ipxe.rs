@@ -307,6 +307,23 @@ exit ||
 "#
             )
         };
+        let exit_instructions_dpu = |machine_id: MachineId,
+                                     interface_id: MachineInterfaceId,
+                                     state: &ManagedHostState|
+         -> String {
+            format!(
+                r#"
+echo Machine ID: {machine_id}
+echo Interface ID: {interface_id}
+echo Current state: {state}
+echo This state assumes an OS is provisioned and will exit into the OS in 5 seconds. To re-run iPXE instructions and OS installation, trigger a reboot request with flag rebootWithCustomIpxe/boot_with_custom_ipxe set. ||
+sleep 5 ||
+sanboot --no-describe --drive 0x80 ||
+sanboot --no-describe --drive 0x81 ||
+exit ||
+"#
+            )
+        };
 
         static UNKNOWN_HOST_INSTRUCTIONS: &str = r#"
 echo this is an unknown host interface, not PXE booting ||
@@ -438,7 +455,7 @@ exit ||
                             ));
                         }
                         _ => {
-                            return Ok(exit_instructions(
+                            return Ok(exit_instructions_dpu(
                                 machine_id,
                                 target.interface_id,
                                 machine.current_state(),
@@ -447,7 +464,7 @@ exit ||
                     }
                 }
                 _ => {
-                    return Ok(exit_instructions(
+                    return Ok(exit_instructions_dpu(
                         machine_id,
                         target.interface_id,
                         machine.current_state(),
