@@ -192,6 +192,9 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
                 { "MetricId": "FanPWM", "MetricValue": "30" },
                 // Discrete state, so there is no gauge to publish.
                 { "MetricId": "PowerState", "MetricValue": "Enabled" },
+                // Parse as f64 but are not measurements.
+                { "MetricId": "NonFinite", "MetricValue": "NaN" },
+                { "MetricId": "Infinite", "MetricValue": "inf" },
                 // No id to name a series after.
                 { "MetricValue": "1" }
             ]

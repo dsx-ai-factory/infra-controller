@@ -270,6 +270,20 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             let Ok(reading) = reading.trim().parse::<f64>() else {
                 continue;
             };
+            // `f64::from_str` also accepts "NaN" and "inf". Those are legal
+            // Prometheus tokens, but as hardware readings they carry no
+            // information and poison every aggregate they enter.
+            if !reading.is_finite() {
+                tracing::debug!(
+                    report_id,
+                    metric_id,
+                    reading,
+                    bmc_address = ?self.endpoint.addr,
+                    rack_id = self.event_context.rack_id().map(tracing::field::display),
+                    "Skipping non-finite metric reading"
+                );
+                continue;
+            }
 
             let unit = units
                 .and_then(|units| units.get(&metric_id))
@@ -479,8 +493,8 @@ mod tests {
 
         check_cases_async(
             [Case {
-                scenario: "numeric readings publish with definition units, \
-                           stale and non-numeric values are dropped",
+                scenario: "finite readings publish with definition units; \
+                           stale, non-numeric and non-finite values are dropped",
                 input: fixture.bmc(),
                 expect: Yields(ObservedIteration {
                     entity_count: Some(3),
