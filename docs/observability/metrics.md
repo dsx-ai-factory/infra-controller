@@ -170,21 +170,28 @@ neither. Records with a `MessageId` keep it unchanged and do not carry these att
 The periodic log collector and the SSE collector derive the attributes the same way.
 
 LiteOn PF-1333-7R firmware r1.3.8 leaves `MessageId` null on every event log entry. The
-message families below were observed across four shelves on 2026-09-08, each with the
-listed Redfish `Severity`. Only the `Assert` form of the parenthesised detail appeared;
-no `Deassert` entry was present in the retained log of 400 entries per shelf.
+message families below were observed across four shelves, 400 retained entries each, on
+2026-09-14, with the listed Redfish `Severity`. The trailing token of the parenthesised
+detail is the IPMI event direction: `Assert` means the family's condition began and
+`Deassert` means it ended. The firmware names most transitions as separate asserted
+families, so `Deassert` appeared only on `PowerDeviceAbsence`, where it records a power
+device becoming present again. `Severity` follows the family, not the direction. The
+collector forwards every entry unchanged; the direction stays in the message text.
 
-| `message_family` | Observed `Severity` |
-|---|---|
-| `BmcFirmwareUpdateCompleted` | OK |
-| `BmcFirmwareUpdateFailure` | Critical |
-| `BmcSystemBootComplete` | OK |
-| `BmcUnsupportedChassis` | Warning |
-| `PowerDeviceFirmwareUpdate` | OK |
-| `PowerDeviceOff` | OK |
-| `PowerDeviceOn` | OK |
-| `PowerDevicePowerNotGood` | OK |
-| `PowerDevicePresence` | OK |
+| `message_family` | Observed form | Observed `Severity` |
+|---|---|---|
+| `BmcFirmwareUpdateCompleted` | Assert | OK |
+| `BmcFirmwareUpdateFailure` | Assert | Critical |
+| `BmcSystemBootComplete` | Assert | OK |
+| `BmcUnsupportedChassis` | Assert | Warning |
+| `PowerDeviceAbsence` | Deassert | OK |
+| `PowerDeviceFirmwareUpdate` | Assert | OK |
+| `PowerDeviceInputUnderVoltageFault` | Assert | Critical |
+| `PowerDeviceInsufficientInputVoltageOff` | Assert | OK |
+| `PowerDeviceOff` | Assert | OK |
+| `PowerDeviceOn` | Assert | OK |
+| `PowerDevicePowerNotGood` | Assert | OK |
+| `PowerDevicePresence` | Assert | OK |
 
 ### Network services
 

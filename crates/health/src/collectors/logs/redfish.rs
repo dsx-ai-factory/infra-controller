@@ -319,6 +319,14 @@ mod tests {
                     },
                 },
                 Check {
+                    scenario: "deassert detail keeps family and component",
+                    input: "PowerDeviceAbsence ( powerdevice5 chassis_SN: 613337RXX01X75101UG Deassert )",
+                    expect: MessageIdentity {
+                        family: Some("PowerDeviceAbsence"),
+                        component: Some("powerdevice5"),
+                    },
+                },
+                Check {
                     scenario: "family without detail",
                     input: "BmcSystemBootComplete",
                     expect: MessageIdentity {
