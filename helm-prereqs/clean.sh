@@ -185,7 +185,28 @@ kubectl delete bgppeer --all \
 kubectl delete ipaddresspool --all \
     -n metallb-system --ignore-not-found 2>/dev/null || true
 
-helmfile destroy 2>/dev/null || true
+# Record whether this install owns Contour, before the destroy removes it.
+# --install-contour is opt-in because a site may already run its own ingress
+# controller, and `contour` in `projectcontour` is upstream Contour's default
+# release name and namespace, so neither identifies our install. The marker is
+# the commonLabels entry in operators/values/contour.yaml, which only a
+# NICo-installed Contour carries. An unlabelled Contour is treated as foreign
+# and left running, including one from a NICo version that predates the label.
+_CONTOUR_OWNED=false
+if [[ "$(kubectl get deployment contour-contour -n projectcontour \
+    -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null)" == "nico" ]]; then
+    _CONTOUR_OWNED=true
+fi
+echo "Contour owned by this install: ${_CONTOUR_OWNED}"
+
+# Scope the destroy when Contour is not ours. A bare `helmfile destroy` covers
+# every release in helmfile.yaml, so it would uninstall a site's own `contour`
+# release without this.
+if [[ "${_CONTOUR_OWNED}" == "true" ]]; then
+    helmfile destroy 2>/dev/null || true
+else
+    helmfile destroy -l 'name!=contour' 2>/dev/null || true
+fi
 
 # MetalLB CRDs — helm does not delete CRDs on uninstall.
 echo "Removing MetalLB CRDs..."
@@ -277,27 +298,18 @@ kubectl delete "clusterrole/cert-manager-policy:dpf-approval-policy" \
     "clusterrolebinding/cert-manager-policy:dpf-approval-policy" \
     --ignore-not-found 2>/dev/null || true
 
-# Contour cluster-scoped resources are normally removed by helm uninstall, but
-# remove stragglers so clean.sh can recover from partial installs. Each one is
-# checked against Helm's release annotation first, and the annotation outlives a
-# failed uninstall. --install-contour is opt-in because a site may already run
-# its own ingress controller, and these resources are cluster-scoped: deleting
-# an IngressClass or ClusterRole by name alone would take out that controller's
-# routing even though it lives in another namespace.
-_owned_by_contour_release() {
-    local resource="$1" owner
-    owner=$(kubectl get "${resource}" -o \
-        jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null) || return 1
-    [[ "${owner}" == "contour" ]]
-}
-echo "Removing Contour cluster-scoped resources..."
-for _contour_res in ingressclass/contour \
-                    clusterrole/contour-contour \
-                    clusterrolebinding/contour-contour; do
-    if _owned_by_contour_release "${_contour_res}"; then
-        kubectl delete "${_contour_res}" --ignore-not-found 2>/dev/null || true
-    fi
-done
+# Contour cluster-scoped resources are normally removed by helm uninstall; these
+# deletes only catch stragglers. They are cluster-scoped, so deleting an
+# IngressClass or ClusterRole by name would reach a foreign Contour in any
+# namespace, which is why this waits on the ownership label checked above.
+if [[ "${_CONTOUR_OWNED}" == "true" ]]; then
+    echo "Removing Contour cluster-scoped resources..."
+    kubectl delete ingressclass contour --ignore-not-found 2>/dev/null || true
+    kubectl delete clusterrole contour-contour \
+        --ignore-not-found 2>/dev/null || true
+    kubectl delete clusterrolebinding contour-contour \
+        --ignore-not-found 2>/dev/null || true
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Cluster-scoped resources created by helm hooks.
@@ -341,12 +353,18 @@ kubectl delete secret vault-cluster-keys vaultunsealkeys vaultroottoken \
 #    conflict with setup.sh's helmfile install into the external-secrets ns.
 # ---------------------------------------------------------------------------
 echo "=== [5/8] Deleting namespaces ==="
-kubectl delete ns nico-system cert-manager vault external-secrets postgres projectcontour metallb-system dpf-operator-system \
+# projectcontour is appended only when we installed Contour. Every other
+# namespace here is created unconditionally by setup.sh, so its name is ours by
+# construction; projectcontour is upstream Contour's default and may hold a
+# controller this install never created.
+_DELETE_NS=(nico-system cert-manager vault external-secrets postgres metallb-system dpf-operator-system)
+[[ "${_CONTOUR_OWNED}" == "true" ]] && _DELETE_NS+=(projectcontour)
+
+kubectl delete ns "${_DELETE_NS[@]}" \
     --wait=false --ignore-not-found 2>/dev/null || true
 
 echo "Waiting for namespaces to terminate..."
-kubectl wait --for=delete \
-    ns/nico-system ns/cert-manager ns/vault ns/external-secrets ns/postgres ns/projectcontour ns/metallb-system ns/dpf-operator-system \
+kubectl wait --for=delete "${_DELETE_NS[@]/#/ns/}" \
     --timeout=180s 2>/dev/null || true
 
 echo "Purging default namespace (ESO and other non-kubespray resources)..."
@@ -467,7 +485,11 @@ fi
 # which is the bug this file exists to fix. loki and tempo in particular hold
 # real data. flow is included for the same reason even though it predated this
 # list: step 0 deletes that namespace.
-_STACK_NS="nico-system cert-manager vault external-secrets postgres projectcontour \
+#
+# projectcontour is the one deliberate omission: Contour and Envoy declare no
+# PVC, so there is no storage to strand, and step 5 only deletes that namespace
+# when this install created it.
+_STACK_NS="nico-system cert-manager vault external-secrets postgres \
 metallb-system dpf-operator-system nico-rest temporal flow \
 loki tempo monitoring otel"
 _STACK_NS="$(printf '%s' "${_STACK_NS}" | tr -s '[:space:]' ' ')"

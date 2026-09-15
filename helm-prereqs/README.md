@@ -276,7 +276,7 @@ It supports these common deployment modes:
 | `--core-values <file>` | Use site-specific Core values instead of `helm-prereqs/values/nico-core.yaml`. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--skip-dpf` | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Use for sites with no DPUs or that still use the deprecated iPXE DPU path. See [DPF](#dpf). |
-| `--install-contour` | Install the optional Contour/Envoy ingress controller. The Envoy Service is `LoadBalancer` and receives its external IP from MetalLB. |
+| `--install-contour` | Install the optional Contour/Envoy ingress controller. The Envoy Service is `LoadBalancer` and is pinned to the `vip-pool-external` MetalLB pool, so that pool must have addresses before the install. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Core deploys. |
 | `--with-observability` | Also install the local monitoring stack (metrics + logs + traces) after Core. Runs in every mode, including `--skip-rest`. Can also be run standalone at any time: `observability/install-observability.sh`. See [observability/README.md](observability/README.md). |
 | `--debug` | Enable bash tracing. This can print secrets, so avoid it in shared logs. |
@@ -727,6 +727,13 @@ probes are reported without failing the run.
 ```
 
 Removes all components in reverse dependency order: NICo REST → NICo Core → helmfile releases → CRDs → namespaces → PVs → local-path-provisioner → host-directory sweep.
+
+Contour is the exception: `clean.sh` removes it only when NICo installed it. It
+checks for the `app.kubernetes.io/part-of: nico` label from
+`operators/values/contour.yaml`, because `contour` in `projectcontour` is
+upstream Contour's default release name and namespace and so cannot distinguish
+the two. An unlabelled Contour keeps running, along with its namespace,
+IngressClass, and RBAC.
 
 The final step reclaims the on-disk PV data under `/opt/local-path-provisioner`
 on every node. `local-path-persistent` PVs use `reclaimPolicy: Retain`, so their

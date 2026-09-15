@@ -47,6 +47,25 @@ tests:
       - failedTemplate:
           errorMessage: "nico-rest-api: ingress.enabled requires at least one entry in ingress.hosts"
 
+  # Checked on every entry, not just the first: the certificate commonName comes
+  # from hosts[0], but any entry without a host renders an empty ingress host.
+  - it: rejects an ingress.hosts entry that omits host
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+          - paths:
+              - path: /
+                pathType: Prefix
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-rest-api: every ingress.hosts entry requires a non-empty host; an entry without one renders an empty ingress host and an empty certificate commonName"
+
   - it: renders ingress rules, class, and annotations when enabled
     template: ingress.yaml
     set:

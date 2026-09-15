@@ -61,6 +61,13 @@ app.kubernetes.io/component: api
 {{- if and .Values.ingress.enabled (not .Values.ingress.hosts) -}}
 {{- fail "nico-rest-api: ingress.enabled requires at least one entry in ingress.hosts" -}}
 {{- end -}}
+{{- if .Values.ingress.enabled -}}
+{{- range .Values.ingress.hosts -}}
+{{- if not .host -}}
+{{- fail "nico-rest-api: every ingress.hosts entry requires a non-empty host; an entry without one renders an empty ingress host and an empty certificate commonName" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{/*
 An explicit ingress.tls replaces the block derived from ingress.hosts, but every
 ingress.hosts entry still gets a rule. A rule host with no TLS entry is served

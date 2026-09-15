@@ -258,7 +258,7 @@ export NICO_INSTALL_CONTOUR=true
 
 ##### Point DNS at the ingress and trust the CA
 
-The Ingress does not answer until the host resolves to the Envoy LoadBalancer address. Read that address, which MetalLB assigns from the external pool in `helm-prereqs/values/metallb-config.yaml`:
+The Ingress does not answer until the host resolves to the Envoy LoadBalancer address. MetalLB assigns that address from `vip-pool-external`, so populate the `addresses` field of that pool in `helm-prereqs/values/metallb-config.yaml` before installing Contour, then read the assigned address:
 
 ```bash
 kubectl get service contour-envoy -n projectcontour \
