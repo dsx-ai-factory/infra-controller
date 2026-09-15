@@ -1788,6 +1788,9 @@ jobs:
           lint: 'true'
           template: 'true'
 
+      - name: Test Vault Kubernetes URLs
+        run: bash helm-prereqs/tests/vault-kubernetes-url_test.sh
+
   build-push-helm-prereqs-chart:
     needs:
       - prepare
