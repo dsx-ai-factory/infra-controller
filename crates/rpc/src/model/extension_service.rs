@@ -54,6 +54,16 @@ impl From<rpc::DpuExtensionServiceType> for ExtensionServiceType {
     }
 }
 
+impl From<model::extension_service::DpuTarget> for rpc::DpuExtensionServiceDpuTarget {
+    fn from(target: model::extension_service::DpuTarget) -> Self {
+        match target {
+            model::extension_service::DpuTarget::Primary => Self::Primary,
+            model::extension_service::DpuTarget::AllActive => Self::AllActive,
+            model::extension_service::DpuTarget::All => Self::All,
+        }
+    }
+}
+
 impl From<rpc::DpuExtensionServiceDpuTarget> for model::extension_service::DpuTarget {
     fn from(target: rpc::DpuExtensionServiceDpuTarget) -> Self {
         match target {
@@ -424,15 +434,5 @@ mod tests {
                 }),
             },
         );
-    }
-}
-
-impl From<model::extension_service::DpuTarget> for rpc::DpuExtensionServiceDpuTarget {
-    fn from(target: model::extension_service::DpuTarget) -> Self {
-        match target {
-            model::extension_service::DpuTarget::Primary => Self::Primary,
-            model::extension_service::DpuTarget::AllActive => Self::AllActive,
-            model::extension_service::DpuTarget::All => Self::All,
-        }
     }
 }

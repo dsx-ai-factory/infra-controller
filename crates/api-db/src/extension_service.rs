@@ -1078,7 +1078,9 @@ mod test_batched_lookups {
     use carbide_test_support::query_counter::count_queries;
     use config_version::ConfigVersion;
     use model::controller_outcome::PersistentStateHandlerOutcome;
-    use model::extension_service::{ExtensionServiceLifecycleState, ExtensionServiceType};
+    use model::extension_service::{
+        DpuTarget, ExtensionServiceLifecycleState, ExtensionServiceType,
+    };
     use model::metadata::Metadata;
     use model::tenant::TenantOrganizationId;
 
@@ -1118,6 +1120,7 @@ mod test_batched_lookups {
                 version,
                 &service_id,
                 &ExtensionServiceType::KubernetesPod,
+                None,
                 &format!("svc-{i}"),
                 &tenant,
                 Some("test service"),
@@ -1156,6 +1159,7 @@ mod test_batched_lookups {
             ConfigVersion::initial(),
             &service_id,
             &ExtensionServiceType::DpfHelmChart,
+            Some(DpuTarget::AllActive),
             "dpf-service",
             &tenant,
             Some("DPF Helm chart service"),

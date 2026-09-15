@@ -141,7 +141,7 @@ pub(crate) async fn create(
             rpc::DpuExtensionServiceDpuTarget::try_from(value)
                 .map_err(|_| {
                     CarbideError::InvalidArgument(
-                        "dpu_target must be PRIMARY, ALL_ACTIVE, or ALL for Helm services".into(),
+                        "dpu_target must be PRIMARY, ALL_ACTIVE, or ALL for helm services".into(),
                     )
                 })?
                 .into(),
@@ -151,7 +151,7 @@ pub(crate) async fn create(
         }
         (ExtensionServiceType::KubernetesPod, Some(_)) => {
             return Err(CarbideError::InvalidArgument(
-                "dpu_target is unsupported for Kubernetes Pod services".into(),
+                "dpu_target is unsupported for kubernetes pod services".into(),
             )
             .into());
         }

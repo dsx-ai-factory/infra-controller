@@ -130,21 +130,22 @@ impl InstanceExtensionServicesStatus {
                     policy.resolve(attached_dpus, primary_dpu, used_dpus).ok()
                 }
             });
-            let required_dpus = match service_type {
-                ExtensionServiceType::KubernetesPod => used_dpus,
-                ExtensionServiceType::DpfHelmChart => helm_targets.as_deref().unwrap_or_default(),
+            let (required_dpus, targets_resolved) = match service_type {
+                ExtensionServiceType::KubernetesPod => (used_dpus, true),
+                ExtensionServiceType::DpfHelmChart => (
+                    helm_targets.as_deref().unwrap_or_default(),
+                    helm_targets.is_some(),
+                ),
             };
 
             if required_dpus.is_empty() {
-                if removed_at.is_none() || *service_type == ExtensionServiceType::DpfHelmChart {
+                if removed_at.is_none() || !targets_resolved {
                     is_configs_synced = false;
                 }
                 extension_services.push(InstanceExtensionServiceStatus {
                     service_id: service.service_id,
                     version: service.version,
-                    overall_status: if removed_at.is_some()
-                        && *service_type == ExtensionServiceType::KubernetesPod
-                    {
+                    overall_status: if removed_at.is_some() && targets_resolved {
                         ExtensionServiceDeploymentStatus::Terminated
                     } else {
                         ExtensionServiceDeploymentStatus::Unknown
@@ -306,8 +307,6 @@ impl InstanceExtensionServicesStatus {
             .filter(|svc| {
                 svc.removed.is_some()
                     && svc.overall_status == ExtensionServiceDeploymentStatus::Terminated
-                    // @TODO(Felicity): handle zero dpu case
-                    && !svc.dpu_statuses.is_empty()
                     && svc.dpu_statuses.iter().all(|dpu_status| {
                         matches!(
                             dpu_status.status,
@@ -627,6 +626,22 @@ mod tests {
         let detached = status(&config, &[], &dpus);
         assert_eq!(detached.extension_services[0].dpu_statuses.len(), 2);
         assert!(detached.get_terminated_service_keys().is_empty());
+
+        let detached_without_dpus = status(&config, &[], &[]);
+        assert_eq!(detached_without_dpus.configs_synced, SyncState::Synced);
+        assert_eq!(
+            detached_without_dpus.extension_services[0].overall_status,
+            ExtensionServiceDeploymentStatus::Terminated
+        );
+        assert!(
+            detached_without_dpus.extension_services[0]
+                .dpu_statuses
+                .is_empty()
+        );
+        assert_eq!(
+            detached_without_dpus.get_terminated_service_keys(),
+            vec![(get_test_service_id(), version)]
+        );
     }
 
     #[test]
@@ -1912,7 +1927,7 @@ mod tests {
                         vec![],
                     )],
                     configs_synced: SyncState::Synced,
-                } => vec![],
+                } => vec![(get_test_service_id(), init_version)],
             }
 
             "removed version with one DPU not terminated" {

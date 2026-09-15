@@ -380,7 +380,7 @@ async fn persist_dpf_helm_chart_placement_observation(
     txn.commit().await?;
 
     // A concurrent reconciliation may have already stored a newer observation.
-    if !applied {
+    if let ConditionalWrite::NotApplied(ExtensionServiceObservationNotCurrent) = observation_write {
         tracing::warn!(
             dpu_machine_id = %dpu_id,
             %observed_at,
@@ -536,7 +536,7 @@ mod tests {
             version,
             removed: Some(Utc::now()),
         };
-        let configs = vec![&active, &removed];
+        let configs = [&active, &removed];
         let active_label =
             DpfHelmChartIdentity::from_service_id(active_service).placement_label_key;
         let removed_label =
@@ -580,7 +580,7 @@ mod tests {
             version,
             removed: Some(Utc::now()),
         };
-        let configs = vec![&active, &removed];
+        let configs = [&active, &removed];
         let active_label =
             DpfHelmChartIdentity::from_service_id(active_service).placement_label_key;
         let removed_label =
@@ -651,7 +651,7 @@ mod tests {
             version,
             removed: None,
         };
-        let configs = vec![&first, &second];
+        let configs = [&first, &second];
 
         let statuses: Vec<_> = configs
             .iter()
