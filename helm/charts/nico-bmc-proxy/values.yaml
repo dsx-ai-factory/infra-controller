@@ -106,6 +106,17 @@ auth:
   namespace: ""
   ## SPIFFE service-id of the API allowed full access (allowed_principals + ACL).
   apiPrincipal: nico-api
+  ## [auth.trust] additional_issuer_cns — client leaf Issuer DN CNs mapped to
+  ## ExternalUser principals (group = cert SubjectOU). Same key as nico-api's;
+  ## set both alike. Empty leaves the operator grant below inert.
+  additionalIssuerCns: []
+  ## SubjectOU operator CLI certs carry, giving principal external-role/<group>.
+  ## This is helm-prereqs vault.nicoCliClientRole.ou, which defaults to .name.
+  ## Empty withholds proxy access from operator certs entirely.
+  cliClientGroup: nico-cli-client
+  ## What that group may reach. Read-only by default.
+  cliClientAcl:
+    - "GET /redfish/v1/**"
 
 configFiles:
   nicoBmcProxyConfig: ""

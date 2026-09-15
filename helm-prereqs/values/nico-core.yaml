@@ -374,6 +374,19 @@ nico-api:
 ##   - The nico-api IP must resolve from external DNS to the hostname above
 ## ---------------------------------------------------------------------------
 
+## ---------------------------------------------------------------------------
+## nico-bmc-proxy — read-only Redfish for operators
+##
+## Trust the same admin-CLI certs nico-api does, so operators read BMCs through
+## the proxy instead of holding BMC root passwords. Keep in step with
+## nico-api.auth.additionalIssuerCns above. The group comes from the cert's
+## SubjectOU; narrow or withhold the grant in the chart's values.yaml.
+## ---------------------------------------------------------------------------
+nico-bmc-proxy:
+  auth:
+    additionalIssuerCns:
+      - "site-root"
+
 nico-dhcp:
   externalService:
     enabled: true    # must be explicitly enabled - defaults to false in chart

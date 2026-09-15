@@ -42,3 +42,80 @@ tests:
       - matchRegex:
           path: data["nico-bmc-proxy.toml"]
           pattern: '"spiffe-service-id/carbide-api" = \["/\*\*"\]'
+
+  - it: leaves the operator grant inert until an issuer CN is trusted
+    documentIndex: 0
+    asserts:
+      # Principal and ACL render, but nothing maps to an ExternalUser until a
+      # deployment names an issuer — which is why this ships enabled.
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'additional_issuer_cns = \[\]'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'allowed_principals = \[.*"external-role/nico-cli-client"\]'
+
+  - it: derives the operator principal and ACL from the configured CLI identity
+    documentIndex: 0
+    set:
+      auth:
+        additionalIssuerCns: ["acme-intermediate"]
+        cliClientGroup: acme-operators
+        cliClientAcl: ["GET /redfish/v1/Systems/**"]
+    asserts:
+      # A site that customized vault.nicoCliClientRole must still reach the
+      # proxy; a hardcoded OU would map its certs to a principal nothing names.
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'additional_issuer_cns = \["acme-intermediate"\]'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'allowed_principals = \[.*"external-role/acme-operators"\]'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '"external-role/acme-operators" = \["GET /redfish/v1/Systems/\*\*"\]'
+      - notMatchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '"external-role/nico-cli-client"'
+
+  - it: withholds proxy access entirely when no CLI group is configured
+    documentIndex: 0
+    set:
+      auth:
+        cliClientGroup: ""
+    asserts:
+      # Matched as rendered TOML, not as a bare string: the comments above
+      # these entries legitimately name the concept.
+      - notMatchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '"external-role/[^"]*" = \['
+      # Service principals untouched.
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'allowed_principals = \["spiffe-service-id/nico-api", "spiffe-service-id/nv-dps"\]'
+
+  - it: renders the operator grant into both image spellings
+    documentIndex: 0
+    asserts:
+      # Both filenames are emitted; one-spelling changes are half-rollouts.
+      - matchRegex:
+          path: data["carbide-bmc-proxy.toml"]
+          pattern: '"external-role/nico-cli-client" = \["GET /redfish/v1/\*\*"\]'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '"external-role/nico-cli-client" = \["GET /redfish/v1/\*\*"\]'
+
+  - it: escapes the CLI group so a hostile value cannot break the TOML
+    documentIndex: 0
+    set:
+      auth:
+        cliClientGroup: 'ops"evil'
+    asserts:
+      # Rendered raw, a quote in the value ends the string early and the proxy
+      # fails to parse its own config at startup.
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'allowed_principals = \[.*"external-role/ops\\"evil"\]'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '"external-role/ops\\"evil" = \["GET /redfish/v1/\*\*"\]'

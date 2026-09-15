@@ -1,7 +1,7 @@
 listen = "[::]:1079"
 metrics_endpoint = "[::]:1080"
 database_url = "postgres://replaced-by-env-var"
-allowed_principals = ["spiffe-service-id/{{ .Values.auth.apiPrincipal }}", "spiffe-service-id/nv-dps"]
+allowed_principals = ["spiffe-service-id/{{ .Values.auth.apiPrincipal }}", "spiffe-service-id/nv-dps"{{ with .Values.auth.cliClientGroup }}, {{ printf "external-role/%s" . | quote }}{{ end }}]
 
 [tls]
 identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
@@ -16,7 +16,12 @@ spiffe_service_base_paths = [
   "/default/sa/",
 ]
 spiffe_machine_base_path = "/{{ .Values.auth.namespace | default (include "nico-bmc-proxy.namespace" .) }}/machine/"
-additional_issuer_cns = []
+# Match nico-api's auth.additionalIssuerCns. A cert's SubjectOU becomes its
+# ExternalUser group, which is what the external-role ACLs below key on; empty
+# means no cert becomes an ExternalUser at all. Attribution is per group, not
+# per user: the proxy logs no principal on success, and audit_identity()
+# redacts an external user to its group.
+additional_issuer_cns = [{{ range $i, $cn := .Values.auth.additionalIssuerCns }}{{ if $i }}, {{ end }}{{ $cn | quote }}{{ end }}]
 
 [auth.acls]
 # ACL entry format:
@@ -74,3 +79,9 @@ additional_issuer_cns = []
   "GET /redfish/v1/TelemetryService/MetricReports/NvidiaNMMetrics_0",
   "GET /redfish/v1/TaskService/Tasks/*",
 ]
+{{- with .Values.auth.cliClientGroup }}
+# Human operators via nico-admin-cli. Read-only: which endpoint answers a
+# hardware question is not known before asking, so the tree is open and every
+# state-changing verb is absent.
+{{ printf "external-role/%s" . | quote }} = [{{ range $i, $rule := $.Values.auth.cliClientAcl }}{{ if $i }}, {{ end }}{{ $rule | quote }}{{ end }}]
+{{- end }}
