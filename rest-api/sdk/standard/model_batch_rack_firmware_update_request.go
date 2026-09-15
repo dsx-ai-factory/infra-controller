@@ -28,7 +28,7 @@ type BatchRackFirmwareUpdateRequest struct {
 	SiteId string `json:"siteId"`
 	// Filter that selects Racks targeted for firmware update
 	Filter *RackFilter `json:"filter,omitempty"`
-	// Target firmware version.
+	// Firmware input serialized as a string. RMS-backed updates require a complete SOT firmware-object JSON document suitable for the selected trays. If the JSON object contains a case-sensitive top-level key `compute`, `nvswitch`, or `powershelf`, each tray type receives its corresponding value (JSON string values are unquoted). A missing tray-type key in this form passes an empty input to that backend; it does not guarantee a skipped update. Otherwise, the entire string is passed unchanged to every selected tray type. Empty, null, or omitted input leaves version handling to the backend and operation rule; direct RMS firmware-object updates require a non-empty input.
 	Version NullableString `json:"version,omitempty"`
 	// Optional, write-only authentication data for firmware downloads. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
 	AuthenticationData NullableFirmwareAuthenticationData `json:"authenticationData,omitempty"`

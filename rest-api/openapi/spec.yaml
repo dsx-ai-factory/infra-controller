@@ -24915,7 +24915,17 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string. RMS-backed updates require a
+            complete SOT firmware-object JSON document suitable for the selected
+            trays. If the JSON object contains a case-sensitive top-level key
+            `compute`, `nvswitch`, or `powershelf`, each tray type receives its
+            corresponding value (JSON string values are unquoted). A missing
+            tray-type key in this form passes an empty input to that backend;
+            it does not guarantee a skipped update. Otherwise, the entire string
+            is passed unchanged to every selected tray type. Empty, null, or
+            omitted input leaves version handling to the backend and operation
+            rule; direct RMS firmware-object updates require a non-empty input.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -26080,7 +26090,17 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string. RMS-backed updates require a
+            complete SOT firmware-object JSON document suitable for the selected
+            trays. If the JSON object contains a case-sensitive top-level key
+            `compute`, `nvswitch`, or `powershelf`, each tray type receives its
+            corresponding value (JSON string values are unquoted). A missing
+            tray-type key in this form passes an empty input to that backend;
+            it does not guarantee a skipped update. Otherwise, the entire string
+            is passed unchanged to every selected tray type. Empty, null, or
+            omitted input leaves version handling to the backend and operation
+            rule; direct RMS firmware-object updates require a non-empty input.
         targets:
           type: array
           items:
@@ -26268,7 +26288,17 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string. RMS-backed updates require a
+            complete SOT firmware-object JSON document suitable for the selected
+            trays. If the JSON object contains a case-sensitive top-level key
+            `compute`, `nvswitch`, or `powershelf`, each tray type receives its
+            corresponding value (JSON string values are unquoted). A missing
+            tray-type key in this form passes an empty input to that backend;
+            it does not guarantee a skipped update. Otherwise, the entire string
+            is passed unchanged to every selected tray type. Empty, null, or
+            omitted input leaves version handling to the backend and operation
+            rule; direct RMS firmware-object updates require a non-empty input.
         targets:
           type: array
           items:

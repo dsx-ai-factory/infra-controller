@@ -101,6 +101,14 @@ jq -n \
   '{siteId: $siteId, version: $version, targets: ["bmc", "bios"]}'
 ```
 
+For a rack request, the same `version` string is passed unchanged to every
+selected tray type when its JSON object has none of the top-level keys
+`compute`, `nvswitch`, or `powershelf`. No additional flag is required. Use
+this shared form only when the firmware object is suitable for every selected
+tray type; Flow does not convert firmware intended for one type into firmware
+for another. Selection and execution order still come from the request and
+operation rule.
+
 For a rack request that needs a different value for each component type,
 `version` can contain a layered JSON document with `compute`, `nvswitch`, and
 `powershelf` keys. Flow extracts the relevant value before calling each
@@ -116,6 +124,12 @@ LAYERED_VERSION=$(jq -cn \
   --argjson nvswitch "$SWITCH_SOT" \
   '{compute: $compute, nvswitch: $nvswitch}')
 ```
+
+The keys are case-sensitive. Any one of these top-level keys selects the
+layered form; nested keys do not. Each selected value may be a JSON object or
+a JSON string containing the backend's firmware input. String values are
+unquoted before dispatch. The outer REST `version` field remains a string in
+both forms.
 
 If a layered document omits a component-type key, Flow passes an empty target
 to that component manager. Use an operation rule that excludes the component
