@@ -416,8 +416,7 @@ token_endpoint_domain_allowlist = []    # token delegation token_endpoint URL ho
 
 **DPU agent / IMDS (separate from site `[machine_identity]`):** Limits and optional HTTP sign-proxy for workload `GET …/meta-data/identity` are configured on the **DPU agent** (and mirrored to **standalone FMDS** via `FmdsConfigUpdate.machine_identity`). They do not live in the API server `site_config.toml`. Refer to **§3.3.1**.
 
-**Global vs per-org:**
-Global config provides:
+**Global vs per-org.** Global config provides:
 
 * the master switch (`enabled`)
 * site-wide signing algorithm (`algorithm`)
