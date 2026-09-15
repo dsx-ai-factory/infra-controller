@@ -1011,10 +1011,8 @@ pub struct MachineATronContext {
     pub bmc_registry: BmcMockRegistry,
     pub api_throttler: ApiThrottler,
     /// These are the firmware versions the server wants us to be on. If not configured for other
-    /// firmware, DPU's can mock that they already have this installed.
-    /// Firmware targets fetched from the API. Behind a lock because a
-    /// background task refreshes them periodically (issue #4688); live
-    /// machines re-read on their own api_refresh_interval tick.
+    /// firmware, DPU's can mock that they already have this installed. Refreshed in the
+    /// background by `spawn_desired_firmware_refresher`.
     pub desired_firmware_versions: std::sync::RwLock<Vec<DesiredFirmwareVersionEntry>>,
     pub forge_api_client: ForgeApiClient,
     pub dhcp_client: crate::dhcp_wrapper::DhcpClient,
