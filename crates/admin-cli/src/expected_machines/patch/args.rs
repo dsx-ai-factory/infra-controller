@@ -64,7 +64,11 @@ use crate::expected_machines::common::HostDpuPolicy;
 "dpf_enabled",
 "default_pause_ingestion_and_poweron",
 "interfaces",
+<<<<<<< HEAD
 "disable_lockdown",
+=======
+"dpu_loopback_reservations",
+>>>>>>> 9dc5662dd (feat: add deterministic DPU underlay loopback reservations)
 ])))]
 #[command(after_long_help = "\
 EXAMPLES:
@@ -248,6 +252,14 @@ pub(crate) struct Args {
         help = "Set true to skip server lockdown during lifecycle management, or false to lock down after BIOS configuration. Omission preserves the stored setting"
     )]
     pub(super) disable_lockdown: Option<bool>,
+
+    #[clap(
+        long = "dpu-loopback-reservations",
+        value_name = "DPU_LOOPBACK_RESERVATIONS",
+        group = "group",
+        help = "Deterministic DPU underlay loopback reservations as a JSON array of objects (fields: dpu_serial_number, loopback_ipv4, loopback_ipv6), keyed by the trimmed DPU pairing serial number. Replaces the full reservation list for the machine: omit the flag to preserve the stored reservations, or pass an empty array '[]' to clear them. Each reservation requires at least one address drawn from the site's non-auto-assignable lo-ip / lo-ip-v6 pool. Example: '[{\"dpu_serial_number\":\"MT2000X00001\",\"loopback_ipv4\":\"192.0.2.10\"}]'."
+    )]
+    pub(super) dpu_loopback_reservations: Option<String>,
 }
 
 impl Args {

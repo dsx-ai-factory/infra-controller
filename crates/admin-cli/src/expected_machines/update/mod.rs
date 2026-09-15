@@ -42,6 +42,13 @@ impl Run for Args {
             .interfaces
             .map(|interfaces| serde_json::to_string(&interfaces))
             .transpose()?;
+        // Re-serialize the parsed reservations so the patch helper receives the
+        // same JSON contract as the flag. An omitted field stays omitted and
+        // preserves the stored reservations; an empty list clears them.
+        let dpu_loopback_reservations = expected_machine
+            .dpu_loopback_reservations
+            .map(|reservations| serde_json::to_string(&reservations))
+            .transpose()?;
 
         // Values present in the file replace the stored values. The patch
         // helper preserves optional fields that the file omitted.
@@ -82,6 +89,7 @@ impl Run for Args {
                     }
                 }),
                 interfaces,
+                dpu_loopback_reservations,
             )
             .await?;
         Ok(())

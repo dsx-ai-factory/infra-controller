@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
@@ -827,6 +827,33 @@ impl ExpectedMachine {
     }
 }
 
+/// A deterministic DPU underlay loopback reservation.
+///
+/// Keyed by the trimmed DPU pairing serial number -- the same identity NICo
+/// pairs DPUs by (`dpu_pairing_serial_number`) and that the operator declares
+/// in `fallback_dpu_serial_numbers` -- not by any MAC, because a DPU's MAC is
+/// not known when the reservation is authored. At least one address is
+/// required; each address, when present, is drawn from the site's `lo-ip` /
+/// `lo-ip-v6` pool and reserved for this specific DPU. Persisted in the
+/// `expected_dpu_loopback_reservations` child table, which owns the site-wide
+/// uniqueness of serials and per-family addresses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DpuLoopbackReservation {
+    pub dpu_serial_number: String,
+    #[serde(default)]
+    pub loopback_ipv4: Option<Ipv4Addr>,
+    #[serde(default)]
+    pub loopback_ipv6: Option<Ipv6Addr>,
+}
+
+impl DpuLoopbackReservation {
+    /// Whether this reservation declares no address at all. The API and the
+    /// database `CHECK` both reject such a reservation.
+    pub fn has_no_address(&self) -> bool {
+        self.loopback_ipv4.is_none() && self.loopback_ipv6.is_none()
+    }
+}
+
 #[derive(Clone, Default, Deserialize)] // Do not add Debug here, it contains password
 pub struct ExpectedMachineData {
     pub bmc_username: String,
@@ -875,12 +902,36 @@ pub struct ExpectedMachineData {
     /// knobs should be added here rather than as new flat columns.
     #[serde(default)]
     pub host_lifecycle_profile: HostLifecycleProfile,
+    /// Deterministic DPU underlay loopback reservations, one per paired DPU,
+    /// keyed by DPU pairing serial number. Persisted in the
+    /// `expected_dpu_loopback_reservations` child table rather than a column on
+    /// this row. The `Option` distinguishes omitted (`None`, preserve stored
+    /// reservations) from an explicit empty list (`Some(vec![])`, clear them);
+    /// a database read always yields `Some(..)` with the actual stored set.
+    #[serde(default)]
+    pub dpu_loopback_reservations: Option<Vec<DpuLoopbackReservation>>,
 }
 // Important : new fields for expected machine (and data) should be optional _and_ serde(default),
 // unless you want to go update all the files in each production deployment that autoload
 // the expected machines on api startup
 
 impl ExpectedMachineData {
+    /// The DPU loopback reservation declared for one paired DPU serial, if any.
+    ///
+    /// Site Explorer resolves a reservation within the matched host expected
+    /// machine by the DPU's pairing serial number. `None` reservations (an
+    /// older client's omission that has not been hydrated) and an absent serial
+    /// both yield `None`, which preserves automatic allocation.
+    pub fn dpu_loopback_reservation(
+        &self,
+        dpu_serial_number: &str,
+    ) -> Option<&DpuLoopbackReservation> {
+        self.dpu_loopback_reservations
+            .as_ref()?
+            .iter()
+            .find(|reservation| reservation.dpu_serial_number == dpu_serial_number)
+    }
+
     /// The MAC the operator declared as this host's boot interface via
     /// `ExpectedInterface.primary`. This is the single source of declared boot
     /// intent the writers consult -- site-explorer ingestion, DHCP, and
@@ -929,6 +980,19 @@ impl<'r> FromRow<'r, PgRow> for ExpectedMachine {
         let json: sqlx::types::Json<Vec<ExpectedInterface>> = row.try_get("host_nics")?;
         let interfaces: Vec<ExpectedInterface> = json.0;
 
+        // Reservations live in a child table and are hydrated by a JSON
+        // subquery column. Reads that do not select that column (for example an
+        // `INSERT ... RETURNING *`) leave the field unhydrated as `None`; the
+        // owning db layer sets it explicitly in those paths.
+        let dpu_loopback_reservations = match row
+            .try_get::<sqlx::types::Json<Vec<DpuLoopbackReservation>>, _>(
+                "dpu_loopback_reservations",
+            ) {
+            Ok(json) => Some(json.0),
+            Err(sqlx::Error::ColumnNotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
+
         Ok(ExpectedMachine {
             id: row.try_get("id")?,
             bmc_mac_address: row.try_get("bmc_mac_address")?,
@@ -951,6 +1015,7 @@ impl<'r> FromRow<'r, PgRow> for ExpectedMachine {
                 host_lifecycle_profile: row
                     .try_get::<sqlx::types::Json<HostLifecycleProfile>, _>("host_lifecycle_profile")
                     .map(|j| j.0)?,
+                dpu_loopback_reservations,
             },
         })
     }
@@ -1981,6 +2046,43 @@ mod tests {
             }
             .declared_primary_mac(),
             None
+        );
+    }
+
+    /// Site Explorer resolves a DPU's reservation by pairing serial through
+    /// `dpu_loopback_reservation`, so a multi-DPU host must match each serial
+    /// to its own reservation regardless of declaration order, and an unknown
+    /// serial or an unhydrated (`None`) set must fall back to automatic
+    /// allocation.
+    #[test]
+    fn dpu_loopback_reservation_matches_by_serial_order_independently() {
+        let reservation = |serial: &str| DpuLoopbackReservation {
+            dpu_serial_number: serial.to_string(),
+            loopback_ipv4: Some(format!("192.0.2.{}", serial.len()).parse().unwrap()),
+            loopback_ipv6: None,
+        };
+        let data = ExpectedMachineData {
+            dpu_loopback_reservations: Some(vec![reservation("SER-BB"), reservation("SER-A")]),
+            ..Default::default()
+        };
+
+        // Each serial resolves to its own reservation regardless of order.
+        assert_eq!(
+            data.dpu_loopback_reservation("SER-A")
+                .map(|r| &r.dpu_serial_number),
+            Some(&"SER-A".to_string()),
+        );
+        assert_eq!(
+            data.dpu_loopback_reservation("SER-BB")
+                .map(|r| &r.dpu_serial_number),
+            Some(&"SER-BB".to_string()),
+        );
+
+        // An unknown serial and an unhydrated set both fall back to automatic.
+        assert_eq!(data.dpu_loopback_reservation("absent"), None);
+        assert_eq!(
+            ExpectedMachineData::default().dpu_loopback_reservation("SER-A"),
+            None,
         );
     }
 
