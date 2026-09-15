@@ -74,9 +74,9 @@ spec:
       {{- end }}
       {{- if or .Values.initContainers .Values.bootArtifactContainers }}
       initContainers:
-        {{- range .Values.bootArtifactContainers }}
+        {{- range $index, $container := .Values.bootArtifactContainers }}
         - name: {{ .name }}
-          image: {{ if and .repository .tag }}{{ .repository }}:{{ .tag }}{{ else }}{{ .image }}{{ end }}
+          image: {{ include "nico.containerImage" (dict "container" $container "path" (printf "%s.bootArtifactContainers[%d]" $.Chart.Name $index)) | quote }}
           {{- with .command }}
           command:
             {{- toYaml . | nindent 12 }}
@@ -91,8 +91,10 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
         {{- end }}
-        {{- with .Values.initContainers }}
-        {{- toYaml . | nindent 8 }}
+        {{- range $index, $entry := .Values.initContainers }}
+        {{- $container := omit $entry "repository" "tag" }}
+        {{- $_ := set $container "image" (include "nico.containerImage" (dict "container" $entry "path" (printf "%s.initContainers[%d]" $.Chart.Name $index))) }}
+        {{- toYaml (list $container) | nindent 8 }}
         {{- end }}
       {{- end }}
       containers:

@@ -138,3 +138,14 @@ tests:
           content:
             name: extra-volume
             mountPath: /extra
+
+  - it: should reject empty split and fallback images
+    set:
+      bootArtifactContainers:
+        - name: empty-image
+          repository: registry.example.com/boot-artifacts
+          tag: ""
+          image: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api.bootArtifactContainers[0] requires either non-empty repository and tag or a non-empty image"
