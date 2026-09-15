@@ -15,12 +15,10 @@
  * limitations under the License.
  */
 
-pub mod client;
-pub mod config;
-pub mod types;
+mod handler;
+mod http_mock;
+mod server;
 
-#[cfg(test)]
-mod test_support;
-
-pub use client::{FieldFilter, NvueClient};
-pub use config::NvueConfig;
+pub(crate) use handler::{ConfigRevisionHandler, NvueMockHandler, handler_fn, respond_once};
+pub(crate) use http_mock::{MockRequest, MockResponse};
+pub(crate) use server::MockNvueServer;
