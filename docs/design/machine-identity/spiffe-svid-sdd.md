@@ -414,7 +414,7 @@ trust_domain_allowlist = []           # JWT issuer trust domain (host from iss U
 token_endpoint_domain_allowlist = []    # token delegation token_endpoint URL host (http/https only)
 ```
 
-**DPU agent / IMDS (separate from site `[machine_identity]`):** Limits and optional HTTP sign-proxy for workload `GET …/meta-data/identity` are configured on the **DPU agent** (and mirrored to **standalone FMDS** via `FmdsConfigUpdate.machine_identity`). They do not live in the API server `site_config.toml`. See **§3.3.1**.
+**DPU agent / IMDS (separate from site `[machine_identity]`):** Limits and optional HTTP sign-proxy for workload `GET …/meta-data/identity` are configured on the **DPU agent** (and mirrored to **standalone FMDS** via `FmdsConfigUpdate.machine_identity`). They do not live in the API server `site_config.toml`. Refer to **§3.3.1**.
 
 **Global vs per-org:**
 Global config provides:
