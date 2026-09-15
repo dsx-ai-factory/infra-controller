@@ -30,7 +30,7 @@ A rule contains **steps**. Each step targets one component type and belongs to
 a numbered **stage**. Execution proceeds stage by stage in ascending order.
 Within a stage, all steps run in parallel.
 
-```
+```text
 Stage 1: [powershelf step]
 Stage 2: [nvswitch step]
 Stage 3: [compute step]        ← stages are sequential
@@ -715,21 +715,32 @@ a rule is applied to a task.
 Before any workflow starts, the task manager resolves the applicable rule for
 the operation and rack using this priority order:
 
-```
-1. Rack-specific association  (rack_rule_associations table for this rack)
-2. Global default rule        (is_default = true for this operation)
-3. Hardcoded fallback         (built into the binary)
+```text
+1. Explicit rule ID           (ruleId on the request)
+2. Rack-specific association  (rack_rule_associations table for this rack)
+3. Global default rule        (is_default = true for this operation)
+4. Hardcoded fallback         (built into the binary)
 ```
 
+Rule resolution does not widen the request target. For a component-scoped
+request, Flow runs only steps whose `component_type` occurs in the selected
+components; other steps remain `skipped` in the task report. The resolved rule
+must have at least one applicable step. If it has none, Flow returns
+`FAILED_PRECONDITION` and does not fall through to a lower-priority rule. This
+same check runs when a waiting task is promoted, using the component UUIDs and
+types persisted on the task, so promotion cannot expand the original scope.
+
 The resolved `RuleDefinition` is embedded in the `ExecutionInfo` passed to the
-parent workflow. The workflow never queries the database.
+parent workflow. The workflow never queries the database. Flow records the ID
+of a resolved database rule on the task as `applied_rule_id`; hardcoded fallback
+rules have no database ID.
 
 ### 2. Parent workflow — sequential stages
 
 `PowerControl` (or `FirmwareControl`) is the parent Temporal workflow. It does
 pure orchestration:
 
-```
+```text
 for each stage in ascending stage number:
     executeGenericStageParallel(stage.steps)   ← waits before advancing
 ```
@@ -750,7 +761,12 @@ Within a stage, each step spawns one `GenericComponentStepWorkflow` child
 workflow. All child workflows in the stage are launched simultaneously and the
 parent waits for all of them to finish before advancing.
 
-```
+A stage with no step applicable to the task target is recorded as `skipped` and
+launches no child workflow. As a defensive check, the parent workflow fails if
+the entire rule has no applicable step, even though the task manager normally
+rejects that condition before scheduling Temporal.
+
+```text
 Stage N:
   ┌─────────────────────────┐  ┌─────────────────────────┐
   │ child: powershelf step  │  │ child: nvswitch step   │  ← in parallel
@@ -758,7 +774,8 @@ Stage N:
            both must complete before Stage N+1 begins
 ```
 
-Steps whose component type is not present in the rack are silently skipped.
+Steps whose component type is not present in the task target are recorded as
+`skipped` and do not launch a child workflow.
 
 The child workflow's `WorkflowExecutionTimeout` is set to the step's `timeout`
 field (defaulting to 30 minutes if unset). This timeout covers the entire
@@ -768,7 +785,7 @@ pre + main + post sequence.
 
 `GenericComponentStepWorkflow` runs the three action phases in order:
 
-```
+```text
 pre_operation actions  (sequential)
        ↓
 main_operation action
@@ -812,7 +829,7 @@ polling loops — not as single activities. Each iteration calls
 `poll_interval` before trying again. The loop exits when the condition is
 satisfied or `timeout` is exceeded.
 
-```
+```text
 loop:
     call GetPowerStatus activity
     if condition met → return success
@@ -837,7 +854,7 @@ targets regardless of the step's own component type.
 
 ### Execution flow diagram
 
-```
+```text
 gRPC request
     │
     ▼

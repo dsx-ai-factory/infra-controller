@@ -27,6 +27,7 @@ import (
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	flowerrors "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/errors"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 )
 
@@ -301,20 +302,15 @@ func (m *ManagerImpl) SubmitTask(
 	return taskIDs, nil
 }
 
-// validateSubmissionRackTargets resolves the effective ingest rule for each
-// rack before deciding whether unlinked expected components are safe targets.
+// validateSubmissionRackTargets resolves the effective rule for each rack and
+// verifies both inventory safety and target applicability before task rows are
+// created. Promotion repeats both checks because a waiting task may observe a
+// different implicit rule when it becomes runnable.
 func (m *ManagerImpl) validateSubmissionRackTargets(
 	ctx context.Context,
 	op operation.Wrapper,
 	rackMap map[uuid.UUID]*rack.Rack,
 ) error {
-	if op.Type != taskcommon.TaskTypeBringUp || op.Code != taskcommon.OpCodeIngest {
-		if err := validateResolvedRackTargets(op, nil, rackMap); err != nil {
-			return fmt.Errorf("operation cannot be submitted: %w", err)
-		}
-		return nil
-	}
-
 	rackIDs := make([]uuid.UUID, 0, len(rackMap))
 	for rackID := range rackMap {
 		rackIDs = append(rackIDs, rackID)
@@ -328,16 +324,73 @@ func (m *ManagerImpl) validateSubmissionRackTargets(
 		if err != nil {
 			return err
 		}
+		if rule == nil {
+			return fmt.Errorf("resolver returned nil rule (should never happen)")
+		}
+
+		ruleDef := &rule.RuleDefinition
+		if op.Type != taskcommon.TaskTypeBringUp || op.Code != taskcommon.OpCodeIngest {
+			ruleDef = nil
+		}
 		if err := validateResolvedRackTargets(
 			op,
-			&rule.RuleDefinition,
+			ruleDef,
 			map[uuid.UUID]*rack.Rack{rackID: rackMap[rackID]},
 		); err != nil {
 			return fmt.Errorf("operation cannot be submitted: %w", err)
 		}
+		if err := validateRuleTargetApplicability(rule, rackMap[rackID]); err != nil {
+			return err
+		}
 	}
 
 	return nil
+}
+
+func validateRuleTargetApplicability(
+	rule *operationrules.OperationRule,
+	targetRack *rack.Rack,
+) error {
+	if rule == nil {
+		return fmt.Errorf("operation rule is nil")
+	}
+
+	targetTypes := make([]devicetypes.ComponentType, 0)
+	seen := make(map[devicetypes.ComponentType]struct{})
+	if targetRack != nil {
+		for _, component := range targetRack.Components {
+			if _, ok := seen[component.Type]; ok {
+				continue
+			}
+			seen[component.Type] = struct{}{}
+			targetTypes = append(targetTypes, component.Type)
+		}
+	}
+	slices.SortFunc(targetTypes, func(a, b devicetypes.ComponentType) int {
+		return strings.Compare(
+			devicetypes.ComponentTypeToString(a),
+			devicetypes.ComponentTypeToString(b),
+		)
+	})
+
+	if rule.RuleDefinition.HasApplicableStep(targetTypes) {
+		return nil
+	}
+
+	typeNames := make([]string, len(targetTypes))
+	for i, componentType := range targetTypes {
+		typeNames[i] = devicetypes.ComponentTypeToString(componentType)
+	}
+	ruleIdentity := fmt.Sprintf("%q", rule.Name)
+	if rule.ID != uuid.Nil {
+		ruleIdentity = fmt.Sprintf("%q (%s)", rule.Name, rule.ID)
+	}
+
+	return flowerrors.GRPCErrorPreconditionFailed(fmt.Sprintf(
+		"operation rule %s has no step applicable to targeted component types [%s]",
+		ruleIdentity,
+		strings.Join(typeNames, ", "),
+	))
 }
 
 // validateResolvedRackTargets enforces the boundary between expected
@@ -698,6 +751,7 @@ func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
 			Str("rack_id", task.RackID.String()).
 			Msg("Resolved operation rule for task")
 	} else {
+		task.AppliedRuleID = nil
 		log.Info().
 			Str("rule_name", rule.Name).
 			Str("operation_type", string(task.Operation.Type)).
@@ -706,7 +760,7 @@ func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
 			Msg("Using hardcoded default rule for task")
 	}
 
-	resp, err := m.executeTask(ctx, task, targetRack, &rule.RuleDefinition)
+	resp, err := m.executeTask(ctx, task, targetRack, rule)
 	if err != nil {
 		deferred, deferErr := m.deferUnlinkedTask(ctx, task, err, transactionActive)
 		if deferred {
@@ -728,6 +782,7 @@ func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
 	if err := m.taskStore.UpdateScheduledTask(ctx, task); err != nil {
 		log.Error().Err(err).
 			Msgf("failed to update scheduled task %s", task.ID)
+		return fmt.Errorf("failed to persist scheduled task %s: %w", task.ID, err)
 	}
 	return nil
 }
@@ -928,26 +983,32 @@ func (m *ManagerImpl) executeTask(
 	ctx context.Context,
 	task *taskdef.Task,
 	targetRack *rack.Rack,
-	ruleDef *operationrules.RuleDefinition,
+	rule *operationrules.OperationRule,
 ) (*taskdef.ExecutionResponse, error) {
 	if task == nil {
 		return nil, fmt.Errorf("task is nil")
 	}
+	if rule == nil {
+		return nil, fmt.Errorf("operation rule is nil")
+	}
 
 	err := validateResolvedRackTargets(
 		task.Operation,
-		ruleDef,
+		&rule.RuleDefinition,
 		map[uuid.UUID]*rack.Rack{task.RackID: targetRack},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("operation cannot be executed: %w", err)
+	}
+	if err := validateRuleTargetApplicability(rule, targetRack); err != nil {
+		return nil, err
 	}
 
 	req := taskdef.ExecutionRequest{
 		Info: taskdef.ExecutionInfo{
 			TaskID:         task.ID,
 			Components:     workflowComponentsFrom(targetRack),
-			RuleDefinition: ruleDef,
+			RuleDefinition: &rule.RuleDefinition,
 			OperationType:  task.Operation.Type,
 			OperationInfo:  task.Operation.Info, // already json.RawMessage from the DB
 		},

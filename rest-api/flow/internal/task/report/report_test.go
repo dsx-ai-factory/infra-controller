@@ -47,7 +47,7 @@ func TestNewInitial_mirrorsRuleAndMarksSkipped(t *testing.T) {
 
 	stage1 := rep.Stages[0]
 	assert.Equal(t, 1, stage1.Number)
-	assert.Equal(t, StatusPending, stage1.Status)
+	assert.Equal(t, StatusSkipped, stage1.Status)
 	require.Len(t, stage1.Steps, 1)
 	assert.Equal(t, "PowerShelf", stage1.Steps[0].ComponentType)
 	assert.Equal(t, StatusSkipped, stage1.Steps[0].Status,
@@ -77,7 +77,11 @@ func TestTracker_BeginStage_advancesPendingOnly(t *testing.T) {
 	totals := map[devicetypes.ComponentType]int{
 		devicetypes.ComponentTypeCompute: 2,
 	}
-	tr := &Tracker{Report: NewInitial(twoStageRule(), totals)}
+	ruleDef := &operationrules.RuleDefinition{Steps: []operationrules.SequenceStep{
+		{ComponentType: devicetypes.ComponentTypePowerShelf, Stage: 1},
+		{ComponentType: devicetypes.ComponentTypeCompute, Stage: 1},
+	}}
+	tr := &Tracker{Report: NewInitial(ruleDef, totals)}
 	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 
 	tr.BeginStage(1, now)
@@ -88,6 +92,7 @@ func TestTracker_BeginStage_advancesPendingOnly(t *testing.T) {
 	// so it must remain skipped after BeginStage.
 	assert.Equal(t, StatusSkipped, stage1.Steps[0].Status)
 	assert.Empty(t, stage1.Steps[0].StartedAt)
+	assert.Equal(t, StatusRunning, stage1.Steps[1].Status)
 
 	// BeginStage on a stage that is already running is a no-op so a
 	// retried Temporal activity does not rewrite timestamps.
@@ -187,7 +192,7 @@ func TestTracker_skippedStepsAreNotMutated(t *testing.T) {
 	tr.CompleteStage(1, now.Add(time.Second))
 
 	stage1 := tr.Report.Stages[0]
-	assert.Equal(t, StatusCompleted, stage1.Status)
+	assert.Equal(t, StatusSkipped, stage1.Status)
 	assert.Equal(t, StatusSkipped, stage1.Steps[0].Status)
 	assert.Empty(t, stage1.Steps[0].StartedAt)
 	assert.Empty(t, stage1.Steps[0].FinishedAt)

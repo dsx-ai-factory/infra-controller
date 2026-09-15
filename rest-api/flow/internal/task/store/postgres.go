@@ -211,7 +211,7 @@ func (s *PostgresStore) ListNonTerminalTasksForRacks(
 	return results, nil
 }
 
-// UpdateScheduledTask updates task scheduling information.
+// UpdateScheduledTask atomically updates scheduling information and the applied rule ID.
 func (s *PostgresStore) UpdateScheduledTask(
 	ctx context.Context,
 	task *taskdef.Task,

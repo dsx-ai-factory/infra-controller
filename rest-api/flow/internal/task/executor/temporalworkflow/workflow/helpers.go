@@ -335,6 +335,9 @@ func executeGenericStageParallel(
 			componentType: step.ComponentType,
 		})
 	}
+	if len(futures) == 0 {
+		return fmt.Errorf("stage has no step applicable to targeted component types")
+	}
 
 	// Wait for all child workflows and attribute any error to the correct type.
 	for _, entry := range futures {
@@ -391,6 +394,17 @@ func executeRuleBasedOperation(
 	if len(ruleDef.Steps) == 0 {
 		return nil, fmt.Errorf("rule definition has no steps")
 	}
+	targetTypes := make([]devicetypes.ComponentType, 0, len(typeToTargets))
+	for componentType, target := range typeToTargets {
+		if len(target.ComponentIDs) > 0 {
+			targetTypes = append(targetTypes, componentType)
+		}
+	}
+	if !ruleDef.HasApplicableStep(targetTypes) {
+		return nil, fmt.Errorf(
+			"rule definition has no step applicable to targeted component types",
+		)
+	}
 
 	// The report mirrors the rule's stage layout up front: every stage
 	// and every SequenceStep has a slot from the moment NewInitial
@@ -407,6 +421,21 @@ func executeRuleBasedOperation(
 
 	iter := operationrules.NewStageIterator(ruleDef)
 	for stage := iter.Next(); stage != nil; stage = iter.Next() {
+		stageApplicable := false
+		for _, step := range stage.Steps {
+			target, ok := typeToTargets[step.ComponentType]
+			if ok && len(target.ComponentIDs) > 0 {
+				stageApplicable = true
+				break
+			}
+		}
+		if !stageApplicable {
+			log.Info().
+				Int("stage", stage.Number).
+				Msg("Skipping stage, no applicable component steps")
+			continue
+		}
+
 		tracker.BeginStage(stage.Number, workflow.Now(ctx))
 		updateTaskReportBestEffort(ctx, taskID, tracker.Report)
 

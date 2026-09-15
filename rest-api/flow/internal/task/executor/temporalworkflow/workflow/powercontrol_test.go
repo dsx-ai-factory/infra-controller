@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
 	temporalworkflow "go.temporal.io/sdk/workflow"
@@ -162,6 +163,98 @@ func createDefaultPowerRuleDef(op operations.PowerOperation) *operationrules.Rul
 			Version: "v1",
 			Steps:   []operationrules.SequenceStep{},
 		}
+	}
+}
+
+func TestPowerControlWorkflow_ComponentScopedRuleApplicability(t *testing.T) {
+	tests := []struct {
+		name          string
+		ruleDef       *operationrules.RuleDefinition
+		components    []taskdef.WorkflowComponent
+		wantError     string
+		wantPowerCall bool
+	}{
+		{
+			name: "rejects an NVSwitch-only rule for a Compute target",
+			ruleDef: &operationrules.RuleDefinition{Steps: []operationrules.SequenceStep{{
+				ComponentType: devicetypes.ComponentTypeNVSwitch,
+				Stage:         1,
+				MainOperation: operationrules.ActionConfig{Name: operationrules.ActionPowerControl},
+			}}},
+			wantError: "no step applicable to targeted component types",
+		},
+		{
+			name: "runs only the applicable part of a full-rack rule",
+			ruleDef: &operationrules.RuleDefinition{Steps: []operationrules.SequenceStep{
+				{
+					ComponentType: devicetypes.ComponentTypePowerShelf,
+					Stage:         1,
+					MainOperation: operationrules.ActionConfig{Name: operationrules.ActionPowerControl},
+				},
+				{
+					ComponentType: devicetypes.ComponentTypeCompute,
+					Stage:         2,
+					MainOperation: operationrules.ActionConfig{Name: operationrules.ActionPowerControl},
+				},
+			}},
+			wantPowerCall: true,
+		},
+		{
+			name: "runs the overlap for mixed component targets",
+			ruleDef: &operationrules.RuleDefinition{Steps: []operationrules.SequenceStep{{
+				ComponentType: devicetypes.ComponentTypeCompute,
+				Stage:         1,
+				MainOperation: operationrules.ActionConfig{Name: operationrules.ActionPowerControl},
+			}}},
+			components: []taskdef.WorkflowComponent{
+				{Type: devicetypes.ComponentTypeCompute, ComponentID: "compute-1"},
+				{Type: devicetypes.ComponentTypeNVSwitch, ComponentID: "switch-1"},
+			},
+			wantPowerCall: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+			registerTaskUpdateActivities(env)
+			env.RegisterActivityWithOptions(mockPowerControl,
+				activity.RegisterOptions{Name: taskactivity.NamePowerControl})
+			env.RegisterWorkflowWithOptions(
+				genericComponentStepWorkflow,
+				temporalworkflow.RegisterOptions{Name: nameGenericComponentStepWorkflow},
+			)
+			expectTaskUpdateActivities(env)
+			env.OnActivity(
+				mockPowerControl,
+				mock.Anything,
+				mock.Anything,
+				mock.Anything,
+			).Return(nil)
+			components := test.components
+			if components == nil {
+				components = []taskdef.WorkflowComponent{{
+					Type:        devicetypes.ComponentTypeCompute,
+					ComponentID: "compute-1",
+				}}
+			}
+			env.ExecuteWorkflow(powerControl, taskdef.ExecutionInfo{
+				TaskID:         uuid.New(),
+				Components:     components,
+				RuleDefinition: test.ruleDef,
+			}, &operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn})
+
+			err := env.GetWorkflowError()
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				env.AssertNotCalled(t, taskactivity.NamePowerControl, mock.Anything, mock.Anything, mock.Anything)
+				return
+			}
+			require.NoError(t, err)
+			if test.wantPowerCall {
+				env.AssertNumberOfCalls(t, taskactivity.NamePowerControl, 1)
+			}
+		})
 	}
 }
 
