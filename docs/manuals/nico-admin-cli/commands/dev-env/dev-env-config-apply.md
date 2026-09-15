@@ -25,12 +25,12 @@ VPC prefix, tenant network segment, or HostInband segment?
 
 *Possible values:*
 
-- network-segment
-
-- vpc-prefix
-
-- host-inband-segment: Flat VPC plus HostInband segment for hosts with
-  no DPU
+> - network-segment
+>
+> - vpc-prefix
+>
+> - host-inband-segment: Flat VPC plus HostInband segment for hosts with
+>   no DPU
 
 `--extended`
 
@@ -46,9 +46,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

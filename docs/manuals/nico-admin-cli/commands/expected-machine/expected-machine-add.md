@@ -104,9 +104,9 @@ first explored. `true` pauses ingestion and automatic power-on;
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--dpf-enabled <DPF_ENABLED>`
 
@@ -114,9 +114,9 @@ Whether DPF is enabled for this machine. Defaults to true.
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--extended`
 
@@ -138,9 +138,9 @@ factory-default credentials in Vault as-is
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--dpu-policy <DPU_POLICY>`
 
@@ -154,11 +154,11 @@ previous `use-as-nic` value remains accepted as an alias. The legacy
 
 *Possible values:*
 
-- manage
-
-- nic
-
-- ignore
+> - manage
+>
+> - nic
+>
+> - ignore
 
 `--bmc-ip-allocation <BMC_IP_ALLOCATION>`
 
@@ -172,15 +172,15 @@ record. Unset defers to the server default (`auto`).
 
 *Possible values:*
 
-- unspecified
-
-- auto
-
-- dynamic
-
-- fixed
-
-- retained
+> - unspecified
+>
+> - auto
+>
+> - dynamic
+>
+> - fixed
+>
+> - retained
 
 `--disable-lockdown <DISABLE_LOCKDOWN>`
 
@@ -190,9 +190,9 @@ behavior of locking down the server after configuring the BIOS.
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
@@ -200,9 +200,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

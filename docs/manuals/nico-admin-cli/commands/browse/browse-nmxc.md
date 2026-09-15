@@ -40,17 +40,17 @@ NMX-C browse operation to run
 
 *Possible values:*
 
-- compute-node-info-list
-
-- switch-node-info-list
-
-- gpu-info
-
-- gpu-info-list
-
-- partition-info-list
-
-- get-domain-properties
+> - compute-node-info-list
+>
+> - switch-node-info-list
+>
+> - gpu-info
+>
+> - gpu-info-list
+>
+> - partition-info-list
+>
+> - get-domain-properties
 
 `--gpu-uid <GPU_UID> [default: 0]`
 
@@ -70,9 +70,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

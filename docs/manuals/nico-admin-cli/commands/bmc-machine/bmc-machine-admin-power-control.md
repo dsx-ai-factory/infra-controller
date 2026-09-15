@@ -30,17 +30,17 @@ Power control action
 
 *Possible values:*
 
-- on
-
-- graceful-shutdown
-
-- force-off
-
-- graceful-restart
-
-- force-restart
-
-- ac-powercycle
+> - on
+>
+> - graceful-shutdown
+>
+> - force-off
+>
+> - graceful-restart
+>
+> - force-restart
+>
+> - ac-powercycle
 
 `--extended`
 
@@ -56,9 +56,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

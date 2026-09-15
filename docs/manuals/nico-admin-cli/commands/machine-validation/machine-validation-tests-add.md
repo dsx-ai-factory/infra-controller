@@ -51,9 +51,9 @@ Run command using chroot in case of container
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--container-arg <CONTAINER_ARG>`
 
@@ -109,9 +109,9 @@ Enable the test
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--read-only <READ_ONLY>`
 
@@ -119,9 +119,9 @@ Is read-only
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
@@ -129,9 +129,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

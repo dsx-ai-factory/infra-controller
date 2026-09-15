@@ -44,9 +44,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 
@@ -62,9 +62,9 @@ Whether to set `oneshot` or `persist`.
 
 *Possible values:*
 
-- oneshot
-
-- persist
+> - oneshot
+>
+> - persist
 
 ## Examples
 

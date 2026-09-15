@@ -11,9 +11,10 @@ firmware on power shelves
 
 ```text
 nico-admin-cli component-manager update-firmware power-shelf
-<--power-shelf-id> <--target-version> [--force-update]
-[--component] [--bypass-state-controller] [--extended]
-[--sort-by] [-h|--help]
+[--power-shelf-id] [--mac-address] <--target-version>
+[--force-update] [--component]
+[--bypass-state-controller] [--extended] [--sort-by]
+[-h|--help]
 ```
 
 ## DESCRIPTION
@@ -25,6 +26,11 @@ Queue firmware on power shelves
 `--power-shelf-id <POWER_SHELF_IDS>...`
 
 Power shelf IDs to target
+
+`--mac-address <MAC_ADDRESSES>...`
+
+Device MAC addresses to target (BMC MAC for compute/switch, PMC MAC for
+power shelf)
 
 `--target-version <TARGET_VERSION>`
 
@@ -41,9 +47,9 @@ components
 
 *Possible values:*
 
-- pmc
-
-- psu
+> - pmc
+>
+> - psu
 
 `--bypass-state-controller`
 
@@ -64,9 +70,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

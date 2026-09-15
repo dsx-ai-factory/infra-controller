@@ -32,27 +32,27 @@ Predefined Template name
 
 *Possible values:*
 
-- host-update
-
-- internal-maintenance
-
-- out-for-repair
-
-- degraded
-
-- validation
-
-- suppress-external-alerting
-
-- mark-healthy
-
-- stop-reboot-for-automatic-recovery-from-state-machine
-
-- tenant-reported-issue
-
-- request-online-repair
-
-- request-repair
+> - host-update
+>
+> - internal-maintenance
+>
+> - out-for-repair
+>
+> - degraded
+>
+> - validation
+>
+> - suppress-external-alerting
+>
+> - mark-healthy
+>
+> - stop-reboot-for-automatic-recovery-from-state-machine
+>
+> - tenant-reported-issue
+>
+> - request-online-repair
+>
+> - request-repair
 
 `--message <MESSAGE>`
 
@@ -80,9 +80,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

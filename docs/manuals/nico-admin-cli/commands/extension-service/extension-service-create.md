@@ -10,11 +10,11 @@ nico-admin-cli-extension-service-create - Create an extension service
 
 ```text
 nico-admin-cli extension-service create [-i|--id]
-<-n|--name> <-t|--type> [--description]
-[--tenant-organization-id] <-d|--data>
-[--registry-url] [--username] [--password]
-[--observability] [--extended] [--sort-by]
-[-h|--help]
+<-n|--name> <-t|--type> [--dpu-target]
+[--description] [--tenant-organization-id]
+<-d|--data> [--registry-url] [--username]
+[--password] [--observability] [--extended]
+[--sort-by] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -37,7 +37,23 @@ Extension service type
 
 *Possible values:*
 
-- kubernetes-pod
+> - kubernetes-pod
+>
+> - dpf-helm-chart
+
+`--dpu-target <DPU_TARGET>`
+
+Immutable Helm placement policy: primary = primary DPU, all-active =
+DPUs used by instance networking, all = all attached DPUs. Required for
+dpf-helm-chart and unsupported for kubernetes-pod
+
+*Possible values:*
+
+> - primary
+>
+> - all-active
+>
+> - all
 
 `--description <DESCRIPTION>`
 
@@ -82,9 +98,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 
@@ -94,6 +110,7 @@ Print help (see a summary with -h)
 
 ```sh
 nico-admin-cli extension-service create --name my-service --type kubernetes-pod --data '{"image":"my-registry/my-service:1.0"}'
+nico-admin-cli extension-service create --name my-helm-service --type dpf-helm-chart --dpu-target all-active --data '{"repoURL":"oci://registry.example.com/charts","chartName":"my-service","chartVersion":"1.2.3","security.privileged":false}'
 nico-admin-cli extension-service create --id 12345678-1234-5678-90ab-cdef01234567 --name my-service --type kubernetes-pod --data '{"image":"my-registry/my-service:1.0"}' --description "Front-end telemetry agent"
 nico-admin-cli extension-service create --name my-service --type kubernetes-pod --data '{"image":"my-registry/my-service:1.0"}' --tenant-organization-id fds34511233a
 nico-admin-cli extension-service create --name my-service --type kubernetes-pod --data '{"image":"my-registry/my-service:1.0"}' --registry-url my-registry.example.com --username admin --password mypassword

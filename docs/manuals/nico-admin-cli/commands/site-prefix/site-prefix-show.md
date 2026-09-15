@@ -32,9 +32,9 @@ Filter by management authority
 
 *Possible values:*
 
-- operator-managed
-
-- tenant-managed
+> - operator-managed
+>
+> - tenant-managed
 
 `--routing-scope <ROUTING_SCOPE>`
 
@@ -42,7 +42,7 @@ Filter by routing scope
 
 *Possible values:*
 
-- datacenter-only
+> - datacenter-only
 
 `--lifecycle-state <LIFECYCLE_STATE>`
 
@@ -50,13 +50,13 @@ Filter by lifecycle state
 
 *Possible values:*
 
-- provisioning
-
-- ready
-
-- deleting
-
-- error
+> - provisioning
+>
+> - ready
+>
+> - deleting
+>
+> - error
 
 `--prefix <CIDR>`
 
@@ -84,9 +84,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

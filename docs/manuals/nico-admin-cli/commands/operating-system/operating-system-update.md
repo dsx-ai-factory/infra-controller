@@ -38,9 +38,9 @@ Set whether this OS definition is active.
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--allow-override <ALLOW_OVERRIDE>`
 
@@ -50,9 +50,9 @@ raw iPXE script; does not affect templated definitions or user data.
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--phone-home-enabled <PHONE_HOME_ENABLED>`
 
@@ -65,9 +65,9 @@ YAML; callers using Core directly must arrange the callback. See
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--user-data <USER_DATA>`
 
@@ -100,9 +100,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

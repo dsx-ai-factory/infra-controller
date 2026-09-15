@@ -2,7 +2,7 @@
 
 VPCs, peerings, prefixes, network segments and devices, security groups, IB/NVLink fabric partitions, IP/domain lookups, and resource pools.
 
-For global flags, setup, and task-oriented documentation, refer to [the CLI reference index](./README.md).
+For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admin-cli.md). Browse all command groups in the [CLI reference index](./README.md).
 
 | Command | Description |
 |---|---|

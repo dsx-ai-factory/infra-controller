@@ -271,9 +271,9 @@ whenever you change a command's help, examples, structure, or domain:
 cargo make gen-cli-docs   # regenerate docs/manuals/nico-admin-cli (needs the pandoc binary)
 ```
 
-CI runs `cargo make check-cli-docs`, which runs the two domain tests, then
-regenerates and fails on any `git diff` in `docs/manuals/nico-admin-cli` —
-so a forgotten regeneration (or an uncategorized command) is caught there.
+Run `cargo make check-cli-docs` locally to check the command tree and domain
+mapping, regenerate the reference, and fail on any `git diff` in
+`docs/manuals/nico-admin-cli`. The CI workflows do not currently invoke this task.
 
 ## Error messages
 

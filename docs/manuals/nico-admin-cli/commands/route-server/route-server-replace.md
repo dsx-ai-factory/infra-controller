@@ -21,13 +21,14 @@ Replace all route server addresses
 
 `--source-type <SOURCE_TYPE> [default: admin_api]`
 
-The source_type to use for the target addresses. Defaults to admin_api.
+The source_type to use for the target addresses. Defaults to
+admin_api.
 
 *Possible values:*
 
-- admin_api
-
-- config_file
+> - admin_api
+>
+> - config_file
 
 `--extended`
 
@@ -43,9 +44,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

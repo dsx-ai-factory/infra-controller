@@ -199,8 +199,8 @@ fn render_domain_index(domain: CliDomain, rows: &[&(String, String, CliDomain)])
     let _ = writeln!(s, "{}\n", intro(domain));
     let _ = writeln!(
         s,
-        "For global flags, setup, and task-oriented documentation, refer to \
-         [the CLI reference index](./README.md).\n"
+        "For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admin-cli.md). \
+         Browse all command groups in the [CLI reference index](./README.md).\n"
     );
     let _ = writeln!(s, "| Command | Description |");
     let _ = writeln!(s, "|---|---|");
@@ -445,6 +445,8 @@ fn man_to_markdown(man_file: &Path) -> CarbideCliResult<String> {
     pandoc.add_input(man_file);
     pandoc.set_input_format(pandoc::InputFormat::Other("man".to_string()), Vec::new());
     pandoc.set_output_format(pandoc::OutputFormat::Other("gfm".to_string()), Vec::new());
+    // Keep list spacing consistent across Pandoc versions and with Markdown lint.
+    pandoc.add_option(pandoc::PandocOption::TabStop(2));
     pandoc.add_option(pandoc::PandocOption::ShiftHeadingLevelBy(1));
     pandoc.set_output(pandoc::OutputKind::Pipe);
 

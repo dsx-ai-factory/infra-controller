@@ -226,6 +226,8 @@ navigation:
           contents:
             - page: VPC Routing Profiles
               path: manuals/vpc/vpc_routing_profiles.md
+            - page: Changing a VPC Routing Profile
+              path: manuals/vpc/changing_vpc_routing_profiles.md
             - page: VPC Peering
               path: manuals/vpc/vpc_peering_management.md
             - page: VPC Network Virtualization

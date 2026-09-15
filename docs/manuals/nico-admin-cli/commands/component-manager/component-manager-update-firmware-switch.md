@@ -56,13 +56,13 @@ components
 
 *Possible values:*
 
-- bmc
-
-- cpld
-
-- bios
-
-- nvos
+> - bmc
+>
+> - cpld
+>
+> - bios
+>
+> - nvos
 
 `--bypass-state-controller`
 
@@ -83,9 +83,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

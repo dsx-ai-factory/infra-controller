@@ -29,17 +29,17 @@ Power control action to apply to the targeted components
 
 *Possible values:*
 
-- on
-
-- graceful-shutdown
-
-- force-off
-
-- graceful-restart
-
-- force-restart
-
-- ac-powercycle
+> - on
+>
+> - graceful-shutdown
+>
+> - force-off
+>
+> - graceful-restart
+>
+> - force-restart
+>
+> - ac-powercycle
 
 `--bypass-state-controller`
 
@@ -60,9 +60,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 
@@ -76,6 +76,7 @@ nico-admin-cli component-manager component-power-control switch --mac-address 00
 nico-admin-cli component-manager component-power-control compute-tray --machine-id 12345678-1234-5678-90ab-cdef01234567 --action force-off
 nico-admin-cli component-manager component-power-control compute-tray --mac-address 00:11:22:33:44:55 --action force-off
 nico-admin-cli component-manager component-power-control power-shelf --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --action ac-powercycle
+nico-admin-cli component-manager component-power-control power-shelf --mac-address 00:11:22:33:44:55 --action ac-powercycle
 ```
 
 ## Subcommands

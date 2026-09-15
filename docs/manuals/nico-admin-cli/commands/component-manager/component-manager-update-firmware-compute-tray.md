@@ -56,9 +56,9 @@ components
 
 *Possible values:*
 
-- bmc
-
-- bios
+> - bmc
+>
+> - bios
 
 `--bypass-state-controller`
 
@@ -79,9 +79,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

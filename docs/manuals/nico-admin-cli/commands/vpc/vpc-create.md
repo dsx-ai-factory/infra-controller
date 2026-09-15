@@ -43,26 +43,26 @@ Network virtualization type
 
 *Possible values:*
 
-- ethernet-virtualizer
-
-- ethernet-virtualizer-with-nvue: 1 was previously
-  FORGE_NATIVE_NETWORKING ETHERNET_VIRTUALIZER_WITH_NVUE is deprecated.
-  NVUE is now implied; just use ETHERNET_VIRTUALIZER
-
-- fnn-classic: Deprecated: FN_CLASSIC and FNN_L3 are deprecated now. Use
-  FNN only
-
-- fnn-l3
-
-- fnn
-
-- flat: FLAT is for VPCs whose tenant instances live directly on the
-  underlay (zero-DPU hosts, or hosts with their DPU in NIC mode). Their
-  interfaces are bound to `HostInband` network segments rather than a
-  Carbide-managed overlay. Flat VPCs are still real tenant VPCs with a
-  VNI and NSGs, but Carbide doesnt drive their data plane -- routing and
-  ACL enforcement between Flat VPCs and other VPCs is the network
-  operators responsibility
+> - ethernet-virtualizer
+>
+> - ethernet-virtualizer-with-nvue: 1 was previously
+>   FORGE_NATIVE_NETWORKING ETHERNET_VIRTUALIZER_WITH_NVUE is
+>   deprecated. NVUE is now implied; just use ETHERNET_VIRTUALIZER
+>
+> - fnn-classic: Deprecated: FN_CLASSIC and FNN_L3 are deprecated now.
+>   Use FNN only
+>
+> - fnn-l3
+>
+> - fnn
+>
+> - flat: FLAT is for VPCs whose tenant instances live directly on the
+>   underlay (zero-DPU hosts, or hosts with their DPU in NIC mode).
+>   Their interfaces are bound to `HostInband` network segments rather
+>   than a Carbide-managed overlay. Flat VPCs are still real tenant VPCs
+>   with a VNI and NSGs, but Carbide doesnt drive their data plane --
+>   routing and ACL enforcement between Flat VPCs and other VPCs is the
+>   network operators responsibility
 
 `--slaac-enabled <SLAAC_ENABLED>`
 
@@ -74,9 +74,9 @@ setting cannot be changed after creation
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--extended`
 
@@ -92,9 +92,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

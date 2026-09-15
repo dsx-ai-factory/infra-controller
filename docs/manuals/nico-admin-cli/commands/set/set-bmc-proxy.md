@@ -27,9 +27,9 @@ integration environments. This setting is independent of static
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--proxy <PROXY>`
 
@@ -49,9 +49,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 
