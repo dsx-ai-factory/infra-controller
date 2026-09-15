@@ -277,17 +277,27 @@ pub(super) async fn handle_deconfiguring_host(
                         "failed to read UEFI password job {job_id}: {error}"
                     ))
                 })?;
-            if !matches!(job_state, JobState::Scheduled) {
-                return Ok(StateHandlerOutcome::wait(format!(
-                    "waiting for UEFI password job {job_id} to be scheduled; current state: {job_state:?}"
-                )));
-            }
+            let next = match job_state {
+                // A scheduled config job only runs once the host reboots.
+                JobState::Scheduled => DeconfiguringHostState::RebootAfterUefiPassword {
+                    job_id: job_id.clone(),
+                },
+                // iDRAC runs the SCP-import fallback immediately, power
+                // cycling the host itself, so that job never reports
+                // Scheduled and there is nothing for a reboot to trigger.
+                JobState::Completed => DeconfiguringHostState::WaitForUefiPasswordJobCompletion {
+                    job_id: job_id.clone(),
+                },
+                _ => {
+                    return Ok(StateHandlerOutcome::wait(format!(
+                        "waiting for UEFI password job {job_id} to be scheduled; current state: {job_state:?}"
+                    )));
+                }
+            };
             Ok(StateHandlerOutcome::transition(
                 ManagedHostState::Decommissioning {
                     decommissioning_state: DecommissioningState::DeconfiguringHost {
-                        deconfiguring_state: DeconfiguringHostState::RebootAfterUefiPassword {
-                            job_id: job_id.clone(),
-                        },
+                        deconfiguring_state: next,
                     },
                 },
             ))

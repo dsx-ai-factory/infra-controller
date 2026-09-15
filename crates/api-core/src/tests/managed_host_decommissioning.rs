@@ -15,11 +15,75 @@
  * limitations under the License.
  */
 
+use model::machine::{DecommissioningState, DeconfiguringHostState, ManagedHostState};
 use rpc::forge::DecommissionManagedHostRequest;
 use rpc::forge::forge_server::Forge;
 use tonic::{Code, Request};
 
-use crate::tests::common::api_fixtures::{create_managed_host, create_test_env};
+use crate::tests::common::api_fixtures::{
+    TestEnv, TestManagedHost, create_managed_host, create_test_env,
+};
+
+/// Run one controller iteration out of `WaitForUefiPasswordJobScheduled` with
+/// the BMC reporting `job_state`, and return the substate it lands in.
+async fn advance_uefi_password_job_wait(
+    env: &TestEnv,
+    mh: &TestManagedHost,
+    job_state: libredfish::JobState,
+) -> DeconfiguringHostState {
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    db::machine::advance(
+        &host,
+        &mut txn,
+        &ManagedHostState::Decommissioning {
+            decommissioning_state: DecommissioningState::DeconfiguringHost {
+                deconfiguring_state: DeconfiguringHostState::WaitForUefiPasswordJobScheduled {
+                    job_id: "JID_893866234996".to_string(),
+                },
+            },
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    env.redfish_sim.set_job_state_sequence(vec![job_state]);
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    let state = host.current_state().clone();
+    txn.commit().await.unwrap();
+    match state {
+        ManagedHostState::Decommissioning {
+            decommissioning_state:
+                DecommissioningState::DeconfiguringHost {
+                    deconfiguring_state,
+                },
+        } => deconfiguring_state,
+        other => panic!("left DeconfiguringHost unexpectedly: {other:?}"),
+    }
+}
+
+#[crate::sqlx_test]
+async fn uefi_password_job_advances_without_a_scheduled_phase(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+
+    // iDRAC runs the SCP-import fallback immediately, so the job reports
+    // Completed without ever being Scheduled and needs no reboot to run.
+    assert!(matches!(
+        advance_uefi_password_job_wait(&env, &mh, libredfish::JobState::Completed).await,
+        DeconfiguringHostState::WaitForUefiPasswordJobCompletion { .. }
+    ));
+    // A genuinely scheduled job still gets its reboot.
+    assert!(matches!(
+        advance_uefi_password_job_wait(&env, &mh, libredfish::JobState::Scheduled).await,
+        DeconfiguringHostState::RebootAfterUefiPassword { .. }
+    ));
+}
 
 #[crate::sqlx_test]
 async fn decommission_requires_redfish_bfb_install_support(pool: sqlx::PgPool) {
