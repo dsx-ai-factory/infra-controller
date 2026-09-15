@@ -47,8 +47,14 @@ the BMC procedure below to reconcile the device state.
 ## Reconcile the BMC Directly
 
 When NICo cannot clear the password from its recorded state, use the Redfish
-command with the password configured on the BMC. Obtain BMC
-and UEFI credentials from your approved credential store.
+command with the password configured on the BMC. Obtain BMC and UEFI
+credentials from your approved credential store. Read the current UEFI
+password into a shell variable without recording it in shell history:
+
+```bash
+read -r -s -p 'Current UEFI password: ' CURRENT_UEFI_PASSWORD
+printf '\n'
+```
 
 ```bash
 nico-admin-cli redfish \
@@ -56,8 +62,9 @@ nico-admin-cli redfish \
   --username <bmc-username> \
   --password <bmc-password> \
   change-uefi-password \
-  --current-password <current-uefi-password> \
+  --current-password "${CURRENT_UEFI_PASSWORD}" \
   --new-password ''
+unset CURRENT_UEFI_PASSWORD
 ```
 
 After the BMC accepts the clear operation, allow the NICo state controller to

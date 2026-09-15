@@ -70,16 +70,29 @@ settings and confirm the maintenance window before continuing.
 
    Continue only when the command returns `Off`.
 
-1. Invoke the Lenovo CMOS-clear action. Replace `<uefi-password>` with the
-   existing UEFI administrator password:
+1. Read the existing UEFI administrator password into a shell variable without
+   recording it in shell history:
 
    ```bash
-   curl --fail --silent --show-error --insecure \
-     --user "${BMC_USER}:${BMC_PASS}" \
-     --header 'Content-Type: application/json' \
-     --data '{"UefiAdminPassword":"<uefi-password>"}' \
-     --request POST \
-     "https://${BMC_IP}/redfish/v1/Systems/1/Actions/Oem/LenovoComputerSystem.RemoteClearCMOS"
+   read -r -s -p 'UEFI administrator password: ' UEFI_PASSWORD
+   printf '\n'
+   ```
+
+1. Invoke the Lenovo CMOS-clear action. Generate the request body with `jq` so
+   that quotes, backslashes, and other characters in the password are encoded
+   correctly:
+
+   ```bash
+   set -o pipefail
+   printf '%s' "${UEFI_PASSWORD}" \
+     | jq -Rs '{UefiAdminPassword: .}' \
+     | curl --fail --silent --show-error --insecure \
+       --user "${BMC_USER}:${BMC_PASS}" \
+       --header 'Content-Type: application/json' \
+       --data-binary @- \
+       --request POST \
+       "https://${BMC_IP}/redfish/v1/Systems/1/Actions/Oem/LenovoComputerSystem.RemoteClearCMOS"
+   unset UEFI_PASSWORD
    ```
 
 1. Power the server on:

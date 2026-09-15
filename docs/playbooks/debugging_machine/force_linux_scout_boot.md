@@ -3,66 +3,44 @@
 Use this playbook when you need the Linux Scout environment for managed-host
 diagnostics and the normal NICo boot workflow does not select it.
 
+<Warning>
+
+Rebooting interrupts the tenant workload. Confirm the maintenance window before
+continuing.
+
+</Warning>
+
 ## Prerequisites
 
-- Access to the managed host's serial or remote console.
-- The static PXE URL that the managed host can reach.
-- The managed host CPU architecture: x86-64 or Arm.
+- Access to `nico-admin-cli` for the site.
+- The ID of the instance assigned to the managed host.
 
-## Open the iPXE Debug Shell
+## Request a Linux Scout Boot
 
-1. Boot the managed host from its BlueField DPU network interface.
-1. When NICo briefly displays `Press p key to override boot procedure`, press
-   <kbd>p</kbd> several times.
-1. Select **iPXE Debug Shell** from the menu:
+Request an instance reboot through the custom PXE flow:
 
-   ```text
-                                   NICo
+```bash
+nico-admin-cli instance reboot \
+  --instance <instance-id> \
+  --custom-pxe
+```
 
-   Boot according to NICo workflow
-   Print information about this machine
-   Boot to local drive
-   Retry boot
-   iPXE Debug Shell
-   Reboot System
+NICo selects the appropriate Linux Scout boot instructions for the managed
+host. For an instance in `Assigned/Ready`, the state machine first verifies the
+boot order and then advances through `Assigned/BootingWithDiscoveryImage`.
+
+## Verify the Boot
+
+1. Confirm that the command reports that the reboot was requested.
+1. Inspect the instance state:
+
+   ```bash
+   nico-admin-cli instance show <instance-id>
    ```
 
-## Configure the Network
+1. Confirm that the managed-host console boots Linux Scout.
 
-At the `nico>` prompt, request an address through DHCP:
-
-```text
-nico> dhcp
-```
-
-A successful request configures the DPU network interface and returns to the
-prompt:
-
-```text
-Type "exit" to return to menu
-nico> dhcp
-Configuring (net0 xx:xx:xx:xx:xx:xx)....... ok
-nico>
-```
-
-## Boot Linux Scout
-
-Replace `<static-pxe-url>` with the static PXE endpoint that is reachable from
-the managed host. The standard site-local endpoint is described in
-[IP and Network Configuration](../../provisioning/ip-and-network-configuration.md).
-
-For an x86-64 managed host, run:
-
-```text
-nico> chain <static-pxe-url>/public/blobs/internal/x86_64/scout.efi console=tty0 console=ttyS1,115200 pci=realloc=off iommu=off cli_cmd=auto-detect
-```
-
-For an Arm managed host, including an NVIDIA GB200 or GB300 system, run:
-
-```text
-nico> chain <static-pxe-url>/public/blobs/internal/aarch64/scout.efi console=tty0 console=ttyAMA0,115200 pci=realloc=off iommu=off cli_cmd=auto-detect
-```
-
-The managed host boots into Linux Scout. If it does not, verify that DHCP
-completed, the static PXE endpoint is reachable, and the selected artifact
-matches the CPU architecture.
+If the host does not boot Linux Scout, inspect the instance state and managed
+host history for boot-order, BMC connectivity, or reboot failures. For general
+state inspection, refer to
+[State Machine Debugging](../stuck_objects/state_machine_debugging.md).
