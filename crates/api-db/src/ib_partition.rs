@@ -26,7 +26,8 @@ use sqlx::{FromRow, PgConnection};
 
 use crate::db_read::DbReader;
 use crate::{
-    ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
+    ColumnInfo, ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult,
+    FilterableQueryBuilder, ObjectColumnFilter,
 };
 
 #[derive(Copy, Clone)]
@@ -189,15 +190,20 @@ pub async fn find_pkey_by_partition_id(
         })
 }
 
-/// Updates the IB partition state that is owned by the state controller
-/// under the premise that the curren controller state version didn't change.
+/// `try_update_controller_state` writes the IB partition state and `new_version`
+/// when the version matches `expected_version`.
+///
+/// A missing partition or changed version returns
+/// `NotApplied(ControllerStateNotCurrent)`.
+/// `Applied(())` leaves the write in the caller's transaction; database failures
+/// remain errors.
 pub async fn try_update_controller_state(
     txn: &mut PgConnection,
     partition_id: IBPartitionId,
     expected_version: ConfigVersion,
     new_version: ConfigVersion,
     new_state: &IBPartitionControllerState,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     let query = "UPDATE ib_partitions SET controller_state_version=$1, controller_state=$2::json where id=$3::uuid AND controller_state_version=$4 returning id";
     let result = sqlx::query_as::<_, IBPartitionId>(query)
         .bind(new_version)
@@ -208,7 +214,10 @@ pub async fn try_update_controller_state(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(result.is_some())
+    Ok(match result {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 pub async fn update_controller_state_outcome(

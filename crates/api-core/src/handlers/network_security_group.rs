@@ -30,6 +30,7 @@ use model::tenant::{InvalidTenantOrg, TenantOrganizationId};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use super::tenant_prefix_overlap;
 use crate::CarbideError;
 use crate::api::{Api, log_request_data, log_tenant_organization_id};
 
@@ -317,17 +318,14 @@ pub(crate) async fn update(
     // Start a new transaction for a db write.
     let mut txn = api.txn_begin().await?;
 
-    // Look up the NetworkSecurityGroup.  We'll need to check the current
-    // version. We could probably do everything with a single query
-    // with a few subqueries, but we'd only be able to send back a
-    // NotFound, leaving the caller with no way to know if it was
-    // because their NetworkSecurityGroup wasn't found or because the version
-    // didn't match.
+    // Classify the policy before taking resource locks: an expanding change
+    // must acquire the overlap lock first. The row is rechecked below.
+    let overlap_enabled = api.runtime_config.tenant_prefix_overlap_enabled;
     let current_network_security_group = network_security_group::find_by_ids(
         &mut txn,
         std::slice::from_ref(&id),
         Some(&tenant_organization_id),
-        true,
+        !overlap_enabled,
     )
     .await?;
 
@@ -382,6 +380,43 @@ pub(crate) async fn update(
             .into());
         }
     };
+
+    let needs_overlap_check = overlap_enabled
+        && !tenant_prefix_overlap::nsg_policy_is_nonexpanding(
+            current_network_security_group,
+            &rules,
+            stateful_egress,
+            api.runtime_config
+                .network_security_group
+                .stateful_acls_enabled,
+        );
+    if needs_overlap_check {
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    }
+    if overlap_enabled {
+        let locked_nsg = network_security_group::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(&id),
+            Some(&tenant_organization_id),
+            true,
+        )
+        .await?
+        .pop();
+        // This also protects requests with unchanged policy that skipped the
+        // overlap lock, including callers without an explicit version match.
+        if locked_nsg.as_ref().map(|nsg| nsg.version)
+            != Some(current_network_security_group.version)
+        {
+            return Err(CarbideError::ConcurrentModificationError(
+                "NetworkSecurityGroup",
+                current_network_security_group.version.to_string(),
+            )
+            .into());
+        }
+    }
+    if needs_overlap_check {
+        tenant_prefix_overlap::validate_nsg_policy(api, &mut txn, &id).await?;
+    }
 
     // Update record in the DB and get back
     // our new NetworkSecurityGroup state.

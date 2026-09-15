@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::extract::{OriginalUri, State};
 use axum::http::{StatusCode, header};
@@ -37,6 +38,12 @@ use super::inventory::DiscoveredEntity;
 enum MockResponse {
     Json(Value),
     Malformed,
+    /// Answers `503 Service Unavailable` while `failures` is above zero,
+    /// decrementing it per request, then serves `then`.
+    Transient {
+        failures: Arc<AtomicUsize>,
+        then: Value,
+    },
 }
 
 async fn resource_response(
@@ -51,6 +58,18 @@ async fn resource_response(
             "not valid JSON",
         )
             .into_response(),
+        Some(MockResponse::Transient { failures, then }) => {
+            let failing = failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
+            if failing {
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            } else {
+                Json(then.clone()).into_response()
+            }
+        }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -85,6 +104,20 @@ fn insert(resources: &mut HashMap<String, MockResponse>, path: &str, value: Valu
     resources.insert(path.to_string(), MockResponse::Json(value));
 }
 
+/// Make the resource at `path` answer 503 to its first request only.
+fn fail_once(resources: &mut HashMap<String, MockResponse>, path: &str) {
+    let Some(MockResponse::Json(then)) = resources.remove(path) else {
+        panic!("{path} should be a JSON mock resource");
+    };
+    resources.insert(
+        path.to_string(),
+        MockResponse::Transient {
+            failures: Arc::new(AtomicUsize::new(1)),
+            then,
+        },
+    );
+}
+
 fn insert_resource(
     resources: &mut HashMap<String, MockResponse>,
     path: &str,
@@ -105,11 +138,12 @@ fn reference(path: &str) -> Value {
 }
 
 const TELEMETRY_SERVICE: &str = "/redfish/v1/TelemetryService";
+const METRIC_DEFINITIONS: &str = "/redfish/v1/TelemetryService/MetricDefinitions";
 
 /// A telemetry service publishing two reports: one healthy and one the
 /// NVIDIA OEM extension marks stale.
 fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
-    const DEFINITIONS: &str = "/redfish/v1/TelemetryService/MetricDefinitions";
+    const DEFINITIONS: &str = METRIC_DEFINITIONS;
     const REPORTS: &str = "/redfish/v1/TelemetryService/MetricReports";
 
     let definition = |id: &str| format!("{DEFINITIONS}/{id}");
@@ -192,6 +226,9 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
                 { "MetricId": "FanPWM", "MetricValue": "30" },
                 // Discrete state, so there is no gauge to publish.
                 { "MetricId": "PowerState", "MetricValue": "Enabled" },
+                // Parse as f64 but are not measurements.
+                { "MetricId": "NonFinite", "MetricValue": "NaN" },
+                { "MetricId": "Infinite", "MetricValue": "inf" },
                 // No id to name a series after.
                 { "MetricValue": "1" }
             ]
@@ -660,7 +697,19 @@ pub(in crate::collectors) struct ProjectionFixture {
 
 impl ProjectionFixture {
     pub(in crate::collectors) async fn new() -> Self {
-        let resources = Arc::new(mock_resources());
+        Self::from_resources(mock_resources()).await
+    }
+
+    /// Like [`Self::new`], but the metric definitions collection answers
+    /// 503 to its first request and serves normally afterwards.
+    pub(in crate::collectors) async fn with_transient_metric_definitions_failure() -> Self {
+        let mut resources = mock_resources();
+        fail_once(&mut resources, METRIC_DEFINITIONS);
+        Self::from_resources(resources).await
+    }
+
+    async fn from_resources(resources: HashMap<String, MockResponse>) -> Self {
+        let resources = Arc::new(resources);
         let router = Router::new()
             .fallback(resource_response)
             .with_state(resources);

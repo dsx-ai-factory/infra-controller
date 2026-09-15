@@ -69,7 +69,7 @@ func (cp *ClientPool) GetClientByID(siteID uuid.UUID) (tsdkClient.Client, error)
 	tInterceptors = append(tInterceptors, otelInterceptor)
 
 	tc, err := tsdkClient.NewLazyClient(tsdkClient.Options{
-		HostPort:  fmt.Sprintf("%v:%v", cp.tcfg.Host, cp.tcfg.Port),
+		HostPort:  cp.tcfg.GetHostPort(),
 		Namespace: siteID.String(),
 		ConnectionOptions: tsdkClient.ConnectionOptions{
 			TLS: cp.tcfg.ClientTLSCfg,

@@ -167,6 +167,12 @@ func TestSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create InfiniBandPartition table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.InfiniBandInterface)(nil))
 	assert.Nil(t, err)
+	// create SpectrumXPartition table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SpectrumXPartition)(nil))
+	assert.Nil(t, err)
+	// create SpectrumXAttachment table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SpectrumXAttachment)(nil))
+	assert.Nil(t, err)
 	// create NVLinkInterface table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NVLinkInterface)(nil))
 	assert.Nil(t, err)

@@ -376,6 +376,14 @@ pub(crate) async fn create(
     )
     .await?;
 
+    super::vpc_peering::validate_prefix_attachment(
+        api,
+        &mut txn,
+        new_prefix.vpc_id,
+        new_prefix.config.prefix,
+    )
+    .await?;
+
     let segment_prefixes = db::probe_segment_prefixes(new_prefix.config.prefix, &mut txn).await?;
     let segment_prefixes = adoptable_segment_prefixes(segment_prefixes, new_prefix.vpc_id)?;
 

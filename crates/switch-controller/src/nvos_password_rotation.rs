@@ -28,7 +28,7 @@ use carbide_uuid::switch::SwitchId;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{SwitchEndpoint, SwitchPasswordRotationState};
 use db::ConditionalWrite::{Applied, NotApplied};
-use db::credential_rotation::RotationAttemptNotEligible;
+use db::credential_rotation::{RotationAttemptNotEligible, RotationStartNotEligible};
 use model::switch::Switch;
 use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
 
@@ -434,13 +434,14 @@ async fn stage_rotation(
 
     txn.commit().await?;
 
-    let Some(attempt) = attempt else {
-        return Ok(NvosPasswordRotationOutcome::Waiting(
+    match attempt {
+        Applied(attempt) => {
+            ensure_staged_rotation(switch_id, bmc_mac_address, target_version, attempt, ctx).await
+        }
+        NotApplied(RotationStartNotEligible) => Ok(NvosPasswordRotationOutcome::Waiting(
             "NVOS rotation could not be claimed because target or device state changed".to_string(),
-        ));
-    };
-
-    ensure_staged_rotation(switch_id, bmc_mac_address, target_version, attempt, ctx).await
+        )),
+    }
 }
 
 /// Checks that the per-device credential uses the confirmed password, when known.

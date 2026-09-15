@@ -323,7 +323,7 @@ impl StateControllerIO for TestStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         let query = "UPDATE test_objects SET controller_state_version=$1, controller_state=$2::json
             where id=$3 AND controller_state_version=$4 returning id";
         let result = sqlx::query_scalar::<_, String>(query)
@@ -335,7 +335,10 @@ impl StateControllerIO for TestStateControllerIO {
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
 
-        Ok(result.is_some())
+        Ok(match result {
+            Some(_) => ConditionalWrite::Applied(()),
+            None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+        })
     }
 
     async fn persist_state_history(
@@ -429,7 +432,7 @@ impl StateControllerIO for PanicInListObjectsStateControllerIO {
         _old_version: ConfigVersion,
         _new_version: ConfigVersion,
         _new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         unreachable!("persist_controller_state should never be called in this test")
     }
 
@@ -1384,7 +1387,7 @@ impl StateControllerIO for SlaTestStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         self.inner
             .persist_controller_state(txn, object_id, old_version, new_version, new_state)
             .await

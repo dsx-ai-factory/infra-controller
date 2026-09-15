@@ -197,6 +197,8 @@ impl From<MachineValidationRunItem> for rpc::forge::MachineValidationRunItem {
             last_heartbeat_at: value.last_heartbeat_at.map(Into::into),
             skip_reason: value.skip_reason,
             failure_reason: value.failure_reason,
+            plugin: value.plugin.map(Into::into),
+            plugin_full_host_approved: value.plugin_full_host_approved,
         }
     }
 }

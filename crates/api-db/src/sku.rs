@@ -799,10 +799,11 @@ pub async fn generate_sku_from_machine_at_version_5(
 
     // Unlike earlier versions, v5 records one storage entry per NVMe drive so
     // each drive's size and PCI location can be validated individually. The
-    // discovered size is stored as an exact point (min == max) and the concrete
-    // sysfs/PCI path is stored as the drive's single "pattern". An expected SKU
-    // authored from this can then widen the size range or replace the literal
-    // path with a regex. Drives are ordered by path for deterministic output.
+    // discovered size is stored as an exact point (min == max) and the drive's
+    // sysfs/PCI location (see `drive_location`) is stored as its single
+    // "pattern". An expected SKU authored from this can then widen the size
+    // range or replace the literal path with a regex. Drives are ordered by
+    // path for deterministic output.
     //
     // size_mb and pci_path may be absent on hardware_info records that predate
     // the v5 fields (discovered before PR #3717). Rather than failing generation
@@ -821,8 +822,8 @@ pub async fn generate_sku_from_machine_at_version_5(
             max_size_mb: nvme.size_mb,
             pci_patterns: nvme
                 .pci_path
-                .as_ref()
-                .map(|p| vec![p.clone()])
+                .as_deref()
+                .map(|path| vec![drive_location(path)])
                 .unwrap_or_default(),
         })
         .collect();
@@ -842,9 +843,27 @@ pub async fn generate_sku_from_machine_at_version_5(
     Ok(sku)
 }
 
+/// The location recorded for a drive whose sysfs `DEVPATH` is `pci_path`.
+///
+/// Host enumeration reports each NVMe controller's full `DEVPATH`, which ends
+/// in the kernel-assigned instance node, e.g.
+/// `/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme/nvme3`. That node is
+/// numbered in probe order, so it changes across reboots and differs between
+/// identical machines. Drop it and record its parent, which is fixed by the PCI
+/// slot. A path with nothing above the final node is kept as is.
+///
+/// SKUs generated before this rule recorded the full path; their patterns must
+/// be shortened the same way to keep matching.
+fn drive_location(pci_path: &str) -> String {
+    match pci_path.rsplit_once('/') {
+        Some((parent, _node)) if !parent.is_empty() => parent.to_string(),
+        _ => pci_path.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::{Check, check_values, value_scenarios};
     use model::hardware_info::MemoryDeviceGroup;
     use model::test_support::machine_snapshot::host_machine;
 
@@ -947,6 +966,20 @@ mod tests {
                 },
             ],
             generated_memory,
+        );
+    }
+
+    #[test]
+    fn drive_location_drops_the_controller_node() {
+        value_scenarios!(drive_location:
+            "the kernel-assigned controller node is dropped" {
+                "/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme/nvme3"
+                    => "/devices/pci0000:c8/0000:c8:01.0/0000:c9:00.0/nvme".to_string(),
+            }
+            "a path with nothing above the final node is kept" {
+                "nvme3" => "nvme3".to_string(),
+                "/nvme3" => "/nvme3".to_string(),
+            }
         );
     }
 }

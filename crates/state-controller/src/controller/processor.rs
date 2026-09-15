@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use super::db;
+use crate::CheckApplied;
 use crate::config::IterationConfig;
 use crate::db_write_batch::DbWriteBatch;
 use crate::io::StateControllerIO;
@@ -733,7 +734,7 @@ async fn process_object<IO: StateControllerIO>(
             next_state_sla = io
                 .state_sla(&Versioned::new(next.clone(), new_version), &snapshot)
                 .sla;
-            if io
+            if let Err(error) = io
                 .persist_controller_state(
                     &mut txn,
                     &object_id,
@@ -742,17 +743,15 @@ async fn process_object<IO: StateControllerIO>(
                     next,
                 )
                 .await?
+                .check_applied()
             {
-                io.persist_state_history(&mut txn, &object_id, new_version, next)
-                    .await?;
-            } else {
                 // The state transition did not apply, so roll back the handler's
                 // other writes too, including queued observations.
                 txn.rollback().await?;
-                return Err(StateHandlerError::IterationInvalidated {
-                    source_ref: std::panic::Location::caller(),
-                });
+                return Err(error);
             }
+            io.persist_state_history(&mut txn, &object_id, new_version, next)
+                .await?;
         }
 
         let is_success = handler_outcome.is_ok();

@@ -15,13 +15,15 @@
  * limitations under the License.
  */
 
-use std::time::SystemTime;
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime};
 
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{DpuMachineId, HostMachineId, StableHostMachineId};
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
 use model::instance::config::network::DeviceLocator;
+use model::machine::{InstanceState, ManagedHostState, RetryInfo};
 use model::metadata::Metadata;
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::forge_server::Forge;
@@ -30,18 +32,24 @@ use tonic::Code;
 use uuid::uuid;
 
 use super::common::api_fixtures::TestEnv;
-use crate::cfg::file::default_max_network_security_group_size;
+use crate::cfg::file::{
+    FnnConfig, FnnRoutingProfileConfig, default_max_network_security_group_size,
+};
 use crate::test_support::fixture_config::FixtureDefault as _;
 use crate::tests::common::api_fixtures::instance::{
     default_os_config, default_tenant_config, interface_network_config_with_devices,
     single_interface_network_config,
 };
+use crate::tests::common::api_fixtures::network_segment::{
+    FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, create_tenant_network_segment,
+};
 use crate::tests::common::api_fixtures::test_managed_host::TestManagedHost;
 use crate::tests::common::api_fixtures::{
-    TestEnvOverrides, create_test_env, create_test_env_with_overrides, get_config,
-    populate_network_security_groups, site_explorer,
+    TestEnvOverrides, create_managed_host, create_test_env, create_test_env_with_overrides,
+    get_config, populate_network_security_groups, site_explorer,
 };
-use crate::tests::common::rpc_builder::VpcCreationRequest;
+use crate::tests::common::postgres::wait_for_blocked_query;
+use crate::tests::common::rpc_builder::{VpcCreationRequest, VpcUpdateRequest};
 
 async fn update_network_status_observation(
     env: &TestEnv,
@@ -1010,6 +1018,542 @@ async fn test_network_security_group_update(
         .await
         .unwrap_err();
 
+    Ok(())
+}
+
+/// Policy checks follow current and pending tenant interfaces, not address
+/// collisions or only the VPC's default NSG attachment.
+#[crate::sqlx_test]
+async fn tenant_prefix_reuse_checks_effective_active_policy(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config.tenant_prefix_overlap_enabled = true;
+    config.default_tenant_routing_profile_type = "INTERNAL".to_string();
+    config.network_security_group.stateful_acls_enabled = true;
+    let fnn = FnnConfig {
+        admin_vpc: None,
+        common_internal_route_target: None,
+        additional_route_target_imports: vec![],
+        routing_profiles: HashMap::from([
+            (
+                "INTERNAL".to_string(),
+                FnnRoutingProfileConfig {
+                    tenant_prefix_overlap_eligible: true,
+                    internal: Some(true),
+                    ..Default::default()
+                },
+            ),
+            (
+                "EXTERNAL".to_string(),
+                FnnRoutingProfileConfig {
+                    internal: Some(false),
+                    ..Default::default()
+                },
+            ),
+        ]),
+        use_vpc_vrf_loopback: false,
+    };
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_fnn_config(Some(fnn)),
+    )
+    .await;
+    let tenant = "overlap-policy";
+    env.api
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: tenant.to_string(),
+            routing_profile_type: Some("INTERNAL".to_string()),
+            metadata: Some(rpc::forge::Metadata {
+                name: tenant.to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+    let permit = rpc::forge::NetworkSecurityGroupAttributes {
+        stateful_egress: false,
+        rules: vec![rpc::forge::NetworkSecurityGroupRuleAttributes {
+            id: Some("permit-http".to_string()),
+            direction: rpc::forge::NetworkSecurityGroupRuleDirection::NsgRuleDirectionIngress
+                .into(),
+            protocol: rpc::forge::NetworkSecurityGroupRuleProtocol::NsgRuleProtoTcp.into(),
+            action: rpc::forge::NetworkSecurityGroupRuleAction::NsgRuleActionPermit.into(),
+            priority: 100,
+            dst_port_start: Some(80),
+            dst_port_end: Some(80),
+            source_net: Some(
+                rpc::forge::network_security_group_rule_attributes::SourceNet::SrcPrefix(
+                    "0.0.0.0/0".to_string(),
+                ),
+            ),
+            destination_net: Some(
+                rpc::forge::network_security_group_rule_attributes::DestinationNet::DstPrefix(
+                    "0.0.0.0/0".to_string(),
+                ),
+            ),
+            ..Default::default()
+        }],
+    };
+    let safe_id = uuid::Uuid::new_v4().to_string();
+    let permit_id = uuid::Uuid::new_v4().to_string();
+    let override_id = uuid::Uuid::new_v4().to_string();
+    for (id, name, attributes) in [
+        (
+            &safe_id,
+            "vpc-policy",
+            rpc::forge::NetworkSecurityGroupAttributes::default(),
+        ),
+        (&permit_id, "unused-permit-policy", permit.clone()),
+        (
+            &override_id,
+            "instance-policy",
+            rpc::forge::NetworkSecurityGroupAttributes::default(),
+        ),
+    ] {
+        env.api
+            .create_network_security_group(tonic::Request::new(
+                rpc::forge::CreateNetworkSecurityGroupRequest {
+                    id: Some(id.clone()),
+                    tenant_organization_id: tenant.to_string(),
+                    metadata: Some(rpc::forge::Metadata {
+                        name: name.to_string(),
+                        ..Default::default()
+                    }),
+                    network_security_group_attributes: Some(attributes),
+                },
+            ))
+            .await?;
+    }
+    let active_vpc_id = VpcId::new();
+    let segment_ids = env
+        .create_vpc_and_tenant_segments_with_vpc_details(
+            VpcCreationRequest::builder(tenant)
+                .id(active_vpc_id)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .routing_profile_type("INTERNAL".to_string())
+                .metadata(Metadata::new_with_default_name())
+                .rpc(),
+            1,
+        )
+        .await;
+    let pending_vpc_id = VpcId::new();
+    env.api
+        .create_vpc(
+            VpcCreationRequest::builder(tenant)
+                .id(pending_vpc_id)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .routing_profile_type("INTERNAL".to_string())
+                .metadata(Metadata::new_with_default_name())
+                .tonic_request(),
+        )
+        .await?;
+    let vpc_update = |nsg: &str| {
+        VpcUpdateRequest::builder()
+            .id(pending_vpc_id)
+            .metadata(Metadata {
+                name: "pending-vpc".to_string(),
+                ..Default::default()
+            })
+            .network_security_group_id(nsg.to_string())
+            .rpc()
+    };
+    // An unused VPC can hold an unsafe policy definition. It is not a
+    // tenant-serving path until an Instance references it.
+    env.api
+        .update_vpc(tonic::Request::new(vpc_update(&permit_id)))
+        .await?;
+    env.api
+        .update_vpc(tonic::Request::new(vpc_update(&safe_id)))
+        .await?;
+    let mh = create_managed_host(&env).await;
+    let instance = mh
+        .instance_builer(&env)
+        .tenant_org(tenant)
+        .single_interface_network_config(segment_ids[0])
+        .build()
+        .await;
+    let pending_segment_id = create_tenant_network_segment(
+        &env.api,
+        Some(pending_vpc_id),
+        FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[1],
+        "PENDING",
+        true,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    let current = instance.rpc_instance().await;
+    let mut pending = current.config().inner().clone();
+    pending.network = Some(single_interface_network_config(pending_segment_id));
+    env.api
+        .update_instance_config(
+            rpc::forge::InstanceConfigUpdateRequest::builder()
+                .instance_id(instance.id)
+                .config(pending)
+                .metadata(current.metadata().clone())
+                .tonic_request(),
+        )
+        .await?;
+
+    let nsg_update = |attributes| rpc::forge::UpdateNetworkSecurityGroupRequest {
+        id: safe_id.clone(),
+        tenant_organization_id: tenant.to_string(),
+        metadata: Some(rpc::forge::Metadata {
+            name: "vpc-policy".to_string(),
+            ..Default::default()
+        }),
+        network_security_group_attributes: Some(attributes),
+        if_version_match: None,
+    };
+    let nsg_query = rpc::forge::FindNetworkSecurityGroupsByIdsRequest {
+        network_security_group_ids: vec![safe_id.clone()],
+        tenant_organization_id: None,
+    };
+    let before_nsg = env
+        .api
+        .find_network_security_groups_by_ids(tonic::Request::new(nsg_query.clone()))
+        .await?
+        .into_inner();
+    let error = env
+        .api
+        .update_network_security_group(tonic::Request::new(nsg_update(permit.clone())))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition, "{error}");
+    assert!(
+        error.message().contains("not safe for tenant prefix reuse"),
+        "{error}"
+    );
+    assert_eq!(
+        env.api
+            .find_network_security_groups_by_ids(tonic::Request::new(nsg_query.clone()))
+            .await?
+            .into_inner(),
+        before_nsg
+    );
+    let mut inline_update = vpc_update(&safe_id);
+    inline_update.routing_profile_overrides = Some(rpc::forge::VpcRoutingProfileOverrides {
+        leak_default_route_from_underlay: Some(true),
+        ..Default::default()
+    });
+    let active_and_pending_query = rpc::forge::VpcsByIdsRequest {
+        vpc_ids: vec![pending_vpc_id, active_vpc_id],
+    };
+    let before_active_and_pending_vpcs = env
+        .api
+        .find_vpcs_by_ids(tonic::Request::new(active_and_pending_query.clone()))
+        .await?
+        .into_inner();
+    for (case, request) in [
+        ("VPC NSG replacement", vpc_update(&permit_id)),
+        ("inline profile", inline_update.clone()),
+    ] {
+        let error = env
+            .api
+            .update_vpc(tonic::Request::new(request))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::FailedPrecondition, "{case}: {error}");
+        assert!(
+            error.message().contains("not safe for tenant prefix reuse"),
+            "{case}: {error}"
+        );
+    }
+    let active_vpc = before_active_and_pending_vpcs
+        .vpcs
+        .iter()
+        .find(|vpc| vpc.id == Some(active_vpc_id))
+        .unwrap();
+    let error = env
+        .api
+        .change_vpc_routing_profile(tonic::Request::new(
+            rpc::forge::VpcChangeRoutingProfileRequest {
+                id: Some(active_vpc_id),
+                if_version_match: Some(active_vpc.version.clone()),
+                routing_profile_type: "EXTERNAL".to_string(),
+                vni: None,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error.message().contains("not safe for tenant prefix reuse"),
+        "{error}"
+    );
+    assert_eq!(
+        env.api
+            .find_vpcs_by_ids(tonic::Request::new(active_and_pending_query))
+            .await?
+            .into_inner(),
+        before_active_and_pending_vpcs
+    );
+
+    // The Instance's NSG replaces the VPC's default. Changing the shadowed
+    // VPC policy is permitted; it does not change this host's effective NSG.
+    sqlx::query("UPDATE instances SET network_security_group_id = $1 WHERE id = $2")
+        .bind(&permit_id)
+        .bind(instance.id)
+        .execute(&env.pool)
+        .await?;
+    env.api
+        .update_network_security_group(tonic::Request::new(nsg_update(permit.clone())))
+        .await?;
+    env.api
+        .update_network_security_group(tonic::Request::new(nsg_update(
+            rpc::forge::NetworkSecurityGroupAttributes::default(),
+        )))
+        .await?;
+    env.api
+        .update_vpc(tonic::Request::new(vpc_update(&permit_id)))
+        .await?;
+    env.api
+        .update_vpc(tonic::Request::new(vpc_update(&safe_id)))
+        .await?;
+    sqlx::query("UPDATE instances SET network_security_group_id = NULL WHERE id = $1")
+        .bind(instance.id)
+        .execute(&env.pool)
+        .await?;
+
+    // Discovery suppresses NSGs, but it still uses the VPC routing profile.
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        &mut txn,
+        &mh.id.into(),
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::BootingWithDiscoveryImage {
+                retry: RetryInfo { count: 0 },
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    env.api
+        .update_network_security_group(tonic::Request::new(nsg_update(permit.clone())))
+        .await?;
+    let error = env
+        .api
+        .update_vpc(tonic::Request::new(inline_update))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error.message().contains("not safe for tenant prefix reuse"),
+        "{error}"
+    );
+    env.api
+        .update_network_security_group(tonic::Request::new(nsg_update(
+            rpc::forge::NetworkSecurityGroupAttributes::default(),
+        )))
+        .await?;
+
+    // Deletion intent does not withdraw an Instance's tenant network or its
+    // direct NSG attachment. Keep it visible until the controller does so.
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        &mut txn,
+        &mh.id.into(),
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE instances SET network_security_group_id = $1, deleted = NOW() WHERE id = $2",
+    )
+    .bind(&override_id)
+    .bind(instance.id)
+    .execute(txn.as_mut())
+    .await?;
+    txn.commit().await?;
+    let mut request = nsg_update(rpc::forge::NetworkSecurityGroupAttributes {
+        stateful_egress: true,
+        rules: vec![],
+    });
+    request.id = override_id;
+    request.metadata.as_mut().unwrap().name = "instance-policy".to_string();
+    let error = env
+        .api
+        .update_network_security_group(tonic::Request::new(request))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error.message().contains("not safe for tenant prefix reuse"),
+        "{error}"
+    );
+
+    let unused_update = |attributes| rpc::forge::UpdateNetworkSecurityGroupRequest {
+        id: permit_id.clone(),
+        tenant_organization_id: tenant.to_string(),
+        metadata: Some(rpc::forge::Metadata {
+            name: "unused-permit-policy".to_string(),
+            ..Default::default()
+        }),
+        network_security_group_attributes: Some(attributes),
+        if_version_match: None,
+    };
+    let mut deny = permit.clone();
+    deny.rules[0].action = rpc::forge::NetworkSecurityGroupRuleAction::NsgRuleActionDeny.into();
+    let mut unchanged_permit = permit.clone();
+    unchanged_permit.rules[0].id = None;
+    let mut overlap_lock = env.db_txn().await;
+    db::tenant_prefix_overlap::lock_checks(&mut overlap_lock).await?;
+    for (case, attributes) in [
+        ("unchanged permit without a rule ID", unchanged_permit),
+        ("deny-only replacement", deny.clone()),
+    ] {
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            env.api
+                .update_network_security_group(tonic::Request::new(unused_update(
+                    attributes.clone(),
+                ))),
+        )
+        .await
+        .expect("nonexpanding NSG policy must not wait for the overlap lock")?;
+        let mut returned = result
+            .into_inner()
+            .network_security_group
+            .unwrap()
+            .attributes
+            .unwrap();
+        if attributes.rules[0].id.is_none() {
+            assert!(returned.rules[0].id.take().is_some_and(|id| !id.is_empty()));
+        }
+        assert_eq!(returned, attributes, "{case}");
+    }
+    overlap_lock.rollback().await?;
+    env.api
+        .update_network_security_group(tonic::Request::new(unused_update(permit.clone())))
+        .await?;
+    env.api
+        .update_vpc(tonic::Request::new(vpc_update(&permit_id)))
+        .await?;
+
+    // A request that classified its old permit rules as unchanged cannot put
+    // them back after another writer commits a restrictive replacement.
+    let mut writer = env.db_txn().await;
+    db::tenant_prefix_overlap::lock_checks(&mut writer).await?;
+    let writer_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(writer.as_mut())
+        .await?;
+    let id = permit_id.parse()?;
+    let old =
+        db::network_security_group::find_by_ids(&mut writer, std::slice::from_ref(&id), None, true)
+            .await?
+            .pop()
+            .unwrap();
+    let deny_rules = deny
+        .rules
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<_>, _>>()?;
+    let restricted = db::network_security_group::update(
+        &mut writer,
+        &id,
+        &old.tenant_organization_id,
+        &old.metadata,
+        false,
+        &deny_rules,
+        old.version,
+        None,
+    )
+    .await?;
+    let mut metadata_update = vpc_update(&permit_id);
+    metadata_update.metadata.as_mut().unwrap().description =
+        "unchanged NSG does not wait".to_string();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        env.api.update_vpc(tonic::Request::new(metadata_update)),
+    )
+    .await
+    .expect("metadata with the current NSG must not wait for that NSG row")?;
+    let pending_vpc_query = rpc::forge::VpcsByIdsRequest {
+        vpc_ids: vec![pending_vpc_id],
+    };
+    let updated_pending_vpc = env
+        .api
+        .find_vpcs_by_ids(tonic::Request::new(pending_vpc_query.clone()))
+        .await?
+        .into_inner()
+        .vpcs
+        .pop()
+        .unwrap();
+    assert_eq!(
+        updated_pending_vpc.metadata.unwrap().description,
+        "unchanged NSG does not wait"
+    );
+    let waiter = env
+        .api
+        .update_network_security_group(tonic::Request::new(unused_update(permit.clone())));
+    let release = async {
+        wait_for_blocked_query(&env.pool, writer_pid, "network_security_groups").await;
+        writer.commit().await
+    };
+    let (result, released) = tokio::join!(waiter, release);
+    released?;
+    let error = result.unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition, "{error}");
+    assert!(error.message().contains("version"), "{error}");
+    let mut txn = env.db_txn().await;
+    assert_eq!(
+        db::network_security_group::find_by_ids(&mut txn, std::slice::from_ref(&id), None, false)
+            .await?,
+        vec![restricted.clone()]
+    );
+    txn.rollback().await?;
+    env.api
+        .update_vpc(tonic::Request::new(vpc_update(&safe_id)))
+        .await?;
+
+    // VPC assignment classifies the target NSG too. A safe NSG may gain
+    // permits while the assignment waits for its row lock.
+    let before_pending_vpc = env
+        .api
+        .find_vpcs_by_ids(tonic::Request::new(pending_vpc_query.clone()))
+        .await?
+        .into_inner();
+    let mut writer = env.db_txn().await;
+    db::tenant_prefix_overlap::lock_checks(&mut writer).await?;
+    let writer_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(writer.as_mut())
+        .await?;
+    let permit_rules = permit
+        .rules
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<_>, _>>()?;
+    db::network_security_group::update(
+        &mut writer,
+        &id,
+        &restricted.tenant_organization_id,
+        &restricted.metadata,
+        false,
+        &permit_rules,
+        restricted.version,
+        None,
+    )
+    .await?;
+    let assignment = env
+        .api
+        .update_vpc(tonic::Request::new(vpc_update(&permit_id)));
+    let release = async {
+        wait_for_blocked_query(&env.pool, writer_pid, "network_security_groups").await;
+        writer.commit().await
+    };
+    let (result, released) = tokio::join!(assignment, release);
+    released?;
+    let error = result.expect_err("VPC assignment must reject the changed NSG");
+    assert_eq!(error.code(), Code::FailedPrecondition, "{error}");
+    assert!(error.message().contains("version"), "{error}");
+    assert_eq!(
+        env.api
+            .find_vpcs_by_ids(tonic::Request::new(pending_vpc_query))
+            .await?
+            .into_inner(),
+        before_pending_vpc
+    );
     Ok(())
 }
 

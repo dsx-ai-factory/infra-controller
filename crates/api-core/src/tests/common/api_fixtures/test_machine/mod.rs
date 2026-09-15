@@ -192,7 +192,11 @@ where
         )
         .await
         .unwrap();
-        assert!(updated, "fixture Site Explorer report should be updated");
+        assert_eq!(
+            updated,
+            db::ConditionalWrite::Applied(()),
+            "fixture Site Explorer report should be updated"
+        );
     }
 
     pub(in crate::tests) async fn json_history(

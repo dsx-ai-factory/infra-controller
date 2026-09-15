@@ -197,6 +197,13 @@ tags:
     description: |-
       InfiniBand (IB) is a high-performance, low-latency networking standard designed for interconnecting servers and storage in HPC (High-Performance Computing) and AI systems,
       utilizing RDMA (Remote Direct Memory Access) to reduce CPU overhead. InfiniBand Partitions are used to group Machines into logical partitions for network isolation and load distribution.
+  - name: SpectrumX Partition
+    x-displayName: SpectrumX Partition
+    description: |-
+      NVIDIA Spectrum-X is an Ethernet networking platform for AI workloads, pairing Spectrum-X switches with SpectrumX SuperNICs to carry east-west GPU-to-GPU traffic.
+      SpectrumX Partitions are the network segments that Instances attach to over those SuperNICs, each identified on the wire by a VXLAN Network Identifier (VNI).
+
+      An Instance attaches to a Partition through a SpectrumX Attachment, which names the device and device instance to attach over. Attachments are managed as part of the Instance create and update requests rather than as their own endpoints.
   - name: NVLink Logical Partition
     x-displayName: NVLink Logical Partition
     description: |-
@@ -454,7 +461,7 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-current-infrastructure-provider-stats
       description: |-
-        Retrieve statistics for the current Infrastructure Provider. IP Block totals exclude `SitePrefix` records created for individual Tenants.
+        Retrieve statistics for the current Infrastructure Provider. IP Block totals exclude private IP Block records linked to a `TenantManaged` SitePrefix.
 
         User must have authorization role with `PROVIDER_ADMIN` suffix.
       parameters: []
@@ -2139,13 +2146,25 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: The Allocation conflicts with an existing name, available capacity or address space, or the lifecycle state of an `OperatorManaged` SitePrefix.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                operator-managed-site-prefix-not-ready:
+                  value:
+                    source: nico
+                    message: 'Could not create child IPAM entry for Allocation Constraint. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 linked to an OperatorManaged SitePrefix is not Ready'
+                    data: null
       description: |-
         Create an Allocation for the org.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
         To successfully create a compute Allocation, there must be enough unallocated Machines associated with the Instance Type to satisfy the constraint value.
-        For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value.
+        For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. When that IP Block is linked to an `OperatorManaged` SitePrefix, it must also be `Ready`. A conflict involving capacity, address space, or lifecycle state returns 409.
       requestBody:
         content:
           application/json:
@@ -2388,7 +2407,17 @@ paths:
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
         '400':
-          $ref: '#/components/responses/ValidationError'
+          description: Invalid request data or an Allocation Constraint change that cannot be applied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                operator-managed-site-prefix-not-ready:
+                  value:
+                    source: nico
+                    message: "Failed to update Allocation Constraint's parent IP Block. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 linked to an OperatorManaged SitePrefix is not Ready"
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |
@@ -2400,7 +2429,9 @@ paths:
 
         For an InstanceType resource, `constraintValue` can be incremented at any time, but not decremented if doing so requires decommissioning Tenant resources.
 
-        For an IPBlock resource, `constraintValue` cannot be modified if Tenant resources, e.g., Subnets or VPC Prefixes, reference the block.
+        For an `IPBlock` resource, `constraintValue` cannot be changed while Subnets or VPC Prefixes reference the allocated Tenant IP Block. If the source IP Block is linked to an `OperatorManaged` SitePrefix, its status must also be `Ready` before `constraintValue` can change. A change blocked by either condition returns 400.
+
+        Submitting the existing `constraintValue` leaves the constraint unchanged and does not require the source IP Block to be `Ready`.
       requestBody:
         content:
           application/json:
@@ -2464,7 +2495,7 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-ipblock
       description: |-
-        Retrieve the IP Blocks visible to the requesting organization. `SitePrefix` records created for individual Tenants are not exposed through this API.
+        Retrieve the IP Blocks visible to the requesting organization. Private IP Block records linked to a `TenantManaged` SitePrefix are not exposed through this API.
 
         User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix. `infrastructureProviderId` or `tenantId` query parameter may be required for older API versions.
       parameters:
@@ -2578,12 +2609,26 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An IP Block conflicts with an existing name or address range, or Site fabric IP Blocks are being updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                site-fabric-update:
+                  value:
+                    source: nico
+                    message: Site fabric IP Blocks are being updated; retry the request
+                    data: null
       description: |-
         Create an IP block for the org.
 
         Only Infrastructure Providers can create a root IP Block. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
         Tenant IP Blocks are created via Allocation.
+
+        A conflicting name or address range returns 409. `DatacenterOnly` creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another `DatacenterOnly` create or Site Config import. Retry the request.
       requestBody:
         content:
           application/json:
@@ -2662,7 +2707,7 @@ paths:
           $ref: '#/components/responses/NotFoundError'
       operationId: get-ipblock
       description: |-
-        Retrieve an IP Block by ID. Records outside the requesting organization's scope, including `SitePrefix` records created for individual Tenants, return the same 404 response as an unknown ID.
+        Retrieve an IP Block by ID. Records outside the requesting organization's scope, including private IP Block records linked to a `TenantManaged` SitePrefix, return the same 404 response as an unknown ID.
 
         User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix.
       parameters:
@@ -2714,12 +2759,24 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: The IP Block is linked to an `OperatorManaged` SitePrefix. Remove the corresponding prefix from Core's `site_fabric_prefixes` configuration instead.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                core-linked-site-prefix:
+                  value:
+                    source: nico
+                    message: This IP Block is linked to an OperatorManaged SitePrefix; remove the corresponding prefix from Core's site_fabric_prefixes configuration instead
+                    data: null
       description: |-
         Delete an IP block
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix. Only root IP Blocks can be deleted if there are no allocations associated with them.
 
-        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and `SitePrefix` records created for individual Tenants return 404.
+        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
       tags:
         - IP Block
     patch:
@@ -2764,7 +2821,7 @@ paths:
 
         Org must have an Infrastructure Provider. Specified IP Block must have been created by the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
 
-        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and `SitePrefix` records created for individual Tenants return 404.
+        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404.
       requestBody:
         content:
           application/json:
@@ -3340,6 +3397,182 @@ paths:
                   labels:
                     region: us-west-1
                     env: dev
+  '/v2/org/{org}/nico/vpc/{vpcId}/routing-profile':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Infrastructure Provider Org
+      - schema:
+          type: string
+          format: uuid
+        name: vpcId
+        in: path
+        required: true
+        description: REST ID of the VPC
+    get:
+      summary: Retrieve VPC routing profile
+      operationId: get-vpc-routing-profile
+      tags:
+        - VPC
+      description: |-
+        Read the VPC's persisted routing profile, active VNI, version, and any retained allocation directly from Core. This is not the effective routing profile or evidence of DPU or fabric convergence. The ordinary VPC GET uses inventory and may lag this response.
+
+        Org must have an Infrastructure Provider entity that owns both the VPC and its Site. The VPC must belong to that Site, and the Site must be registered. User must have authorization role with `PROVIDER_ADMIN` suffix. Tenant administrator authorization alone is insufficient.
+
+        Inspection supports VPCs with valid pool ownership even when no named profile is stored or their virtualization type cannot support profile changes. Missing or inconsistent allocation ownership returns 412. A Site-global VNI override is not reflected in this response.
+      responses:
+        '200':
+          description: Authoritative persisted routing state and VNI allocations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VpcRoutingState'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The VPC's allocation ownership is missing or inconsistent.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: The routing state could not be retrieved or Core returned an invalid response.
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Core version does not implement routing-state inspection.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site Agent is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: The authoritative read exceeded the request's Site communication budget.
+          $ref: '#/components/responses/GenericHttpError'
+    patch:
+      summary: Update VPC routing profile
+      operationId: update-vpc-routing-profile
+      tags:
+        - VPC
+      description: |-
+        Change an existing FNN VPC to a configured routing profile with the opposite internal setting. Submit the destination `routingProfile` and optional exact `vni`; REST reads the current Core version internally and submits one change using that version. Core atomically changes the profile and active VNI, advances the version, and retains the old allocation. VPC identity, Instances, addresses, prefixes, NSGs, metadata, and the creation-time requested VNI are preserved.
+
+        Requires the same Infrastructure Provider ownership, registered Site, and `PROVIDER_ADMIN` authorization as [routing-state inspection](#tag/VPC/operation/get-vpc-routing-profile). Core also enforces the Tenant's permitted access tier; Provider authorization does not permit broader Tenant routing access. Named source and destination profiles, nonoverlapping internal and external pools, and VNIs in 1..16777215 are required. Site-global VNIs, substantive VPC or interface routing overrides, and tenant-managed SitePrefix attachments are unsupported. Every serving Core must support the requested operation, including exact VNI selection; response validation cannot undo a change made by an older Core that ignores the exact VNI.
+
+        REST makes no change if the initial read fails. A concurrent VPC update between the read and change returns 412 without rereading or retrying. Authorization, the read, and the change share one 50-second budget from handler entry within the HTTP request deadline. REST does not submit the change if its request context has expired before dispatch; a submitted workflow may outlive the caller. A timeout, lost response, or invalid acknowledgement after submission can leave a committed change; inspect the authoritative routing state before deciding on another request. Neither the mutation nor the full sequence is automatically retried. Each separate HTTP request is a new action, not a replay or deduplicated retry of a previous request.
+
+        A 200 response confirms the Core configuration transaction, not restored traffic. Prevent attachment, peering, deletion, and profile-definition changes until all attached and directly peered DPUs and fabric routes have been independently verified and the inactive allocation released. Neither REST nor Core enforces this hold or verifies convergence. Release is a [separate operator action](#tag/VPC/operation/release-vpc-inactive-vni). A later change back must pass current validation; retaining the allocation does not guarantee reversal. External routing does not allocate public addresses or configure NAT, fabric routes, or NSGs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VpcRoutingProfileUpdateRequest'
+            examples:
+              automatic-vni:
+                value:
+                  routingProfile: external
+              exact-vni:
+                value:
+                  routingProfile: external
+                  vni: 51000
+      responses:
+        '200':
+          description: Committed routing state, including the retained previous allocation; dataplane convergence is not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VpcRoutingState'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: Provider authorization or resource ownership failed.
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: The VPC or a required named routing profile was not found.
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Core rejected the change because the observed version is stale, the destination exceeds the Tenant's access tier, the configuration or allocations are unsupported or inconsistent, or the exact VNI is unavailable or does not match the retained allocation. The rejected request commits no changes.
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: No VNI is available for automatic allocation from the destination pool.
+          $ref: '#/components/responses/ResourceExhaustedError'
+        '500':
+          description: The request failed or Core returned an invalid acknowledgement. If the change was submitted, it may have committed; inspect authoritative routing state before another request.
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Core version does not implement a required routing operation.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site Agent is unavailable. If the change was submitted, inspect authoritative routing state before another request; the change may have committed.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: The read and change exceeded their shared request budget. A submitted change may still commit; inspect authoritative routing state before another request and do not retry automatically.
+          $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/vpc/{vpcId}/routing-profile/release-inactive-vni':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Infrastructure Provider Org
+      - schema:
+          type: string
+          format: uuid
+        name: vpcId
+        in: path
+        required: true
+        description: REST ID of the VPC
+    post:
+      summary: Release inactive VPC VNI
+      operationId: release-vpc-inactive-vni
+      tags:
+        - VPC
+      description: |-
+        Release the allocation retained after a routing-profile change, leaving the active VNI and routing profile unchanged. Requires the same Provider ownership, registered Site, and `PROVIDER_ADMIN` authorization as [routing-state inspection](#tag/VPC/operation/get-vpc-routing-profile).
+
+        Before release, independently verify that all attached and directly peered DPUs and fabric routes no longer use the inactive VNI. Keep the attachment, peering, deletion, and profile-definition hold described in [profile changes](#tag/VPC/operation/update-vpc-routing-profile) through release. Retain the allocation for unreachable consumers unless they have been isolated. REST and Core validate ownership, not dataplane convergence.
+
+        Supply the exact `ifVersionMatch` and `expectedInactiveVni` from the authoritative state used for that decision. REST does not substitute a fresh version. The release advances the Core VPC version and makes the inactive VNI available for allocation to another VPC. It is never part of an automatic profile change or cleanup loop.
+
+        A timeout, lost response, or invalid acknowledgement may follow a committed release. Inspect authoritative routing state before deciding what to do next; do not automatically retry or replace the original version. A stale-version error does not prove that a previous release failed. The ordinary VPC GET may lag the authoritative response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VpcInactiveVniReleaseRequest'
+      responses:
+        '200':
+          description: Authoritative acknowledgement of the released allocation and advanced VPC version
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VpcInactiveVniReleaseResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The observed version is stale, the exact inactive VNI does not match, or allocation ownership is missing or inconsistent. The rejected request commits no changes.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: The request failed or Core returned an invalid acknowledgement. A submitted release may have committed; inspect authoritative routing state before another request.
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Core version does not implement inactive VNI release.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Core or the Site Agent is unavailable. A submitted release may have committed; inspect authoritative routing state before another request.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: The release exceeded the request's Site communication budget. It may still commit; inspect authoritative routing state and do not retry automatically or substitute a fresh version.
+          $ref: '#/components/responses/GenericHttpError'
   '/v2/org/{org}/nico/vpc/{vpcId}/virtualization':
     parameters:
       - schema:
@@ -5628,7 +5861,7 @@ paths:
                             minSizeMiB: 7680000
                             maxSizeMiB: 7680000
                             pciPatterns:
-                               - ^/devices/pci.*nvme0$
+                               - ^/devices/pci.*/nvme$
                             count: 4
                         chassis:
                           vendor: Supermicro
@@ -5734,7 +5967,7 @@ paths:
                             minSizeMiB: 7680000
                             maxSizeMiB: 7680000
                             pciPatterns:
-                               - ^/devices/pci.*nvme0$
+                               - ^/devices/pci.*/nvme$
                             count: 4
                       chassis:
                         vendor: Supermicro
@@ -6126,6 +6359,275 @@ paths:
                     team: devops
       tags:
         - InfiniBand Partition
+  '/v2/org/{org}/nico/spectrumx-partition':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    get:
+      summary: Retrieve all SpectrumX Partitions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SpectrumXPartition'
+              examples:
+                Example 1:
+                  value:
+                    - id: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+                      name: east-west-net
+                      description: SpectrumX Partition for east-west training traffic
+                      siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+                      tenantId: f97df110-f4de-492e-8849-4a6af68026b0
+                      vni: 10200
+                      labels:
+                        environment: production
+                        team: devops
+                      status: Ready
+                      statusHistory:
+                        - status: Ready
+                          message: SpectrumX Partition is ready for use
+                          created: '2019-08-24T14:15:22Z'
+                          updated: '2019-08-24T14:15:22Z'
+                      created: '2019-08-24T14:15:22Z'
+                      updated: '2019-08-24T14:15:22Z'
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
+              description: Pagination result in JSON format
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+      operationId: get-all-spectrumx-partition
+      description: |-
+        Retrieve all SpectrumX Partitions for the org
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: siteId
+          description: Filter Partitions by Site. Repeat the parameter to match multiple Sites.
+        - schema:
+            type: string
+            enum:
+              - Pending
+              - Provisioning
+              - Ready
+              - Error
+              - Deleting
+          in: query
+          name: status
+          description: Filter Partitions by Status. Repeat the parameter to match multiple Statuses.
+        - schema:
+            type: string
+          in: query
+          name: query
+          description: 'Search for matches across all SpectrumX Partitions. Input will be matched against name, description, status and labels fields'
+        - schema:
+            type: string
+            enum:
+              - Site
+              - Tenant
+          in: query
+          name: includeRelation
+          description: Related entity to expand
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            example: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            example: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            default: CREATED_ASC
+            enum:
+              - NAME_ASC
+              - NAME_DESC
+              - STATUS_ASC
+              - STATUS_DESC
+              - CREATED_ASC
+              - CREATED_DESC
+              - UPDATED_ASC
+              - UPDATED_DESC
+          in: query
+          name: orderBy
+          description: 'Ordering for pagination query. Defaults to CREATED_ASC.'
+      tags:
+        - SpectrumX Partition
+    post:
+      summary: Create SpectrumX Partition
+      operationId: create-spectrumx-partition
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpectrumXPartition'
+              examples:
+                Example 1:
+                  value:
+                    id: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+                    name: east-west-net
+                    description: SpectrumX Partition for east-west training traffic
+                    siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+                    tenantId: f97df110-f4de-492e-8849-4a6af68026b0
+                    vni: 10200
+                    labels:
+                      environment: production
+                      team: devops
+                    status: Pending
+                    statusHistory:
+                      - status: Pending
+                        message: 'SpectrumX Partition request received, pending creation on Site'
+                        created: '2019-08-24T14:15:22Z'
+                        updated: '2019-08-24T14:15:22Z'
+                    created: '2019-08-24T14:15:22Z'
+                    updated: '2019-08-24T14:15:22Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: 'A SpectrumX Partition with the requested name already exists for the Tenant on the Site. The response data carries the conflicting Partition ID.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+      description: |-
+        Create a SpectrumX Partition for the org.
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+
+        The Tenant must be associated with the Site and hold an Allocation on it. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpectrumXPartitionCreateRequest'
+            examples:
+              Example 1:
+                value:
+                  name: east-west-net
+                  siteId: 69dae3c8-3554-4a1f-b391-858c6dc47fff
+                  labels:
+                    environment: production
+                    team: devops
+      tags:
+        - SpectrumX Partition
+  '/v2/org/{org}/nico/spectrumx-partition/{spectrumXPartitionId}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: spectrumXPartitionId
+        in: path
+        required: true
+        description: ID of the SpectrumX Partition
+    get:
+      summary: Retrieve SpectrumX Partition
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpectrumXPartition'
+              examples:
+                Example 1:
+                  value:
+                    id: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+                    name: east-west-net
+                    description: SpectrumX Partition for east-west training traffic
+                    siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+                    tenantId: f97df110-f4de-492e-8849-4a6af68026b0
+                    vni: 10200
+                    labels:
+                      environment: production
+                      team: devops
+                    status: Ready
+                    statusHistory:
+                      - status: Ready
+                        message: SpectrumX Partition is ready for use
+                        created: '2019-08-24T14:15:22Z'
+                        updated: '2019-08-24T14:15:22Z'
+                    created: '2019-08-24T14:15:22Z'
+                    updated: '2019-08-24T14:15:22Z'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+      operationId: get-spectrumx-partition
+      description: |-
+        Retrieve a specific SpectrumX Partition
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+
+        Tenant must own the Partition.
+      parameters:
+        - schema:
+            type: string
+            enum:
+              - Site
+              - Tenant
+          in: query
+          name: includeRelation
+          description: Related entity to expand
+      tags:
+        - SpectrumX Partition
+    delete:
+      summary: Delete SpectrumX Partition
+      operationId: delete-spectrumx-partition
+      responses:
+        '202':
+          description: Deletion request was accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                example-1:
+                  value:
+                    message: Deletion request was accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+      description: |-
+        Delete a specific SpectrumX Partition by ID.
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+
+        Tenant must own the Partition. The request is rejected while any Instance is still attached to the Partition. The Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
+      tags:
+        - SpectrumX Partition
   '/v2/org/{org}/nico/nvlink-logical-partition':
     parameters:
       - schema:
@@ -19315,7 +19817,7 @@ components:
           type:
             - string
             - 'null'
-          minLength: 3
+          minLength: 1
           maxLength: 64
           description: Routing profile type for the VPC. Populated when Site has Native Networking enabled and network virtualization type is `FNN`.
         powerResourceGroup:
@@ -19345,7 +19847,7 @@ components:
             - integer
             - 'null'
           minimum: 1
-          maximum: 65535
+          maximum: 16777215
           readOnly: true
           description: Active VNI assigned to the VPC
         networkSecurityGroupId:
@@ -19655,6 +20157,162 @@ components:
         labels:
           $ref: '#/components/schemas/Labels'
           description: 'Update labels of the VPC. Up to 10 key-value pairs can be specified. The labels will be replaced with the labels sent in the request. Any labels not included in the request will be removed. To retain existing labels, fetch them first and include them in this request.'
+    VpcRoutingProfileUpdateRequest:
+      title: VpcRoutingProfileUpdateRequest
+      type: object
+      description: Change a VPC's named routing profile with automatic or exact VNI selection. REST reads the Core version internally; the caller does not supply a version or manipulate resource pools.
+      examples:
+        - routingProfile: external
+        - routingProfile: external
+          vni: 51000
+      properties:
+        routingProfile:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Required Site-configured destination profile with the opposite internal setting from the current profile. The REST aliases `external`, `internal`, and `privileged-internal` map to Core's `EXTERNAL`, `INTERNAL`, and `PRIVILEGED_INTERNAL` names. Other configured names are passed unchanged; this is not a closed enum.
+        vni:
+          type:
+            - integer
+            - 'null'
+          minimum: 1
+          maximum: 16777215
+          description: Optional exact destination VNI. Omission or null reuses an allocation retained in the destination pool, otherwise allocates automatically. An exact request must match a retained destination allocation if present; otherwise it must name a free materialized entry in the destination pool, regardless of that entry's automatic-allocation setting. A mismatched, occupied, missing, or already active VNI is rejected without fallback.
+      required:
+        - routingProfile
+    VpcRoutingState:
+      title: VpcRoutingState
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - routingProfile
+        - retainedAllocation
+      description: Authoritative persisted routing state read with the VPC's owned allocations. This is not the effective routing profile, a Site-global VNI override, or a convergence report. Every field is present; null means no stored profile or retained allocation, respectively.
+      examples:
+        - vpcId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          version: V2-T1789147200000000
+          routingProfile: external
+          activeVni: 51000
+          retainedAllocation:
+            poolName: vpc-vni
+            vni: 12001
+      properties:
+        vpcId:
+          type: string
+          format: uuid
+          description: REST ID of the VPC selected in the request, which may differ from its Site-local Core ID.
+        version:
+          type: string
+          description: Core VPC version observed with these allocations. Use this exact value when approving release of the observed inactive VNI; it is not a DPU-applied version.
+        routingProfile:
+          type:
+            - string
+            - 'null'
+          description: Persisted profile name, or null when no named profile is stored. Known Core names are returned as the REST aliases `external`, `internal`, and `privileged-internal`; other names are unchanged. The name can be returned even when its Site definition is unavailable.
+        activeVni:
+          type: integer
+          format: uint32
+          minimum: 0
+          maximum: 4294967295
+          description: Persisted active VNI verified against pool ownership. Inspection accepts nonnegative values, including zero and values outside the profile-change range; successful inspection does not imply a profile change is supported.
+        retainedAllocation:
+          oneOf:
+            - $ref: '#/components/schemas/VpcRetainedVniAllocation'
+            - type: 'null'
+          description: Allocation owned by this VPC in the other pool, or null when the valid active allocation is its only allocation. Inconsistent ownership is an error, not a null result.
+      required:
+        - vpcId
+        - version
+        - routingProfile
+        - activeVni
+        - retainedAllocation
+    VpcRetainedVniAllocation:
+      title: VpcRetainedVniAllocation
+      type: object
+      description: VNI still reserved for the VPC in the pool other than its active allocation. Retention alone does not guarantee that a reverse profile change passes current validation.
+      examples:
+        - poolName: vpc-vni
+          vni: 12001
+      properties:
+        poolName:
+          type: string
+          enum:
+            - vpc-vni
+            - external-vpc-vni
+          description: Resource pool containing the retained allocation.
+        vni:
+          type: integer
+          format: uint32
+          minimum: 0
+          maximum: 4294967295
+          description: Persisted nonnegative VNI, distinct from the active VNI. Inspection does not establish whether it is valid for a profile change or release.
+      required:
+        - poolName
+        - vni
+    VpcInactiveVniReleaseRequest:
+      title: VpcInactiveVniReleaseRequest
+      type: object
+      description: Release the exact inactive VNI from the operator's authoritative observation after independently verifying convergence. REST preserves the supplied version and does not look up a replacement.
+      examples:
+        - ifVersionMatch: V2-T1789147200000000
+          expectedInactiveVni: 12001
+      properties:
+        ifVersionMatch:
+          type: string
+          minLength: 1
+          description: Exact Core VPC version from routing-state inspection used for the release decision, in `V<counter>-T<microseconds>` format. Missing or malformed versions are rejected. A stale version returns 412; after an ambiguous release, that error does not prove whether the previous release committed.
+        expectedInactiveVni:
+          type: integer
+          minimum: 1
+          maximum: 16777215
+          description: Exact retained VNI observed with `ifVersionMatch`. It must match the VPC's inactive allocation and differ from its active VNI.
+      required:
+        - ifVersionMatch
+        - expectedInactiveVni
+    VpcInactiveVniReleaseResult:
+      title: VpcInactiveVniReleaseResult
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - routingProfile
+      description: Authoritative acknowledgement after releasing the inactive allocation. The active VNI and routing profile remain unchanged, and the Core VPC version advances. This is not evidence of dataplane convergence.
+      examples:
+        - vpcId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          version: V3-T1789147260000000
+          routingProfile: external
+          activeVni: 51000
+          releasedInactiveVni: 12001
+      properties:
+        vpcId:
+          type: string
+          format: uuid
+          description: REST ID of the VPC selected in the release request.
+        version:
+          type: string
+          description: Advanced Core VPC version after release committed.
+        routingProfile:
+          type:
+            - string
+            - 'null'
+          description: Unchanged persisted profile name, or null when none is stored. Known Core names use the REST aliases `external`, `internal`, and `privileged-internal`; custom names are unchanged.
+        activeVni:
+          type: integer
+          format: uint32
+          minimum: 0
+          maximum: 4294967295
+          description: Unchanged active VNI.
+        releasedInactiveVni:
+          type: integer
+          format: uint32
+          minimum: 1
+          maximum: 16777215
+          description: Exact inactive VNI released by this request and now available for allocation to another VPC.
+      required:
+        - vpcId
+        - version
+        - routingProfile
+        - activeVni
+        - releasedInactiveVni
     VpcVirtualizationUpdateRequest:
       title: VpcVirtualizationUpdateRequest
       type: object
@@ -20447,6 +21105,261 @@ components:
           description: String key-value pairs describing Partition labels. Up to 10 key-value pairs can be specified
       required:
         - name
+    SpectrumXPartition:
+      title: SpectrumXPartition
+      type: object
+      description: SpectrumX Partitions are east-west network segments that Instances attach to over SpectrumX interfaces
+      examples:
+        - id: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+          name: east-west-net
+          description: SpectrumX Partition for east-west training traffic
+          siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+          tenantId: f97df110-f4de-492e-8849-4a6af68026b0
+          vni: 10200
+          labels:
+            environment: production
+            team: devops
+          status: Ready
+          statusHistory:
+            - status: Ready
+              message: SpectrumX Partition is ready for use
+              created: '2019-08-24T14:15:22Z'
+              updated: '2019-08-24T14:15:22Z'
+          created: '2019-08-24T14:15:22Z'
+          updated: '2019-08-24T14:15:22Z'
+      properties:
+        id:
+          type: string
+          description: 'Unique UUID v4 identifier for the SpectrumX Partition'
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+          description: 'Name of the SpectrumX Partition'
+          minLength: 2
+          maxLength: 256
+        description:
+          type:
+            - string
+            - 'null'
+          description: 'Description of the SpectrumX Partition'
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site the Partition belongs to
+        site:
+          $ref: '#/components/schemas/SiteSummary'
+          description: Summary of the Site, present when requested through includeRelation
+        tenantId:
+          type: string
+          format: uuid
+          description: ID of the Tenant that owns the Partition
+        tenant:
+          $ref: '#/components/schemas/TenantSummary'
+          description: Summary of the Tenant, present when requested through includeRelation
+        vni:
+          type:
+            - integer
+            - 'null'
+          description: 'VXLAN Network Identifier for the Partition. Allocated by the Site when the create request omits it'
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: String key-value pairs describing Partition labels. Up to 10 key-value pairs can be specified
+        status:
+          type: string
+          enum:
+            - Pending
+            - Provisioning
+            - Ready
+            - Error
+            - Deleting
+          description: 'Status of the SpectrumX Partition. A Partition becomes Ready once the Site reports it in inventory'
+          readOnly: true
+        statusHistory:
+          type: array
+          description: Status detail records for the SpectrumX Partition over time
+          readOnly: true
+          items:
+            $ref: '#/components/schemas/StatusDetail'
+        created:
+          type: string
+          format: date-time
+          description: ISO datetime string for when the SpectrumX Partition was created
+          readOnly: true
+        updated:
+          type: string
+          format: date-time
+          description: ISO datetime string for when the SpectrumX Partition was last updated
+          readOnly: true
+      required:
+        - id
+        - name
+        - siteId
+        - tenantId
+        - status
+    SpectrumXPartitionCreateRequest:
+      title: SpectrumXPartitionCreateRequest
+      type: object
+      examples:
+        - name: east-west-net
+          siteId: 8c43e859-d301-4ecf-9d0e-46bf374473c4
+      description: Request data to create a SpectrumX Partition
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 256
+          description: Name of the Partition to create
+        description:
+          type:
+            - string
+            - 'null'
+          description: Optional description of the Partition
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site the Partition should belong to
+        vni:
+          type:
+            - integer
+            - 'null'
+          minimum: 0
+          maximum: 2147483647
+          description: 'Requested VXLAN Network Identifier. Omit it to let the Site allocate one from its pool. A requested value that is already allocated or outside that pool is rejected by the Site'
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: String key-value pairs describing Partition labels. Up to 10 key-value pairs can be specified
+      required:
+        - name
+        - siteId
+    SpectrumXPartitionSummary:
+      title: SpectrumXPartitionSummary
+      type: object
+      description: Summary of a SpectrumX Partition nested under another resource
+      examples:
+        - id: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+          name: east-west-net
+          siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+          vni: 10200
+          status: Ready
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: ID of the SpectrumX Partition
+        name:
+          type: string
+          description: Name of the SpectrumX Partition
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site the Partition belongs to
+        vni:
+          type:
+            - integer
+            - 'null'
+          description: VXLAN Network Identifier allocated for the Partition
+        status:
+          type: string
+          description: Status of the SpectrumX Partition
+      required:
+        - id
+        - name
+        - siteId
+        - status
+    SpectrumXAttachment:
+      title: SpectrumXAttachment
+      type: object
+      description: 'A SpectrumX Attachment binds one SpectrumX Partition to one device instance on an Instance. macAddress and ipAddress are allocated by the Site and reported through inventory, so they are absent until the attachment reaches Ready'
+      examples:
+        - id: 3f5a1b2c-8d4e-4f6a-9b7c-0d1e2f3a4b5c
+          instanceId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          spectrumXPartitionId: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
+          device: NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC
+          deviceInstance: 0
+          attachmentType: Physical
+          virtualFunctionId: null
+          macAddress: '00:11:22:33:44:55'
+          ipAddress: 192.0.2.15
+          status: Ready
+          created: '2019-08-24T14:15:22Z'
+          updated: '2019-08-24T14:15:22Z'
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique UUID v4 identifier for the SpectrumX Attachment
+          readOnly: true
+        instanceId:
+          type: string
+          format: uuid
+          description: ID of the associated Instance
+        spectrumXPartitionId:
+          type: string
+          format: uuid
+          description: ID of the associated SpectrumX Partition
+        spectrumXPartition:
+          $ref: '#/components/schemas/SpectrumXPartitionSummary'
+          description: Summary of the SpectrumX Partition
+        device:
+          type: string
+          description: 'SpectrumX device the Partition is attached over, matching the device description reported for the Machine''s SpectrumX interfaces'
+        deviceInstance:
+          type: integer
+          minimum: 0
+          description: 'Index of the device, identifying which interface card the Partition is attached to'
+        attachmentType:
+          type: string
+          enum:
+            - Physical
+            - Virtual
+            - OVS
+          description: 'Type of SpectrumX attachment. `Virtual` is not currently supported and is rejected'
+        virtualFunctionId:
+          type:
+            - integer
+            - 'null'
+          description: 'Virtual function the attachment uses. Not currently supported'
+        macAddress:
+          type:
+            - string
+            - 'null'
+          description: MAC address the Site allocated for the attachment
+          readOnly: true
+        ipAddress:
+          type:
+            - string
+            - 'null'
+          description: IP address the Site allocated for the attachment
+          readOnly: true
+        status:
+          type: string
+          enum:
+            - Pending
+            - Provisioning
+            - Ready
+            - Error
+            - Deleting
+          description: Status of the SpectrumX Attachment
+          readOnly: true
+        created:
+          type: string
+          format: date-time
+          description: ISO datetime string for when the SpectrumX Attachment was created
+          readOnly: true
+        updated:
+          type: string
+          format: date-time
+          description: ISO datetime string for when the SpectrumX Attachment was last updated
+          readOnly: true
+      required:
+        - id
+        - instanceId
+        - spectrumXPartitionId
+        - device
+        - deviceInstance
+        - attachmentType
+        - status
     NVLinkLogicalPartition:
       title: NVLinkLogicalPartition
       type: object
@@ -22007,6 +22920,11 @@ components:
           items:
             $ref: '#/components/schemas/InfiniBandInterface'
           description: 'InfiniBandInterfaces are list of the InfiniBandInterface associated with the Instance'
+        spectrumXAttachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/SpectrumXAttachment'
+          description: 'SpectrumXAttachments are list of the SpectrumXAttachment associated with the Instance'
         nvLinkInterfaces:
           type: array
           items:
@@ -23120,7 +24038,7 @@ components:
         - spectrumXPartitionId: 8e6f2a1c-9b3d-4e5f-a6b7-c8d9e0f1a2b3
           device: 'NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC'
           deviceInstance: 3
-          attachmentType: OVN
+          attachmentType: OVS
           virtualFunctionId: null
       description: Request data to attach a SpectrumX Partition to an Instance
       properties:
@@ -23140,7 +24058,7 @@ components:
           enum:
             - Physical
             - Virtual
-            - OVN
+            - OVS
           description: 'Type of SpectrumX attachment. `Virtual` is not currently supported and is rejected.'
         virtualFunctionId:
           type:
@@ -28027,7 +28945,7 @@ components:
           minSizeMiB: 1831420
           maxSizeMiB: 1831420
           pciPatterns:
-            - ^/devices/pci.*nvme0$
+            - /0000:65:00\.0/nvme$
         - vendor: ''
           model: SAMSUNG MZTL63T8HFLT-00AW7
           capacityMb: 0
@@ -28035,7 +28953,7 @@ components:
           minSizeMiB: 3662840
           maxSizeMiB: 3662840
           pciPatterns:
-            - ^/devices/pci.*nvme[1-8]$
+            - ^/devices/pci.*/nvme$
       properties:
         vendor:
           type: string
@@ -28071,7 +28989,10 @@ components:
           description: Inclusive maximum size in MiB for each storage device. Null or omission means no upper bound. Used for SKU schema version 5 and later.
         pciPatterns:
           type: array
-          description: Regular expressions matched against storage sysfs PCI paths. An empty or omitted list disables PCI location matching. Used for SKU schema version 5 and later.
+          description: |-
+            Regular expressions matched against each drive's sysfs PCI path. An empty or omitted list disables PCI location matching. Used for SKU schema version 5 and later.
+
+            The matched path is the NVMe controller's sysfs DEVPATH with its trailing kernel-assigned `nvmeN` node removed, for example `/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme`, because that node changes with probe order. Patterns that anchor on the node (such as `nvme0$`) never match; end them at `/nvme` instead.
           items:
             type: string
     SkuChassis:

@@ -491,7 +491,7 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, apimi.Labels, dbm.Labels)
+	assert.Equal(t, map[string]string(apimi.Labels), dbm.Labels)
 	assert.Equal(t, dbm.HwSkuDeviceType, apimi.HwSkuDeviceType)
 	assert.Equal(t, dbm.IsUsableByTenant, apimi.IsUsableByTenant)
 }

@@ -141,6 +141,142 @@ async fn create_routing_profile_vpc(
 }
 
 #[crate::sqlx_test]
+async fn vpc_policy_updates_skip_unneeded_overlap_locks_without_restoring_stale_policy(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let mut config = crate::test_support::default_config::get();
+    config.tenant_prefix_overlap_enabled = true;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_fnn_config(None),
+    )
+    .await;
+    let created = create_routing_profile_vpc(&env, "policy-lock-order", None).await?;
+    let vpc_id = created.id.unwrap();
+    let request = |description: &str, overrides| {
+        tonic::Request::new(rpc::forge::VpcUpdateRequest {
+            id: Some(vpc_id),
+            metadata: Some(rpc::Metadata {
+                name: "policy-lock-order".to_string(),
+                description: description.to_string(),
+                ..Default::default()
+            }),
+            routing_profile_overrides: overrides,
+            ..Default::default()
+        })
+    };
+
+    let mut overlap_txn = env.pool.begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut overlap_txn).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *overlap_txn)
+        .await?;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        env.api.update_vpc(request("metadata does not wait", None)),
+    )
+    .await??;
+    assert_eq!(
+        find_test_vpc(&env, vpc_id)
+            .await?
+            .metadata
+            .unwrap()
+            .description,
+        "metadata does not wait"
+    );
+
+    let expand = env.api.update_vpc(request(
+        "must not overwrite concurrent metadata",
+        Some(rpc::forge::VpcRoutingProfileOverrides {
+            leak_default_route_from_underlay: Some(true),
+            ..Default::default()
+        }),
+    ));
+    let release = async {
+        wait_for_blocked_query(&env.pool, blocker_pid, "tenant_prefix_overlap:checks").await;
+        env.api.update_vpc(request("newer metadata", None)).await?;
+        overlap_txn.commit().await?;
+        Ok::<(), eyre::Report>(())
+    };
+    let (result, released) = tokio::join!(expand, release);
+    released?;
+    let error = result.expect_err("the waiting request must not overwrite a newer VPC version");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        error
+            .message()
+            .contains("did not have the expected version")
+    );
+    let current = find_test_vpc(&env, vpc_id).await?;
+    assert_eq!(
+        current.metadata.as_ref().unwrap().description,
+        "newer metadata"
+    );
+    assert_eq!(
+        forge_vpc_config(&current).routing_profile_overrides,
+        Some(rpc::forge::VpcRoutingProfileOverrides::default())
+    );
+
+    // The opposite race matters too: an unchanged-policy request reads the
+    // old row while a policy write is uncommitted. Skipping the overlap lock
+    // must not let it restore that old policy after the writer commits.
+    let mut policy_txn = env.pool.begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut policy_txn).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *policy_txn)
+        .await?;
+    let persisted = db::vpc::update(
+        &UpdateVpc {
+            id: vpc_id,
+            network_security_group_id: None,
+            routing_profile_overrides: Some(VpcRoutingProfileOverrides {
+                leak_default_route_from_underlay: Some(true),
+                ..Default::default()
+            }),
+            power_resource_group: None,
+            if_version_match: Some(current.version.parse()?),
+            metadata: Metadata {
+                name: "policy-lock-order".to_string(),
+                description: "committed policy".to_string(),
+                ..Default::default()
+            },
+        },
+        &mut policy_txn,
+    )
+    .await?;
+    let unchanged = env.api.update_vpc(request(
+        "stale unchanged policy",
+        Some(rpc::forge::VpcRoutingProfileOverrides::default()),
+    ));
+    let release = async {
+        wait_for_blocked_query(&env.pool, blocker_pid, "vpcs").await;
+        policy_txn.commit().await
+    };
+    let (result, released) = tokio::join!(unchanged, release);
+    released?;
+    let error = result.expect_err("an unchanged-policy request must reject its stale read");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        error
+            .message()
+            .contains("did not have the expected version")
+    );
+    let current = find_test_vpc(&env, vpc_id).await?;
+    assert_eq!(current.version, persisted.version.to_string());
+    assert_eq!(current.metadata.unwrap().description, "committed policy");
+    assert_eq!(
+        current
+            .config
+            .unwrap()
+            .routing_profile_overrides
+            .unwrap()
+            .leak_default_route_from_underlay,
+        Some(true)
+    );
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn change_vpc_routing_profile_retains_allocations_and_creation_intent(
     pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
@@ -502,9 +638,13 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
         message: &'static str,
     }
 
-    let env =
-        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
-            .await;
+    let mut config = crate::tests::common::api_fixtures::get_config();
+    config.tenant_prefix_overlap_enabled = true;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_fnn_config(None),
+    )
+    .await;
     let created = create_routing_profile_vpc(&env, "unsupported-transition", None).await?;
     let vpc_id = created.id.expect("VPC ID");
     let internal_pool = env.common_pools.ethernet.pool_vpc_vni.name();
@@ -537,7 +677,7 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
             .await?;
         let expected = match failure {
             Failure::NonFnn => {
-                sqlx::query("UPDATE vpcs SET network_virtualization_type = $1 WHERE id = $2")
+                sqlx::query("UPDATE vpcs SET network_virtualization_type = $1, routing_profile_type = NULL WHERE id = $2")
                     .bind(VpcVirtualizationType::EthernetVirtualizer)
                     .bind(vpc_id)
                     .execute(&env.pool)

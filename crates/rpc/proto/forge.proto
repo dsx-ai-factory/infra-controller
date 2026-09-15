@@ -754,8 +754,22 @@ service Forge {
   rpc AdminBmcReset(AdminBmcResetRequest) returns (AdminBmcResetResponse);
   // Admin Power Control
   rpc AdminPowerControl(AdminPowerControlRequest) returns (AdminPowerControlResponse);
-  // Reset a GPU baseboard (e.g. HGX) via Redfish Chassis.Reset, resetting all GPUs on it; v1 accepts only ForceRestart and rejects all other actions.
-  rpc AdminGpuReset(AdminGpuResetRequest) returns (AdminGpuResetResponse);
+  // Queues a Redfish Chassis.Reset request for later execution by the machine
+  // controller through Maintenance state. Success means the request was accepted,
+  // not that the reset completed. Requests are accepted only for hosts in Ready.
+  // The controller returns the host to Ready after the Redfish command succeeds,
+  // and to Failed if execution fails.
+  // Operator maintenance must be enabled with SetMaintenance and is preserved
+  // after execution. Disable it only after verifying target chassis readiness.
+  //
+  // v1 accepts only ForceRestart. An omitted action has proto3's On default and
+  // is rejected with INVALID_ARGUMENT, as are a missing/invalid machine_id or
+  // missing chassis_id.
+  // NOT_FOUND means the machine does not exist. FAILED_PRECONDITION means
+  // operator maintenance is disabled, an instance exists, or the host is not in Ready.
+  //
+  // This replaces the unused AdminGpuReset RPC; no compatibility alias is kept.
+  rpc AdminChassisReset(AdminChassisResetRequest) returns (AdminChassisResetResponse);
   // Disable Secure Boot
   rpc DisableSecureBoot(BmcEndpointRequest) returns (DisableSecureBootResponse);
   // Set Lockdown (Enable or Disable)
@@ -7324,16 +7338,17 @@ message AdminPowerControlResponse {
   optional string msg = 1;
 }
 
-message AdminGpuResetRequest {
-  // Machine whose GPU baseboard BMC is targeted. Required.
+message AdminChassisResetRequest {
+  // Machine whose BMC is targeted. Required.
   common.MachineId machine_id = 1;
   // Redfish Chassis id to reset, e.g. "HGX_Chassis_0". Required.
   string chassis_id = 2;
-  // Reset type. v1 accepts only ForceRestart and rejects all other actions.
+  // Required. v1 accepts only ForceRestart; omission uses proto3's On default
+  // and is rejected with INVALID_ARGUMENT.
   AdminPowerControlRequest.SystemPowerControl action = 3;
 }
 
-message AdminGpuResetResponse {
+message AdminChassisResetResponse {
 }
 
 message GetRedfishJobStateRequest {
@@ -7400,6 +7415,10 @@ message MachineValidationRunItem {
   optional string skip_reason = 16;
   optional string failure_reason = 17;
   common.UUID current_attempt_id = 18;
+  // Immutable plugin configuration selected when the run plan was created.
+  optional MachineValidationPlugin plugin = 19;
+  // Full-host approval captured with the selected plugin revision.
+  bool plugin_full_host_approved = 20;
 }
 
 message MachineValidationAttemptGetRequest {

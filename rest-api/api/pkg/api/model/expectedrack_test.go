@@ -417,7 +417,7 @@ func TestNewAPIExpectedRack(t *testing.T) {
 			assert.Equal(t, "rack-profile-001", got.RackProfileID)
 			assert.Equal(t, "rack-alpha", got.Name)
 			assert.Equal(t, "Primary compute rack", got.Description)
-			assert.Equal(t, map[string]string{"env": "production"}, got.Labels)
+			assert.Equal(t, APILabels{"env": "production"}, got.Labels)
 			assert.Equal(t, created, got.Created)
 			assert.Equal(t, updated, got.Updated)
 			assert.Nil(t, got.Site)

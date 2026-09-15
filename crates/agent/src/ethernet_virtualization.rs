@@ -316,8 +316,10 @@ fn parse_managed_host_loopback_ips(
     Ok((loopback_ip, loopback_ip_v6))
 }
 
-/// Update the NVUE network config. Returns Ok(true) if the configuration changed, and
-/// Ok(false) if not.
+/// Update the NVUE network config, returning whether NVUE applied a change.
+/// With `StartupFile` and `skip_post`, only save the desired file and return
+/// whether that file was replaced. Errors from saving or applying the desired
+/// configuration are returned to the caller.
 // The fetcher projects `addresses` into these compatibility fields before rendering.
 #[allow(deprecated)]
 pub(super) async fn update_nvue(
@@ -708,7 +710,7 @@ pub(super) async fn update_nvue(
             // that exceeded MAX_EXPECTED_SIZE.  Because of the diff check failing, it
             // also prevented a successful termination because the NVUE config couldn't
             // be switched to the admin network.
-            if !write(
+            let file_changed = write(
                 next_contents,
                 &path,
                 "NVUE",
@@ -716,17 +718,15 @@ pub(super) async fn update_nvue(
                     && path.0.exists()
                     && path.0.metadata()?.len() > MAX_EXPECTED_SIZE,
             )
-            .wrap_err(format!("NVUE config at {path}"))?
-            {
-                // config didn't change OR we are switching to the admin network.
-                return Ok(false);
-            };
+            .wrap_err(format!("NVUE config at {path}"))?;
 
             if !skip_post {
-                // Apply only when NVUE reports semantic diff.
+                // The agent can restart after saving the file but before
+                // applying it. Check NVUE even when the file is unchanged;
+                // `apply` skips the live update when NVUE reports no semantic diff.
                 return nvue::apply(hbn_root, &path).await;
             }
-            Ok(true)
+            Ok(file_changed)
         }
         NvueUpdateFlavor::RestApi { nvue_context } => {
             let config = NvueConfigWithHeader::from_yaml(&next_contents)
@@ -1963,6 +1963,153 @@ mod tests {
             ),
             Err(_) => tracing::debug!("Env var $HOSTNAME missing, skipping test, not important"),
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_file_retries_after_interrupted_apply() -> eyre::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Separate processes model a restart while sharing the saved YAML and
+        // fake NVUE state. Only each child's PATH points at the fake `crictl`.
+        if let Some(root) = std::env::var_os("NVUE_STARTUP_TEST_ROOT") {
+            let root = PathBuf::from(root);
+            let stage = std::env::var("NVUE_STARTUP_TEST_STAGE")?;
+            let virtualization_type = VpcVirtualizationType::EthernetVirtualizer;
+            let network_config = netconf(virtualization_type, 32, 24, false, None, true, false);
+            let update = async |skip_post| {
+                super::update_nvue(
+                    virtualization_type,
+                    NvueUpdateFlavor::StartupFile {
+                        hbn_root: &root,
+                        skip_post,
+                    },
+                    &network_config,
+                    HBNDeviceNames::hbn_23(),
+                    None,
+                )
+                .await
+            };
+
+            match stage.as_str() {
+                "save" => {
+                    assert!(update(true).await?);
+                    assert!(!update(true).await?);
+                }
+                "failure" => {
+                    let error = update(false).await.expect_err("live apply should fail");
+                    assert!(format!("{error:#}").contains("injected apply failure"));
+                }
+                "retry" => assert!(update(false).await?),
+                "unchanged" => assert!(!update(false).await?),
+                _ => panic!("unexpected StartupFile test stage: {stage}"),
+            }
+            return Ok(());
+        }
+
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        fs::create_dir_all(root.join("var/support"))?;
+        fs::create_dir_all(root.join("etc/cumulus/acl/policy.d"))?;
+        fs::create_dir(root.join("bin"))?;
+        let crictl = root.join("bin/crictl");
+        fs::write(
+            &crictl,
+            r#"#!/bin/sh
+set -eu
+root="$NVUE_STARTUP_TEST_ROOT"
+if [ "$*" = 'ps --name=doca-hbn -o=json' ]; then
+    printf '%s\n' '{"containers":[{"id":"test-hbn"}]}'
+    exit 0
+fi
+[ "$1" = exec ] && [ "$2" = test-hbn ]
+shift 2
+printf '%s\n' "$*" >> "$root/commands"
+case "$*" in
+    'nv config replace /var/support/nvue_startup.yaml')
+        cp "$root/var/support/nvue_startup.yaml" "$root/pending.yaml" ;;
+    'nv config diff')
+        if ! cmp -s "$root/pending.yaml" "$root/applied.yaml"; then
+            printf '%s\n' 'configuration changed'
+        fi ;;
+    'nv config apply -y')
+        if [ "$NVUE_STARTUP_TEST_STAGE" = failure ]; then
+            printf '%s\n' 'injected apply failure' >&2
+            exit 1
+        fi
+        cp "$root/pending.yaml" "$root/applied.yaml" ;;
+    'nv config detach') rm "$root/pending.yaml" ;;
+    'supervisorctl restart nl2doca') ;;
+    *) printf 'unexpected command: %s\n' "$*" >&2; exit 1 ;;
+esac
+"#,
+        )?;
+        fs::set_permissions(&crictl, fs::Permissions::from_mode(0o755))?;
+
+        // Stop after saving the desired file, while NVUE still has the old
+        // configuration. This is the state left by an interrupted update.
+        fs::write(root.join("applied.yaml"), "previous configuration")?;
+        run_startup_file_attempt(root, "save").await?;
+        assert!(!root.join("commands").exists(), "skip_reload ran a command");
+        let desired = fs::read_to_string(root.join(nvue::PATH))?;
+
+        run_startup_file_attempt(root, "failure").await?;
+        assert_eq!(
+            fs::read_to_string(root.join("applied.yaml"))?,
+            "previous configuration"
+        );
+        assert_eq!(
+            fs::read_to_string(FPath(root.join(nvue::PATH)).with_ext("error"))?,
+            desired
+        );
+        let attempted_apply = "nv config replace /var/support/nvue_startup.yaml\nnv config diff\nnv config apply -y\n";
+        assert_eq!(fs::read_to_string(root.join("commands"))?, attempted_apply);
+
+        run_startup_file_attempt(root, "retry").await?;
+        assert_eq!(fs::read_to_string(root.join("applied.yaml"))?, desired);
+        let successful_retry =
+            format!("{attempted_apply}{attempted_apply}supervisorctl restart nl2doca\n");
+        assert_eq!(fs::read_to_string(root.join("commands"))?, successful_retry);
+
+        run_startup_file_attempt(root, "unchanged").await?;
+        assert_eq!(fs::read_to_string(root.join("applied.yaml"))?, desired);
+        assert_eq!(
+            fs::read_to_string(root.join("commands"))?,
+            format!(
+                "{successful_retry}nv config replace /var/support/nvue_startup.yaml\nnv config diff\nnv config detach\n"
+            )
+        );
+        assert!(!root.join("pending.yaml").exists());
+        Ok(())
+    }
+
+    async fn run_startup_file_attempt(root: &Path, stage: &str) -> eyre::Result<()> {
+        let inherited_path =
+            std::env::var_os("PATH").ok_or_else(|| eyre::eyre!("missing test PATH"))?;
+        let path = std::env::join_paths(
+            std::iter::once(root.join("bin")).chain(std::env::split_paths(&inherited_path)),
+        )?;
+        let mut command = TokioCommand::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                "ethernet_virtualization::tests::startup_file_retries_after_interrupted_apply",
+                "--nocapture",
+            ])
+            .env("NVUE_STARTUP_TEST_ROOT", root)
+            .env("NVUE_STARTUP_TEST_STAGE", stage)
+            .env("IGNORE_MGMT_VRF", "true")
+            .env("PATH", path)
+            .kill_on_drop(true);
+        // The fake commands only use local files; bound a stuck child to 30s.
+        let output = timeout(Duration::from_secs(30), command.output()).await??;
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "StartupFile stage {stage} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         Ok(())
     }
 

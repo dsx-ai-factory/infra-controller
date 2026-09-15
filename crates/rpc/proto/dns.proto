@@ -14,8 +14,45 @@ message DnsResourceRecordLookupRequest {
   optional string real_remote = 6;
 }
 
+// How a lookup was classified against the zones the site holds. The DNS
+// server maps this to an RCODE and the AA bit; the values are not RCODE
+// numbers.
+enum DnsLookupOutcome {
+  // Sent by servers that predate this field. Clients must fall back to the
+  // record list: non-empty is NOERROR, empty is NXDOMAIN.
+  DNS_LOOKUP_OUTCOME_UNSPECIFIED = 0;
+  // A successful lookup. NOERROR with `records` as the answer section. Clients
+  // answer NOERROR even if `records` is empty; a negative answer is always
+  // NO_DATA or NO_SUCH_NAME, never an empty RECORDS.
+  DNS_LOOKUP_OUTCOME_RECORDS = 1;
+  // The name exists in a held zone but has no records of the requested type.
+  // NOERROR with an empty answer; `authority_soa` is set.
+  DNS_LOOKUP_OUTCOME_NO_DATA = 2;
+  // The name is inside a held zone and nothing exists at or below it.
+  // NXDOMAIN; `authority_soa` is set.
+  DNS_LOOKUP_OUTCOME_NO_SUCH_NAME = 3;
+  // No held zone contains the name. The server must not answer NXDOMAIN.
+  DNS_LOOKUP_OUTCOME_NOT_AUTHORITATIVE = 4;
+  // The zone is held but policy declines to answer. REFUSED.
+  DNS_LOOKUP_OUTCOME_REFUSED = 5;
+  // The requested operation is not implemented. NOTIMP.
+  DNS_LOOKUP_OUTCOME_NOT_IMPLEMENTED = 6;
+}
+
 message DnsResourceRecordLookupResponse {
+  // Records of the requested type at the queried name, or the zone SOA for an
+  // apex SOA query. Empty unless `outcome` is RECORDS.
   repeated DnsResourceRecord records = 1;
+  // How the lookup was classified.
+  DnsLookupOutcome outcome = 2;
+  // The SOA of the zone the name falls in, for the authority section of a
+  // negative answer. Always set for NO_DATA and NO_SUCH_NAME, never for the
+  // other outcomes. A client treats a negative without it as a broken reply.
+  optional DnsResourceRecord authority_soa = 3;
+  // The AA bit. True exactly when `outcome` is RECORDS, NO_DATA, or
+  // NO_SUCH_NAME. A client that receives an `outcome` value it does not
+  // recognise answers SERVFAIL rather than guessing an RCODE.
+  bool authoritative = 4;
 }
 
 message DnsResourceRecord {
