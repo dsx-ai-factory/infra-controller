@@ -7071,6 +7071,7 @@ dependencies = [
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "prometheus",
+ "socket2",
  "tokio",
  "tokio-util",
  "tracing",

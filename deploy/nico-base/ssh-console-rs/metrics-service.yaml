@@ -23,6 +23,7 @@ metadata:
     app: nico-ssh-console-rs
     app.kubernetes.io/metrics: nico-ssh-console-rs
 spec:
+  ipFamilyPolicy: PreferDualStack
   ports:
     - port: 9009
       name: http

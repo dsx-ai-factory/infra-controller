@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "port"
+      ]
+    },
+    "dhcp": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "v6Enabled": {
+          "type": "boolean"
+        },
+        "interface": {
+          "type": "string",
+          "minLength": 1
+        },
+        "v6ServerIdentifier": {
+          "type": "string"
+        },
+        "v6DnsServers": {
+          "type": "string"
+        },
+        "v6NtpServers": {
+          "type": "string"
+        },
+        "v6ProvisioningServer": {
+          "type": "string"
+        },
+        "v6RapidCommit": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "v6Enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "v6Enabled"
+            ]
+          },
+          "then": {
+            "required": [
+              "v6ServerIdentifier"
+            ],
+            "properties": {
+              "v6ServerIdentifier": {
+                "pattern": "^[0-9A-Fa-f]{12}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "v6ExternalService": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "dhcp": {
+            "type": "object",
+            "properties": {
+              "v6Enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "v6Enabled"
+            ]
+          }
+        },
+        "required": [
+          "dhcp"
+        ]
+      },
+      "then": {
+        "properties": {
+          "replicas": {
+            "const": 1
+          }
+        }
+      }
+    }
+  ]
+}

@@ -6,6 +6,7 @@ metadata:
   namespace: {{ include "unbound.namespace" . }}
   labels:
     {{- include "unbound.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: nico-unbound
     app: nico-unbound
   annotations:
     {{- include "unbound.annotations" . | nindent 4 }}
@@ -17,7 +18,7 @@ spec:
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
   selector:
     matchLabels:
-      app.kubernetes.io/instance: nico-unbound
+      app.kubernetes.io/metrics: nico-unbound
   namespaceSelector:
     any: true
 {{- end }}

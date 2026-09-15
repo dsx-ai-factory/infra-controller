@@ -375,6 +375,18 @@ nico-api:
 ## ---------------------------------------------------------------------------
 
 nico-dhcp:
+  ## IPv6 is opt-in. Enable only after the pod network and relay IPv6 VIP are ready.
+  dhcp:
+    v6Enabled: false
+    v6ServerIdentifier: ""  # Required when enabled: stable, site-unique 12 hex digits.
+    v6DnsServers: ""
+    v6NtpServers: ""
+    v6ProvisioningServer: ""
+    v6RapidCommit: false
+  v6ExternalService:
+    enabled: false
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: ""  # Required only when this Service is enabled.
   externalService:
     enabled: true    # must be explicitly enabled - defaults to false in chart
     annotations:

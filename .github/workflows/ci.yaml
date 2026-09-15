@@ -1721,6 +1721,21 @@ jobs:
           lint: 'true'
           template: 'true'
 
+      - name: Validate Prometheus scrape configuration
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends prometheus python3-yaml
+          promtool check config dev/prometheus/prometheus.yml
+          /usr/bin/python3 - <<'PYCONFIG' | promtool check config /dev/stdin
+          import yaml
+          with open("helm-prereqs/observability/values-nico-ipv6-scraping.yaml") as stream:
+              values = yaml.safe_load(stream)
+          print(yaml.safe_dump({"scrape_configs": values["prometheus"]["prometheusSpec"]["additionalScrapeConfigs"]}))
+          PYCONFIG
+
+      - name: Check Core VIP preflight
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
+
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
@@ -1728,6 +1743,7 @@ jobs:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
           charts: >-
+            bluefield/charts/nico-otelcol
             helm
             helm/charts/nico-api
             helm/charts/nico-bmc-proxy
