@@ -17,10 +17,15 @@ service:
 
 args:
   listenPort: 8100
+  credsManagerServerName: credsmgr.csm
   credsManagerUrl: "https://nico-rest-cert-manager.nico-rest:8000"
   tlsCertPath: /etc/tls/tls.crt
   tlsKeyPath: /etc/tls/tls.key
   debug: true
+
+# -- Secret containing the certificate manager's public CA certificate in tls.crt.
+# Only tls.crt is mounted; the CA private key is never mounted in Site Manager.
+credsManagerCASecret: ca-signing-secret
 
 resources:
   requests:

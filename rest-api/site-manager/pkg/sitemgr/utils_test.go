@@ -7,7 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -46,7 +46,7 @@ func (util *testUtils) setup(t *testing.T) {
 		}
 
 		var req csmtypes.SiteCreateRequest
-		content, err := ioutil.ReadAll(r.Body)
+		content, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		err = json.Unmarshal(content, &req)
 		require.NoError(t, err)
