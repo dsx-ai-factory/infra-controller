@@ -261,7 +261,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
                 | hw::HwType::Gb200
                 | hw::HwType::LiteonPowerShelf
                 | hw::HwType::DeltaPowerShelf
-                | hw::HwType::NvSwitch,
+                | hw::HwType::NvSwitch
+                | hw::HwType::Sushy,
             ) => false,
             None => false,
         })
@@ -474,6 +475,7 @@ pub(crate) fn hw_type<B: Bmc>(
                 Some(hw::HwType::Gb200)
             }
             "NVIDIA" if root.product() == Some(Product::new("P3809")) => Some(hw::HwType::NvSwitch),
+            "Contoso" | "Sushy" | "RedVirt" => Some(hw::HwType::Sushy),
             _ => None,
         })
         .or_else(|| {
@@ -818,6 +820,7 @@ fn machine_setup_status<B: Bmc>(
         hw::HwType::LiteonPowerShelf => (),
         hw::HwType::DeltaPowerShelf => (),
         hw::HwType::NvSwitch => (),
+        hw::HwType::Sushy => (),
         hw::HwType::Viking => {
             diffs.extend(
                 hw::viking::EXPECTED_BIOS_ATTRS

@@ -1303,6 +1303,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_bmc_root_password_sushy_is_noop() {
+        let sim = RedfishSim::default();
+        sim.seed_user("root", "factory_pass");
+
+        sim.set_bmc_root_password(
+            "127.0.0.1",
+            Some(443),
+            RedfishVendor::Sushy,
+            Credentials::new("root", "factory_pass"),
+            "site_pass".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            sim.user_password("root").as_deref(),
+            Some("factory_pass"),
+            "Sushy password change must be a no-op",
+        );
+        assert_eq!(
+            sim.create_client_calls()
+                .into_iter()
+                .map(|call| call.vendor)
+                .collect::<Vec<_>>(),
+            vec![Some(RedfishVendor::Unknown), Some(RedfishVendor::Sushy)],
+            "Sushy must still create the Unknown rotation client and the vendor policy client",
+        );
+    }
+
+    #[tokio::test]
     async fn probe_bmc_vendor_resolves_from_service_root() {
         let sim = RedfishSim::default();
         let vendor = sim

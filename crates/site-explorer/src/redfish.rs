@@ -228,12 +228,6 @@ impl RedfishClient {
         match service_root.vendor() {
             Some(vendor) if vendor != RedfishVendor::Unknown => Ok(vendor),
             _ => {
-                // Capture the raw vendor string the ServiceRoot actually reported
-                // (the `Vendor` field, falling back to the first `Oem` key) so the
-                // recorded exploration error says *what* we read and *where* from.
-                // `None` here means the BMC reported neither — usually transient
-                // while it is still initializing; `Some(_)` means a vendor we don't
-                // recognize yet. See NVBug 6036327.
                 let observed = service_root.vendor_string();
                 Err(EndpointExplorationError::MissingVendor { observed })
             }
