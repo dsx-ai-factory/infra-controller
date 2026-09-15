@@ -513,6 +513,7 @@ async fn test_network_security_group_stateful_egress_requires_site_support(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = get_config();
+    config.tenant_prefix_overlap_enabled = false;
     config.network_security_group.stateful_acls_enabled = false;
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
 
@@ -635,6 +636,61 @@ async fn test_network_security_group_stateful_egress_requires_site_support(
         .into_inner()
         .network_security_groups;
     assert_eq!(persisted_groups, vec![stateless_network_security_group]);
+
+    // A stateful group can outlive the site setting. Once another writer
+    // disables it, an unconditional update must not re-enable it using the
+    // exception for an existing stateful group.
+    sqlx::query("UPDATE network_security_groups SET stateful_egress = true WHERE id = $1")
+        .bind(stateless_id)
+        .execute(&env.pool)
+        .await?;
+    let id = stateless_id.parse()?;
+    let mut writer = env.db_txn().await;
+    let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(writer.as_mut())
+        .await?;
+    let old =
+        db::network_security_group::find_by_ids(&mut writer, std::slice::from_ref(&id), None, true)
+            .await?
+            .pop()
+            .unwrap();
+    let restricted = db::network_security_group::update(
+        &mut writer,
+        &id,
+        &old.tenant_organization_id,
+        &old.metadata,
+        false,
+        &[],
+        old.version,
+        None,
+    )
+    .await?;
+    let update = env.api.update_network_security_group(tonic::Request::new(
+        rpc::forge::UpdateNetworkSecurityGroupRequest {
+            id: stateless_id.to_string(),
+            tenant_organization_id: tenant_organization_id.to_string(),
+            metadata: persisted_groups[0].metadata.clone(),
+            network_security_group_attributes: Some(rpc::forge::NetworkSecurityGroupAttributes {
+                stateful_egress: true,
+                rules: vec![],
+            }),
+            if_version_match: None,
+        },
+    ));
+    let release = async {
+        wait_for_blocked_query(&env.pool, writer_pid, "network_security_groups").await;
+        writer.commit().await
+    };
+    let (result, released) = tokio::join!(update, release);
+    released?;
+    let error = result.expect_err("stateful enablement must use the locked policy");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+    let mut txn = env.db_txn().await;
+    assert_eq!(
+        db::network_security_group::find_by_ids(&mut txn, &[id], None, false).await?,
+        vec![restricted]
+    );
+    txn.rollback().await?;
 
     Ok(())
 }
@@ -1289,6 +1345,69 @@ async fn tenant_prefix_reuse_checks_effective_active_policy(
         before_active_and_pending_vpcs
     );
 
+    // Assignment advances without another API request, even if release was
+    // requested before activation. Deletion intent is not network withdrawal.
+    for (state, use_admin_network, deleted) in [
+        (ManagedHostState::Ready, true, false),
+        (ManagedHostState::Ready, true, true),
+        (
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
+            },
+            false,
+            false,
+        ),
+    ] {
+        let mut txn = env.db_txn().await;
+        let (mut network, version) = db::machine::get_network_config(txn.as_mut(), &mh.id.into())
+            .await?
+            .take();
+        network.use_admin_network = Some(use_admin_network);
+        assert!(
+            db::machine::try_update_network_config(&mut txn, &mh.id.into(), version, &network)
+                .await?
+        );
+        db::machine::update_state(&mut txn, &mh.id.into(), &state).await?;
+        sqlx::query(
+            "UPDATE instances SET deleted = CASE WHEN $1 THEN NOW() ELSE NULL END WHERE id = $2",
+        )
+        .bind(deleted)
+        .bind(instance.id)
+        .execute(txn.as_mut())
+        .await?;
+        txn.commit().await?;
+        let error = env
+            .api
+            .update_network_security_group(tonic::Request::new(nsg_update(permit.clone())))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::FailedPrecondition, "{state:?}: {error}");
+        for request in [vpc_update(&permit_id), inline_update.clone()] {
+            let error = env
+                .api
+                .update_vpc(tonic::Request::new(request))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), Code::FailedPrecondition, "{state:?}: {error}");
+        }
+    }
+    assert_eq!(
+        env.api
+            .find_network_security_groups_by_ids(tonic::Request::new(nsg_query.clone()))
+            .await?
+            .into_inner(),
+        before_nsg
+    );
+    assert_eq!(
+        env.api
+            .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+                vpc_ids: vec![pending_vpc_id, active_vpc_id],
+            }))
+            .await?
+            .into_inner(),
+        before_active_and_pending_vpcs
+    );
+
     // The Instance's NSG replaces the VPC's default. Changing the shadowed
     // VPC policy is permitted; it does not change this host's effective NSG.
     sqlx::query("UPDATE instances SET network_security_group_id = $1 WHERE id = $2")
@@ -1553,6 +1672,606 @@ async fn tenant_prefix_reuse_checks_effective_active_policy(
             .await?
             .into_inner(),
         before_pending_vpc
+    );
+
+    // After deletion has entered network teardown, changing policy must not
+    // prevent the controller from withdrawing the old tenant configuration.
+    let mut txn = env.db_txn().await;
+    let (mut network, version) = db::machine::get_network_config(txn.as_mut(), &mh.id.into())
+        .await?
+        .take();
+    network.use_admin_network = Some(true);
+    assert!(
+        db::machine::try_update_network_config(&mut txn, &mh.id.into(), version, &network).await?
+    );
+    db::machine::update_state(
+        &mut txn,
+        &mh.id.into(),
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForNetworkReconfig,
+        },
+    )
+    .await?;
+    sqlx::query("UPDATE instances SET network_security_group_id = NULL WHERE id = $1")
+        .bind(instance.id)
+        .execute(txn.as_mut())
+        .await?;
+    txn.commit().await?;
+    let updated = env
+        .api
+        .update_network_security_group(tonic::Request::new(nsg_update(
+            rpc::forge::NetworkSecurityGroupAttributes {
+                stateful_egress: true,
+                rules: vec![],
+            },
+        )))
+        .await?
+        .into_inner();
+    assert!(
+        updated
+            .network_security_group
+            .unwrap()
+            .attributes
+            .unwrap()
+            .stateful_egress
+    );
+    env.api
+        .update_vpc(tonic::Request::new(vpc_update(&permit_id)))
+        .await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn network_security_group_gate_off_concurrent_updates(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config.tenant_prefix_overlap_enabled = false;
+    config.network_security_group.stateful_acls_enabled = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let tenant = "concurrent-nsg-updates";
+    crate::tests::common::api_fixtures::tenant::create_fixture_tenant(&env, tenant).await?;
+
+    for (scenario, stateful_egress, match_version) in [
+        ("unconditional metadata", false, false),
+        ("unconditional expansion", true, false),
+        ("explicit version", false, true),
+    ] {
+        let nsg = env
+            .api
+            .create_network_security_group(tonic::Request::new(
+                rpc::forge::CreateNetworkSecurityGroupRequest {
+                    id: Some(uuid::Uuid::new_v4().to_string()),
+                    tenant_organization_id: tenant.to_string(),
+                    metadata: Some(rpc::forge::Metadata {
+                        name: scenario.to_string(),
+                        ..Default::default()
+                    }),
+                    network_security_group_attributes: Some(Default::default()),
+                },
+            ))
+            .await?
+            .into_inner()
+            .network_security_group
+            .unwrap();
+        let id = nsg.id.parse()?;
+        let mut writer = env.db_txn().await;
+        let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(writer.as_mut())
+            .await?;
+        let old = db::network_security_group::find_by_ids(
+            &mut writer,
+            std::slice::from_ref(&id),
+            None,
+            true,
+        )
+        .await?
+        .pop()
+        .unwrap();
+        let mut metadata = old.metadata.clone();
+        metadata.description = "competing update".to_string();
+        let competing = db::network_security_group::update(
+            &mut writer,
+            &id,
+            &old.tenant_organization_id,
+            &metadata,
+            false,
+            &[],
+            old.version,
+            None,
+        )
+        .await?;
+        let mut overlap_blocker = env.db_txn().await;
+        if !stateful_egress {
+            db::tenant_prefix_overlap::lock_checks(&mut overlap_blocker).await?;
+        }
+        let request = rpc::forge::UpdateNetworkSecurityGroupRequest {
+            id: nsg.id,
+            tenant_organization_id: tenant.to_string(),
+            metadata: Some(rpc::forge::Metadata {
+                name: scenario.to_string(),
+                description: "requested update".to_string(),
+                ..Default::default()
+            }),
+            network_security_group_attributes: Some(rpc::forge::NetworkSecurityGroupAttributes {
+                stateful_egress,
+                rules: vec![],
+            }),
+            if_version_match: match_version.then_some(nsg.version),
+        };
+        let update = env
+            .api
+            .update_network_security_group(tonic::Request::new(request));
+        let release = async {
+            wait_for_blocked_query(&env.pool, writer_pid, "network_security_groups").await;
+            writer.commit().await
+        };
+        let (result, released) = tokio::time::timeout(Duration::from_secs(40), async {
+            tokio::join!(update, release)
+        })
+        .await?;
+        released?;
+        overlap_blocker.rollback().await?;
+        let mut txn = env.db_txn().await;
+        let persisted = db::network_security_group::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(&id),
+            None,
+            false,
+        )
+        .await?
+        .pop()
+        .unwrap();
+        txn.rollback().await?;
+        if match_version {
+            let error = result.expect_err(scenario);
+            assert_eq!(
+                error.code(),
+                Code::FailedPrecondition,
+                "{scenario}: {error}"
+            );
+            assert_eq!(persisted, competing, "{scenario}");
+        } else {
+            let returned = result?.into_inner().network_security_group.unwrap();
+            assert_eq!(
+                persisted.metadata.description, "requested update",
+                "{scenario}"
+            );
+            assert_eq!(persisted.stateful_egress, stateful_egress, "{scenario}");
+            assert_eq!(
+                persisted.version.version_nr(),
+                competing.version.version_nr() + 1,
+                "{scenario}"
+            );
+            let expected: rpc::forge::NetworkSecurityGroup = persisted.try_into()?;
+            assert_eq!(returned, expected, "{scenario}");
+        }
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn tenant_prefix_overlap_gate_off_preserves_policy_contraction(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = get_config();
+    config.tenant_prefix_overlap_enabled = false;
+    config.default_tenant_routing_profile_type = "INTERNAL".to_string();
+    config.network_security_group.stateful_acls_enabled = true;
+    let fnn = FnnConfig {
+        admin_vpc: None,
+        common_internal_route_target: None,
+        additional_route_target_imports: vec![],
+        routing_profiles: HashMap::from([(
+            "INTERNAL".to_string(),
+            FnnRoutingProfileConfig {
+                tenant_prefix_overlap_eligible: true,
+                internal: Some(true),
+                ..Default::default()
+            },
+        )]),
+        use_vpc_vrf_loopback: false,
+    };
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(Vec::new()),
+            ..TestEnvOverrides::with_config(config).with_fnn_config(Some(fnn))
+        },
+    )
+    .await;
+    let tenant = "gate-off-policy";
+    crate::tests::common::api_fixtures::tenant::create_fixture_tenant(&env, tenant).await?;
+    let nsg_id = uuid::Uuid::new_v4().to_string();
+    env.api
+        .create_network_security_group(tonic::Request::new(
+            rpc::forge::CreateNetworkSecurityGroupRequest {
+                id: Some(nsg_id.clone()),
+                tenant_organization_id: tenant.to_string(),
+                metadata: Some(rpc::forge::Metadata {
+                    name: nsg_id.clone(),
+                    ..Default::default()
+                }),
+                network_security_group_attributes: Some(Default::default()),
+            },
+        ))
+        .await?;
+    let vpc_id = VpcId::new();
+    let mut request = VpcCreationRequest::builder(tenant)
+        .id(vpc_id)
+        .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+        .routing_profile_type("INTERNAL".to_string())
+        .metadata(Metadata::new_with_default_name())
+        .rpc();
+    request.network_security_group_id = Some(nsg_id.clone());
+    env.api.create_vpc(tonic::Request::new(request)).await?;
+    let segment_id = create_tenant_network_segment(
+        &env.api,
+        Some(vpc_id),
+        "10.117.1.1/24".parse()?,
+        "gate-off-policy",
+        true,
+    )
+    .await;
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+    let host = create_managed_host(&env).await;
+    let _instance = host
+        .instance_builer(&env)
+        .tenant_org(tenant)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let nsg_update = |stateful_egress| {
+        tonic::Request::new(rpc::forge::UpdateNetworkSecurityGroupRequest {
+            id: nsg_id.clone(),
+            tenant_organization_id: tenant.to_string(),
+            metadata: Some(rpc::forge::Metadata {
+                name: nsg_id.clone(),
+                ..Default::default()
+            }),
+            network_security_group_attributes: Some(rpc::forge::NetworkSecurityGroupAttributes {
+                stateful_egress,
+                rules: vec![],
+            }),
+            if_version_match: None,
+        })
+    };
+    let read_nsg = || {
+        env.api
+            .find_network_security_groups_by_ids(tonic::Request::new(
+                rpc::forge::FindNetworkSecurityGroupsByIdsRequest {
+                    network_security_group_ids: vec![nsg_id.clone()],
+                    tenant_organization_id: None,
+                },
+            ))
+    };
+    let vpc_update = |leak_default_route_from_underlay| {
+        tonic::Request::new(rpc::forge::VpcUpdateRequest {
+            id: Some(vpc_id),
+            metadata: Some(rpc::forge::Metadata {
+                name: "gate-off-policy".to_string(),
+                ..Default::default()
+            }),
+            network_security_group_id: Some(nsg_id.clone()),
+            routing_profile_overrides: Some(rpc::forge::VpcRoutingProfileOverrides {
+                leak_default_route_from_underlay: Some(leak_default_route_from_underlay),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    };
+    // The disabled gate preserves ordinary policy changes without duplicates.
+    env.api
+        .update_network_security_group(nsg_update(true))
+        .await?;
+    env.api
+        .update_network_security_group(nsg_update(false))
+        .await?;
+    env.api.update_vpc(vpc_update(true)).await?;
+    env.api.update_vpc(vpc_update(false)).await?;
+
+    let update_after_restriction = async || {
+        let id = nsg_id.parse()?;
+        let mut writer = env.db_txn().await;
+        let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(writer.as_mut())
+            .await?;
+        let old = db::network_security_group::find_by_ids(
+            &mut writer,
+            std::slice::from_ref(&id),
+            None,
+            true,
+        )
+        .await?
+        .pop()
+        .unwrap();
+        assert!(old.stateful_egress);
+        let restricted = db::network_security_group::update(
+            &mut writer,
+            &id,
+            &old.tenant_organization_id,
+            &old.metadata,
+            false,
+            &[],
+            old.version,
+            None,
+        )
+        .await?;
+        let mut overlap_blocker = env.db_txn().await;
+        db::tenant_prefix_overlap::lock_checks(&mut overlap_blocker).await?;
+        let overlap_blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(overlap_blocker.as_mut())
+            .await?;
+        let update = env.api.update_network_security_group(nsg_update(true));
+        let release = async {
+            // The request first sees unchanged policy, then discovers the
+            // restriction after waiting for the NSG row.
+            wait_for_blocked_query(&env.pool, writer_pid, "network_security_groups").await;
+            writer.commit().await?;
+            wait_for_blocked_query(
+                &env.pool,
+                overlap_blocker_pid,
+                "tenant_prefix_overlap:checks",
+            )
+            .await;
+            // The overlap wait must not keep the first transaction's row lock.
+            let available = tokio::time::timeout(
+                Duration::from_secs(10),
+                db::network_security_group::find_by_ids(
+                    &mut overlap_blocker,
+                    std::slice::from_ref(&id),
+                    None,
+                    true,
+                ),
+            )
+            .await??;
+            assert_eq!(available, vec![restricted.clone()]);
+            overlap_blocker.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (result, released) = tokio::join!(update, release);
+        released?;
+        Ok::<_, Box<dyn std::error::Error>>((result, restricted))
+    };
+    env.api
+        .update_network_security_group(nsg_update(true))
+        .await?;
+    let (result, restricted) = update_after_restriction().await?;
+    let updated = result?.into_inner().network_security_group.unwrap();
+    assert!(updated.attributes.as_ref().unwrap().stateful_egress);
+    assert_eq!(
+        updated.version.parse::<ConfigVersion>()?.version_nr(),
+        restricted.version.version_nr() + 1
+    );
+    assert_eq!(
+        read_nsg().await?.into_inner().network_security_groups,
+        vec![updated]
+    );
+    env.api
+        .update_network_security_group(nsg_update(false))
+        .await?;
+
+    let other = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(tenant)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn)
+                .routing_profile_type("INTERNAL".to_string())
+                .metadata(Metadata::new_with_default_name())
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let other_id = other.id.unwrap();
+    let mut txn = env.db_txn().await;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    let root = db::site_prefix::create_tenant_managed(
+        model::site_prefix::NewTenantManagedSitePrefix {
+            id: carbide_uuid::site_prefix::SitePrefixId::new(),
+            tenant_organization_id: tenant.parse()?,
+            prefix: "10.117.0.0/16".parse()?,
+            metadata: Metadata::new_with_default_name(),
+        },
+        env.config.max_site_prefixes_per_tenant,
+        &mut txn,
+    )
+    .await?
+    .site_prefix;
+    sqlx::query("UPDATE site_prefixes SET lifecycle_state = 'ready' WHERE id = $1")
+        .bind(root.id)
+        .execute(txn.as_mut())
+        .await?;
+    // Mixed tables allow a retained duplicate fixture without removing either
+    // exclusion constraint. Deletion intent must not hide its address space.
+    let prefix_id = carbide_uuid::vpc::VpcPrefixId::new();
+    db::vpc_prefix::persist(
+        model::vpc_prefix::NewVpcPrefix {
+            id: prefix_id,
+            site_prefix_id: Some(root.id),
+            vpc_id: other_id,
+            config: model::vpc_prefix::VpcPrefixConfig {
+                prefix: "10.117.1.0/24".parse()?,
+            },
+            metadata: Metadata::new_with_default_name(),
+        },
+        other.version.parse()?,
+        &mut txn,
+    )
+    .await?;
+    let version = sqlx::query_scalar("SELECT version FROM vpcs WHERE id = $1")
+        .bind(other_id)
+        .fetch_one(txn.as_mut())
+        .await?;
+    db::vpc_prefix::mark_as_deleted(
+        &model::vpc_prefix::DeleteVpcPrefix { id: prefix_id },
+        version,
+        &mut txn,
+    )
+    .await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(txn.as_mut())
+        .await?;
+    let before_nsg = read_nsg().await?.into_inner();
+    let expansion = env.api.update_network_security_group(nsg_update(true));
+    let release = async {
+        wait_for_blocked_query(&env.pool, blocker_pid, "tenant_prefix_overlap:checks").await;
+        txn.commit().await
+    };
+    let (result, released) = tokio::join!(expansion, release);
+    released?;
+    let error = result.expect_err("gate-off expansion must see the newly committed duplicate");
+    assert_eq!(error.code(), Code::FailedPrecondition, "{error}");
+    assert_eq!(read_nsg().await?.into_inner(), before_nsg);
+    let read_vpc = || {
+        env.api
+            .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+                vpc_ids: vec![vpc_id],
+            }))
+    };
+    let before_vpc = read_vpc().await?.into_inner();
+    let error = env.api.update_vpc(vpc_update(true)).await.unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition, "{error}");
+    assert_eq!(read_vpc().await?.into_inner(), before_vpc);
+
+    // Assignment must recheck an NSG that gained permissions while the VPC
+    // request waited for its row lock.
+    let target_id = uuid::Uuid::new_v4().to_string();
+    env.api
+        .create_network_security_group(tonic::Request::new(
+            rpc::forge::CreateNetworkSecurityGroupRequest {
+                id: Some(target_id.clone()),
+                tenant_organization_id: tenant.to_string(),
+                metadata: Some(rpc::forge::Metadata {
+                    name: "concurrent assignment policy".to_string(),
+                    ..Default::default()
+                }),
+                network_security_group_attributes: Some(Default::default()),
+            },
+        ))
+        .await?;
+    let id = target_id.parse()?;
+    let mut writer = env.db_txn().await;
+    let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(writer.as_mut())
+        .await?;
+    let old =
+        db::network_security_group::find_by_ids(&mut writer, std::slice::from_ref(&id), None, true)
+            .await?
+            .pop()
+            .unwrap();
+    let expanded = db::network_security_group::update(
+        &mut writer,
+        &id,
+        &old.tenant_organization_id,
+        &old.metadata,
+        true,
+        &[],
+        old.version,
+        None,
+    )
+    .await?;
+    let mut overlap_blocker = env.db_txn().await;
+    db::tenant_prefix_overlap::lock_checks(&mut overlap_blocker).await?;
+    let overlap_blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(overlap_blocker.as_mut())
+        .await?;
+    let assignment = env
+        .api
+        .update_vpc(tonic::Request::new(rpc::forge::VpcUpdateRequest {
+            network_security_group_id: Some(target_id),
+            ..vpc_update(false).into_inner()
+        }));
+    let release = async {
+        wait_for_blocked_query(&env.pool, writer_pid, "network_security_groups").await;
+        writer.commit().await?;
+        wait_for_blocked_query(
+            &env.pool,
+            overlap_blocker_pid,
+            "tenant_prefix_overlap:checks",
+        )
+        .await;
+        let available = tokio::time::timeout(
+            Duration::from_secs(10),
+            db::network_security_group::find_by_ids(&mut overlap_blocker, &[id], None, true),
+        )
+        .await??;
+        assert_eq!(available, vec![expanded]);
+        overlap_blocker.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (result, released) = tokio::join!(assignment, release);
+    released?;
+    let error = result.expect_err("assignment must recheck the expanded NSG");
+    assert_eq!(error.code(), Code::FailedPrecondition, "{error}");
+    assert!(
+        error.message().contains("not safe for tenant prefix reuse"),
+        "{error}"
+    );
+    assert_eq!(read_vpc().await?.into_inner(), before_vpc);
+
+    // With retained duplicates, the same concurrent restriction must not be
+    // undone after the request reacquires the overlap lock.
+    sqlx::query("UPDATE network_security_groups SET stateful_egress = true WHERE id = $1")
+        .bind(&nsg_id)
+        .execute(&env.pool)
+        .await?;
+    let (result, restricted) = update_after_restriction().await?;
+    let error = result.expect_err("reclassified expansion must check retained duplicates");
+    assert_eq!(error.code(), Code::FailedPrecondition, "{error}");
+    assert!(
+        error.message().contains("not safe for tenant prefix reuse"),
+        "{error}"
+    );
+    let expected: rpc::forge::NetworkSecurityGroup = restricted.try_into()?;
+    assert_eq!(
+        read_nsg().await?.into_inner().network_security_groups,
+        vec![expected]
+    );
+
+    // Restore the unsafe policy so recovery removes permissions rather than
+    // resubmitting an already safe configuration.
+    sqlx::query("UPDATE network_security_groups SET stateful_egress = true WHERE id = $1")
+        .bind(&nsg_id)
+        .execute(&env.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE vpcs SET routing_profile_overrides = \
+         jsonb_build_object('leak_default_route_from_underlay', true) WHERE id = $1",
+    )
+    .bind(vpc_id)
+    .execute(&env.pool)
+    .await?;
+    let mut blocker = env.db_txn().await;
+    db::tenant_prefix_overlap::lock_checks(&mut blocker).await?;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        env.api.update_network_security_group(nsg_update(false)),
+    )
+    .await??;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        env.api.update_vpc(vpc_update(false)),
+    )
+    .await??;
+    blocker.rollback().await?;
+    assert!(
+        !read_nsg().await?.into_inner().network_security_groups[0]
+            .attributes
+            .as_ref()
+            .unwrap()
+            .stateful_egress
+    );
+    assert_eq!(
+        read_vpc().await?.into_inner().vpcs[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .routing_profile_overrides
+            .as_ref()
+            .unwrap()
+            .leak_default_route_from_underlay,
+        Some(false)
     );
     Ok(())
 }

@@ -161,6 +161,7 @@ async fn get_managed_host_network_config_inner(
     dpu_machine_id: DpuMachineId,
 ) -> Result<rpc::ManagedHostNetworkConfigResponse, tonic::Status> {
     let mut txn = api.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_config(txn.as_mut()).await?;
 
     let snapshot = db::managed_host::load_snapshot(
         &mut txn,
@@ -241,6 +242,18 @@ async fn get_managed_host_network_config_inner(
     // network. But if no interfaces are configured for this DPU, override
     // and keep it on admin. This prevents the host from using the DPU at all.
     let use_admin_network = snapshot.use_admin_network() || !dpu_has_tenant_interface_config;
+    let serves_tenant_network = !use_admin_network
+        && !matches!(
+            snapshot.managed_state,
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
+            }
+        );
+    if serves_tenant_network {
+        // Validate before rendering either network: rendering can allocate
+        // loopbacks, which must follow the VPC/VNI locks taken by this check.
+        super::tenant_prefix_overlap::validate_retained_host(api, &mut txn, &snapshot).await?;
+    }
 
     let use_admin_network_changed = dpu_snapshot.network_config.use_admin_network_changed;
 
@@ -308,17 +321,8 @@ async fn get_managed_host_network_config_inner(
         // We don't support secondary DPU yet.
         // If admin network is to be used for this managedhost, why to send old tenant data, which
         // is just to be deleted.
-        Some(_instance) if use_admin_network => vec![],
-        Some(_instance)
-            // If instance is waiting for network segment to come up in READY state, stay on admin
-            // network.
-            if matches!(
-                snapshot.managed_state,
-                ManagedHostState::Assigned {
-                    instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
-                }
-            ) =>
-        {
+        // Waiting Instances also stay on Admin until their segments are ready.
+        Some(_instance) if !serves_tenant_network => {
             // Should/Can we still query and return the NSG of the VPC so that
             // policies can be configured on the DPU while interfaces are still coming up?
             vec![]
@@ -330,11 +334,11 @@ async fn get_managed_host_network_config_inner(
                 // network segment is empty, return error.
                 return Err(CarbideError::NetworkSegmentNotAllocated.into());
             };
-            let Some(vpc) = db::vpc::find_by_segment(&mut txn, network_segment_id)
-                .await? else {
+            let Some(vpc) = db::vpc::find_by_segment(&mut txn, network_segment_id).await? else {
                 return Err(CarbideError::FailedPrecondition(
                     "network segment is not a member of a VPC".to_string(),
-                ).into())
+                )
+                .into());
             };
 
             network_virtualization_type = vpc.config.network_virtualization_type;
@@ -350,33 +354,35 @@ async fn get_managed_host_network_config_inner(
                     // which point it's safe to move to the admin network). The
                     // tenant's NSGs can interfere with these connections, so we
                     // must avoid installing them.
-                    matches!(instance_state, InstanceState::BootingWithDiscoveryImage { ..})
-                },
+                    matches!(
+                        instance_state,
+                        InstanceState::BootingWithDiscoveryImage { .. }
+                    )
+                }
                 _ => false,
             };
 
             // Check if there's an NSG on the instance.
             let network_security_group_details = if !suppress_tenant_security_groups
                 && let Some((tenant_id, Some(nsg_id))) = snapshot.instance.as_ref().map(|i| {
-                (
-                    &i.config.tenant.tenant_organization_id,
-                    i.config.network_security_group_id.as_ref(),
-                )
-            }) {
-                // Make our DB query for the IDs to get our NetworkSecurityGroup
-                let network_security_group =
-                    network_security_group::find_by_ids(
-                        &mut txn,
-                        std::slice::from_ref(nsg_id),
-                        Some(tenant_id),
-                        false,
+                    (
+                        &i.config.tenant.tenant_organization_id,
+                        i.config.network_security_group_id.as_ref(),
                     )
-                        .await?
-                        .pop()
-                        .ok_or(CarbideError::NotFoundError {
-                            kind: "NetworkSecurityGroup",
-                            id: tenant_id.to_string(),
-                        })?;
+                }) {
+                // Make our DB query for the IDs to get our NetworkSecurityGroup
+                let network_security_group = network_security_group::find_by_ids(
+                    &mut txn,
+                    std::slice::from_ref(nsg_id),
+                    Some(tenant_id),
+                    false,
+                )
+                .await?
+                .pop()
+                .ok_or(CarbideError::NotFoundError {
+                    kind: "NetworkSecurityGroup",
+                    id: tenant_id.to_string(),
+                })?;
 
                 Some((
                     i32::from(rpc::NetworkSecurityGroupSource::NsgSourceInstance),
@@ -394,32 +400,37 @@ async fn get_managed_host_network_config_inner(
             });
 
             let Some(physical_iface) = physical_iface else {
-                return Err(CarbideError::internal(String::from(
-                    "Physical interface not found",
-                ))
-                .into());
+                return Err(
+                    CarbideError::internal(String::from("Physical interface not found")).into(),
+                );
             };
 
             let physical_ip = preferred_physical_ip(physical_iface.ip_addrs.values().copied());
             let prefix_only =
                 physical_iface.ip_addrs.is_empty() && !physical_iface.interface_prefixes.is_empty();
             if physical_ip.is_none() && !prefix_only {
-                return Err(CarbideError::internal(String::from(
-                    "physical IP address not found",
-                ))
-                .into());
+                return Err(
+                    CarbideError::internal(String::from("physical IP address not found")).into(),
+                );
             }
 
             // All interfaces have the segment id allocated. It is already validated during
             // instance creation.
-            let segment_ids = interfaces.iter().filter_map(|x|x.network_segment_id).collect_vec();
+            let segment_ids = interfaces
+                .iter()
+                .filter_map(|x| x.network_segment_id)
+                .collect_vec();
             let segment_details = db::network_segment::find_by(
                 &mut txn,
                 ObjectColumnFilter::List(network_segment::IdColumn, &segment_ids),
                 NetworkSegmentSearchConfig::default(),
-            ).await?;
+            )
+            .await?;
 
-            let segment_details = segment_details.iter().map(|x|(x.id, x)).collect::<HashMap<_,_>>();
+            let segment_details = segment_details
+                .iter()
+                .map(|x| (x.id, x))
+                .collect::<HashMap<_, _>>();
             let mut tenant_loopback_ips: HashMap<VpcId, IpAddr> = HashMap::new();
 
             // Resolve every segment domain in a single query up front, then look each one up by id
@@ -430,21 +441,25 @@ async fn get_managed_host_network_config_inner(
                 .filter_map(|segment| segment.config.subdomain_id)
                 .unique()
                 .collect_vec();
-            let domains_by_id =
-                db::dns::domain::find_by_uuids(txn.as_pgconn(), &subdomain_ids)
-                    .await
-                    .map_err(CarbideError::from)?;
+            let domains_by_id = db::dns::domain::find_by_uuids(txn.as_pgconn(), &subdomain_ids)
+                .await
+                .map_err(CarbideError::from)?;
 
             // if there is no device then this is a legacy config and only the primary dpu is allowed.
             // all other DPUs don't get interfaces
-            for iface in interfaces.iter().filter(|i|
-                (i.device_locator.is_none() && is_primary_dpu) || (i.device_locator.as_ref().is_some_and(|dl| device_locator.as_ref().is_some_and(|dl2| dl2 == dl)))
-            ) {
+            for iface in interfaces.iter().filter(|i| {
+                (i.device_locator.is_none() && is_primary_dpu)
+                    || (i
+                        .device_locator
+                        .as_ref()
+                        .is_some_and(|dl| device_locator.as_ref().is_some_and(|dl2| dl2 == dl)))
+            }) {
                 // This can not happen as validated during instance creation.
                 let Some(iface_segment) = iface.network_segment_id else {
-                    return Err(CarbideError::Internal { message: format!(
-                        "Tenant segment is not assigned for iface: {iface:?}."
-                    ) }.into());
+                    return Err(CarbideError::Internal {
+                        message: format!("Tenant segment is not assigned for iface: {iface:?}."),
+                    }
+                    .into());
                 };
 
                 let Some(segment) = segment_details.get(&iface_segment) else {
@@ -453,7 +468,8 @@ async fn get_managed_host_network_config_inner(
                     ) }.into());
                 };
 
-                let tenant_loopback_ip = if VpcVirtualizationType::Fnn == network_virtualization_type
+                let tenant_loopback_ip = if VpcVirtualizationType::Fnn
+                    == network_virtualization_type
                     && use_vpc_vrf_loopback
                 {
                     match segment.config.vpc_id {

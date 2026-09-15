@@ -80,6 +80,7 @@ mod site_prefix;
 mod sku;
 mod spdm;
 mod switch;
+mod tenant_prefix_startup;
 mod tenants;
 mod tpm_ca;
 mod vpc;

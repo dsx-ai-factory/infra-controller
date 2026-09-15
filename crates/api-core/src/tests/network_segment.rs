@@ -1610,7 +1610,7 @@ async fn test_update_svi_ip_admin_segment(
     let env = create_test_env(pool).await;
 
     // This should create VPC for admin segment
-    db_init::create_admin_vpc(&env.pool, Some(10600)).await?;
+    db_init::create_admin_vpc(&env.api, Some(10600)).await?;
 
     let mut txn = env.pool.begin().await?;
     let admin_segments = db::network_segment::admin(&mut txn).await?;
