@@ -26,24 +26,24 @@ use crate::component_manager::common::{
 EXAMPLES:
 
 Power on a switch:
-    $ nico-admin-cli component-manager component-power-control switch \
-    --switch-id 12345678-1234-5678-90ab-cdef01234567 --action on
+    $ nico-admin-cli component-manager component-power-control --action on switch \
+    --switch-id 12345678-1234-5678-90ab-cdef01234567
 
 Power on a switch by BMC MAC (targets the switch before ingestion):
-    $ nico-admin-cli component-manager component-power-control switch \
-    --mac-address 00:11:22:33:44:55 --action on
+    $ nico-admin-cli component-manager component-power-control --action on switch \
+    --mac-address 00:11:22:33:44:55
 
 Force off a compute tray:
-    $ nico-admin-cli component-manager component-power-control compute-tray \
-    --machine-id 12345678-1234-5678-90ab-cdef01234567 --action force-off
+    $ nico-admin-cli component-manager component-power-control --action force-off compute-tray \
+    --machine-id 12345678-1234-5678-90ab-cdef01234567
 
 Force off a compute tray by BMC MAC (targets the tray before ingestion):
-    $ nico-admin-cli component-manager component-power-control compute-tray \
-    --mac-address 00:11:22:33:44:55 --action force-off
+    $ nico-admin-cli component-manager component-power-control --action force-off compute-tray \
+    --mac-address 00:11:22:33:44:55
 
 AC power-cycle a power shelf:
-    $ nico-admin-cli component-manager component-power-control power-shelf \
-    --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --action ac-powercycle
+    $ nico-admin-cli component-manager component-power-control --action ac-powercycle power-shelf \
+    --power-shelf-id 12345678-1234-5678-90ab-cdef01234567
 
 ")]
 pub(crate) struct Args {
