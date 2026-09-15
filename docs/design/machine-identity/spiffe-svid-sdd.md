@@ -366,7 +366,7 @@ NICo Tenant issue JWT-SVID to tenant workload, routed back through NICo
 
 A new table will be created to store tenant signing key pairs and optional token delegation config. The private key will be encrypted with a master key stored in Vault. Token delegation columns are nullable when an org does not use delegation.
 
-| tenant\_identity\_config |  |  |
+| tenant_identity_config |  |  |
 | :---- | :---- | :---- |
 | `VARCHAR(255)` | `organization_id` | PK |
 | `issuer` domain type | `issuer` | JWT `iss`; normalized URL / SPIFFE / host form |
