@@ -51,6 +51,7 @@ pub(super) async fn create_test_machine(
         ManagedHostState::Ready,
         None,
         CURRENT_STATE_MODEL_VERSION,
+        None,
     )
     .await?;
     db::machine_topology::create_or_update(txn, &machine_id, topology).await?;
