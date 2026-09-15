@@ -43,6 +43,9 @@ Print help (see a summary with -h)
 |---|---|
 | [`create`](./vpc-create.md) | Create VPC |
 | [`show`](./vpc-show.md) | Display VPC information |
+| [`routing-state`](./vpc-routing-state.md) | Inspect persisted routing profile and VNI allocations for a VPC |
+| [`change-routing-profile`](./vpc-change-routing-profile.md) | Change the routing profile while retaining the previous VNI |
+| [`release-inactive-vni`](./vpc-release-inactive-vni.md) | Release the inactive VNI after independently verifying convergence |
 | [`set-virtualizer`](./vpc-set-virtualizer.md) |  |
 
 ---
