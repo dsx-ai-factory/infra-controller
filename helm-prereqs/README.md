@@ -506,12 +506,13 @@ base infrastructure and NICo Core) and enables it in carbide-api as phase 6b:
    `NICO_DPF_DPU_INTERFACE` / `NICO_DPF_DPU_CLUSTER_VIP`), and, when
    `NICO_DPF_METALLB_POOL` is set, the VIP LoadBalancer Service that makes the
    DPU cluster VIP routable.
-5. **carbide-api enablement (phase 6b)** — DPF SDK init requires the site-wide
-   BMC root password, which can only be set through a running carbide-api. So
-   Core is deployed with `[dpf]` off, `NICO_DPF_BMC_ROOT_PASSWORD` is set via an
-   in-cluster `nico-admin-cli` Job, then Core is upgraded to `[dpf]` on and
-   carbide-api is restarted so it initializes DPF and creates the BFB,
-   DPUFlavor, and DPUDeployment. The `nico-api-dpf` Role is created via
+5. **carbide-api enablement (phase 6b)** — The DPF SDK requires the site-wide
+   BMC root password, which can only be set through a running carbide-api.
+   `setup.sh` deploys Core with `[dpf]` off and sets
+   `NICO_DPF_BMC_ROOT_PASSWORD` through an in-cluster `nico-admin-cli` Job. It
+   then upgrades Core with `[dpf]` on and restarts carbide-api. The restart
+   initializes DPF and creates each deployment's provisioning source,
+   DPUFlavor, and DPUDeployment. The `nico-api-dpf` Role is created with
    `nico-api.dpf.rbacCreate=true`.
 
 Requirements (unless `--skip-dpf`): `git` + `envsubst` on the machine running
