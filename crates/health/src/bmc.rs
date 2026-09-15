@@ -22,13 +22,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use carbide_utils::redfish::format_forwarded_host_parameter;
+use carbide_utils::redfish::{
+    format_forwarded_host_parameter, log_redfish_http_error, redact_redfish_response_body,
+};
 use carbide_uuid::rack::RackId;
 use futures::TryStreamExt;
 use http::HeaderMap;
 use http::header::{self, InvalidHeaderValue};
 use nv_redfish::bmc_http::reqwest::{BmcError, Client as ReqwestClient};
-use nv_redfish::bmc_http::{CacheSettings, ConcurrencyLimitedBmc, HttpBmc, HttpClient};
+use nv_redfish::bmc_http::{
+    BmcCredentials as NvBmcCredentials, CacheSettings, ConcurrencyLimitedBmc, HttpBmc, HttpClient,
+};
 use nv_redfish::core::query::{ExpandQuery, FilterQuery};
 use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
@@ -350,6 +354,19 @@ impl BmcClient {
         if let Some(model) = model {
             identity.model = Some(model);
         }
+    }
+
+    fn finish<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, HealthError>,
+    ) -> Result<T, HealthError> {
+        if let Err(error) = &result
+            && let Some(error) = bmc_source_error(error)
+        {
+            log_bmc_error(operation, error);
+        }
+        result
     }
 
     pub async fn ensure_credentials(&self) -> Result<(), HealthError> {
@@ -889,6 +906,94 @@ impl InstrumentedHttpClient {
     }
 }
 
+/// Redacts an HTTP error with the credentials used by this exact request.
+///
+/// `HttpBmc` snapshots credentials before sending a request, while the health
+/// client may refresh its shared credentials concurrently. Sanitizing at this
+/// boundary avoids consulting a newer credential after an older request has
+/// completed.
+fn redact_request_credential<T>(
+    result: Result<T, BmcError>,
+    credentials: &NvBmcCredentials,
+) -> Result<T, BmcError> {
+    let sensitive_value = match credentials {
+        NvBmcCredentials::UsernamePassword {
+            password: Some(password),
+            ..
+        } => Some(password.as_str()),
+        NvBmcCredentials::Token { token } => Some(token.as_str()),
+        NvBmcCredentials::UsernamePassword { password: None, .. } => None,
+    }
+    .filter(|value| !value.is_empty());
+
+    let Some(sensitive_value) = sensitive_value else {
+        return result;
+    };
+
+    result.map_err(|error| match error {
+        BmcError::InvalidResponse { url, status, text } => BmcError::InvalidResponse {
+            url,
+            status,
+            text: redact_redfish_response_body(&text, [sensitive_value]),
+        },
+        error => error,
+    })
+}
+
+/// Redacts values carried in a session-creation body from an HTTP error.
+///
+/// Session creation is the one `HttpClient` operation that sends credentials
+/// in its JSON body instead of receiving a `BmcCredentials` argument. Treat
+/// every non-empty string in that small credential document as sensitive so a
+/// BMC cannot echo a username, password, or token into a returned or logged
+/// error.
+fn redact_session_request_values<T, B>(result: Result<T, BmcError>, body: &B) -> Result<T, BmcError>
+where
+    B: Serialize,
+{
+    let (url, status, text) = match result {
+        Err(BmcError::InvalidResponse { url, status, text }) => (url, status, text),
+        result => return result,
+    };
+    let Ok(body) = serde_json::to_value(body) else {
+        return Err(BmcError::InvalidResponse { url, status, text });
+    };
+    let mut sensitive_values = Vec::new();
+    collect_nonempty_json_strings(&body, &mut sensitive_values);
+    sensitive_values.sort_unstable();
+    sensitive_values.dedup();
+
+    if sensitive_values.is_empty() {
+        return Err(BmcError::InvalidResponse { url, status, text });
+    }
+
+    Err(BmcError::InvalidResponse {
+        url,
+        status,
+        text: redact_redfish_response_body(&text, sensitive_values.iter().copied()),
+    })
+}
+
+fn collect_nonempty_json_strings<'a>(value: &'a serde_json::Value, strings: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::String(value) if !value.is_empty() => strings.push(value),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_nonempty_json_strings(value, strings);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_nonempty_json_strings(value, strings);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
 impl HttpClient for InstrumentedHttpClient {
     type Error = BmcError;
 
@@ -904,10 +1009,12 @@ impl HttpClient for InstrumentedHttpClient {
     {
         let started = Instant::now();
         let request_url = url.clone();
-        let result = self
-            .inner
-            .get::<T>(url, credentials, etag, custom_headers)
-            .await;
+        let result = redact_request_credential(
+            self.inner
+                .get::<T>(url, credentials, etag, custom_headers)
+                .await,
+            credentials,
+        );
         self.observe_result("GET", &request_url, &result, "200", started.elapsed());
         result
     }
@@ -926,10 +1033,12 @@ impl HttpClient for InstrumentedHttpClient {
         let started = Instant::now();
         let request_url = url.clone();
         let entity_status_code = post_entity_status_code(&request_url);
-        let result = self
-            .inner
-            .post::<B, T>(url, body, credentials, custom_headers)
-            .await;
+        let result = redact_request_credential(
+            self.inner
+                .post::<B, T>(url, body, credentials, custom_headers)
+                .await,
+            credentials,
+        );
         self.observe_modification_result(
             "POST",
             &request_url,
@@ -952,10 +1061,12 @@ impl HttpClient for InstrumentedHttpClient {
     {
         let started = Instant::now();
         let request_url = url.clone();
-        let result = self
-            .inner
-            .post_session::<B, T>(url, body, custom_headers)
-            .await;
+        let result = redact_session_request_values(
+            self.inner
+                .post_session::<B, T>(url, body, custom_headers)
+                .await,
+            body,
+        );
         self.observe_result("POST", &request_url, &result, "201", started.elapsed());
         result
     }
@@ -974,10 +1085,12 @@ impl HttpClient for InstrumentedHttpClient {
     {
         let started = Instant::now();
         let request_url = url.clone();
-        let result = self
-            .inner
-            .post_multipart_update::<U, V, T>(url, request, credentials, custom_headers)
-            .await;
+        let result = redact_request_credential(
+            self.inner
+                .post_multipart_update::<U, V, T>(url, request, credentials, custom_headers)
+                .await,
+            credentials,
+        );
         self.observe_modification_result("POST", &request_url, &result, "200", started.elapsed());
         result
     }
@@ -996,10 +1109,12 @@ impl HttpClient for InstrumentedHttpClient {
     {
         let started = Instant::now();
         let request_url = url.clone();
-        let result = self
-            .inner
-            .patch::<B, T>(url, etag, body, credentials, custom_headers)
-            .await;
+        let result = redact_request_credential(
+            self.inner
+                .patch::<B, T>(url, etag, body, credentials, custom_headers)
+                .await,
+            credentials,
+        );
         self.observe_modification_result("PATCH", &request_url, &result, "200", started.elapsed());
         result
     }
@@ -1015,10 +1130,12 @@ impl HttpClient for InstrumentedHttpClient {
     {
         let started = Instant::now();
         let request_url = url.clone();
-        let result = self
-            .inner
-            .delete::<T>(url, credentials, custom_headers)
-            .await;
+        let result = redact_request_credential(
+            self.inner
+                .delete::<T>(url, credentials, custom_headers)
+                .await,
+            credentials,
+        );
         self.observe_modification_result("DELETE", &request_url, &result, "200", started.elapsed());
         result
     }
@@ -1031,7 +1148,10 @@ impl HttpClient for InstrumentedHttpClient {
     ) -> Result<BoxTryStream<T, Self::Error>, Self::Error> {
         let started = Instant::now();
         let request_url = url.clone();
-        let result = self.inner.sse::<T>(url, credentials, custom_headers).await;
+        let result = redact_request_credential(
+            self.inner.sse::<T>(url, credentials, custom_headers).await,
+            credentials,
+        );
         self.observe_result("GET", &request_url, &result, "200", started.elapsed());
         result
     }
@@ -1138,27 +1258,31 @@ impl Bmc for BmcClient {
         id: &ODataId,
         query: ExpandQuery,
     ) -> Result<Arc<T>, Self::Error> {
-        self.read_with_auth_retry(|| async {
-            self.inner
-                .expand(id, query.clone())
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .read_with_auth_retry(|| async {
+                self.inner
+                    .expand(id, query.clone())
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("expand", result)
     }
 
     async fn get<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
         &self,
         id: &ODataId,
     ) -> Result<Arc<T>, Self::Error> {
-        self.read_with_auth_retry(|| async move {
-            let result = self.inner.get::<T>(id).await.map_err(HealthError::from);
-            if let Ok(value) = &result {
-                self.note_bmc_identity_from(value.as_ref());
-            }
-            result
-        })
-        .await
+        let result = self
+            .read_with_auth_retry(|| async move {
+                let result = self.inner.get::<T>(id).await.map_err(HealthError::from);
+                if let Ok(value) = &result {
+                    self.note_bmc_identity_from(value.as_ref());
+                }
+                result
+            })
+            .await;
+        self.finish("get", result)
     }
 
     async fn filter<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
@@ -1166,13 +1290,15 @@ impl Bmc for BmcClient {
         id: &ODataId,
         query: FilterQuery,
     ) -> Result<Arc<T>, Self::Error> {
-        self.read_with_auth_retry(|| async {
-            self.inner
-                .filter(id, query.clone())
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .read_with_auth_retry(|| async {
+                self.inner
+                    .filter(id, query.clone())
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("filter", result)
     }
 
     async fn create<V: Send + Sync + Serialize, R: Send + Sync + for<'de> Deserialize<'de>>(
@@ -1181,13 +1307,15 @@ impl Bmc for BmcClient {
         query: &V,
     ) -> Result<ModificationResponse<R>, Self::Error> {
         self.ensure_credentials().await?;
-        self.guarded(async {
-            self.inner
-                .create(id, query)
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .guarded(async {
+                self.inner
+                    .create(id, query)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("create", result)
     }
 
     async fn update<
@@ -1200,13 +1328,15 @@ impl Bmc for BmcClient {
         update: &V,
     ) -> Result<ModificationResponse<R>, Self::Error> {
         self.ensure_credentials().await?;
-        self.guarded(async {
-            self.inner
-                .update(id, etag, update)
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .guarded(async {
+                self.inner
+                    .update(id, etag, update)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("update", result)
     }
 
     async fn multipart_update<U, V, R>(
@@ -1220,13 +1350,15 @@ impl Bmc for BmcClient {
         V: Send + Sync + Serialize,
     {
         self.ensure_credentials().await?;
-        self.guarded(async {
-            self.inner
-                .multipart_update(uri, request)
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .guarded(async {
+                self.inner
+                    .multipart_update(uri, request)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("multipart_update", result)
     }
 
     async fn delete<R: EntityTypeRef + for<'de> Deserialize<'de>>(
@@ -1234,8 +1366,10 @@ impl Bmc for BmcClient {
         id: &ODataId,
     ) -> Result<ModificationResponse<R>, Self::Error> {
         self.ensure_credentials().await?;
-        self.guarded(async { self.inner.delete(id).await.map_err(HealthError::from) })
-            .await
+        let result = self
+            .guarded(async { self.inner.delete(id).await.map_err(HealthError::from) })
+            .await;
+        self.finish("delete", result)
     }
 
     async fn action<
@@ -1247,13 +1381,15 @@ impl Bmc for BmcClient {
         params: &T,
     ) -> Result<ModificationResponse<R>, Self::Error> {
         self.ensure_credentials().await?;
-        self.guarded(async {
-            self.inner
-                .action(action, params)
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .guarded(async {
+                self.inner
+                    .action(action, params)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("action", result)
     }
 
     async fn stream<T: Sized + for<'de> Deserialize<'de> + Send + 'static>(
@@ -1268,11 +1404,12 @@ impl Bmc for BmcClient {
         // flood — many short requests against a dead endpoint — not a single
         // long-lived connection. Routing item errors here would also couple
         // log-stream health to sensor/discovery collection.
-        let stream = self
+        let result = self
             .read_with_auth_retry(|| async {
                 self.inner.stream(uri).await.map_err(HealthError::from)
             })
-            .await?;
+            .await;
+        let stream = self.finish("stream", result)?;
         Ok(Box::pin(stream.map_err(HealthError::from)))
     }
 
@@ -1285,13 +1422,40 @@ impl Bmc for BmcClient {
         query: &V,
     ) -> Result<SessionCreateResponse<R>, Self::Error> {
         self.ensure_credentials().await?;
-        self.guarded(async {
-            self.inner
-                .create_session(id, query)
-                .await
-                .map_err(HealthError::from)
-        })
-        .await
+        let result = self
+            .guarded(async {
+                self.inner
+                    .create_session(id, query)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+        self.finish("create_session", result)
+    }
+}
+
+fn bmc_source_error(error: &HealthError) -> Option<&BmcError> {
+    let HealthError::BmcError(source) = error else {
+        return None;
+    };
+
+    source.downcast_ref::<BmcError>().or_else(|| {
+        source
+            .downcast_ref::<HealthError>()
+            .and_then(bmc_source_error)
+    })
+}
+
+fn log_bmc_error(operation: &str, error: &BmcError) {
+    if let BmcError::InvalidResponse { url, status, text } = error {
+        log_redfish_http_error(
+            "nv-redfish",
+            operation,
+            url.as_str(),
+            status.as_u16(),
+            text,
+            std::iter::empty(),
+        );
     }
 }
 
@@ -1381,6 +1545,7 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
+    use carbide_instrument::testing::{CapturedFieldKind, capture_logs};
     use carbide_test_support::value_scenarios;
     use mac_address::MacAddress;
     use nv_redfish::bmc_http::reqwest::ClientParams as ReqwestClientParams;
@@ -1557,6 +1722,86 @@ mod tests {
             status,
             text: String::new(),
         }
+    }
+
+    #[test]
+    fn final_http_failure_logs_request_redacted_context() {
+        let client = test_client();
+        let credentials = NvBmcCredentials::token("secret".to_string());
+        let error = redact_request_credential::<()>(
+            Err(BmcError::InvalidResponse {
+                url: Url::parse("https://127.0.0.1/redfish/v1/Systems/1").expect("valid test URL"),
+                status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                text: r#"{
+                    "error": {
+                        "@Message.ExtendedInfo": [{"Message": "s\u0065cret rejected"}]
+                    }
+                }"#
+                .to_string(),
+            }),
+            &credentials,
+        )
+        .expect_err("HTTP failure remains an error after request-boundary redaction");
+        let error = HealthError::from(error);
+
+        let (result, logs) = {
+            let mut result = None;
+            let logs = capture_logs(|| {
+                result = Some(client.finish::<()>("get", Err(error)));
+            });
+            (result.expect("captured result"), logs)
+        };
+
+        assert!(result.is_err(), "the original failure must still propagate");
+        let log = logs.first().expect("one final Redfish failure log");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(log.field("backend"), Some("nv-redfish"));
+        assert_eq!(log.field("operation"), Some("get"));
+        assert_eq!(
+            log.field("url"),
+            Some("https://127.0.0.1/redfish/v1/Systems/1")
+        );
+        assert_eq!(log.field("http_status"), Some("500"));
+        assert_eq!(log.field_kind("http_status"), Some(CapturedFieldKind::U64));
+        assert_eq!(log.field("error"), Some("REDACTED rejected"));
+    }
+
+    #[tokio::test]
+    async fn session_failure_redacts_request_body_values_before_returning() {
+        let response_body = r#"{
+            "error": {
+                "@Message.ExtendedInfo": [{"Message": "credential s\u0065cret rejected"}]
+            }
+        }"#;
+        let (base_url, requests, server) = spawn_scripted_http_server(vec![(500, response_body)]);
+        let client = InstrumentedHttpClient::new(
+            reqwest(),
+            None,
+            "127.0.0.1".to_string(),
+            "http".to_string(),
+            Arc::new(StdMutex::new(BmcIdentity::default())),
+        );
+        let url = base_url
+            .join("/redfish/v1/SessionService/Sessions")
+            .expect("session URL joins");
+        let body = serde_json::json!({
+            "UserName": "root",
+            "Password": "secret",
+        });
+
+        let error = client
+            .post_session::<_, serde_json::Value>(url, &body, &HeaderMap::new())
+            .await
+            .expect_err("HTTP 500 remains an error after redaction");
+
+        let BmcError::InvalidResponse { text, .. } = error else {
+            panic!("expected an HTTP response error");
+        };
+        assert_eq!(requests.load(AtomicOrdering::SeqCst), 1);
+        assert!(!text.contains("secret"));
+        assert!(!text.contains(r"s\u0065cret"));
+        assert!(text.contains("credential REDACTED rejected"));
+        server.join().expect("test server thread");
     }
 
     fn test_client() -> BmcClient {
@@ -2851,6 +3096,7 @@ mod tests {
                 let reason = match status {
                     200 => "OK",
                     401 => "Unauthorized",
+                    500 => "Internal Server Error",
                     503 => "Service Unavailable",
                     _ => panic!("unsupported test response status {status}"),
                 };
