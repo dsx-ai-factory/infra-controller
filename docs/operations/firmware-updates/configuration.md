@@ -473,9 +473,10 @@ restore the desired NVOS admin password on each selected switch before the rack
 leaves the NVOS update phase. Without `firmware_object`, NICo skips both
 automatic update phases. An explicit maintenance request can supply a firmware
 object instead.
-If no firmware object is available while a switch in the maintenance scope is
-already waiting for an NVOS update, the rack transitions to `Error` instead of
-skipping the NVOS phase.
+If no firmware object is available while a selected switch is in
+`WaitingForNVOSUpgrade` for a reprovision request whose initiator is
+`rack-{rack_id}`, the rack transitions to `Error` instead of skipping the NVOS
+phase.
 
 The `url` field identifies the document location. The optional `fetch_timeout`
 field accepts duration strings such as `30s` and `60s` and defaults to `30s`.

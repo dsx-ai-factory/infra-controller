@@ -41,6 +41,8 @@ redirects:
     destination: "/infra-controller/dev/"
   - source: "/infra-controller/documentation/architecture/state-machines/rack-state-machine"
     destination: "/infra-controller/documentation/architecture/state-machines/on-demand-rack-maintenance"
+  - source: "/infra-controller/documentation/configuration-day-1/component-manager-rms-backends"
+    destination: "/infra-controller/documentation/configuration-day-1/rms-configuration"
   - source: "/infra-controller/documentation/getting-started/building-ni-co-containers"
     destination: "/infra-controller/documentation/getting-started/building-nico-containers"
   - source: "/infra-controller/documentation/getting-started/site-setup"

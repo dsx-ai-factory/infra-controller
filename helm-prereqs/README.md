@@ -313,7 +313,7 @@ dependencies outside `setup.sh`. In particular, inspect custom Core values and
 configuration for `componentManager.nvSwitchBackend: nsm`,
 `componentManager.powerShelfBackend: psm`, `nv_switch_backend = "nsm"`, or
 `power_shelf_backend = "psm"`. Move those roles to
-[RMS](../docs/configuration/component-manager-rms.md) or to an externally
+[RMS](../docs/configuration/rms.md) or to an externally
 managed endpoint, and deploy and verify that Core change using the site's
 existing process. This release does not provide a Core or manager data
 migration. An external endpoint must not resolve to the `psm` or `nsm` Service
