@@ -10,6 +10,7 @@ import "common.proto";
 import "dns.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
+import "google/protobuf/field_mask.proto";
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 import "health.proto";
@@ -512,6 +513,8 @@ service Forge {
   rpc DeleteExpectedMachine(ExpectedMachineRequest) returns (google.protobuf.Empty);
   // Update the BMC credentials for a specific username/password
   rpc UpdateExpectedMachine(ExpectedMachine) returns (google.protobuf.Empty);
+  // Atomically update only the selected fields; omitted fields remain unchanged.
+  rpc PatchExpectedMachine(PatchExpectedMachineRequest) returns (google.protobuf.Empty);
   // Get the BMC credentials for a specific expected machine
   rpc GetExpectedMachine(ExpectedMachineRequest) returns (ExpectedMachine);
   // Get the BMC credentials for all expected machines
@@ -533,6 +536,8 @@ service Forge {
   rpc CreateExpectedMachines(BatchExpectedMachineOperationRequest) returns (BatchExpectedMachineOperationResponse);
   // Batch update expected machines
   rpc UpdateExpectedMachines(BatchExpectedMachineOperationRequest) returns (BatchExpectedMachineOperationResponse);
+  // Apply every patch in one transaction. Any failure rolls back the whole batch.
+  rpc PatchExpectedMachines(PatchExpectedMachinesRequest) returns (google.protobuf.Empty);
 
   // Expected Power Shelf Management
   // Add expected power shelf
@@ -541,6 +546,8 @@ service Forge {
   rpc DeleteExpectedPowerShelf(ExpectedPowerShelfRequest) returns (google.protobuf.Empty);
   // Update the BMC credentials for a specific username/password
   rpc UpdateExpectedPowerShelf(ExpectedPowerShelf) returns (google.protobuf.Empty);
+  // Atomically update only the selected fields; omitted fields remain unchanged.
+  rpc PatchExpectedPowerShelf(PatchExpectedPowerShelfRequest) returns (google.protobuf.Empty);
   // Get the BMC credentials for a specific expected power shelf
   rpc GetExpectedPowerShelf(ExpectedPowerShelfRequest) returns (ExpectedPowerShelf);
   // Get the BMC credentials for all expected power shelves
@@ -559,6 +566,8 @@ service Forge {
   rpc DeleteExpectedSwitch(ExpectedSwitchRequest) returns (google.protobuf.Empty);
   // Update the BMC credentials for a specific username/password
   rpc UpdateExpectedSwitch(ExpectedSwitch) returns (google.protobuf.Empty);
+  // Atomically update only the selected fields; omitted fields remain unchanged.
+  rpc PatchExpectedSwitch(PatchExpectedSwitchRequest) returns (google.protobuf.Empty);
   // Get the BMC credentials for a specific expected switch
   rpc GetExpectedSwitch(ExpectedSwitchRequest) returns (ExpectedSwitch);
   // Get the BMC credentials for all expected switches
@@ -10952,4 +10961,69 @@ message VpcChangeRoutingProfileRequest {
   // it and may choose another VNI. Verify the returned profile and active VNI;
   // a mismatched or lost response does not undo a committed change.
   optional uint32 vni = 4;
+}
+
+// Partial update of an existing expected power shelf, selected by ID.
+message PatchExpectedPowerShelfRequest {
+  // Required. expected_power_shelf_id identifies the row. A nonempty BMC MAC
+  // may reassert the stored identity but cannot change it.
+  ExpectedPowerShelf expected_power_shelf = 1;
+  // Required; an empty mask checks existence without changing the row.
+  // Paths: bmc_username, bmc_password, shelf_serial_number, bmc_ip_address,
+  // rack_id, metadata.name, metadata.description, metadata.labels.
+  // Unselected values are ignored. Selected values replace the stored field,
+  // including empty labels and an empty BMC IP (clear). Nonempty IPs must parse
+  // as IPv4 or IPv6. BMC username and password must be selected together and
+  // both be nonempty; clearing credentials is unsupported. Unknown, parent,
+  // and wildcard paths are rejected. Duplicate paths have no additional effect.
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+// Partial update of an existing expected switch, selected by ID.
+message PatchExpectedSwitchRequest {
+  // Required. expected_switch_id identifies the row. A nonempty BMC MAC
+  // may reassert the stored identity but cannot change it.
+  ExpectedSwitch expected_switch = 1;
+  // Required; an empty mask checks existence without changing the row.
+  // Paths: bmc_username, bmc_password, switch_serial_number, bmc_ip_address,
+  // rack_id, nvos_mac_addresses, nvos_username, nvos_password,
+  // metadata.name, metadata.description, metadata.labels.
+  // Unselected values are ignored. Selected values replace the stored field,
+  // including empty collections and an empty BMC IP (clear). Nonempty IPs must
+  // parse as IPv4 or IPv6. Each username/password pair must be selected together
+  // with both values present and nonempty; clearing credentials is unsupported.
+  // Changing NVOS MACs must remain consistent with the stored NVOS IP, which
+  // requires exactly one NVOS MAC. Unknown, parent, and wildcard paths are
+  // rejected. Duplicate paths have no additional effect.
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+// Partial update of an existing expected machine, selected by ID.
+message PatchExpectedMachineRequest {
+  // Required. id identifies the row. A nonempty BMC MAC may reassert the stored
+  // identity but cannot change it. Unselected Core interface and DPU settings
+  // remain unchanged.
+  ExpectedMachine expected_machine = 1;
+  // Required; an empty mask checks existence without changing the row.
+  // Paths: bmc_username, bmc_password, chassis_serial_number,
+  // fallback_dpu_serial_numbers, sku_id, rack_id, is_dpf_enabled,
+  // bmc_ip_address, host_lifecycle_profile.disable_lockdown,
+  // metadata.name, metadata.description, metadata.labels.
+  // Unselected values are ignored. Selected values replace the stored field,
+  // including empty collections and false. A selected bmc_ip_address must be
+  // present: an empty string clears it, otherwise it must parse as IPv4 or IPv6.
+  // Selected is_dpf_enabled and disable_lockdown values must be present;
+  // false disables DPF or restores lockdown, respectively.
+  // BMC username and password must be selected together and both be nonempty;
+  // clearing credentials is unsupported. Unknown, parent, and wildcard paths
+  // are rejected. Duplicate paths have no additional effect.
+  google.protobuf.FieldMask update_mask = 2;
+}
+
+// Atomic batch of expected-machine patches. Each ID may appear only once.
+message PatchExpectedMachinesRequest {
+  // Each item follows PatchExpectedMachineRequest. All validation and writes
+  // succeed together or no row changes. No resource or credentials are echoed
+  // in the response. An empty list is invalid.
+  repeated PatchExpectedMachineRequest patches = 1;
 }

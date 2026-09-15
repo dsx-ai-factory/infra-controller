@@ -4,6 +4,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -12,8 +13,11 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 func TestAPIExpectedSwitchCreateRequest_Validate(t *testing.T) {
@@ -437,6 +441,36 @@ func TestAPIExpectedSwitchUpdateRequest_Validate(t *testing.T) {
 		expectErr bool
 	}{
 		{
+			desc:      "error when only DefaultBmcUsername is provided",
+			obj:       APIExpectedSwitchUpdateRequest{DefaultBmcUsername: cutil.GetPtr("partial-pair")},
+			expectErr: true,
+		},
+		{
+			desc:      "error when only DefaultBmcPassword is provided",
+			obj:       APIExpectedSwitchUpdateRequest{DefaultBmcPassword: cutil.GetPtr("partial-pair")},
+			expectErr: true,
+		},
+		{
+			desc:      "NVOS username without password",
+			obj:       APIExpectedSwitchUpdateRequest{NvOsUsername: cutil.GetPtr("admin")},
+			expectErr: true,
+		},
+		{
+			desc:      "NVOS password without username",
+			obj:       APIExpectedSwitchUpdateRequest{NvOsPassword: cutil.GetPtr("secret")},
+			expectErr: true,
+		},
+		{
+			desc:      "empty NVOS pair",
+			obj:       APIExpectedSwitchUpdateRequest{NvOsUsername: cutil.GetPtr(""), NvOsPassword: cutil.GetPtr("")},
+			expectErr: true,
+		},
+		{
+			desc:      "valid NVOS pair without BMC update",
+			obj:       APIExpectedSwitchUpdateRequest{NvOsUsername: cutil.GetPtr("admin"), NvOsPassword: cutil.GetPtr("secret")},
+			expectErr: false,
+		},
+		{
 			desc: "ok when all fields are provided",
 			obj: APIExpectedSwitchUpdateRequest{
 				SwitchSerialNumber: &validSwitchSerial,
@@ -798,4 +832,46 @@ func TestNewAPIExpectedSwitchWithSite(t *testing.T) {
 		assert.NotNil(t, apiES)
 		assert.Nil(t, apiES.Site)
 	})
+}
+
+func TestAPIExpectedSwitchUpdateRequest_ToProto(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantPaths []string
+	}{
+		{name: "omitted fields preserve Core state", body: `{}`},
+		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"nvOsUsername":null,"nvOsPassword":null,"labels":null}`},
+		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{},"nvosMacAddresses":[]}`, wantPaths: []string{"metadata.labels", "nvos_mac_addresses"}},
+		{name: "BMC pair is selected together", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_username", "bmc_password"}},
+		{name: "NVOS pair leaves BMC unchanged", body: `{"nvOsUsername":"admin","nvOsPassword":"secret"}`, wantPaths: []string{"nvos_username", "nvos_password"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var request APIExpectedSwitchUpdateRequest
+			require.NoError(t, json.Unmarshal([]byte(test.body), &request))
+			require.NoError(t, request.Validate())
+			patch := request.ToProto(&cdbm.ExpectedSwitch{SlotID: cutil.GetPtr(int32(0))})
+			encoded, err := protojson.Marshal(patch)
+			require.NoError(t, err)
+			var decoded corev1.PatchExpectedSwitchRequest
+			require.NoError(t, protojson.Unmarshal(encoded, &decoded))
+			require.NotNil(t, decoded.UpdateMask)
+			assert.ElementsMatch(t, test.wantPaths, decoded.GetUpdateMask().GetPaths())
+			if request.SlotID != nil {
+				labels := decoded.GetExpectedSwitch().GetMetadata().GetLabels()
+				require.Len(t, labels, 1)
+				assert.Equal(t, "slot_id", labels[0].GetKey())
+				assert.Equal(t, "0", labels[0].GetValue())
+			}
+			if request.DefaultBmcPassword != nil {
+				assert.Equal(t, *request.DefaultBmcUsername, decoded.GetExpectedSwitch().GetBmcUsername())
+				assert.Equal(t, *request.DefaultBmcPassword, decoded.GetExpectedSwitch().GetBmcPassword())
+			}
+			if request.NvOsPassword != nil {
+				assert.Equal(t, *request.NvOsUsername, decoded.GetExpectedSwitch().GetNvosUsername())
+				assert.Equal(t, *request.NvOsPassword, decoded.GetExpectedSwitch().GetNvosPassword())
+			}
+		})
+	}
 }

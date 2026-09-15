@@ -670,19 +670,10 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Switch due to DB error", nil)
 		}
 
-		updateExpectedSwitchRequest := es.ToProto(cdbm.ExpectedSwitchCredentials{
-			BmcUsername:  apiRequest.DefaultBmcUsername,
-			BmcPassword:  apiRequest.DefaultBmcPassword,
-			NvosUsername: apiRequest.NvOsUsername,
-			NvosPassword: apiRequest.NvOsPassword,
-		})
-
-		logger.Info().Msg("triggering ExpectedSwitch update workflow")
-
-		workflowOptions := tclient.StartWorkflowOptions{
-			ID:                       "expected-switch-update-" + expectedSwitch.ID.String(),
-			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-			TaskQueue:                queue.SiteTaskQueue,
+		patchExpectedSwitchRequest := apiRequest.ToProto(es)
+		var secretFields []string
+		if apiRequest.DefaultBmcPassword != nil || apiRequest.NvOsPassword != nil {
+			secretFields = []string{"expectedSwitch"}
 		}
 
 		stc, err := uesh.scp.GetClientByID(site.ID)
@@ -691,7 +682,8 @@ func (uesh UpdateExpectedSwitchHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		if apiErr := common.ExecuteSyncWorkflow(ctx, logger, stc, "UpdateExpectedSwitch", workflowOptions, updateExpectedSwitchRequest); apiErr != nil {
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_PatchExpectedSwitch_FullMethodName, patchExpectedSwitchRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
 			return nil, apiErr
 		}
 		return es, nil

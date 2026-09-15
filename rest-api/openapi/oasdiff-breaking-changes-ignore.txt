@@ -268,3 +268,13 @@ API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `vni` response property's max was i
 API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/batch the `items/defaultBmcPassword` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-machine/batch the `items/defaultBmcUsername` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `defaultBmcPassword` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `defaultBmcUsername` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the `defaultBmcPassword` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the `defaultBmcUsername` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the `defaultBmcPassword` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the `defaultBmcUsername` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the `nvOsPassword` request property's minLength was increased from `0` to `1`
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the `nvOsUsername` request property's minLength was increased from `0` to `1`

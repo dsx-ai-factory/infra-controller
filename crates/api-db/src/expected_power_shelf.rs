@@ -54,6 +54,19 @@ pub async fn find_by_id(
         .map_err(|err| DatabaseError::query(sql, err))
 }
 
+/// `find_by_id_for_update` holds the selected shelf until its patch commits.
+pub async fn find_by_id_for_update(
+    txn: &mut PgConnection,
+    expected_power_shelf_id: Uuid,
+) -> DatabaseResult<Option<ExpectedPowerShelf>> {
+    let query = "SELECT * FROM expected_power_shelves WHERE expected_power_shelf_id=$1 FOR UPDATE";
+    sqlx::query_as(query)
+        .bind(expected_power_shelf_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 pub async fn find_many_by_bmc_mac_address(
     txn: &mut PgConnection,
     bmc_mac_addresses: &[MacAddress],

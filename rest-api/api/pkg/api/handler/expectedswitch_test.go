@@ -16,6 +16,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -763,7 +764,7 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "UpdateExpectedSwitch", mock.Anything).Return(mockWorkflowRun, nil)
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).Return(mockWorkflowRun, nil)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewUpdateExpectedSwitchHandler(dbSession, scp, cfg)

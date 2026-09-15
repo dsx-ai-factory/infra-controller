@@ -362,8 +362,10 @@ impl InternalRBACRules {
         );
         x.perm("DeleteExpectedMachine", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateExpectedMachine", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("PatchExpectedMachine", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("CreateExpectedMachines", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateExpectedMachines", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("PatchExpectedMachines", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetExpectedMachine", vec![ForgeAdminCLI, Flow]);
         x.perm(
             "GetAllExpectedMachines",
@@ -765,6 +767,10 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm(
+            "PatchExpectedPowerShelf",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
             "GetExpectedPowerShelf",
             vec![ForgeAdminCLI, Machineatron, Flow],
         );
@@ -820,6 +826,10 @@ impl InternalRBACRules {
         );
         x.perm(
             "UpdateExpectedSwitch",
+            vec![ForgeAdminCLI, Machineatron, SiteAgent],
+        );
+        x.perm(
+            "PatchExpectedSwitch",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm("GetExpectedSwitch", vec![ForgeAdminCLI, Machineatron, Flow]);

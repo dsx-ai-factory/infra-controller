@@ -26,9 +26,14 @@ use model::expected_switch::{ExpectedSwitch, ExpectedSwitchRequest};
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
-use crate::api::Api;
+use crate::api::{Api, log_request_data_redacted};
+use crate::handlers::expected_component_patch::{
+    ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, validate_bmc_mac,
+};
 use crate::handlers::machine_interface_address::update_preallocated_machine_interface;
-use crate::handlers::static_address_metrics::StaticAddressPreallocationCompleted;
+use crate::handlers::static_address_metrics::{
+    PreallocationSuccess, StaticAddressPreallocationCompleted,
+};
 
 fn parse_expected_switch_update_mask(
     request: &Request<rpc::ExpectedSwitch>,
@@ -271,37 +276,12 @@ pub(crate) async fn update_expected_switch(
             })?
     };
 
-    validate_expected_switch(&switch)?;
-
-    let mut preallocations = Vec::with_capacity(2);
-    if let Some(bmc_ip) = switch.bmc_ip_address {
-        preallocations.push(
-            update_preallocated_machine_interface(
-                &mut txn,
-                switch.bmc_mac_address,
-                bmc_ip,
-                api.runtime_config.retained_boot_interface_window,
-            )
-            .await?,
-        );
-    }
-    if let Some(nvos_ip) = switch.nvos_ip_address {
-        // Pairing already validated above; nvos_mac_addresses has exactly one entry.
-        let nvos_mac = switch.nvos_mac_addresses[0];
-        preallocations.push(
-            update_preallocated_machine_interface(
-                &mut txn,
-                nvos_mac,
-                nvos_ip,
-                api.runtime_config.retained_boot_interface_window,
-            )
-            .await?,
-        );
-    }
-
-    db_expected_switch::update(&mut txn, &switch)
-        .await
-        .map_err(CarbideError::from)?;
+    let preallocations = update_switch_in_transaction(
+        &mut txn,
+        &switch,
+        api.runtime_config.retained_boot_interface_window,
+    )
+    .await?;
 
     txn.commit().await.map_err(|e| CarbideError::Internal {
         message: format!("Failed to commit transaction: {}", e),
@@ -312,6 +292,117 @@ pub(crate) async fn update_expected_switch(
     }
 
     Ok(Response::new(()))
+}
+
+pub(crate) async fn patch_expected_switch(
+    api: &Api,
+    request: Request<rpc::PatchExpectedSwitchRequest>,
+) -> Result<Response<()>, Status> {
+    let request = request.into_inner();
+    let fields = UpdateMask::parse(
+        request.update_mask.map(|mask| mask.paths),
+        ExpectedComponent::Switch,
+    )?;
+    let mut patch = request
+        .expected_switch
+        .ok_or_else(|| CarbideError::InvalidArgument("expected_switch is required".to_string()))?;
+    let expected_switch_id = required_id(patch.expected_switch_id.take(), "expected_switch_id")?;
+    fields.validate_bmc_credentials(&patch.bmc_username, &patch.bmc_password)?;
+    fields.validate_nvos_credentials(
+        patch.nvos_username.as_deref(),
+        patch.nvos_password.as_deref(),
+    )?;
+    log_request_data_redacted(format!("expected_switch_id: {expected_switch_id}"));
+
+    let mut txn = api.txn_begin().await?;
+    let mut switch = db_expected_switch::find_for_update(
+        &mut txn,
+        &ExpectedSwitchRequest {
+            expected_switch_id: Some(expected_switch_id),
+            bmc_mac_address: None,
+        },
+    )
+    .await?
+    .ok_or_else(|| CarbideError::NotFoundError {
+        kind: "expected_switch",
+        id: expected_switch_id.to_string(),
+    })?;
+    validate_bmc_mac(&patch.bmc_mac_address, switch.bmc_mac_address)?;
+    if fields.is_empty() {
+        txn.commit().await?;
+        return Ok(Response::new(()));
+    }
+    if fields.contains(UpdateField::BmcUsername) {
+        switch.bmc_username = patch.bmc_username;
+        switch.bmc_password = patch.bmc_password;
+    }
+    if fields.contains(UpdateField::NvosUsername) {
+        switch.nvos_username = patch.nvos_username;
+        switch.nvos_password = patch.nvos_password;
+    }
+    if fields.contains(UpdateField::SwitchSerialNumber) {
+        switch.serial_number = patch.switch_serial_number;
+    }
+    if fields.contains(UpdateField::NvosMacAddresses) {
+        switch.nvos_mac_addresses = patch
+            .nvos_mac_addresses
+            .into_iter()
+            .map(|address| address.parse::<MacAddress>().map_err(CarbideError::from))
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+    if fields.contains(UpdateField::BmcIpAddress) {
+        switch.bmc_ip_address = parse_bmc_ip(&patch.bmc_ip_address)?;
+    }
+    if fields.contains(UpdateField::RackId) {
+        switch.rack_id = patch.rack_id;
+    }
+    fields.update_metadata(patch.metadata, &mut switch.metadata)?;
+    let preallocations = update_switch_in_transaction(
+        &mut txn,
+        &switch,
+        api.runtime_config.retained_boot_interface_window,
+    )
+    .await?;
+    txn.commit().await?;
+    for preallocation in preallocations {
+        emit(StaticAddressPreallocationCompleted::from(preallocation));
+    }
+    Ok(Response::new(()))
+}
+
+async fn update_switch_in_transaction(
+    txn: &mut sqlx::PgConnection,
+    switch: &ExpectedSwitch,
+    retained_window: Option<chrono::Duration>,
+) -> Result<Vec<PreallocationSuccess>, CarbideError> {
+    validate_expected_switch(switch)?;
+
+    let mut preallocations = Vec::with_capacity(2);
+    if let Some(bmc_ip) = switch.bmc_ip_address {
+        preallocations.push(
+            update_preallocated_machine_interface(
+                &mut *txn,
+                switch.bmc_mac_address,
+                bmc_ip,
+                retained_window,
+            )
+            .await?,
+        );
+    }
+    if let Some(nvos_ip) = switch.nvos_ip_address {
+        // Pairing already validated above; nvos_mac_addresses has exactly one entry.
+        let nvos_mac = switch.nvos_mac_addresses[0];
+        preallocations.push(
+            update_preallocated_machine_interface(&mut *txn, nvos_mac, nvos_ip, retained_window)
+                .await?,
+        );
+    }
+
+    db_expected_switch::update(txn, switch)
+        .await
+        .map_err(CarbideError::from)?;
+
+    Ok(preallocations)
 }
 
 pub(crate) async fn get_expected_switch(

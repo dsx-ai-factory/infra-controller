@@ -16,14 +16,17 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
 	tmocks "go.temporal.io/sdk/mocks"
 )
@@ -722,7 +725,16 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, "UpdateExpectedPowerShelf", mock.Anything).Return(mockWorkflowRun, nil)
+	var capturedPatch *corev1.PatchExpectedPowerShelfRequest
+	var capturedProxy grpcproxy.Request
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+		Run(func(args mock.Arguments) {
+			capturedPatch = &corev1.PatchExpectedPowerShelfRequest{}
+			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), capturedPatch)
+			capturedProxy = args.Get(3).(grpcproxy.Request)
+			assert.Equal(t, corev1.Forge_PatchExpectedPowerShelf_FullMethodName, capturedProxy.FullMethod)
+		}).
+		Return(mockWorkflowRun, nil)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewUpdateExpectedPowerShelfHandler(dbSession, scp, cfg)
@@ -753,6 +765,20 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 		expectedErrorMsg     string
 		expectNoWorkflow     bool
 	}{
+		{
+			name: "credential values reach Core through encrypted transport",
+			id:   testEPS.ID.String(),
+			requestBody: model.APIExpectedPowerShelfUpdateRequest{
+				DefaultBmcUsername: cutil.GetPtr("patch-admin"),
+				DefaultBmcPassword: cutil.GetPtr("patch-secret"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEPS.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+		},
 		{
 			name: "successful update",
 			id:   testEPS.ID.String(),
@@ -847,6 +873,14 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 			err := handler.Handle(c)
 
 			assert.Nil(t, err)
+			if rec.Code == http.StatusOK && tt.requestBody.DefaultBmcPassword != nil {
+				require.NotNil(t, capturedPatch)
+				assert.Equal(t, *tt.requestBody.DefaultBmcPassword, capturedPatch.ExpectedPowerShelf.BmcPassword)
+				assert.NotEmpty(t, capturedProxy.EncryptedSecrets)
+				assert.NotContains(t, string(capturedProxy.RequestJSON), *tt.requestBody.DefaultBmcPassword)
+				assert.NotContains(t, rec.Body.String(), *tt.requestBody.DefaultBmcPassword)
+			}
+
 			assert.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())

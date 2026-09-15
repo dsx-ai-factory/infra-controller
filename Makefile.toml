@@ -770,6 +770,24 @@ args = [
   "--profile=ci-tests",
 ]
 
+# This ignored test also runs Go. CI supplies PostgreSQL and selects it
+# explicitly after the ordinary Rust tests, using the same build profile.
+[tasks.test-expected-component-rest-patch]
+workspace = false
+command = "cargo"
+args = [
+  "test",
+  "--profile=ci-tests",
+  "-p",
+  "carbide-api-core",
+  "--test",
+  "integration",
+  "expected_component_rest_patch::test_expected_component_rest_patch",
+  "--",
+  "--ignored",
+  "--exact",
+]
+
 [tasks.build-and-test-release-container-services]
 workspace = false
 # Important: We only build perform a single build task here since every additional

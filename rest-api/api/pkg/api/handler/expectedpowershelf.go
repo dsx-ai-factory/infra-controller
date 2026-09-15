@@ -616,17 +616,10 @@ func (uepsh UpdateExpectedPowerShelfHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Power Shelf due to DB error", nil)
 		}
 
-		updateExpectedPowerShelfRequest := eps.ToProto(cdbm.ExpectedPowerShelfCredentials{
-			Username: apiRequest.DefaultBmcUsername,
-			Password: apiRequest.DefaultBmcPassword,
-		})
-
-		logger.Info().Msg("triggering ExpectedPowerShelf update workflow")
-
-		workflowOptions := tclient.StartWorkflowOptions{
-			ID:                       "expected-power-shelf-update-" + expectedPowerShelf.ID.String(),
-			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
-			TaskQueue:                queue.SiteTaskQueue,
+		patchExpectedPowerShelfRequest := apiRequest.ToProto(eps)
+		var secretFields []string
+		if apiRequest.DefaultBmcPassword != nil {
+			secretFields = []string{"expectedPowerShelf"}
 		}
 
 		stc, err := uepsh.scp.GetClientByID(site.ID)
@@ -635,7 +628,8 @@ func (uepsh UpdateExpectedPowerShelfHandler) Handle(c echo.Context) error {
 			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 		}
 
-		if apiErr := common.ExecuteSyncWorkflow(ctx, logger, stc, "UpdateExpectedPowerShelf", workflowOptions, updateExpectedPowerShelfRequest); apiErr != nil {
+		apiErr := common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_PatchExpectedPowerShelf_FullMethodName, patchExpectedPowerShelfRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
 			return nil, apiErr
 		}
 		return eps, nil
