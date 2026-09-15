@@ -30,7 +30,7 @@ Create a network security group for a tenant:
     $ nico-admin-cli network-security-group create --tenant-organization-id fds34511233a \
     --name web-tier
 
-Create one with stateful egress and labels:
+Create one with stateful egress and labels (requires site-level support):
     $ nico-admin-cli network-security-group create --tenant-organization-id fds34511233a \
     --name web-tier --stateful-egress --labels '{\"env\":\"prod\"}'
 
@@ -66,7 +66,7 @@ pub(crate) struct Args {
     #[clap(
         short = 's',
         long,
-        help = "Optional, whether egress rules are stateful"
+        help = "Enable stateful egress (default: false); rejected when site-level stateful ACL support is disabled"
     )]
     stateful_egress: bool,
 

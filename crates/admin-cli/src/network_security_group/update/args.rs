@@ -57,7 +57,7 @@ pub(crate) struct Args {
     #[clap(
         short = 's',
         long,
-        help = "Optional, whether egress rules are stateful"
+        help = "Set whether egress rules are stateful (omitted: unchanged); changing false to true is rejected when site-level stateful ACL support is disabled"
     )]
     pub(super) stateful_egress: Option<bool>,
 
