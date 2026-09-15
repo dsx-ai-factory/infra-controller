@@ -1202,6 +1202,13 @@ unset BMC_ROOT_PASSWORD
 `printf` is a shell builtin, so the value never appears in a process argument
 list.
 
+On a site deployed with `helm-prereqs`, `vault.siteCredentials` in
+`helm-prereqs/values.yaml` seeds this path and the two UEFI site defaults from
+the chart instead; see
+[Seeding site credentials](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#seeding-site-credentials)
+for how it interacts with `NICO_DPF_BMC_ROOT_PASSWORD` and with credential
+rotation.
+
 Until the credential is set, DPU provisioning cannot proceed and Site Explorer
 does not run: it requires this credential plus the host and DPU UEFI site
 defaults, and fails each iteration with `MissingCredentials` until all three are

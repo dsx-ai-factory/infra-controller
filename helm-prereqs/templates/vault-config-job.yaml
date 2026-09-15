@@ -14,6 +14,8 @@
 ##     - Create cert-manager-nico-policy + nico-vault-policy
 ##     - Enable KV v2 at secrets/
 ##     - Seed factory-default KV entries (machines/all_dpus/...)
+##     - Optionally seed the site BMC root and site-default UEFI credentials
+##       from the nico-site-credentials Secret (templates/secrets.yaml)
 ##     - Enable AppRole, create nico role
 ##
 ## Token read from vaultroottoken K8s secret (written by unseal_vault.sh).
@@ -141,6 +143,26 @@ spec:
                 secretKeyRef:
                   name: nico-vault-token
                   key: token
+            {{- if .Values.vault.siteCredentials.enabled }}
+            ## Vault KV payloads rendered into nico-site-credentials by
+            ## templates/secrets.yaml; injected here so the passwords stay out
+            ## of the pod spec.
+            - name: SITE_CREDENTIAL_BMC_ROOT
+              valueFrom:
+                secretKeyRef:
+                  name: nico-site-credentials
+                  key: bmc_site_root
+            - name: SITE_CREDENTIAL_UEFI_DPU
+              valueFrom:
+                secretKeyRef:
+                  name: nico-site-credentials
+                  key: uefi_dpu_site_default
+            - name: SITE_CREDENTIAL_UEFI_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: nico-site-credentials
+                  key: uefi_host_site_default
+            {{- end }}
           volumeMounts:
             - name: approle-creds
               mountPath: /approle-creds
@@ -325,6 +347,22 @@ spec:
               vault kv put {{ $.Values.vault.kvMount }}/{{ .path }} - <<'KVSEED'
               {{ .data | toJson }}
               KVSEED
+              {{- end }}
+              {{- if .Values.vault.siteCredentials.enabled }}
+
+              # ---- Site credentials ----
+              # Payloads come from the nico-site-credentials Secret through the
+              # SITE_CREDENTIAL_* env vars. Written after kvSeeds so they take
+              # precedence at the same paths; rewritten on every upgrade.
+              echo "Seeding {{ .Values.vault.kvMount }}/machines/bmc/site/root..."
+              printf '%s\n' "$SITE_CREDENTIAL_BMC_ROOT" \
+                | vault kv put {{ .Values.vault.kvMount }}/machines/bmc/site/root -
+              echo "Seeding {{ .Values.vault.kvMount }}/machines/all_dpus/site_default/uefi-metadata-items/auth..."
+              printf '%s\n' "$SITE_CREDENTIAL_UEFI_DPU" \
+                | vault kv put {{ .Values.vault.kvMount }}/machines/all_dpus/site_default/uefi-metadata-items/auth -
+              echo "Seeding {{ .Values.vault.kvMount }}/machines/all_hosts/site_default/uefi-metadata-items/auth..."
+              printf '%s\n' "$SITE_CREDENTIAL_UEFI_HOST" \
+                | vault kv put {{ .Values.vault.kvMount }}/machines/all_hosts/site_default/uefi-metadata-items/auth -
               {{- end }}
 
               echo "Enabling AppRole auth..."
