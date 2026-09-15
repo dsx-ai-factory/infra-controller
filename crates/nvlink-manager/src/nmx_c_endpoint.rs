@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use carbide_uuid::rack::RackId;
 use db::db_read::DbReader;
@@ -66,13 +66,13 @@ pub fn nmx_c_endpoint_url_from_nvos_ip(
     port: Option<u16>,
     config: &NvLinkConfig,
 ) -> String {
-    format!(
-        "{}://{}:{}",
-        nmx_c_endpoint_scheme(config),
-        ip,
+    // SocketAddr includes the brackets required by an IPv6 URL authority.
+    let address = SocketAddr::new(
+        *ip,
         port.or(config.nmx_c_endpoint_port)
-            .unwrap_or(NMX_C_DEFAULT_GRPC_PORT)
-    )
+            .unwrap_or(NMX_C_DEFAULT_GRPC_PORT),
+    );
+    format!("{}://{address}", nmx_c_endpoint_scheme(config))
 }
 
 /// Outcome of resolving an NMX-C gRPC endpoint for a chassis- or rack-scoped machine group.
@@ -165,9 +165,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
-
     use carbide_macros::sqlx_test;
+    use carbide_test_support::{Check, check_values};
     use carbide_uuid::rack::{RackId, RackProfileId};
     use model::rack::RackConfig;
     use model::switch::{
@@ -178,35 +177,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn endpoint_url_uses_http_when_allow_insecure() {
-        let config = NvLinkConfig {
-            allow_insecure: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            nmx_c_endpoint_url_from_nvos_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), None, &config),
-            "http://10.0.0.1:9370"
-        );
-    }
+    fn endpoint_urls_preserve_address_scheme_and_port() {
+        struct EndpointCase {
+            ip: &'static str,
+            port: Option<u16>,
+            config: NvLinkConfig,
+        }
 
-    #[test]
-    fn endpoint_url_uses_https_by_default() {
-        let config = NvLinkConfig::default();
-        assert_eq!(
-            nmx_c_endpoint_url_from_nvos_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), None, &config),
-            "https://10.0.0.1:9370"
-        );
-    }
-
-    #[test]
-    fn endpoint_url_uses_configured_port() {
-        let config = NvLinkConfig {
-            nmx_c_endpoint_port: Some(9601),
-            ..Default::default()
-        };
-        assert_eq!(
-            nmx_c_endpoint_url_from_nvos_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), None, &config),
-            "https://10.0.0.1:9601"
+        check_values(
+            [
+                Check {
+                    scenario: "IPv4 default",
+                    input: EndpointCase {
+                        ip: "10.0.0.1",
+                        port: None,
+                        config: NvLinkConfig::default(),
+                    },
+                    expect: "https://10.0.0.1:9370".to_string(),
+                },
+                Check {
+                    scenario: "IPv6 default",
+                    input: EndpointCase {
+                        ip: "2001:db8::1",
+                        port: None,
+                        config: NvLinkConfig::default(),
+                    },
+                    expect: "https://[2001:db8::1]:9370".to_string(),
+                },
+                Check {
+                    scenario: "insecure HTTP",
+                    input: EndpointCase {
+                        ip: "10.0.0.1",
+                        port: None,
+                        config: NvLinkConfig {
+                            allow_insecure: true,
+                            ..Default::default()
+                        },
+                    },
+                    expect: "http://10.0.0.1:9370".to_string(),
+                },
+                Check {
+                    scenario: "configured port",
+                    input: EndpointCase {
+                        ip: "10.0.0.1",
+                        port: None,
+                        config: NvLinkConfig {
+                            nmx_c_endpoint_port: Some(9601),
+                            ..Default::default()
+                        },
+                    },
+                    expect: "https://10.0.0.1:9601".to_string(),
+                },
+                Check {
+                    scenario: "explicit port overrides configuration",
+                    input: EndpointCase {
+                        ip: "2001:db8::1",
+                        port: Some(9602),
+                        config: NvLinkConfig {
+                            nmx_c_endpoint_port: Some(9601),
+                            ..Default::default()
+                        },
+                    },
+                    expect: "https://[2001:db8::1]:9602".to_string(),
+                },
+            ],
+            |case| {
+                let ip = case.ip.parse().expect("parse fixture IP");
+                let url = nmx_c_endpoint_url_from_nvos_ip(&ip, case.port, &case.config);
+                libnmxc::Endpoint::new(&url).expect("parse generated NMX-C endpoint");
+                url
+            },
         );
     }
 
