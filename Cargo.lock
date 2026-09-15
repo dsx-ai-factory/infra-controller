@@ -6760,6 +6760,7 @@ name = "libnmxc"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "carbide-test-support",
  "clap",
  "http",
  "prost",
