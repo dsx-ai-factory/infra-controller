@@ -19,23 +19,77 @@
 //!
 //! V2 is a separate gRPC service with a single method. Note that V1 declares a
 //! method of the same name taking different message types; keeping the two
-//! impls in separate files makes it hard to reach for the wrong one.
+//! impls in separate files makes it hard to reach for the wrong one. The V1
+//! spelling is deliberately left unimplemented, because the fabric-manager API
+//! version defaults to V2 and the V1 value has no effect.
 
 use librms::protos::rack_manager_v2::rack_manager_v2_server::RackManagerV2;
 
+use crate::envelope::BatchOutcome;
+use crate::fabric::Candidate;
 use crate::{RmsMock, rms_v2};
 
 #[tonic::async_trait]
 impl RackManagerV2 for RmsMock {
+    /// Begin configuring the rack's scale-up fabric manager.
+    ///
+    /// The response carries nothing but a job id, and an empty one is fatal:
+    /// the caller reports the outcome as unknown and the rack waits forever.
+    /// So the job is registered before responding, and the id it returns is
+    /// the one `GetJobStatus` will answer for.
+    ///
+    /// A request naming no switches is `INVALID_ARGUMENT` before any job
+    /// exists, as the proto specifies. NICo always sends the switches of one
+    /// rack.
+    ///
+    /// A request whose switches are all unknown to the mock is accepted, since
+    /// the proto rejects only a malformed request synchronously, but its job
+    /// fails and names them. Completing it instead would send the caller to
+    /// read back a fabric in which no primary can be elected, and it waits on
+    /// that indefinitely.
+    ///
+    /// The call also elects the rack's primary switch. After the job completes
+    /// the caller reads the fabric back and requires exactly one enabled
+    /// switch; the requested primary is honoured when it is one of the rack's
+    /// simulated switches, otherwise one of those is chosen deterministically.
     async fn configure_scale_up_fabric_manager(
         &self,
-        _request: tonic::Request<rms_v2::ConfigureScaleUpFabricManagerRequest>,
+        request: tonic::Request<rms_v2::ConfigureScaleUpFabricManagerRequest>,
     ) -> std::result::Result<
         tonic::Response<rms_v2::ConfigureScaleUpFabricManagerResponse>,
         tonic::Status,
     > {
-        Err(tonic::Status::unimplemented(
-            "the machine-a-tron RMS mock does not yet implement configure_scale_up_fabric_manager",
+        let req = request.get_ref();
+        let inventory = self.inventory.nodes();
+        let refs = crate::resolve::resolve_nodes(&inventory, req.nodes.as_ref());
+        let Some(first) = refs.first() else {
+            return Err(tonic::Status::invalid_argument(
+                "nodes is required: name at least one switch to configure the fabric on",
+            ));
+        };
+
+        // The fabric is configured per rack rather than per node, so this is
+        // one job however many nodes the request names. Only a switch the
+        // inventory has is a candidate, so the elected primary is one the
+        // caller can reach.
+        let rack_id = first.rack_id;
+        let candidates: Vec<Candidate<'_>> = refs.iter().filter_map(Candidate::of).collect();
+        let primary =
+            self.fabric
+                .elect_primary(rack_id, &candidates, req.primary_switch_node_id.as_deref());
+        let job_id = match primary {
+            Some(primary) => self.jobs.start(primary, rack_id),
+            // No switch matched, so there is no primary to name and nothing
+            // to run the fabric manager on. The job fails naming the switches
+            // rather than completing, which would have the caller wait for a
+            // primary that cannot exist.
+            None => self
+                .jobs
+                .start_failing("", rack_id, BatchOutcome::of(&refs).message),
+        };
+
+        Ok(tonic::Response::new(
+            rms_v2::ConfigureScaleUpFabricManagerResponse { job_id },
         ))
     }
 }

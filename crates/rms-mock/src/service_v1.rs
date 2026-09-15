@@ -25,6 +25,8 @@
 
 use librms::protos::rack_manager::rack_manager_server::RackManager;
 
+use crate::envelope::{BatchOutcome, UNMATCHED_NODE};
+use crate::fabric::Candidate;
 use crate::{RmsMock, rms};
 
 /// Builds the whole `RackManager` impl.
@@ -111,39 +113,265 @@ rack_manager_impl! {
                     })
                 })
                 .collect();
-            let unmatched: Vec<&str> = refs
-                .iter()
-                .filter(|r| !r.matched())
-                .map(|r| r.node_id)
-                .collect();
 
-            let total = refs.len() as u32;
-            let matched = node_device_details.len() as u32;
-            let (status, message) = if unmatched.is_empty() {
-                (rms::ReturnCode::Success, String::new())
-            } else {
-                (
-                    rms::ReturnCode::Failure,
-                    format!(
-                        "{} of {total} nodes did not match any simulated device: {}",
-                        unmatched.len(),
-                        unmatched.join(", ")
-                    ),
-                )
-            };
-
+            let outcome = BatchOutcome::of(&refs);
             Ok(tonic::Response::new(rms::BatchGetNodeDeviceInfoResponse {
                 // Proto3 leaves this at UNSPECIFIED, which callers read as a
                 // failure, so it must be set explicitly on every path.
-                status: status as i32,
-                message,
+                status: outcome.status as i32,
+                message: outcome.message,
                 node_device_details,
-                stats: Some(rms::NodeOperationStats {
-                    total_nodes: total,
-                    successful_nodes: matched,
-                    failed_nodes: total - matched,
-                }),
+                stats: Some(outcome.stats),
             }))
+        }
+
+        /// Report the state of a job, and of its children when asked.
+        ///
+        /// The caller looks for its own job id in `job_states` and gives up if
+        /// it is absent, so the requested id is always echoed even when the
+        /// job is unknown to this process. A failed job carries its reason in
+        /// `error_message`, which the caller records as the rack's error.
+        async fn get_job_status(
+            &self,
+            request: tonic::Request<rms::GetJobStatusRequest>,
+        ) -> std::result::Result<tonic::Response<rms::GetJobStatusResponse>, tonic::Status> {
+            let job_id = &request.get_ref().job_id;
+            let status = self.jobs.observe(job_id);
+
+            Ok(tonic::Response::new(rms::GetJobStatusResponse {
+                job_states: vec![rms::JobStatus {
+                    job_id: job_id.clone(),
+                    parent_job_id: None,
+                    // The mock configures a rack's fabric as a single job, so
+                    // there are no children to report.
+                    child_job_ids: Vec::new(),
+                    // Never left at the proto3 default: the caller cannot
+                    // distinguish an unset state from a real one and reports
+                    // the outcome as unknown.
+                    execution_state: status.state.as_execution_state(),
+                    error_message: status.error_message,
+                    error_code: 0,
+                    result_json: String::new(),
+                    state_description: status.state.as_wire_str().to_owned(),
+                    rack_id: Some(status.rack_id),
+                    node_id: Some(status.node_id),
+                    created_at: None,
+                    updated_at: None,
+                }],
+            }))
+        }
+
+        /// Add or remove switches from the scale-up fabric.
+        ///
+        /// Nothing is reconfigured; the setting is recorded so that reading
+        /// the fabric back reflects what was written to it. A node the mock
+        /// has no device for is a per-node failure and records nothing.
+        async fn batch_set_scale_up_fabric_state(
+            &self,
+            request: tonic::Request<rms::BatchSetScaleUpFabricStateRequest>,
+        ) -> std::result::Result<tonic::Response<rms::BatchSetScaleUpFabricStateResponse>, tonic::Status>
+        {
+            let enabled = request.get_ref().enabled;
+            let inventory = self.inventory.nodes();
+            let refs = crate::resolve::resolve_nodes(&inventory, request.get_ref().nodes.as_ref());
+
+            for node in refs.iter().filter(|r| r.matched()) {
+                self.fabric.set_enabled(node.node_id, enabled);
+            }
+
+            Ok(tonic::Response::new(rms::BatchSetScaleUpFabricStateResponse {
+                response: Some(crate::envelope::node_batch(&refs, "")),
+            }))
+        }
+
+        /// Report the fabric's membership and per-switch health.
+        ///
+        /// A switch the mock has no device for is listed with the error the
+        /// proto reserves for a switch that could not be inspected, and reads
+        /// back disabled: it can never be the primary. The response as a whole
+        /// still succeeds, since failing it would unset the status of every
+        /// switch that was inspected.
+        async fn get_scale_up_fabric_status(
+            &self,
+            request: tonic::Request<rms::GetScaleUpFabricStatusRequest>,
+        ) -> std::result::Result<tonic::Response<rms::GetScaleUpFabricStatusResponse>, tonic::Status>
+        {
+            let inventory = self.inventory.nodes();
+            let refs = crate::resolve::resolve_nodes(&inventory, request.get_ref().nodes.as_ref());
+
+            // Exactly one switch per rack must read back enabled, even when
+            // this process never saw the rack's configuration call.
+            self.fabric.ensure_primaries(
+                refs.iter()
+                    .filter_map(|r| Some((r.rack_id, Candidate::of(r)?))),
+            );
+
+            let switches = refs
+                .iter()
+                .map(|r| {
+                    if r.matched() {
+                        rms::ScaleUpFabricSwitchStatus {
+                            node_id: r.node_id.to_owned(),
+                            enabled: self.fabric.is_enabled(r.rack_id, r.node_id),
+                            fabric_manager_status: crate::fabric::FABRIC_MANAGER_OK.to_owned(),
+                            error_message: String::new(),
+                        }
+                    } else {
+                        rms::ScaleUpFabricSwitchStatus {
+                            node_id: r.node_id.to_owned(),
+                            enabled: false,
+                            // Empty when unavailable, as the proto specifies.
+                            fabric_manager_status: String::new(),
+                            error_message: UNMATCHED_NODE.to_owned(),
+                        }
+                    }
+                })
+                .collect();
+
+            Ok(tonic::Response::new(rms::GetScaleUpFabricStatusResponse {
+                status: rms::ReturnCode::Success as i32,
+                fabric_status: Some(rms::ScaleUpFabricStatus {
+                    // Not read by NICo, which takes the topology from the rack profile.
+                    topology_type: String::new(),
+                    extra_static_configs: Vec::new(),
+                    switches,
+                }),
+                error_message: String::new(),
+            }))
+        }
+
+        /// Report each switch's fabric-manager service health.
+        ///
+        /// The health is carried as a JSON document whose `status` field the
+        /// caller matches against a two-word vocabulary; anything it cannot
+        /// parse or recognise becomes an unknown state, so the body is built
+        /// rather than written inline. The rack's primary additionally reports
+        /// a configured control plane, which is what marks a switch as the
+        /// fabric manager endpoint for later consumers. A switch the mock has
+        /// no device for is a per-node failure: its entry carries the error
+        /// and no body, and the caller reads its state as unknown.
+        async fn batch_get_scale_up_fabric_service_status(
+            &self,
+            request: tonic::Request<rms::BatchGetScaleUpFabricServiceStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<rms::BatchGetScaleUpFabricServiceStatusResponse>,
+            tonic::Status,
+        > {
+            let inventory = self.inventory.nodes();
+            let refs = crate::resolve::resolve_nodes(&inventory, request.get_ref().nodes.as_ref());
+            self.fabric.ensure_primaries(
+                refs.iter()
+                    .filter_map(|r| Some((r.rack_id, Candidate::of(r)?))),
+            );
+
+            let service_statuses = refs
+                .iter()
+                .map(|r| {
+                    let entry = if r.matched() {
+                        rms::ScaleUpFabricServiceStatusEntry {
+                            status_json: crate::fabric::status_json(
+                                self.fabric.is_primary(r.rack_id, r.node_id),
+                            ),
+                            error_message: String::new(),
+                        }
+                    } else {
+                        rms::ScaleUpFabricServiceStatusEntry {
+                            status_json: String::new(),
+                            error_message: UNMATCHED_NODE.to_owned(),
+                        }
+                    };
+                    (r.node_id.to_owned(), entry)
+                })
+                .collect();
+
+            let outcome = BatchOutcome::of(&refs);
+            Ok(tonic::Response::new(
+                rms::BatchGetScaleUpFabricServiceStatusResponse {
+                    status: outcome.status as i32,
+                    service_statuses,
+                    stats: Some(outcome.stats),
+                },
+            ))
+        }
+
+        /// Begin configuring certificates on the given switches.
+        ///
+        /// A simulated switch has no certificate store, so there is nothing to
+        /// install; what matters is that the response carries everything the
+        /// caller needs to keep going. It needs a per-node job id in `jobs`
+        /// whose `node_id` matches what it sent - a batch-level id alone is
+        /// not enough - and a batch whose status, per-node results and
+        /// `stats.failed_nodes` all agree. Miss any of those and the switch
+        /// never leaves configuration.
+        ///
+        /// A node the mock has no device for gets no job: it is a per-node
+        /// failure in the batch, which the caller records as the node's error
+        /// instead of polling a job that stands for nothing.
+        async fn configure_switch_certificate(
+            &self,
+            request: tonic::Request<rms::ConfigureSwitchCertificateRequest>,
+        ) -> std::result::Result<tonic::Response<rms::ConfigureSwitchCertificateResponse>, tonic::Status>
+        {
+            let inventory = self.inventory.nodes();
+            let refs = crate::resolve::resolve_nodes(&inventory, request.get_ref().nodes.as_ref());
+
+            let jobs = refs
+                .iter()
+                .filter(|r| r.matched())
+                .map(|r| rms::ConfigureSwitchCertificateJobInfo {
+                    // Echoed exactly: the caller looks its own node id up in
+                    // this list and ignores entries that do not match.
+                    node_id: r.node_id.to_owned(),
+                    job_id: self.jobs.start(r.node_id, r.rack_id),
+                })
+                .collect::<Vec<_>>();
+
+            let batch_job_id = jobs.first().map(|j| j.job_id.as_str()).unwrap_or_default();
+
+            Ok(tonic::Response::new(rms::ConfigureSwitchCertificateResponse {
+                response: Some(crate::envelope::node_batch(&refs, batch_job_id)),
+                jobs,
+            }))
+        }
+
+        /// Report progress of a certificate configuration job.
+        ///
+        /// `state` is a free-form string here rather than an enum, and the
+        /// caller maps only a fixed vocabulary; anything it does not
+        /// recognise it reads as still running and polls forever. So the
+        /// spelling comes from `JobState` rather than being written inline.
+        ///
+        /// A job id the mock has no record of is reported completed, so a poll
+        /// that survives the host's restart does not strand the switch.
+        async fn get_configure_switch_certificate_job_status(
+            &self,
+            request: tonic::Request<rms::GetConfigureSwitchCertificateJobStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<rms::GetConfigureSwitchCertificateJobStatusResponse>,
+            tonic::Status,
+        > {
+            let job_id = &request.get_ref().job_id;
+            let status = self.jobs.observe(job_id);
+
+            Ok(tonic::Response::new(
+                rms::GetConfigureSwitchCertificateJobStatusResponse {
+                    // The RPC succeeded; whether the *job* succeeded is what
+                    // `state` reports. Conflating the two would make a job
+                    // that is merely still running look like a failed call.
+                    status: rms::ReturnCode::Success as i32,
+                    job_id: job_id.clone(),
+                    state: status.state.as_wire_str().to_owned(),
+                    message: String::new(),
+                    rack_id: status.rack_id,
+                    node_id: status.node_id,
+                    error_message: status.error_message,
+                    result_json: String::new(),
+                    // No clock: the mock has no wall-clock behaviour to model,
+                    // and nothing in NICo reads these.
+                    created_at: None,
+                    updated_at: None,
+                },
+            ))
         }
     }
 
@@ -182,19 +410,13 @@ rack_manager_impl! {
         push_switch_firmware(PushSwitchFirmwareRequest) -> PushSwitchFirmwareResponse,
         batch_reset_switch_factory_default(BatchResetSwitchFactoryDefaultRequest) -> BatchResetSwitchFactoryDefaultResponse,
         configure_scale_up_fabric_manager(ConfigureScaleUpFabricManagerRequest) -> ConfigureScaleUpFabricManagerResponse,
-        get_scale_up_fabric_status(GetScaleUpFabricStatusRequest) -> GetScaleUpFabricStatusResponse,
         batch_reset_switch_sdn_factory_default(BatchResetSwitchSdnFactoryDefaultRequest) -> BatchResetSwitchSdnFactoryDefaultResponse,
-        batch_set_scale_up_fabric_state(BatchSetScaleUpFabricStateRequest) -> BatchSetScaleUpFabricStateResponse,
-        batch_get_scale_up_fabric_service_status(BatchGetScaleUpFabricServiceStatusRequest) -> BatchGetScaleUpFabricServiceStatusResponse,
         get_scale_up_fabric_state(GetScaleUpFabricStateRequest) -> GetScaleUpFabricStateResponse,
         set_scale_up_fabric_telemetry_interface_state(SetScaleUpFabricTelemetryInterfaceStateRequest) -> SetScaleUpFabricTelemetryInterfaceStateResponse,
-        configure_switch_certificate(ConfigureSwitchCertificateRequest) -> ConfigureSwitchCertificateResponse,
         batch_disable_switch_mtls(BatchDisableSwitchMtlsRequest) -> BatchDisableSwitchMtlsResponse,
-        get_configure_switch_certificate_job_status(GetConfigureSwitchCertificateJobStatusRequest) -> GetConfigureSwitchCertificateJobStatusResponse,
         list_switch_system_images(ListSwitchSystemImagesRequest) -> ListSwitchSystemImagesResponse,
         get_switch_system_image_job_status(GetSwitchSystemImageJobStatusRequest) -> GetSwitchSystemImageJobStatusResponse,
         update_switch_system_password(UpdateSwitchSystemPasswordRequest) -> UpdateSwitchSystemPasswordResponse,
         get_firmware_job_status(GetFirmwareJobStatusRequest) -> GetFirmwareJobStatusResponse,
-        get_job_status(GetJobStatusRequest) -> GetJobStatusResponse,
     }
 }
