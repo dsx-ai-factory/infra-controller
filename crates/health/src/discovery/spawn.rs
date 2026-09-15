@@ -141,6 +141,8 @@ pub(super) fn collector_eligibility(
                 || ctx.telemetry_config.is_enabled()
                 || logs
                 || ctx.firmware_config.is_enabled()
+                || (ctx.manager_config.is_enabled()
+                    && matches!(endpoint.metadata, Some(EndpointMetadata::PowerShelf(_))))
                 || ctx.leak_detector_config.is_enabled()
                 || gpu_inventory,
             ..Default::default()
@@ -636,7 +638,10 @@ fn spawn_generic_redfish_collectors(
         }
     }
 
-    if power_shelf && sensors_enabled && !ctx.collectors.contains(CollectorKind::Manager, &key) {
+    if let Configurable::Enabled(manager_cfg) = &ctx.manager_config
+        && power_shelf
+        && !ctx.collectors.contains(CollectorKind::Manager, &key)
+    {
         let collector_registry = Arc::new(
             ctx.metrics_manager
                 .create_collector_registry(format!("manager_collector_{key}"), metrics_prefix)?,
@@ -649,7 +654,7 @@ fn spawn_generic_redfish_collectors(
             },
             CollectorStartContext {
                 limiter: ctx.limiter.clone(),
-                iteration_interval: ctx.discovery_config.refresh_interval,
+                iteration_interval: manager_cfg.poll_interval,
                 collector_registry,
                 metrics_manager: ctx.metrics_manager.clone(),
             },
@@ -1191,7 +1196,8 @@ mod tests {
     #[tokio::test]
     async fn test_manager_collector_starts_for_power_shelf_endpoints_only() {
         let mut config = Config::default();
-        config.collectors.sensors = Configurable::Enabled(Default::default());
+        config.collectors.sensors = Configurable::Disabled;
+        config.collectors.manager = Configurable::Enabled(Default::default());
         config.collectors.logs = Configurable::Disabled;
         config.collectors.firmware = Configurable::Disabled;
         config.collectors.leak_detector = Configurable::Disabled;
@@ -1224,7 +1230,7 @@ mod tests {
             .expect("spawn should succeed");
         }
 
-        assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 2);
+        assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::Manager), 1);
         assert!(
             ctx.collectors
@@ -1234,6 +1240,35 @@ mod tests {
             !ctx.collectors
                 .contains(CollectorKind::Manager, &machine.key())
         );
+    }
+
+    #[tokio::test]
+    async fn test_manager_collector_disabled_skips_power_shelf_endpoints() {
+        let mut config = Config::default();
+        config.collectors.sensors = Configurable::Enabled(Default::default());
+        config.collectors.manager = Configurable::Disabled;
+        config.collectors.logs = Configurable::Disabled;
+        config.collectors.firmware = Configurable::Disabled;
+        config.collectors.leak_detector = Configurable::Disabled;
+
+        let mut ctx = context_with_config(config, "test_manager_disabled_gate");
+        let power_shelf = test_endpoint(
+            Ipv4Addr::new(10, 0, 0, 11),
+            "55:66:77:88:99:ee",
+            Some(EndpointMetadata::PowerShelf(
+                crate::endpoint::PowerShelfData {
+                    id: None,
+                    serial: Some("614MP1RXX03X6510036".to_string()),
+                    nvlink_domain_uuid: None,
+                },
+            )),
+        );
+
+        spawn_collectors_for_endpoint(&mut ctx, &power_shelf, None, "test_manager_disabled_gate")
+            .expect("spawn should succeed");
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 1);
+        assert_eq!(ctx.collectors.len(CollectorKind::Manager), 0);
     }
 
     #[tokio::test]
