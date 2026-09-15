@@ -364,6 +364,7 @@ impl StateControllerIO for MachineStateControllerIO {
             ManagedHostState::ForceDeletion => ("forcedeletion", ""),
             ManagedHostState::Failed { .. } => ("failed", ""),
             ManagedHostState::DPUReprovision { .. } => ("reprovisioning", ""),
+            ManagedHostState::Reset { .. } => ("reset", ""),
             ManagedHostState::HostReprovision { .. } => ("hostreprovisioning", ""),
             ManagedHostState::RotatingBmc { .. } => ("rotatingbmc", ""),
             ManagedHostState::RotatingHostUefi { .. } => ("rotatinghostuefi", ""),
