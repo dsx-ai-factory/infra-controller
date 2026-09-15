@@ -25,7 +25,6 @@ use carbide_redfish::boot_interface::BootInterfaceTarget;
 use chrono::{DateTime, Duration, Utc};
 use config_version::Versioned;
 use db::ConditionalWrite;
-use db::machine_desired_boot_interface::BootInterfaceObservationNotApplicable;
 use model::machine::{DpuMachine, HostMachine, ManagedHostState, ManagedHostStateSnapshot};
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use state_controller::state_handler::{
@@ -170,10 +169,11 @@ pub(super) async fn observe_verified_boot_interface(
                     desired_version = %desired_boot_interface.version,
                     "Verified periodic host boot configuration observation",
                 ),
-                ConditionalWrite::NotApplied(BootInterfaceObservationNotApplicable) => {
+                ConditionalWrite::NotApplied(reason) => {
                     tracing::debug!(
                         machine_id = %host.id,
                         desired_version = %desired_boot_interface.version,
+                        ?reason,
                         "Discarded stale host boot configuration observation",
                     )
                 }
@@ -202,10 +202,11 @@ pub(super) async fn observe_verified_boot_interface(
                     ),
                     "Host boot configuration drift detected",
                 ),
-                ConditionalWrite::NotApplied(BootInterfaceObservationNotApplicable) => {
+                ConditionalWrite::NotApplied(reason) => {
                     tracing::debug!(
                         machine_id = %host.id,
                         desired_version = %desired_boot_interface.version,
+                        ?reason,
                         "Discarded stale host boot configuration drift observation",
                     )
                 }
