@@ -42,3 +42,31 @@ tests:
       - matchRegex:
           path: data["nico-bmc-proxy.toml"]
           pattern: '"spiffe-service-id/carbide-api" = \["/\*\*"\]'
+
+  - it: admits operator CLI certs as a read-only principal, on both spellings
+    documentIndex: 0
+    asserts:
+      # The criteria nico-api already runs, so a cert that reaches the API
+      # reaches the proxy as the same identity.
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'required_equals = \{ "IssuerCN" = "site-root", "SubjectOU" = "nico-cli-client", "SubjectO" = "NVIDIA" \}'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'group_from = "SubjectOU"'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'username_from = "SubjectCN"'
+      # Allow-listed and ACL'd: either alone denies, so both are the contract.
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'allowed_principals = \[.*"external-role/nico-cli-client"\]'
+      # GET and only GET. A widening edit here is the regression worth catching.
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '"external-role/nico-cli-client" = \["GET /redfish/v1/\*\*"\]'
+      # The carbide-named copy is the file the pre-2.1 image reads; a change
+      # applied to one spelling and not the other is a silent half-rollout.
+      - matchRegex:
+          path: data["carbide-bmc-proxy.toml"]
+          pattern: '"external-role/nico-cli-client" = \["GET /redfish/v1/\*\*"\]'

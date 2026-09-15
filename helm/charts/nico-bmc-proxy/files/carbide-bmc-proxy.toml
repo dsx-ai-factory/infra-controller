@@ -1,7 +1,7 @@
 listen = "[::]:1079"
 metrics_endpoint = "[::]:1080"
 database_url = "postgres://replaced-by-env-var"
-allowed_principals = ["spiffe-service-id/{{ .Values.auth.apiPrincipal }}", "spiffe-service-id/nv-dps"]
+allowed_principals = ["spiffe-service-id/{{ .Values.auth.apiPrincipal }}", "spiffe-service-id/nv-dps", "external-role/nico-cli-client"]
 
 [tls]
 identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
@@ -17,6 +17,15 @@ spiffe_service_base_paths = [
 ]
 spiffe_machine_base_path = "/{{ .Values.auth.namespace | default (include "nico-bmc-proxy.namespace" .) }}/machine/"
 additional_issuer_cns = []
+
+# Operator certificates, as `nico-admin-cli` presents them. Same criteria
+# nico-api already runs in its own site config, so a cert that reaches the API
+# reaches this proxy under the same identity: group from the OU, username from
+# the CN, which is what lands in the audit line.
+[auth.cli_certs]
+required_equals = { "IssuerCN" = "site-root", "SubjectOU" = "nico-cli-client", "SubjectO" = "NVIDIA" }
+group_from = "SubjectOU"
+username_from = "SubjectCN"
 
 [auth.acls]
 # ACL entry format:
@@ -74,3 +83,5 @@ additional_issuer_cns = []
   "GET /redfish/v1/TelemetryService/MetricReports/NvidiaNMMetrics_0",
   "GET /redfish/v1/TaskService/Tasks/*",
 ]
+# Read-only, all paths for NICo human admins (for now)
+"external-role/nico-cli-client" = ["GET /redfish/v1/**"]
