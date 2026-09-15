@@ -44,6 +44,7 @@ eyre = { workspace = true }
 figment = { features = ["env", "toml"], workspace = true }
 metrics-endpoint = { path = "../metrics-endpoint" }
 reqwest = { default-features = false, features = ["json", "rustls"], workspace = true }
+rustls = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

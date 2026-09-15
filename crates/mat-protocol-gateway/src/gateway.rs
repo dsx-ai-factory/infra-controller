@@ -215,7 +215,11 @@ pub async fn watch_source_list(
             _ = cancellation.cancelled() => return None,
             _ = interval.tick() => {}
         }
-        let list = match client.fetch().await {
+        let fetched = tokio::select! {
+            _ = cancellation.cancelled() => return None,
+            result = client.fetch() => result,
+        };
+        let list = match fetched {
             Ok(list) => list,
             Err(error) => {
                 tracing::warn!(url = %client.url, error = %error, "Could not refresh controller source list");
@@ -371,6 +375,10 @@ async fn serve(
 ) -> eyre::Result<()> {
     match tls {
         Some(tls) => {
+            // Other workspace crates link the `ring` provider next to `aws-lc-rs`, so rustls
+            // cannot pick a process default on its own. Installing is a no-op when a provider is
+            // already installed.
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             let tls =
                 axum_server::tls_rustls::RustlsConfig::from_pem_file(tls.cert_path, tls.key_path)
                     .await?;
