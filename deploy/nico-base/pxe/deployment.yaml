@@ -33,6 +33,8 @@ spec:
       annotations:
         kubectl.kubernetes.io/default-container: nico-pxe
     spec:
+      securityContext:
+        fsGroup: 10001
       containers:
         - name: nico-pxe
           image: yourdockerregistry.com/path/to/nico-core:latest
@@ -40,7 +42,7 @@ spec:
             - /opt/carbide/carbide
           args:
             - -s
-            - /nico-boot-artifacts
+            - /forge-boot-artifacts
           env:
             - name: ROCKET_CONFIG
               value: "/tmp/nico/Rocket.toml"
@@ -64,6 +66,9 @@ spec:
                 optional: true
           imagePullPolicy: IfNotPresent
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
             capabilities:
               add:
                 - SYS_PTRACE
@@ -83,7 +88,15 @@ spec:
             - name: spiffe
               mountPath: /var/run/secrets/spiffe.io
               readOnly: true
+            - name: boot-artifacts
+              mountPath: /forge-boot-artifacts/blobs/internal
       volumes:
+        - name: config
+          configMap:
+            defaultMode: 420
+            name: nico-pxe-config
         - name: spiffe
           secret:
             secretName: nico-pxe-certificate
+        - name: boot-artifacts
+          emptyDir: {}

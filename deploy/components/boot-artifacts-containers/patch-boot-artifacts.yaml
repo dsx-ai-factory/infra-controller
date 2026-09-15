@@ -15,17 +15,6 @@
 # limitations under the License.
 #
 - op: add
-  path: /spec/template/spec/volumes/0
-  value:
-    name: boot-artifacts
-    emptyDir: {}
-- op: add
-  path: /spec/template/spec/containers/0/volumeMounts/0
-  value:
-    name: boot-artifacts
-    mountPath: /forge-boot-artifacts/blobs/internal
-
-- op: add
   path: /spec/template/spec/containers/0
   value:
     name: boot-artifacts-x86-64
