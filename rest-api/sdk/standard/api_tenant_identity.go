@@ -1527,8 +1527,10 @@ The URL `{org}` identifies the provider whose admin authorizes the
 operation. Omit `organizationId` or set it to `null` to re-wrap every
 org's secrets on the Site, or set it to a tenant organization identifier
 that has an allocation on the Site. This identifier is the tenant's
-`org` value, not its REST resource UUID or display name. Set `dryRun`
-to decrypt and validate without writing any changes.
+`org` value, not its REST resource UUID or display name, and it is
+matched case-insensitively. Set `dryRun` to decrypt and validate
+without writing any changes. An omitted request body behaves as `{}`,
+so it re-wraps every org on the Site with `dryRun` defaulted to `false`.
 
 Returns `400 Bad Request` when a supplied organization identifier is
 empty or contains characters other than ASCII letters, digits,

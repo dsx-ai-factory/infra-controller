@@ -291,38 +291,38 @@ func TestAPITenantIdentityConfig_FromResponseProto(t *testing.T) {
 	})
 }
 
-// TestAPIReencryptTenantIdentitySecretsRequest_Validate verifies an optional scope uses the Core tenant organization identifier format without accepting blank scopes.
-func TestAPIReencryptTenantIdentitySecretsRequest_Validate(t *testing.T) {
+// TestAPITenantIdentityReencryptSecretsRequest_Validate verifies an optional scope uses the Core tenant organization identifier format without accepting blank scopes.
+func TestAPITenantIdentityReencryptSecretsRequest_Validate(t *testing.T) {
 	tests := []struct {
 		name    string
-		req     APIReencryptTenantIdentitySecretsRequest
+		req     APITenantIdentityReencryptSecretsRequest
 		wantErr string
 	}{
 		{name: "organization omitted"},
 		{
 			name: "organization supplied",
-			req: APIReencryptTenantIdentitySecretsRequest{
+			req: APITenantIdentityReencryptSecretsRequest{
 				OrganizationID: cutil.GetPtr("Tenant-Corp_01"),
 				DryRun:         true,
 			},
 		},
 		{
 			name: "organization is empty",
-			req: APIReencryptTenantIdentitySecretsRequest{
+			req: APITenantIdentityReencryptSecretsRequest{
 				OrganizationID: cutil.GetPtr(""),
 			},
 			wantErr: "organizationId must not be empty",
 		},
 		{
 			name: "blank organization cannot select all organizations",
-			req: APIReencryptTenantIdentitySecretsRequest{
+			req: APITenantIdentityReencryptSecretsRequest{
 				OrganizationID: cutil.GetPtr(" \t"),
 			},
 			wantErr: "organizationId must contain only ASCII letters, digits, underscores, and hyphens",
 		},
 		{
 			name: "invalid identifier character",
-			req: APIReencryptTenantIdentitySecretsRequest{
+			req: APITenantIdentityReencryptSecretsRequest{
 				OrganizationID: cutil.GetPtr("tenant.corp"),
 			},
 			wantErr: "organizationId must contain only ASCII letters, digits, underscores, and hyphens",
@@ -341,11 +341,35 @@ func TestAPIReencryptTenantIdentitySecretsRequest_Validate(t *testing.T) {
 	}
 }
 
-// TestAPIReencryptTenantIdentitySecretsRequest_ToProto verifies optional organization scope and dry-run behavior map directly to the Core request.
-func TestAPIReencryptTenantIdentitySecretsRequest_ToProto(t *testing.T) {
+// TestAPITenantIdentityReencryptSecretsRequest_NormalizeOrganizationID verifies a supplied scope is lowercased to match stored Tenant and Core organization identifiers, and that an absent scope stays absent.
+func TestAPITenantIdentityReencryptSecretsRequest_NormalizeOrganizationID(t *testing.T) {
+	tests := []struct {
+		name string
+		req  APITenantIdentityReencryptSecretsRequest
+		want *string
+	}{
+		{name: "omitted scope stays absent"},
+		{
+			name: "mixed-case scope is lowercased",
+			req:  APITenantIdentityReencryptSecretsRequest{OrganizationID: cutil.GetPtr("Tenant-Corp_01")},
+			want: cutil.GetPtr("tenant-corp_01"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := tt.req
+			req.NormalizeOrganizationID()
+			assert.Equal(t, tt.want, req.OrganizationID)
+		})
+	}
+}
+
+// TestAPITenantIdentityReencryptSecretsRequest_ToProto verifies optional organization scope and dry-run behavior map directly to the Core request.
+func TestAPITenantIdentityReencryptSecretsRequest_ToProto(t *testing.T) {
 	tests := []struct {
 		name           string
-		req            APIReencryptTenantIdentitySecretsRequest
+		req            APITenantIdentityReencryptSecretsRequest
 		wantOrg        string
 		wantOrgPresent bool
 		wantDryRun     bool
@@ -353,7 +377,7 @@ func TestAPIReencryptTenantIdentitySecretsRequest_ToProto(t *testing.T) {
 		{name: "organization omitted"},
 		{
 			name: "organization and dry-run supplied",
-			req: APIReencryptTenantIdentitySecretsRequest{
+			req: APITenantIdentityReencryptSecretsRequest{
 				OrganizationID: cutil.GetPtr("acme-corp"),
 				DryRun:         true,
 			},
@@ -374,11 +398,11 @@ func TestAPIReencryptTenantIdentitySecretsRequest_ToProto(t *testing.T) {
 	}
 }
 
-// TestAPIReencryptTenantIdentitySecretsResponse_FromProto verifies failure mapping and replacement, including an empty result and the nil-input no-op contract.
-func TestAPIReencryptTenantIdentitySecretsResponse_FromProto(t *testing.T) {
-	previous := APIReencryptTenantIdentitySecretsResponse{
+// TestAPITenantIdentityReencryptSecretsResponse_FromProto verifies failure mapping and replacement, including an empty result and the nil-input no-op contract.
+func TestAPITenantIdentityReencryptSecretsResponse_FromProto(t *testing.T) {
+	previous := APITenantIdentityReencryptSecretsResponse{
 		RowsFailed: 1,
-		Failures: []APIReencryptTenantIdentityFailure{{
+		Failures: []APITenantIdentityReencryptFailure{{
 			OrganizationID: "tenant-corp",
 			Field:          "encrypted_signing_key_1",
 			Error:          "decryption failed",
@@ -386,9 +410,9 @@ func TestAPIReencryptTenantIdentitySecretsResponse_FromProto(t *testing.T) {
 	}
 	tests := []struct {
 		name    string
-		initial APIReencryptTenantIdentitySecretsResponse
+		initial APITenantIdentityReencryptSecretsResponse
 		proto   *corev1.ReencryptTenantIdentitySecretsResponse
-		want    APIReencryptTenantIdentitySecretsResponse
+		want    APITenantIdentityReencryptSecretsResponse
 	}{
 		{
 			name: "map per-field failure",
@@ -406,8 +430,8 @@ func TestAPIReencryptTenantIdentitySecretsResponse_FromProto(t *testing.T) {
 			name:    "empty result clears prior failures to a non-nil slice",
 			initial: previous,
 			proto:   &corev1.ReencryptTenantIdentitySecretsResponse{},
-			want: APIReencryptTenantIdentitySecretsResponse{
-				Failures: []APIReencryptTenantIdentityFailure{},
+			want: APITenantIdentityReencryptSecretsResponse{
+				Failures: []APITenantIdentityReencryptFailure{},
 			},
 		},
 		{

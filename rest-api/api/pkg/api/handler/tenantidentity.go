@@ -1024,16 +1024,16 @@ func (goidch GetOpenIDConfigurationHandler) Handle(c echo.Context) error {
 
 // ~~~~~ Reencrypt Secrets Handler ~~~~~ //
 
-// ReencryptTenantIdentitySecretsHandler handles POST /tenant-identity/re-encrypt.
-type ReencryptTenantIdentitySecretsHandler struct {
+// TenantIdentityReencryptSecretsHandler handles POST /tenant-identity/re-encrypt.
+type TenantIdentityReencryptSecretsHandler struct {
 	dbSession  *cdb.Session
 	scp        *sc.ClientPool
 	tracerSpan *cutil.TracerSpan
 }
 
-// NewReencryptTenantIdentitySecretsHandler returns a new ReencryptTenantIdentitySecretsHandler.
-func NewReencryptTenantIdentitySecretsHandler(dbSession *cdb.Session, scp *sc.ClientPool) ReencryptTenantIdentitySecretsHandler {
-	return ReencryptTenantIdentitySecretsHandler{
+// NewTenantIdentityReencryptSecretsHandler returns a new TenantIdentityReencryptSecretsHandler.
+func NewTenantIdentityReencryptSecretsHandler(dbSession *cdb.Session, scp *sc.ClientPool) TenantIdentityReencryptSecretsHandler {
+	return TenantIdentityReencryptSecretsHandler{
 		dbSession:  dbSession,
 		scp:        scp,
 		tracerSpan: cutil.NewTracerSpan(),
@@ -1049,11 +1049,11 @@ func NewReencryptTenantIdentitySecretsHandler(dbSession *cdb.Session, scp *sc.Cl
 // @Security ApiKeyAuth
 // @Param org path string true "Name of provider organization"
 // @Param siteID path string true "ID of target Site"
-// @Param message body model.APIReencryptTenantIdentitySecretsRequest true "Reencrypt Tenant Identity Secrets request"
-// @Success 200 {object} model.APIReencryptTenantIdentitySecretsResponse
+// @Param message body model.APITenantIdentityReencryptSecretsRequest true "Reencrypt Tenant Identity Secrets request"
+// @Success 200 {object} model.APITenantIdentityReencryptSecretsResponse
 // @Failure 503 {object} util.APIError
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt [post]
-func (rtish ReencryptTenantIdentitySecretsHandler) Handle(c echo.Context) error {
+func (rtish TenantIdentityReencryptSecretsHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "ReencryptSecrets", c, rtish.tracerSpan)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
@@ -1062,18 +1062,6 @@ func (rtish ReencryptTenantIdentitySecretsHandler) Handle(c echo.Context) error 
 	siteID := c.Param("siteID")
 	if siteID == "" {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Missing siteID path parameter", nil)
-	}
-
-	apiRequest := model.APIReencryptTenantIdentitySecretsRequest{}
-	err := c.Bind(&apiRequest)
-	if err != nil {
-		logger.Warn().Err(err).Msg("error binding request data into API model")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
-	}
-	validationErr := apiRequest.Validate()
-	if validationErr != nil {
-		logger.Warn().Err(validationErr).Msg("error validating Reencrypt Tenant Identity Secrets request data")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating Reencrypt Tenant Identity Secrets request data", validationErr)
 	}
 
 	temporalClient, resolvedSiteID, apiErr := common.AuthorizeProviderSiteForCore(common.AuthorizeProviderSiteForCoreInput{
@@ -1088,6 +1076,19 @@ func (rtish ReencryptTenantIdentitySecretsHandler) Handle(c echo.Context) error 
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
+
+	apiRequest := model.APITenantIdentityReencryptSecretsRequest{}
+	err := c.Bind(&apiRequest)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding request data into API model")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+	validationErr := apiRequest.Validate()
+	if validationErr != nil {
+		logger.Warn().Err(validationErr).Msg("error validating Reencrypt Tenant Identity Secrets request data")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating Reencrypt Tenant Identity Secrets request data", validationErr)
+	}
+	apiRequest.NormalizeOrganizationID()
 
 	if apiRequest.OrganizationID != nil {
 		tenant, err := common.GetTenantForOrg(ctx, nil, rtish.dbSession, *apiRequest.OrganizationID)
@@ -1129,7 +1130,7 @@ func (rtish ReencryptTenantIdentitySecretsHandler) Handle(c echo.Context) error 
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
-	apiResponse := &model.APIReencryptTenantIdentitySecretsResponse{}
+	apiResponse := &model.APITenantIdentityReencryptSecretsResponse{}
 	apiResponse.FromProto(&protoResponse)
 	return c.JSON(http.StatusOK, apiResponse)
 }

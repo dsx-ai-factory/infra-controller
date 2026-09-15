@@ -199,8 +199,8 @@ func TestTenantIdentityWorkflowHandlers_TimeoutReturns500AndTerminatesWorkflow(t
 	}
 }
 
-// TestReencryptTenantIdentitySecretsHandler_Handle verifies that only the re-encryption endpoint dispatches through the generic Core gRPC proxy and returns the curated REST response.
-func TestReencryptTenantIdentitySecretsHandler_Handle(t *testing.T) {
+// TestTenantIdentityReencryptSecretsHandler_Handle verifies that only the re-encryption endpoint dispatches through the generic Core gRPC proxy and returns the curated REST response.
+func TestTenantIdentityReencryptSecretsHandler_Handle(t *testing.T) {
 	dbSession := testSiteInitDB(t)
 	defer dbSession.Close()
 
@@ -243,7 +243,7 @@ func TestReencryptTenantIdentitySecretsHandler_Handle(t *testing.T) {
 	temporalConfig, _ := testConfig.GetTemporalConfig()
 	siteClientPool := sc.NewClientPool(temporalConfig)
 	echoServer := echo.New()
-	handler := NewReencryptTenantIdentitySecretsHandler(dbSession, siteClientPool)
+	handler := NewTenantIdentityReencryptSecretsHandler(dbSession, siteClientPool)
 
 	tests := []struct {
 		name       string
@@ -269,6 +269,11 @@ func TestReencryptTenantIdentitySecretsHandler_Handle(t *testing.T) {
 		{
 			name:    "tenant with allocation on selected site is forwarded",
 			body:    `{"organizationId":"` + tenantOrg + `"}`,
+			wantOrg: cutil.GetPtr(tenantOrg),
+		},
+		{
+			name:    "mixed-case organization resolves and is forwarded lowercased",
+			body:    `{"organizationId":"` + strings.ToUpper(tenantOrg) + `"}`,
 			wantOrg: cutil.GetPtr(tenantOrg),
 		},
 		{

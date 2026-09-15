@@ -6,7 +6,7 @@ This is **not** the same as **per-org JWT signing key rotation** (see [JWT Signi
 
 Design background: [SPIFFE JWT-SVID SDD §3.1.1](../design/machine-identity/spiffe-svid-sdd.md).
 
-> **API surface:** Re-wrap is available through NICo-rest at `POST /v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt` for provider admins and directly through Core gRPC (`ReencryptTenantIdentitySecrets`) with a Forge Admin CLI mTLS certificate. There is no `nico-admin-cli` subcommand for re-wrap.
+**API surface:** Re-wrap is available through NICo REST at `POST /v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt` for provider admins and directly through Core gRPC (`ReencryptTenantIdentitySecrets`) with a Forge Admin CLI mTLS certificate. There is no `nico-admin-cli` subcommand for re-wrap.
 
 ---
 
@@ -31,7 +31,7 @@ Fields re-wrapped per org (when present):
 ## Prerequisites
 
 - `[machine_identity].enabled = true` and a healthy `nico-api`.
-- Credentials for the selected surface: provider-admin bearer-token access for NICo-rest, or a **Forge Admin CLI** mTLS client certificate for direct gRPC (see [Generating client certificates](../manuals/nico-admin-cli.md#generating-client-certificates)).
+- Credentials for the selected surface: provider-admin bearer-token access for NICo REST, or a **Forge Admin CLI** mTLS client certificate for direct gRPC (see [Generating client certificates](../manuals/nico-admin-cli.md#generating-client-certificates)).
 - Maintenance window: plan for a config change + API restart + one re-encrypt pass. Issuance can continue during re-wrap if old keys remain in secrets.
 
 ---
@@ -80,7 +80,13 @@ Restart `nico-api` (this setting is **not** hot-reloaded). New encrypts (new org
 
 ### Step 3 — Dry-run re-wrap
 
-> The examples below use direct gRPC. For NICo-rest, use the JSON field names `dryRun` and `organizationId`. The URL `{org}` identifies the provider; a non-null `organizationId` is the tenant's `org` identifier, not its REST resource UUID or display name. It must contain one or more ASCII letters, digits, underscores, or hyphens and is passed unchanged. The tenant must have an allocation and tenant identity configuration on the selected Site. Omission or JSON `null` selects all organizations; empty and whitespace-containing strings return Bad Request instead of broadening the scope. Direct gRPC trims `organization_id` and treats an omitted or blank value as all organizations. NICo-rest also returns Bad Request when the tenant is unknown or has no allocation on the selected Site. On either surface, a valid scoped tenant without tenant identity configuration returns Not Found.
+The following examples use direct gRPC. For NICo REST, use the JSON field names `dryRun` and `organizationId`:
+
+- The URL `{org}` identifies the provider.
+- A non-null `organizationId` identifies the tenant by its `org` identifier, not by its REST resource UUID or display name. The identifier must contain one or more ASCII letters, digits, underscores, or hyphens. NICo REST matches it case-insensitively, lowercasing it before the Tenant lookup and before forwarding it to Core. The tenant must have an allocation and tenant identity configuration on the selected Site.
+- Omit `organizationId` or set it to JSON `null` to select all organizations. Empty and whitespace-containing strings return Bad Request instead of broadening the scope. An omitted NICo REST request body behaves the same as `{}`, selecting all organizations with `dryRun` defaulted to `false`.
+- NICo REST returns Bad Request when the tenant is unknown or has no allocation on the selected Site. On either surface, a valid scoped tenant without tenant identity configuration returns Not Found.
+- Direct gRPC trims `organization_id` and treats an omitted or blank value as all organizations. It does not lowercase the value.
 
 Call **`ReencryptTenantIdentitySecrets`** with `dry_run: true`. Optionally scope to one org.
 
