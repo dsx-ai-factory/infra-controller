@@ -1005,6 +1005,21 @@ func TestPrefix_Availableips(t *testing.T) {
 			Cidr: "2001:0db8:85a3::/116",
 			want: 4096,
 		},
+		{
+			name: "IPv6 below reporting boundary",
+			Cidr: "2001:db8::/98",
+			want: 1073741824,
+		},
+		{
+			name: "IPv6 at reporting boundary",
+			Cidr: "2001:db8::/97",
+			want: 2147483647,
+		},
+		{
+			name: "IPv6 above reporting boundary",
+			Cidr: "2001:db8::/96",
+			want: 2147483647,
+		},
 	}
 	for _, tt := range tests {
 		test := tt

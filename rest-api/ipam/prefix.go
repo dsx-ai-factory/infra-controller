@@ -113,8 +113,8 @@ func copyMap(m map[string]bool) map[string]bool {
 
 // Usage of ips and child Prefixes of a Prefix
 type Usage struct {
-	// AvailableIPs the number of available IPs if this is not a parent prefix
-	// No more than 2^31 available IPs are reported
+	// AvailableIPs is the total address count, including acquired and reserved IPs.
+	// Counts above 2,147,483,647 are capped at that value.
 	AvailableIPs uint64
 	// AcquiredIPs the number of acquired IPs if this is not a parent prefix
 	AcquiredIPs uint64
@@ -595,14 +595,13 @@ func (p *Prefix) hasIPs() bool {
 	return false
 }
 
-// availableips return the number of ips available in this Prefix
+// availableips returns the total address count, capped at 2,147,483,647.
 func (p *Prefix) availableips() uint64 {
 	ipprefix, err := netip.ParsePrefix(p.Cidr)
 	if err != nil {
 		return 0
 	}
-	// We don't report more than 2^31 available IPs by design
-	if (ipprefix.Addr().BitLen() - ipprefix.Bits()) > 31 {
+	if (ipprefix.Addr().BitLen() - ipprefix.Bits()) >= 31 {
 		return math.MaxInt32
 	}
 	return 1 << (ipprefix.Addr().BitLen() - ipprefix.Bits())
