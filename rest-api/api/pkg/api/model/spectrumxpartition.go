@@ -9,7 +9,6 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 )
@@ -57,32 +56,6 @@ func (sxpcr *APISpectrumXPartitionCreateRequest) Validate() error {
 	}
 
 	return util.ValidateLabels(sxpcr.Labels)
-}
-
-// ToProto builds the request that asks a Site to create this SpectrumX
-// Partition. `sxp` is the just-persisted DB record; its `ToProto()` is the
-// source of the canonical wire fields, which the create request reuses.
-//
-// A nil `sxp.VNI` leaves the optional wire field unset so the Site allocates
-// one, which is the distinction the non-optional `SpxPartition.Vni` cannot
-// carry on its own.
-//
-// The method trusts that the request has already been Validated and that the
-// handler has performed any cross-context checks Validate cannot see
-// (org/tenant association, Site readiness, name uniqueness). It returns no
-// error.
-func (sxpcr *APISpectrumXPartitionCreateRequest) ToProto(sxp *cdbm.SpectrumXPartition) *corev1.SpxPartitionCreationRequest {
-	sxpProto := sxp.ToProto()
-	req := &corev1.SpxPartitionCreationRequest{
-		Id:                   sxpProto.Id,
-		Metadata:             sxpProto.Metadata,
-		TenantOrganizationId: sxpProto.TenantOrganizationId,
-	}
-	if sxpcr.VNI != nil {
-		vni := uint32(*sxpcr.VNI)
-		req.Vni = &vni
-	}
-	return req
 }
 
 // APISpectrumXPartition is the data structure to capture API representation of a SpectrumX Partition

@@ -4011,7 +4011,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to parse SpectrumX Partition ID specified in request: %s", apiSxA.SpectrumXPartitionID), nil)
 				}
 
-				// Keyed through the persisted shape so a requested Attachment and the row it
+				// Keyed through the persisted row so a requested Attachment and the row it
 				// would reuse cannot disagree. The attachment type is part of that identity,
 				// so changing it retires the old row rather than silently keeping the type.
 				requestedSxA := cdbm.SpectrumXAttachment{

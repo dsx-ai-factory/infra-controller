@@ -473,27 +473,11 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 		}
 	}
 
-	// Delete SpectrumX Partitions
-	sxps, _, err := sxpDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.SpectrumXPartitionFilterInput{
-			SiteIDs: []uuid.UUID{siteID},
-		},
-		cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)},
-		nil,
-	)
+	// Delete SpectrumX Partitions for site
+	err = sxpDAO.DeleteAllBySiteID(ctx, nil, siteID)
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to retrieve SpectrumX Partitions from DB by Site ID")
+		logger.Error().Err(err).Msg("error deleting SpectrumX Partition records in DB for Site")
 		return err
-	}
-
-	for _, sxp := range sxps {
-		serr := sxpDAO.Delete(ctx, nil, sxp.ID)
-		if serr != nil && serr != cdb.ErrDoesNotExist {
-			logger.Error().Err(serr).Str("SpectrumX Partition ID", sxp.ID.String()).Msg("error deleting SpectrumX Partition record in DB")
-			return serr
-		}
 	}
 
 	// Delete NVLink Logical Partitions

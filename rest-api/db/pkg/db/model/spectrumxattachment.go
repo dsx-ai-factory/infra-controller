@@ -40,7 +40,7 @@ const (
 // long before a row reaches the wire.
 //
 // OVS maps onto Core's `Ovn`, which is the same attachment under its older name. Core renames
-// that enum value to `Ovs` in a separate proto sync, and this mapping follows once that lands.
+// that enum value to `Ovs` in a separate proto sync, and this mapping follows once that merges.
 // The name matters on the wire because attachments reach the Site as protojson.
 // FromProto maps the attachment type Core reports onto the persisted value, the inverse of
 // ToProto. An unrecognized value leaves the type empty rather than guessing at one, since

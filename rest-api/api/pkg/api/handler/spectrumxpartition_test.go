@@ -411,6 +411,15 @@ func TestGetAllSpectrumXPartitionHandler_Handle(t *testing.T) {
 
 	// Both filters are documented as repeatable, so a second value has to widen the match
 	// rather than being dropped.
+	// Nothing found is an empty list, not a 404, and the body has to be `[]` rather than
+	// `null` so a client can iterate it without a nil check.
+	t.Run("returns an empty array when no Partition matches", func(t *testing.T) {
+		ec, rec := fx.newContext(t, http.MethodGet, "/?siteId="+fx.noAllocSit.ID.String(), "", fx.user, fx.org, "")
+		require.NoError(t, handler.Handle(ec))
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.JSONEq(t, "[]", rec.Body.String())
+	})
+
 	t.Run("matches every repeated status", func(t *testing.T) {
 		assert.Len(t, list(t, "/?status=Ready&status=Pending", fx.user, fx.org), 2)
 	})

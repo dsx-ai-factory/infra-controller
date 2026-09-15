@@ -149,41 +149,41 @@ func validateSpectrumXPartitionNameWhitespace(value interface{}) error {
 	return nil
 }
 
-// toMetadataProto builds a workflow Metadata proto from the
-// SpectrumXPartition's Name, Description, and Labels. Description defaults to
-// the empty string when sxp.Description is nil. Labels are produced via
-// `(Labels).ToProto()` so the conversion stays on the named type per the
-// proto-conversion convention.
-func (sxp *SpectrumXPartition) toMetadataProto() *corev1.Metadata {
-	md := &corev1.Metadata{
+func (sxp *SpectrumXPartition) ToProto() *corev1.SpxPartition {
+	metadata := &corev1.Metadata{
 		Name:        sxp.Name,
 		Description: "",
 		Labels:      sxp.Labels.ToProto(),
 	}
 	if sxp.Description != nil {
-		md.Description = *sxp.Description
+		metadata.Description = *sxp.Description
 	}
-	return md
-}
-
-// ToProto converts this SpectrumXPartition into its workflow proto
-// representation. Used as the canonical entity-to-proto conversion; the create
-// request proto is produced by the `ToProto` method on the corresponding API
-// request type in api/pkg/api/model/spectrumxpartition.go.
-//
-// `TenantOrganizationId` is sourced from `sxp.Org`, the persisted tenant org id
-// populated from the path param at create time. A nil VNI maps to 0, which is
-// how Core represents "not yet allocated" on the non-optional wire field.
-func (sxp *SpectrumXPartition) ToProto() *corev1.SpxPartition {
 	proto := &corev1.SpxPartition{
 		Id:                   &corev1.SpxPartitionId{Value: sxp.ID.String()},
 		TenantOrganizationId: sxp.Org,
-		Metadata:             sxp.toMetadataProto(),
+		Metadata:             metadata,
 	}
 	if sxp.VNI != nil {
 		proto.Vni = uint32(*sxp.VNI)
 	}
 	return proto
+}
+
+// ToCreationRequestProto builds the Core creation request for the Partition. Vni is optional
+// on the wire and the row carries the requested value, so a Partition created without one
+// leaves it unset and the Site allocates it.
+func (sxp *SpectrumXPartition) ToCreationRequestProto() *corev1.SpxPartitionCreationRequest {
+	proto := sxp.ToProto()
+	req := &corev1.SpxPartitionCreationRequest{
+		Id:                   proto.Id,
+		Metadata:             proto.Metadata,
+		TenantOrganizationId: proto.TenantOrganizationId,
+	}
+	if sxp.VNI != nil {
+		vni := uint32(*sxp.VNI)
+		req.Vni = &vni
+	}
+	return req
 }
 
 // ToDeletionRequestProto builds the workflow request that asks a Site to delete
@@ -284,6 +284,7 @@ type SpectrumXPartitionDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input SpectrumXPartitionClearInput) (*SpectrumXPartition, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
+	DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) error
 }
 
 // SpectrumXPartitionSQLDAO is an implementation of the SpectrumXPartitionDAO interface
@@ -597,6 +598,24 @@ func (sxpsd SpectrumXPartitionSQLDAO) Delete(ctx context.Context, tx *db.Tx, id 
 	}
 
 	return nil
+}
+
+// DeleteAllBySiteID deletes all SpectrumXPartition records for a given Site
+func (sxpsd SpectrumXPartitionSQLDAO) DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) error {
+	ctx, SpectrumXPartitionDAOSpan := sxpsd.tracerSpan.CreateChildInCurrentContext(ctx, "SpectrumXPartitionDAO.DeleteAllBySiteID")
+	if SpectrumXPartitionDAOSpan != nil {
+		defer SpectrumXPartitionDAOSpan.End()
+
+		sxpsd.tracerSpan.SetAttribute(SpectrumXPartitionDAOSpan, "site_id", siteID.String())
+	}
+
+	sxp := &SpectrumXPartition{
+		SiteID: siteID,
+	}
+
+	_, err := db.GetIDB(tx, sxpsd.dbSession).NewDelete().Model(sxp).Where("site_id = ?", siteID).Exec(ctx)
+
+	return err
 }
 
 // NewSpectrumXPartitionDAO returns a new SpectrumXPartitionDAO

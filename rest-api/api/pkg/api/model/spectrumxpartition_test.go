@@ -99,46 +99,6 @@ func TestAPISpectrumXPartitionCreateRequest_Validate(t *testing.T) {
 	}
 }
 
-func TestAPISpectrumXPartitionCreateRequest_ToProto(t *testing.T) {
-	partitionID := uuid.New()
-	persisted := &cdbm.SpectrumXPartition{
-		ID:   partitionID,
-		Name: "east-west-net",
-		Org:  "test-org",
-	}
-
-	// The optional wire field is what tells the Site to allocate a VNI itself, so the
-	// nil and set cases have to stay distinguishable through the conversion.
-	t.Run("omitted VNI leaves the optional wire field unset", func(t *testing.T) {
-		request := APISpectrumXPartitionCreateRequest{Name: "east-west-net", SiteID: uuid.NewString()}
-
-		got := request.ToProto(persisted)
-		require.NotNil(t, got)
-		require.NotNil(t, got.Id)
-		assert.Equal(t, partitionID.String(), got.Id.Value)
-		assert.Equal(t, "test-org", got.TenantOrganizationId)
-		require.NotNil(t, got.Metadata)
-		assert.Equal(t, "east-west-net", got.Metadata.Name)
-		assert.Nil(t, got.Vni)
-	})
-
-	t.Run("requested VNI is carried through", func(t *testing.T) {
-		request := APISpectrumXPartitionCreateRequest{Name: "east-west-net", SiteID: uuid.NewString(), VNI: cutil.GetPtr(10200)}
-
-		got := request.ToProto(persisted)
-		require.NotNil(t, got.Vni)
-		assert.Equal(t, uint32(10200), *got.Vni)
-	})
-
-	t.Run("explicit zero VNI is carried through rather than dropped", func(t *testing.T) {
-		request := APISpectrumXPartitionCreateRequest{Name: "east-west-net", SiteID: uuid.NewString(), VNI: cutil.GetPtr(0)}
-
-		got := request.ToProto(persisted)
-		require.NotNil(t, got.Vni)
-		assert.Equal(t, uint32(0), *got.Vni)
-	})
-}
-
 func TestAPISpectrumXPartition_FromDB(t *testing.T) {
 	partitionID := uuid.New()
 	siteID := uuid.New()

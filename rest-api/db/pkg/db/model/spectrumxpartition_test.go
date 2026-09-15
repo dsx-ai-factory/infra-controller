@@ -13,6 +13,43 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
+// TestSpectrumXPartition_ToCreationRequestProto proves the optional wire field stays
+// distinguishable, since an unset Vni is what tells the Site to allocate one itself.
+func TestSpectrumXPartition_ToCreationRequestProto(t *testing.T) {
+	partitionID := uuid.New()
+	build := func(vni *int) *SpectrumXPartition {
+		return &SpectrumXPartition{
+			ID:   partitionID,
+			Name: "east-west-net",
+			Org:  "test-org",
+			VNI:  vni,
+		}
+	}
+
+	t.Run("omitted VNI leaves the optional wire field unset", func(t *testing.T) {
+		got := build(nil).ToCreationRequestProto()
+		require.NotNil(t, got)
+		require.NotNil(t, got.Id)
+		assert.Equal(t, partitionID.String(), got.Id.Value)
+		assert.Equal(t, "test-org", got.TenantOrganizationId)
+		require.NotNil(t, got.Metadata)
+		assert.Equal(t, "east-west-net", got.Metadata.Name)
+		assert.Nil(t, got.Vni)
+	})
+
+	t.Run("requested VNI is carried through", func(t *testing.T) {
+		got := build(cutil.GetPtr(10200)).ToCreationRequestProto()
+		require.NotNil(t, got.Vni)
+		assert.Equal(t, uint32(10200), *got.Vni)
+	})
+
+	t.Run("explicit zero VNI is carried through rather than dropped", func(t *testing.T) {
+		got := build(cutil.GetPtr(0)).ToCreationRequestProto()
+		require.NotNil(t, got.Vni)
+		assert.Equal(t, uint32(0), *got.Vni)
+	})
+}
+
 func TestSpectrumXPartition_ToProto(t *testing.T) {
 	id := uuid.New()
 	desc := "east-west"

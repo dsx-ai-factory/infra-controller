@@ -23,7 +23,7 @@ const (
 func (api *API) RegisterCron() error {
 	ManagerAccess.Data.EB.Log.Info().Msg("SpectrumXPartition: Registering Inventory Discovery Cron")
 
-	workflowID := "inventory-spectrumxpartition-" + ManagerAccess.Conf.EB.Temporal.TemporalSubscribeNamespace
+	workflowID := "inventory-spectrumx-partition-" + ManagerAccess.Conf.EB.Temporal.TemporalSubscribeNamespace
 
 	cronSchedule := wfmgr.EffectiveCronSchedule()
 

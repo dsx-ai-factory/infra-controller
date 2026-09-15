@@ -141,7 +141,7 @@ func TestSpectrumXAttachment_Key(t *testing.T) {
 		}
 	}
 
-	// A row's own proto is what the Site is sent, so reading it back has to land on the same
+	// A row's own proto is what the Site is sent, so reading it back has to produce the same
 	// key. OVS matters most, since it is the one type whose Core name differs.
 	for _, attachmentType := range []SpectrumXAttachmentType{
 		SpectrumXAttachmentTypePhysical,
@@ -261,7 +261,9 @@ func TestSpectrumXPartitionSQLDAO_Lifecycle(t *testing.T) {
 	assert.Nil(t, cleared.VNI)
 	assert.Nil(t, cleared.Labels)
 
-	require.NoError(t, sxpDAO.Delete(ctx, nil, created.ID))
+	// Site teardown removes Partitions by Site rather than one at a time, so that is the
+	// path exercised here.
+	require.NoError(t, sxpDAO.DeleteAllBySiteID(ctx, nil, st.ID))
 	_, err = sxpDAO.Get(ctx, nil, created.ID, nil)
 	assert.ErrorIs(t, err, db.ErrDoesNotExist)
 

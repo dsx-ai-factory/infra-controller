@@ -4,7 +4,6 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,14 +15,12 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
-	"github.com/rs/zerolog"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -36,40 +33,6 @@ const (
 	createSpxPartitionMethod = "/forge.Forge/CreateSpxPartition"
 	deleteSpxPartitionMethod = "/forge.Forge/DeleteSpxPartition"
 )
-
-// authorizeTenantForSpectrumXPartition runs the gates every SpectrumX Partition handler
-// shares: the caller belongs to the org, holds Tenant Admin, and the org resolves to a
-// Tenant. It returns that Tenant.
-func authorizeTenantForSpectrumXPartition(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, org string, dbUser *cdbm.User) (*cdbm.Tenant, *cutil.APIError) {
-	ok, err := auth.ValidateOrgMembership(dbUser, org)
-	if !ok {
-		if err != nil {
-			logger.Error().Err(err).Msg("error validating org membership for User in request")
-		} else {
-			logger.Warn().Msg("could not validate org membership for user, access denied")
-		}
-		return nil, cutil.NewAPIError(http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
-	}
-
-	// Only Tenant Admins may manage SpectrumX Partitions.
-	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole)
-	if !ok {
-		logger.Warn().Msg("user does not have Tenant Admin role, access denied")
-		return nil, cutil.NewAPIError(http.StatusForbidden, "User does not have Tenant Admin role with org", nil)
-	}
-
-	tenant, err := common.GetTenantForOrg(ctx, nil, dbSession, org)
-	if err != nil {
-		if err == common.ErrOrgTenantNotFound {
-			logger.Warn().Err(err).Msg("Org does not have a Tenant associated")
-			return nil, cutil.NewAPIError(http.StatusBadRequest, "Org does not have a Tenant associated", nil)
-		}
-		logger.Error().Err(err).Msg("unable to retrieve Tenant for org")
-		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Tenant for org", nil)
-	}
-
-	return tenant, nil
-}
 
 // ~~~~~ Create Handler ~~~~~ //
 
@@ -111,7 +74,7 @@ func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	orgTenant, apiErr := authorizeTenantForSpectrumXPartition(ctx, logger, csxph.dbSession, org, dbUser)
+	orgTenant, apiErr := common.IsTenant(ctx, logger, csxph.dbSession, org, dbUser, nil)
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
@@ -251,7 +214,7 @@ func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
 		// The Site allocates the VNI when the request omits one, so capture the
 		// response rather than discarding it.
 		coreResp := &corev1.SpxPartition{}
-		proxyErr := common.ExecuteCoreGRPC(ctx, stc, createSpxPartitionMethod, apiRequest.ToProto(sxp), coreResp, "")
+		proxyErr := common.ExecuteCoreGRPC(ctx, stc, createSpxPartitionMethod, sxp.ToCreationRequestProto(), coreResp, "")
 		if proxyErr != nil {
 			logAPIError(logger, proxyErr, "failed to create SpectrumX Partition on Site")
 			return cutil.NewAPIError(proxyErr.Code, proxyErr.Message, nil)
@@ -329,7 +292,7 @@ func (gasxph GetAllSpectrumXPartitionHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	tenant, apiErr := authorizeTenantForSpectrumXPartition(ctx, logger, gasxph.dbSession, org, dbUser)
+	tenant, apiErr := common.IsTenant(ctx, logger, gasxph.dbSession, org, dbUser, nil)
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
@@ -501,7 +464,7 @@ func (gsxph GetSpectrumXPartitionHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	orgTenant, apiErr := authorizeTenantForSpectrumXPartition(ctx, logger, gsxph.dbSession, org, dbUser)
+	orgTenant, apiErr := common.IsTenant(ctx, logger, gsxph.dbSession, org, dbUser, nil)
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
@@ -588,7 +551,7 @@ func (dsxph DeleteSpectrumXPartitionHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	orgTenant, apiErr := authorizeTenantForSpectrumXPartition(ctx, logger, dsxph.dbSession, org, dbUser)
+	orgTenant, apiErr := common.IsTenant(ctx, logger, dsxph.dbSession, org, dbUser, nil)
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}

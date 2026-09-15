@@ -762,7 +762,6 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 		reportedSxaKeys := map[string]bool{}
 		if controllerInstance.Config.Spxconfig != nil && controllerInstance.Status.SpxStatus != nil {
 			for idx, attachmentConfig := range controllerInstance.Config.Spxconfig.SpxAttachments {
-
 				// If the SpectrumX Config as well as Status is not empty, set the flag to false
 				isSpectrumXConfigStatusEmpty = false
 
