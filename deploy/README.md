@@ -223,14 +223,14 @@ Path: `deploy/nico-base/dns/`
 ### NICo Hardware Health
 
 **Role**  
-`nico-hardware-health` continuously polls host and DPU BMCs for health information (fans, temperatures, leak sensors, etc.), exposes those metrics via Prometheus, and notifies nico‑api when it detects problems so operators get alerts on failing hardware.
+`nico-hardware-health` continuously polls host and DPU BMCs for health information (fans, temperatures, leak sensors, etc.), exposes service metrics and per-sensor measurements via Prometheus, and notifies nico‑api when it detects problems so operators get alerts on failing hardware.
 
 **What it deploys**
 
 Path: `deploy/nico-base/hardware-health/`
 
 - Deployment `nico-hardware-health`
-- Service `nico-hardware-health` – HTTP metrics on TCP **9009**
+- Service `nico-hardware-health` – HTTP Prometheus endpoints on TCP **9009**
 - TLS
   - `Certificate/nico-hardware-health-certificate` → `Secret/nico-hardware-health-certificate`
 - RBAC
@@ -240,12 +240,13 @@ Path: `deploy/nico-base/hardware-health/`
 The pod:
 
 - Uses SPIFFE certs from `/var/run/secrets/spiffe.io` to talk back to nico‑api.
-- Exposes Prometheus metrics at `:9009/metrics`.
+- Exposes service-level Prometheus metrics at `:9009/metrics`.
+- Exposes per-sensor Prometheus measurements at `:9009/telemetry`.
 
 **External inputs you must provide**
 
 - A reachable nico‑api endpoint.
-- A Prometheus instance (or other metrics system) scraping the `nico-hardware-health` Service.
+- A Prometheus instance (or other metrics system) with separate scrape jobs for the `nico-hardware-health` Service's `/metrics` and `/telemetry` paths.
 - A cert‑manager `ClusterIssuer` for the hardware‑health certificate.
 
 **Quick start**
@@ -257,7 +258,9 @@ The pod:
    kubectl apply -k deploy/nico-base/hardware-health -n <NICO_NAMESPACE>
    ```
 
-3. Point Prometheus at `nico-hardware-health:9009` to ingest metrics.
+3. Configure separate Prometheus scrape jobs against `nico-hardware-health:9009`:
+   - Scrape `/metrics` for service-level operational metrics.
+   - Scrape `/telemetry` for per-sensor measurements. This endpoint is high-cardinality, so ensure the metrics backend has sufficient scrape and retention capacity.
 
 ---
 

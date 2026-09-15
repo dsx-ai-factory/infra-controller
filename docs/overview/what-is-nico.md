@@ -53,7 +53,7 @@ The green boxes in the architecture diagram are the services that NICo provides.
   overlay DHCP of a host with a managed DPU. The service is stateless and
   forwards requests to the API Service for IP address management.
 - **PXE Service** — serves boot artifacts (iPXE scripts, cloud-init user-data, OS images) to managed hosts and DPUs over HTTP. Fetches the correct artifact for each host from the API Service via mTLS/gRPC.
-- **Hardware Health** — scrapes host and DPU BMCs via Redfish HTTPS for sensor data (temperature, fan speed, power, current) and firmware inventory. Exports metrics on a Prometheus `/metrics` endpoint and reports health alerts to the API Service via mTLS/gRPC.
+- **Hardware Health** — scrapes host and DPU BMCs via Redfish HTTPS for sensor data (temperature, fan speed, power, current) and firmware inventory. Exposes service-level Prometheus metrics on `/metrics` and per-sensor measurements on `/telemetry`, and reports health alerts to the API Service via mTLS/gRPC.
 - **SSH Console Service** — maintains persistent SSH/IPMI connections to all host BMCs for serial console access. Streams console output to Loki for logging and provides live console access to tenants and administrators. Connects to the API Service via mTLS/gRPC.
 - **Authoritative DNS Service** — handles DNS queries from the site controller and managed nodes. Authoritative for NICo-delegated zones. Connects to the API Service via mTLS/gRPC.
 - **Recursive DNS (unbound)** — provides recursive DNS resolution to managed machines and tenant instances via the OOB network.
@@ -81,7 +81,7 @@ The white boxes in the architecture diagram are off-the-shelf services that NICo
 - **Temporal** — workflow orchestration engine used by NICo REST for multi-step operations (instance provisioning, reboot, release). The Site Agent connects to NICo REST through Temporal. Requires registered namespaces: `cloud`, `site`, and a per-site UUID.
 - **cert-manager** — issues and rotates the TLS certificates that NICo services use for mTLS/gRPC communication. Includes approver-policy for certificate request authorization.
 - **External Secrets Operator (ESO)** — syncs secrets from Vault into Kubernetes Secret objects, making credentials (database, PKI, bootstrap material) available to NICo workloads in each namespace.
-- **Telemetry and Logging (Prometheus, Grafana, OpenTelemetry, Loki)** — collects metrics and logs from all NICo services and managed hosts. Prometheus scrapes the Hardware Health `/metrics` endpoint. Loki aggregates logs from the SSH Console Service and DPU agents. OpenTelemetry Collector ships telemetry from both the site controller and DPUs. Optional but strongly recommended.
+- **Telemetry and Logging (Prometheus, Grafana, OpenTelemetry, Loki)** — collects metrics and logs from all NICo services and managed hosts. Prometheus scrapes Hardware Health service metrics from `/metrics` and, when enabled, per-sensor measurements from `/telemetry`. Loki aggregates logs from the SSH Console Service and DPU agents. OpenTelemetry Collector ships telemetry from both the site controller and DPUs. Optional but strongly recommended.
 - **MetalLB** — provides load-balanced virtual IPs for NICo services on the Kubernetes cluster, making them reachable from the underlay network.
 - **ArgoCD** — GitOps-based continuous delivery for deploying and updating NICo components. Optional.
 - **NGC Registry** — NVIDIA's container registry, used to pull NICo service images during deployment and upgrades.

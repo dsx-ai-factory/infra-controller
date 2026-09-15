@@ -169,7 +169,8 @@ telemetryServiceMonitor:
 
 Configure the prometheus receiver for Kubernetes service discovery. This example scrapes
 only the `/metrics` endpoint. For nico-hardware-health `/telemetry` (high-cardinality
-sensor data), add a separate scrape job targeting the `telemetry` port name.
+sensor data), add a separate scrape job targeting the `metrics` port name with its
+metrics path set to `/telemetry`.
 
 <Note>
 If running as a DaemonSet, each replica will independently discover and scrape
