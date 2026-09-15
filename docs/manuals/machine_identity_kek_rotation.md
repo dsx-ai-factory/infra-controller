@@ -80,7 +80,13 @@ Restart `nico-api` (this setting is **not** hot-reloaded). New encrypts (new org
 
 ### Step 3 — Dry-run re-wrap
 
-> The examples below use direct gRPC. For NICo-rest, use the JSON field names `dryRun` and `organizationId`. The URL `{org}` identifies the provider; a non-null `organizationId` is the tenant's `org` identifier, not its REST resource UUID or display name. It must contain one or more ASCII letters, digits, underscores, or hyphens and is passed unchanged. The tenant must have an allocation and tenant identity configuration on the selected Site. Omission or JSON `null` selects all organizations; empty and whitespace-containing strings return Bad Request instead of broadening the scope. Direct gRPC trims `organization_id` and treats an omitted or blank value as all organizations. NICo-rest also returns Bad Request when the tenant is unknown or has no allocation on the selected Site. On either surface, a valid scoped tenant without tenant identity configuration returns Not Found.
+The following examples use direct gRPC. For NICo-rest, use the JSON field names `dryRun` and `organizationId`:
+
+- The URL `{org}` identifies the provider.
+- A non-null `organizationId` identifies the tenant by its `org` identifier, not by its REST resource UUID or display name. The identifier must contain one or more ASCII letters, digits, underscores, or hyphens and is passed unchanged. The tenant must have an allocation and tenant identity configuration on the selected Site.
+- Omit `organizationId` or set it to JSON `null` to select all organizations. Empty and whitespace-containing strings return Bad Request instead of broadening the scope.
+- NICo-rest returns Bad Request when the tenant is unknown or has no allocation on the selected Site. On either surface, a valid scoped tenant without tenant identity configuration returns Not Found.
+- Direct gRPC trims `organization_id` and treats an omitted or blank value as all organizations.
 
 Call **`ReencryptTenantIdentitySecrets`** with `dry_run: true`. Optionally scope to one org.
 
