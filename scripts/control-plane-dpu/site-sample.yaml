@@ -5,6 +5,13 @@ bgpAsnStart: 4244766860
 siteControllerMtuSize: 1500
 nameServer: 8.8.8.8
 
+# Optional. Set to true where the datacenter enforces BGP TCP MD5 authentication on
+# DPU-facing ToR ports. The build then asks for the password (or reads
+# BGP_LEAF_SESSION_PASSWORD), renders it onto the leaf-facing sessions (p0/p1) of every
+# startup.yaml, and requires --encrypt-artifacts so the ISO never holds it in plaintext.
+# The password is never written to this file.
+#installWithLeafPassword: true
+
 # Generate with: openssl passwd -6 'yourpassword'
 ubuntuPasswordHash: "$6$rounds=4096$examplesalt$hashedvalue"
 

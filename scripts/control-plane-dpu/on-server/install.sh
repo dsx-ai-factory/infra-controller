@@ -28,6 +28,36 @@ usage() {
     exit 1
 }
 
+# >>> artifact-decryption functions
+# Self-contained: unit-tests source this block verbatim. build-dpu-install-iso.sh
+# carries the matching encryption block; the cipher arguments must stay identical.
+ARTIFACT_CIPHER_ARGS=(-aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -salt)
+
+# decrypt_artifacts_to <in.enc> <dest-dir>
+#   Decrypts with the passphrase in $DPU_ISO_ARTIFACT_PASSWORD into a private
+#   (0700) temporary directory next to <dest-dir>, verifies the SHA256SUMS
+#   manifest written at build time, and only then replaces <dest-dir> with the
+#   verified tree. An existing <dest-dir> is left untouched on every failure —
+#   wrong passphrase, damaged or tampered archive — which returns non-zero and
+#   leaves nothing behind. The archive is normalised at build time (root:root,
+#   dirs 700, files 600, no macOS metadata entries), so a plain extraction as
+#   root yields a root-only tree.
+decrypt_artifacts_to() {
+    local in="$1" dest="$2" tmp
+    [[ -n "${DPU_ISO_ARTIFACT_PASSWORD:-}" ]] || { echo "DPU_ISO_ARTIFACT_PASSWORD is empty" >&2; return 1; }
+    [[ -s "$in" ]] || { echo "encrypted archive not found: $in" >&2; return 1; }
+    tmp="$(umask 077 && mktemp -d "${dest}.new.XXXXXX")" \
+        || { echo "cannot create a temporary directory next to $dest" >&2; return 1; }
+    ( umask 077 && openssl enc -d "${ARTIFACT_CIPHER_ARGS[@]}" -pass env:DPU_ISO_ARTIFACT_PASSWORD -in "$in" 2>/dev/null | tar -C "$tmp" -xf - 2>/dev/null ) \
+        || { rm -rf "$tmp"; echo "decryption failed (wrong passphrase or damaged archive)" >&2; return 1; }
+    [[ -f "$tmp/SHA256SUMS" ]] || { rm -rf "$tmp"; echo "decrypted archive has no SHA256SUMS manifest" >&2; return 1; }
+    ( cd "$tmp" && shasum -a 256 --check --quiet --strict SHA256SUMS >/dev/null 2>&1 ) \
+        || { rm -rf "$tmp"; echo "integrity check failed after decryption (wrong passphrase or tampered archive)" >&2; return 1; }
+    # Verified: swap the new tree in. Only now does an existing <dest-dir> go away.
+    rm -rf "$dest" && mv "$tmp" "$dest"
+}
+# <<< artifact-decryption functions
+
 # ── Load version ───────────────────────────────────────────────────────────────
 
 VERSION_CFG="$SCRIPT_DIR/dpu_fw_version.cfg"
@@ -64,6 +94,35 @@ exec 3> >(tee -a "$LOG_FILE" >/dev/tty)
 echo "============================================================" >&3
 echo "  Logging to: $LOG_FILE" >&3
 echo "============================================================" >&3
+
+# ── Encrypted artifacts: decrypt and verify FIRST, before anything is changed ──
+# A wrong passphrase or a damaged ISO must fail before any package is installed
+# or any file copied. The verified tree waits in a private (0700) directory
+# inside WORK_DIR and is moved into place in the "Copy per-node server configs"
+# step below; it is removed on any earlier exit (abort, die, error).
+
+_DECRYPTED_SERVERS=""
+if [[ -f "$SCRIPT_DIR/servers.tar.enc" ]]; then
+    log "Per-node server configs are encrypted (servers.tar.enc)."
+    command -v openssl &>/dev/null || die "openssl is required to decrypt servers.tar.enc"
+    command -v shasum  &>/dev/null || die "shasum is required to verify servers.tar.enc"
+    if [[ -z "${DPU_ISO_ARTIFACT_PASSWORD:-}" && -r /dev/tty ]]; then
+        # stderr is redirected to the log at this point, so `read -p` would hide the
+        # prompt; write it to the terminal (fd 3) explicitly.
+        printf 'Passphrase for the ISO artifacts: ' >&3
+        read -r -s DPU_ISO_ARTIFACT_PASSWORD < /dev/tty
+        echo >&3
+    fi
+    [[ -n "${DPU_ISO_ARTIFACT_PASSWORD:-}" ]] \
+        || die "the ISO artifacts are encrypted but no passphrase was given — export DPU_ISO_ARTIFACT_PASSWORD or enter it at the prompt"
+    export DPU_ISO_ARTIFACT_PASSWORD
+    _DECRYPTED_SERVERS="$(umask 077 && mktemp -d "$WORK_DIR/.servers.new.XXXXXX")"
+    trap '[[ -n "${_DECRYPTED_SERVERS:-}" ]] && rm -rf "$_DECRYPTED_SERVERS"' EXIT
+    decrypt_artifacts_to "$SCRIPT_DIR/servers.tar.enc" "$_DECRYPTED_SERVERS" 2>&3 \
+        || die "could not decrypt the per-node server configs — wrong passphrase, or the ISO is damaged. Nothing has been installed or changed."
+    unset DPU_ISO_ARTIFACT_PASSWORD
+    log "  $(find "$_DECRYPTED_SERVERS" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') node(s) decrypted and verified (root-only; installed in the copy step below)"
+fi
 
 # ── OS version check ──────────────────────────────────────────────────────────
 
@@ -157,7 +216,9 @@ fi
 if [[ "$_work_dir_existed" == true ]]; then
     echo "WARNING: working directory already exists: $WORK_DIR"
     echo "Re-installing will overwrite scripts and artifacts but preserve touchfiles."
-    read -r -p "Continue? [y/N] " _confirm
+    # stderr is redirected to the log at this point, so `read -p` would hide the question.
+    printf 'Continue? [y/N] ' >&3
+    read -r _confirm < /dev/tty
     [[ "$(echo "$_confirm" | tr '[:upper:]' '[:lower:]')" == "y" ]] || die "Aborted."
 fi
 log "Creating working directory: $WORK_DIR"
@@ -181,13 +242,21 @@ chmod 755 "$WORK_DIR/provision-dpu.sh" \
 
 # ── Copy per-node server configs ───────────────────────────────────────────────
 
-if [[ -d "$SCRIPT_DIR/servers" ]]; then
+if [[ -n "$_DECRYPTED_SERVERS" ]]; then
+    # Decrypted and verified at the top of the script; the previous tree (if any)
+    # is replaced only now, by the verified one.
+    log "Installing the decrypted per-node server configs..."
+    rm -rf "$WORK_DIR/servers"
+    mv "$_DECRYPTED_SERVERS" "$WORK_DIR/servers"
+    _DECRYPTED_SERVERS=""
+    log "  $(find "$WORK_DIR/servers" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') node(s) installed into $WORK_DIR/servers (root-only)"
+elif [[ -d "$SCRIPT_DIR/servers" ]]; then
     log "Copying per-node server configs..."
     rm -rf "$WORK_DIR/servers"
     cp -r "$SCRIPT_DIR/servers" "$WORK_DIR/"
     log "  $(ls "$SCRIPT_DIR/servers" | wc -l | tr -d ' ') node(s) copied"
 else
-    die "servers/ directory not found in $SCRIPT_DIR — ISO may be incomplete"
+    die "neither servers/ nor servers.tar.enc found in $SCRIPT_DIR — ISO may be incomplete"
 fi
 
 # ── Copy artifacts ─────────────────────────────────────────────────────────────

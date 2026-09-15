@@ -40,26 +40,34 @@ The following tools must be installed on the build machine:
 | `curl`, `jq` | Download HBN config bundle from NGC |
 | `xxd` | Decode NGC's base64 SHA256 hashes for verification |
 | `zip`, `gzip` | Package artifacts |
-| `sha256sum` / `shasum` | Verify downloaded files |
+| `sha256sum` / `shasum` | Verify downloaded files; `shasum` also writes the manifest for `--encrypt-artifacts` |
+| `openssl` | Only with `--encrypt-artifacts`: encrypt `servers/`. Ships with Ubuntu (OpenSSL) and macOS (LibreSSL); no install needed |
 | `mkisofs` (Linux) or `xorrisofs` (macOS) | Build ISO |
 
 Install on Ubuntu:
 ```bash
 # yq (mikefarah v4) — do NOT use apt-get install yq, that installs the wrong one
 sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-sudo chmod +x /usr/local/bin/yq
+sudo chmod 755 /usr/local/bin/yq
 
 # gomplate
 sudo wget -qO /usr/local/bin/gomplate https://github.com/hairyhenderson/gomplate/releases/latest/download/gomplate_linux-amd64
-sudo chmod +x /usr/local/bin/gomplate
+sudo chmod 755 /usr/local/bin/gomplate
 
-sudo apt-get install wget curl jq zip gzip genisoimage
+sudo apt-get install wget curl jq zip gzip genisoimage xxd docker.io
+
+# verify — `yq --version` must mention mikefarah
+yq --version && gomplate --version
 ```
 
 Install on macOS:
 ```bash
-brew install yq gomplate wget curl jq zip xorriso
+brew install bash yq gomplate wget curl jq zip xorriso
 ```
+
+The build script needs bash 4 or newer (it uses associative arrays); macOS ships bash 3.2 as
+`/bin/bash`. Either put Homebrew's bash first on your `PATH` or invoke the script through it:
+`/opt/homebrew/bin/bash ./build-dpu-install-iso.sh ...`.
 
 ---
 
@@ -75,6 +83,25 @@ Optional: the entire `fnn` block (only needed for FNN/SMN networking mode). When
 `fnn.controlPlaneVni`, `fnn.commonManagedNodeBmcRouteTarget`, `fnn.commonSiteControllerRouteTarget`,
 and `fnn.commonAdminNetworkTarget` are required; `fnn.vpcVrfLoopbackPrefix` and
 `fnn.routeTargetsToImport` are optional.
+
+Optional: `installWithLeafPassword: true` — for datacenters that enforce BGP TCP MD5
+authentication on DPU-facing ToR ports. The build asks for the leaf BGP password (or reads
+`BGP_LEAF_SESSION_PASSWORD`), renders it as the `password` of the two leaf-facing sessions
+(`p0_if`/`p1_if`, both templates) in every `startup.yaml`, and requires `--encrypt-artifacts`
+(below) so the rendered configs never sit in the ISO in plaintext. The password is never
+written to the site file; nothing is asked at install time beyond the artifact passphrase.
+Managed-host DPUs take theirs from `bgp_leaf_session_password` in the nico-api site config;
+the two must match when the same ToRs serve both. Maximum 80 bytes, the TCP MD5 key limit.
+
+**Encrypted artifacts (`--encrypt-artifacts`).** `servers/` is packed and encrypted as
+`servers.tar.enc` (AES-256-CBC, PBKDF2, with a SHA-256 manifest inside) using the passphrase
+from `DPU_ISO_ARTIFACT_PASSWORD` or a prompt, and the plaintext copies are removed from the
+ISO, the ZIP and the output directory. `install.sh` then asks for that passphrase once,
+decrypts and verifies the manifest first, before any package is installed or file copied;
+a wrong passphrase or a damaged ISO stops the install with nothing changed, and on a
+re-install the previous per-node configs stay in place until the new ones are verified. Required when
+`installWithLeafPassword` is true; usable on its own otherwise. The artifact passphrase and
+the leaf BGP password are independent and may be the same or different.
 
 ```yaml
 # yaml-language-server: $schema=
@@ -212,6 +239,10 @@ dpu_install_3.2.2_3.2.2.iso
         └── 99_config.yaml
 ```
 
+Built with `--encrypt-artifacts`, the ISO has no `servers/` directory; in its place is
+`servers.tar.enc`, the same tree encrypted with a `SHA256SUMS` manifest inside, which
+`install.sh` decrypts after asking for the passphrase.
+
 ---
 
 ## Part 2 — Provision the site controller
@@ -225,6 +256,9 @@ Run these steps **on each site controller host** via its BMC remote console.
   been validated.
 - Access: BMC remote console (IPMI/iDRAC/iLO)
 - The host has **no network connectivity** at this stage — that is expected
+- For an ISO built with `--encrypt-artifacts`: `openssl` and `shasum`, both present on a
+  standard Ubuntu 24.04 install (`openssl` and `perl` packages); `install.sh` checks for
+  them before asking for the passphrase
 - `libc6` must be installed — it is a dependency of `libfuse2t64`, which in turn is
   required by `rshim`. A clean Ubuntu 24.04 install includes `libc6` by default.
 
@@ -275,6 +309,7 @@ Verify the mount:
 ```bash
 ls /mnt/dpu-install
 # Expected: install.sh  post-power-cycle.sh  servers/  ...
+# Encrypted ISO (--encrypt-artifacts): install.sh  post-power-cycle.sh  servers.tar.enc  ...  (no servers/)
 ```
 
 ---
@@ -380,7 +415,8 @@ Repeat **Part 2** (Steps 1–6) for each site controller host, substituting its 
 ```
 
 The same ISO is used for all nodes — each `--server-name` selects the correct
-per-node config from the `servers/` folder.
+per-node config from the `servers/` folder (on an encrypted ISO, `install.sh` decrypted it
+there from `servers.tar.enc`).
 
 ---
 
