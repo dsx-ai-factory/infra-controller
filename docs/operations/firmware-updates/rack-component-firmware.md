@@ -103,7 +103,9 @@ jq -n \
 
 For a rack request, `version` can hold one shared firmware object for all
 selected tray types. No additional flag is required. The firmware object must
-be suitable for every selected tray type.
+be suitable for every selected tray type. The exact lowercase top-level keys
+`compute`, `nvswitch`, and `powershelf` are reserved for per-tray mappings;
+a shared firmware object must not contain any of them.
 
 For a rack request that needs a different value for each component type,
 `version` can contain a layered JSON document with `compute`, `nvswitch`, and

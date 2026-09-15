@@ -24919,6 +24919,8 @@ components:
             Firmware input serialized as a string: either one shared value for
             all selected trays or a JSON mapping from tray type (`compute`,
             `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
             A missing tray type in the mapping receives an empty input, which
             does not guarantee a skipped update. Empty, null, or omitted input
             is handled by the selected backend and operation rule.
@@ -26090,6 +26092,8 @@ components:
             Firmware input serialized as a string: either one shared value for
             all selected trays or a JSON mapping from tray type (`compute`,
             `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
             A missing tray type in the mapping receives an empty input, which
             does not guarantee a skipped update. Empty, null, or omitted input
             is handled by the selected backend and operation rule.
@@ -26284,6 +26288,8 @@ components:
             Firmware input serialized as a string: either one shared value for
             all selected trays or a JSON mapping from tray type (`compute`,
             `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
             A missing tray type in the mapping receives an empty input, which
             does not guarantee a skipped update. Empty, null, or omitted input
             is handled by the selected backend and operation rule.
