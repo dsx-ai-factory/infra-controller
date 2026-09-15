@@ -57,7 +57,7 @@ use tracing::Instrument;
 use crate::config::{AuthConfig, TlsConfig};
 use crate::metrics::{
     AuthContextMissing, MethodLabel, PrincipalAllowListDenied, RequestAclDenied,
-    UpstreamRequestCompleted, UpstreamStatus,
+    UpstreamAuthRetried, UpstreamRequestCompleted, UpstreamStatus,
 };
 
 const TLS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -722,10 +722,142 @@ async fn proxy_request_inner(
 
     let path_and_query = parts
         .uri
+        .clone()
         .into_parts()
         .path_and_query
         .ok_or_else(|| error_response((StatusCode::BAD_REQUEST, "missing path").into()))?;
 
+    // Buffer a replayable body once so a stale-credential rejection can be
+    // retried; streamed (large) bodies are sent as-is and never replayed.
+    let mut upstream_body = if method_supports_body(&parts.method) {
+        UpstreamBody::prepare(&parts.headers, body)
+            .await
+            .map_err(|e| error_response((StatusCode::BAD_REQUEST, e.to_string()).into()))?
+    } else {
+        UpstreamBody::None
+    };
+
+    let mut upstream_response = send_upstream(
+        &state,
+        target_ip,
+        &parts,
+        path_and_query.clone(),
+        &mut upstream_body,
+    )
+    .await?;
+
+    // A BMC that rejects the credential the proxy cached (an expired Redfish
+    // session, a rotated password) gets one replay with freshly resolved
+    // credentials, so callers never see a stale-session 401. Only replayable
+    // bodies qualify; a streamed body was consumed by the first attempt.
+    let rejected = |status: reqwest::StatusCode| {
+        status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+    };
+    if rejected(upstream_response.status()) && upstream_body.is_replayable() {
+        evict_cached_credentials(target_ip, &state.credential_cache).await;
+        emit(UpstreamAuthRetried {
+            method: MethodLabel::from(&parts.method),
+            bmc_ip_address: target_ip.to_string(),
+        });
+        upstream_response = send_upstream(
+            &state,
+            target_ip,
+            &parts,
+            path_and_query,
+            &mut upstream_body,
+        )
+        .await?;
+    }
+
+    let status = upstream_response.status();
+    let headers = upstream_response.headers().clone();
+    let body = Body::from_stream(upstream_response.bytes_stream());
+
+    if rejected(status) {
+        evict_cached_credentials(target_ip, &state.credential_cache).await;
+    }
+
+    Ok(build_response(status, &headers, body))
+}
+
+/// The caller's request body, in a form the proxy can attach to an upstream
+/// request -- and, when buffered, attach again for one retry.
+enum UpstreamBody {
+    None,
+    /// Small or unsized bodies, buffered up to [`MAX_BUFFERED_BODY_SIZE`].
+    Buffered(bytes::Bytes),
+    /// A large body with a declared length is streamed straight through and
+    /// can be sent only once; `None` once consumed.
+    Streamed {
+        body: Option<Body>,
+        declared_length: u64,
+    },
+}
+
+impl UpstreamBody {
+    async fn prepare(headers: &HeaderMap, body: Body) -> Result<Self, axum::Error> {
+        let declared_length = headers
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+        match declared_length {
+            Some(length) if length > MAX_BUFFERED_BODY_SIZE as u64 => Ok(Self::Streamed {
+                body: Some(body),
+                declared_length: length,
+            }),
+            _ => Ok(Self::Buffered(
+                axum::body::to_bytes(body, MAX_BUFFERED_BODY_SIZE).await?,
+            )),
+        }
+    }
+
+    fn is_replayable(&self) -> bool {
+        matches!(self, Self::None | Self::Buffered(_))
+    }
+
+    /// Attaches the body to `request`. A streamed body is handed over on the
+    /// first call; a later call finds it consumed and fails.
+    fn attach(
+        &mut self,
+        request: reqwest_middleware::RequestBuilder,
+    ) -> Result<reqwest_middleware::RequestBuilder, ProxyError> {
+        match self {
+            Self::None => Ok(request),
+            Self::Buffered(bytes) => Ok(request.body(bytes.clone())),
+            Self::Streamed {
+                body,
+                declared_length,
+            } => {
+                // A streamed body cannot be replayed, so reqwest's redirect
+                // layer forwards a BMC 307/308 to the caller as-is instead of
+                // following it the way buffered requests do. Callers pushing
+                // firmware should use the canonical UpdateService URI rather
+                // than rely on redirects.
+                let body = body.take().ok_or_else(|| {
+                    ProxyError::from((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "streamed request body already consumed".to_string(),
+                    ))
+                })?;
+                Ok(request
+                    .header(axum::http::header::CONTENT_LENGTH, *declared_length)
+                    .timeout(sized_upload_timeout(*declared_length))
+                    .body(reqwest::Body::wrap_stream(body.into_data_stream())))
+            }
+        }
+    }
+}
+
+/// One forwarding attempt: resolve credentials for `target_ip` (cached or
+/// freshly minted), build the upstream request from the caller's `parts`,
+/// attach the body, and send. Records the per-attempt upstream metric.
+async fn send_upstream(
+    state: &BmcProxyState,
+    target_ip: IpAddr,
+    parts: &http::request::Parts,
+    path_and_query: http::uri::PathAndQuery,
+    upstream_body: &mut UpstreamBody,
+) -> Result<reqwest::Response, Response<Body>> {
     let mut bmc_client_info = create_client(
         target_ip,
         &state.api_client,
@@ -747,18 +879,15 @@ async fn proxy_request_inner(
         .http_client
         .request(parts.method.clone(), upstream_uri.to_string())
         .headers(bmc_client_info.header_map);
-    let mut upstream_request = bmc_client_info
+    let upstream_request = bmc_client_info
         .credentials
         .apply_to_request(upstream_request)
         .map_err(|e| {
             error_response((StatusCode::BAD_GATEWAY, format!("invalid credentials: {e}")).into())
         })?;
-
-    if method_supports_body(&parts.method) {
-        upstream_request = attach_request_body(upstream_request, &parts.headers, body)
-            .await
-            .map_err(|e| error_response((StatusCode::BAD_REQUEST, e.to_string()).into()))?;
-    }
+    let upstream_request = upstream_body
+        .attach(upstream_request)
+        .map_err(error_response)?;
 
     let started = Instant::now();
     let upstream_result = upstream_request.send().await;
@@ -767,18 +896,7 @@ async fn proxy_request_inner(
         status: UpstreamStatus::from_result(&upstream_result),
         took: started.elapsed(),
     });
-    let upstream_response = upstream_result
-        .map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))?;
-
-    let status = upstream_response.status();
-    let headers = upstream_response.headers().clone();
-    let body = Body::from_stream(upstream_response.bytes_stream());
-
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        evict_cached_credentials(target_ip, &state.credential_cache).await;
-    }
-
-    Ok(build_response(status, &headers, body))
+    upstream_result.map_err(|e| error_response((StatusCode::BAD_GATEWAY, e.to_string()).into()))
 }
 
 async fn ip_for_forwarded_target(
@@ -946,41 +1064,6 @@ fn method_supports_body(method: &Method) -> bool {
     !matches!(*method, Method::GET | Method::HEAD)
 }
 
-/// Attaches the caller's body to the upstream request.
-///
-/// Small and unsized bodies are buffered, so the upstream sees the same
-/// `Content-Length` framing as before streaming existed. A body whose
-/// declared length exceeds [`MAX_BUFFERED_BODY_SIZE`] is streamed through
-/// with its length forwarded explicitly -- an explicit `Content-Length`
-/// keeps hyper from switching to chunked transfer encoding, which BMC
-/// firmwares commonly reject -- and with a timeout scaled to that length,
-/// because the client-wide 60-second default assumes small exchanges.
-async fn attach_request_body(
-    request: reqwest_middleware::RequestBuilder,
-    headers: &HeaderMap,
-    body: Body,
-) -> Result<reqwest_middleware::RequestBuilder, axum::Error> {
-    let declared_length = headers
-        .get(axum::http::header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok());
-
-    match declared_length {
-        // A streamed body cannot be replayed, so reqwest's redirect layer
-        // forwards a BMC 307/308 to the caller as-is instead of following it
-        // the way buffered requests do. Callers pushing firmware should use
-        // the canonical UpdateService URI rather than rely on redirects.
-        Some(length) if length > MAX_BUFFERED_BODY_SIZE as u64 => Ok(request
-            .header(axum::http::header::CONTENT_LENGTH, length)
-            .timeout(sized_upload_timeout(length))
-            .body(reqwest::Body::wrap_stream(body.into_data_stream()))),
-        // An unsized (chunked) body keeps the old 8 MiB bound: without a
-        // declared length there is nothing to scale a timeout by, and no
-        // Content-Length to preserve toward the BMC.
-        _ => Ok(request.body(axum::body::to_bytes(body, MAX_BUFFERED_BODY_SIZE).await?)),
-    }
-}
-
 /// Time allowed for a streamed upload of `length` bytes: the ordinary
 /// request budget plus the transfer itself at worst-case OOB bandwidth,
 /// bounded by [`MAX_UPLOAD_TIMEOUT`] because `length` is caller-supplied.
@@ -1057,6 +1140,7 @@ fn error_response(error: ProxyError) -> Response<Body> {
     (error.status, error.message).into_response()
 }
 
+#[derive(Debug)]
 struct ProxyError {
     status: StatusCode,
     message: String,
@@ -1288,7 +1372,7 @@ mod tests {
     use super::{
         BmcCredentials, BmcProxyState, CREDENTIAL_CACHE_IDLE_TTL, ConnectionFailReason,
         CredentialCache, ForwardedTarget, IP_CACHE_TTL, MAX_BUFFERED_BODY_SIZE, MethodLabel,
-        TcpAcceptFailed, TlsCertificateReloadFailed, TlsConnectionFailed, attach_request_body,
+        TcpAcceptFailed, TlsCertificateReloadFailed, TlsConnectionFailed, UpstreamBody,
         authorize_principal_allow_list, bmc_proxy_request_span, bounded_cache, build_authority,
         build_http_client, build_response, copy_request_headers, create_client,
         evict_cached_credentials, forwarded_header_value, idle_bounded_cache,
@@ -2352,7 +2436,7 @@ mod tests {
         .await;
     }
 
-    /// One observation of [`attach_request_body`]: whether the built request
+    /// One observation of [`UpstreamBody::attach`]: whether the built request
     /// carries a buffered body (`as_bytes()` is `Some`), an explicit
     /// `Content-Length`, and a per-request timeout override.
     #[derive(Debug, PartialEq)]
@@ -2374,15 +2458,13 @@ mod tests {
             );
         }
 
-        let request = attach_request_body(
-            client.post("https://bmc.invalid/redfish/v1/UpdateService"),
-            &headers,
-            Body::from("payload"),
-        )
-        .await
-        .map_err(|e| e.to_string())?
-        .build()
-        .map_err(|e| e.to_string())?;
+        let request = UpstreamBody::prepare(&headers, Body::from("payload"))
+            .await
+            .map_err(|e| e.to_string())?
+            .attach(client.post("https://bmc.invalid/redfish/v1/UpdateService"))
+            .map_err(|e| e.message)?
+            .build()
+            .map_err(|e| e.to_string())?;
 
         Ok(AttachedBodySummary {
             buffered: request.body().is_some_and(|b| b.as_bytes().is_some()),
@@ -2684,5 +2766,51 @@ mod tests {
             ],
             observe_tls_failure,
         );
+    }
+
+    // The retry contract: a buffered body can be attached again for the one
+    // credential-refresh replay, a streamed body cannot (its bytes were
+    // consumed by the first attempt), and a bodyless request is trivially
+    // replayable.
+    #[tokio::test]
+    async fn only_buffered_or_absent_bodies_are_replayable() {
+        let client = build_http_client().expect("http client");
+        let post = || client.post("https://bmc.invalid/redfish/v1/Systems");
+
+        let mut none = UpstreamBody::None;
+        assert!(none.is_replayable());
+        let _ = none.attach(post()).expect("first attach");
+        let _ = none
+            .attach(post())
+            .expect("bodyless requests replay freely");
+
+        let mut buffered = UpstreamBody::prepare(&HeaderMap::new(), Body::from("payload"))
+            .await
+            .expect("small bodies buffer");
+        assert!(buffered.is_replayable());
+        let _ = buffered.attach(post()).expect("first attach");
+        let _ = buffered
+            .attach(post())
+            .expect("a buffered body replays for the credential-refresh retry");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_LENGTH,
+            HeaderValue::from_str(&(MAX_BUFFERED_BODY_SIZE as u64 + 1).to_string()).unwrap(),
+        );
+        let mut streamed = UpstreamBody::prepare(&headers, Body::from("payload"))
+            .await
+            .expect("large declared bodies stream");
+        assert!(
+            !streamed.is_replayable(),
+            "a streamed body must never be replayed"
+        );
+        let _ = streamed
+            .attach(post())
+            .expect("first attach consumes the stream");
+        let Err(err) = streamed.attach(post()) else {
+            panic!("a consumed stream cannot be attached again");
+        };
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

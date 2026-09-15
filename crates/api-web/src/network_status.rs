@@ -193,10 +193,10 @@ async fn fetch_network_status(
         .map(|response| response.into_inner())?
         .all;
 
-    let all_ids: Vec<MachineId> = all_status
+    let all_ids = all_status
         .iter()
         .filter_map(|status| status.dpu_machine_id)
-        .collect();
+        .collect::<Vec<_>>();
 
     // Handling the case of getting a nonsensical limit.
     let limit = if limit == 0 {
@@ -216,10 +216,11 @@ async fn fetch_network_status(
         return Ok((pages, vec![]));
     }
 
-    let ids_for_page: Vec<MachineId> = all_ids
+    let ids_for_page = all_ids
         .into_iter()
         .skip(current_record_cnt_seen)
         .take(limit)
+        .map(Into::into)
         .collect();
 
     let all_dpus = api
@@ -243,7 +244,7 @@ async fn fetch_network_status(
         let Some(dpu_id) = status.dpu_machine_id else {
             continue;
         };
-        let Some(dpu) = dpus_by_id.get(&dpu_id) else {
+        let Some(dpu) = dpus_by_id.get(&MachineId::from(dpu_id)) else {
             continue;
         };
 

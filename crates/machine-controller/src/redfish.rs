@@ -16,6 +16,7 @@
  */
 
 use carbide_redfish::libredfish::conv::machine_last_reboot_requested_mode;
+use carbide_uuid::machine::MachineIdSubtypeTrait;
 use chrono::Utc;
 use libredfish::model::BootProgress;
 use libredfish::{PowerState, Redfish, RedfishError, SystemPowerControl};
@@ -28,7 +29,7 @@ use crate::write_ops::MachineWriteOp;
 #[track_caller]
 pub fn host_power_control(
     redfish_client: &dyn Redfish,
-    machine: &Machine,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
     action: SystemPowerControl,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> impl Future<Output = Result<(), RedfishError>> {
@@ -41,7 +42,7 @@ pub fn host_power_control(
 /// host_power_control allows control over the power of the host
 pub async fn host_power_control_with_location(
     redfish_client: &dyn Redfish,
-    machine: &Machine,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
     action: SystemPowerControl,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     trigger_location: &std::panic::Location<'_>,
@@ -63,7 +64,7 @@ pub async fn host_power_control_with_location(
     );
     ctx.pending_db_writes
         .push(MachineWriteOp::UpdateRebootRequestedTime {
-            machine_id: machine.id,
+            machine_id: machine.id.into(),
             mode: machine_last_reboot_requested_mode(action),
             time: Utc::now(),
         });

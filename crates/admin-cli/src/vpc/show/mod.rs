@@ -29,6 +29,7 @@ impl Run for Args {
         cmd::show(
             self,
             ctx.config.format,
+            &mut ctx.output_file,
             &ctx.api_client,
             ctx.config.page_size,
         )

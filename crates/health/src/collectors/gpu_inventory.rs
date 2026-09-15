@@ -386,6 +386,7 @@ mod bmc_mock_integration_tests {
                         entity: Arc::new(processor),
                         system: system.clone(),
                         sensors: Vec::new(),
+                        gpu: None,
                     });
                 }
             }
@@ -396,6 +397,7 @@ mod bmc_mock_integration_tests {
                 entities.push(DiscoveredEntity::Chassis {
                     entity: Arc::new(chassis),
                     sensors: Vec::new(),
+                    gpu: None,
                 });
             }
         }

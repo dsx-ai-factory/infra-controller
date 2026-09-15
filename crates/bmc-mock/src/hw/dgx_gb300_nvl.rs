@@ -45,6 +45,10 @@ pub(crate) struct DgxGB300Nvl<'a> {
 }
 
 impl DgxGB300Nvl<'_> {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let bmc_manager_id = "BMC_0";
         let bmc_eth_builder = |eth| {
@@ -170,6 +174,7 @@ impl DgxGB300Nvl<'_> {
                     log_services: None,
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("GB300 1CPU:2GPU Board PC".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: None,
                     serial_console: None,
@@ -191,6 +196,7 @@ impl DgxGB300Nvl<'_> {
                     // DGX GB300: NVIDIA host system (vs Lenovo's "HG634N_V2").
                     manufacturer: Some("NVIDIA".into()),
                     model: Some("GB300 Titania-Bianca Compute Tray".into()),
+                    bios_version: None,
                     oem: redfish::computer_system::Oem::Generic,
                     callbacks: Some(callbacks),
                     serial_console: None,

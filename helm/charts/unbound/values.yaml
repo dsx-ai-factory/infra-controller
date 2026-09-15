@@ -60,7 +60,8 @@ env:
   BROKEN_DNSSEC: "1"
   UNBOUND_CONTROL_DIR: /etc/unbound/keys
 
-# Local DNS A records served to managed hosts and DPUs. Rendered into a
+# Local DNS A and AAAA records served to managed hosts and DPUs. IPv4 and IPv6
+# address literals render as A and AAAA records, respectively, in the
 # local_data.conf file that unbound includes from local.conf.d. Names and IPs
 # are environment-specific, so this is empty by default — populate per site.
 localData: []
@@ -69,8 +70,10 @@ localData: []
 #     addresses: ["10.0.0.1"]
 #   - name: carbide-api.forge        # legacy alias → same address
 #     addresses: ["10.0.0.1"]
-#   - name: nico-ntp.nico            # multiple addresses are supported
-#     addresses: ["10.0.0.2", "10.0.0.3", "10.0.0.4"]
+#   - name: carbide-ntp.forge         # exact hostname queried by stock agents
+#     addresses: ["10.0.0.2", "10.0.0.3", "2001:db8::2"]
+#   - name: nico-ntp.nico             # optional alias for rebranded images
+#     addresses: ["10.0.0.2", "10.0.0.3", "2001:db8::2"]
 
 # Local config files for unbound
 localConfig:

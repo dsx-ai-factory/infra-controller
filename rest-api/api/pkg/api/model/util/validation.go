@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,7 +39,7 @@ var (
 	NotAllWhitespaceRegexp   = regexp.MustCompile("[^\\s]+")
 	ShaHashRegex             = regexp.MustCompile("^[A-Fa-f0-9]+$")
 	Sha256LowercaseHexRegex  = regexp.MustCompile("^[a-f0-9]{64}$")
-	DiskImagePathRegex       = regexp.MustCompile(`^(smallest|/dev/(nvme[0-9]+n[0-9]+|sd[a-z]+|disk/by-id/[^/[:space:]]+))$`)
+	DiskImagePathRegex       = regexp.MustCompile(`^(smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/[:space:]]+))$`)
 	diskImagePartitionRegex  = regexp.MustCompile(`^/dev/disk/by-id/.*-part[0-9]+$`)
 	errInvalidDiskImagePath  = errors.New("not a valid disk path")
 
@@ -57,6 +58,7 @@ var (
 	ErrValidationLabelKeyLength   = fmt.Errorf("label key must contain at least 1 character and a maximum of %v characters", LabelKeyMaxLength)
 	ErrValidationLabelValueLength = fmt.Errorf("label value cannot exceed a maximum of %v characters", LabelValueMaxLength)
 	ErrValidationLabelCount       = fmt.Errorf("up to %v key/value pairs can be specified in labels", LabelCountMax)
+	ErrValidationLabelNUL         = errors.New("label keys and values must not contain the Unicode NUL character (U+0000)")
 
 	// ErrValidationEffectiveUserDataLength reports the merged user data
 	// breaching MaxUserDataBytes after Operating System defaults are
@@ -123,6 +125,11 @@ func ValidateLabels(value interface{}) error {
 		if key == "" {
 			return validation.Errors{
 				"labels": ErrValidationLabelKeyEmpty,
+			}
+		}
+		if strings.ContainsRune(key, '\x00') || strings.ContainsRune(value, '\x00') {
+			return validation.Errors{
+				"labels": ErrValidationLabelNUL,
 			}
 		}
 

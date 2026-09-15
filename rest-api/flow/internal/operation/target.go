@@ -187,10 +187,6 @@ func (er *ExternalRef) Validate() error {
 		return fmt.Errorf("external ref is nil")
 	}
 
-	if er.Type == devicetypes.ComponentTypeUnknown {
-		return fmt.Errorf("external ref must have a valid component type")
-	}
-
 	if er.ID == "" {
 		return fmt.Errorf("external ref must have an id")
 	}

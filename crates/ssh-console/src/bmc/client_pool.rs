@@ -159,7 +159,7 @@ impl BmcConnectionStore {
             self.0
                 .read()
                 .expect("lock poisoned")
-                .get(&machine_id_candidate)
+                .get(&machine_id_candidate.into())
                 .map(|session_handle| session_handle.subscribe(metrics))
                 .ok_or_else(|| GetConnectionError::NoMachineWithInstanceId { instance_id })
         } else {

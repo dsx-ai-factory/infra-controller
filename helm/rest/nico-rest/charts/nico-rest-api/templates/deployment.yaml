@@ -51,6 +51,13 @@ spec:
           env:
             - name: CONFIG_FILE_PATH
               value: /app/config.yaml
+            {{- range $k, $v := .Values.extraEnv }}
+            {{- if has $k (list "CONFIG_FILE_PATH") }}
+            {{- fail (printf "extraEnv must not override chart-managed variable %s" $k) }}
+            {{- end }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml

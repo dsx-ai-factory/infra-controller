@@ -20,7 +20,7 @@ Machine Validation
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -46,6 +46,7 @@ Print help (see a summary with -h)
 | [`results`](./machine-validation-results.md) | Display machine validation results of individual runs |
 | [`runs`](./machine-validation-runs.md) | Display all machine validation runs |
 | [`tests`](./machine-validation-tests.md) | Supported Tests |
+| [`plugins`](./machine-validation-plugins.md) | Manage OCI Machine Validation plugins |
 
 ---
 

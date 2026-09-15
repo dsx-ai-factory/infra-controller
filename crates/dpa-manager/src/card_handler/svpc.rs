@@ -22,12 +22,13 @@ use carbide_dpa::DpaInfo;
 use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::spx::{NULL_SPX_PARTITION_ID, SpxPartitionId};
 use chrono::TimeDelta;
+use db::credential_rotation::NoStagedCredentialRotation;
 use db::{self, ObjectColumnFilter};
 use mac_address::MacAddress;
 use model::dpa_interface::DpaLockMode::{Locked, Unlocked};
 use model::dpa_interface::{DpaInterface, DpaInterfaceControllerState};
 use model::instance::snapshot::InstanceSnapshot;
-use model::machine::{Machine, ManagedHostStateSnapshot};
+use model::machine::{HostMachine, ManagedHostStateSnapshot};
 use mqttea::client::MqtteaClient;
 use sqlx::{PgConnection, PgTransaction};
 
@@ -89,7 +90,7 @@ impl SvpcInterfaceHandler {
     async fn reconcile_assigned_state<'a>(
         monitor: &mut DpaMonitor,
         dpa_interface: &DpaInterface,
-        machine: &Machine,
+        machine: &HostMachine,
         instance: &InstanceSnapshot,
         client: Arc<MqtteaClient>,
         dpa_info: &Arc<DpaInfo>,
@@ -194,7 +195,7 @@ impl SvpcInterfaceHandler {
 
     async fn reconcile_ready_state<'a>(
         monitor: &mut DpaMonitor,
-        machine: &Machine,
+        machine: &HostMachine,
         dpa_interface: &DpaInterface,
         client: Arc<MqtteaClient>,
         dpa_info: &Arc<DpaInfo>,
@@ -783,7 +784,7 @@ async fn record_lock_convergence(
     )
     .await?;
 
-    if !promoted {
+    if let db::ConditionalWrite::NotApplied(NoStagedCredentialRotation) = promoted {
         tracing::warn!(
             %dpa_interface_id,
             %mac_address,

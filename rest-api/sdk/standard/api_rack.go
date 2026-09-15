@@ -45,7 +45,7 @@ func (r ApiBringupRackRequest) Execute() (*BringUpRackResponse, *http.Response, 
 /*
 BringupRack Bring up a Rack
 
-Bring up a Rack identified by Rack UUID.
+Bring up a Rack identified by its Rack ID.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -347,7 +347,7 @@ func (r ApiFirmwareUpdateRackRequest) Execute() (*FirmwareUpdateResponse, *http.
 /*
 FirmwareUpdateRack Firmware update a Rack
 
-Update firmware on a Rack identified by Rack UUID.
+Update firmware on a Rack identified by its Rack ID.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1053,7 +1053,7 @@ By default the `report` field is omitted from each task in the response. Set `in
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
-	@param id UUID of the Rack
+	@param id ID of the Rack
 	@return ApiGetRackTasksRequest
 */
 func (a *RackAPIService) GetRackTasks(ctx context.Context, org string, id string) ApiGetRackTasksRequest {
@@ -1234,7 +1234,7 @@ func (r ApiPowerControlRackRequest) Execute() (*UpdatePowerStateResponse, *http.
 /*
 PowerControlRack Power control a Rack
 
-Power control a Rack identified by Rack UUID.
+Power control a Rack identified by its Rack ID.
 
 Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
 

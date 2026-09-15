@@ -18,7 +18,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::net::Ipv4Addr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use bmc_mock::injection::InjectionStore;
@@ -27,7 +27,7 @@ use bmc_mock::{
     SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
 };
 use carbide_network::virtualization::build_dual_stack_list;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, InvalidMachineType, MachineId, MachineInterfaceId};
 use rpc::forge::{MachineArchitecture, MachineDiscoveryResult, ManagedHostNetworkConfigResponse};
 use rpc::forge_agent_control_response::Action;
 use serde::{Deserialize, Serialize};
@@ -225,6 +225,25 @@ pub(super) struct LiveState {
     /// firmware is applied.  Used by `persisted()` so restarts resume from the
     /// last observed versions rather than the operator-configured starting point.
     pub(super) active_host_firmware: Option<bmc_mock::HostFirmwareVersions>,
+    /// BMC account passwords restored from the previous snapshot at startup,
+    /// used to re-apply rotated passwords onto a freshly built BMC mock so they
+    /// survive a machine-a-tron restart (issue #5966).
+    pub(super) bmc_credentials: Option<Vec<bmc_mock::BmcAccountCredential>>,
+    /// Live BMC account service, so `persisted()` can export the current
+    /// passwords at shutdown rather than a stale mirror (issue #5966).
+    pub(super) bmc_account_service: Option<Weak<bmc_mock::AccountServiceState>>,
+}
+
+impl LiveState {
+    /// Credentials to write into the next device snapshot: the current live BMC
+    /// passwords when the mock is running, else the passwords restored at
+    /// startup so they aren't dropped for a machine whose BMC never came up.
+    pub(super) fn bmc_accounts_for_snapshot(&self) -> Option<Vec<bmc_mock::BmcAccountCredential>> {
+        match self.bmc_account_service.as_ref().and_then(Weak::upgrade) {
+            Some(account_service) => Some(account_service.export_credentials()),
+            None => self.bmc_credentials.clone(),
+        }
+    }
 }
 
 impl Default for LiveState {
@@ -247,6 +266,8 @@ impl Default for LiveState {
             infiniband_port_states: HashMap::new(),
             dpu_flipped_to_nic_mode: false,
             active_host_firmware: None,
+            bmc_credentials: None,
+            bmc_account_service: None,
         }
     }
 }
@@ -333,12 +354,15 @@ impl MachineStateMachine {
         dpu_dhcp_relay: Option<DpuDhcpRelay>,
         mat_host_id: Uuid,
     ) -> MachineStateMachine {
-        let (initial_os_image, tpm_ek_certificate) = match persisted_machine {
-            PersistedMachine::Host(h) => (h.installed_os, h.tpm_ek_certificate),
-            PersistedMachine::Dpu(d) => (d.installed_os, None),
+        let (initial_os_image, tpm_ek_certificate, bmc_credentials) = match persisted_machine {
+            PersistedMachine::Host(h) => (h.installed_os, h.tpm_ek_certificate, h.bmc_accounts),
+            PersistedMachine::Dpu(d) => (d.installed_os, None, d.bmc_accounts),
         };
         let (fsm, actions) = MachineFsm::init(true, Self::is_bmc_only(&machine_info, &config));
         let resolved_timings = Self::resolve_timings(&machine_info, &config);
+        let mut live_state =
+            LiveState::for_machine(&machine_info, MockPowerState::On, tpm_ek_certificate);
+        live_state.bmc_credentials = bmc_credentials;
         MachineStateMachine {
             fsm,
             actions: actions.into_iter().collect(),
@@ -354,11 +378,7 @@ impl MachineStateMachine {
             dhcp_retry_deadline: None,
             machine_discovery_result: None,
             installed_os: initial_os_image,
-            live_state: Arc::new(RwLock::new(LiveState::for_machine(
-                &machine_info,
-                MockPowerState::On,
-                tpm_ek_certificate,
-            ))),
+            live_state: Arc::new(RwLock::new(live_state)),
             machine_info,
             bmc_command_channel,
             config,
@@ -936,11 +956,10 @@ impl MachineStateMachine {
             .as_ref()
             .and_then(|result| result.machine_id)
             .ok_or(MissingMachineId)?;
-
         let network_config = match self
             .app_context
             .forge_api_client
-            .get_managed_host_network_config(machine_id)
+            .get_managed_host_network_config(DpuMachineId::try_from(machine_id)?)
             .await
         {
             Ok(config) => config,
@@ -1180,7 +1199,7 @@ impl MachineStateMachine {
         self.app_context
             .api_client()
             .record_dpu_network_status(DpuNetworkStatusArgs {
-                dpu_machine_id: machine_id,
+                dpu_machine_id: DpuMachineId::try_from(machine_id)?,
                 network_config_version: network_config.managed_host_config_version.clone(),
                 instance_network_config_version,
                 instance_config_version,
@@ -1258,6 +1277,20 @@ impl MachineStateMachine {
                 .account_service_state
                 .change_factory_default_password(pw);
         }
+
+        // Restore the passwords saved in the device snapshot so a rotated BMC
+        // password survives a machine-a-tron restart instead of resetting to
+        // the factory default (issue #5966). Applied after the password
+        // override above so the restored (most recent) credentials win.
+        let saved_credentials = self.live_state.read().unwrap().bmc_credentials.clone();
+        if let Some(saved_credentials) = saved_credentials {
+            bmc_mock
+                .state()
+                .account_service_state
+                .restore_credentials(&saved_credentials);
+        }
+        self.live_state.write().unwrap().bmc_account_service =
+            Some(Arc::downgrade(&bmc_mock.state().account_service_state));
 
         let maybe_bmc_mock_handle = {
             self.app_context
@@ -1350,6 +1383,8 @@ pub(super) enum MachineStateError {
         "invalid machine state: missing machine_id for this machine in machine discovery results"
     )]
     MissingMachineId,
+    #[error("invalid machine ID subtype: {0}")]
+    InvalidMachineIdSubtype(#[from] InvalidMachineType),
     #[error("no mac addresses specified for machine")]
     NoMachineMacAddress,
     #[error("no DHCP info for BMC. this is bug")]

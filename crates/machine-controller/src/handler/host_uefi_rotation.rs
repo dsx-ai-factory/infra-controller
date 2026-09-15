@@ -48,6 +48,7 @@
 use carbide_redfish::libredfish::CredentialOpError;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
+use db::credential_rotation::NoStagedCredentialRotation;
 use eyre::eyre;
 use libredfish::{Redfish, SystemPowerControl};
 use model::machine::{ManagedHostState, ManagedHostStateSnapshot, UefiSetupInfo, UefiSetupState};
@@ -410,7 +411,7 @@ async fn set_rotating_host_uefi_password(
             if state.host_snapshot.uefi_credential_rotation_requested {
                 db::machine::clear_uefi_credential_rotation_requested(
                     &mut txn,
-                    state.host_snapshot.id,
+                    state.host_snapshot.id.into(),
                 )
                 .await?;
             }
@@ -447,8 +448,7 @@ async fn reenable_host_bmc_lockdown_after_rotation(
 /// Promotes the staged `rotating_to_version`; for a row predating the staged
 /// flow (no marker), falls back to
 /// [`record_device_converged`](db::credential_rotation::record_device_converged),
-/// mirroring the BMC engine. Clears a one-shot force request on the same
-/// transaction.
+/// and clears a one-shot force request in the same transaction.
 async fn finish_rotating_host_uefi(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     state: &ManagedHostStateSnapshot,
@@ -466,7 +466,7 @@ async fn finish_rotating_host_uefi(
             .map_err(|e| {
                 StateHandlerError::GenericError(eyre!("promote host uefi rotating_to_version: {e}"))
             })?;
-    if !promoted {
+    if let db::ConditionalWrite::NotApplied(NoStagedCredentialRotation) = promoted {
         db::credential_rotation::record_device_converged(&mut txn, host_bmc_mac, HostUefi)
             .await
             .map_err(|e| {
@@ -475,8 +475,11 @@ async fn finish_rotating_host_uefi(
     }
     tracing::info!(mac = %host_bmc_mac, "host UEFI converged to site-wide rotation target");
     if state.host_snapshot.uefi_credential_rotation_requested {
-        db::machine::clear_uefi_credential_rotation_requested(&mut txn, state.host_snapshot.id)
-            .await?;
+        db::machine::clear_uefi_credential_rotation_requested(
+            &mut txn,
+            state.host_snapshot.id.into(),
+        )
+        .await?;
     }
     Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
 }

@@ -81,6 +81,7 @@ pub(super) async fn run(
         root_ca: cmd_config.root_ca.clone(),
         client_cert: cmd_config.client_cert.clone(),
         client_key: cmd_config.client_key.clone(),
+        plugin_contract_dir: cmd_config.machine_validation_plugin_contract_dir.clone(),
     };
     machine_validation::MachineValidationManager::run(
         machine_id,

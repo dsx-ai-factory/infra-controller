@@ -284,7 +284,7 @@ func TestCreateExpectedPowerShelfHandler_Handle(t *testing.T) {
 				err := json.Unmarshal(rec.Body.Bytes(), &response)
 				assert.Nil(t, err)
 				assert.NotNil(t, response.Labels, "Labels should not be nil in response")
-				assert.Equal(t, tt.requestBody.Labels, response.Labels, "Labels in response should match request")
+				assert.Equal(t, tt.requestBody.Labels, map[string]string(response.Labels), "Labels in response should match request")
 			}
 		})
 	}

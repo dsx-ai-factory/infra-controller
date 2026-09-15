@@ -6,7 +6,7 @@ the effect of each throughput knob in isolation. Companion to
 
 > Developer working notes, deliberately not registered in `docs/index.yml` —
 > same treatment as the scale-testing companion above. Tracked under epic
-> NVIDIA/infra-controller#3738; per-knob results are recorded on the
+> dsx-ai-factory/infra-controller#3738; per-knob results are recorded on the
 > subtickets #3758-#3763.
 
 ## Knob inventory
@@ -23,7 +23,7 @@ the effect of each throughput knob in isolation. Companion to
 
 Throughput model (creation phase): `hosts_per_hour ≈ K4 × (3600 / K1_secs)`,
 provided the cycle actually completes within `K1` (K3 too high breaks this —
-see the K3 row below and NVIDIA/infra-controller#3758). Defaults give 120 hosts/h; current scale settings give 1,200
+see the K3 row below and dsx-ai-factory/infra-controller#3758). Defaults give 120 hosts/h; current scale settings give 1,200
 hosts/h → ~3.75 h floor for 4,500 hosts, consistent with observed runs.
 
 ## Method

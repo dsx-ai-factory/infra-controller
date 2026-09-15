@@ -16,6 +16,7 @@
  */
 
 use std::fmt::{Display, Formatter};
+use std::hash::Hash;
 use std::ops::Deref;
 use std::str::FromStr;
 
@@ -94,6 +95,12 @@ impl Deref for HostMachineId {
     }
 }
 
+impl AsRef<MachineId> for HostMachineId {
+    fn as_ref(&self) -> &MachineId {
+        &self.0
+    }
+}
+
 impl TryFrom<MachineId> for HostMachineId {
     type Error = InvalidMachineType;
 
@@ -150,6 +157,39 @@ impl<'de> serde::Deserialize<'de> for HostMachineId {
     {
         let id = <MachineId as serde::Deserialize>::deserialize(deserializer)?;
         Self::try_from(id).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Common behavior for IDs known to identify a stable or predicted host.
+pub trait HostMachineIdSubtypeTrait:
+    MachineIdSubtypeTrait
+    + Into<HostMachineId>
+    + TryFrom<HostMachineId, Error: Into<InvalidMachineType> + std::fmt::Debug>
+{
+    /// Returns the ID's concrete stable or predicted host subtype.
+    fn host_machine_id_subtype(&self) -> HostMachineIdSubtype;
+
+    /// Borrows this ID as a host machine ID.
+    fn as_host_machine_id(&self) -> &HostMachineId;
+
+    /// Returns whether this ID identifies a predicted host.
+    fn is_predicted_host(&self) -> bool {
+        matches!(self.machine_type(), MachineType::PredictedHost)
+    }
+
+    /// Copies this ID as a host machine ID.
+    fn to_host_machine_id(&self) -> HostMachineId {
+        *self.as_host_machine_id()
+    }
+}
+
+impl HostMachineIdSubtypeTrait for HostMachineId {
+    fn host_machine_id_subtype(&self) -> HostMachineIdSubtype {
+        Self::host_machine_id_subtype(self)
+    }
+
+    fn as_host_machine_id(&self) -> &HostMachineId {
+        self
     }
 }
 

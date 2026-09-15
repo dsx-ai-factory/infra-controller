@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -1126,13 +1125,6 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 func validateMachineLabelSelector(selector map[string]string) error {
 	err := util.ValidateLabels(selector)
 	if err == nil {
-		for key, value := range selector {
-			if strings.ContainsRune(key, '\x00') || strings.ContainsRune(value, '\x00') {
-				return validation.Errors{
-					"machineLabelSelector": errors.New("machine label selector keys and values must not contain NUL characters"),
-				}
-			}
-		}
 		return nil
 	}
 
@@ -1144,6 +1136,11 @@ func validateMachineLabelSelector(selector map[string]string) error {
 	labelErr, found := labelErrors["labels"]
 	if !found {
 		return validation.Errors{"machineLabelSelector": err}
+	}
+	if errors.Is(labelErr, util.ErrValidationLabelNUL) {
+		return validation.Errors{
+			"machineLabelSelector": errors.New("machine label selector keys and values must not contain the Unicode NUL character (U+0000)"),
+		}
 	}
 
 	return validation.Errors{"machineLabelSelector": labelErr}
@@ -2025,7 +2022,7 @@ type APIInstance struct {
 	// UserData is inherited from Operating System or specified by user if allowed
 	UserData *string `json:"userData"`
 	// Labels is Instace labels specified by user
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// IsUpdatePending is an attribute suggest if instance update pending or not
 	IsUpdatePending bool `json:"isUpdatePending"`
 	// SerialConsoleURL is the ssh serial console URL associated with the instance
@@ -2053,6 +2050,8 @@ type APIInstance struct {
 	Interfaces []APIInterface `json:"interfaces"`
 	// InfiniBandInterfaces are list of the InfiniBandInterface associated with the Instance
 	InfiniBandInterfaces []APIInfiniBandInterface `json:"infinibandInterfaces"`
+	// SpectrumXAttachments are list of the SpectrumXAttachment associated with the Instance
+	SpectrumXAttachments []APISpectrumXAttachment `json:"spectrumXAttachments"`
 	// DpuExtensionServiceDeployments are list of the DpuExtensionServiceDeployments associated with the Instance
 	DpuExtensionServiceDeployments []APIDpuExtensionServiceDeployment `json:"dpuExtensionServiceDeployments"`
 	// NVLinkInterfaces are list of the NVLinkInterface associated with the Instance
@@ -2100,7 +2099,7 @@ func InstanceListQueryParamDeprecations() []APIDeprecation {
 // NewAPIInstance accepts a DB layer Instance object returns an API layer object.
 // SecondaryVpcIDs are derived from Interface.VpcID or the explicit prefix relation, so
 // callers must preload Interface.VpcPrefix when explicit-prefix IDs should be populated.
-func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Interface, dbibis []cdbm.InfiniBandInterface, dbdesds []cdbm.DpuExtensionServiceDeployment, dbnvlis []cdbm.NVLinkInterface, dbskgs []cdbm.SSHKeyGroup, dbsds []cdbm.StatusDetail) *APIInstance {
+func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Interface, dbibis []cdbm.InfiniBandInterface, dbsxas []cdbm.SpectrumXAttachment, dbdesds []cdbm.DpuExtensionServiceDeployment, dbnvlis []cdbm.NVLinkInterface, dbskgs []cdbm.SSHKeyGroup, dbsds []cdbm.StatusDetail) *APIInstance {
 	var instanceTypeID *string
 	if dbinst.InstanceTypeID != nil {
 		instanceTypeID = cutil.GetPtr(dbinst.InstanceTypeID.String())
@@ -2122,7 +2121,7 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 		PhoneHomeEnabled:                       dbinst.PhoneHomeEnabled,
 		UserData:                               dbinst.UserData,
 		AutoNetwork:                            dbinst.AutoNetwork,
-		Labels:                                 dbinst.Labels,
+		Labels:                                 APILabels(dbinst.Labels),
 		IsUpdatePending:                        dbinst.IsUpdatePending,
 		PowerProfile:                           dbinst.PowerProfile,
 		Created:                                dbinst.Created,
@@ -2204,6 +2203,12 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 	for _, dbibi := range dbibis {
 		curibi := dbibi
 		apiInstance.InfiniBandInterfaces = append(apiInstance.InfiniBandInterfaces, *NewAPIInfiniBandInterface(&curibi))
+	}
+
+	apiInstance.SpectrumXAttachments = []APISpectrumXAttachment{}
+	for _, dbsxa := range dbsxas {
+		cursxa := dbsxa
+		apiInstance.SpectrumXAttachments = append(apiInstance.SpectrumXAttachments, *NewAPISpectrumXAttachment(&cursxa))
 	}
 
 	apiInstance.NVLinkInterfaces = []APINVLinkInterface{}

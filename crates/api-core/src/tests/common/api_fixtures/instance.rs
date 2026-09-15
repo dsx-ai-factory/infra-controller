@@ -29,8 +29,8 @@ use model::instance::snapshot::InstanceSnapshot;
 use model::instance::status::network::InstanceNetworkStatusObservation;
 use model::machine::health_override::HARDWARE_HEALTH_OVERRIDE_PREFIX;
 use model::machine::{
-    CleanupContext, CleanupState, Machine, MachineState, MachineValidatingState, ManagedHostState,
-    ValidationState,
+    CleanupContext, CleanupState, MachineState, MachineValidatingState, ManagedHostState,
+    StableHostMachine, ValidationState,
 };
 use rpc::forge::InstanceDpuExtensionServicesConfig;
 use rpc::forge::forge_server::Forge;
@@ -130,7 +130,7 @@ impl<'a, 'b> TestInstanceBuilder<'a, 'b> {
             .api
             .allocate_instance(tonic::Request::new(rpc::InstanceAllocationRequest {
                 instance_id: None,
-                machine_id: Some(self.mh.host().id.into()),
+                machine_id: Some(self.mh.host().id),
                 instance_type_id: None,
                 config: Some(self.config),
                 metadata: self.metadata,
@@ -366,7 +366,7 @@ pub(in crate::tests) fn config_for_nvlink_config(
 pub(in crate::tests) async fn advance_created_instance_into_state(
     env: &TestEnv,
     mh: &TestManagedHost,
-    state_check_fn: impl Fn(&Machine) -> bool,
+    state_check_fn: impl Fn(&StableHostMachine) -> bool,
 ) {
     // Run network state machine here.
     env.run_network_segment_controller_iteration().await;
@@ -420,17 +420,6 @@ pub(in crate::tests) async fn advance_created_instance_into_state(
         health_report::HealthReport::empty(format!("{HARDWARE_HEALTH_OVERRIDE_PREFIX}health")),
     )
     .await;
-
-    env.run_machine_state_controller_iteration_until_state_matches(
-        &mh.host().id,
-        20,
-        ManagedHostState::Assigned {
-            instance_state: model::machine::InstanceState::WaitingForRebootToReady,
-        },
-    )
-    .await;
-    env.run_machine_state_controller_iteration().await;
-    mh.host().reboot_completed().await;
 
     // State controller continues to run till target state
     env.run_machine_state_controller_iteration_until_state_condition(

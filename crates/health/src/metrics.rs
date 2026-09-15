@@ -16,7 +16,7 @@
  */
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +25,6 @@ use dashmap::DashMap;
 use http::Response;
 use http::header::CONTENT_TYPE;
 use hyper::Request;
-use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -479,6 +478,7 @@ pub struct GaugeMetrics {
     metric_name_prefix: String,
     metric_help: String,
     static_labels: Vec<proto::LabelPair>,
+    static_label_names: HashSet<String>,
     desc: Desc,
 }
 
@@ -491,20 +491,27 @@ impl GaugeMetrics {
         static_labels: Vec<(impl Into<String>, impl Into<String>)>,
     ) -> Result<Self, prometheus::Error> {
         let desc = Desc::new(id.clone(), id, Vec::new(), HashMap::new())?;
+        let mut static_label_names = HashSet::with_capacity(static_labels.len());
+        let static_labels = static_labels
+            .into_iter()
+            .map(|(name, value)| {
+                let name = name.into();
+                static_label_names.insert(name.clone());
+
+                let mut label = LabelPair::new();
+                label.set_name(name);
+                label.set_value(value.into());
+                label
+            })
+            .collect();
+
         let metrics = Self {
             gauges: Arc::new(DashMap::new()),
             current_generation: Arc::new(AtomicU64::new(0)),
             metric_name_prefix: metric_name_prefix.into(),
             metric_help: metric_help.into(),
-            static_labels: static_labels
-                .into_iter()
-                .map(|(name, value)| {
-                    let mut label = LabelPair::new();
-                    label.set_name(name.into());
-                    label.set_value(value.into());
-                    label
-                })
-                .collect(),
+            static_labels,
+            static_label_names,
             desc,
         };
 
@@ -514,6 +521,10 @@ impl GaugeMetrics {
 
     pub fn begin_update(&self) {
         self.current_generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn has_static_label(&self, name: &str) -> bool {
+        self.static_label_names.contains(name)
     }
 
     pub fn record(&self, reading: GaugeReading) {
@@ -628,8 +639,8 @@ pub async fn run_metrics_server(
     }
 }
 
-fn serve_request(
-    req: Request<Incoming>,
+fn serve_request<B>(
+    req: Request<B>,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<Response<String>, hyper::Error> {
     match req.uri().path() {
@@ -641,7 +652,7 @@ fn serve_request(
         "/metrics" => serve_prometheus(metrics_manager.export_metrics(), "service metrics"),
         "/telemetry" => serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics"),
         _ => Ok(Response::builder()
-            .status(http::StatusCode::OK)
+            .status(http::StatusCode::NOT_FOUND)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
             .body("not found; use /metrics, /telemetry, or /livez".to_string())
             .expect("BUG: Response::builder error")),
@@ -698,6 +709,33 @@ mod tests {
     use carbide_test_support::{Check, check_values};
 
     use super::*;
+
+    #[test]
+    fn unknown_metrics_route_returns_not_found() {
+        let request = Request::builder()
+            .uri("/definitely-not-a-route")
+            .body(())
+            .expect("test request should be valid");
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test").expect("metrics manager should initialize for test"),
+        );
+
+        let response =
+            serve_request(request, metrics_manager).expect("request should produce a response");
+
+        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+        );
+        assert_eq!(
+            response.body(),
+            "not found; use /metrics, /telemetry, or /livez",
+        );
+    }
 
     #[test]
     fn collector_registry_sanitizes_descriptor_fq_name() {

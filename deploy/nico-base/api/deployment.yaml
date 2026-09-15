@@ -49,8 +49,19 @@ spec:
           command:
             - /bin/sh
             - -c
-            # if you change this command, keep it in sync (as appropriate) with the overlay in local-dev for the local workflow
-            - exec /opt/carbide/carbide-api run --config-path /etc/forge/carbide-api/carbide-api-config.toml --site-config-path /etc/forge/carbide-api/site/nico-api-site-config.toml
+            - |
+              DATASTORE_URL_HOST="$DATASTORE_HOST"
+              case "$DATASTORE_URL_HOST" in
+                \[*\]) ;;
+                *:*) DATASTORE_URL_HOST="[$DATASTORE_URL_HOST]" ;;
+              esac
+              DATASTORE_URL="postgres://${DATASTORE_USER}:${DATASTORE_PASSWORD}@${DATASTORE_URL_HOST}:${DATASTORE_PORT}/${DATASTORE_NAME}"
+              # Leave explicit URL overrides unchanged.
+              GENERATED_DATASTORE_URL="postgres://${DATASTORE_USER}:${DATASTORE_PASSWORD}@${DATASTORE_HOST}:${DATASTORE_PORT}/${DATASTORE_NAME}"
+              if [ "${CARBIDE_API_DATABASE_URL-}" = "$GENERATED_DATASTORE_URL" ]; then
+                export CARBIDE_API_DATABASE_URL="$DATASTORE_URL"
+              fi
+              exec /opt/carbide/carbide-api run --config-path /etc/forge/carbide-api/carbide-api-config.toml --site-config-path /etc/forge/carbide-api/site/nico-api-site-config.toml
           env:
             - name: VAULT_ROLE_ID
               valueFrom:

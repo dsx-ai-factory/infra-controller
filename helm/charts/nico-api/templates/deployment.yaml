@@ -104,7 +104,35 @@ spec:
               add:
                 - SYS_PTRACE
           command:
-            {{- toYaml .Values.command | nindent 12 }}
+            - /bin/sh
+            - -c
+            - |
+              {{- /* Native Kubernetes ulimits support: https://github.com/kubernetes/kubernetes/pull/137023 */ -}}
+              {{- $fdLimit := 65536 }}
+              {{- if not (kindIs "invalid" .Values.fileDescriptorLimit) }}
+              {{- $fdLimit = .Values.fileDescriptorLimit | int }}
+              {{- end }}
+              {{- if le $fdLimit 0 }}
+              {{- fail "fileDescriptorLimit must be a positive integer" }}
+              {{- end }}
+              FD_LIMIT={{ $fdLimit }}
+              FD_REQUESTED="$FD_LIMIT"
+              FD_HARD="$(ulimit -Hn)"
+              if [ "$FD_HARD" != "unlimited" ] && [ "$FD_LIMIT" -gt "$FD_HARD" ]; then
+                echo "fileDescriptorLimit ${FD_LIMIT} exceeds the hard limit ${FD_HARD}; clamping" >&2
+                FD_LIMIT="$FD_HARD"
+              fi
+              ulimit -Sn "$FD_LIMIT" || { echo "ulimit -Sn ${FD_LIMIT} failed (requested ${FD_REQUESTED}, hard limit ${FD_HARD})" >&2; exit 1; }
+              {{- include "nico-api.databaseUrlScript" . | nindent 14 }}
+              # Leave explicit URL overrides unchanged.
+              GENERATED_DATASTORE_URL="postgres://${DATASTORE_USER}:${DATASTORE_PASSWORD}@${DATASTORE_HOST}:${DATASTORE_PORT}/${DATASTORE_NAME}"
+              if [ "${CARBIDE_API_DATABASE_URL-}" = "$GENERATED_DATASTORE_URL" ]; then
+                export CARBIDE_API_DATABASE_URL="$DATASTORE_URL"
+              fi
+              if [ "${NICO_API_DATABASE_URL-}" = "$GENERATED_DATASTORE_URL" ]; then
+                export NICO_API_DATABASE_URL="$DATASTORE_URL"
+              fi
+              {{ .Values.command | nindent 14 }}
           env:
             - name: VAULT_ROLE_ID
               valueFrom:
@@ -206,6 +234,10 @@ spec:
               value: {{ .Values.env.RUST_BACKTRACE | quote }}
             - name: RUST_LIB_BACKTRACE
               value: {{ .Values.env.RUST_LIB_BACKTRACE | quote }}
+            {{- with .Values.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT }}
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.dsxExchangeEventBusConfig }}
             - name: CARBIDE_API_DSX_EXCHANGE_EVENT_BUS
               value: {{ . | quote }}

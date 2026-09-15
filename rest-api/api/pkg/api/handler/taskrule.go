@@ -167,7 +167,7 @@ func (h CreateTaskRuleHandler) Handle(c echo.Context) error {
 		ctx, c, logger, stc,
 		flowv1.Flow_CreateOperationRule_FullMethodName,
 		flowRequest, &flowResponse,
-		common.FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
 	)
 	if proxyErr != nil {
 		return proxyErr
@@ -259,7 +259,7 @@ func (h GetTaskRuleHandler) Handle(c echo.Context) error {
 		ctx, c, logger, stc,
 		flowv1.Flow_GetOperationRule_FullMethodName,
 		flowRequest, &flowResponse,
-		common.FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
 		return proxyErr
@@ -358,7 +358,7 @@ func (h GetAllTaskRuleHandler) Handle(c echo.Context) error {
 		ctx, c, logger, stc,
 		flowv1.Flow_ListOperationRules_FullMethodName,
 		flowRequest, &flowResponse,
-		common.FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
 		return proxyErr
@@ -459,7 +459,7 @@ func (h UpdateTaskRuleHandler) Handle(c echo.Context) error {
 		ctx, c, logger, stc,
 		flowv1.Flow_UpdateOperationRule_FullMethodName,
 		flowRequest, nil,
-		common.FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
 	)
 	if proxyErr != nil {
 		return proxyErr
@@ -544,7 +544,7 @@ func (h DeleteTaskRuleHandler) Handle(c echo.Context) error {
 		ctx, c, logger, stc,
 		flowv1.Flow_DeleteOperationRule_FullMethodName,
 		flowRequest, nil,
-		common.FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
 		return proxyErr

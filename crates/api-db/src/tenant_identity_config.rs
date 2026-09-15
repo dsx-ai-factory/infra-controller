@@ -325,7 +325,7 @@ async fn instance_machine_id_for_identity_lookup(
     else {
         return Ok(*machine_id);
     };
-    Ok(host.id)
+    Ok(host.id.into())
 }
 
 /// Resolve tenant identity config for machine-identity RPCs: one join query, then overlap GC, then

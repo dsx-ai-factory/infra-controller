@@ -296,6 +296,7 @@ mod tests {
             "test-host-id".to_string(),
             false,
             MachineRouterOptions {
+                event_service: crate::EventServiceOverride::Profile,
                 bmc_reset_duration: None,
                 virtual_media_devices: Some(vec![
                     DeviceConfig {

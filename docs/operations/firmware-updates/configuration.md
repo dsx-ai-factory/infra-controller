@@ -203,6 +203,62 @@ have been merged:
 nico-admin-cli -a <core-api-url> firmware show
 ```
 
+### ConnectX-7 InfiniBand Firmware
+
+NICo v2.0 and later use Scout to update CX7 firmware on hosts reported with
+vendor `Nvidia`, model `DGXH100`, and firmware inventory entries named
+`CX7_<number>`.
+
+To prepare the update:
+
+1. Publish the NVIDIA-signed CX7 firmware artifact at an HTTPS URL that Scout can
+   access from the discovery environment.
+
+   Use the
+   [DGX H100/H200 firmware guide](https://docs.nvidia.com/dgx/dgxh100-fw-update-guide/network-card-fw-update.html)
+   to select an artifact compatible with every CX7 adapter in the host. The
+   artifact's SHA-256 digest is optional; when provided, it must be 64
+   hexadecimal characters and NICo uses it to verify the download. NICo does
+   not require a particular repository path or filename.
+
+1. Call the
+   [Host Firmware Config API](#configure-host-firmware-through-the-api) with the
+   following:
+
+   - `vendor: Nvidia`
+   - `model: DGXH100`
+   - Component `type: Cx7`
+   - `version: 28.47.2682`
+   - `default: true`
+   - `powerDrainsNeeded: 1`
+   - One artifact containing the HTTPS `url`
+   - `sha256`: (optional) the artifact's 64-character SHA-256 digest to enable
+     download verification
+
+Use [Monitor and verify](host-firmware.md#monitor-and-verify). A host is updated
+only when every `CX7_<number>` entry reports the target version, the host has
+returned to `Ready` or `Assigned/Ready`, and its reprovisioning request is gone.
+
+<Note>
+**Legacy NICo installations:** If you are running a version of NICo prior to
+2.0, the firmware container must also carry the CX7 upgrade script. NICo 2.0 and
+later bundle the Scout script, so their firmware containers no longer need to
+contain that script.
+</Note>
+
+Other host models require their own inventory mapping and Scout script. To add
+support for another model:
+
+- Follow the [contributing guide](../../../CONTRIBUTING.md).
+- Add the catalog component regex for `FirmwareComponentType::Cx7` to the
+  [host firmware inventory mappings](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/handlers/firmware.rs)
+  for the model.
+- Add the model's script and metadata under the
+  [Scout firmware script assets](https://github.com/dsx-ai-factory/infra-controller/tree/main/pxe/scout-firmware-scripts).
+
+The existing DGX H100 script might work on other servers, but it has not been
+tested on them; validate it on the new platform before reusing it.
+
 ## DPU firmware
 
 DPU firmware does not use the Host Firmware Config API. Its site configuration
@@ -385,7 +441,7 @@ selected by the rack or component backend. Refer to
 ### Rack profile firmware object
 
 A rack profile can specify one firmware-object JSON document to use as the
-default firmware input during rack ingestion:
+default input for automatic rack firmware and switch NVOS updates:
 
 ```toml
 [rack_profiles.NVL72]
@@ -407,6 +463,19 @@ count = 9
 vendor = "LiteOn"
 count = 8
 ```
+
+When `firmware_object` is configured for a profile with switches, the SOT JSON
+must contain an NVOS image whose firmware type matches `rack_hardware_class`.
+NICo requests `prod` when `rack_hardware_class` is omitted. RMS records an
+asynchronous update failure when the document does not contain the required
+image. After all NVOS image jobs complete or fail, NICo uses RMS to verify or
+restore the desired NVOS admin password on each selected switch before the rack
+leaves the NVOS update phase. Without `firmware_object`, NICo skips both
+automatic update phases. An explicit maintenance request can supply a firmware
+object instead.
+If no firmware object is available while a switch in the maintenance scope is
+already waiting for an NVOS update, the rack transitions to `Error` instead of
+skipping the NVOS phase.
 
 The `url` field identifies the document location. The optional `fetch_timeout`
 field accepts duration strings such as `30s` and `60s` and defaults to `30s`.

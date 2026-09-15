@@ -97,6 +97,12 @@ func TestSetupSchema(t *testing.T, dbSession *db.Session) {
 	// create InfiniBandInterface table
 	err = dbSession.DB.ResetModel(context.Background(), (*InfiniBandInterface)(nil))
 	assert.Nil(t, err)
+	// create SpectrumXPartition table
+	err = dbSession.DB.ResetModel(context.Background(), (*SpectrumXPartition)(nil))
+	assert.Nil(t, err)
+	// create SpectrumXAttachment table
+	err = dbSession.DB.ResetModel(context.Background(), (*SpectrumXAttachment)(nil))
+	assert.Nil(t, err)
 	// create ssh key table
 	err = dbSession.DB.ResetModel(context.Background(), (*SSHKey)(nil))
 	assert.Nil(t, err)

@@ -19,7 +19,7 @@ use std::str::FromStr;
 
 use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::nvlink::NvLinkLogicalPartitionId;
 use carbide_uuid::vpc::VpcId;
@@ -437,7 +437,7 @@ pub struct InstanceForUpdate {
     /// Instance identifier.
     pub id: InstanceId,
     /// Machine that owns the Instance.
-    pub machine_id: MachineId,
+    pub machine_id: HostMachineId,
     /// Tenant that owns the Instance.
     pub tenant_organization_id: TenantOrganizationId,
     /// Desired InfiniBand configuration stored on the Instance.
@@ -528,7 +528,7 @@ pub async fn find_live_by_machine_id_for_update(
 
 pub async fn find_by_machine_ids(
     txn: &mut PgConnection,
-    machine_ids: &[&MachineId],
+    machine_ids: &[&HostMachineId],
 ) -> Result<Vec<InstanceSnapshot>, DatabaseError> {
     if machine_ids.is_empty() {
         return Ok(Vec::new());
@@ -637,7 +637,7 @@ pub async fn count_vpc_references(
 }
 
 pub async fn use_custom_ipxe_on_next_boot(
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     boot_with_custom_ipxe: bool,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
@@ -658,7 +658,7 @@ pub async fn use_custom_ipxe_on_next_boot(
 /// the HostPlatformConfiguration flow. The WaitingForRebootToReady handler clears this
 /// flag after setting use_custom_pxe_on_boot.
 pub async fn set_custom_pxe_reboot_requested(
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     requested: bool,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
@@ -1524,8 +1524,8 @@ mod tests {
 
     /// Seeds `n` bare machines (no FK dependents besides `dpf`), each with a
     /// distinct id derived from its index, in a single multi-row INSERT.
-    async fn seed_machines(conn: &mut PgConnection, n: usize) -> Vec<MachineId> {
-        let machine_ids: Vec<MachineId> = (0..n)
+    async fn seed_machines(conn: &mut PgConnection, n: usize) -> Vec<HostMachineId> {
+        let machine_ids: Vec<HostMachineId> = (0..n)
             .map(|i| {
                 let mut hardware_hash = [0u8; 32];
                 hardware_hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
@@ -1534,6 +1534,8 @@ mod tests {
                     hardware_hash,
                     MachineType::Host,
                 )
+                .try_into()
+                .unwrap()
             })
             .collect();
 
@@ -1548,7 +1550,7 @@ mod tests {
 
     /// Builds a minimal-but-valid `NewInstance` on `machine_id`, distinct from
     /// every other instance produced by this helper via `instance_id`.
-    fn new_instance(machine_id: MachineId, config: &InstanceConfig) -> NewInstance<'_> {
+    fn new_instance(machine_id: HostMachineId, config: &InstanceConfig) -> NewInstance<'_> {
         let version = ConfigVersion::initial();
         NewInstance {
             instance_id: InstanceId::new(),

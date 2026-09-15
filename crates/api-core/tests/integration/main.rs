@@ -16,6 +16,7 @@
  */
 
 mod batch_instance_allocation_validation;
+mod batch_instance_release;
 mod compute_allocation;
 mod credential_management;
 mod credential_rotation;
@@ -39,6 +40,7 @@ mod ib_fabric_find;
 mod level_filter;
 mod machine_bmc_metadata;
 mod machine_boot_interfaces;
+mod machine_metadata;
 mod nvlink_domain_health;
 mod operating_system;
 mod power_options;
@@ -50,6 +52,7 @@ mod power_shelf_health;
 mod power_shelf_maintenance;
 mod rack_find;
 mod rack_profile;
+mod redfish_actions;
 mod route_servers;
 mod scout_firmware_upgrade_status;
 mod set_primary_dpu;

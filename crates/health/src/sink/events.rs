@@ -760,7 +760,7 @@ mod tests {
             })),
             ContextKind::PowerShelf => Some(EndpointMetadata::PowerShelf(PowerShelfData {
                 id: Some(power_shelf_id()),
-                serial: "PS-001".to_string(),
+                serial: Some("PS-001".to_string()),
             })),
         };
 

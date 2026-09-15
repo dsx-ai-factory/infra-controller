@@ -20,14 +20,14 @@
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use chrono::Utc;
 use component_manager::compute_tray_manager::{ComputeTrayEndpoint, ComputeTrayResult};
 use db::machine as db_machine;
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::machine::{
-    FailureCause, FailureDetails, FailureSource, Machine, MachineMaintenanceOperation,
+    FailureCause, FailureDetails, FailureSource, HostMachine, MachineMaintenanceOperation,
     ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
 };
 use state_controller::state_handler::{
@@ -36,9 +36,10 @@ use state_controller::state_handler::{
 
 use crate::context::MachineStateHandlerContextObjects;
 
-/// Handles a host Maintenance operation.
+/// Handles the Maintenance state for a host, dispatching on the requested
+/// operation (`PowerOn` / `PowerOff` / `Reset`).
 pub(super) async fn handle_maintenance(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
@@ -62,7 +63,7 @@ pub(super) async fn handle_maintenance(
 }
 
 async fn handle_power_on(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
@@ -78,7 +79,7 @@ async fn handle_power_on(
 }
 
 async fn handle_power_off(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
@@ -94,7 +95,7 @@ async fn handle_power_off(
 }
 
 async fn handle_reset(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
@@ -110,17 +111,18 @@ async fn handle_reset(
 }
 
 async fn handle_chassis_reset(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     chassis_id: &str,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     tracing::info!(
         machine_id = %host_machine_id,
-        chassis_id,
+        %chassis_id,
         "Machine maintenance: ChassisReset",
     );
-    let client = match ctx
+
+    let redfish_client = match ctx
         .services
         .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
         .await
@@ -138,34 +140,33 @@ async fn handle_chassis_reset(
         }
     };
 
-    match client
+    if let Err(error) = redfish_client
         .chassis_reset(chassis_id, libredfish::SystemPowerControl::ForceRestart)
         .await
     {
-        Ok(()) => {
-            tracing::info!(
-                machine_id = %host_machine_id,
-                chassis_id,
-                "Chassis reset succeeded; returning host to Ready",
-            );
-            let mut txn = ctx.services.db_pool.begin().await?;
-            db_machine::clear_machine_maintenance_requested(&mut txn, *host_machine_id).await?;
-            Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
-        }
-        Err(error) => finish_maintenance_with_error(
+        return finish_maintenance_with_error(
             host_machine_id,
             ctx,
             format!(
                 "Machine {host_machine_id} maintenance (ChassisReset): chassis reset failed: {error}"
             ),
         )
-        .await,
+        .await;
     }
+
+    tracing::info!(
+        machine_id = %host_machine_id,
+        %chassis_id,
+        "Chassis reset request accepted; verify recovery before clearing operator maintenance",
+    );
+    let mut txn = ctx.services.db_pool.begin().await?;
+    db_machine::clear_machine_maintenance_requested(&mut txn, *host_machine_id).await?;
+    Ok(StateHandlerOutcome::transition(ManagedHostState::Ready).with_txn(txn))
 }
 
 /// Common driver for component-manager-backed power maintenance operations.
 async fn invoke_power_operation(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     action: PowerAction,
@@ -268,8 +269,8 @@ async fn invoke_power_operation(
 
 /// Build the [`ComputeTrayEndpoint`] describing this host for component manager power operations.
 pub(super) async fn build_compute_tray_endpoint(
-    machine_id: &MachineId,
-    machine: &Machine,
+    machine_id: &HostMachineId,
+    machine: &HostMachine,
     credential_manager: &dyn CredentialManager,
 ) -> Result<ComputeTrayEndpoint, String> {
     let bmc_mac = machine
@@ -317,7 +318,7 @@ async fn lookup_bmc_credentials(
 /// given cause. Clearing the request breaks retry loops on persistent failures
 /// and forces the operator to explicitly re-request maintenance to retry.
 async fn finish_maintenance_with_error(
-    host_machine_id: &MachineId,
+    host_machine_id: &HostMachineId,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     cause: String,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
@@ -329,7 +330,7 @@ async fn finish_maintenance_with_error(
             failed_at: Utc::now(),
             source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
         },
-        machine_id: *host_machine_id,
+        machine_id: (*host_machine_id).into(),
         retry_count: 0,
     })
     .with_txn(txn))

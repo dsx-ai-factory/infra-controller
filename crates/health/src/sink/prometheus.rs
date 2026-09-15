@@ -16,6 +16,7 @@
  */
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -24,6 +25,12 @@ use super::{CollectorEvent, DataSink, EventContext, MetricSample};
 use crate::HealthError;
 use crate::metrics::{CollectorRegistry, GaugeMetrics, GaugeReading, MetricsManager};
 
+/// Publishes metric samples to the Prometheus telemetry registry.
+///
+/// In dynamic label names, characters other than ASCII letters, digits, and
+/// `_` become `_`; an initial ASCII digit gains an `_` prefix, and an empty
+/// name becomes `_`. A sample is rejected when normalization collides with
+/// another dynamic label or a label supplied by the sink.
 pub struct PrometheusSink {
     collector_registry: Arc<CollectorRegistry>,
     stream_metrics: DashMap<String, DashMap<&'static str, Arc<GaugeMetrics>>>,
@@ -79,6 +86,77 @@ impl PrometheusSink {
         key
     }
 
+    fn is_valid_label_name(name: &str) -> bool {
+        let mut characters = name.chars();
+
+        characters
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+            && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    }
+
+    /// Converts sink-neutral attribute names to Prometheus label names.
+    fn normalize_label_name(name: Cow<'static, str>) -> Cow<'static, str> {
+        if Self::is_valid_label_name(&name) {
+            return name;
+        }
+
+        let mut normalized = String::with_capacity(name.len().saturating_add(1));
+
+        if name.is_empty() {
+            normalized.push('_');
+        }
+
+        for (index, character) in name.chars().enumerate() {
+            if index == 0 && character.is_ascii_digit() {
+                normalized.push('_');
+            }
+
+            normalized.push(if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            });
+        }
+
+        Cow::Owned(normalized)
+    }
+
+    /// Normalizes effective dynamic labels before they enter the registry.
+    fn normalize_label_names(
+        context: &EventContext,
+        stream_metrics: &GaugeMetrics,
+        metric: &str,
+        labels: &mut [(Cow<'static, str>, String)],
+    ) -> Result<(), HealthError> {
+        let mut label_names = HashSet::with_capacity(labels.len());
+
+        for (name, _) in labels {
+            let normalized_name = Self::normalize_label_name(name.clone());
+
+            if stream_metrics.has_static_label(&normalized_name)
+                || !label_names.insert(normalized_name.clone())
+            {
+                tracing::warn!(
+                    endpoint_key = context.endpoint_key(),
+                    collector = context.collector_type,
+                    metric,
+                    label = name.as_ref(),
+                    normalized_label = normalized_name.as_ref(),
+                    "Prometheus metric has conflicting label names"
+                );
+
+                return Err(HealthError::GenericError(format!(
+                    "prometheus label {name:?} conflicts after normalization as {normalized_name:?}"
+                )));
+            }
+
+            *name = normalized_name;
+        }
+
+        Ok(())
+    }
+
     fn stream_static_labels(context: &EventContext) -> Vec<(Cow<'static, str>, String)> {
         let mut labels = vec![
             (
@@ -101,6 +179,9 @@ impl PrometheusSink {
         }
         if let Some(switch_id) = context.switch_id() {
             labels.push((Cow::Borrowed("switch_id"), switch_id.to_string()));
+        }
+        if let Some(power_shelf_id) = context.power_shelf_id() {
+            labels.push((Cow::Borrowed("power_shelf_id"), power_shelf_id.to_string()));
         }
         if let Some(serial) = context.serial_number() {
             labels.push((Cow::Borrowed("serial_number"), serial.to_string()));
@@ -208,11 +289,21 @@ impl DataSink for PrometheusSink {
             CollectorEvent::Metric(sample) => match self.get_or_create_stream_metrics(context) {
                 Ok(stream_metrics) => {
                     let mut labels = sample.labels.clone();
-                    for (name, value) in context.labels() {
-                        if labels.iter().all(|(existing, _)| existing.as_ref() != name) {
-                            labels.push((Cow::Owned(name.clone()), value.clone()));
-                        }
-                    }
+
+                    labels.extend(
+                        context
+                            .labels()
+                            .iter()
+                            .map(|(name, value)| (Cow::Owned(name.clone()), value.clone())),
+                    );
+
+                    Self::normalize_label_names(
+                        context,
+                        &stream_metrics,
+                        &sample.name,
+                        &mut labels,
+                    )?;
+
                     stream_metrics.record(
                         GaugeReading::new(
                             Self::metric_reading_key(sample),
@@ -259,12 +350,15 @@ mod tests {
     use std::str::FromStr;
 
     use carbide_uuid::nvlink::NvLinkDomainId;
+    use carbide_uuid::power_shelf::PowerShelfId;
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
     use mac_address::MacAddress;
 
     use super::*;
-    use crate::endpoint::{BmcAddr, EndpointMetadata, MachineData, SwitchData, SwitchEndpointRole};
+    use crate::endpoint::{
+        BmcAddr, EndpointMetadata, MachineData, PowerShelfData, SwitchData, SwitchEndpointRole,
+    };
 
     fn test_switch_id(label: &str) -> SwitchId {
         let mut hash = [0u8; 32];
@@ -372,5 +466,164 @@ mod tests {
             label_value("nvlink_domain_uuid"),
             Some(nvlink_domain_uuid_label.as_str())
         );
+    }
+
+    #[test]
+    fn test_stream_static_labels_includes_available_power_shelf_metadata() {
+        let power_shelf_id =
+            PowerShelfId::from_str("ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg")
+                .expect("valid power shelf id");
+        let power_shelf_id_label = power_shelf_id.to_string();
+        let context = EventContext {
+            endpoint_key: "22:33:44:55:66:77".to_string(),
+            addr: BmcAddr {
+                ip: "10.0.2.1".parse().expect("valid ip"),
+                port: Some(443),
+                mac: MacAddress::from_str("22:33:44:55:66:77").unwrap(),
+            },
+            collector_type: "sensor_collector",
+            labels: Default::default(),
+            metadata: Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                id: Some(power_shelf_id),
+                serial: Some("SN-PS-001".to_string()),
+            })),
+            rack_id: Some(RackId::new("RACK_3")),
+        };
+
+        let labels = PrometheusSink::stream_static_labels(&context);
+        let label_value = |key: &str| {
+            labels
+                .iter()
+                .find_map(|(label, value)| (label.as_ref() == key).then_some(value.as_str()))
+        };
+
+        assert_eq!(
+            label_value("power_shelf_id"),
+            Some(power_shelf_id_label.as_str())
+        );
+        assert_eq!(label_value("serial_number"), Some("SN-PS-001"));
+        assert_eq!(label_value("rack_id"), Some("RACK_3"));
+
+        let context_without_id = EventContext {
+            metadata: Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                id: None,
+                serial: Some("SN-PS-001".to_string()),
+            })),
+            ..context
+        };
+        let labels_without_id = PrometheusSink::stream_static_labels(&context_without_id);
+
+        assert!(
+            labels_without_id
+                .iter()
+                .all(|(label, _)| label.as_ref() != "power_shelf_id")
+        );
+    }
+
+    #[test]
+    fn prometheus_sink_normalizes_dynamic_label_names() {
+        let metrics_manager =
+            Arc::new(MetricsManager::new("test").expect("metrics manager should initialize"));
+
+        let sink = PrometheusSink::new(metrics_manager.clone(), "test_sink")
+            .expect("Prometheus sink should initialize");
+
+        let context = EventContext {
+            endpoint_key: "11:22:33:44:55:66".to_string(),
+            addr: BmcAddr {
+                ip: "10.0.1.1".parse().expect("test IP address should parse"),
+                port: Some(443),
+                mac: MacAddress::from_str("11:22:33:44:55:66")
+                    .expect("test MAC address should parse"),
+            },
+            collector_type: "nvue_gnmi_events",
+            labels: [("site".to_string(), "test".to_string())].into(),
+            metadata: None,
+            rack_id: None,
+        };
+
+        sink.handle_event(
+            &context,
+            &CollectorEvent::Metric(Box::new(MetricSample {
+                key: "event:42".to_string(),
+                name: "nvue_gnmi_events".to_string(),
+                metric_type: "on_change_row".to_string(),
+                unit: "severity".to_string(),
+                value: 1.0,
+                labels: vec![
+                    (Cow::Borrowed("type-id"), "link".to_string()),
+                    (Cow::Borrowed("event-id"), "42".to_string()),
+                    (
+                        Cow::Borrowed("time-created"),
+                        "2026-09-10T14:42:19Z".to_string(),
+                    ),
+                ],
+                context: None,
+            })),
+        );
+
+        let exposition = metrics_manager
+            .export_telemetry()
+            .expect("telemetry should export");
+
+        assert!(exposition.contains("type_id=\"link\""));
+        assert!(exposition.contains("event_id=\"42\""));
+        assert!(exposition.contains("time_created=\"2026-09-10T14:42:19Z\""));
+        assert!(!exposition.contains("type-id="));
+        assert!(!exposition.contains("event-id="));
+        assert!(!exposition.contains("time-created="));
+
+        let collision_cases = [
+            ("normalized dynamic labels", vec!["type-id", "type_id"]),
+            (
+                "duplicate valid dynamic labels",
+                vec!["event_id", "event_id"],
+            ),
+            ("digit-prefixed normalization", vec!["9port", "_9port"]),
+            ("empty-name normalization", vec!["", "_"]),
+            ("normalized static label", vec!["endpoint-ip"]),
+            ("valid static label", vec!["endpoint_ip"]),
+            ("exact sample and context label", vec!["site"]),
+        ];
+
+        for (scenario, names) in collision_cases {
+            let sample = CollectorEvent::Metric(Box::new(MetricSample {
+                key: scenario.to_string(),
+                name: "nvue_gnmi_events".to_string(),
+                metric_type: "on_change_row".to_string(),
+                unit: "severity".to_string(),
+                value: 1.0,
+                labels: names
+                    .into_iter()
+                    .map(|name| (Cow::Owned(name.to_string()), "collision".to_string()))
+                    .collect(),
+                context: None,
+            }));
+
+            assert!(
+                sink.try_handle_event(&context, &sample).is_err(),
+                "{scenario}"
+            );
+        }
+
+        let exposition = metrics_manager
+            .export_telemetry()
+            .expect("telemetry should remain exportable");
+
+        assert!(!exposition.contains("\"collision\""));
+    }
+
+    #[test]
+    fn prometheus_label_name_normalization_cases() {
+        let cases = [
+            ("type-id", "type_id"),
+            ("9port", "_9port"),
+            ("", "_"),
+            ("valid_name", "valid_name"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(PrometheusSink::normalize_label_name(input.into()), expected);
+        }
     }
 }

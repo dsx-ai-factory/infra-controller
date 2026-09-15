@@ -65,6 +65,17 @@ const CIRCUIT_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 /// credentials repaired out of band are picked up within a couple of intervals.
 const KNOWN_BAD_CREDENTIAL_COOLDOWN: Duration = Duration::from_secs(60);
 
+/// How long a credential fetch the provider failed is remembered before another
+/// caller may drive the provider again for this endpoint.
+///
+/// Nothing else damps a provider failure: no request reaches the BMC, so the
+/// connection circuit never trips, and the known-bad record only covers
+/// credentials that were fetched and then refused. The value matches
+/// [`KNOWN_BAD_CREDENTIAL_COOLDOWN`] for the same reason it has: a sweep against
+/// an endpoint whose credentials cannot be issued costs one provider call, and a
+/// provider that recovers is noticed within a couple of collection intervals.
+const CREDENTIAL_FETCH_FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
+
 /// Per-endpoint connection circuit breaker state.
 ///
 /// When a BMC stops answering at the network level, every collector sharing the
@@ -114,6 +125,40 @@ pub enum CollectorSweep {
 struct KnownBadCredentials {
     generation: u64,
     proven_at: Instant,
+}
+
+/// The most recent credential fetch the provider failed for this endpoint.
+///
+/// Both paths that drive the provider retry on every read unless something
+/// remembers the failure: a failed initial fetch leaves the init cell empty, and
+/// a failed refresh leaves the generation unchanged. Every collector sharing the
+/// client then pays a provider call per resource, so one endpoint whose
+/// credentials Core refuses to issue turns each sweep into hundreds of failed
+/// `GetBmcCredentials` RPCs, each a database lookup and an error span on the
+/// Core side. Remembering the failure fast-fails those callers locally and
+/// admits one per cooldown to try the provider again.
+#[derive(Debug)]
+struct CredentialFetchFailure {
+    failed_at: Instant,
+    /// The provider's error, rendered, so the fast-fail error still says why
+    /// credentials are unavailable and not only that a fetch was skipped.
+    error: String,
+}
+
+/// Whether `cooldown` has elapsed since `since`, admitting the caller that
+/// observes it and restarting the window for everyone else.
+///
+/// Restarting rather than clearing matters under the collectors' concurrent
+/// fan-out: clearing would let every caller queued behind the owning lock
+/// through at once, turning the single revalidation back into the flood the
+/// cooldown exists to prevent. The admitted caller either moves past the record
+/// or records a fresh verdict.
+fn admit_one_after_cooldown(since: &mut Instant, cooldown: Duration) -> bool {
+    if since.elapsed() < cooldown {
+        return false;
+    }
+    *since = Instant::now();
+    true
 }
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
@@ -219,6 +264,10 @@ pub struct BmcClient {
     /// [`KnownBadCredentials`]. Only touched on the auth-failure path, so the
     /// healthy request path never takes this lock.
     known_bad_credentials: StdMutex<Option<KnownBadCredentials>>,
+    /// Set while the provider's last fetch for this endpoint failed; see
+    /// [`CredentialFetchFailure`]. Only touched around a fetch attempt, so the
+    /// healthy request path never takes this lock.
+    credential_fetch_failure: StdMutex<Option<CredentialFetchFailure>>,
     bmc_identity: Arc<StdMutex<BmcIdentity>>,
 }
 
@@ -268,6 +317,7 @@ impl BmcClient {
             circuit: StdMutex::new(CircuitState::Closed),
             circuit_tripped: AtomicBool::new(false),
             known_bad_credentials: StdMutex::new(None),
+            credential_fetch_failure: StdMutex::new(None),
             bmc_identity,
         })
     }
@@ -305,17 +355,15 @@ impl BmcClient {
     pub async fn ensure_credentials(&self) -> Result<(), HealthError> {
         self.init
             .get_or_try_init(|| async {
-                let credentials = tokio::time::timeout(
-                    CREDENTIAL_REFRESH_TIMEOUT,
-                    self.provider.fetch_credentials(&self.addr),
-                )
-                .await
-                .map_err(|_elapsed| {
+                // The cell runs one initializer at a time, so a fan-out that
+                // arrives while the provider is failing queues here, and each
+                // queued caller then observes the recorded failure instead of
+                // driving the provider again.
+                let credentials = self.fetch_credentials().await.map_err(|error| {
                     HealthError::GenericError(format!(
-                        "Timed out after {}s fetching initial BMC credentials",
-                        CREDENTIAL_REFRESH_TIMEOUT.as_secs(),
+                        "failed to fetch initial BMC credentials: {error}"
                     ))
-                })??;
+                })?;
                 self.inner.set_credentials(credentials.into());
                 self.credential_generation.fetch_add(1, Ordering::AcqRel);
                 Ok::<_, HealthError>(())
@@ -350,25 +398,70 @@ impl BmcClient {
             "Authentication failed, refreshing BMC credentials"
         );
 
-        let credentials = tokio::time::timeout(
-            CREDENTIAL_REFRESH_TIMEOUT,
-            self.provider.fetch_credentials(&self.addr),
-        )
-        .await
-        .map_err(|_elapsed| {
+        let credentials = self.fetch_credentials().await.map_err(|refresh_error| {
             HealthError::GenericError(format!(
-                "Timed out after {}s refreshing BMC credentials following auth error {error}",
-                CREDENTIAL_REFRESH_TIMEOUT.as_secs(),
-            ))
-        })?
-        .map_err(|refresh_error| {
-            HealthError::GenericError(format!(
-                "Failed to refresh credentials after auth error {error}: {refresh_error}"
+                "failed to refresh BMC credentials after auth error {error}: {refresh_error}"
             ))
         })?;
         self.inner.set_credentials(credentials.into());
         self.credential_generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
+    }
+
+    /// Drive the provider for this endpoint, bounded by
+    /// [`CREDENTIAL_REFRESH_TIMEOUT`] and damped by the fetch-failure cooldown.
+    ///
+    /// Callers hold whichever lock serialises their path, the init cell or
+    /// `refresh_lock`, so the cooldown check and the fetch it admits cannot
+    /// interleave with another caller's fetch through this client.
+    async fn fetch_credentials(&self) -> Result<BmcCredentials, HealthError> {
+        self.check_credential_fetch_cooldown()?;
+        let result = match tokio::time::timeout(
+            CREDENTIAL_REFRESH_TIMEOUT,
+            self.provider.fetch_credentials(&self.addr),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(HealthError::GenericError(format!(
+                "timed out after {}s fetching BMC credentials",
+                CREDENTIAL_REFRESH_TIMEOUT.as_secs(),
+            ))),
+        };
+        // A success clears the record rather than leaving the restarted window
+        // behind: the admitted retry can be followed at once by a 401 on the
+        // credentials it just fetched, and that refresh has to be allowed to run.
+        *self
+            .credential_fetch_failure
+            .lock()
+            .expect("credential fetch failure mutex poisoned") =
+            result.as_ref().err().map(|error| CredentialFetchFailure {
+                failed_at: Instant::now(),
+                error: error.to_string(),
+            });
+        result
+    }
+
+    /// Fail fast while the provider's last failure for this endpoint is inside
+    /// the cooldown. Once it elapses, exactly one caller is admitted to retry.
+    fn check_credential_fetch_cooldown(&self) -> Result<(), HealthError> {
+        let mut failure = self
+            .credential_fetch_failure
+            .lock()
+            .expect("credential fetch failure mutex poisoned");
+        let Some(failure) = failure.as_mut() else {
+            return Ok(());
+        };
+        let elapsed = failure.failed_at.elapsed();
+        if admit_one_after_cooldown(&mut failure.failed_at, CREDENTIAL_FETCH_FAILURE_COOLDOWN) {
+            return Ok(());
+        }
+        Err(HealthError::GenericError(format!(
+            "BMC credential fetch skipped: the provider failed {}s ago and is retried after {}s: {}",
+            elapsed.as_secs(),
+            CREDENTIAL_FETCH_FAILURE_COOLDOWN.as_secs(),
+            failure.error,
+        )))
     }
 
     /// Run an idempotent read through the circuit breaker, retrying it once if it
@@ -492,18 +585,9 @@ impl BmcClient {
         if bad.generation != generation {
             return false;
         }
-        if bad.proven_at.elapsed() < KNOWN_BAD_CREDENTIAL_COOLDOWN {
-            return true;
-        }
-
-        // Cooldown elapsed: admit one caller to revalidate. Restart the window
-        // rather than clearing the record — clearing would let every caller
-        // blocked behind this mutex during a concurrent sweep through at once,
-        // turning the single revalidation back into the fan-out this exists to
-        // prevent. The admitted caller either refreshes past this generation or
-        // records a fresh verdict.
-        bad.proven_at = Instant::now();
-        false
+        // The admitted caller either refreshes past this generation or records
+        // a fresh verdict.
+        !admit_one_after_cooldown(&mut bad.proven_at, KNOWN_BAD_CREDENTIAL_COOLDOWN)
     }
 
     /// Record that a replay running at `generation` was refused, so subsequent
@@ -708,6 +792,16 @@ impl BmcClient {
             .known_bad_credentials
             .lock()
             .expect("known-bad credential mutex poisoned") = record;
+    }
+
+    /// Backdate (or clear) the fetch-failure record, for the same reason as
+    /// [`Self::set_known_bad_credentials_for_test`].
+    #[cfg(test)]
+    fn set_credential_fetch_failure_for_test(&self, record: Option<CredentialFetchFailure>) {
+        *self
+            .credential_fetch_failure
+            .lock()
+            .expect("credential fetch failure mutex poisoned") = record;
     }
 }
 
@@ -1336,6 +1430,61 @@ mod tests {
         }
     }
 
+    /// Fails the first fetch and succeeds every fetch after it.
+    struct FlakyProvider {
+        attempts: AtomicUsize,
+    }
+
+    impl CredentialProvider for FlakyProvider {
+        fn fetch_credentials<'a>(
+            &'a self,
+            _endpoint: &'a BmcAddr,
+        ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
+            let attempt = self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+            Box::pin(async move {
+                if attempt == 0 {
+                    Err(HealthError::GenericError("transient".to_string()))
+                } else {
+                    Ok(BmcCredentials::SessionToken {
+                        token: "t".to_string(),
+                    })
+                }
+            })
+        }
+    }
+
+    /// Succeeds the first fetch (the initial load) and fails every fetch after
+    /// it, standing in for a provider that can no longer issue credentials.
+    struct InitOnceThenFailingProvider {
+        calls: AtomicUsize,
+    }
+
+    impl CredentialProvider for InitOnceThenFailingProvider {
+        fn fetch_credentials<'a>(
+            &'a self,
+            _endpoint: &'a BmcAddr,
+        ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
+            let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Box::pin(async move {
+                if call == 0 {
+                    Ok(BmcCredentials::SessionToken {
+                        token: "t".to_string(),
+                    })
+                } else {
+                    Err(HealthError::GenericError("vault down".to_string()))
+                }
+            })
+        }
+    }
+
+    /// A fetch-failure record old enough that the next check admits a retry.
+    fn expired_fetch_failure() -> Option<CredentialFetchFailure> {
+        Some(CredentialFetchFailure {
+            failed_at: Instant::now() - CREDENTIAL_FETCH_FAILURE_COOLDOWN - Duration::from_secs(1),
+            error: "expired".to_string(),
+        })
+    }
+
     fn test_addr() -> BmcAddr {
         BmcAddr {
             ip: "10.0.0.1".parse().unwrap(),
@@ -1800,40 +1949,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_credentials_retries_after_failed_fetch() {
-        struct FlakyProvider {
-            attempts: AtomicUsize,
-        }
+    async fn failed_initial_fetch_is_not_retried_until_the_cooldown_elapses() {
+        // A failed `get_or_try_init` leaves the cell empty, so without the
+        // cooldown every collector read re-drives the provider: one endpoint
+        // whose credentials Core refused to issue cost hundreds of failed
+        // GetBmcCredentials RPCs per minute.
+        let provider = Arc::new(FlakyProvider {
+            attempts: AtomicUsize::new(0),
+        });
+        let client = Arc::new(
+            test_bmc(reqwest(), test_addr(), provider.clone(), None, 10, None)
+                .expect("constructor succeeds"),
+        );
 
-        impl CredentialProvider for FlakyProvider {
-            fn fetch_credentials<'a>(
-                &'a self,
-                _endpoint: &'a BmcAddr,
-            ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
-                let attempt = self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
-                Box::pin(async move {
-                    if attempt == 0 {
-                        Err(HealthError::GenericError("transient".to_string()))
-                    } else {
-                        Ok(BmcCredentials::SessionToken {
-                            token: "t".to_string(),
-                        })
-                    }
-                })
-            }
+        // A concurrent fan-out arriving while the provider fails costs one call.
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let client = client.clone();
+            handles.push(tokio::spawn(
+                async move { client.ensure_credentials().await },
+            ));
         }
+        for handle in handles {
+            handle
+                .await
+                .expect("task")
+                .expect_err("the provider failure surfaces to every caller");
+        }
+        assert_eq!(provider.attempts.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(client.credential_generation.load(Ordering::Acquire), 0);
 
+        // A later read inside the cooldown fast-fails and still names the cause.
+        let error = client
+            .ensure_credentials()
+            .await
+            .expect_err("still inside the cooldown");
+        assert!(
+            error.to_string().contains("transient"),
+            "the fast-fail error must carry the provider's error: {error}"
+        );
+        assert_eq!(provider.attempts.load(AtomicOrdering::SeqCst), 1);
+
+        // Once the cooldown elapses one caller gets to try the provider again.
+        client.set_credential_fetch_failure_for_test(expired_fetch_failure());
+        client
+            .ensure_credentials()
+            .await
+            .expect("the retry after the cooldown succeeds");
+        assert_eq!(provider.attempts.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(client.credential_generation.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_fetch_clears_the_failure_record() {
+        // The admitted retry restarts the window before it runs. If its success
+        // left the record in place, a 401 on the freshly fetched credentials
+        // would find the refresh suppressed and go unreplayed.
         let provider = Arc::new(FlakyProvider {
             attempts: AtomicUsize::new(0),
         });
         let client = test_bmc(reqwest(), test_addr(), provider.clone(), None, 10, None)
             .expect("constructor succeeds");
+        client
+            .ensure_credentials()
+            .await
+            .expect_err("the first fetch fails");
+        client.set_credential_fetch_failure_for_test(expired_fetch_failure());
 
-        assert!(client.ensure_credentials().await.is_err());
-        assert_eq!(client.credential_generation.load(Ordering::Acquire), 0);
-        assert!(client.ensure_credentials().await.is_ok());
-        assert_eq!(client.credential_generation.load(Ordering::Acquire), 1);
-        assert_eq!(provider.attempts.load(AtomicOrdering::SeqCst), 2);
+        let (op, attempts) = scripted_op(vec![Err(auth_error()), Ok("body")]);
+        let value = client
+            .read_with_auth_retry(op)
+            .await
+            .expect("a refresh right after a recovered fetch must run");
+
+        assert_eq!(value, "body");
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(
+            provider.attempts.load(AtomicOrdering::SeqCst),
+            3,
+            "failed fetch, recovered fetch, refresh"
+        );
     }
 
     #[tokio::test]
@@ -1996,7 +2191,7 @@ mod tests {
         let error = result.expect_err("hanging provider must surface as timeout");
         match error {
             HealthError::GenericError(msg) => assert!(
-                msg.contains("Timed out") && msg.contains("initial BMC credentials"),
+                msg.contains("timed out") && msg.contains("initial BMC credentials"),
                 "expected timeout message, got: {msg}"
             ),
             other => panic!("unexpected error variant: {other:?}"),
@@ -2130,28 +2325,6 @@ mod tests {
 
     #[tokio::test]
     async fn read_surfaces_original_error_when_refresh_fails() {
-        struct InitOnceThenFailingProvider {
-            calls: AtomicUsize,
-        }
-
-        impl CredentialProvider for InitOnceThenFailingProvider {
-            fn fetch_credentials<'a>(
-                &'a self,
-                _endpoint: &'a BmcAddr,
-            ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
-                let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-                Box::pin(async move {
-                    if call == 0 {
-                        Ok(BmcCredentials::SessionToken {
-                            token: "t".to_string(),
-                        })
-                    } else {
-                        Err(HealthError::GenericError("vault down".to_string()))
-                    }
-                })
-            }
-        }
-
         let provider = Arc::new(InitOnceThenFailingProvider {
             calls: AtomicUsize::new(0),
         });
@@ -2171,6 +2344,52 @@ mod tests {
             attempts.load(AtomicOrdering::SeqCst),
             1,
             "no retry when the refresh could not produce new credentials"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_is_not_retried_until_the_cooldown_elapses() {
+        // A failed refresh leaves the generation unchanged, so without the
+        // cooldown every 401 pays a provider call: the same fan-out as the
+        // initial fetch once an endpoint's credentials stop being issuable.
+        let provider = Arc::new(InitOnceThenFailingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let client =
+            test_bmc(reqwest(), test_addr(), provider.clone(), None, 10, None).expect("ok");
+
+        for read in 0..3 {
+            let (op, attempts) = scripted_op(vec![Err(auth_error())]);
+            let error = client
+                .read_with_auth_retry(op)
+                .await
+                .expect_err("the refresh cannot produce credentials");
+            assert!(
+                is_auth_error(&error),
+                "read {read} surfaces the original 401: {error:?}"
+            );
+            assert_eq!(
+                attempts.load(AtomicOrdering::SeqCst),
+                1,
+                "read {read} must not be replayed"
+            );
+        }
+        assert_eq!(
+            provider.calls.load(AtomicOrdering::SeqCst),
+            2,
+            "the initial fetch plus the one refresh that failed"
+        );
+
+        client.set_credential_fetch_failure_for_test(expired_fetch_failure());
+        let (op, _) = scripted_op(vec![Err(auth_error())]);
+        client
+            .read_with_auth_retry(op)
+            .await
+            .expect_err("the provider is still failing");
+        assert_eq!(
+            provider.calls.load(AtomicOrdering::SeqCst),
+            3,
+            "the elapsed cooldown admits one refresh"
         );
     }
 

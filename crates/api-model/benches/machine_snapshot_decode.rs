@@ -25,7 +25,7 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use model::machine::Machine;
+use model::machine::AnyMachine;
 use model::machine::json::MachineSnapshotPgJson;
 use model::test_support::alloc_counter::{CountingAllocator, measure_allocs};
 use model::test_support::machine_snapshot;
@@ -36,7 +36,7 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 
 /// The pre-fix `FromRow for Machine` shape: decode the column into a
 /// `serde_json::Value` DOM, then deserialize the struct out of the DOM.
-fn decode_via_value_dom(bytes: &[u8]) -> Machine {
+fn decode_via_value_dom(bytes: &[u8]) -> AnyMachine {
     let json: serde_json::Value = serde_json::from_slice(bytes).expect("valid fixture JSON");
     MachineSnapshotPgJson::deserialize(json)
         .expect("fixture deserializes")
@@ -46,7 +46,7 @@ fn decode_via_value_dom(bytes: &[u8]) -> Machine {
 
 /// The `sqlx::types::Json<T>` shape: deserialize the struct straight from the
 /// column bytes.
-fn decode_direct(bytes: &[u8]) -> Machine {
+fn decode_direct(bytes: &[u8]) -> AnyMachine {
     serde_json::from_slice::<MachineSnapshotPgJson>(bytes)
         .expect("fixture deserializes")
         .try_into()

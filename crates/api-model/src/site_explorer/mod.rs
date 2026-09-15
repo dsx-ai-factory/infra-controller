@@ -1063,15 +1063,47 @@ impl EndpointExplorationReport {
         Ok(Some(self.power_shelf_id.insert(power_shelf_id)))
     }
 
+    /// Returns whether `chassis` reports a serial number usable for switch ID
+    /// generation.
+    ///
+    /// The serial is trimmed first; an empty or whitespace-only serial and the
+    /// literal `"NA"` are all treated the same as a missing serial because some
+    /// switch BMCs return these placeholders in error situations (see
+    /// [`switch_id::from_hardware_info_with_type`]). Rejecting them here lets
+    /// chassis selection fall through to a subsystem that reports a real serial.
+    fn is_switch_chassis_valid(chassis: &Chassis) -> bool {
+        matches!(
+            chassis.serial_number.as_deref().map(str::trim),
+            Some(serial) if !serial.is_empty() && serial != "NA"
+        )
+    }
+
+    /// Returns the chassis reported under the `id` subsystem (matched
+    /// case-insensitively) only when it carries a serial number usable for
+    /// switch ID generation, per [`Self::is_switch_chassis_valid`].
+    fn query_switch_chassis_subsystem(&self, id: &str) -> Option<&Chassis> {
+        let id = id.to_lowercase();
+        self.chassis
+            .iter()
+            .find(|c| c.id.to_lowercase() == id)
+            .filter(|c| Self::is_switch_chassis_valid(c))
+    }
+
     //TODO: refactor for common code with generate_power_shelf_id
     /// Tries to generate and store a MachineId for the discovered endpoint if
     /// enough data for generation is available
     pub fn generate_switch_id(&mut self) -> ModelResult<Option<SwitchId>> {
+        // On GB200 (N5200_LD) the switch serial is reported by the
+        // `MGX_NVSwitch_0` chassis. On Vera Rubin (N6100_LD) that chassis
+        // reports `"NA"` and the usable serial is surfaced by `Chassis_0`
+        // instead, so fall back to it when the primary chassis has no valid
+        // serial.
         let chassis = self
-            .chassis
-            .iter()
-            .find(|c| c.id.to_string().to_lowercase() == "mgx_nvswitch_0")
-            .unwrap();
+            .query_switch_chassis_subsystem("mgx_nvswitch_0")
+            .or_else(|| self.query_switch_chassis_subsystem("chassis_0"))
+            .ok_or(ModelError::HardwareInfo(
+                HardwareInfoError::MissingHardwareInfo(MissingHardwareInfo::Serial),
+            ))?;
         let serial_number = chassis.serial_number.clone();
         let manufacturer = chassis.manufacturer.clone().unwrap_or("NVIDIA".to_string());
         let model = "Switch".to_string();
@@ -1112,6 +1144,32 @@ impl EndpointExplorationReport {
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default()
+    }
+
+    /// BMC firmware observed directly from the exact `BMC` inventory entry.
+    pub fn observed_host_bmc_version(&self) -> Option<&str> {
+        self.service
+            .iter()
+            .find(|service| service.id == "FirmwareInventory")
+            .and_then(|service| {
+                service
+                    .inventories
+                    .iter()
+                    .find(|inventory| inventory.id == "BMC")
+            })
+            .and_then(|inventory| inventory.version.as_deref())
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+    }
+
+    /// Host BIOS/UEFI version observed on the `System_0` resource.
+    pub fn system_bios_version(&self) -> Option<&str> {
+        self.systems
+            .iter()
+            .find(|system| system.id == "System_0")
+            .and_then(|system| system.bios_version.as_deref())
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
     }
 
     pub fn dpu_component_version(&self, component: FirmwareComponentType) -> Option<String> {
@@ -1475,6 +1533,9 @@ pub struct ComputerSystem {
     pub sku: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_order: Option<BootOrder>,
+    /// Version reported by the Redfish `ComputerSystem.BiosVersion` property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bios_version: Option<String>,
     /// SSH port for the system's Redfish serial-console service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_console_ssh_port: Option<u16>,
@@ -3497,6 +3558,7 @@ mod tests {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
                 serial_console_ssh_port: None,
             }],
             chassis: vec![Chassis {
@@ -3544,6 +3606,96 @@ mod tests {
     }
 
     #[test]
+    fn observed_host_bmc_version_requires_exact_non_blank_inventory() {
+        let report_with_inventory = |id: &str, version: &str| EndpointExplorationReport {
+            service: vec![Service {
+                id: "FirmwareInventory".to_string(),
+                inventories: vec![Inventory {
+                    id: id.to_string(),
+                    version: Some(version.to_string()),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            report_with_inventory("BMC-Primary", "1.0.0").observed_host_bmc_version(),
+            None,
+            "only the exact Lenovo GB300 BMC inventory ID is accepted"
+        );
+        assert_eq!(
+            report_with_inventory("BMC", " \t ").observed_host_bmc_version(),
+            None,
+            "blank BMC versions are treated as absent"
+        );
+        assert_eq!(
+            report_with_inventory("BMC", " 1.0.0 ").observed_host_bmc_version(),
+            Some("1.0.0"),
+            "the exact BMC inventory version is trimmed"
+        );
+    }
+
+    #[test]
+    fn system_bios_version_selects_system_0_and_rejects_blank_values() {
+        let report = EndpointExplorationReport {
+            systems: vec![
+                ComputerSystem {
+                    id: "HGX_Baseboard_0".to_string(),
+                    bios_version: Some("wrong-system-version".to_string()),
+                    ..Default::default()
+                },
+                ComputerSystem {
+                    id: "System_0".to_string(),
+                    bios_version: Some(" GBHC01A_01.05.0 ".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            report.system_bios_version(),
+            Some("GBHC01A_01.05.0"),
+            "System_0 must be selected even when the HGX baseboard appears first"
+        );
+
+        let blank_report = EndpointExplorationReport {
+            systems: vec![ComputerSystem {
+                id: "System_0".to_string(),
+                bios_version: Some("  ".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            blank_report.system_bios_version(),
+            None,
+            "blank System_0 BIOS versions are treated as absent"
+        );
+    }
+
+    #[test]
+    fn computer_system_bios_version_is_json_compatible() {
+        let system = ComputerSystem {
+            id: "System_0".to_string(),
+            bios_version: Some("GBHC01A_01.05.0".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&system).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ComputerSystem>(&json).unwrap(),
+            system,
+            "BiosVersion must round-trip through the exploration-report JSON"
+        );
+
+        let without_bios = serde_json::from_str::<ComputerSystem>(r#"{"Id":"System_0"}"#).unwrap();
+        assert_eq!(
+            without_bios.bios_version, None,
+            "older JSON without BiosVersion must remain deserializable"
+        );
+    }
+
+    #[test]
     fn generate_machine_id_for_dpu() {
         let mut report = EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
@@ -3570,6 +3722,7 @@ mod tests {
                 power_state: PowerState::On,
                 sku: None,
                 boot_order: None,
+                bios_version: None,
                 serial_console_ssh_port: None,
             }],
             chassis: vec![Chassis {
@@ -3834,6 +3987,68 @@ mod tests {
                     id: "chassis",
                     manufacturer: None,
                 } => false,
+            }
+        );
+    }
+
+    // `generate_switch_id` prefers the `MGX_NVSwitch_0` chassis serial (GB200)
+    // and otherwise falls back to `Chassis_0` (Vera Rubin). A primary serial
+    // that is missing, the `"NA"` placeholder, empty, or whitespace-only is
+    // unusable and must not block the fallback. Each row varies only the
+    // primary serial; `Chassis_0` always carries a real one, so the resulting
+    // `SwitchId` reveals which chassis was selected.
+    #[test]
+    fn generate_switch_id_falls_back_when_primary_serial_unusable() {
+        fn expected_switch_id(serial: &str) -> SwitchId {
+            switch_id::from_hardware_info_with_type(
+                serial,
+                "NVIDIA",
+                "Switch",
+                SwitchIdSource::ProductBoardChassisSerial,
+                SwitchType::NvLink,
+            )
+            .unwrap()
+        }
+
+        value_scenarios!(
+            run = |primary_serial: Option<&'static str>| {
+                EndpointExplorationReport {
+                    chassis: vec![
+                        Chassis {
+                            id: "MGX_NVSwitch_0".to_string(),
+                            serial_number: primary_serial.map(str::to_string),
+                            ..Default::default()
+                        },
+                        Chassis {
+                            id: "Chassis_0".to_string(),
+                            serial_number: Some("CHASSIS0".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }
+                .generate_switch_id()
+                .unwrap()
+                .unwrap()
+            };
+            "valid primary serial is used" {
+                Some("MGX0") => expected_switch_id("MGX0"),
+            }
+
+            "missing primary serial falls back to Chassis_0" {
+                None => expected_switch_id("CHASSIS0"),
+            }
+
+            "NA primary serial falls back to Chassis_0" {
+                Some("NA") => expected_switch_id("CHASSIS0"),
+            }
+
+            "empty primary serial falls back to Chassis_0" {
+                Some("") => expected_switch_id("CHASSIS0"),
+            }
+
+            "whitespace-only primary serial falls back to Chassis_0" {
+                Some("   ") => expected_switch_id("CHASSIS0"),
             }
         );
     }

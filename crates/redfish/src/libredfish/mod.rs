@@ -115,6 +115,26 @@ pub fn new_pool_with_credential_ops(
     (inner.clone(), inner)
 }
 
+/// A pool whose clients all target nico-bmc-proxy: the proxy resolves the
+/// BMC from the RFC 7239 `Forwarded` header and authenticates upstream
+/// itself, so these clients carry no BMC credentials, and the pool rejects
+/// `RedfishAuth::Direct` and non-443 BMC ports loudly. It implements only
+/// [`RedfishClientPool`], never the sealed [`BmcCredentialOps`]. `pool`
+/// should be built with the client identity the proxy's mTLS listener
+/// expects, and *without* `danger_accept_invalid_certs` -- the proxy,
+/// unlike a BMC, presents a verifiable certificate.
+pub fn new_proxied_pool(
+    credential_reader: Arc<dyn CredentialReader>,
+    pool: libredfish::RedfishClientPool,
+    proxy: HostPortPair,
+) -> Arc<dyn RedfishClientPool> {
+    Arc::new(implementation::ProxiedRedfishClientPoolImpl::new(
+        credential_reader,
+        pool,
+        proxy,
+    ))
+}
+
 /// Create Redfish clients for a certain Redfish BMC endpoint
 #[async_trait]
 pub trait RedfishClientPool: Send + Sync + 'static {

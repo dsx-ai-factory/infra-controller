@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use super::{EventContext, EventProcessor};
 use crate::sink::{
-    Classification, CollectorEvent, HealthReport, HealthReportAlert, HealthReportSuccess,
-    HealthReportTarget, Probe, ReportSource,
+    Classification, CollectorEvent, HealthReport, HealthReportAlert, HealthReportSuccess, Probe,
+    ReportSource,
 };
 
 pub struct LeakEventProcessor {
@@ -69,21 +69,18 @@ impl EventProcessor for LeakEventProcessor {
 
         // Normalize each source's leak signal into the derived tray leak report
         // consumed by rack leak aggregation.
-        let (target, leak_classification, alert_kind, detail_kind) = match report.source {
-            ReportSource::BmcLeakDetectors => (
-                HealthReportTarget::Machine,
-                Classification::LeakDetector,
-                "leak-detector",
-                "detectors",
-            ),
-            ReportSource::NvueLeakage => (
-                HealthReportTarget::Switch,
-                Classification::Leak,
-                "nvue-leakage",
-                "leakage sensors",
-            ),
+        let (leak_classification, alert_kind, detail_kind) = match report.source {
+            ReportSource::BmcLeakDetectors => {
+                (Classification::LeakDetector, "leak-detector", "detectors")
+            }
+            ReportSource::NvueLeakage => (Classification::Leak, "nvue-leakage", "leakage sensors"),
             _ => return Vec::new(),
         };
+        // The derived report addresses whatever the source report addressed.
+        // BMC leak detectors are collected from power shelves as well as
+        // machine trays, and a power-shelf report forced onto the machine
+        // target is rejected by the machine sink for lack of a machine id.
+        let target = report.target;
 
         let leak_alerts: Vec<&HealthReportAlert> = report
             .alerts
@@ -135,7 +132,7 @@ impl EventProcessor for LeakEventProcessor {
 
         let leak_report = HealthReport {
             source: ReportSource::TrayLeakDetection,
-            target: Some(target),
+            target,
             observed_at: Some(chrono::Utc::now()),
             successes,
             alerts,
@@ -155,6 +152,7 @@ mod tests {
 
     use super::*;
     use crate::endpoint::BmcAddr;
+    use crate::sink::HealthReportTarget;
 
     fn context() -> EventContext {
         EventContext {
@@ -323,6 +321,44 @@ mod tests {
             processor.process_event(&context(), &CollectorEvent::HealthReport(Arc::new(report)));
 
         assert!(emitted.is_empty());
+    }
+
+    /// The derived report inherits the source report's target. Machine and
+    /// switch trays are covered above; this pins the targets a hard-coded
+    /// mapping got wrong or could not express.
+    #[test]
+    fn derived_report_inherits_source_target() {
+        check_values(
+            [
+                Check {
+                    scenario: "power shelf leak detectors stay on the power shelf target",
+                    input: Some(HealthReportTarget::PowerShelf),
+                    expect: Some(HealthReportTarget::PowerShelf),
+                },
+                Check {
+                    scenario: "an endpoint without metadata derives no target",
+                    input: None,
+                    expect: None,
+                },
+            ],
+            |target| {
+                let processor = LeakEventProcessor::new(1);
+                let report = HealthReport {
+                    source: ReportSource::BmcLeakDetectors,
+                    target,
+                    observed_at: Some(chrono::Utc::now()),
+                    successes: Vec::new(),
+                    alerts: vec![leak_alert("Detector_0")],
+                };
+
+                let emitted = processor
+                    .process_event(&context(), &CollectorEvent::HealthReport(Arc::new(report)));
+                let [CollectorEvent::HealthReport(derived)] = emitted.as_slice() else {
+                    panic!("expected exactly one derived health report");
+                };
+                derived.target
+            },
+        );
     }
 
     fn unreadable_detector_alert(target: &str) -> HealthReportAlert {

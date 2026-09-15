@@ -10,7 +10,7 @@ the management backend for NVIDIA Infrastructure Controller (NICo), exposed as a
 provides multi-tenant, API-driven bare-metal lifecycle management, working in
 concert with Core services for on-site hardware operations.
 
-> **Status:** Experimental/Preview. APIs, configurations, and features may
+> **Status:** Active development. APIs, configurations, and features may
 > change without notice between releases.
 
 ### Key Responsibilities
@@ -370,7 +370,7 @@ Keep handlers thin and reuse the common surfaces already in the tree:
    `Validate`; keep auth, ownership, site readiness, and DB-backed checks in the
    handler where context is available.
 3. Use `IsProviderOrTenant` from `rest-api/api/pkg/api/handler/util/common/common.go`
-   to retrieve Provider and Tenant objects. When adding list endpoints, reuse 
+   to retrieve Provider and Tenant objects. When adding list endpoints, reuse
    `pagination.PageRequest`, `common.ValidateKnownQueryParams`, and `common.GetSearchQuery`.
 4. Put request-to-proto conversion on the API request type and entity-to-proto
    conversion on the DB model, following the "Proto conversion methods" section
@@ -586,7 +586,8 @@ stays on the entity because there's no API request body for delete.
 `InstanceType` is the reference for everything else under this rollout
 (typed-slice validation, typed-map proto behavior, ozzo composition,
 shared conversion helpers): `(*cdbm.InstanceType).ToProto/FromProto`
-+ `(*InstanceType).AttachCapabilities` on the entity,
+
+- `(*InstanceType).AttachCapabilities` on the entity,
 `APIMachineCapabilities` + `APIMachineCapability` for the list/element
 split, `cdbm.Labels` for the typed map, and
 `common/pkg/util.IntPtrToUint32Ptr` for shared casts.
@@ -860,9 +861,11 @@ When writing git commit messages, follow the conventions below:
 All commits **must** meet the following signing requirement:
 
 - **DCO sign-off** — certifies the Developer Certificate of Origin:
+
   ```bash
   git commit -s -m "Your commit message"
   ```
+
   DCO compliance is enforced automatically; unsigned commits block merging.
 
 ## Pull Request Guidelines
@@ -917,7 +920,7 @@ make pre-commit-update      # update hooks to latest versions
 ## Further Reading
 
 - [`README.md`](README.md) — Project overview and getting started
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — Contribution workflow and DCO process
+- [`CONTRIBUTING.md`](../CONTRIBUTING.md) — Contribution workflow and DCO process
 - [`openapi/README.md`](openapi/README.md) — OpenAPI schema development
 - [`cli/README.md`](cli/README.md) — CLI client reference
 - [`deploy/README.md`](deploy/README.md) — Deployment quickstart guide

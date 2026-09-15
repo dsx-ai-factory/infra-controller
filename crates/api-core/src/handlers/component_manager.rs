@@ -25,7 +25,7 @@ use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
 use carbide_utils::none_if_empty::NoneIfEmpty;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
@@ -35,7 +35,7 @@ use component_manager::compute_tray_manager::{
 };
 use component_manager::core_compute_manager::CoreComputeTrayManager;
 use component_manager::error::ComponentManagerError;
-use component_manager::nv_switch_manager::SwitchEndpoint;
+use component_manager::nv_switch_manager::{NvSwitchManager, SwitchEndpoint};
 use component_manager::power_shelf_manager::{PowerShelfEndpoint, PowerShelfVendor};
 use component_manager::types::FirmwareUpdateOptions;
 use db::{self, WithTransaction};
@@ -47,9 +47,11 @@ use model::component_manager::{
 };
 use model::firmware::FirmwareComponentType;
 use model::machine::machine_search_config::MachineSearchConfig;
-use model::machine::{Machine, MachineMaintenanceOperation};
+use model::machine::{
+    HostMachine, HostReprovisionState, MachineMaintenanceOperation, ManagedHostState,
+};
 use model::power_shelf::PowerShelfMaintenanceOperation;
-use model::rack::{FirmwareUpgradeJob, MaintenanceActivity};
+use model::rack::{FirmwareProgressState, FirmwareUpgradeJob, MaintenanceActivity};
 use model::switch::SwitchMaintenanceOperation;
 use tonic::{Code, Request, Response, Status};
 
@@ -59,6 +61,7 @@ use crate::handlers::firmware::load_desired_firmware_version_entries;
 
 const MACHINE_POWER_OVERRIDE_SOURCE: &str = "component_power_control";
 const MACHINE_POWER_OVERRIDE_MESSAGE: &str = "Compute-Tray component power control in progress";
+const UNTRACKED_SWITCH_FIRMWARE_ERROR: &str = "no firmware job tracked for this switch";
 
 fn require_component_manager(api: &Api) -> Result<&ComponentManager, Status> {
     api.component_manager
@@ -120,8 +123,9 @@ fn error_result(id: &str, error: String) -> rpc::ComponentResult {
     )
 }
 
-fn status_result(id: &str, status: Status) -> rpc::ComponentResult {
-    let component_status = match status.code() {
+/// Map a gRPC `Status` code onto the caller-facing per-component status code.
+fn component_status_code_for(code: Code) -> rpc::ComponentManagerStatusCode {
+    match code {
         Code::InvalidArgument | Code::FailedPrecondition | Code::OutOfRange => {
             rpc::ComponentManagerStatusCode::InvalidArgument
         }
@@ -131,8 +135,15 @@ fn status_result(id: &str, status: Status) -> rpc::ComponentResult {
             rpc::ComponentManagerStatusCode::Unavailable
         }
         _ => rpc::ComponentManagerStatusCode::InternalError,
-    };
-    make_result(id, component_status, Some(status.message().to_string()))
+    }
+}
+
+fn status_result(id: &str, status: Status) -> rpc::ComponentResult {
+    make_result(
+        id,
+        component_status_code_for(status.code()),
+        Some(status.message().to_string()),
+    )
 }
 
 fn not_found_component_result(id: &str, message: impl Into<String>) -> rpc::ComponentResult {
@@ -157,21 +168,18 @@ fn safe_firmware_target_display(firmware_version: &str) -> String {
         )
 }
 
+fn requested_firmware_version(activities: &[MaintenanceActivity]) -> Option<String> {
+    activities.iter().find_map(|activity| match activity {
+        MaintenanceActivity::FirmwareUpgrade {
+            firmware_version: Some(firmware_version),
+            ..
+        } if !firmware_version.is_empty() => Some(safe_firmware_target_display(firmware_version)),
+        _ => None,
+    })
+}
+
 fn rack_requested_firmware_version(rack: &model::rack::Rack) -> Option<String> {
-    rack.config
-        .maintenance_requested
-        .as_ref()?
-        .activities
-        .iter()
-        .find_map(|activity| match activity {
-            MaintenanceActivity::FirmwareUpgrade {
-                firmware_version: Some(firmware_version),
-                ..
-            } if !firmware_version.is_empty() => {
-                Some(safe_firmware_target_display(firmware_version))
-            }
-            _ => None,
-        })
+    requested_firmware_version(&rack.config.maintenance_requested.as_ref()?.activities)
 }
 
 fn rack_firmware_upgrade_requested(rack: &model::rack::Rack) -> bool {
@@ -187,56 +195,116 @@ fn rack_firmware_upgrade_requested(rack: &model::rack::Rack) -> bool {
         })
 }
 
-fn firmware_job_state(job: &FirmwareUpgradeJob) -> i32 {
-    if let Some(status) = job.status.as_deref() {
-        match status.to_ascii_lowercase().as_str() {
-            "queued" | "pending" => return rpc::FirmwareUpdateState::FwStateQueued as i32,
-            "running" | "in_progress" | "active" => {
-                return rpc::FirmwareUpdateState::FwStateInProgress as i32;
-            }
-            "verifying" => return rpc::FirmwareUpdateState::FwStateVerifying as i32,
-            "completed" | "success" | "done" => {
-                return rpc::FirmwareUpdateState::FwStateCompleted as i32;
-            }
-            "failed" | "error" => return rpc::FirmwareUpdateState::FwStateFailed as i32,
-            "cancelled" | "canceled" => return rpc::FirmwareUpdateState::FwStateCancelled as i32,
-            _ => {}
+fn firmware_job_state(job: &FirmwareUpgradeJob) -> rpc::FirmwareUpdateState {
+    match job.status.as_ref() {
+        Some(FirmwareProgressState::Pending) => return rpc::FirmwareUpdateState::FwStateQueued,
+        Some(FirmwareProgressState::InProgress) => {
+            return rpc::FirmwareUpdateState::FwStateInProgress;
         }
+        Some(FirmwareProgressState::Completed) => {
+            return rpc::FirmwareUpdateState::FwStateCompleted;
+        }
+        Some(FirmwareProgressState::Failed) => return rpc::FirmwareUpdateState::FwStateFailed,
+        Some(FirmwareProgressState::Unknown(_)) | None => {}
     }
 
     let devices: Vec<_> = job.all_devices().collect();
     let total = devices.len();
 
     if total == 0 {
-        return rpc::FirmwareUpdateState::FwStateUnknown as i32;
+        return rpc::FirmwareUpdateState::FwStateUnknown;
     }
 
     let completed = devices
         .iter()
-        .filter(|device| device.status == "completed")
+        .filter(|device| device.status == FirmwareProgressState::Completed)
         .count();
     let failed = devices
         .iter()
-        .filter(|device| device.status == "failed")
+        .filter(|device| device.status == FirmwareProgressState::Failed)
         .count();
     let terminal = completed + failed;
     let has_in_progress = devices
         .iter()
-        .any(|device| matches!(device.status.as_str(), "in_progress" | "running" | "active"));
+        .any(|device| device.status == FirmwareProgressState::InProgress);
     let all_queued = devices
         .iter()
-        .all(|device| matches!(device.status.as_str(), "pending" | "queued" | "started"));
+        .all(|device| device.status == FirmwareProgressState::Pending);
 
     if failed > 0 && terminal == total {
-        rpc::FirmwareUpdateState::FwStateFailed as i32
+        rpc::FirmwareUpdateState::FwStateFailed
     } else if completed == total {
-        rpc::FirmwareUpdateState::FwStateCompleted as i32
+        rpc::FirmwareUpdateState::FwStateCompleted
     } else if terminal > 0 || has_in_progress || job.started_at.is_some() {
-        rpc::FirmwareUpdateState::FwStateInProgress as i32
+        rpc::FirmwareUpdateState::FwStateInProgress
     } else if all_queued {
-        rpc::FirmwareUpdateState::FwStateQueued as i32
+        rpc::FirmwareUpdateState::FwStateQueued
     } else {
-        rpc::FirmwareUpdateState::FwStateUnknown as i32
+        rpc::FirmwareUpdateState::FwStateUnknown
+    }
+}
+
+/// Summarizes a failed rack firmware upgrade into an operator-facing message.
+///
+/// A rack upgrade fans out to every device in the rack, so the one rack-level
+/// `ComponentResult` can only carry a summary of the per-device outcomes the rack
+/// controller recorded. A common backend reason is useful inline; divergent failures
+/// are summarized by count because their details belong in the backend service logs.
+///
+/// A job-level failure carries no per-device reason, so the rack's error state is the
+/// only detail left. It is reported as context rather than as the cause: see the note
+/// on the `RackState::Error` branch below.
+fn rack_firmware_failure_summary(rack: &model::rack::Rack, job: &FirmwareUpgradeJob) -> String {
+    let total = job.all_devices().count();
+    let failed: Vec<_> = job
+        .all_devices()
+        .filter(|device| device.status == FirmwareProgressState::Failed)
+        .collect();
+
+    if failed.is_empty() {
+        // `firmware_upgrade_job` is only cleared when the next firmware maintenance
+        // request is accepted, never when a job fails, while `controller_state` moves
+        // on with any later rack operation — NVOS, NMX cluster, ingestion. A failed
+        // job can therefore outlive its own error and sit next to an unrelated one, so
+        // quote the rack error as context instead of claiming it caused this upgrade
+        // to fail.
+        if let model::rack::RackState::Error { cause } = &rack.controller_state.value {
+            let cause = cause.trim();
+            if !cause.is_empty() {
+                return format!("firmware upgrade failed; rack is in error state: {cause}");
+            }
+        }
+
+        return if total == 0 {
+            "firmware upgrade failed before any device update was submitted".to_owned()
+        } else {
+            "firmware upgrade failed without a failed per-device result".to_owned()
+        };
+    }
+
+    let summary = format!(
+        "firmware upgrade failed: {}/{total} devices failed",
+        failed.len()
+    );
+
+    let mut reasons: Vec<&str> = failed
+        .iter()
+        .filter_map(|device| device.error_message.as_deref())
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .collect();
+    let reported = reasons.len();
+    reasons.sort_unstable();
+    reasons.dedup();
+
+    match reasons.as_slice() {
+        [] => summary,
+        [reason] if reported == failed.len() => format!("{summary}: {reason}"),
+        [_] => format!("{summary}; some devices reported no reason; see backend service logs"),
+        reasons => format!(
+            "{summary}: {} distinct errors; see backend service logs",
+            reasons.len()
+        ),
     }
 }
 
@@ -247,9 +315,9 @@ fn rack_firmware_status(rack: &model::rack::Rack) -> rpc::FirmwareUpdateStatus {
     let state = if let Some(job) = job {
         firmware_job_state(job)
     } else if firmware_upgrade_requested {
-        rpc::FirmwareUpdateState::FwStateQueued as i32
+        rpc::FirmwareUpdateState::FwStateQueued
     } else {
-        rpc::FirmwareUpdateState::FwStateUnknown as i32
+        rpc::FirmwareUpdateState::FwStateUnknown
     };
     let target_version = requested_version
         .or_else(|| job.and_then(|job| job.firmware_id.clone()))
@@ -259,12 +327,379 @@ fn rack_firmware_status(rack: &model::rack::Rack) -> rpc::FirmwareUpdateStatus {
         .or_else(|| firmware_upgrade_requested.then_some(rack.updated))
         .map(Into::into);
 
+    // A failed upgrade must carry why it failed: the rack controller already
+    // persisted each device's reason from the backend, and this is the only place an
+    // operator can see it.
+    let result = if state == rpc::FirmwareUpdateState::FwStateFailed {
+        let summary = job.map_or_else(
+            || "firmware upgrade failed".to_owned(),
+            |job| rack_firmware_failure_summary(rack, job),
+        );
+        error_result(rack.id.as_ref(), summary)
+    } else {
+        success_result(rack.id.as_ref())
+    };
+
     rpc::FirmwareUpdateStatus {
-        result: Some(success_result(rack.id.as_ref())),
-        state,
+        result: Some(result),
+        state: state as i32,
         target_version,
         updated_at,
     }
+}
+
+fn persisted_firmware_status(
+    component_id: impl std::fmt::Display,
+    status: &model::rack::RackFirmwareUpgradeStatus,
+) -> rpc::FirmwareUpdateStatus {
+    let component_id = component_id.to_string();
+    let (state, result) = match &status.status {
+        model::rack::RackFirmwareUpgradeState::Started => (
+            rpc::FirmwareUpdateState::FwStateQueued,
+            success_result(&component_id),
+        ),
+        model::rack::RackFirmwareUpgradeState::InProgress => (
+            rpc::FirmwareUpdateState::FwStateInProgress,
+            success_result(&component_id),
+        ),
+        model::rack::RackFirmwareUpgradeState::Completed => (
+            rpc::FirmwareUpdateState::FwStateCompleted,
+            success_result(&component_id),
+        ),
+        model::rack::RackFirmwareUpgradeState::Failed { cause } => (
+            rpc::FirmwareUpdateState::FwStateFailed,
+            error_result(&component_id, cause.clone()),
+        ),
+    };
+
+    rpc::FirmwareUpdateStatus {
+        result: Some(result),
+        state: state as i32,
+        // The per-device status currently persists the backend task ID and state,
+        // but not the firmware object ID.
+        target_version: String::new(),
+        updated_at: status
+            .ended_at
+            .as_ref()
+            .or(status.started_at.as_ref())
+            .copied()
+            .map(Into::into),
+    }
+}
+
+fn queued_firmware_status(
+    switch_id: SwitchId,
+    requested_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> rpc::FirmwareUpdateStatus {
+    rpc::FirmwareUpdateStatus {
+        result: Some(success_result(&switch_id.to_string())),
+        state: rpc::FirmwareUpdateState::FwStateQueued as i32,
+        target_version: String::new(),
+        updated_at: requested_at.map(Into::into),
+    }
+}
+
+/// The firmware upgrade request currently in flight for a switch, whether it was
+/// accepted at the rack or already dispatched to the device.
+struct SwitchFirmwareRequest {
+    /// When the request was accepted, used as the cycle boundary. `None` for a
+    /// scope persisted before acceptance timestamps existed: the request is
+    /// active but its boundary is unknown. It is never derived from a mutable
+    /// column such as `racks.updated`, which firmware polling advances on every
+    /// write and which would keep moving the boundary past a running update.
+    requested_at: Option<chrono::DateTime<chrono::Utc>>,
+    target_version: Option<String>,
+}
+
+fn switch_firmware_request(
+    switch: &model::switch::Switch,
+    rack: Option<&model::rack::Rack>,
+) -> Option<SwitchFirmwareRequest> {
+    let firmware_activity = MaintenanceActivity::FirmwareUpgrade {
+        firmware_version: None,
+        components: vec![],
+        force_update: false,
+    };
+    let switch_request = switch
+        .switch_reprovisioning_requested
+        .as_ref()
+        .filter(|request| {
+            request.activities.is_empty()
+                || request
+                    .activities
+                    .iter()
+                    .any(|activity| activity.same_kind(&firmware_activity))
+        })
+        .map(|request| {
+            (
+                Some(request.requested_at),
+                requested_firmware_version(&request.activities),
+            )
+        });
+    let rack_request = rack.and_then(|rack| {
+        rack.config
+            .maintenance_requested
+            .as_ref()
+            .filter(|scope| {
+                scope.should_run(&firmware_activity)
+                    && (scope.is_full_rack() || scope.switch_ids.contains(&switch.id))
+            })
+            .map(|scope| {
+                (
+                    scope.requested_at,
+                    requested_firmware_version(&scope.activities),
+                )
+            })
+    });
+
+    if switch_request.is_none() && rack_request.is_none() {
+        return None;
+    }
+    let requested_at = switch_request
+        .as_ref()
+        .and_then(|(requested_at, _)| *requested_at)
+        .max(
+            rack_request
+                .as_ref()
+                .and_then(|(requested_at, _)| *requested_at),
+        );
+    // The device request is the dispatched form of the rack request and does not
+    // have to repeat the version the operator asked for.
+    let target_version = switch_request
+        .and_then(|(_, version)| version)
+        .or_else(|| rack_request.and_then(|(_, version)| version));
+
+    Some(SwitchFirmwareRequest {
+        requested_at,
+        target_version,
+    })
+}
+
+/// Selects the persisted result only when it belongs to the active request.
+/// A pending request with no current result is queued. Once the request is gone the
+/// persisted result is not served at all, it records a cycle that has already ended and
+/// would otherwise shadow the backend for as long as the row survives, so the caller
+/// queries the component-manager backend instead.
+fn select_persisted_switch_firmware_status(
+    switch_id: SwitchId,
+    persisted_status: Option<&model::rack::RackFirmwareUpgradeStatus>,
+    request: Option<&SwitchFirmwareRequest>,
+) -> Option<rpc::FirmwareUpdateStatus> {
+    match request {
+        Some(request) => {
+            let status = persisted_status
+                // An unknown boundary cannot prove the status belongs to an
+                // earlier cycle, so keep it rather than reporting Queued forever.
+                .filter(|status| {
+                    request
+                        .requested_at
+                        .is_none_or(|requested_at| status.is_current_for(requested_at))
+                })
+                .map_or_else(
+                    || queued_firmware_status(switch_id, request.requested_at),
+                    |status| persisted_firmware_status(switch_id, status),
+                );
+            // The per-device backend status never persists the firmware object ID.
+            Some(rpc::FirmwareUpdateStatus {
+                target_version: request.target_version.clone().unwrap_or_default(),
+                ..status
+            })
+        }
+        None => None,
+    }
+}
+
+/// Retains the terminal per-switch result of the latest rack job as a fallback.
+/// A component-manager backend result takes precedence over this status.
+fn retained_rack_switch_firmware_status(
+    switch: &model::switch::Switch,
+    rack: Option<&model::rack::Rack>,
+) -> Option<rpc::FirmwareUpdateStatus> {
+    let job = rack?.firmware_upgrade_job.as_ref()?;
+    if !matches!(
+        firmware_job_state(job),
+        rpc::FirmwareUpdateState::FwStateCompleted | rpc::FirmwareUpdateState::FwStateFailed
+    ) {
+        return None;
+    }
+
+    let persisted_status = switch
+        .firmware_upgrade_status
+        .as_ref()
+        .filter(|status| status.is_terminal())?;
+
+    if job
+        .started_at
+        .is_some_and(|started_at| !persisted_status.is_current_for(started_at))
+    {
+        return None;
+    }
+
+    let mut status = persisted_firmware_status(switch.id, persisted_status);
+    status.target_version = job
+        .firmware_id
+        .as_deref()
+        .map(safe_firmware_target_display)
+        .unwrap_or_default();
+
+    Some(status)
+}
+
+fn untracked_switch_firmware_status(switch_id: SwitchId) -> rpc::FirmwareUpdateStatus {
+    rpc::FirmwareUpdateStatus {
+        result: Some(error_result(
+            &switch_id.to_string(),
+            UNTRACKED_SWITCH_FIRMWARE_ERROR.into(),
+        )),
+        state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
+        target_version: String::new(),
+        updated_at: None,
+    }
+}
+
+async fn switch_firmware_statuses(
+    api: &Api,
+    switch_ids: &[SwitchId],
+) -> Result<Vec<rpc::FirmwareUpdateStatus>, Status> {
+    let mut conn = api
+        .database_connection
+        .acquire()
+        .await
+        .map_err(|e| Status::internal(format!("failed to acquire database connection: {e}")))?;
+
+    let switches = db::switch::find_by(
+        &mut conn,
+        db::ObjectColumnFilter::List(db::switch::IdColumn, switch_ids),
+    )
+    .await
+    .map_err(|e| Status::internal(format!("failed to look up switches: {e}")))?;
+    let rack_ids: Vec<_> = switches
+        .iter()
+        .filter_map(|switch| switch.rack_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    drop(conn);
+
+    let racks = if rack_ids.is_empty() {
+        vec![]
+    } else {
+        db::rack::find_by(
+            api.db_reader().as_mut(),
+            db::ObjectColumnFilter::List(db::rack::IdColumn, &rack_ids),
+        )
+        .await
+        .map_err(|e| Status::internal(format!("failed to look up switch racks: {e}")))?
+    };
+
+    let switch_by_id: HashMap<_, _> = switches
+        .into_iter()
+        .map(|switch| (switch.id, switch))
+        .collect();
+    let rack_by_id: HashMap<_, _> = racks
+        .into_iter()
+        .map(|rack| (rack.id.clone(), rack))
+        .collect();
+
+    let mut statuses = Vec::new();
+    let mut backend_switch_ids = Vec::new();
+    let mut persisted_fallbacks = HashMap::new();
+
+    for switch_id in switch_ids {
+        let Some(switch) = switch_by_id.get(switch_id) else {
+            backend_switch_ids.push(*switch_id);
+            continue;
+        };
+        let rack = switch
+            .rack_id
+            .as_ref()
+            .and_then(|rack_id| rack_by_id.get(rack_id));
+        if let Some(status) = select_persisted_switch_firmware_status(
+            switch.id,
+            switch.firmware_upgrade_status.as_ref(),
+            switch_firmware_request(switch, rack).as_ref(),
+        ) {
+            statuses.push(status);
+        } else {
+            if let Some(fallback) = retained_rack_switch_firmware_status(switch, rack) {
+                persisted_fallbacks.insert(switch.id, fallback);
+            }
+
+            backend_switch_ids.push(*switch_id);
+        }
+    }
+
+    if backend_switch_ids.is_empty() {
+        return Ok(statuses);
+    }
+
+    let cm = require_component_manager(api)?;
+    let endpoints = resolve_switch_endpoints(api, &backend_switch_ids).await?;
+
+    for unresolved in &endpoints.unresolved {
+        // Endpoint resolution did not produce a newer backend observation, so
+        // preserve a terminal result retained from the rack firmware job.
+        statuses.push(
+            persisted_fallbacks
+                .remove(&unresolved.id)
+                .unwrap_or_else(|| rpc::FirmwareUpdateStatus {
+                    result: Some(error_result(
+                        &unresolved.id.to_string(),
+                        unresolved.reason.clone(),
+                    )),
+                    state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
+                    target_version: String::new(),
+                    updated_at: None,
+                }),
+        );
+    }
+
+    if !endpoints.resolved.endpoints.is_empty() {
+        let backend_statuses = cm
+            .nv_switch
+            .get_firmware_status(&endpoints.resolved.endpoints)
+            .await
+            .map_err(component_manager_error_to_status)?;
+
+        let mut observed_switch_ids = HashSet::new();
+
+        statuses.extend(backend_statuses.into_iter().map(|s| {
+            if let Some(switch_id) = endpoints.resolved.mac_to_id.get(&s.bmc_mac) {
+                observed_switch_ids.insert(*switch_id);
+                persisted_fallbacks.remove(switch_id);
+            }
+
+            let id = switch_mac_to_id_str(&s.bmc_mac, &endpoints.resolved.mac_to_id);
+            rpc::FirmwareUpdateStatus {
+                result: Some(if s.error.is_none() {
+                    success_result(&id)
+                } else {
+                    error_result(&id, s.error.unwrap_or_default())
+                }),
+                state: map_fw_state(s.state),
+                target_version: s.target_version,
+                updated_at: None,
+            }
+        }));
+
+        for endpoint in &endpoints.resolved.endpoints {
+            let Some(switch_id) = endpoints.resolved.mac_to_id.get(&endpoint.bmc_mac) else {
+                continue;
+            };
+
+            if observed_switch_ids.contains(switch_id) {
+                continue;
+            }
+
+            statuses.push(
+                persisted_fallbacks
+                    .remove(switch_id)
+                    .unwrap_or_else(|| untracked_switch_firmware_status(*switch_id)),
+            );
+        }
+    }
+
+    Ok(statuses)
 }
 
 fn build_inventory_entries(
@@ -382,7 +817,7 @@ fn switch_maintenance_request_result_to_component_result(
 async fn queue_machine_power_control_via_state_controller(
     api: &Api,
     cm: &ComponentManager,
-    machine_ids: &[carbide_uuid::machine::MachineId],
+    machine_ids: &[HostMachineId],
     action: PowerAction,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
     let operation = map_machine_maintenance_operation(action);
@@ -392,7 +827,7 @@ async fn queue_machine_power_control_via_state_controller(
 async fn queue_machine_maintenance_via_state_controller(
     api: &Api,
     cm: &ComponentManager,
-    machine_ids: &[carbide_uuid::machine::MachineId],
+    machine_ids: &[HostMachineId],
     operation: MachineMaintenanceOperation,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
     let results = cm
@@ -684,7 +1119,7 @@ fn push_rack_firmware_target(
 
 async fn group_machine_ids_by_rack(
     api: &Api,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
 ) -> Result<Vec<RackFirmwareMaintenanceTarget>, Status> {
     let machines = db::machine::find(
         api.db_reader().as_mut(),
@@ -721,7 +1156,7 @@ async fn group_machine_ids_by_rack(
 }
 
 /// Returns whether the machine is a rack-scale MNNVL server (GB200, GB300, etc.).
-fn is_rack_scale_server(machine: &Machine) -> bool {
+fn is_rack_scale_server(machine: &HostMachine) -> bool {
     machine
         .status
         .hardware_info
@@ -736,9 +1171,9 @@ fn is_rack_scale_server(machine: &Machine) -> bool {
 /// Unknown ids are a hard error here (firmware path); power control collects
 /// them as per-machine results instead via [`machine_is_rack_scale`].
 fn partition_loaded_compute_machines_by_rack_scale(
-    machines_by_id: &HashMap<MachineId, Machine>,
-    machine_ids: &[MachineId],
-) -> Result<(Vec<MachineId>, Vec<MachineId>), Status> {
+    machines_by_id: &HashMap<HostMachineId, HostMachine>,
+    machine_ids: &[HostMachineId],
+) -> Result<(Vec<HostMachineId>, Vec<HostMachineId>), Status> {
     let mut rack_scale = Vec::new();
     let mut standalone = Vec::new();
     for &machine_id in machine_ids {
@@ -756,8 +1191,8 @@ fn partition_loaded_compute_machines_by_rack_scale(
 /// simply absent from the returned map, left for the caller to handle.
 async fn load_machines_by_id(
     api: &Api,
-    machine_ids: &[MachineId],
-) -> Result<HashMap<MachineId, Machine>, Status> {
+    machine_ids: &[HostMachineId],
+) -> Result<HashMap<HostMachineId, HostMachine>, Status> {
     let machines = db::machine::find(
         api.db_reader().as_mut(),
         db::ObjectFilter::List(machine_ids),
@@ -776,8 +1211,8 @@ async fn load_machines_by_id(
 /// the map. Callers decide whether an unknown id aborts the batch or is
 /// collected as a per-machine error.
 fn machine_is_rack_scale(
-    machines_by_id: &HashMap<MachineId, Machine>,
-    machine_id: MachineId,
+    machines_by_id: &HashMap<HostMachineId, HostMachine>,
+    machine_id: HostMachineId,
 ) -> Result<bool, Status> {
     let machine = machines_by_id
         .get(&machine_id)
@@ -788,7 +1223,7 @@ fn machine_is_rack_scale(
 /// Initiate a firmware upgrade for standalone (non rack-scale) servers
 async fn schedule_host_reprovisioning_firmware_update(
     api: &Api,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
 ) -> Vec<rpc::ComponentResult> {
     let mut results = Vec::with_capacity(machine_ids.len());
     for machine_id in machine_ids {
@@ -802,7 +1237,7 @@ async fn schedule_host_reprovisioning_firmware_update(
 
 async fn schedule_one_host_reprovisioning_firmware_update(
     api: &Api,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
 ) -> Result<(), String> {
     let mut txn = api
         .txn_begin()
@@ -1031,6 +1466,20 @@ fn switch_firmware_maintenance_activities(
 struct UnresolvedDevice<Id> {
     id: Id,
     reason: String,
+}
+
+/// Reports each device that couldn't be resolved to a backend endpoint as an errored
+/// `FwStateUnknown` firmware status, so it still surfaces in the response rather than being
+/// silently dropped from the batch.
+fn unresolved_firmware_statuses<Id: std::fmt::Display>(
+    unresolved: &[UnresolvedDevice<Id>],
+) -> impl Iterator<Item = rpc::FirmwareUpdateStatus> + '_ {
+    unresolved.iter().map(|u| rpc::FirmwareUpdateStatus {
+        result: Some(error_result(&u.id.to_string(), u.reason.clone())),
+        state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
+        target_version: String::new(),
+        updated_at: None,
+    })
 }
 
 impl<Id: std::fmt::Display> std::fmt::Display for UnresolvedDevice<Id> {
@@ -1294,12 +1743,12 @@ async fn resolve_power_shelf_endpoints(
 
 struct ResolvedComputeTrayEndpoints {
     endpoints: Vec<ComputeTrayEndpoint>,
-    ip_to_machine_id: HashMap<IpAddr, carbide_uuid::machine::MachineId>,
+    ip_to_machine_id: HashMap<IpAddr, HostMachineId>,
 }
 
 struct ComputeTrayEndpoints {
     resolved: ResolvedComputeTrayEndpoints,
-    unresolved: Vec<UnresolvedDevice<carbide_uuid::machine::MachineId>>,
+    unresolved: Vec<UnresolvedDevice<HostMachineId>>,
 }
 
 /// Resolve BMC endpoints from an already-loaded machine map.
@@ -1308,8 +1757,8 @@ struct ComputeTrayEndpoints {
 /// partition) reuse that map here so the machine table is not queried again.
 async fn resolve_compute_tray_endpoints_from_machines(
     credential_manager: &dyn CredentialManager,
-    machines_by_id: &HashMap<MachineId, Machine>,
-    machine_ids: &[MachineId],
+    machines_by_id: &HashMap<HostMachineId, HostMachine>,
+    machine_ids: &[HostMachineId],
 ) -> ComputeTrayEndpoints {
     let mut endpoints = Vec::with_capacity(machine_ids.len());
     let mut ip_to_machine_id = HashMap::with_capacity(machine_ids.len());
@@ -1394,6 +1843,17 @@ fn mac_result(
     }
 }
 
+/// Per-MAC result carrying a gRPC `Status`, echoing the MAC so the caller can
+/// correlate the failure with its input. Used to report a subset-level failure
+/// against the MACs it pertains to instead of aborting the whole batch.
+fn mac_status_result(mac: &MacAddress, status: &Status) -> rpc::ComponentResult {
+    mac_result(
+        mac,
+        component_status_code_for(status.code()),
+        Some(status.message().to_string()),
+    )
+}
+
 /// Result for a `--mac-address` value that could not be parsed as a MAC. The
 /// raw text is echoed so the caller can correlate it with its input.
 fn invalid_mac_result(raw: &str) -> rpc::ComponentResult {
@@ -1419,37 +1879,40 @@ fn pre_ingestion_unsupported_result(mac: &MacAddress, operation: &str) -> rpc::C
     )
 }
 
-/// Outcome of resolving caller-supplied compute BMC MAC addresses.
+/// Outcome of resolving a batch of caller-supplied BMC MAC addresses for one
+/// component type, keyed by that type's id (`Id`).
 ///
-/// `ingested` MACs resolve to an existing machine row and are dispatched by
-/// reusing that machine's id-based path, so state-controller routing and all
-/// power/firmware bookkeeping match an id target exactly. `uningested` MACs have no
-/// machine row yet (only reachable before ingestion completes). `errors` holds
-/// MACs that could not be parsed, already rendered as per-MAC results.
-struct ComputeMacResolution {
-    ingested: HashMap<MachineId, MacAddress>,
+/// `ingested` MACs resolve to an existing component row and are dispatched by
+/// reusing that component's id-based path, so state-controller routing and all
+/// power/firmware bookkeeping match an id target exactly. `uningested` MACs have
+/// no row yet (only reachable before ingestion completes). `errors` holds MACs
+/// that could not be parsed, already rendered as per-MAC results.
+struct MacResolution<Id> {
+    ingested: HashMap<Id, MacAddress>,
     uningested: Vec<MacAddress>,
     errors: Vec<rpc::ComponentResult>,
 }
 
-impl ComputeMacResolution {
-    /// Machine ids of the ingested MACs, for building an id-target sub-request.
-    fn ingested_machine_ids(&self) -> Vec<MachineId> {
+impl<Id> MacResolution<Id>
+where
+    Id: Copy + Eq + std::hash::Hash + std::str::FromStr,
+{
+    /// Component ids of the ingested MACs, for building an id-target sub-request.
+    fn ingested_ids(&self) -> Vec<Id> {
         self.ingested.keys().copied().collect()
     }
 
-    /// Look up the MAC an ingested result's `component_id` (a machine-id string)
-    /// resolved from, by parsing the id back into a [`MachineId`]. Returns
-    /// `None` for a missing or unparseable id, or one not in this resolution.
-    /// `MachineId`'s `FromStr` decodes into a stack buffer, so this allocates
-    /// nothing.
+    /// Look up the MAC an ingested result's `component_id` (an id string)
+    /// resolved from, by parsing the id back into an `Id`. Returns `None` for a
+    /// missing or unparseable id, or one not in this resolution. Both id types
+    /// decode into a stack buffer, so this allocates nothing.
     fn mac_for_component_id(&self, component_id: Option<&str>) -> Option<MacAddress> {
-        let id = component_id?.parse::<MachineId>().ok()?;
+        let id = component_id?.parse::<Id>().ok()?;
         self.ingested.get(&id).copied()
     }
 
     /// Set `mac_address` on results from the reused id path, keyed by the
-    /// `component_id` (machine id string) each result carries.
+    /// `component_id` (id string) each result carries.
     fn echo_mac_by_component_id(
         &self,
         mut results: Vec<rpc::ComponentResult>,
@@ -1462,6 +1925,10 @@ impl ComputeMacResolution {
         results
     }
 }
+
+/// Compute (machine) MAC resolution. Ingested MACs reuse the machine id path;
+/// `uningested` MACs are reachable only before ingestion completes.
+type ComputeMacResolution = MacResolution<HostMachineId>;
 
 /// Resolve each caller-supplied compute BMC MAC to an ingested machine id or
 /// classify it as having no row yet. Parse failures are collected as per-MAC
@@ -1617,6 +2084,179 @@ fn switch_mac_to_id_str(mac: &MacAddress, mac_to_id: &HashMap<MacAddress, Switch
         .unwrap_or_else(|| mac.to_string())
 }
 
+/// Switch MAC resolution. Ingested MACs reuse the switch id path; `uningested`
+/// MACs are reachable before ingestion via the expected inventory.
+type SwitchMacResolution = MacResolution<SwitchId>;
+
+/// Resolve each caller-supplied switch BMC MAC to an ingested `switch_id` or
+/// classify it as having no row yet. Parse failures are collected as per-MAC
+/// error results rather than failing the whole request.
+async fn resolve_switch_macs(
+    api: &Api,
+    mac_addresses: &[String],
+) -> Result<SwitchMacResolution, Status> {
+    let mut ingested = HashMap::new();
+    let mut uningested = Vec::new();
+    let mut errors = Vec::new();
+
+    let mut parsed = Vec::new();
+    for raw_mac in mac_addresses {
+        match raw_mac.parse::<MacAddress>() {
+            Ok(mac) => parsed.push(mac),
+            Err(_) => errors.push(invalid_mac_result(raw_mac)),
+        }
+    }
+
+    if !parsed.is_empty() {
+        let rows = db::switch::find_ids_by_bmc_macs(&mut api.db_reader(), &parsed)
+            .await
+            .map_err(|e| Status::internal(format!("db error: {e}")))?;
+        let mac_to_id: HashMap<MacAddress, SwitchId> = rows
+            .into_iter()
+            .map(|r| (r.bmc_mac_address, r.id))
+            .collect();
+        for mac in parsed {
+            match mac_to_id.get(&mac) {
+                Some(id) => {
+                    ingested.insert(*id, mac);
+                }
+                None => uningested.push(mac),
+            }
+        }
+    }
+
+    Ok(SwitchMacResolution {
+        ingested,
+        uningested,
+        errors,
+    })
+}
+
+/// Build direct switch endpoints for pre-ingestion switches from the expected
+/// inventory (BMC + NVOS IP/MAC) and stored credentials, keyed by BMC MAC.
+///
+/// Returns the resolvable endpoints plus per-MAC error results for MACs missing
+/// from the expected inventory, missing NVOS info, or missing credentials.
+/// Switch vendor is always NVIDIA, so no vendor lookup is needed (unlike the
+/// compute pre-ingestion path).
+async fn build_pre_ingestion_switch_endpoints(
+    api: &Api,
+    macs: &[MacAddress],
+) -> Result<(Vec<SwitchEndpoint>, Vec<rpc::ComponentResult>), Status> {
+    let rows = db::switch::find_switch_endpoints_by_bmc_macs(&mut api.db_reader(), macs)
+        .await
+        .map_err(|e| Status::internal(format!("db error resolving switch endpoints: {e}")))?;
+
+    let mut by_mac: HashMap<MacAddress, _> = rows.into_iter().map(|r| (r.bmc_mac, r)).collect();
+
+    let mut endpoints = Vec::new();
+    let mut errors = Vec::new();
+
+    for &mac in macs {
+        let Some(row) = by_mac.remove(&mac) else {
+            errors.push(mac_result(
+                &mac,
+                rpc::ComponentManagerStatusCode::NotFound,
+                Some("switch BMC MAC not found in expected inventory".to_owned()),
+            ));
+            continue;
+        };
+
+        let (Some(nvos_mac), Some(nvos_ip)) = (row.nvos_mac, row.nvos_ip) else {
+            errors.push(mac_result(
+                &mac,
+                rpc::ComponentManagerStatusCode::NotFound,
+                Some("NVOS MAC or IP not available".to_owned()),
+            ));
+            continue;
+        };
+
+        let bmc_credentials =
+            match fetch_switch_bmc_credentials(api.credential_manager.as_ref(), mac).await {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push(mac_result(
+                        &mac,
+                        rpc::ComponentManagerStatusCode::NotFound,
+                        Some(format!("BMC credentials unavailable: {e}")),
+                    ));
+                    continue;
+                }
+            };
+
+        let nvos_credentials =
+            match fetch_switch_nvos_credentials(api.credential_manager.as_ref(), mac).await {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push(mac_result(
+                        &mac,
+                        rpc::ComponentManagerStatusCode::NotFound,
+                        Some(format!("NVOS credentials unavailable: {e}")),
+                    ));
+                    continue;
+                }
+            };
+
+        endpoints.push(SwitchEndpoint {
+            bmc_ip: row.bmc_ip,
+            bmc_mac: mac,
+            nvos_ip,
+            nvos_mac,
+            bmc_credentials,
+            nvos_credentials,
+            nvos_host_name: row.nvos_hostname.none_if_empty(),
+        });
+    }
+
+    Ok((endpoints, errors))
+}
+
+/// Dispatch power control to the BMCs of pre-ingestion switches through the
+/// configured `backend`, returning per-MAC results and the BMC IPs dispatched
+/// to (for site re-exploration). The backend echoes each endpoint's BMC MAC, so
+/// results correlate on it directly.
+async fn dispatch_pre_ingestion_switch_power_control(
+    api: &Api,
+    backend: &dyn NvSwitchManager,
+    macs: &[MacAddress],
+    action: PowerAction,
+) -> Result<(Vec<rpc::ComponentResult>, Vec<IpAddr>), Status> {
+    let (endpoints, mut results) = build_pre_ingestion_switch_endpoints(api, macs).await?;
+
+    if endpoints.is_empty() {
+        return Ok((results, Vec::new()));
+    }
+
+    let ips: Vec<IpAddr> = endpoints.iter().map(|ep| ep.bmc_ip).collect();
+    match backend.power_control(&endpoints, action).await {
+        Ok(backend_results) => {
+            results.extend(backend_results.into_iter().map(|r| {
+                mac_result(
+                    &r.bmc_mac,
+                    if r.success {
+                        rpc::ComponentManagerStatusCode::Success
+                    } else {
+                        rpc::ComponentManagerStatusCode::InternalError
+                    },
+                    r.error,
+                )
+            }));
+        }
+        Err(e) => {
+            let status = component_manager_error_to_status(e);
+            for ep in &endpoints {
+                results.push(mac_result(
+                    &ep.bmc_mac,
+                    rpc::ComponentManagerStatusCode::Unavailable,
+                    Some(status.message().to_owned()),
+                ));
+            }
+        }
+    }
+
+    Ok((results, ips))
+}
+
 fn ps_mac_to_id_str(mac: &MacAddress, mac_to_id: &HashMap<MacAddress, PowerShelfId>) -> String {
     mac_to_id
         .get(mac)
@@ -1676,12 +2316,43 @@ fn exploration_report_firmware_versions(
         .collect()
 }
 
+/// The reason reprovisioning recorded for this machine's firmware failure, if any.
+///
+/// For a rack-driven upgrade the machine controller copies this out of the rack
+/// controller's `rack_fw_details` — which carries the per-device backend
+/// `error_message` — on the same transition that clears the reprovisioning
+/// request. Reading the state rather than `rack_fw_details` therefore keeps the
+/// reason tied to the cycle that produced this failure: once the request is gone
+/// there is no timestamp left to gate a persisted status against. Host-driven
+/// upgrades fill the same field in from the scout report.
+fn machine_firmware_failure_reason(machine: &HostMachine) -> Option<String> {
+    let reason = match &machine.state.value {
+        ManagedHostState::HostReprovision {
+            reprovision_state: HostReprovisionState::FailedFirmwareUpgrade { reason, .. },
+            ..
+        }
+        | ManagedHostState::Assigned {
+            instance_state:
+                model::machine::InstanceState::HostReprovision {
+                    reprovision_state: HostReprovisionState::FailedFirmwareUpgrade { reason, .. },
+                },
+        } => reason,
+        _ => return None,
+    };
+
+    reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_owned)
+}
+
 /// When explored firmware satisfies a desired entry, the update is complete
 /// (or still verifying while the host reprovisions). Otherwise status is
 /// inferred from `update_complete` and the machine's reprovision state.
 fn derive_machine_firmware_update_status(
     machine_id: &str,
-    machine: Option<&Machine>,
+    machine: Option<&HostMachine>,
     actual_firmware: Option<&HashMap<String, String>>,
     desired_entries: &[rpc::DesiredFirmwareVersionEntry],
 ) -> rpc::FirmwareUpdateStatus {
@@ -1729,8 +2400,21 @@ fn derive_machine_firmware_update_status(
         rpc::FirmwareUpdateState::FwStateQueued
     };
 
+    // A failed upgrade must carry why it failed, the same way the rack and switch
+    // results do. Without this a compute tray reports FwStateFailed with an empty
+    // error and the backend reason never reaches the operator.
+    let result = if state == rpc::FirmwareUpdateState::FwStateFailed {
+        error_result(
+            machine_id,
+            machine_firmware_failure_reason(machine)
+                .unwrap_or_else(|| "firmware upgrade failed without a recorded reason".to_owned()),
+        )
+    } else {
+        success_result(machine_id)
+    };
+
     rpc::FirmwareUpdateStatus {
-        result: Some(success_result(machine_id)),
+        result: Some(result),
         state: state as i32,
         target_version: String::new(),
         updated_at: None,
@@ -1739,7 +2423,7 @@ fn derive_machine_firmware_update_status(
 
 async fn machine_firmware_statuses(
     api: &Api,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
 ) -> Result<Vec<rpc::FirmwareUpdateStatus>, Status> {
     let machines = db::machine::find(
         api.db_reader().as_mut(),
@@ -1749,7 +2433,7 @@ async fn machine_firmware_statuses(
     .await
     .map_err(|e| Status::internal(format!("failed to look up machines: {e}")))?;
 
-    let machine_by_id: HashMap<MachineId, Machine> = machines
+    let machine_by_id: HashMap<HostMachineId, HostMachine> = machines
         .into_iter()
         .map(|machine| (machine.id, machine))
         .collect();
@@ -1766,7 +2450,7 @@ async fn machine_firmware_statuses(
         .await
         .map_err(|e| Status::internal(format!("db error: {e}")))?;
 
-    let ip_to_machine_id: HashMap<IpAddr, MachineId> = bmc_pairs
+    let ip_to_machine_id: HashMap<IpAddr, HostMachineId> = bmc_pairs
         .into_iter()
         .filter_map(|(machine_id, ip_str)| {
             let ip: IpAddr = ip_str?.parse().ok()?;
@@ -1783,7 +2467,7 @@ async fn machine_firmware_statuses(
             .map_err(|e| Status::internal(format!("db error: {e}")))?
     };
 
-    let mut actual_firmware_by_machine: HashMap<MachineId, HashMap<String, String>> =
+    let mut actual_firmware_by_machine: HashMap<HostMachineId, HashMap<String, String>> =
         HashMap::new();
     for endpoint in endpoints {
         let Some(machine_id) = ip_to_machine_id.get(&endpoint.address).copied() else {
@@ -1827,7 +2511,7 @@ async fn machine_firmware_statuses(
 /// inline error entry; successfully queried IDs carry the backend result.
 fn map_compute_tray_firmware_status(
     s: component_manager::compute_tray_manager::ComputeTrayFirmwareUpdateStatus,
-    ip_to_machine_id: &HashMap<IpAddr, MachineId>,
+    ip_to_machine_id: &HashMap<IpAddr, HostMachineId>,
 ) -> rpc::FirmwareUpdateStatus {
     let id = ip_to_machine_id
         .get(&s.bmc_ip)
@@ -1848,8 +2532,8 @@ fn map_compute_tray_firmware_status(
 async fn compute_tray_firmware_statuses(
     cm: &ComponentManager,
     api: &Api,
-    machines_by_id: &HashMap<MachineId, Machine>,
-    machine_ids: &[MachineId],
+    machines_by_id: &HashMap<HostMachineId, HostMachine>,
+    machine_ids: &[HostMachineId],
 ) -> Result<Vec<rpc::FirmwareUpdateStatus>, Status> {
     let resolved = resolve_compute_tray_endpoints_from_machines(
         api.credential_manager.as_ref(),
@@ -1858,16 +2542,7 @@ async fn compute_tray_firmware_statuses(
     )
     .await;
 
-    let mut statuses: Vec<_> = resolved
-        .unresolved
-        .iter()
-        .map(|u| rpc::FirmwareUpdateStatus {
-            result: Some(error_result(&u.id.to_string(), u.reason.clone())),
-            state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
-            target_version: String::new(),
-            updated_at: None,
-        })
-        .collect();
+    let mut statuses: Vec<_> = unresolved_firmware_statuses(&resolved.unresolved).collect();
 
     if !resolved.resolved.endpoints.is_empty() {
         let backend_statuses = cm
@@ -1951,9 +2626,9 @@ async fn pre_ingestion_compute_tray_firmware_statuses(
 ///
 /// Divide the requested machines the same way compute firmware updates do:
 /// rack-scale (MNNVL) systems vs standalone servers. Only rack-scale systems
-/// have a compute-tray backend (RMS) and a state-controller maintenance flow;
+/// have a compute-tray backend and a state-controller maintenance flow;
 /// standalone servers are always driven synchronously through NICo-core's
-/// Redfish stack, because RMS cannot power-control them.
+/// Redfish stack, because the backend service cannot power-control them.
 ///
 /// Classify each machine and persist its power-manager desired state in a
 /// single pass. A machine joins `rack_scale_ids`/`standalone_ids` only after
@@ -1976,7 +2651,7 @@ async fn pre_ingestion_compute_tray_firmware_statuses(
 async fn power_control_ingested_machine_ids(
     api: &Api,
     cm: &ComponentManager,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
     action: PowerAction,
     bypass_state_controller: bool,
 ) -> Result<(Vec<rpc::ComponentResult>, Vec<IpAddr>), Status> {
@@ -2048,7 +2723,7 @@ async fn power_control_ingested_machine_ids(
 
     // Rack-scale systems: the state-controller maintenance flow when
     // enabled, otherwise a synchronous dispatch through the configured
-    // backend (RMS).
+    // backend.
     if !rack_scale_ids.is_empty() {
         if cm.compute_tray_use_state_controller && !bypass_state_controller {
             match queue_machine_power_control_via_state_controller(api, cm, &rack_scale_ids, action)
@@ -2080,7 +2755,13 @@ async fn power_control_ingested_machine_ids(
     // stack (never the state machine, which has no non-rack path), so
     // power control works even when the configured backend is RMS.
     if !standalone_ids.is_empty() {
-        let core_backend = CoreComputeTrayManager::new(api.redfish_pool.clone());
+        // CoreComputeTrayManager authenticates with explicit per-endpoint
+        // credentials (RedfishAuth::Direct), which the proxied pool rejects
+        // by design -- keep it on the direct pool (the credential-ops handle,
+        // upcast to a plain pool) until it moves to credential-key auth.
+        let direct_pool: std::sync::Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
+            api.bmc_credential_ops.clone();
+        let core_backend = CoreComputeTrayManager::new(direct_pool);
         match dispatch_compute_tray_power_control(
             api,
             &core_backend,
@@ -2101,6 +2782,62 @@ async fn power_control_ingested_machine_ids(
     Ok((results, ips))
 }
 
+/// Power-control ingested switches by id: through the state controller when
+/// enabled and not bypassed, otherwise directly via the configured backend.
+/// Returns per-switch results and the BMC IPs dispatched to (for
+/// re-exploration). Shared by the `switch_ids` target and the ingested branch
+/// of the `switch_bmc_macs` target.
+async fn power_control_switch_ids(
+    api: &Api,
+    cm: &ComponentManager,
+    switch_ids: &[SwitchId],
+    action: PowerAction,
+    bypass_state_controller: bool,
+) -> Result<(Vec<rpc::ComponentResult>, Vec<IpAddr>), Status> {
+    if cm.nv_switch_use_state_controller && !bypass_state_controller {
+        let results =
+            queue_switch_power_control_via_state_controller(api, cm, switch_ids, action).await?;
+        Ok((results, Vec::new()))
+    } else {
+        let endpoints = resolve_switch_endpoints(api, switch_ids).await?;
+
+        let mut results: Vec<_> = endpoints
+            .unresolved
+            .iter()
+            .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
+            .collect();
+
+        tracing::info!(
+            backend = cm.nv_switch.name(),
+            switch_count = endpoints.resolved.endpoints.len(),
+            ?action,
+            "power control for switches"
+        );
+        let backend_results = cm
+            .nv_switch
+            .power_control(&endpoints.resolved.endpoints, action)
+            .await
+            .map_err(component_manager_error_to_status)?;
+        results.extend(backend_results.into_iter().map(|r| {
+            let id = switch_mac_to_id_str(&r.bmc_mac, &endpoints.resolved.mac_to_id);
+            if r.success {
+                success_result(&id)
+            } else {
+                error_result(&id, r.error.unwrap_or_default())
+            }
+        }));
+
+        let ips: Vec<IpAddr> = endpoints
+            .resolved
+            .endpoints
+            .iter()
+            .map(|ep| ep.bmc_ip)
+            .collect();
+
+        Ok((results, ips))
+    }
+}
+
 pub(crate) async fn component_power_control(
     api: &Api,
     request: Request<rpc::ComponentPowerControlRequest>,
@@ -2118,49 +2855,72 @@ pub(crate) async fn component_power_control(
 
     let (results, exploration_ips) = match target {
         rpc::component_power_control_request::Target::SwitchIds(list) => {
-            if cm.nv_switch_use_state_controller && !bypass_state_controller {
-                let results =
-                    queue_switch_power_control_via_state_controller(api, cm, &list.ids, action)
-                        .await?;
-                (results, Vec::new())
-            } else {
-                let endpoints = resolve_switch_endpoints(api, &list.ids).await?;
+            power_control_switch_ids(api, cm, &list.ids, action, bypass_state_controller).await?
+        }
+        rpc::component_power_control_request::Target::SwitchBmcMacs(list) => {
+            let resolution = resolve_switch_macs(api, &list.mac_addresses).await?;
+            let mut results = resolution.errors.clone();
+            let mut ips: Vec<IpAddr> = Vec::new();
 
-                let mut results: Vec<_> = endpoints
-                    .unresolved
-                    .iter()
-                    .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
-                    .collect();
-
-                tracing::info!(
-                    backend = cm.nv_switch.name(),
-                    switch_count = endpoints.resolved.endpoints.len(),
-                    ?action,
-                    "power control for switches"
-                );
-                let backend_results = cm
-                    .nv_switch
-                    .power_control(&endpoints.resolved.endpoints, action)
-                    .await
-                    .map_err(component_manager_error_to_status)?;
-                results.extend(backend_results.into_iter().map(|r| {
-                    let id = switch_mac_to_id_str(&r.bmc_mac, &endpoints.resolved.mac_to_id);
-                    if r.success {
-                        success_result(&id)
-                    } else {
-                        error_result(&id, r.error.unwrap_or_default())
+            // Uningested switch MACs (no switches row) always dispatch directly
+            // through the configured backend: a row-less device has no persisted
+            // state for the state controller to reconcile, so
+            // --bypass-state-controller only governs ingested targets.
+            // Dispatching the uningested subset must not discard parse-error
+            // results already collected above, nor block the independent
+            // ingested subset below. Report a dispatch failure per-MAC against
+            // the uningested targets instead of aborting the whole batch.
+            if !resolution.uningested.is_empty() {
+                match dispatch_pre_ingestion_switch_power_control(
+                    api,
+                    cm.nv_switch.as_ref(),
+                    &resolution.uningested,
+                    action,
+                )
+                .await
+                {
+                    Ok((pre_results, pre_ips)) => {
+                        results.extend(pre_results);
+                        ips.extend(pre_ips);
                     }
-                }));
-
-                let ips: Vec<IpAddr> = endpoints
-                    .resolved
-                    .endpoints
-                    .iter()
-                    .map(|ep| ep.bmc_ip)
-                    .collect();
-
-                (results, ips)
+                    Err(status) => results.extend(
+                        resolution
+                            .uningested
+                            .iter()
+                            .map(|mac| mac_status_result(mac, &status)),
+                    ),
+                }
             }
+
+            // Ingested MACs: reuse the switch-id path verbatim (state-controller
+            // routing matches an id target), then echo the caller's MAC onto
+            // each result. The pre-ingestion dispatch above has already committed
+            // power actions, so a failure resolving the ingested subset must not
+            // discard those results; report it per-MAC instead.
+            if !resolution.ingested.is_empty() {
+                match power_control_switch_ids(
+                    api,
+                    cm,
+                    &resolution.ingested_ids(),
+                    action,
+                    bypass_state_controller,
+                )
+                .await
+                {
+                    Ok((ingested_results, ingested_ips)) => {
+                        results.extend(resolution.echo_mac_by_component_id(ingested_results));
+                        ips.extend(ingested_ips);
+                    }
+                    Err(status) => results.extend(
+                        resolution
+                            .ingested
+                            .values()
+                            .map(|mac| mac_status_result(mac, &status)),
+                    ),
+                }
+            }
+
+            (results, ips)
         }
         rpc::component_power_control_request::Target::PowerShelfIds(list) => {
             if cm.power_shelf_use_state_controller && !bypass_state_controller {
@@ -2257,7 +3017,13 @@ pub(crate) async fn component_power_control(
                 // NICo-core's Redfish stack, which needs only the BMC IP and
                 // credentials — matching the ingested standalone path.
                 if !standalone_macs.is_empty() {
-                    let core_backend = CoreComputeTrayManager::new(api.redfish_pool.clone());
+                    // Same direct-pool requirement as the ingested
+                    // standalone path above: explicit per-endpoint
+                    // credentials cannot route through the proxied pool.
+                    let direct_pool: std::sync::Arc<
+                        dyn carbide_redfish::libredfish::RedfishClientPool,
+                    > = api.bmc_credential_ops.clone();
+                    let core_backend = CoreComputeTrayManager::new(direct_pool);
                     let (standalone_server_results, standalone_server_ips) =
                         dispatch_pre_ingestion_compute_power_control(
                             api,
@@ -2279,7 +3045,7 @@ pub(crate) async fn component_power_control(
                     power_control_ingested_machine_ids(
                         api,
                         cm,
-                        &resolution.ingested_machine_ids(),
+                        &resolution.ingested_ids(),
                         action,
                         bypass_state_controller,
                     )
@@ -2309,7 +3075,7 @@ pub(crate) async fn component_power_control(
 /// status code is preserved per machine (e.g. `Unavailable` for a backend that
 /// is down) rather than flattened to `InternalError`.
 fn partition_error_results(
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
     status: &Status,
 ) -> Vec<rpc::ComponentResult> {
     machine_ids
@@ -2328,8 +3094,8 @@ fn partition_error_results(
 async fn dispatch_compute_tray_power_control(
     api: &Api,
     backend: &dyn ComputeTrayManager,
-    machines_by_id: &HashMap<MachineId, Machine>,
-    machine_ids: &[MachineId],
+    machines_by_id: &HashMap<HostMachineId, HostMachine>,
+    machine_ids: &[HostMachineId],
     action: PowerAction,
 ) -> Result<(Vec<rpc::ComponentResult>, Vec<IpAddr>), Status> {
     let resolved = resolve_compute_tray_endpoints_from_machines(
@@ -2452,14 +3218,10 @@ pub(crate) async fn component_configure_switch_certificate(
 /// Best-effort insert or removal of the health report override used to
 /// suppress external alerting during compute power control.
 /// Returns `true` when the operation succeeded.
-async fn power_control_health_override(
-    api: &Api,
-    machine_id: carbide_uuid::machine::MachineId,
-    insert: bool,
-) -> bool {
+async fn power_control_health_override(api: &Api, machine_id: HostMachineId, insert: bool) -> bool {
     let result = if insert {
         let req = rpc::InsertMachineHealthReportRequest {
-            machine_id: Some(machine_id),
+            machine_id: Some(machine_id.into()),
             health_report_entry: Some(rpc::HealthReportEntry {
                 report: Some(::rpc::health::HealthReport {
                     source: MACHINE_POWER_OVERRIDE_SOURCE.to_string(),
@@ -2486,7 +3248,7 @@ async fn power_control_health_override(
             .map(|_| ())
     } else {
         let req = rpc::RemoveMachineHealthReportRequest {
-            machine_id: Some(machine_id),
+            machine_id: Some(machine_id.into()),
             source: MACHINE_POWER_OVERRIDE_SOURCE.to_string(),
         };
         crate::handlers::health::remove_machine_health_report(api, Request::new(req))
@@ -2534,6 +3296,73 @@ async fn request_re_exploration(api: &Api, ips: &[IpAddr]) {
 }
 
 // ---- Inventory ----
+
+/// Serve inventory for a set of BMC MAC targets.
+///
+/// Inventory is read-only, so a MAC target resolves to the same exploration
+/// report an id target serves — no state-controller routing and no
+/// ingested/pre-ingestion split needed. Resolve each BMC MAC to its BMC IP
+/// through the interface tables (populated by DHCP for both ingested and
+/// pre-ingestion devices), then serve the report via the same indexed `address`
+/// lookup the id paths use. Vendor-agnostic, so shared by compute and switch.
+async fn inventory_by_bmc_macs(
+    api: &Api,
+    mac_addresses: &[String],
+) -> Result<Vec<rpc::ComponentInventoryEntry>, Status> {
+    let mut entries: Vec<rpc::ComponentInventoryEntry> = Vec::new();
+    let mut mac_ips: Vec<(MacAddress, Vec<IpAddr>)> = Vec::new();
+    let mut all_ips: Vec<IpAddr> = Vec::new();
+
+    for raw_mac in mac_addresses {
+        let Ok(mac) = raw_mac.parse::<MacAddress>() else {
+            entries.push(rpc::ComponentInventoryEntry {
+                result: Some(invalid_mac_result(raw_mac)),
+                report: None,
+            });
+            continue;
+        };
+        let ips = db::machine_interface::lookup_bmc_ip_by_mac_address(&mut api.db_reader(), mac)
+            .await
+            .map_err(|e| Status::internal(format!("db error: {e}")))?;
+        all_ips.extend(ips.iter().copied());
+        mac_ips.push((mac, ips));
+    }
+
+    let report_by_ip: HashMap<IpAddr, _> = if all_ips.is_empty() {
+        HashMap::new()
+    } else {
+        db::explored_endpoints::find_by_ips(&mut api.db_reader(), all_ips)
+            .await
+            .map_err(|e| Status::internal(format!("db error: {e}")))?
+            .into_iter()
+            .map(|ep| (ep.address, ep.report))
+            .collect()
+    };
+
+    for (mac, ips) in mac_ips {
+        let report = ips.iter().find_map(|ip| report_by_ip.get(ip).cloned());
+        entries.push(match report {
+            Some(report) => rpc::ComponentInventoryEntry {
+                result: Some(mac_result(
+                    &mac,
+                    rpc::ComponentManagerStatusCode::Success,
+                    None,
+                )),
+                report: Some(report.into()),
+            },
+            None => rpc::ComponentInventoryEntry {
+                result: Some(mac_result(
+                    &mac,
+                    rpc::ComponentManagerStatusCode::NotFound,
+                    Some("no explored endpoint found for MAC".to_owned()),
+                )),
+                report: None,
+            },
+        });
+    }
+
+    Ok(entries)
+}
 
 pub(crate) async fn get_component_inventory(
     api: &Api,
@@ -2645,67 +3474,10 @@ pub(crate) async fn get_component_inventory(
             build_inventory_entries(&id_strings, &report_by_id)
         }
         rpc::get_component_inventory_request::Target::ComputeBmcMacs(list) => {
-            // Inventory is read-only, so a MAC target resolves to the same
-            // exploration report an id target serves — no state-controller
-            // routing and no ingested/pre-ingestion split needed. Resolve each
-            // BMC MAC to its BMC IP through the interface tables (populated by
-            // DHCP for both ingested and pre-ingestion devices), then serve the
-            // report via the same indexed `address` lookup the machine-id path
-            // uses.
-            let mut entries: Vec<rpc::ComponentInventoryEntry> = Vec::new();
-            let mut mac_ips: Vec<(MacAddress, Vec<IpAddr>)> = Vec::new();
-            let mut all_ips: Vec<IpAddr> = Vec::new();
-
-            for raw_mac in &list.mac_addresses {
-                let Ok(mac) = raw_mac.parse::<MacAddress>() else {
-                    entries.push(rpc::ComponentInventoryEntry {
-                        result: Some(invalid_mac_result(raw_mac)),
-                        report: None,
-                    });
-                    continue;
-                };
-                let ips =
-                    db::machine_interface::lookup_bmc_ip_by_mac_address(&mut api.db_reader(), mac)
-                        .await
-                        .map_err(|e| Status::internal(format!("db error: {e}")))?;
-                all_ips.extend(ips.iter().copied());
-                mac_ips.push((mac, ips));
-            }
-
-            let report_by_ip: HashMap<IpAddr, _> = if all_ips.is_empty() {
-                HashMap::new()
-            } else {
-                db::explored_endpoints::find_by_ips(&mut api.db_reader(), all_ips)
-                    .await
-                    .map_err(|e| Status::internal(format!("db error: {e}")))?
-                    .into_iter()
-                    .map(|ep| (ep.address, ep.report))
-                    .collect()
-            };
-
-            for (mac, ips) in mac_ips {
-                let report = ips.iter().find_map(|ip| report_by_ip.get(ip).cloned());
-                entries.push(match report {
-                    Some(report) => rpc::ComponentInventoryEntry {
-                        result: Some(mac_result(
-                            &mac,
-                            rpc::ComponentManagerStatusCode::Success,
-                            None,
-                        )),
-                        report: Some(report.into()),
-                    },
-                    None => rpc::ComponentInventoryEntry {
-                        result: Some(mac_result(
-                            &mac,
-                            rpc::ComponentManagerStatusCode::NotFound,
-                            Some("no explored endpoint found for MAC".to_owned()),
-                        )),
-                        report: None,
-                    },
-                });
-            }
-
-            entries
+            inventory_by_bmc_macs(api, &list.mac_addresses).await?
+        }
+        rpc::get_component_inventory_request::Target::SwitchBmcMacs(list) => {
+            inventory_by_bmc_macs(api, &list.mac_addresses).await?
         }
     };
 
@@ -2715,6 +3487,214 @@ pub(crate) async fn get_component_inventory(
 }
 
 // ---- Firmware Update ----
+
+/// Update firmware for a set of ingested switches by id.
+///
+/// Routes through rack maintenance when the state controller is enabled and not
+/// bypassed (submitting the maintenance request inline and returning its
+/// results), otherwise dispatches directly to the configured backend. Returns
+/// per-switch results. Shared by the `switch_ids` target and the ingested
+/// branch of the `bmc_macs` target.
+async fn update_switch_firmware_by_ids(
+    api: &Api,
+    switch_ids: &[SwitchId],
+    components: &[i32],
+    target_version: &str,
+    access_token: &Option<String>,
+    force_update: bool,
+    bypass_state_controller: bool,
+) -> Result<Vec<rpc::ComponentResult>, Status> {
+    let cm = require_component_manager(api)?;
+    let route_through_state_controller =
+        cm.nv_switch_use_state_controller && !bypass_state_controller;
+    let use_direct_rms_json =
+        !route_through_state_controller && cm.nv_switch.supports_firmware_object_json();
+
+    if route_through_state_controller {
+        let token = require_firmware_object_json_for_rack_maintenance(
+            "switch",
+            access_token,
+            target_version,
+        )?;
+        let components = map_nv_switch_components(components)?;
+        let maintenance_activities = switch_firmware_maintenance_activities(
+            target_version,
+            &token,
+            &components,
+            force_update,
+        );
+        let rack_maintenance_targets = group_switch_ids_by_rack(api, switch_ids).await?;
+        submit_rack_firmware_maintenance_requests(
+            api,
+            rack_maintenance_targets,
+            maintenance_activities,
+        )
+        .await
+    } else {
+        let options = if use_direct_rms_json {
+            require_firmware_object_json_for_direct_rms(
+                "switch",
+                access_token,
+                target_version,
+                force_update,
+            )?
+        } else {
+            reject_firmware_object_json_for_direct_dispatch("switch", access_token)?;
+            FirmwareUpdateOptions::default()
+        };
+        let components = map_nv_switch_components(components)?;
+        let endpoints = resolve_switch_endpoints(api, switch_ids).await?;
+
+        let mut results: Vec<_> = endpoints
+            .unresolved
+            .iter()
+            .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
+            .collect();
+
+        let backend_results = cm
+            .nv_switch
+            .queue_firmware_updates(
+                &endpoints.resolved.endpoints,
+                target_version,
+                &components,
+                &options,
+            )
+            .await
+            .map_err(component_manager_error_to_status)?;
+        results.extend(backend_results.into_iter().map(|r| {
+            let id = switch_mac_to_id_str(&r.bmc_mac, &endpoints.resolved.mac_to_id);
+            if r.success {
+                success_result(&id)
+            } else {
+                error_result(&id, r.error.unwrap_or_default())
+            }
+        }));
+
+        Ok(results)
+    }
+}
+
+/// Direct-dispatch a firmware update to pre-ingestion switches through the
+/// configured backend, correlated by BMC MAC. A row-less switch has no
+/// persisted state for the state controller to reconcile, so it is always
+/// dispatched directly regardless of `--bypass-state-controller`.
+async fn dispatch_pre_ingestion_switch_firmware(
+    api: &Api,
+    macs: &[MacAddress],
+    components: &[i32],
+    target_version: &str,
+    access_token: &Option<String>,
+    force_update: bool,
+) -> Result<Vec<rpc::ComponentResult>, Status> {
+    let cm = require_component_manager(api)?;
+    let options = if cm.nv_switch.supports_firmware_object_json() {
+        require_firmware_object_json_for_direct_rms(
+            "switch",
+            access_token,
+            target_version,
+            force_update,
+        )?
+    } else {
+        reject_firmware_object_json_for_direct_dispatch("switch", access_token)?;
+        FirmwareUpdateOptions::default()
+    };
+    let components = map_nv_switch_components(components)?;
+
+    let (endpoints, mut results) = build_pre_ingestion_switch_endpoints(api, macs).await?;
+    if endpoints.is_empty() {
+        return Ok(results);
+    }
+
+    let backend_results = cm
+        .nv_switch
+        .queue_firmware_updates(&endpoints, target_version, &components, &options)
+        .await
+        .map_err(component_manager_error_to_status)?;
+    results.extend(backend_results.into_iter().map(|r| {
+        mac_result(
+            &r.bmc_mac,
+            if r.success {
+                rpc::ComponentManagerStatusCode::Success
+            } else {
+                rpc::ComponentManagerStatusCode::InternalError
+            },
+            r.error,
+        )
+    }));
+
+    Ok(results)
+}
+
+/// Update firmware for a set of switch BMC MAC targets.
+///
+/// Ingested MACs reuse the switch-id path verbatim (state-controller routing
+/// matches an id target), then echo the caller's MAC onto each result.
+/// Uningested MACs always direct-dispatch through the configured backend.
+async fn update_switch_firmware_by_mac(
+    api: &Api,
+    mac_addresses: &[String],
+    components: &[i32],
+    target_version: &str,
+    access_token: &Option<String>,
+    force_update: bool,
+    bypass_state_controller: bool,
+) -> Result<Vec<rpc::ComponentResult>, Status> {
+    let resolution = resolve_switch_macs(api, mac_addresses).await?;
+    let mut results = resolution.errors.clone();
+
+    if !resolution.uningested.is_empty() {
+        // Dispatching the uningested subset must not discard parse-error results
+        // already collected above, nor block the independent ingested subset
+        // below. Report a dispatch failure per-MAC against the uningested
+        // targets instead of aborting the whole batch.
+        match dispatch_pre_ingestion_switch_firmware(
+            api,
+            &resolution.uningested,
+            components,
+            target_version,
+            access_token,
+            force_update,
+        )
+        .await
+        {
+            Ok(dispatched) => results.extend(dispatched),
+            Err(status) => results.extend(
+                resolution
+                    .uningested
+                    .iter()
+                    .map(|mac| mac_status_result(mac, &status)),
+            ),
+        }
+    }
+
+    if !resolution.ingested.is_empty() {
+        // The pre-ingestion dispatch above has already queued backend jobs, so
+        // a failure resolving the ingested subset (e.g. an ingested switch with
+        // no rack) must not discard those results. Report it per-MAC against the
+        // ingested targets instead of aborting after submission.
+        match update_switch_firmware_by_ids(
+            api,
+            &resolution.ingested_ids(),
+            components,
+            target_version,
+            access_token,
+            force_update,
+            bypass_state_controller,
+        )
+        .await
+        {
+            Ok(ingested) => results.extend(resolution.echo_mac_by_component_id(ingested)),
+            Err(status) => results.extend(
+                resolution
+                    .ingested
+                    .values()
+                    .map(|mac| mac_status_result(mac, &status)),
+            ),
+        }
+    }
+
+    Ok(results)
+}
 
 pub(crate) async fn update_component_firmware(
     api: &Api,
@@ -2737,76 +3717,57 @@ pub(crate) async fn update_component_firmware(
 
     match target {
         rpc::update_component_firmware_request::Target::Switches(t) => {
-            let list = t
-                .switch_ids
-                .ok_or_else(|| Status::invalid_argument("switch_ids is required"))?;
-            if list.ids.is_empty() {
-                return Err(Status::invalid_argument("switch_ids must not be empty"));
-            }
-
-            let cm = require_component_manager(api)?;
-            let route_through_state_controller =
-                cm.nv_switch_use_state_controller && !bypass_state_controller;
-            let use_direct_rms_json =
-                !route_through_state_controller && cm.nv_switch.supports_firmware_object_json();
-
-            if route_through_state_controller {
-                let token = require_firmware_object_json_for_rack_maintenance(
-                    "switch",
-                    &access_token,
-                    &req.target_version,
-                )?;
-                let components = map_nv_switch_components(&t.components)?;
-                maintenance_activities = switch_firmware_maintenance_activities(
-                    &req.target_version,
-                    &token,
-                    &components,
-                    force_update,
-                );
-                rack_maintenance_targets = group_switch_ids_by_rack(api, &list.ids).await?;
-            } else {
-                let options = if use_direct_rms_json {
-                    require_firmware_object_json_for_direct_rms(
-                        "switch",
-                        &access_token,
-                        &req.target_version,
-                        force_update,
-                    )?
-                } else {
-                    reject_firmware_object_json_for_direct_dispatch("switch", &access_token)?;
-                    FirmwareUpdateOptions::default()
-                };
-                let components = map_nv_switch_components(&t.components)?;
-                let endpoints = resolve_switch_endpoints(api, &list.ids).await?;
-
-                let mut results: Vec<_> = endpoints
-                    .unresolved
-                    .iter()
-                    .map(|u| error_result(&u.id.to_string(), u.reason.clone()))
-                    .collect();
-
-                let backend_results = cm
-                    .nv_switch
-                    .queue_firmware_updates(
-                        &endpoints.resolved.endpoints,
-                        &req.target_version,
-                        &components,
-                        &options,
-                    )
-                    .await
-                    .map_err(component_manager_error_to_status)?;
-                results.extend(backend_results.into_iter().map(|r| {
-                    let id = switch_mac_to_id_str(&r.bmc_mac, &endpoints.resolved.mac_to_id);
-                    if r.success {
-                        success_result(&id)
-                    } else {
-                        error_result(&id, r.error.unwrap_or_default())
+            require_component_manager(api)?;
+            let components = t.components;
+            // switch_ids and bmc_macs are plain fields (not a proto oneof, to
+            // keep field 1 wire-compatible), so the server enforces exactly one.
+            match (t.switch_ids, t.bmc_macs) {
+                (Some(_), Some(_)) => {
+                    return Err(Status::invalid_argument(
+                        "switch target must set exactly one of switch_ids or bmc_macs, not both",
+                    ));
+                }
+                (None, None) => {
+                    return Err(Status::invalid_argument(
+                        "switch target (switch_ids or bmc_macs) is required",
+                    ));
+                }
+                (Some(list), None) => {
+                    if list.ids.is_empty() {
+                        return Err(Status::invalid_argument("switch_ids must not be empty"));
                     }
-                }));
-
-                return Ok(Response::new(rpc::UpdateComponentFirmwareResponse {
-                    results,
-                }));
+                    let results = update_switch_firmware_by_ids(
+                        api,
+                        &list.ids,
+                        &components,
+                        &req.target_version,
+                        &access_token,
+                        force_update,
+                        bypass_state_controller,
+                    )
+                    .await?;
+                    return Ok(Response::new(rpc::UpdateComponentFirmwareResponse {
+                        results,
+                    }));
+                }
+                (None, Some(macs)) => {
+                    if macs.mac_addresses.is_empty() {
+                        return Err(Status::invalid_argument("bmc_macs must not be empty"));
+                    }
+                    let results = update_switch_firmware_by_mac(
+                        api,
+                        &macs.mac_addresses,
+                        &components,
+                        &req.target_version,
+                        &access_token,
+                        force_update,
+                        bypass_state_controller,
+                    )
+                    .await?;
+                    return Ok(Response::new(rpc::UpdateComponentFirmwareResponse {
+                        results,
+                    }));
+                }
             }
         }
         rpc::update_component_firmware_request::Target::ComputeTrays(t) => {
@@ -3152,11 +4113,11 @@ async fn update_pre_ingestion_compute_tray_firmware(
 /// Standalone (non-rack-scale) servers have no compute-tray backend that can
 /// take a direct firmware dispatch, so they always go through the host
 /// reprovisioning firmware flow. Only rack-scale systems (currently GB200 NVL,
-/// backed by RMS via the ComputeTrayManager interface) can choose between the
+/// driven through the ComputeTrayManager interface) can choose between the
 /// rack-level state controller maintenance flow and a direct backend dispatch.
 async fn update_compute_tray_firmware_by_machine_ids(
     api: &Api,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
     components: &[i32],
     target_version: &str,
     access_token: &Option<String>,
@@ -3270,7 +4231,7 @@ async fn update_compute_tray_firmware_by_mac(
     if !resolution.ingested.is_empty() {
         let ingested_firmware_results = update_compute_tray_firmware_by_machine_ids(
             api,
-            &resolution.ingested_machine_ids(),
+            &resolution.ingested_ids(),
             components,
             target_version,
             access_token,
@@ -3295,35 +4256,38 @@ enum FirmwareStatusRouting {
     /// requested IDs are sent to the compute-tray backend.
     DirectDispatch,
     /// The CM is in state-controller mode: the request is split by whether each
-    /// machine has a persisted `backend_firmware_object_job_id`.
+    /// machine has an in-flight direct-dispatch firmware-object job.
     Partitioned {
         /// IDs with a persisted backend job — route to `compute_tray` so callers
         /// can poll the live in-flight state.
-        persisted: Vec<MachineId>,
+        persisted: Vec<HostMachineId>,
         /// Remaining IDs — route to `machine_firmware_statuses` (DB-only).
-        fallback: Vec<MachineId>,
+        fallback: Vec<HostMachineId>,
     },
 }
 
-/// Partition `machine_ids` into those that have a persisted backend
-/// firmware-object job ID on their machine row and those that do not.
+/// Partition `machine_ids` by whether their BMC MAC has a persisted
+/// direct-dispatch firmware-update job (`bmc_macs_with_direct_fw_updates`).
 ///
 /// Returns `(persisted_ids, fallback_ids)`:
-/// - `persisted_ids` — IDs where the loaded machine has a non-null
-///   `backend_firmware_object_job_id`; route to `compute_tray`.
+/// - `persisted_ids` — the machine's BMC MAC is in
+///   `bmc_macs_with_direct_fw_updates`; route to `compute_tray` to poll the live
+///   in-flight job.
 /// - `fallback_ids` — remaining IDs; route to `machine_firmware_statuses`.
 ///
-/// A tray flashed before ingestion persists its job to `explored_endpoints`
-/// rather than the machine row, so the caller augments the split with
-/// [`reclassify_preingestion_jobs_from_explored_endpoints`] before routing.
+/// Keyed by BMC MAC because a job dispatched before ingestion is recorded under
+/// the tray's MAC, and stays reachable there after ingestion creates the machine
+/// row — so a tray flashed pre-ingestion still polls the live backend.
 fn partition_by_backend_job_id(
-    machine_ids: &[MachineId],
-    machines_by_id: &HashMap<MachineId, Machine>,
-) -> (Vec<MachineId>, Vec<MachineId>) {
+    machine_ids: &[HostMachineId],
+    machines_by_id: &HashMap<HostMachineId, HostMachine>,
+    bmc_macs_with_direct_fw_updates: &HashSet<MacAddress>,
+) -> (Vec<HostMachineId>, Vec<HostMachineId>) {
     machine_ids.iter().copied().partition(|id| {
         machines_by_id
             .get(id)
-            .is_some_and(|m| m.status.backend_firmware_object_job_id.is_some())
+            .and_then(|m| m.status.bmc_info.mac)
+            .is_some_and(|mac| bmc_macs_with_direct_fw_updates.contains(&mac))
     })
 }
 
@@ -3331,17 +4295,23 @@ fn partition_by_backend_job_id(
 ///
 /// When `use_state_controller` is `false` (direct-dispatch mode) all IDs are
 /// forwarded to the compute-tray backend. Otherwise the IDs are partitioned by
-/// the presence of a persisted `backend_firmware_object_job_id`: those with a job
-/// go to the live backend; the rest fall back to the DB-only path.
+/// whether their BMC MAC has a persisted direct-dispatch job
+/// (`bmc_macs_with_direct_fw_updates`): those with a job poll the live backend;
+/// the rest fall back to the DB-only path.
 fn select_firmware_status_routing(
     use_state_controller: bool,
-    machine_ids: &[MachineId],
-    machines_by_id: &HashMap<MachineId, Machine>,
+    machine_ids: &[HostMachineId],
+    machines_by_id: &HashMap<HostMachineId, HostMachine>,
+    bmc_macs_with_direct_fw_updates: &HashSet<MacAddress>,
 ) -> FirmwareStatusRouting {
     if !use_state_controller {
         FirmwareStatusRouting::DirectDispatch
     } else {
-        let (persisted, fallback) = partition_by_backend_job_id(machine_ids, machines_by_id);
+        let (persisted, fallback) = partition_by_backend_job_id(
+            machine_ids,
+            machines_by_id,
+            bmc_macs_with_direct_fw_updates,
+        );
         FirmwareStatusRouting::Partitioned {
             persisted,
             fallback,
@@ -3349,46 +4319,222 @@ fn select_firmware_status_routing(
     }
 }
 
-/// Move `fallback` machines whose BMC IP still carries a pre-ingestion firmware
-/// job in `explored_endpoints` into `persisted`, so they poll the live backend.
-///
-/// A tray flashed before ingestion persists its job id to `explored_endpoints`
-/// (keyed by BMC IP), not the machine row. Once ingestion creates the row its
-/// `backend_firmware_object_job_id` stays NULL, so the machine-row partition
-/// alone would misroute it to the DB-only path and lose live status. One batched
-/// query over the fallback set's BMC IPs reclassifies those still tracked.
-async fn reclassify_preingestion_jobs_from_explored_endpoints(
+/// Firmware status for pre-ingestion switches, dispatched to the configured
+/// backend via direct endpoints and correlated by BMC MAC. Endpoints that
+/// cannot be resolved (missing NVOS info, credentials, or expected inventory)
+/// and resolved endpoints omitted from the backend response are reported
+/// per-MAC as unknown errors.
+async fn pre_ingestion_switch_firmware_statuses(
     api: &Api,
-    persisted: &mut Vec<MachineId>,
-    fallback: &mut Vec<MachineId>,
-    machines_by_id: &HashMap<MachineId, Machine>,
-) -> Result<(), Status> {
-    let fallback_ips: Vec<IpAddr> = fallback
-        .iter()
-        .filter_map(|id| machines_by_id.get(id).and_then(|m| m.status.bmc_info.ip))
-        .collect();
-    let ips_with_job = db::explored_endpoints::find_ips_with_backend_firmware_object_job_id(
-        api.pg_pool(),
-        &fallback_ips,
-    )
-    .await
-    .map_err(|e| Status::internal(format!("db error: {e}")))?;
+    cm: &ComponentManager,
+    macs: &[MacAddress],
+) -> Result<Vec<rpc::FirmwareUpdateStatus>, Status> {
+    let (endpoints, errors) = build_pre_ingestion_switch_endpoints(api, macs).await?;
 
-    if ips_with_job.is_empty() {
-        return Ok(());
+    let mut statuses: Vec<rpc::FirmwareUpdateStatus> = errors
+        .into_iter()
+        .map(|result| rpc::FirmwareUpdateStatus {
+            result: Some(result),
+            state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
+            target_version: String::new(),
+            updated_at: None,
+        })
+        .collect();
+
+    if endpoints.is_empty() {
+        return Ok(statuses);
     }
 
-    fallback.retain(|id| {
-        let has_explored_job = machines_by_id
-            .get(id)
-            .and_then(|m| m.status.bmc_info.ip)
-            .is_some_and(|ip| ips_with_job.contains(&ip));
-        if has_explored_job {
-            persisted.push(*id);
+    let backend_statuses = cm
+        .nv_switch
+        .get_firmware_status(&endpoints)
+        .await
+        .map_err(component_manager_error_to_status)?;
+
+    let mut observed_bmc_macs = HashSet::new();
+
+    statuses.extend(backend_statuses.into_iter().map(|s| {
+        observed_bmc_macs.insert(s.bmc_mac);
+        rpc::FirmwareUpdateStatus {
+            result: Some(if s.error.is_none() {
+                mac_result(&s.bmc_mac, rpc::ComponentManagerStatusCode::Success, None)
+            } else {
+                mac_result(
+                    &s.bmc_mac,
+                    rpc::ComponentManagerStatusCode::InternalError,
+                    s.error,
+                )
+            }),
+            state: map_fw_state(s.state),
+            target_version: s.target_version,
+            updated_at: None,
         }
-        !has_explored_job
-    });
-    Ok(())
+    }));
+
+    for endpoint in endpoints {
+        if observed_bmc_macs.contains(&endpoint.bmc_mac) {
+            continue;
+        }
+
+        statuses.push(rpc::FirmwareUpdateStatus {
+            result: Some(mac_result(
+                &endpoint.bmc_mac,
+                rpc::ComponentManagerStatusCode::InternalError,
+                Some(UNTRACKED_SWITCH_FIRMWARE_ERROR.to_owned()),
+            )),
+            state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
+            target_version: String::new(),
+            updated_at: None,
+        });
+    }
+
+    Ok(statuses)
+}
+
+/// Power shelves are not part of the rack firmware job, so their status always
+/// comes from the backend.
+async fn power_shelf_firmware_statuses(
+    api: &Api,
+    ids: &[PowerShelfId],
+) -> Result<Vec<rpc::FirmwareUpdateStatus>, Status> {
+    // The rack controller currently writes power-shelf Completed only as an
+    // internal reprovisioning-unblock sentinel; the backend does not include
+    // shelves in the rack firmware job. It is therefore not an API firmware result.
+    let cm = require_component_manager(api)?;
+    let endpoints = resolve_power_shelf_endpoints(api, ids).await?;
+
+    let mut statuses: Vec<_> = unresolved_firmware_statuses(&endpoints.unresolved).collect();
+
+    let backend_statuses = cm
+        .power_shelf
+        .get_firmware_status(&endpoints.resolved.endpoints)
+        .await
+        .map_err(component_manager_error_to_status)?;
+    statuses.extend(backend_statuses.into_iter().map(|s| {
+        let id = ps_mac_to_id_str(&s.pmc_mac, &endpoints.resolved.mac_to_id);
+        rpc::FirmwareUpdateStatus {
+            result: Some(if s.error.is_none() {
+                success_result(&id)
+            } else {
+                error_result(&id, s.error.unwrap_or_default())
+            }),
+            state: map_fw_state(s.state),
+            target_version: s.target_version,
+            updated_at: None,
+        }
+    }));
+
+    Ok(statuses)
+}
+
+/// Routes each machine to the backend or to the database, depending on whether a
+/// firmware update was dispatched around the state controller.
+async fn routed_machine_firmware_statuses(
+    api: &Api,
+    machine_ids: &[HostMachineId],
+) -> Result<Vec<rpc::FirmwareUpdateStatus>, Status> {
+    if machine_ids.is_empty() {
+        return Err(Status::invalid_argument("machine_ids must not be empty"));
+    }
+
+    // In direct-dispatch mode all IDs go to the compute-tray backend. In
+    // state-controller mode, IDs with a persisted direct-dispatch job poll the
+    // live backend; the rest use the database-only status path.
+    let Some(cm) = api.component_manager.as_ref() else {
+        return machine_firmware_statuses(api, machine_ids).await;
+    };
+    let machines_by_id = load_machines_by_id(api, machine_ids).await?;
+    let bmc_macs_with_direct_fw_updates = if cm.compute_tray_use_state_controller {
+        let bmc_macs: Vec<MacAddress> = machine_ids
+            .iter()
+            .filter_map(|id| machines_by_id.get(id).and_then(|m| m.status.bmc_info.mac))
+            .collect();
+
+        db::direct_dispatch_firmware_job::find_macs_with_job(api.pg_pool(), &bmc_macs)
+            .await
+            .map_err(|e| Status::internal(format!("db error: {e}")))?
+    } else {
+        HashSet::new()
+    };
+
+    match select_firmware_status_routing(
+        cm.compute_tray_use_state_controller,
+        machine_ids,
+        &machines_by_id,
+        &bmc_macs_with_direct_fw_updates,
+    ) {
+        FirmwareStatusRouting::DirectDispatch => {
+            compute_tray_firmware_statuses(cm, api, &machines_by_id, machine_ids).await
+        }
+        FirmwareStatusRouting::Partitioned {
+            persisted,
+            fallback,
+        } => {
+            // Disjoint ID sets on independent backends (a component-manager RPC vs. a DB
+            // query): run them concurrently instead of paying the sum of their latencies.
+            let persisted_statuses = async {
+                if persisted.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    compute_tray_firmware_statuses(cm, api, &machines_by_id, &persisted).await
+                }
+            };
+            let fallback_statuses = async {
+                if fallback.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    machine_firmware_statuses(api, &fallback).await
+                }
+            };
+            let (persisted_statuses, fallback_statuses) =
+                tokio::try_join!(persisted_statuses, fallback_statuses)?;
+
+            let mut statuses = Vec::with_capacity(machine_ids.len());
+            statuses.extend(persisted_statuses);
+            statuses.extend(fallback_statuses);
+            Ok(statuses)
+        }
+    }
+}
+
+/// Rack status is entirely database-derived; a missing rack is reported per ID
+/// rather than failing the batch.
+async fn rack_firmware_statuses(
+    api: &Api,
+    rack_ids: &[RackId],
+) -> Result<Vec<rpc::FirmwareUpdateStatus>, Status> {
+    if rack_ids.is_empty() {
+        return Err(Status::invalid_argument("rack_ids must not be empty"));
+    }
+
+    let racks = db::rack::find_by(
+        api.db_reader().as_mut(),
+        db::ObjectColumnFilter::List(db::rack::IdColumn, rack_ids),
+    )
+    .await
+    .map_err(|e| Status::internal(format!("failed to look up racks: {e}")))?;
+    let rack_by_id: HashMap<_, _> = racks
+        .into_iter()
+        .map(|rack| (rack.id.clone(), rack))
+        .collect();
+
+    Ok(rack_ids
+        .iter()
+        .map(|rack_id| {
+            rack_by_id
+                .get(rack_id)
+                .map(rack_firmware_status)
+                .unwrap_or(rpc::FirmwareUpdateStatus {
+                    result: Some(not_found_component_result(
+                        rack_id.as_ref(),
+                        format!("rack {rack_id} not found"),
+                    )),
+                    state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
+                    target_version: String::new(),
+                    updated_at: None,
+                })
+        })
+        .collect())
 }
 
 pub(crate) async fn get_component_firmware_status(
@@ -3404,168 +4550,55 @@ pub(crate) async fn get_component_firmware_status(
 
     let statuses = match target {
         rpc::get_component_firmware_status_request::Target::SwitchIds(list) => {
+            switch_firmware_statuses(api, &list.ids).await?
+        }
+        rpc::get_component_firmware_status_request::Target::SwitchBmcMacs(list) => {
             let cm = require_component_manager(api)?;
-            let endpoints = resolve_switch_endpoints(api, &list.ids).await?;
-
-            let mut statuses: Vec<_> = endpoints
-                .unresolved
+            let resolution = resolve_switch_macs(api, &list.mac_addresses).await?;
+            let mut statuses: Vec<rpc::FirmwareUpdateStatus> = resolution
+                .errors
                 .iter()
-                .map(|u| rpc::FirmwareUpdateStatus {
-                    result: Some(error_result(&u.id.to_string(), u.reason.clone())),
+                .map(|result| rpc::FirmwareUpdateStatus {
+                    result: Some(result.clone()),
                     state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
                     target_version: String::new(),
                     updated_at: None,
                 })
                 .collect();
 
-            let backend_statuses = cm
-                .nv_switch
-                .get_firmware_status(&endpoints.resolved.endpoints)
-                .await
-                .map_err(component_manager_error_to_status)?;
-            statuses.extend(backend_statuses.into_iter().map(|s| {
-                let id = switch_mac_to_id_str(&s.bmc_mac, &endpoints.resolved.mac_to_id);
-                rpc::FirmwareUpdateStatus {
-                    result: Some(if s.error.is_none() {
-                        success_result(&id)
-                    } else {
-                        error_result(&id, s.error.unwrap_or_default())
-                    }),
-                    state: map_fw_state(s.state),
-                    target_version: s.target_version,
-                    updated_at: None,
-                }
-            }));
+            // Uningested switches: query the backend directly via pre-ingestion
+            // endpoints, correlated by MAC.
+            if !resolution.uningested.is_empty() {
+                statuses.extend(
+                    pre_ingestion_switch_firmware_statuses(api, cm, &resolution.uningested).await?,
+                );
+            }
+
+            // Ingested MACs: reuse the switch-id path, then echo the MAC.
+            if !resolution.ingested.is_empty() {
+                let ingested = switch_firmware_statuses(api, &resolution.ingested_ids()).await?;
+
+                statuses.extend(ingested.into_iter().map(|mut status| {
+                    if let Some(result) = status.result.as_mut()
+                        && let Some(mac) =
+                            resolution.mac_for_component_id(result.component_id.as_deref())
+                    {
+                        result.mac_address = Some(mac.to_string());
+                    }
+                    status
+                }));
+            }
+
             statuses
         }
         rpc::get_component_firmware_status_request::Target::PowerShelfIds(list) => {
-            let cm = require_component_manager(api)?;
-            let endpoints = resolve_power_shelf_endpoints(api, &list.ids).await?;
-
-            let mut statuses: Vec<_> = endpoints
-                .unresolved
-                .iter()
-                .map(|u| rpc::FirmwareUpdateStatus {
-                    result: Some(error_result(&u.id.to_string(), u.reason.clone())),
-                    state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
-                    target_version: String::new(),
-                    updated_at: None,
-                })
-                .collect();
-
-            let backend_statuses = cm
-                .power_shelf
-                .get_firmware_status(&endpoints.resolved.endpoints)
-                .await
-                .map_err(component_manager_error_to_status)?;
-            statuses.extend(backend_statuses.into_iter().map(|s| {
-                let id = ps_mac_to_id_str(&s.pmc_mac, &endpoints.resolved.mac_to_id);
-                rpc::FirmwareUpdateStatus {
-                    result: Some(if s.error.is_none() {
-                        success_result(&id)
-                    } else {
-                        error_result(&id, s.error.unwrap_or_default())
-                    }),
-                    state: map_fw_state(s.state),
-                    target_version: s.target_version,
-                    updated_at: None,
-                }
-            }));
-            statuses
+            power_shelf_firmware_statuses(api, &list.ids).await?
         }
         rpc::get_component_firmware_status_request::Target::MachineIds(list) => {
-            if list.machine_ids.is_empty() {
-                return Err(Status::invalid_argument("machine_ids must not be empty"));
-            }
-
-            // In direct-dispatch mode all IDs go to the compute-tray backend.
-            // In state-controller mode the batch is partitioned: IDs with a
-            // persisted backend_firmware_object_job_id (set when a firmware update
-            // was dispatched via --bypass-state-controller) are polled from the
-            // live backend; the rest use the DB-only machine_firmware_statuses()
-            // path.
-            if let Some(cm) = api.component_manager.as_ref() {
-                let machines_by_id = load_machines_by_id(api, &list.machine_ids).await?;
-
-                match select_firmware_status_routing(
-                    cm.compute_tray_use_state_controller,
-                    &list.machine_ids,
-                    &machines_by_id,
-                ) {
-                    FirmwareStatusRouting::DirectDispatch => {
-                        compute_tray_firmware_statuses(cm, api, &machines_by_id, &list.machine_ids)
-                            .await?
-                    }
-                    FirmwareStatusRouting::Partitioned {
-                        mut persisted,
-                        mut fallback,
-                    } => {
-                        // A tray flashed before ingestion keeps its job on
-                        // explored_endpoints, not the machine row, so reclassify
-                        // those still tracked there back onto the live-poll path.
-                        reclassify_preingestion_jobs_from_explored_endpoints(
-                            api,
-                            &mut persisted,
-                            &mut fallback,
-                            &machines_by_id,
-                        )
-                        .await?;
-
-                        let mut statuses = Vec::with_capacity(list.machine_ids.len());
-                        if !persisted.is_empty() {
-                            statuses.extend(
-                                compute_tray_firmware_statuses(
-                                    cm,
-                                    api,
-                                    &machines_by_id,
-                                    &persisted,
-                                )
-                                .await?,
-                            );
-                        }
-                        if !fallback.is_empty() {
-                            statuses.extend(machine_firmware_statuses(api, &fallback).await?);
-                        }
-                        statuses
-                    }
-                }
-            } else {
-                machine_firmware_statuses(api, &list.machine_ids).await?
-            }
+            routed_machine_firmware_statuses(api, &list.machine_ids).await?
         }
         rpc::get_component_firmware_status_request::Target::RackIds(list) => {
-            if list.rack_ids.is_empty() {
-                return Err(Status::invalid_argument("rack_ids must not be empty"));
-            }
-
-            let requested_rack_ids = list.rack_ids;
-            let racks = db::rack::find_by(
-                api.db_reader().as_mut(),
-                db::ObjectColumnFilter::List(db::rack::IdColumn, &requested_rack_ids),
-            )
-            .await
-            .map_err(|e| Status::internal(format!("failed to look up racks: {e}")))?;
-            let rack_by_id: HashMap<_, _> = racks
-                .into_iter()
-                .map(|rack| (rack.id.clone(), rack))
-                .collect();
-
-            requested_rack_ids
-                .iter()
-                .map(|rack_id| {
-                    rack_by_id.get(rack_id).map(rack_firmware_status).unwrap_or(
-                        rpc::FirmwareUpdateStatus {
-                            result: Some(not_found_component_result(
-                                rack_id.as_ref(),
-                                format!("rack {rack_id} not found"),
-                            )),
-                            state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
-                            target_version: String::new(),
-                            updated_at: None,
-                        },
-                    )
-                })
-                .collect()
+            rack_firmware_statuses(api, &list.rack_ids).await?
         }
         rpc::get_component_firmware_status_request::Target::ComputeBmcMacs(list) => {
             let resolution = resolve_compute_macs(api, &list.mac_addresses).await?;
@@ -3617,8 +4650,8 @@ pub(crate) async fn get_component_firmware_status(
                 let sub = rpc::GetComponentFirmwareStatusRequest {
                     target: Some(
                         rpc::get_component_firmware_status_request::Target::MachineIds(
-                            ::rpc::common::MachineIdList {
-                                machine_ids: resolution.ingested_machine_ids(),
+                            ::rpc::common::HostMachineIdList {
+                                machine_ids: resolution.ingested_ids(),
                             },
                         ),
                     ),
@@ -3658,7 +4691,7 @@ pub(crate) async fn get_component_firmware_status(
 /// ingested-MAC branch so the latter need not build a recursive sub-request.
 async fn compute_tray_firmware_versions_by_machine_ids(
     api: &Api,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
 ) -> Result<Vec<rpc::DeviceFirmwareVersions>, Status> {
     if machine_ids.is_empty() {
         return Err(Status::invalid_argument("machine_ids must not be empty"));
@@ -3711,6 +4744,51 @@ async fn compute_tray_firmware_versions_by_machine_ids(
     Ok(devices)
 }
 
+/// List available switch firmware versions for a set of ingested switch ids.
+///
+/// The version list is a backend-global catalog, so it is fetched once and
+/// cloned onto every resolved id. Ids that cannot be resolved to an endpoint
+/// produce an inline error entry. Shared by the `switch_ids` target and the
+/// ingested-MAC branch. Callers apply the `cm`/state-controller guards.
+async fn firmware_versions_switch_ids(
+    api: &Api,
+    cm: &ComponentManager,
+    switch_ids: &[SwitchId],
+) -> Result<Vec<rpc::DeviceFirmwareVersions>, Status> {
+    let endpoints = resolve_switch_endpoints(api, switch_ids).await?;
+
+    let mut devices: Vec<rpc::DeviceFirmwareVersions> = endpoints
+        .unresolved
+        .iter()
+        .map(|u| rpc::DeviceFirmwareVersions {
+            result: Some(error_result(&u.id.to_string(), u.reason.clone())),
+            ..Default::default()
+        })
+        .collect();
+
+    let versions = cm
+        .nv_switch
+        .list_firmware_bundles()
+        .await
+        .map_err(component_manager_error_to_status)?;
+
+    for ep in &endpoints.resolved.endpoints {
+        let id = endpoints
+            .resolved
+            .mac_to_id
+            .get(&ep.bmc_mac)
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        devices.push(rpc::DeviceFirmwareVersions {
+            result: Some(success_result(&id)),
+            versions: versions.clone(),
+            ..Default::default()
+        });
+    }
+
+    Ok(devices)
+}
+
 pub(crate) async fn list_component_firmware_versions(
     api: &Api,
     request: Request<rpc::ListComponentFirmwareVersionsRequest>,
@@ -3730,35 +4808,65 @@ pub(crate) async fn list_component_firmware_versions(
             if cm.nv_switch_use_state_controller {
                 return Err(unsupported_from_json_firmware_versions("switch"));
             }
-            let endpoints = resolve_switch_endpoints(api, &list.ids).await?;
+            let devices = firmware_versions_switch_ids(api, cm, &list.ids).await?;
 
-            let mut devices: Vec<rpc::DeviceFirmwareVersions> = endpoints
-                .unresolved
+            Ok(Response::new(rpc::ListComponentFirmwareVersionsResponse {
+                devices,
+            }))
+        }
+        rpc::list_component_firmware_versions_request::Target::SwitchBmcMacs(list) => {
+            let Some(cm) = api.component_manager.as_ref() else {
+                return Err(unsupported_from_json_firmware_versions("switch"));
+            };
+            if cm.nv_switch_use_state_controller {
+                return Err(unsupported_from_json_firmware_versions("switch"));
+            }
+
+            let resolution = resolve_switch_macs(api, &list.mac_addresses).await?;
+            let mut devices: Vec<rpc::DeviceFirmwareVersions> = resolution
+                .errors
                 .iter()
-                .map(|u| rpc::DeviceFirmwareVersions {
-                    result: Some(error_result(&u.id.to_string(), u.reason.clone())),
+                .map(|result| rpc::DeviceFirmwareVersions {
+                    result: Some(result.clone()),
                     ..Default::default()
                 })
                 .collect();
 
-            let versions = cm
-                .nv_switch
-                .list_firmware_bundles()
-                .await
-                .map_err(component_manager_error_to_status)?;
+            // Uningested switches report the backend-global catalog directly by
+            // MAC: the switch vendor is always NVIDIA and the catalog needs no
+            // resolved endpoint, so no rack-scale/standalone split is required.
+            if !resolution.uningested.is_empty() {
+                let versions = cm
+                    .nv_switch
+                    .list_firmware_bundles()
+                    .await
+                    .map_err(component_manager_error_to_status)?;
+                devices.extend(resolution.uningested.iter().map(|mac| {
+                    rpc::DeviceFirmwareVersions {
+                        result: Some(mac_result(
+                            mac,
+                            rpc::ComponentManagerStatusCode::Success,
+                            None,
+                        )),
+                        versions: versions.clone(),
+                        ..Default::default()
+                    }
+                }));
+            }
 
-            for ep in &endpoints.resolved.endpoints {
-                let id = endpoints
-                    .resolved
-                    .mac_to_id
-                    .get(&ep.bmc_mac)
-                    .map(|id| id.to_string())
-                    .unwrap_or_default();
-                devices.push(rpc::DeviceFirmwareVersions {
-                    result: Some(success_result(&id)),
-                    versions: versions.clone(),
-                    ..Default::default()
-                });
+            // Ingested MACs: reuse the switch-id path, then echo the MAC.
+            if !resolution.ingested.is_empty() {
+                let ingested =
+                    firmware_versions_switch_ids(api, cm, &resolution.ingested_ids()).await?;
+                devices.extend(ingested.into_iter().map(|mut device| {
+                    if let Some(result) = device.result.as_mut()
+                        && let Some(mac) =
+                            resolution.mac_for_component_id(result.component_id.as_deref())
+                    {
+                        result.mac_address = Some(mac.to_string());
+                    }
+                    device
+                }));
             }
 
             Ok(Response::new(rpc::ListComponentFirmwareVersionsResponse {
@@ -3878,11 +4986,8 @@ pub(crate) async fn list_component_firmware_versions(
             }
 
             if !resolution.ingested.is_empty() {
-                match compute_tray_firmware_versions_by_machine_ids(
-                    api,
-                    &resolution.ingested_machine_ids(),
-                )
-                .await
+                match compute_tray_firmware_versions_by_machine_ids(api, &resolution.ingested_ids())
+                    .await
                 {
                     Ok(sub_devices) => {
                         devices.extend(sub_devices.into_iter().map(|mut device| {
@@ -3934,12 +5039,12 @@ mod tests {
 
     use super::*;
 
-    fn firmware_device(status: &str) -> model::rack::FirmwareUpgradeDeviceStatus {
+    fn firmware_device(status: FirmwareProgressState) -> model::rack::FirmwareUpgradeDeviceStatus {
         model::rack::FirmwareUpgradeDeviceStatus {
             node_id: String::new(),
             mac: "00:00:00:00:00:00".to_string(),
             bmc_ip: String::new(),
-            status: status.to_string(),
+            status,
             job_id: None,
             parent_job_id: None,
             error_message: None,
@@ -3961,6 +5066,41 @@ mod tests {
             deleted: None,
             metadata: Metadata::default(),
             version: ConfigVersion::initial(),
+        }
+    }
+
+    fn test_switch() -> model::switch::Switch {
+        model::switch::Switch {
+            id: test_switch_id(),
+            config: model::switch::SwitchConfig {
+                name: "test-switch".into(),
+                enable_nmxc: false,
+                fabric_manager_config: None,
+            },
+            status: None,
+            deleted: None,
+            bmc_mac_address: None,
+            bmc_info: None,
+            bmc_credential_rotation_requested: false,
+            decommission_requested: false,
+            controller_state: Versioned::new(
+                model::switch::SwitchControllerState::Created,
+                ConfigVersion::initial(),
+            ),
+            controller_state_outcome: None,
+            switch_maintenance_requested: None,
+            switch_reprovisioning_requested: None,
+            firmware_upgrade_status: None,
+            nvos_update_status: None,
+            fabric_manager_status: None,
+            nvlink_domain_uuid: None,
+            rack_id: None,
+            metadata: Metadata::default(),
+            version: ConfigVersion::initial(),
+            is_primary: false,
+            slot_number: None,
+            tray_index: None,
+            health_reports: Default::default(),
         }
     }
 
@@ -4276,13 +5416,13 @@ mod tests {
     #[test]
     fn firmware_job_state_explicit_status_wins_for_empty_job() {
         let job = FirmwareUpgradeJob {
-            status: Some("queued".to_string()),
+            status: Some(FirmwareProgressState::Pending),
             ..Default::default()
         };
 
         assert_eq!(
             firmware_job_state(&job),
-            rpc::FirmwareUpdateState::FwStateQueued as i32
+            rpc::FirmwareUpdateState::FwStateQueued
         );
     }
 
@@ -4290,76 +5430,78 @@ mod tests {
     fn firmware_job_state_empty_job_without_status_is_unknown() {
         assert_eq!(
             firmware_job_state(&FirmwareUpgradeJob::default()),
-            rpc::FirmwareUpdateState::FwStateUnknown as i32
+            rpc::FirmwareUpdateState::FwStateUnknown
         );
     }
 
     #[test]
     fn firmware_job_state_all_completed_is_completed() {
         let job = FirmwareUpgradeJob {
-            machines: vec![firmware_device("completed")],
-            switches: vec![firmware_device("completed")],
+            machines: vec![firmware_device(FirmwareProgressState::Completed)],
+            switches: vec![firmware_device(FirmwareProgressState::Completed)],
             ..Default::default()
         };
 
         assert_eq!(
             firmware_job_state(&job),
-            rpc::FirmwareUpdateState::FwStateCompleted as i32
+            rpc::FirmwareUpdateState::FwStateCompleted
         );
     }
 
     #[test]
     fn firmware_job_state_mixed_terminal_with_failure_is_failed() {
         let job = FirmwareUpgradeJob {
-            machines: vec![firmware_device("completed")],
-            switches: vec![firmware_device("failed")],
+            machines: vec![firmware_device(FirmwareProgressState::Completed)],
+            switches: vec![firmware_device(FirmwareProgressState::Failed)],
             ..Default::default()
         };
 
         assert_eq!(
             firmware_job_state(&job),
-            rpc::FirmwareUpdateState::FwStateFailed as i32
+            rpc::FirmwareUpdateState::FwStateFailed
         );
     }
 
     #[test]
     fn firmware_job_state_partial_terminal_is_in_progress() {
         let job = FirmwareUpgradeJob {
-            machines: vec![firmware_device("completed")],
-            switches: vec![firmware_device("pending")],
+            machines: vec![firmware_device(FirmwareProgressState::Completed)],
+            switches: vec![firmware_device(FirmwareProgressState::Pending)],
             ..Default::default()
         };
 
         assert_eq!(
             firmware_job_state(&job),
-            rpc::FirmwareUpdateState::FwStateInProgress as i32
+            rpc::FirmwareUpdateState::FwStateInProgress
         );
     }
 
     #[test]
     fn firmware_job_state_all_pending_without_start_is_queued() {
         let job = FirmwareUpgradeJob {
-            machines: vec![firmware_device("pending")],
-            switches: vec![firmware_device("queued")],
+            machines: vec![firmware_device(FirmwareProgressState::Pending)],
+            switches: vec![firmware_device(FirmwareProgressState::Pending)],
             ..Default::default()
         };
 
         assert_eq!(
             firmware_job_state(&job),
-            rpc::FirmwareUpdateState::FwStateQueued as i32
+            rpc::FirmwareUpdateState::FwStateQueued
         );
     }
 
     #[test]
     fn firmware_job_state_unknown_device_status_is_unknown() {
         let job = FirmwareUpgradeJob {
-            machines: vec![firmware_device("mystery")],
+            machines: vec![firmware_device(FirmwareProgressState::Unknown(
+                "mystery".into(),
+            ))],
             ..Default::default()
         };
 
         assert_eq!(
             firmware_job_state(&job),
-            rpc::FirmwareUpdateState::FwStateUnknown as i32
+            rpc::FirmwareUpdateState::FwStateUnknown
         );
     }
 
@@ -4367,7 +5509,7 @@ mod tests {
     fn rack_firmware_status_reports_retained_completed_job() {
         let job = FirmwareUpgradeJob {
             firmware_id: Some("fw-1".to_string()),
-            status: Some("completed".to_string()),
+            status: Some(FirmwareProgressState::Completed),
             started_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
             completed_at: Some(chrono::Utc::now()),
             ..Default::default()
@@ -4388,7 +5530,7 @@ mod tests {
     fn rack_firmware_status_default_request_uses_job_firmware_id() {
         let job = FirmwareUpgradeJob {
             firmware_id: Some("fw-default".to_string()),
-            status: Some("in_progress".to_string()),
+            status: Some(FirmwareProgressState::InProgress),
             started_at: Some(chrono::Utc::now()),
             ..Default::default()
         };
@@ -4429,6 +5571,218 @@ mod tests {
         assert_eq!(status.state, rpc::FirmwareUpdateState::FwStateQueued as i32);
         assert!(status.target_version.is_empty());
         assert!(status.updated_at.is_some());
+    }
+
+    /// Builds a failed device carrying the reason backend service reported for it.
+    fn failed_firmware_device(error_message: &str) -> model::rack::FirmwareUpgradeDeviceStatus {
+        model::rack::FirmwareUpgradeDeviceStatus {
+            error_message: Some(error_message.to_string()),
+            ..firmware_device(FirmwareProgressState::Failed)
+        }
+    }
+
+    #[test]
+    fn rack_firmware_failure_summary_reports_counts_and_reasons() {
+        use carbide_test_support::value_scenarios;
+
+        value_scenarios!(
+            run = |job| rack_firmware_failure_summary(&test_rack_with_job(None), &job);
+            "a shared reason is reported verbatim so the SOT rejection is visible" {
+                FirmwareUpgradeJob {
+                    machines: vec![
+                        failed_firmware_device("config_json.ProductName is required"),
+                        failed_firmware_device("config_json.ProductName is required"),
+                    ],
+                    ..Default::default()
+                } => "firmware upgrade failed: 2/2 devices failed: \
+                      config_json.ProductName is required".to_string(),
+            }
+
+            "divergent reasons direct operators to backend service logs" {
+                FirmwareUpgradeJob {
+                    machines: vec![failed_firmware_device("download failed")],
+                    switches: vec![failed_firmware_device("target not found")],
+                    ..Default::default()
+                } => "firmware upgrade failed: 2/2 devices failed: 2 distinct errors; \
+                      see backend service logs".to_string(),
+            }
+
+            "a partial failure reports the failed subset" {
+                FirmwareUpgradeJob {
+                    machines: vec![
+                        failed_firmware_device("task failed"),
+                        firmware_device(FirmwareProgressState::Completed),
+                    ],
+                    ..Default::default()
+                } => "firmware upgrade failed: 1/2 devices failed: task failed".to_string(),
+            }
+
+            "devices without a recorded reason still report the count" {
+                FirmwareUpgradeJob {
+                    machines: vec![firmware_device(FirmwareProgressState::Failed)],
+                    ..Default::default()
+                } => "firmware upgrade failed: 1/1 devices failed".to_string(),
+            }
+
+            "one known reason is not attributed to a device that reported none" {
+                FirmwareUpgradeJob {
+                    machines: vec![
+                        failed_firmware_device("download failed"),
+                        firmware_device(FirmwareProgressState::Failed),
+                    ],
+                    ..Default::default()
+                } => "firmware upgrade failed: 2/2 devices failed; some devices \
+                      reported no reason; see backend service logs".to_string(),
+            }
+
+            "one known reason is not attributed to a device that reported a blank one" {
+                FirmwareUpgradeJob {
+                    machines: vec![
+                        failed_firmware_device("download failed"),
+                        failed_firmware_device("   "),
+                    ],
+                    ..Default::default()
+                } => "firmware upgrade failed: 2/2 devices failed; some devices \
+                      reported no reason; see backend service logs".to_string(),
+            }
+
+            "blank reasons are treated as absent" {
+                FirmwareUpgradeJob {
+                    machines: vec![failed_firmware_device("   ")],
+                    ..Default::default()
+                } => "firmware upgrade failed: 1/1 devices failed".to_string(),
+            }
+
+            "a job that never reached its devices says so" {
+                FirmwareUpgradeJob::default() =>
+                    "firmware upgrade failed before any device update was submitted".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rack_firmware_status_job_level_failure_reports_controller_cause() {
+        let cause = "rack firmware upgrade cannot progress because target machines are Ready with desired power state Off";
+        let job = FirmwareUpgradeJob {
+            status: Some(FirmwareProgressState::Failed),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+            machines: vec![firmware_device(FirmwareProgressState::InProgress)],
+            ..Default::default()
+        };
+        let mut rack = test_rack_with_job(Some(job));
+        rack.controller_state = Versioned::new(
+            RackState::Error {
+                cause: cause.to_string(),
+            },
+            ConfigVersion::initial(),
+        );
+
+        let status = rack_firmware_status(&rack);
+        let result = status.result.expect("a rack status carries a result");
+
+        assert_eq!(status.state, rpc::FirmwareUpdateState::FwStateFailed as i32);
+        assert_eq!(
+            result.error,
+            format!("firmware upgrade failed; rack is in error state: {cause}")
+        );
+        assert!(!result.error.contains("0/1 devices failed"));
+    }
+
+    /// A failed job outlives its own error: it is only cleared when the next firmware
+    /// maintenance request is accepted, so an unrelated later failure can leave a stale
+    /// "failed" job sitting next to a rack error that has nothing to do with firmware.
+    /// The summary must not present that error as the reason the upgrade failed.
+    #[test]
+    fn rack_firmware_status_does_not_attribute_an_unrelated_rack_error() {
+        let unrelated = "rack profile is missing or unknown; cannot build switch node descriptor";
+        let job = FirmwareUpgradeJob {
+            status: Some(FirmwareProgressState::Failed),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+            machines: vec![firmware_device(FirmwareProgressState::InProgress)],
+            ..Default::default()
+        };
+        let mut rack = test_rack_with_job(Some(job));
+        rack.controller_state = Versioned::new(
+            RackState::Error {
+                cause: unrelated.to_string(),
+            },
+            ConfigVersion::initial(),
+        );
+
+        let status = rack_firmware_status(&rack);
+        let result = status.result.expect("a rack status carries a result");
+
+        assert!(
+            result
+                .error
+                .starts_with("firmware upgrade failed; rack is in error state:"),
+            "the rack error must be quoted as context, not as the cause: {}",
+            result.error
+        );
+        assert!(
+            result.error.contains(unrelated),
+            "the rack error is still worth showing an operator"
+        );
+    }
+
+    /// The reported regression: every device failed with the backend SOT parse error, but
+    /// the rack-level result claimed success and carried no error at all.
+    #[test]
+    fn rack_firmware_status_failed_job_reports_the_device_error() {
+        let job = FirmwareUpgradeJob {
+            firmware_id: Some(String::new()),
+            status: Some(FirmwareProgressState::Failed),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: Some(chrono::Utc::now()),
+            machines: vec![failed_firmware_device(
+                "config_json.ProductName is required",
+            )],
+            ..Default::default()
+        };
+        let rack = test_rack_with_job(Some(job));
+
+        let status = rack_firmware_status(&rack);
+        let result = status
+            .result
+            .expect("a rack status always carries a result");
+
+        assert_eq!(status.state, rpc::FirmwareUpdateState::FwStateFailed as i32);
+        assert_eq!(
+            result.status,
+            rpc::ComponentManagerStatusCode::InternalError as i32
+        );
+        assert_eq!(
+            result.error,
+            "firmware upgrade failed: 1/1 devices failed: config_json.ProductName is required"
+        );
+    }
+
+    #[test]
+    fn rack_firmware_status_unfinished_job_stays_successful() {
+        let job = FirmwareUpgradeJob {
+            status: Some(FirmwareProgressState::InProgress),
+            started_at: Some(chrono::Utc::now()),
+            machines: vec![firmware_device(FirmwareProgressState::InProgress)],
+            ..Default::default()
+        };
+        let rack = test_rack_with_job(Some(job));
+
+        let status = rack_firmware_status(&rack);
+        let result = status
+            .result
+            .expect("a rack status always carries a result");
+
+        assert_eq!(
+            status.state,
+            rpc::FirmwareUpdateState::FwStateInProgress as i32
+        );
+        assert_eq!(
+            result.status,
+            rpc::ComponentManagerStatusCode::Success as i32
+        );
+        assert!(result.error.is_empty());
     }
 
     #[test]
@@ -4507,6 +5861,319 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(map_fw_state(input), expected, "mismatch for {input:?}");
         }
+    }
+
+    #[test]
+    fn persisted_firmware_status_maps_all_states() {
+        let component_id = "component-id";
+        let started_at = chrono::Utc::now();
+        let cases = [
+            (
+                model::rack::RackFirmwareUpgradeState::Started,
+                rpc::FirmwareUpdateState::FwStateQueued,
+                rpc::ComponentManagerStatusCode::Success,
+                "",
+            ),
+            (
+                model::rack::RackFirmwareUpgradeState::InProgress,
+                rpc::FirmwareUpdateState::FwStateInProgress,
+                rpc::ComponentManagerStatusCode::Success,
+                "",
+            ),
+            (
+                model::rack::RackFirmwareUpgradeState::Completed,
+                rpc::FirmwareUpdateState::FwStateCompleted,
+                rpc::ComponentManagerStatusCode::Success,
+                "",
+            ),
+            (
+                model::rack::RackFirmwareUpgradeState::Failed {
+                    cause: "config_json.ProductName is required".into(),
+                },
+                rpc::FirmwareUpdateState::FwStateFailed,
+                rpc::ComponentManagerStatusCode::InternalError,
+                "config_json.ProductName is required",
+            ),
+        ];
+
+        for (input, expected_state, expected_result, expected_error) in cases {
+            let status = model::rack::RackFirmwareUpgradeStatus {
+                task_id: "backend-task-id".into(),
+                status: input,
+                started_at: Some(started_at),
+                ended_at: None,
+            };
+
+            let actual = persisted_firmware_status(component_id, &status);
+            let result = actual.result.expect("component result must be present");
+
+            assert_eq!(result.component_id.as_deref(), Some(component_id));
+            assert_eq!(actual.state, expected_state as i32);
+            assert_eq!(result.status, expected_result as i32);
+            assert_eq!(result.error, expected_error);
+            assert_eq!(actual.updated_at, Some(started_at.into()));
+        }
+    }
+
+    #[test]
+    fn switch_persisted_status_is_gated_to_the_current_request() {
+        let switch_id = test_switch_id();
+        let requested_at = chrono::Utc::now();
+        let stale_status = model::rack::RackFirmwareUpgradeStatus {
+            task_id: "old-backend-task".into(),
+            status: model::rack::RackFirmwareUpgradeState::Failed {
+                cause: "old failure".into(),
+            },
+            started_at: Some(requested_at - chrono::Duration::minutes(2)),
+            ended_at: Some(requested_at - chrono::Duration::minutes(1)),
+        };
+        let current_status = model::rack::RackFirmwareUpgradeStatus {
+            task_id: "current-backend-task".into(),
+            status: model::rack::RackFirmwareUpgradeState::Completed,
+            started_at: Some(requested_at + chrono::Duration::seconds(1)),
+            ended_at: Some(requested_at + chrono::Duration::seconds(2)),
+        };
+
+        let request = SwitchFirmwareRequest {
+            requested_at: Some(requested_at),
+            target_version: Some("fw-42".into()),
+        };
+
+        let cases = [
+            (
+                Some(&stale_status),
+                Some(&request),
+                rpc::FirmwareUpdateState::FwStateQueued,
+                "fw-42",
+            ),
+            (
+                None,
+                Some(&request),
+                rpc::FirmwareUpdateState::FwStateQueued,
+                "fw-42",
+            ),
+            (
+                Some(&current_status),
+                Some(&request),
+                rpc::FirmwareUpdateState::FwStateCompleted,
+                "fw-42",
+            ),
+        ];
+
+        for (persisted, request, expected, expected_version) in cases {
+            let actual = select_persisted_switch_firmware_status(switch_id, persisted, request)
+                .expect("an active request always yields a status");
+            assert_eq!(
+                actual.state,
+                expected as i32,
+                "persisted: {persisted:?}, requested_at: {:?}",
+                request.map(|request| request.requested_at)
+            );
+            assert_eq!(
+                actual.target_version, expected_version,
+                "the active request carries the target version for its whole cycle"
+            );
+        }
+
+        for persisted in [None, Some(&stale_status), Some(&current_status)] {
+            assert!(
+                select_persisted_switch_firmware_status(switch_id, persisted, None).is_none(),
+                "with no active request the backend answers; a finished cycle's result must \
+                 not shadow it: {persisted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn switch_firmware_request_covers_pending_rack_and_dispatched_requests() {
+        let rack_requested_at = chrono::Utc::now();
+        let switch_requested_at = rack_requested_at + chrono::Duration::seconds(1);
+        let mut rack = test_rack_with_job(None);
+        let mut switch = test_switch();
+        switch.rack_id = Some(rack.id.clone());
+        rack.updated = rack_requested_at;
+        rack.config.maintenance_requested = Some(model::rack::MaintenanceScope {
+            switch_ids: vec![switch.id],
+            activities: vec![MaintenanceActivity::FirmwareUpgrade {
+                firmware_version: Some("firmware-object-json".into()),
+                components: vec![],
+                force_update: false,
+            }],
+            requested_at: Some(rack_requested_at),
+            ..Default::default()
+        });
+
+        let request = switch_firmware_request(&switch, Some(&rack))
+            .expect("the accepted rack request gates status before device dispatch");
+        assert_eq!(request.requested_at, Some(rack_requested_at));
+        assert_eq!(
+            request.target_version.as_deref(),
+            Some("firmware-object-json")
+        );
+
+        switch.switch_reprovisioning_requested = Some(model::switch::SwitchReprovisionRequest {
+            requested_at: switch_requested_at,
+            initiator: "test".into(),
+            activities: vec![MaintenanceActivity::FirmwareUpgrade {
+                firmware_version: None,
+                components: vec![],
+                force_update: false,
+            }],
+        });
+
+        let request = switch_firmware_request(&switch, Some(&rack))
+            .expect("a dispatched device request is still an active request");
+        assert_eq!(
+            request.requested_at,
+            Some(switch_requested_at),
+            "the dispatched device request is the more precise cycle boundary"
+        );
+        assert_eq!(
+            request.target_version.as_deref(),
+            Some("firmware-object-json"),
+            "the rack scope still supplies the version the operator asked for"
+        );
+
+        rack.config.maintenance_requested = Some(model::rack::MaintenanceScope {
+            power_shelf_ids: vec![test_power_shelf_id()],
+            activities: vec![MaintenanceActivity::FirmwareUpgrade {
+                firmware_version: None,
+                components: vec![],
+                force_update: false,
+            }],
+            ..Default::default()
+        });
+        switch.switch_reprovisioning_requested = None;
+        assert!(
+            switch_firmware_request(&switch, Some(&rack)).is_none(),
+            "a rack scope that excludes the switch is not its request"
+        );
+    }
+
+    #[test]
+    fn switch_firmware_request_has_no_boundary_for_a_legacy_rack_scope() {
+        let mut rack = test_rack_with_job(None);
+        let mut switch = test_switch();
+        switch.rack_id = Some(rack.id.clone());
+        // A scope persisted before acceptance timestamps existed.
+        rack.config.maintenance_requested = Some(model::rack::MaintenanceScope {
+            switch_ids: vec![switch.id],
+            activities: vec![MaintenanceActivity::FirmwareUpgrade {
+                firmware_version: Some("firmware-object-json".into()),
+                components: vec![],
+                force_update: false,
+            }],
+            requested_at: None,
+            ..Default::default()
+        });
+
+        let started_at = chrono::Utc::now();
+        let status = model::rack::RackFirmwareUpgradeStatus {
+            task_id: "backend-task-id".into(),
+            status: model::rack::RackFirmwareUpgradeState::InProgress,
+            started_at: Some(started_at),
+            ended_at: None,
+        };
+
+        // Firmware polling rewrites the rack row, so `updated` keeps advancing
+        // past the running update. It must not become the cycle boundary.
+        for offset in [0, 5, 60] {
+            rack.updated = started_at + chrono::Duration::minutes(offset);
+            let request = switch_firmware_request(&switch, Some(&rack))
+                .expect("a legacy scope is still an active request");
+            assert_eq!(
+                request.requested_at, None,
+                "a legacy scope has no boundary; rack.updated must not supply one"
+            );
+
+            let selected =
+                select_persisted_switch_firmware_status(switch.id, Some(&status), Some(&request))
+                    .expect("an active request always yields a status");
+            assert_eq!(
+                selected.state,
+                rpc::FirmwareUpdateState::FwStateInProgress as i32,
+                "a later rack write must not send a running update back to queued"
+            );
+        }
+    }
+
+    #[test]
+    fn switch_firmware_request_ignores_version_from_an_unrelated_rack_scope() {
+        let requested_at = chrono::Utc::now();
+        let mut rack = test_rack_with_job(None);
+        let mut switch = test_switch();
+        switch.rack_id = Some(rack.id.clone());
+        rack.config.maintenance_requested = Some(model::rack::MaintenanceScope {
+            power_shelf_ids: vec![test_power_shelf_id()],
+            activities: vec![MaintenanceActivity::FirmwareUpgrade {
+                firmware_version: Some("other-firmware-object-json".into()),
+                components: vec![],
+                force_update: false,
+            }],
+            requested_at: Some(requested_at),
+            ..Default::default()
+        });
+        switch.switch_reprovisioning_requested = Some(model::switch::SwitchReprovisionRequest {
+            requested_at,
+            initiator: "test".into(),
+            activities: vec![MaintenanceActivity::FirmwareUpgrade {
+                firmware_version: None,
+                components: vec![],
+                force_update: false,
+            }],
+        });
+
+        let request = switch_firmware_request(&switch, Some(&rack))
+            .expect("the dispatched device request is active on its own");
+        assert_eq!(request.requested_at, Some(requested_at));
+        assert_eq!(
+            request.target_version, None,
+            "a scope that does not cover this switch must not supply its target version"
+        );
+    }
+
+    #[test]
+    fn switch_firmware_request_ignores_later_rack_writes() {
+        let requested_at = chrono::Utc::now();
+        let mut rack = test_rack_with_job(None);
+        let mut switch = test_switch();
+        switch.rack_id = Some(rack.id.clone());
+        // The rack row is written repeatedly while the request is pending
+        // (state transitions, job updates), long after the upgrade started.
+        rack.updated = requested_at + chrono::Duration::minutes(5);
+        rack.config.maintenance_requested = Some(model::rack::MaintenanceScope {
+            activities: vec![MaintenanceActivity::FirmwareUpgrade {
+                firmware_version: Some("firmware-object-json".into()),
+                components: vec![],
+                force_update: false,
+            }],
+            requested_at: Some(requested_at),
+            ..Default::default()
+        });
+
+        let request = switch_firmware_request(&switch, Some(&rack))
+            .expect("a pending rack request is an active request");
+        assert_eq!(
+            request.requested_at,
+            Some(requested_at),
+            "the cycle boundary is when the request was accepted"
+        );
+
+        let status = model::rack::RackFirmwareUpgradeStatus {
+            task_id: "backend-task-id".into(),
+            status: model::rack::RackFirmwareUpgradeState::InProgress,
+            started_at: Some(requested_at + chrono::Duration::seconds(30)),
+            ended_at: None,
+        };
+        let selected =
+            select_persisted_switch_firmware_status(switch.id, Some(&status), Some(&request))
+                .expect("a pending request always yields a status");
+
+        assert_eq!(
+            selected.state,
+            rpc::FirmwareUpdateState::FwStateInProgress as i32,
+            "a later rack write must not send the upgrade back to queued"
+        );
     }
 
     #[test]
@@ -4819,12 +6486,128 @@ mod tests {
         );
     }
 
+    /// A failed rack firmware upgrade must reach the operator with the reason the
+    /// backend gave. The rack controller records it on `rack_fw_details`, the machine
+    /// controller copies it into `FailedFirmwareUpgrade` while clearing the
+    /// reprovisioning request, and this is the only place the API can surface it.
+    #[test]
+    fn derive_machine_firmware_update_status_failed_reports_the_reprovision_reason() {
+        use super::derive_machine_firmware_update_status;
+
+        fn failed_machine(reason: Option<&str>, assigned: bool) -> HostMachine {
+            let mut machine = machine_with_id(standalone_machine(), *host_machine_id());
+            machine.status.update_complete = false;
+
+            let reprovision_state = HostReprovisionState::FailedFirmwareUpgrade {
+                firmware_type: FirmwareComponentType::Unknown,
+                report_time: Some(chrono::Utc::now()),
+                reason: reason.map(str::to_owned),
+            };
+
+            let state = if assigned {
+                ManagedHostState::Assigned {
+                    instance_state: model::machine::InstanceState::HostReprovision {
+                        reprovision_state,
+                    },
+                }
+            } else {
+                ManagedHostState::HostReprovision {
+                    reprovision_state,
+                    retry_count: 0,
+                }
+            };
+
+            machine.state = Versioned::new(state, ConfigVersion::initial());
+            machine
+        }
+
+        let machine_id = host_machine_id().to_string();
+        let cases = [
+            (
+                "the backend reason is reported verbatim",
+                Some("config_json.ProductName is required"),
+                false,
+                "config_json.ProductName is required",
+            ),
+            (
+                "an assigned machine reports the backend reason verbatim",
+                Some("config_json.ProductName is required"),
+                true,
+                "config_json.ProductName is required",
+            ),
+            (
+                "no recorded reason is reported as such",
+                None,
+                false,
+                "firmware upgrade failed without a recorded reason",
+            ),
+            (
+                "a blank reason is treated as absent",
+                Some("   "),
+                false,
+                "firmware upgrade failed without a recorded reason",
+            ),
+        ];
+
+        for (label, reason, assigned, expected_error) in cases {
+            let machine = failed_machine(reason, assigned);
+
+            let status =
+                derive_machine_firmware_update_status(&machine_id, Some(&machine), None, &[]);
+            let result = status.result.expect("a machine status carries a result");
+
+            assert_eq!(
+                status.state,
+                rpc::FirmwareUpdateState::FwStateFailed as i32,
+                "[{label}] state"
+            );
+            assert_eq!(result.error, expected_error, "[{label}] error");
+            assert_eq!(
+                result.status,
+                if expected_error.is_empty() {
+                    rpc::ComponentManagerStatusCode::Success as i32
+                } else {
+                    rpc::ComponentManagerStatusCode::InternalError as i32
+                },
+                "[{label}] status code"
+            );
+        }
+    }
+
+    /// A machine that is not in a firmware failure keeps the plain success result,
+    /// so the reason lookup cannot leak into healthy states.
+    #[test]
+    fn derive_machine_firmware_update_status_non_failed_states_stay_successful() {
+        use super::derive_machine_firmware_update_status;
+
+        let mut machine = machine_with_id(standalone_machine(), *host_machine_id());
+        machine.status.update_complete = true;
+        let machine_id = host_machine_id().to_string();
+
+        let status = derive_machine_firmware_update_status(&machine_id, Some(&machine), None, &[]);
+        let result = status.result.expect("a machine status carries a result");
+
+        assert_eq!(
+            status.state,
+            rpc::FirmwareUpdateState::FwStateCompleted as i32
+        );
+        assert!(result.error.is_empty());
+    }
+
     // ---- compute power-control (MachineIds) decision logic ----
 
     use carbide_secrets::credentials::Credentials;
     use carbide_secrets::test_support::credentials::TestCredentialManager;
+    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
     use model::hardware_info::{Gpu, GpuPlatformInfo, HardwareInfo};
-    use model::test_support::machine_snapshot::{dpu_machine_id, host_machine, host_machine_id};
+    use model::machine::HostMachine;
+    use model::test_support::machine_snapshot::{host_machine, host_machine_id};
+
+    fn compute_host_machine_id(index: u8) -> HostMachineId {
+        MachineId::new(MachineIdSource::Tpm, [index; 32], MachineType::Host)
+            .try_into()
+            .expect("test host ID should have a host subtype")
+    }
 
     /// A GPU carrying NVLink platform metadata and an MNNVL family name — what
     /// `is_mnnvl_capable` keys off of to flag a rack-scale (GB200) server.
@@ -4849,19 +6632,19 @@ mod tests {
         }
     }
 
-    fn machine_with_hardware(hardware_info: Option<HardwareInfo>) -> Machine {
-        let mut machine = host_machine();
+    fn machine_with_hardware(hardware_info: Option<HardwareInfo>) -> HostMachine {
+        let mut machine: HostMachine = host_machine().into();
         machine.status.hardware_info = hardware_info;
         machine
     }
 
-    fn machine_with_id(mut machine: Machine, id: MachineId) -> Machine {
+    fn machine_with_id(mut machine: HostMachine, id: HostMachineId) -> HostMachine {
         machine.id = id;
         machine
     }
 
     /// Rack-scale: at least one MNNVL-capable GPU.
-    fn rack_scale_machine() -> Machine {
+    fn rack_scale_machine() -> HostMachine {
         machine_with_hardware(Some(HardwareInfo {
             gpus: vec![mnnvl_gpu()],
             ..Default::default()
@@ -4869,7 +6652,7 @@ mod tests {
     }
 
     /// Standalone: no MNNVL-capable GPU.
-    fn standalone_machine() -> Machine {
+    fn standalone_machine() -> HostMachine {
         machine_with_hardware(Some(HardwareInfo::default()))
     }
 
@@ -4877,10 +6660,14 @@ mod tests {
     /// loop without a database: unknown ids become per-machine NotFound results,
     /// and only machines with a successful power-option update join a partition.
     fn prepare_dispatch_lists(
-        machines_by_id: &HashMap<MachineId, Machine>,
-        machine_ids: &[MachineId],
-        power_option_ok: &HashMap<MachineId, bool>,
-    ) -> (Vec<MachineId>, Vec<MachineId>, Vec<rpc::ComponentResult>) {
+        machines_by_id: &HashMap<HostMachineId, HostMachine>,
+        machine_ids: &[HostMachineId],
+        power_option_ok: &HashMap<HostMachineId, bool>,
+    ) -> (
+        Vec<HostMachineId>,
+        Vec<HostMachineId>,
+        Vec<rpc::ComponentResult>,
+    ) {
         let mut results = Vec::new();
         let mut rack_scale_ids = Vec::new();
         let mut standalone_ids = Vec::new();
@@ -4911,7 +6698,7 @@ mod tests {
 
     #[test]
     fn machine_is_rack_scale_classifies_rack_standalone_and_unknown() {
-        let id = host_machine_id();
+        let id = compute_host_machine_id(0);
 
         let rack_map = HashMap::from([(id, rack_scale_machine())]);
         assert!(
@@ -4933,27 +6720,27 @@ mod tests {
 
     #[test]
     fn mixed_batch_routes_rack_to_rack_partition_and_standalone_to_core_partition() {
-        let rack_id = host_machine_id();
-        let standalone_id = dpu_machine_id(0);
+        let rack_id = compute_host_machine_id(0);
+        let standalone_id = compute_host_machine_id(1);
         let machines = HashMap::from([
             (rack_id, machine_with_id(rack_scale_machine(), rack_id)),
             (
-                standalone_id.into(),
-                machine_with_id(standalone_machine(), standalone_id.into()),
+                standalone_id,
+                machine_with_id(standalone_machine(), standalone_id),
             ),
         ]);
 
         let (rack, standalone, results) =
-            prepare_dispatch_lists(&machines, &[rack_id, standalone_id.into()], &HashMap::new());
+            prepare_dispatch_lists(&machines, &[rack_id, standalone_id], &HashMap::new());
 
         assert!(results.is_empty());
         assert_eq!(rack, vec![rack_id]);
-        assert_eq!(standalone, vec![standalone_id.into()]);
+        assert_eq!(standalone, vec![standalone_id]);
     }
 
     #[test]
     fn all_rack_scale_batch_uses_only_rack_partition() {
-        let id = host_machine_id();
+        let id = compute_host_machine_id(0);
         let machines = HashMap::from([(id, rack_scale_machine())]);
         let (rack, standalone, results) = prepare_dispatch_lists(&machines, &[id], &HashMap::new());
         assert!(results.is_empty());
@@ -4963,7 +6750,7 @@ mod tests {
 
     #[test]
     fn all_standalone_batch_uses_only_standalone_partition() {
-        let id = host_machine_id();
+        let id = compute_host_machine_id(0);
         let machines = HashMap::from([(id, standalone_machine())]);
         let (rack, standalone, results) = prepare_dispatch_lists(&machines, &[id], &HashMap::new());
         assert!(results.is_empty());
@@ -4973,12 +6760,12 @@ mod tests {
 
     #[test]
     fn unknown_machine_id_is_not_found_and_does_not_abort_rest_of_batch() {
-        let known = host_machine_id();
-        let unknown = dpu_machine_id(1);
+        let known = compute_host_machine_id(0);
+        let unknown = compute_host_machine_id(1);
         let machines = HashMap::from([(known, standalone_machine())]);
 
         let (rack, standalone, results) =
-            prepare_dispatch_lists(&machines, &[unknown.into(), known], &HashMap::new());
+            prepare_dispatch_lists(&machines, &[unknown, known], &HashMap::new());
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].component_id, Some(unknown.to_string()));
@@ -4992,19 +6779,16 @@ mod tests {
 
     #[test]
     fn power_option_failure_is_not_dispatched_while_siblings_are() {
-        let ok_id = host_machine_id();
-        let fail_id = dpu_machine_id(0);
+        let ok_id = compute_host_machine_id(0);
+        let fail_id = compute_host_machine_id(1);
         let machines = HashMap::from([
             (ok_id, machine_with_id(rack_scale_machine(), ok_id)),
-            (
-                fail_id.into(),
-                machine_with_id(standalone_machine(), fail_id.into()),
-            ),
+            (fail_id, machine_with_id(standalone_machine(), fail_id)),
         ]);
-        let power_ok = HashMap::from([(ok_id, true), (fail_id.into(), false)]);
+        let power_ok = HashMap::from([(ok_id, true), (fail_id, false)]);
 
         let (rack, standalone, results) =
-            prepare_dispatch_lists(&machines, &[ok_id, fail_id.into()], &power_ok);
+            prepare_dispatch_lists(&machines, &[ok_id, fail_id], &power_ok);
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].component_id, Some(fail_id.to_string()));
@@ -5018,7 +6802,7 @@ mod tests {
 
     #[test]
     fn partition_error_results_reports_one_error_per_machine() {
-        let ids = [host_machine_id(), dpu_machine_id(0).into()];
+        let ids = [compute_host_machine_id(0), compute_host_machine_id(1)];
         let status = Status::unavailable("backend down");
 
         let results = partition_error_results(&ids, &status);
@@ -5037,19 +6821,19 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_from_machines_reports_missing_id_and_bmc_gaps() {
-        let missing_id = dpu_machine_id(0);
-        let no_mac_id = host_machine_id();
-        let no_ip_id = dpu_machine_id(1);
+        let missing_id = compute_host_machine_id(0);
+        let no_mac_id = compute_host_machine_id(1);
+        let no_ip_id = compute_host_machine_id(2);
 
         let mut no_mac = standalone_machine();
         no_mac.id = no_mac_id;
         no_mac.status.bmc_info.mac = None;
 
         let mut no_ip = standalone_machine();
-        no_ip.id = no_ip_id.into();
+        no_ip.id = no_ip_id;
         no_ip.status.bmc_info.ip = None;
 
-        let machines = HashMap::from([(no_mac_id, no_mac), (no_ip_id.into(), no_ip)]);
+        let machines = HashMap::from([(no_mac_id, no_mac), (no_ip_id, no_ip)]);
         let creds = TestCredentialManager::new(Credentials::UsernamePassword {
             username: "u".into(),
             password: "p".into(),
@@ -5058,7 +6842,7 @@ mod tests {
         let resolved = resolve_compute_tray_endpoints_from_machines(
             &creds,
             &machines,
-            &[missing_id.into(), no_mac_id, no_ip_id.into()],
+            &[missing_id, no_mac_id, no_ip_id],
         )
         .await;
 
@@ -5068,7 +6852,7 @@ mod tests {
             resolved
                 .unresolved
                 .iter()
-                .any(|u| u.id == missing_id.into() && u.reason.contains("machine not found"))
+                .any(|u| u.id == missing_id && u.reason.contains("machine not found"))
         );
         assert!(
             resolved
@@ -5080,13 +6864,13 @@ mod tests {
             resolved
                 .unresolved
                 .iter()
-                .any(|u| u.id == no_ip_id.into() && u.reason.contains("BMC IP"))
+                .any(|u| u.id == no_ip_id && u.reason.contains("BMC IP"))
         );
     }
 
     #[tokio::test]
     async fn resolve_from_machines_builds_endpoint_when_bmc_and_creds_present() {
-        let id = host_machine_id();
+        let id = compute_host_machine_id(0);
         let machine = standalone_machine();
         let bmc_ip = machine.status.bmc_info.ip.expect("fixture has BMC IP");
         let machines = HashMap::from([(id, machine)]);
@@ -5114,7 +6898,7 @@ mod tests {
         target_version: &'static str,
         error: Option<&'static str>,
         /// When `Some`, the IP is present in `ip_to_machine_id`.
-        machine_id: Option<MachineId>,
+        machine_id: Option<HostMachineId>,
         expected_component_id: String,
         expected_state: rpc::FirmwareUpdateState,
         expected_success: bool,
@@ -5163,7 +6947,7 @@ mod tests {
     fn map_compute_tray_firmware_status_cases() {
         let known_ip: IpAddr = "10.0.0.1".parse().unwrap();
         let unknown_ip: IpAddr = "10.0.0.2".parse().unwrap();
-        let id = host_machine_id();
+        let id: HostMachineId = host_machine_id().into();
         let id_str = id.to_string();
         let unknown_ip_str = unknown_ip.to_string();
 
@@ -5212,25 +6996,25 @@ mod tests {
 
     #[test]
     fn firmware_status_routing_covers_all_dispatch_paths() {
-        let id_a = host_machine_id();
-        let id_b = dpu_machine_id(0);
-        let id_c = dpu_machine_id(1);
+        let id_a: HostMachineId = host_machine_id().into();
+        let id_b = compute_host_machine_id(1);
+        let id_c = compute_host_machine_id(2);
 
-        let mut machine_with_rms_job = machine_with_id(standalone_machine(), id_a);
-        machine_with_rms_job.status.backend_firmware_object_job_id =
-            Some("backend-job-bypass-abc".to_string());
+        let mac_a: MacAddress = "AA:BB:CC:DD:EE:01".parse().unwrap();
+        let mac_b: MacAddress = "AA:BB:CC:DD:EE:02".parse().unwrap();
+        let mac_c: MacAddress = "AA:BB:CC:DD:EE:03".parse().unwrap();
 
-        let machines = HashMap::from([
-            (id_a, machine_with_rms_job),
-            (
-                id_b.into(),
-                machine_with_id(standalone_machine(), id_b.into()),
-            ),
-            (
-                id_c.into(),
-                machine_with_id(standalone_machine(), id_c.into()),
-            ),
-        ]);
+        let mut machine_a = machine_with_id(standalone_machine(), id_a);
+        machine_a.status.bmc_info.mac = Some(mac_a);
+        let mut machine_b = machine_with_id(standalone_machine(), id_b);
+        machine_b.status.bmc_info.mac = Some(mac_b);
+        let mut machine_c = machine_with_id(standalone_machine(), id_c);
+        machine_c.status.bmc_info.mac = Some(mac_c);
+
+        let machines = HashMap::from([(id_a, machine_a), (id_b, machine_b), (id_c, machine_c)]);
+
+        // Only machine A has an in-flight direct-dispatch firmware job.
+        let bmc_macs_with_direct_fw_updates: HashSet<MacAddress> = HashSet::from([mac_a]);
 
         struct Case {
             scenario: &'static str,
@@ -5241,7 +7025,7 @@ mod tests {
             expect_fallback_indices: &'static [usize],
         }
 
-        let all_ids = [id_a, id_b.into(), id_c.into()];
+        let all_ids = [id_a, id_b, id_c];
 
         let cases = [
             Case {
@@ -5271,20 +7055,24 @@ mod tests {
         ];
 
         for case in &cases {
-            let ids: Vec<MachineId> = case.ids.iter().map(|&i| all_ids[i]).collect();
-            let expect_persisted: Vec<MachineId> = case
+            let ids: Vec<HostMachineId> = case.ids.iter().map(|&i| all_ids[i]).collect();
+            let expect_persisted: Vec<HostMachineId> = case
                 .expect_persisted_indices
                 .iter()
                 .map(|&i| all_ids[i])
                 .collect();
-            let expect_fallback: Vec<MachineId> = case
+            let expect_fallback: Vec<HostMachineId> = case
                 .expect_fallback_indices
                 .iter()
                 .map(|&i| all_ids[i])
                 .collect();
 
-            let routing =
-                select_firmware_status_routing(case.use_state_controller, &ids, &machines);
+            let routing = select_firmware_status_routing(
+                case.use_state_controller,
+                &ids,
+                &machines,
+                &bmc_macs_with_direct_fw_updates,
+            );
             match routing {
                 FirmwareStatusRouting::DirectDispatch => {
                     assert!(
@@ -5332,13 +7120,32 @@ mod tests {
     }
 
     #[test]
+    fn mac_status_result_echoes_mac_and_maps_status_code() {
+        let mac: MacAddress = "AA:BB:CC:DD:EE:12".parse().unwrap();
+
+        // A rack-precondition failure from the ingested subset maps to a
+        // caller-facing invalid-argument result rather than aborting the batch.
+        let result = mac_status_result(
+            &mac,
+            &Status::failed_precondition("switch is not associated with a rack"),
+        );
+        assert_eq!(result.component_id, None);
+        assert_eq!(result.mac_address, Some(mac.to_string()));
+        assert_eq!(
+            result.status,
+            rpc::ComponentManagerStatusCode::InvalidArgument as i32,
+        );
+        assert_eq!(result.error, "switch is not associated with a rack");
+    }
+
+    #[test]
     fn echo_mac_by_component_id_only_updates_matching_ids() {
         const ID_PRESENT: &str = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30";
         const ID_ABSENT: &str = "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng";
 
         let mac: MacAddress = "AA:BB:CC:DD:EE:11".parse().unwrap();
         let resolution = ComputeMacResolution {
-            ingested: HashMap::from([(ID_PRESENT.parse::<MachineId>().unwrap(), mac)]),
+            ingested: HashMap::from([(ID_PRESENT.parse::<HostMachineId>().unwrap(), mac)]),
             uningested: Vec::new(),
             errors: Vec::new(),
         };

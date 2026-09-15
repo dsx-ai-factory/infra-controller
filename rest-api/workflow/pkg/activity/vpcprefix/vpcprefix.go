@@ -360,7 +360,8 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 
 		// Get the IP Block for the VPC Prefix
 		// if existingVpcPrefix is not nil, we use the stored IP Block ID
-		// otherwise we need to find the most specific Ready tenant IPBlock that contains its prefix
+		// otherwise we need to find the most specific Ready tenant IP Block created
+		// through Allocation that contains its prefix
 		ipBlockDAO := cdbm.NewIPBlockDAO(mvp.dbSession)
 		var ipBlock *cdbm.IPBlock
 		if existingVpcPrefix != nil {
@@ -393,12 +394,20 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 			}
 		} else {
 			// Site inventory does not report the REST IPBlock ID for a new VPC Prefix.
-			// Find the most specific Ready tenant IPBlock that contains its prefix.
-			ipBlocks, _, ipBlockErr := ipBlockDAO.GetAll(ctx, tx, cdbm.IPBlockFilterInput{
-				SiteIDs:   []uuid.UUID{site.ID},
-				TenantIDs: []uuid.UUID{vpc.TenantID},
-				Statuses:  []string{cdbm.IPBlockStatusReady},
-			}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+			// Find the most specific Ready tenant IP Block created through Allocation
+			// that contains its prefix.
+			filter := cdbm.IPBlockFilterInput{
+				SiteIDs:  []uuid.UUID{site.ID},
+				Statuses: []string{cdbm.IPBlockStatusReady},
+			}
+			filter.TenantAllocated(vpc.TenantID)
+			ipBlocks, _, ipBlockErr := ipBlockDAO.GetAll(
+				ctx,
+				tx,
+				filter,
+				cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+				nil,
+			)
 			if ipBlockErr != nil {
 				return nil, fmt.Errorf("unable to create VPC Prefix found on Site: failed to retrieve IP Blocks, DB error: %w", ipBlockErr)
 			}

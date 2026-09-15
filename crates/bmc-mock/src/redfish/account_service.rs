@@ -74,6 +74,20 @@ pub(crate) trait PasswordUpdater: Send + Sync {
     ) -> BoxFuture<'a, Result<(), String>>;
 }
 
+/// A snapshot of one BMC account's current password, suitable for durable
+/// persistence and later restoration after a mock rebuild.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BmcAccountCredential {
+    /// Redfish account id this credential belongs to.
+    pub account_id: String,
+    /// Account username, used together with `account_id` to match this
+    /// credential back onto an account during `restore_credentials`.
+    pub username: String,
+    /// The account's current password. Sensitive: this snapshot is written
+    /// to disk as plaintext for restoration after a mock rebuild.
+    pub password: String,
+}
+
 impl AccountServiceState {
     pub(crate) fn new(factory_default_account: Account) -> Self {
         Self {
@@ -84,6 +98,41 @@ impl AccountServiceState {
 
     pub(crate) fn set_password_updater(&self, updater: &Arc<dyn PasswordUpdater>) {
         *self.password_updater.lock().expect("mutex poisoned") = Some(Arc::downgrade(updater));
+    }
+
+    /// Exports the current password of every account for durable persistence.
+    pub fn export_credentials(&self) -> Vec<BmcAccountCredential> {
+        self.accounts
+            .lock()
+            .expect("mutex poisoned")
+            .iter()
+            .map(|account| BmcAccountCredential {
+                account_id: account.id.clone(),
+                username: account.username.clone(),
+                password: account.password.clone(),
+            })
+            .collect()
+    }
+
+    /// Restores previously exported passwords onto matching accounts. Accounts
+    /// are matched by id and username; the factory-default password recorded at
+    /// construction is left untouched so factory-default detection still works.
+    /// Credentials that don't match any current account (e.g. from an
+    /// old/stale snapshot) are silently ignored.
+    pub fn restore_credentials(&self, credentials: &[BmcAccountCredential]) {
+        let mut accounts = self.accounts.lock().expect("mutex poisoned");
+        for credential in credentials {
+            if let Some(account) = accounts.iter_mut().find(|account| {
+                account.id == credential.account_id && account.username == credential.username
+            }) {
+                account.password = credential.password.clone();
+            } else {
+                tracing::warn!(
+                    account_id = %credential.account_id,
+                    "BMC credential snapshot did not match a current account"
+                );
+            }
+        }
     }
 
     pub(crate) fn accounts(&self) -> Vec<Account> {
@@ -146,22 +195,26 @@ impl AccountServiceState {
                 .await?;
         }
 
-        let mut accounts = self.accounts.lock().expect("mutex poisoned");
-        let account = accounts
-            .iter_mut()
-            .find(|candidate| candidate.id == account_id)
-            .expect("account existed before password synchronization");
-        account.password = password;
+        {
+            let mut accounts = self.accounts.lock().expect("mutex poisoned");
+            let account = accounts
+                .iter_mut()
+                .find(|candidate| candidate.id == account_id)
+                .expect("account existed before password synchronization");
+            account.password = password;
+        }
         Ok(true)
     }
 
     /// Rotates every account on its factory default password to `new_password`
     pub fn change_factory_default_password(&self, new_password: impl Into<String>) {
         let new_password = new_password.into();
-        let mut accounts = self.accounts.lock().expect("mutex poisoned");
-        for account in accounts.iter_mut() {
-            if account.password == account.factory_default_password {
-                account.password = new_password.clone();
+        {
+            let mut accounts = self.accounts.lock().expect("mutex poisoned");
+            for account in accounts.iter_mut() {
+                if account.password == account.factory_default_password {
+                    account.password = new_password.clone();
+                }
             }
         }
     }
@@ -329,6 +382,78 @@ mod tests {
 
         assert_eq!(state.update_password("1", "new-password").await, Ok(true));
         assert!(state.is_authorized("root", "new-password"));
+    }
+
+    #[tokio::test]
+    async fn rotated_password_survives_bmc_rebuild() {
+        // Regression test for issue #5966: machine-a-tron loses rotated BMC
+        // passwords on pod restart because AccountServiceState is in-memory only.
+        let (state, _updater) = state_with_updater(Ok(()));
+        assert_eq!(
+            state.update_password("1", "rotated-password").await,
+            Ok(true)
+        );
+        assert!(state.is_authorized("root", "rotated-password"));
+
+        // The credentials exported on each password change are persisted in
+        // the machine-a-tron device snapshot.
+        let exported = state.export_credentials();
+
+        // Simulate a machine-a-tron pod restart: run_bmc_mock rebuilds every
+        // BMC from its factory-default configuration, then restores the
+        // snapshot-saved credentials.
+        let restarted =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        restarted.restore_credentials(&exported);
+
+        assert!(
+            restarted.is_authorized("root", "rotated-password"),
+            "rotated password must survive a BMC mock rebuild (issue #5966)"
+        );
+        assert!(
+            !restarted.is_authorized("root", "old-password"),
+            "factory-default password must stay rejected after rotation (issue #5966)"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_credentials_preserves_factory_default_detection() {
+        let (state, _updater) = state_with_updater(Ok(()));
+        assert_eq!(
+            state.update_password("1", "rotated-password").await,
+            Ok(true)
+        );
+        let exported = state.export_credentials();
+
+        let restarted =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        restarted.restore_credentials(&exported);
+
+        // The restored password is not the factory default, and the factory
+        // default recorded at construction must remain intact underneath.
+        assert!(!restarted.is_factory_default_password("root", "rotated-password"));
+        assert!(!restarted.is_factory_default_password("root", "old-password"));
+
+        // A never-rotated export restores onto a fresh state as still-factory.
+        let untouched =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        let untouched_export = untouched.export_credentials();
+        let restored_untouched =
+            AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        restored_untouched.restore_credentials(&untouched_export);
+        assert!(restored_untouched.is_factory_default_password("root", "old-password"));
+    }
+
+    #[tokio::test]
+    async fn restore_credentials_ignores_unknown_accounts() {
+        let state = AccountServiceState::new(Account::administrator("1", "root", "old-password"));
+        state.restore_credentials(&[super::BmcAccountCredential {
+            account_id: "2".to_string(),
+            username: "other".to_string(),
+            password: "whatever".to_string(),
+        }]);
+        assert!(state.is_authorized("root", "old-password"));
+        assert!(!state.is_authorized("other", "whatever"));
     }
 
     #[tokio::test]

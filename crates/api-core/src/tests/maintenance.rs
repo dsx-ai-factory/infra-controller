@@ -20,51 +20,12 @@ use common::api_fixtures::create_test_env;
 use common::api_fixtures::instance::{
     default_os_config, default_tenant_config, single_interface_network_config,
 };
-use model::machine::{
-    FailureCause, FailureDetails, FailureSource, MachineMaintenanceOperation, ManagedHostState,
-};
+use model::machine::{FailureCause, FailureDetails, FailureSource, ManagedHostState};
 use rpc::forge as rpcf;
 use rpc::forge::forge_server::Forge;
 
 use crate::tests::common;
 use crate::tests::common::api_fixtures::{create_managed_host, create_managed_host_multi_dpu};
-
-#[crate::sqlx_test]
-async fn trigger_chassis_reset_queues_without_overwriting(db_pool: sqlx::PgPool) {
-    let env = create_test_env(db_pool).await;
-    let mh = create_managed_host(&env).await;
-    let request = |chassis_id: &str| {
-        tonic::Request::new(rpcf::AdminChassisResetRequest {
-            machine_id: Some(mh.id.into()),
-            chassis_id: chassis_id.to_string(),
-        })
-    };
-
-    env.api
-        .admin_chassis_reset(request("Chassis_0"))
-        .await
-        .unwrap();
-    env.api
-        .admin_chassis_reset(request("Chassis_0"))
-        .await
-        .unwrap();
-    let error = env
-        .api
-        .admin_chassis_reset(request("Chassis_1"))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-
-    let mut txn = env.db_txn().await;
-    let machine = mh.host().db_machine(&mut txn).await;
-    assert_eq!(machine.current_state(), &ManagedHostState::Ready);
-    assert_eq!(
-        machine.machine_maintenance_requested.unwrap().operation,
-        MachineMaintenanceOperation::ChassisReset {
-            chassis_id: "Chassis_0".to_string(),
-        }
-    );
-}
 
 #[crate::sqlx_test]
 async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
@@ -99,7 +60,7 @@ async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::R
     // allocate: should fail
     let req = rpcf::InstanceAllocationRequest {
         instance_id: None,
-        machine_id: Some(mh.host().id.into()),
+        machine_id: Some(mh.host().id),
         instance_type_id: None,
         config: Some(instance_config.clone()),
         metadata: Some(rpcf::Metadata {
@@ -166,7 +127,7 @@ async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::R
     // allocate: should succeed
     let req = rpcf::InstanceAllocationRequest {
         instance_id: None,
-        machine_id: Some(mh.host().id.into()),
+        machine_id: Some(mh.host().id),
         instance_type_id: None,
         config: Some(instance_config),
         metadata: Some(rpc::Metadata {

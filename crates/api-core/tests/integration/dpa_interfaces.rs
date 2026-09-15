@@ -44,7 +44,7 @@ async fn dpa_api_test_cases(pool: PgPool) -> Result<(), Box<dyn std::error::Erro
 
     let cr_request = tonic::Request::new(DpaInterfaceCreationRequest {
         mac_addr: "00:11:22:33:44:55".to_string(),
-        machine_id: Some(managed_host.host.id.into()),
+        machine_id: Some(managed_host.host.id),
         device_type: "BlueField3".to_string(),
         pci_name: "0000:cc:00.0".to_string(),
         device_description: Some("NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112
@@ -105,7 +105,7 @@ async fn dpa_scout_request_returns_typed_mlx_action(
         .api()
         .create_dpa_interface(tonic::Request::new(DpaInterfaceCreationRequest {
             mac_addr: "00:11:22:33:44:55".to_string(),
-            machine_id: Some(managed_host.host.id.into()),
+            machine_id: Some(managed_host.host.id),
             device_type: "BlueField3".to_string(),
             pci_name: "0000:cc:00.0".to_string(),
             device_description: Some("NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112".to_string()),
@@ -121,7 +121,7 @@ async fn dpa_scout_request_returns_typed_mlx_action(
         .pop()
         .expect("created dpa interface");
     let mut txn = env.db_txn().await;
-    db::dpa_interface::try_update_controller_state(
+    let applied = db::dpa_interface::try_update_controller_state(
         &mut txn,
         dpa.id,
         dpa.controller_state.version,
@@ -129,6 +129,7 @@ async fn dpa_scout_request_returns_typed_mlx_action(
         &model::dpa_interface::DpaInterfaceControllerState::ApplyFirmware,
     )
     .await?;
+    assert_eq!(applied, db::ConditionalWrite::Applied(()));
     txn.commit().await.unwrap();
 
     let action = env

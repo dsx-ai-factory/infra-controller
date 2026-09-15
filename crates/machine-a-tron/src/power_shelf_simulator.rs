@@ -558,6 +558,9 @@ impl PowerShelfHandle {
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
             active_host_firmware: None,
+            // Power shelves always accept factory-default logins, so there is
+            // no rotated credential to persist (issue #5966).
+            bmc_accounts: None,
         }
     }
 

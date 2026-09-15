@@ -318,7 +318,7 @@ mod tests {
         let forge = descriptor_set
             .file
             .iter()
-            .find(|file| file.name.as_deref() == Some("forge.proto"))
+            .find(|file| file.package.as_deref() == Some("forge"))
             .unwrap();
 
         for (message_name, field_number) in [

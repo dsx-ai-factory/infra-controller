@@ -61,7 +61,9 @@ import (
 	sshKeyGroupWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/sshkeygroup"
 
 	ibpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/infinibandpartition"
+	sxpActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/spectrumxpartition"
 	ibpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/infinibandpartition"
+	sxpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/spectrumxpartition"
 
 	expectedMachineActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedmachine"
 	expectedMachineWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedmachine"
@@ -104,6 +106,8 @@ import (
 
 	nvLinkLogicalPartitionActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/nvlinklogicalpartition"
 	nvLinkLogicalPartitionWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/nvlinklogicalpartition"
+
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/tracing"
 )
 
 const (
@@ -114,6 +118,10 @@ const (
 )
 
 func main() {
+	// First: interceptors and handlers below capture the global propagator.
+	tracing.InstallPropagator()
+	// No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
+	defer tracing.InstallExporter("nico-rest-workflow")()
 	// Initialize context
 	ctx := context.Background()
 
@@ -188,6 +196,7 @@ func main() {
 	}
 
 	var tInterceptors []interceptor.ClientInterceptor
+	var wInterceptors []interceptor.WorkerInterceptor
 
 	if cfg.GetTracingEnabled() {
 		otelInterceptor, err := opentelemetry.NewTracingInterceptor(opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
@@ -195,6 +204,7 @@ func main() {
 			log.Panic().Err(err).Msg("unable to get otelInterceptor")
 		}
 		tInterceptors = append(tInterceptors, otelInterceptor)
+		wInterceptors = append(wInterceptors, otelInterceptor)
 	}
 
 	tc, err = tsdkClient.NewLazyClient(tsdkClient.Options{
@@ -212,8 +222,8 @@ func main() {
 			tsdkConverter.NewProtoPayloadConverter(),
 			tsdkConverter.NewJSONPayloadConverter(),
 		),
-		// Interceptors: tInterceptors,
-		Logger: tLogger,
+		Interceptors: tInterceptors,
+		Logger:       tLogger,
 	})
 
 	if err != nil {
@@ -224,8 +234,9 @@ func main() {
 
 	w := tsdkWorker.New(tc, tcfg.Queue, tsdkWorker.Options{
 		WorkflowPanicPolicy:              tsdkWorker.FailWorkflow,
-		MaxConcurrentActivityTaskPollers: 10,
+		MaxConcurrentActivityTaskPollers: cfg.GetMaxConcurrentActivityPollers(),
 		MaxConcurrentWorkflowTaskPollers: 10,
+		Interceptors:                     wInterceptors,
 	})
 
 	siteClientPool := sc.NewClientPool(tcfg)
@@ -286,6 +297,7 @@ func main() {
 
 		// InfiniBandPartition workflows
 		w.RegisterWorkflow(ibpWorkflow.UpdateInfiniBandPartitionInventory)
+		w.RegisterWorkflow(sxpWorkflow.UpdateSpectrumXPartitionInventory)
 
 		// Tenant workflow
 		w.RegisterWorkflow(tenantWorkflow.UpdateTenantInventory)
@@ -395,6 +407,9 @@ func main() {
 
 	ibpManager := ibpActivity.NewManageInfiniBandPartition(dbSession, siteClientPool)
 	w.RegisterActivity(&ibpManager)
+
+	sxpManager := sxpActivity.NewManageSpectrumXPartition(dbSession, siteClientPool)
+	w.RegisterActivity(&sxpManager)
 
 	tenantManager := tenantActivity.NewManageTenant(dbSession, siteClientPool)
 	w.RegisterActivity(&tenantManager)

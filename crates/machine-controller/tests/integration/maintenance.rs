@@ -17,7 +17,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_secrets::credentials::{CredentialManager, Credentials};
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::prelude::*;
@@ -156,13 +155,13 @@ struct Observation {
     actions: Vec<PowerAction>,
 }
 
-fn expected_action(operation: &MachineMaintenanceOperation) -> PowerAction {
+fn expected_action(operation: MachineMaintenanceOperation) -> PowerAction {
     match operation {
         MachineMaintenanceOperation::PowerOn => PowerAction::On,
         MachineMaintenanceOperation::PowerOff => PowerAction::ForceOff,
         MachineMaintenanceOperation::Reset => PowerAction::ForceRestart,
         MachineMaintenanceOperation::ChassisReset { .. } => {
-            unreachable!("chassis reset does not use the component manager")
+            unreachable!("chassis resets do not use the compute-tray backend")
         }
     }
 }
@@ -242,7 +241,7 @@ async fn enter_requested_state(
 
     db::machine::set_machine_maintenance_requested(
         &mut txn,
-        host.host.id.into(),
+        host.host.id,
         "maintenance-test",
         operation,
     )
@@ -267,8 +266,8 @@ async fn reconcile(
     env.run_single_iteration().await;
     let entered = host.host.machine().await;
     if !matches!(
-        entered.state.value,
-        ManagedHostState::Maintenance { ref operation } if operation == &case.operation
+        &entered.state.value,
+        ManagedHostState::Maintenance { operation } if operation == &case.operation
     ) {
         return Err(format!(
             "request did not enter Maintenance from {:?}: {:?}",
@@ -324,49 +323,13 @@ fn backend_cases() -> Vec<Case<ReconciliationCase, Observation, String>> {
                         } else {
                             ResultingState::Failed
                         },
-                        actions: vec![expected_action(&operation)],
+                        actions: vec![expected_action(operation.clone())],
                     }),
                 });
             }
         }
     }
     cases
-}
-
-#[sqlx_test]
-async fn reconciles_chassis_reset_through_redfish(pool: PgPool) {
-    let mut env = Env::builder(pool).build().await;
-    let domain = env.test_harness.test_domain().await;
-    let network_controller = env.test_harness.network_controller();
-    let underlay_segment = network_controller.create_underlay_segment(&domain).await;
-    network_controller.create_admin_segment(&domain).await;
-    let host = create_ready_host(&env, &underlay_segment).await;
-    let timepoint = env.redfish_sim.timepoint();
-
-    enter_requested_state(
-        &env,
-        &host,
-        MachineMaintenanceOperation::ChassisReset {
-            chassis_id: "Chassis_0".to_string(),
-        },
-        EntryState::Ready,
-    )
-    .await;
-    env.run_single_iteration().await;
-    env.run_single_iteration().await;
-
-    let machine = host.host.machine().await;
-    assert!(matches!(machine.state.value, ManagedHostState::Ready));
-    assert!(machine.machine_maintenance_requested.is_none());
-    assert!(
-        env.redfish_sim
-            .actions_since(&timepoint)
-            .all_hosts()
-            .contains(&RedfishSimAction::ChassisReset {
-                chassis_id: "Chassis_0".to_string(),
-                reset_type: libredfish::SystemPowerControl::ForceRestart,
-            })
-    );
 }
 
 #[sqlx_test]

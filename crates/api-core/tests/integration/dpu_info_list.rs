@@ -67,7 +67,7 @@ async fn test_get_dpu_info_list(pool: PgPool) {
     // Persist a current network status with fabric interface data for one DPU.
     env.api()
         .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
-            dpu_machine_id: Some(dpu_machine_id_1.into()),
+            dpu_machine_id: Some(dpu_machine_id_1),
             dpu_agent_version: Some("test".to_string()),
             observed_at: Some(heartbeat_timestamp),
             dpu_health: Some(rpc::health::HealthReport {

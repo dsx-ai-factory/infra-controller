@@ -191,10 +191,9 @@ func NewFlowGrpcClient(config *FlowGrpcClientConfig) (client *FlowGrpcClient, er
 	if config.ClientMetrics != nil {
 		streamInterceptors = append(streamInterceptors, newGrpcStreamMetricsInterceptor(config.ClientMetrics))
 	}
-	if os.Getenv("LS_SERVICE_NAME") != "" {
-		handler := otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))
-		client.dialOpts = append(client.dialOpts, grpc.WithStatsHandler(handler))
-	}
+	// Unconditional: was gated on LS_SERVICE_NAME, which no chart sets.
+	handler := otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))
+	client.dialOpts = append(client.dialOpts, grpc.WithStatsHandler(handler))
 	if len(unaryInterceptors) > 0 {
 		client.dialOpts = append(client.dialOpts, grpc.WithUnaryInterceptor(grpcmw.ChainUnaryClient(unaryInterceptors...)))
 	}

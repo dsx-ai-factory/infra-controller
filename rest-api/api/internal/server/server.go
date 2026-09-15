@@ -41,6 +41,7 @@ import (
 	authn "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authentication"
 	otprop "go.opentelemetry.io/contrib/propagators/ot"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/interceptor"
 	"golang.org/x/time/rate"
@@ -191,7 +192,15 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	if cfg.GetTracingEnabled() {
 		svcName := cfg.GetTracingServiceName()
 		if svcName != "" {
-			e.Use(otelecho.Middleware(svcName, otelecho.WithSkipper(skipTracingRoutes), otelecho.WithPropagators(otprop.OT{})))
+			// Composite: WithPropagators replaces, so OT alone dropped W3C.
+			e.Use(otelecho.Middleware(svcName,
+				otelecho.WithSkipper(skipTracingRoutes),
+				otelecho.WithPropagators(propagation.NewCompositeTextMapPropagator(
+					propagation.TraceContext{},
+					propagation.Baggage{},
+					otprop.OT{},
+				)),
+			))
 		} else {
 			log.Warn().Msg("failed to get Tracing Service Name, skipping OTel middleware")
 		}
@@ -268,16 +277,16 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 		routeGroup.Use(middleware.AuditLog(dbSession))
 	}
 
-	jwtOriginConfig := cfg.GetOrInitJWTOriginConfig()
-	if jwtOriginConfig == nil {
-		log.Panic().Msg("JWT origin config not initialized, cannot initialize auth middleware")
+	tokenOriginConfig := cfg.GetOrInitTokenOriginConfig()
+	if tokenOriginConfig == nil {
+		log.Panic().Msg("token origin config not initialized, cannot initialize auth middleware")
 	}
 
 	keycloakConfig, _ := cfg.GetOrInitKeycloakConfig()
 	payloadEncryptionConfig := cconfig.NewPayloadEncryptionConfig(cfg.GetTemporalEncryptionKey())
 
 	// Wrap the auth middleware to check readiness (optional, can be removed if panic is sufficient)
-	authMiddleware := authn.Auth(dbSession, tc, jwtOriginConfig, payloadEncryptionConfig, keycloakConfig)
+	authMiddleware := authn.Auth(dbSession, tc, tokenOriginConfig, payloadEncryptionConfig, keycloakConfig)
 	routeGroup.Use(authMiddleware)
 
 	apiRoutes := api.NewAPIRoutes(dbSession, tc, tnc, scp, cfg, dps)

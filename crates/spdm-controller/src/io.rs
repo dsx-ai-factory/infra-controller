@@ -80,11 +80,18 @@ impl StateControllerIO for SpdmStateControllerIO {
         &self,
         txn: &mut PgConnection,
         object_id: &Self::ObjectId,
-        _old_version: ConfigVersion,
-        _new_version: ConfigVersion,
+        old_version: ConfigVersion,
+        new_version: ConfigVersion,
         new_controller_state: &Self::ControllerState,
     ) -> Result<bool, DatabaseError> {
-        db::attestation::spdm::persist_controller_state(txn, object_id, new_controller_state).await
+        db::attestation::spdm::persist_controller_state(
+            txn,
+            object_id,
+            old_version,
+            new_version,
+            new_controller_state,
+        )
+        .await
     }
 
     async fn persist_state_history(

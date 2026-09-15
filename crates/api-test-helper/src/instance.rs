@@ -16,8 +16,9 @@
  */
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, StableHostMachineId};
 use eyre::{ContextCompat, WrapErr};
 use rpc::forge::instance_interface_config::NetworkDetails;
 use rpc::forge::instance_operating_system_config::Variant as OperatingSystemVariant;
@@ -28,12 +29,39 @@ use rpc::forge::{
     InstancesByIdsRequest, InterfaceFunctionType, Metadata, TenantConfig, TenantState,
 };
 
-use super::machine::wait_for_state;
+use super::machine::{get_by_id as get_machine_by_id, wait_for_state};
 use crate::api_client;
+
+const POWERED_OFF_ALERT_CLEAR_RETRIES: usize = 60;
+
+async fn wait_for_powered_off_alert_to_clear(
+    addrs: &[SocketAddr],
+    host_machine_id: &StableHostMachineId,
+) -> eyre::Result<()> {
+    let machine_id = MachineId::from(host_machine_id);
+
+    for _ in 0..POWERED_OFF_ALERT_CLEAR_RETRIES {
+        let machine = get_machine_by_id(addrs, &machine_id).await?;
+
+        let powered_off = machine
+            .status
+            .as_ref()
+            .and_then(|status| status.health.as_ref())
+            .is_some_and(|health| health.alerts.iter().any(|alert| alert.id == "PoweredOff"));
+
+        if !powered_off {
+            return Ok(());
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    eyre::bail!("machine {host_machine_id} still has a PoweredOff health alert")
+}
 
 pub async fn create(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     segment_id: &str,
     hostname: Option<&str>,
     phone_home_enable: bool,
@@ -71,7 +99,7 @@ pub async fn create(
 /// within the requested Flat VPC.
 pub async fn create_with_auto_host_inband_networking(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     flat_vpc_id: &str,
 ) -> eyre::Result<String> {
     tracing::info!(
@@ -93,13 +121,15 @@ pub async fn create_with_auto_host_inband_networking(
 
 async fn create_with_network(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     network: InstanceNetworkConfig,
     hostname: Option<&str>,
     phone_home_enable: bool,
     wait_until_ready: bool,
     keyset_ids: &[&str],
 ) -> eyre::Result<String> {
+    wait_for_powered_off_alert_to_clear(addrs, host_machine_id).await?;
+
     let request = InstanceAllocationRequest {
         machine_id: Some(*host_machine_id),
         config: Some(InstanceConfig {
@@ -165,7 +195,7 @@ async fn create_with_network(
 /// Takes a primary (v4) VPC prefix ID and an optional v6 VPC prefix ID.
 pub async fn create_with_vpc_prefixes(
     addrs: &[SocketAddr],
-    host_machine_id: &MachineId,
+    host_machine_id: &StableHostMachineId,
     tenant_organization_id: &str,
     vpc_prefix_ids: &[&str],
 ) -> eyre::Result<String> {
@@ -194,6 +224,9 @@ pub async fn create_with_vpc_prefixes(
         ipv6_interface_config,
         ..Default::default()
     };
+
+    wait_for_powered_off_alert_to_clear(addrs, host_machine_id).await?;
+
     let request = InstanceAllocationRequest {
         machine_id: Some(*host_machine_id),
         config: Some(InstanceConfig {

@@ -57,7 +57,4 @@ pub struct MachineStatus {
     pub tray_index: Option<i32>,
     /// Power management state for this machine (hosts only; absent for DPUs).
     pub power_options: Option<PowerOptions>,
-    /// Backend firmware-object job ID persisted when a firmware update was
-    /// dispatched via --bypass-state-controller. Cleared on job completion.
-    pub backend_firmware_object_job_id: Option<String>,
 }

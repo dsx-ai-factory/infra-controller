@@ -160,6 +160,7 @@ jobs:
       proto_files_changed: ${{ steps.base-container-gate.outputs.proto_files_changed }}
       core_rpc_proto_files_changed: ${{ steps.base-container-gate.outputs.core_rpc_proto_files_changed }}
       source_files_changed: ${{ steps.base-container-gate.outputs.source_files_changed }}
+      kea_version: ${{ steps.kea-version.outputs.version }}
       release_build_args: ${{ steps.release-metadata.outputs.build_args }}
       release_build_args_aarch64: ${{ steps.release-metadata.outputs.build_args_aarch64 }}
     steps:
@@ -169,6 +170,10 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           fetch-tags: true
+
+      - name: Load Kea version
+        id: kea-version
+        run: echo "version=$(cat dev/docker/kea.version)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python for CI helpers
         uses: actions/setup-python@v5
@@ -185,12 +190,16 @@ jobs:
           filters: |
             build_container:
               - 'dev/docker/Dockerfile.build-container-x86_64'
+              - 'dev/docker/kea.version'
             runtime_container:
               - 'dev/docker/Dockerfile.runtime-container-x86_64'
+              - 'dev/docker/kea.version'
             runtime_container_aarch64:
               - 'dev/docker/Dockerfile.runtime-container-aarch64'
+              - 'dev/docker/kea.version'
             build_container_aarch64:
               - 'dev/docker/Dockerfile.build-container-aarch64'
+              - 'dev/docker/kea.version'
             build_artifacts_x86_64:
               - 'dev/docker/Dockerfile.build-artifacts-container-x86_64'
             build_artifacts_aarch64:
@@ -282,14 +291,14 @@ jobs:
               exit 1
             fi
           done
-          if [[ "${GITHUB_REPOSITORY}" == "NVIDIA/infra-controller" ]]; then
+          if [[ "${GITHUB_REPOSITORY}" == "dsx-ai-factory/infra-controller" ]]; then
             # canonical endpoints are constants: repository variables must not
             # be able to redirect canonical credentials without a workflow diff
             TARGET="${CANONICAL_DEV}"
             PROD="${CANONICAL_PROD}"
           else
             if [[ -z "${TARGET_OVERRIDE}" ]]; then
-              echo "::error::NICO_TARGET_IMAGE_REGISTRY repository variable is required outside NVIDIA/infra-controller"
+              echo "::error::NICO_TARGET_IMAGE_REGISTRY repository variable is required outside dsx-ai-factory/infra-controller"
               exit 1
             fi
             TARGET="${TARGET_OVERRIDE}"
@@ -311,7 +320,7 @@ jobs:
           fi
           TARGET="${TARGET%/}"
           PROD="${PROD%/}"
-          if [[ "${GITHUB_REPOSITORY}" == "NVIDIA/infra-controller" ]]; then
+          if [[ "${GITHUB_REPOSITORY}" == "dsx-ai-factory/infra-controller" ]]; then
             SOURCE="${CANONICAL_DEV}"
             EXTRAS="${SOURCE}/nvmetal-carbide-extras:latest"
           else
@@ -323,7 +332,7 @@ jobs:
             echo "::error::NICO_EXTRAS_IMAGE must live on the source registry host (${SOURCE%%/*}); refusing to send source credentials to ${EXTRAS%%/*}"
             exit 1
           fi
-          if [[ "${GITHUB_REPOSITORY}" == "NVIDIA/infra-controller" ]]; then
+          if [[ "${GITHUB_REPOSITORY}" == "dsx-ai-factory/infra-controller" ]]; then
             NGC_PATH="${TARGET#*/}"
           else
             NGC_PATH="${NGC_PATH_OVERRIDE:-}"
@@ -550,7 +559,7 @@ jobs:
           echo "publish_built_container=${PUBLISH}" >> "$GITHUB_OUTPUT"
           # job containers log in before any step runs, so the lint job must
           # never point at a target ref that was not published (mirror PRs)
-          if [[ "${BUILD_X86_RUN}" == "true" && "${GITHUB_REPOSITORY}" != "NVIDIA/infra-controller" && "${PUBLISH}" != "true" ]]; then
+          if [[ "${BUILD_X86_RUN}" == "true" && "${GITHUB_REPOSITORY}" != "dsx-ai-factory/infra-controller" && "${PUBLISH}" != "true" ]]; then
             echo "lint_container_ref=${SOURCE_REGISTRY}/build-container-x86_64:latest" >> "$GITHUB_OUTPUT"
           else
             echo "lint_container_ref=${BUILD_X86_REF}" >> "$GITHUB_OUTPUT"
@@ -609,12 +618,13 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.build-container-x86_64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/build-container-x86_64
       image_tag: ${{ needs.prepare.outputs.build_container_x86_64_version }}
       additional_tags: ${{ needs.prepare.outputs.build_container_x86_64_version_latest }}
       platforms: linux/amd64
       runner: linux-amd64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: true
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -627,12 +637,13 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.build-container-aarch64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/build-container-aarch64
       image_tag: ${{ needs.prepare.outputs.build_container_aarch64_version }}
       additional_tags: ${{ needs.prepare.outputs.build_container_aarch64_version_latest }}
       platforms: linux/arm64
       runner: linux-arm64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: false
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -645,12 +656,13 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.runtime-container-x86_64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/runtime-container-x86_64
       image_tag: ${{ needs.prepare.outputs.runtime_container_x86_64_version }}
       additional_tags: ${{ needs.prepare.outputs.runtime_container_x86_64_version_latest }}
       platforms: linux/amd64
       runner: linux-amd64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: true
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -663,12 +675,13 @@ jobs:
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
       dockerfile_path: dev/docker/Dockerfile.runtime-container-aarch64
+      build_args: '{"KEA_VERSION":"${{ needs.prepare.outputs.kea_version }}"}'
       image_name: ${{ needs.prepare.outputs.image_registry }}/runtime-container-aarch64
       image_tag: ${{ needs.prepare.outputs.runtime_container_aarch64_version }}
       additional_tags: ${{ needs.prepare.outputs.runtime_container_aarch64_version_latest }}
       platforms: linux/arm64
       runner: linux-arm64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: false
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -686,7 +699,7 @@ jobs:
       additional_tags: ${{needs.prepare.outputs.build_artifacts_container_x86_64_version_latest }}
       platforms: linux/amd64
       runner: linux-amd64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: true
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -704,7 +717,7 @@ jobs:
       additional_tags: ${{ needs.prepare.outputs.build_artifacts_container_aarch64_version_latest }}
       platforms: linux/arm64
       runner: linux-arm64-cpu4
-      push: ${{ github.repository == 'NVIDIA/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+      push: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
       load: false
       tag_latest: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
@@ -1629,7 +1642,7 @@ jobs:
       # The PR mirror's `github.sha` is the submitted head commit. Keep lint on
       # the same revision as the other PR checks and builds. Validation of the
       # exact queued revision is tracked at:
-      # https://github.com/NVIDIA/infra-controller/issues/4587
+      # https://github.com/dsx-ai-factory/infra-controller/issues/4587
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -1774,6 +1787,12 @@ jobs:
           chart-path: helm-prereqs
           lint: 'true'
           template: 'true'
+
+      - name: Test Vault Kubernetes URLs
+        run: bash helm-prereqs/tests/vault-kubernetes-url_test.sh
+
+      - name: Test observability collector addresses
+        run: bash helm-prereqs/tests/observability-collector-addresses_test.sh
 
   build-push-helm-prereqs-chart:
     needs:
@@ -2171,7 +2190,7 @@ jobs:
 
   promote-to-be-scanned-image:
     # Skip for pull-request/* branches (main, release/*, and tags are allowed by workflow trigger)
-    if: ${{ !cancelled() && github.repository == 'NVIDIA/infra-controller' && needs.build-release-container-x86_64.result == 'success' && github.event_name != 'schedule' && needs.prepare.outputs.publish_images == 'true' }}
+    if: ${{ !cancelled() && github.repository == 'dsx-ai-factory/infra-controller' && needs.build-release-container-x86_64.result == 'success' && github.event_name != 'schedule' && needs.prepare.outputs.publish_images == 'true' }}
     needs:
       - prepare
       - build-release-container-x86_64

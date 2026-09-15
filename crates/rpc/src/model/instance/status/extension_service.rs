@@ -105,7 +105,7 @@ impl TryFrom<MachineExtensionServiceStatus> for rpc::DpuExtensionServiceStatus {
 
     fn try_from(status: MachineExtensionServiceStatus) -> Result<Self, Self::Error> {
         Ok(Self {
-            dpu_machine_id: Some(status.machine_id.into()),
+            dpu_machine_id: Some(status.machine_id),
             status: rpc::DpuExtensionServiceDeploymentStatus::from(status.status).into(),
             error_message: status.error_message,
             components: status

@@ -7,6 +7,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
@@ -52,6 +53,65 @@ func TestListTasks_DefaultOrderBeforePagination(t *testing.T) {
 	assert.Empty(t, tasks)
 	assert.Equal(t, int32(1), total)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTask_UpdateTaskStatus(t *testing.T) {
+	t.Run("persists a queue deadline", func(t *testing.T) {
+		sqlDB, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer sqlDB.Close()
+
+		db := bun.NewDB(sqlDB, pgdialect.New())
+		defer db.Close()
+
+		deadline := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+		mock.ExpectExec(
+			`UPDATE "task" AS "t" SET .*"queue_expires_at" = '2030-01-02 03:04:05\+00:00'.* WHERE \(id =`,
+		).WillReturnResult(sqlmock.NewResult(0, 1))
+		task := &Task{ID: uuid.New()}
+
+		err = task.UpdateTaskStatus(
+			t.Context(),
+			db,
+			taskcommon.TaskStatusWaiting,
+			"Waiting for target linkage",
+			nil,
+			&deadline,
+		)
+
+		require.NoError(t, err)
+		require.Equal(t, taskcommon.TaskStatusWaiting, task.Status)
+		require.Equal(t, deadline, *task.QueueExpiresAt)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("clears the queue deadline when finished", func(t *testing.T) {
+		sqlDB, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer sqlDB.Close()
+
+		db := bun.NewDB(sqlDB, pgdialect.New())
+		defer db.Close()
+
+		mock.ExpectExec(`UPDATE "task" AS "t" SET .*"queue_expires_at" = NULL.* WHERE \(id =`).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		deadline := time.Now().Add(time.Hour).UTC()
+		task := &Task{ID: uuid.New(), QueueExpiresAt: &deadline}
+
+		err = task.UpdateTaskStatus(
+			t.Context(),
+			db,
+			taskcommon.TaskStatusTerminated,
+			"Expired",
+			nil,
+			nil,
+		)
+
+		require.NoError(t, err)
+		require.Nil(t, task.QueueExpiresAt)
+		require.NotNil(t, task.FinishedAt)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 }
 
 // All tests below set TaskType: TaskTypeUnknown explicitly, matching the

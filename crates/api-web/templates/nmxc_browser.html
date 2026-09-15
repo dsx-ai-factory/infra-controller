@@ -10,7 +10,7 @@ Choose an operation and an endpoint — either a chassis serial or a rack ID.
 See the <a href="https://docs.nvidia.com/networking/display/nmxcv11/grpc+api+documentation">NMX-C gRPC API documentation</a> for details.
 </p>
 
-<form id="nmxc_console" method="GET" action="/admin/nmxc-browser">
+<form id="nmxc_console" method="GET" action="/admin/nmxc-browser" onsubmit="nmxcSyncEndpointName()">
 	<div>
 		<label for="endpoint_value_input">Endpoint:</label>
 		<div style="display: flex; gap: 0.5rem; align-items: center;">
@@ -94,7 +94,6 @@ See the <a href="https://docs.nvidia.com/networking/display/nmxcv11/grpc+api+doc
 {% endblock %}
 
 {% block script %}
-<script>
 function nmxcUpdateEndpoint(select) {
 	var input = document.getElementById('endpoint_value_input');
 	input.name = select.value;
@@ -104,5 +103,12 @@ function nmxcUpdateEndpoint(select) {
 		: 'e.g. 1234567890';
 	input.focus();
 }
-</script>
+
+// Derive the submitted field name from the select's current
+// value at submit time, rather than trusting that onchange already synced it.
+function nmxcSyncEndpointName() {
+	var select = document.getElementById('endpoint_type_select');
+	var input = document.getElementById('endpoint_value_input');
+	input.name = select.value;
+}
 {% endblock %}

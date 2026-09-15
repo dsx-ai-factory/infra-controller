@@ -1112,7 +1112,9 @@ mod tests {
     use std::str::FromStr as _;
 
     use carbide_instrument::emit;
-    use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
+    use carbide_instrument::testing::{
+        ApproxHistogramSum, CapturedFieldKind, MetricsCapture, capture_logs,
+    };
     use carbide_test_support::{Check, check_values};
 
     use super::*;
@@ -1694,7 +1696,7 @@ mod tests {
             log_count: usize,
             log: Option<LogObservation>,
             histogram_count_delta: u64,
-            histogram_sum_delta: f64,
+            histogram_sum_delta: ApproxHistogramSum,
         }
 
         fn observe(case: CleanupCase) -> Observation {
@@ -1772,7 +1774,7 @@ mod tests {
                             error_kind: None,
                         }),
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 0.25,
+                        histogram_sum_delta: ApproxHistogramSum(0.25),
                     },
                 },
                 Check {
@@ -1798,7 +1800,7 @@ mod tests {
                             error_kind: Some(CapturedFieldKind::Debug),
                         }),
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 0.5,
+                        histogram_sum_delta: ApproxHistogramSum(0.5),
                     },
                 },
                 Check {
@@ -1823,7 +1825,7 @@ mod tests {
                             error_kind: None,
                         }),
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 0.75,
+                        histogram_sum_delta: ApproxHistogramSum(0.75),
                     },
                 },
                 Check {
@@ -1849,7 +1851,7 @@ mod tests {
                             error_kind: Some(CapturedFieldKind::Debug),
                         }),
                         histogram_count_delta: 1,
-                        histogram_sum_delta: 1.0,
+                        histogram_sum_delta: ApproxHistogramSum(1.0),
                     },
                 },
             ],

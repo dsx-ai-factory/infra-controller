@@ -296,7 +296,7 @@ func TestUpdateNVLinkDomainPowerStateHandler_Handle(t *testing.T) {
 			}
 
 			assert.Equal(t, flowv1.Flow_PowerOnRack_FullMethodName, captured.request.FullMethod)
-			assert.True(t, strings.HasPrefix(captured.options.ID, "flow-grpc-nvlink-domain-power-state-update-on-"))
+			assert.True(t, strings.HasPrefix(captured.options.ID, "nvlink-domain-power-state-update-on-"))
 			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, captured.options.WorkflowIDConflictPolicy)
 			flowRequest := &flowv1.PowerOnRackRequest{}
 			assertProxiedNVLinkDomainIDs(t, captured.request.RequestJSON, flowRequest, []string{nvLinkDomainID})

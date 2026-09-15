@@ -28,7 +28,7 @@ use std::time::Duration;
 use carbide_dpf::types::{DpuDeviceSummary, DpuNodeSummary, HostDpfSnapshot};
 use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
-use carbide_uuid::machine::{DpuMachineId, HostMachineId};
+use carbide_uuid::machine::{AsMachineId, DpuMachineId, HostMachineId};
 use carbide_uuid::rack::RackId;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
@@ -38,7 +38,7 @@ use rpc::forge::dpu_reprovisioning_request::Mode;
 use rpc::forge::forge_server::Forge;
 use tokio::time::timeout;
 
-use super::{dpf_config, get_host_state};
+use super::{dpf_config, expect_dpf_service_inventory, get_host_state};
 use crate::test_support::builder::TestApiBuilder;
 use crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder;
 use crate::tests::common::api_fixtures::{
@@ -90,6 +90,7 @@ fn provisioning_mock_with_dpu_count(
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    expect_dpf_service_inventory(&mut mock);
     mock.expect_snapshot_host()
         .returning(move |_| Ok(snapshot_with_crs_present(dpu_count)));
     mock.expect_get_dpu_phase().returning(move |_, _| {
@@ -130,6 +131,7 @@ fn source_deployment_mock_with_verification_observer(
         .returning(move |_| Ok(snapshot_with_crs_present(dpu_count)));
     mock.expect_get_dpu_phase()
         .returning(|_, _| Ok(DpuPhase::Ready));
+    expect_dpf_service_inventory(&mut mock);
     mock
 }
 
@@ -164,7 +166,7 @@ async fn test_gb200_deployment_migration_rechecks_after_attachment_updates(pool:
     let mut request_task = tokio::spawn(async move {
         api.trigger_dpu_reprovisioning(tonic::Request::new(
             ::rpc::forge::DpuReprovisioningRequest {
-                dpu_id: Some(requested_dpu_id.into()),
+                dpu_id: Some(requested_dpu_id.to_machine_id()),
                 machine_id: None,
                 mode: Mode::Set as i32,
                 initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
@@ -247,7 +249,7 @@ async fn assert_dpu_reprovision_set_rechecks_request_updates(
     let request_task = tokio::spawn(async move {
         api.trigger_dpu_reprovisioning(tonic::Request::new(
             ::rpc::forge::DpuReprovisioningRequest {
-                dpu_id: Some(requested_dpu_id.into()),
+                dpu_id: Some(requested_dpu_id.to_machine_id()),
                 machine_id: None,
                 mode: Mode::Set as i32,
                 initiator: ::rpc::forge::UpdateInitiator::AdminCli as i32,
@@ -734,6 +736,7 @@ fn capturing_mock(
     dpu_count: usize,
 ) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
+    expect_dpf_service_inventory(&mut mock);
 
     mock.expect_register_dpu_device().returning(move |info, _| {
         registered_devices.lock().unwrap().push(info.device_id);
@@ -840,6 +843,7 @@ async fn test_gb200_b3240_pair_uses_specialized_deployment_from_report_or_rack(p
     let registered_deployments = Arc::new(Mutex::new(Vec::new()));
 
     let mut mock = MockDpfOperations::new();
+    expect_dpf_service_inventory(&mut mock);
     mock.expect_register_dpu_device().returning(|_, _| Ok(()));
     let registered_deployments_for_mock = registered_deployments.clone();
     mock.expect_register_dpu_node().returning(move |info| {
@@ -900,7 +904,7 @@ async fn test_gb200_b3240_pair_uses_specialized_deployment_from_report_or_rack(p
     assert_eq!(classified.len(), mh.dpu_ids.len());
     assert_eq!(
         classified.into_iter().collect::<HashSet<_>>(),
-        mh.dpu_ids.iter().copied().map(Into::into).collect()
+        mh.dpu_ids.iter().copied().collect()
     );
     assert_eq!(
         *verified_deployments.lock().unwrap(),
@@ -1036,6 +1040,7 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
     let deleted_source_devices = Arc::new(Mutex::new(Vec::new()));
 
     let mut mock = MockDpfOperations::new();
+    expect_dpf_service_inventory(&mut mock);
     mock.expect_register_dpu_device().returning(|_, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     let released_holds_for_mock = released_holds.clone();
@@ -1531,6 +1536,7 @@ async fn test_mixed_dpu_deployment_types_fail_without_registration(pool: sqlx::P
     let registered_nodes = Arc::new(AtomicUsize::new(0));
 
     let mut mock = MockDpfOperations::new();
+    expect_dpf_service_inventory(&mut mock);
     let registered_devices_for_mock = registered_devices.clone();
     mock.expect_register_dpu_device().returning(move |_, _| {
         registered_devices_for_mock.fetch_add(1, Ordering::SeqCst);

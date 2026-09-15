@@ -136,8 +136,16 @@ impl AclEntry {
         let Some(path) = path.strip_prefix('/') else {
             return false;
         };
+        // `/redfish/v1/` and `/redfish/v1` name the same resource (libredfish
+        // requests the service root with the trailing slash), so a single
+        // trailing slash is not a path component.
+        let path = path.strip_suffix('/').unwrap_or(path);
         if path.is_empty() {
-            return self.path.components.is_empty();
+            return self.path.components.is_empty()
+                || matches!(
+                    self.path.components.as_slice(),
+                    [WildcardPathComponent::DoubleWildcard]
+                );
         }
 
         let path_components = path.split('/').collect::<Vec<_>>();
@@ -582,13 +590,39 @@ mod tests {
                 EntryMatchInput {
                     entry: "GET /redfish/v1/**",
                     method: http::Method::GET,
-                    path: "/redfish/v1/Systems/",
+                    path: "/",
                 } => false,
+            }
+
+            // Redfish treats a trailing slash as insignificant, and libredfish
+            // requests the service root as `/redfish/v1/`; the slash must not
+            // count as an (empty) path component.
+            "trailing slash is not a component" {
                 EntryMatchInput {
                     entry: "GET /redfish/v1/**",
                     method: http::Method::GET,
+                    path: "/redfish/v1/",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/**",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Systems/",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /**",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /**",
+                    method: http::Method::GET,
                     path: "/",
-                } => false,
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Systems",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Systems/",
+                } => true,
             }
 
             "trailing double wildcard" {

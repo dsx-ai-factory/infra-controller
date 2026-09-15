@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::extension_service::ExtensionServiceType;
 use crate::instance::config::extension_services::InstanceExtensionServicesConfig;
 use crate::instance::status::SyncState;
-use crate::machine::Machine;
+use crate::machine::DpuMachine;
 
 /// The status of all extension services configured on an instance
 #[derive(Clone, Debug)]
@@ -443,14 +443,13 @@ impl InstanceExtensionServiceStatusObservationByType {
 
     /// Aggregates persisted type-partitioned observations.
     pub fn aggregate_instance_observation(
-        dpu_snapshots: &[Machine],
+        dpu_snapshots: &[DpuMachine],
     ) -> HashMap<DpuMachineId, Self> {
         dpu_snapshots
             .iter()
             .filter_map(|dpu| {
-                let dpu_id = dpu.dpu_machine_id().ok()?;
                 let observations = dpu.status.extension_service_status_observations.clone();
-                (!observations.by_service_type.is_empty()).then_some((dpu_id, observations))
+                (!observations.by_service_type.is_empty()).then_some((dpu.id, observations))
             })
             .collect()
     }
@@ -929,7 +928,7 @@ mod tests {
             InstanceExtensionServiceStatusObservationByType::aggregate_instance_observation(&[
                 dpu.clone()
             ]);
-        let aggregated = &aggregated[&dpu.dpu_machine_id().unwrap()];
+        let aggregated = &aggregated[&dpu.id];
         assert!(
             aggregated
                 .for_service_type(ExtensionServiceType::KubernetesPod)

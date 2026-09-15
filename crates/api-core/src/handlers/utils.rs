@@ -86,14 +86,18 @@ fn invalid_bmc_address(address: &str, reason: impl std::fmt::Display) -> Carbide
 
 /// Converts a MachineID from RPC format to Model format
 /// and logs the MachineID as MachineID for the current request.
-pub(super) fn convert_and_log_machine_id<T>(id: Option<&MachineId>) -> Result<T, CarbideError>
+pub(super) fn convert_and_log_machine_id<FromId, ToId>(
+    id: Option<&FromId>,
+) -> Result<ToId, CarbideError>
 where
-    T: MachineIdSubtypeTrait,
-    T: TryFrom<MachineId>,
-    CarbideError: From<<T as TryFrom<MachineId>>::Error>,
+    FromId: Copy,
+    MachineId: From<FromId>,
+    ToId: MachineIdSubtypeTrait,
+    ToId: TryFrom<MachineId>,
+    CarbideError: From<<ToId as TryFrom<MachineId>>::Error>,
 {
     let machine_id = match id {
-        Some(id) => T::try_from(*id)?,
+        Some(id) => ToId::try_from(MachineId::from(*id))?,
         None => {
             return Err(CarbideError::MissingArgument("machine ID"));
         }

@@ -105,7 +105,7 @@ spec:
             # Both names so chart works with either carbide or nico image.
             - name: CARBIDE_BMC_PROXY_DATABASE_URL
               value: "postgres://$(DATASTORE_USER):$(DATASTORE_PASSWORD)@$(DATASTORE_HOST):$(DATASTORE_PORT)/$(DATASTORE_NAME)"
-            - name: NICO_BMC_PROXY_DATABASE_URL
+            - name: NICO_BMC_PROXY__DATABASE_URL
               value: "postgres://$(DATASTORE_USER):$(DATASTORE_PASSWORD)@$(DATASTORE_HOST):$(DATASTORE_PORT)/$(DATASTORE_NAME)"
             - name: RUST_BACKTRACE
               value: {{ .Values.env.RUST_BACKTRACE | quote }}

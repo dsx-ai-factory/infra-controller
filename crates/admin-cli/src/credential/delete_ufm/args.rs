@@ -42,6 +42,7 @@ impl TryFrom<Args> for forgerpc::CredentialDeletionRequest {
             credential_type: CredentialType::Ufm.into(),
             username: Some(username),
             mac_address: None,
+            credential_name: None,
         })
     }
 }

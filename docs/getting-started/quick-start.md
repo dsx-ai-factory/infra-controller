@@ -97,9 +97,14 @@ export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plan
 # up within 60 s). Prompt to keep it out of shell history:
 read -r -s -p "Site-wide BMC root password (leave blank to set later): " NICO_DPF_BMC_ROOT_PASSWORD; echo
 export NICO_DPF_BMC_ROOT_PASSWORD
+
+# RMS (Rack Management Service) installs by default. Set the image tag (there
+# is no safe default), or pass --skip-rms to setup.sh to opt out:
+export NICO_RMS_IMAGE_TAG=v0.10.0-rc2             # your rms-api image tag (git describe of your build)
+# export NICO_RMS_IMAGE_REPO=<registry>/rms-api   # only for a mirror/self-built image
 ```
 
-`NICO_IMAGE_REGISTRY` is used for both NICo Core (`<registry>/nvmetal-carbide`) and NICo REST (`<registry>/nico-rest-*`). Push all images to this registry before running setup. DPF operator/DOCA images pull anonymously from public NGC by default; to mirror or self-build them into your registry, see [helm-prereqs → DPF images and registries](https://github.com/NVIDIA/infra-controller/blob/main/helm-prereqs/README.md#dpf-images-and-registries).
+`NICO_IMAGE_REGISTRY` is used for both NICo Core (`<registry>/nvmetal-carbide`) and NICo REST (`<registry>/nico-rest-*`). Push all images to this registry before running setup. DPF operator/DOCA images pull anonymously from public NGC by default; to mirror or self-build them into your registry, see [helm-prereqs → DPF images and registries](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf-images-and-registries).
 
 For authenticated NGC pulls, obtain an API key at [ngc.nvidia.com](https://ngc.nvidia.com) → **API Keys** → **Generate Personal Key**. You do not need to set `REGISTRY_PULL_SECRET` when images are public, preloaded, or an existing pull secret is configured in the values files.
 
@@ -111,7 +116,7 @@ For authenticated NGC pulls, obtain an API key at [ngc.nvidia.com](https://ngc.n
 | `NICO_CORE_IMAGE_TAG` | Unless `--skip-core` | NICo Core image tag (e.g. `v2.0.0`). |
 | `NICO_REST_IMAGE_TAG` | Unless `--skip-rest` | NICo REST image tag (e.g. `v2.0.0`). |
 | `KUBECONFIG` | No | Path to the target cluster kubeconfig. Omit when the current `kubectl` context is already correct. |
-| `NICO_DPF_DPU_INTERFACE`, `NICO_DPF_DPU_CLUSTER_VIP` | **Yes**, unless `--skip-dpf` | DPF DPU provisioning (default-on): the control-plane NIC facing the DPUs and a free DPU-routable VIP for the DPU cluster control plane. See [helm-prereqs → DPF](https://github.com/NVIDIA/infra-controller/blob/main/helm-prereqs/README.md#dpf). |
+| `NICO_DPF_DPU_INTERFACE`, `NICO_DPF_DPU_CLUSTER_VIP` | **Yes**, unless `--skip-dpf` | DPF DPU provisioning (default-on): the control-plane NIC facing the DPUs and a free DPU-routable VIP for the DPU cluster control plane. See [helm-prereqs → DPF](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#dpf). |
 | `NICO_DPF_BMC_ROOT_PASSWORD` | No | Site-wide BMC root password. When provided, setup.sh seeds the credential via nico-admin-cli in phase 6b so DPU provisioning starts immediately. When omitted, carbide-api starts without it (the startup read is best-effort) and the credential can be set at any time via `nico-admin-cli credential add-bmc --kind=site-wide-root`; carbide-api picks it up within 60 s. |
 | `NICO_SITE_UUID` | No | Stable UUID for this site. If unset, `setup.sh` tries to reuse the UUID from a prior install (site-agent ConfigMap). If that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself. |
 
@@ -164,15 +169,20 @@ Open `helm-prereqs/values/nico-core.yaml` and update the following values:
   | `[pools.lo-ip]` ranges | Loopback IP range allocated to bare-metal hosts |
   | `[pools.vlan-id]` ranges | VLAN ID allocation range |
   | `[pools.vni]` ranges | VXLAN Network Identifier range |
-  | `[networks.admin]` | Admin network CIDR, gateway, and MTU |
+  | `[networks.admin]` | `type = "admin"`, an IPv4 `prefix` and `gateway` for DPU provisioning, `mtu`, and `reserve_first` |
   | `[networks.<underlay>]` | Underlay data-plane network(s) — one block per L3 segment |
 
 All fields are documented with inline comments in the file.
 
-**Required fields--do not leave empty:** You must set `[networks.admin]`, `prefix`, and `gateway` to real values. `nico-api` crashes at startup with a parse error if these are empty strings. Similarly, `[pools.lo-ip]`, `[pools.vlan-id]`, and `[pools.vni]` ranges must be non-empty.
+Define the site networks to create at startup using the
+[Initial Network Configuration](../provisioning/ip-and-network-configuration.md#initial-network-configuration)
+requirements. An IPv4 prefix requires a gateway; an IPv6-only definition can
+omit it. DPU provisioning requires an admin segment with an IPv4 prefix and
+gateway. Do not use empty strings for address fields. The `[pools.lo-ip]`,
+`[pools.vlan-id]`, and `[pools.vni]` ranges must be non-empty.
 
 <Tip>
-The following fields are safe to leave as empty arrays: `dhcp_servers`, `ntp_servers`, `site_fabric_prefixes`, and `deny_prefixes`. Do not delete any field from the TOML block; missing keys cause a different crash than empty ones.
+The following fields are safe to leave as empty arrays: `dhcp_servers`, `ntp_servers`, and `site_fabric_prefixes`. Keep required fields in the TOML block; optional network fields follow the initial network configuration requirements above.
 </Tip>
 
 ### 3d. NICo REST source tree
@@ -337,7 +347,8 @@ You can combine common options as needed:
 | `--skip-core` | Skip the Phase 6 NICo Core Helm release. |
 | `--skip-flow` | Skip Phase 7h NICo Flow. Also set `flow.enabled=false` in `helm-prereqs/values.yaml` to omit Flow prerequisites. |
 | `--skip-rest` | Skip all Phase 7 NICo REST phases. |
-| `--with-observability` | Install the optional local metrics, logs, and traces stack before Phase 7. This also runs with `--skip-rest`; see [`helm-prereqs/observability/README.md`](https://github.com/NVIDIA/infra-controller/blob/main/helm-prereqs/observability/README.md) for standalone installation. |
+| `--skip-rms` | Skip Phase 5c Rack Management Service (installs by default; `NICO_RMS_IMAGE_TAG` required otherwise). |
+| `--with-observability` | Install the optional local metrics, logs, and traces stack before Phase 7. This also runs with `--skip-rest`; see [`helm-prereqs/observability/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/observability/README.md) for standalone installation. |
 | `-y` | Accept setup prompts automatically. |
 
 The `setup.sh` script installs all prerequisites and NICo components in sequential phases:
@@ -359,6 +370,7 @@ before continuing.
 | 4 | Vault init + unseal + SSH host key |
 | 5 | external-secrets + nico-prereqs + nico-pg-cluster |
 | 5b | DPF stack for DPU provisioning (default; `--skip-dpf` to opt out) |
+| 5c | RMS (Rack Management Service) (default; `--skip-rms` to opt out) |
 | 6 | **NICo Core** (nico helm release) |
 | 7a-7g | **NICo REST** base stack (source and CA setup, PostgreSQL, Keycloak, Temporal, REST services) |
 | 7h | **NICo Flow**, unless `--skip-flow` is used |
@@ -369,12 +381,14 @@ The following components are deployed:
 ```text
 local-path-provisioner     (raw manifest - StorageClasses for Vault + PostgreSQL PVCs)
 metallb                    (metallb/metallb 0.14.5 - LoadBalancer IPs via BGP or L2)
-postgres-operator          (zalando/postgres-operator 1.10.1 - manages nico-pg-cluster)
+postgres-operator          (zalando/postgres-operator 1.11.0 - manages nico-pg-cluster)
 cert-manager               (jetstack/cert-manager v1.17.1)
 vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS)
 external-secrets           (external-secrets/external-secrets 0.14.3)
 DPF stack                  (default; --skip-dpf to opt out: argo-cd, kamaji, NFD,
                             maintenance-operator, dpf-operator — see docs/manuals/dpf.md)
+rack-manager (RMS)         (default; --skip-rms to opt out - pinned nv-rms submodule, mTLS
+                            via vault-nico-issuer, rms database on nico-pg-cluster)
 nico-prereqs               (this Helm chart - nico-system namespace)
 NICo Core                  (../helm - nico-core.yaml values)
 NICo REST                  (../helm/rest/nico-rest)
@@ -503,8 +517,8 @@ This `GET` endpoint lazily initializes the org on first call as follows:
 
 1. Checks if service account is enabled in the auth config
 2. Creates an **InfrastructureProvider** for the org if one doesn't exist
-3. Creates a **Tenant** with targeted instance creation enabled if one doesn't exist
-4. Creates a **TenantAccount** linking the provider and tenant if one doesn't exist
+3. Creates a **Tenant** for the org if one doesn't exist
+4. Creates a **TenantAccount** linking the provider and tenant if one doesn't exist, already in `Ready` status with the `targetedInstanceCreation` capability enabled
 5. Returns the service account status with the provider and tenant IDs
 
 Without this call, site operations return 404. Subsequent calls are read-only.
@@ -556,7 +570,8 @@ kubectl get pods -n temporal
 kubectl get certificate core-grpc-client-site-agent-certs -n nico-rest
 ```
 
-For troubleshooting common issues, refer to the [Reference Installation — Troubleshooting](installation-options/reference-install.md#troubleshooting) guide.
+For troubleshooting resources, refer to the source-of-truth guides linked from
+the [Reference Installation](installation-options/reference-install.md) guide.
 
 ## Step 6 — Connect the OOB Network
 
@@ -592,7 +607,7 @@ kubectl get svc nico-api -n nico-system -o jsonpath='{.status.loadBalancer.ingre
 
 ### Set Site-wide Credentials
 
-Configure the credentials NICo will apply to BMCs and UEFI after ingestion:
+Configure the credentials NICo will apply to BMCs and UEFI after ingestion. These commands write to the configured credential store: Vault by default, or Postgres when the site was set up as described in [Day 0 Credential Store](installation-options/day0-credential-store.md).
 
 ```bash
 nico-admin-cli -a <api-url> credential add-bmc --kind=site-wide-root --password='<password>'

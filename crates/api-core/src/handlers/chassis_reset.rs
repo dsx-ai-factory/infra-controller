@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+//! Handler for the administrative out-of-band Redfish chassis reset.
+
 use ::rpc::forge as rpc;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::HostMachineId;
@@ -25,51 +27,56 @@ use tonic::{Request, Response, Status};
 use crate::api::{Api, log_request_data};
 use crate::handlers::utils::convert_and_log_machine_id;
 
-pub(super) fn validate_chassis_id(chassis_id: &str) -> Result<(), Status> {
-    if !chassis_id
-        .bytes()
-        .next()
-        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        || !chassis_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        return Err(Status::invalid_argument(
-            "chassis_id contains unsupported characters",
-        ));
+/// Maps the requested reset action to a Redfish chassis power control.
+///
+/// v1 only supports `ForceRestart`; all other actions are rejected because
+/// Redfish `Chassis.Reset` allowable `ResetType` values are vendor-specific.
+fn map_chassis_reset_action(action: i32) -> Result<libredfish::SystemPowerControl, Status> {
+    use rpc::admin_power_control_request::SystemPowerControl as Spc;
+    let action = Spc::try_from(action).map_err(|_| Status::invalid_argument("unknown action"))?;
+    match action {
+        Spc::ForceRestart => Ok(libredfish::SystemPowerControl::ForceRestart),
+        Spc::On
+        | Spc::GracefulRestart
+        | Spc::AcPowercycle
+        | Spc::GracefulShutdown
+        | Spc::ForceOff => Err(Status::invalid_argument(
+            "action must be ForceRestart (the only reset type supported today)",
+        )),
     }
-    Ok(())
 }
 
+/// Handle an administrative out-of-band Redfish chassis reset and return the response.
 pub(crate) async fn admin_chassis_reset(
     api: &Api,
     request: Request<rpc::AdminChassisResetRequest>,
-) -> Result<Response<()>, Status> {
+) -> Result<Response<rpc::AdminChassisResetResponse>, Status> {
     log_request_data(&request);
     let req = request.into_inner();
-    let host_machine_id = convert_and_log_machine_id::<HostMachineId>(req.machine_id.as_ref())?;
+    let machine_id: HostMachineId = convert_and_log_machine_id(req.machine_id.as_ref())?;
     let chassis_id = req
         .chassis_id
         .none_if_empty()
-        .ok_or_else(|| Status::invalid_argument("chassis_id is required"))?;
-    validate_chassis_id(&chassis_id)?;
+        // xtask:allow-error-case: HGX_Chassis_0 is a case-sensitive Redfish chassis id
+        .ok_or_else(|| Status::invalid_argument("chassis_id is required (e.g. HGX_Chassis_0)"))?;
 
-    let operation = MachineMaintenanceOperation::ChassisReset { chassis_id };
-    let machine_id = host_machine_id.into();
+    map_chassis_reset_action(req.action)?;
+
     let (host_machine, mut txn) = api
         .load_machine(
-            &host_machine_id,
+            &machine_id,
             MachineSearchConfig {
                 for_update: true,
                 ..Default::default()
             },
         )
         .await?;
-
-    if matches!(
-        host_machine.current_state(),
-        ManagedHostState::Assigned { .. }
-    ) || db::instance::find_id_by_machine_id(&mut txn, &machine_id)
+    if !matches!(host_machine.current_state(), ManagedHostState::Ready) {
+        return Err(Status::failed_precondition(
+            "host state does not allow a chassis reset",
+        ));
+    }
+    if db::instance::find_id_by_machine_id(&mut txn, &host_machine.id)
         .await?
         .is_some()
     {
@@ -77,63 +84,58 @@ pub(crate) async fn admin_chassis_reset(
             "host is assigned to a tenant; a chassis reset is not allowed",
         ));
     }
-    if matches!(
-        host_machine.current_state(),
-        ManagedHostState::ForceDeletion
-    ) {
+
+    if host_machine.health_reports.maintenance_override().is_none() {
         return Err(Status::failed_precondition(
-            "host is marked for forced deletion; a chassis reset is not allowed",
+            "host must be in maintenance mode before a chassis reset (enable it with SetMaintenance)",
         ));
     }
 
-    if let Some(existing) = host_machine.machine_maintenance_requested.as_ref() {
-        if existing.operation != operation {
-            return Err(Status::failed_precondition(
-                "host already has a pending maintenance operation",
-            ));
-        }
-    } else {
-        if matches!(
-            host_machine.current_state(),
-            ManagedHostState::Maintenance { .. }
-        ) {
-            return Err(Status::failed_precondition(
-                "host is already executing a maintenance operation",
-            ));
-        }
-        db::machine::set_machine_maintenance_requested(&mut txn, machine_id, "rest-api", operation)
-            .await?;
-    }
+    db::machine::set_machine_maintenance_requested(
+        &mut txn,
+        machine_id,
+        "admin-chassis-reset",
+        MachineMaintenanceOperation::ChassisReset { chassis_id },
+    )
+    .await?;
     txn.commit().await?;
 
     if let Err(error) = api
         .machine_state_handler_enqueuer
-        .enqueue_object(&host_machine_id)
+        .enqueue_object(&machine_id)
         .await
     {
         tracing::warn!(
-            %host_machine_id,
+            %machine_id,
             %error,
             "Failed to enqueue managed host after recording chassis reset request",
         );
     }
 
-    Ok(Response::new(()))
+    Ok(Response::new(rpc::AdminChassisResetResponse {}))
 }
 
 #[cfg(test)]
 mod tests {
     use carbide_test_support::value_scenarios;
 
-    use super::validate_chassis_id;
+    use super::map_chassis_reset_action;
 
     #[test]
-    fn chassis_id_rejects_path_characters() {
-        value_scenarios!(run = |id: &str| { validate_chassis_id(id).map_err(|_| ()) };
-            "chassis ID validation" {
-                "Chassis_0" => Ok(()),
-                "../Chassis_0" => Err(()),
-                "Chassis/0" => Err(()),
+    fn chassis_reset_action_maps_force_restart_and_rejects_others() {
+        use libredfish::SystemPowerControl as L;
+
+        use super::rpc::admin_power_control_request::SystemPowerControl as Spc;
+        value_scenarios!(run = |a: i32| { map_chassis_reset_action(a).map_err(|_| ()) };
+            "chassis reset action mapping" {
+                Spc::ForceRestart as i32 => Ok(L::ForceRestart),
+                Spc::On as i32 => Err(()),
+                0 => Err(()), // omitted action (proto3 default)
+                Spc::GracefulRestart as i32 => Err(()),
+                Spc::AcPowercycle as i32 => Err(()),
+                Spc::GracefulShutdown as i32 => Err(()),
+                Spc::ForceOff as i32 => Err(()),
+                9999 => Err(()),
             }
         );
     }

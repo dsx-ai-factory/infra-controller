@@ -26,7 +26,9 @@ pub use serde_json::Value as JsonValue;
 
 use crate::config::{NvueConfig, NvueConfigWithHeader, NvueRevision};
 use crate::types::bgp::{BgpNeighbors, BgpVrfInfo};
-use crate::types::revision::{RevisionApplyStatus, RevisionData, RevisionIssueSummary};
+use crate::types::revision::{
+    RevisionApplyStatus, RevisionConfigDiff, RevisionData, RevisionIssueSummary,
+};
 
 /// Repeated NVUE field-selection query parameters.
 ///
@@ -199,6 +201,27 @@ impl NvueClient {
         Ok(nvue_config)
     }
 
+    /// Get the config diff between two NVUE revisions. The order of the
+    /// arguments is significant; NVUE will return the set of changes necessary
+    /// to turn `base_revision` into `target_revision`.
+    pub async fn get_revision_config_diff(
+        &self,
+        base_revision: &str,
+        target_revision: &str,
+    ) -> Result<RevisionConfigDiff, NvueClientError> {
+        let mut request = self.request(Method::GET, "/nvue_v1/")?.build()?;
+        request
+            .url_mut()
+            .query_pairs_mut()
+            .append_pair("diff", base_revision)
+            .append_pair("rev", target_revision)
+            .append_pair("filled", "false");
+
+        let response = self.execute("get_revision_config_diff", request).await?;
+        let diff = response.json().await?;
+        Ok(diff)
+    }
+
     /// Return BGP data for a VRF.
     ///
     /// This calls `GET /nvue_v1/vrf/{vrf-id}/router/bgp` without field filters.
@@ -360,15 +383,34 @@ impl NvueClient {
         }
     }
 
-    /// Create a new configuration using the values from `config`, then  apply
-    /// it, returning the revision ID. This is a convenience method that
-    /// creates, replaces, and then applies the configuration (which a caller
-    /// could do manually if more control is desired).
-    pub async fn push_config(&self, config: &NvueConfig) -> Result<String, NvueClientError> {
+    /// Perform all of the NVUE operations required to apply a new config. Under
+    /// the hood, we create a new revision, patch it with this config, diff it
+    /// against the "applied" revision, and then apply it if it differed.
+    ///
+    /// Returns a `Some(revision_id)` if we applied the new revision, and `None`
+    /// if NVUE indicated no change compared to the "applied" revision.
+    pub async fn push_config(
+        &self,
+        config: &NvueConfig,
+    ) -> Result<Option<String>, NvueClientError> {
         let revision_id = self.create_config_revision().await?;
         self.replace_config_revision(&revision_id, config).await?;
+
+        // NVUE will not actually apply a revision if it's unchanged from what's
+        // currently applied, we need to check this before we try.
+        let diff = self
+            .get_revision_config_diff("applied", &revision_id)
+            .await?;
+        if diff.is_empty() {
+            // Note that we're leaving the old revision sitting around unused!
+            // NVUE provides a `DELETE` operation on a revision ID, but HBN
+            // patches this out in its OpenAPI spec For Some Reason(tm) so it's
+            // unclear if it's safe to try it.
+            return Ok(None);
+        }
+
         self.apply_config_revision(&revision_id).await?;
-        Ok(revision_id)
+        Ok(Some(revision_id))
     }
 
     // Retrieve the system information from the NVUE server. The fields returned

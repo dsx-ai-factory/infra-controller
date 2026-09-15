@@ -37,6 +37,10 @@ impl LiteOnPowerShelf<'_> {
         }
     }
 
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         redfish::manager::Config {
             managers: vec![redfish::manager::SingleConfig {
@@ -71,6 +75,7 @@ impl LiteOnPowerShelf<'_> {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
+                bios_version: None,
                 eth_interfaces: None,
                 serial_number: None,
                 boot_order_mode: redfish::computer_system::BootOrderMode::Generic,

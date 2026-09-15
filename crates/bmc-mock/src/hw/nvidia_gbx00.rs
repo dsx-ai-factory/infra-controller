@@ -21,10 +21,56 @@ use std::borrow::Cow;
 
 use serde_json::json;
 
-use crate::{RackPlacement, redfish};
+use crate::hw::rack::{RackPlacement, TrayPlacement};
+use crate::redfish;
 
-const CBC_CHASSIS_PHYSICAL_SLOT_OFFSET: u32 = 10;
+/// The topology id an NVL72 rack's compute trays report.
+const NVL72_TOPOLOGY_ID: u32 = 128;
 const CBC_REVISION_ID: u32 = 2;
+/// Compute trays do not begin at slot zero, so the chassis slot number is the
+/// tray index plus this offset.
+const CBC_CHASSIS_PHYSICAL_SLOT_OFFSET: u32 = 10;
+
+// NVL72 layout: eighteen compute trays in two banks, with the nine NVLink
+// switch trays between them.
+const FIRST_COMPUTE_RANGE_START: u8 = 11;
+const FIRST_COMPUTE_RANGE_END: u8 = 18;
+const SWITCH_RANGE_START: u8 = 19;
+const SWITCH_RANGE_END: u8 = 27;
+const SECOND_COMPUTE_RANGE_START: u8 = 28;
+const SECOND_COMPUTE_RANGE_END: u8 = 37;
+const FIRST_COMPUTE_BANK_SIZE: u8 = FIRST_COMPUTE_RANGE_END - FIRST_COMPUTE_RANGE_START + 1;
+
+/// Placement of the unit at a rack position in an NVL72 rack.
+///
+/// Compute trays are indexed from the bottom across both banks and report a
+/// chassis slot offset from that index. Switch trays are indexed from the
+/// bottom of their bank; a switch tray's chassis publishes no slot of its own,
+/// so the rack unit it occupies is the one physical slot that exists for it.
+/// Any other position holds no tray.
+pub(crate) fn nvl72_placement(position: u8) -> RackPlacement {
+    let tray = match position {
+        FIRST_COMPUTE_RANGE_START..=FIRST_COMPUTE_RANGE_END => {
+            Some(compute_tray(position - FIRST_COMPUTE_RANGE_START))
+        }
+        SECOND_COMPUTE_RANGE_START..=SECOND_COMPUTE_RANGE_END => Some(compute_tray(
+            position - SECOND_COMPUTE_RANGE_START + FIRST_COMPUTE_BANK_SIZE,
+        )),
+        SWITCH_RANGE_START..=SWITCH_RANGE_END => Some(TrayPlacement::Switch {
+            tray_index: position - SWITCH_RANGE_START,
+            slot_number: u32::from(position),
+        }),
+        _ => None,
+    };
+    RackPlacement::new(position, NVL72_TOPOLOGY_ID, tray)
+}
+
+fn compute_tray(tray_index: u8) -> TrayPlacement {
+    TrayPlacement::Compute {
+        tray_index,
+        chassis_physical_slot_number: u32::from(tray_index) + CBC_CHASSIS_PHYSICAL_SLOT_OFFSET,
+    }
+}
 
 pub(crate) struct Topology {
     pub(crate) chassis_physical_slot_number: u32,
@@ -35,10 +81,16 @@ pub(crate) struct Topology {
 
 impl Topology {
     pub(crate) fn from_rack_placement(placement: RackPlacement) -> Option<Self> {
-        let compute_tray_index = u32::from(placement.compute_tray_index()?);
+        let TrayPlacement::Compute {
+            tray_index,
+            chassis_physical_slot_number,
+        } = placement.tray()?
+        else {
+            return None;
+        };
         Some(Self {
-            chassis_physical_slot_number: compute_tray_index + CBC_CHASSIS_PHYSICAL_SLOT_OFFSET,
-            compute_tray_index,
+            chassis_physical_slot_number,
+            compute_tray_index: u32::from(tray_index),
             revision_id: CBC_REVISION_ID,
             topology_id: placement.topology_id(),
         })
@@ -147,5 +199,62 @@ mod tests {
                 ))
             },
         );
+    }
+
+    fn switch(position: u8) -> Option<(u8, u32)> {
+        match nvl72_placement(position).tray()? {
+            TrayPlacement::Switch {
+                tray_index,
+                slot_number,
+            } => Some((tray_index, slot_number)),
+            TrayPlacement::Compute { .. } => None,
+        }
+    }
+
+    fn compute(position: u8) -> Option<(u8, u32)> {
+        match nvl72_placement(position).tray()? {
+            TrayPlacement::Compute {
+                tray_index,
+                chassis_physical_slot_number,
+            } => Some((tray_index, chassis_physical_slot_number)),
+            TrayPlacement::Switch { .. } => None,
+        }
+    }
+
+    #[test]
+    fn every_position_is_at_most_one_kind_of_tray() {
+        for position in 1..=48u8 {
+            assert!(
+                !(compute(position).is_some() && switch(position).is_some()),
+                "position {position} cannot be both a compute and a switch tray"
+            );
+            assert_eq!(nvl72_placement(position).position(), position);
+            assert_eq!(nvl72_placement(position).topology_id(), NVL72_TOPOLOGY_ID);
+        }
+    }
+
+    #[test]
+    fn switch_trays_are_indexed_from_the_bottom_of_their_bank() {
+        assert_eq!(switch(19), Some((0, 19)));
+        assert_eq!(switch(27), Some((8, 27)));
+
+        // Compute trays and power shelves are not switch trays.
+        for position in [11, 18, 28, 37, 6, 9, 39, 42] {
+            assert_eq!(switch(position), None, "{position}");
+        }
+    }
+
+    #[test]
+    fn compute_trays_keep_their_chassis_numbering() {
+        assert_eq!(compute(11), Some((0, 10)));
+        assert_eq!(compute(18), Some((7, 17)));
+        assert_eq!(compute(28), Some((8, 18)));
+        assert_eq!(compute(37), Some((17, 27)));
+
+        // Switch trays and power shelves are not compute trays.
+        for position in [19, 27, 6, 9, 39, 42] {
+            assert_eq!(compute(position), None, "{position}");
+            assert_eq!(nvl72_placement(position).compute_tray_index(), None);
+        }
     }
 }

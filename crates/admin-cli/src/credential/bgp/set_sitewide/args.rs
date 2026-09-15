@@ -44,6 +44,7 @@ impl TryFrom<Args> for forgerpc::CredentialCreationRequest {
             password: password_validator(args.password)?,
             mac_address: None,
             vendor: None,
+            credential_name: None,
         })
     }
 }

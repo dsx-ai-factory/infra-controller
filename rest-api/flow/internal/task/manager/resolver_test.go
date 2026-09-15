@@ -102,6 +102,13 @@ func (m *mockTargetFetcher) GetComponentByID(
 	return nil, errors.New("component not found")
 }
 
+func (m *mockTargetFetcher) GetComponentByBMCMAC(
+	_ context.Context,
+	_ string,
+) (*component.Component, error) {
+	return nil, status.Error(codes.NotFound, "component not found")
+}
+
 func (m *mockTargetFetcher) GetComponentsByExternalIDs(
 	ctx context.Context,
 	externalIDs []string,
@@ -164,6 +171,7 @@ func newTestComponent(id uuid.UUID, rackID uuid.UUID, compType devicetypes.Compo
 	)
 
 	comp.RackID = rackID
+	comp.ComponentID = name
 	return comp
 }
 
@@ -512,7 +520,7 @@ func TestResolveTargetSpecToRacks_ComponentTargetByExternalRef(t *testing.T) {
 		Components: []operation.ComponentTarget{
 			{
 				External: &operation.ExternalRef{
-					Type: devicetypes.ComponentTypeCompute,
+					Type: devicetypes.ComponentTypeUnknown,
 					ID:   externalID,
 				},
 			},
@@ -702,6 +710,7 @@ func TestResolveRackTarget_MultipleComponentTypeFilters(t *testing.T) {
 	comp1 := newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeCompute, "comp-1")
 	comp2 := newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeNVSwitch, "comp-2")
 	comp3 := newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypePowerShelf, "comp-3")
+	comp3.ComponentID = "" // Unlinked but outside the selected component types.
 	testRack.AddComponent(comp1)
 	testRack.AddComponent(comp2)
 	testRack.AddComponent(comp3)

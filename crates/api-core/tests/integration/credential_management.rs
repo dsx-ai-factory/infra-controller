@@ -83,6 +83,7 @@ fn ufm_create_request() -> CredentialCreationRequest {
         password: "test-ufm-token".to_string(),
         vendor: None,
         mac_address: None,
+        credential_name: None,
     }
 }
 
@@ -91,6 +92,97 @@ fn ufm_delete_request() -> CredentialDeletionRequest {
         credential_type: RpcCredentialType::Ufm.into(),
         username: Some("https://ufm.example.com".to_string()),
         mac_address: None,
+        credential_name: None,
+    }
+}
+
+fn firmware_artifact_token_create_request(name: &str, token: &str) -> CredentialCreationRequest {
+    CredentialCreationRequest {
+        credential_type: RpcCredentialType::FirmwareArtifactAccessToken.into(),
+        username: None,
+        password: token.to_string(),
+        vendor: None,
+        mac_address: None,
+        credential_name: Some(name.to_string()),
+    }
+}
+
+#[sqlx_test]
+async fn firmware_artifact_access_token_can_be_replaced_and_deleted(pool: PgPool) {
+    let (env, credential_manager) = init(pool).await;
+    let name = "repository-a".to_string();
+    let key = CredentialKey::FirmwareArtifactAccessToken { name: name.clone() };
+
+    for token in ["first-token", " rotated-token \r\n"] {
+        env.api()
+            .create_credential(tonic::Request::new(firmware_artifact_token_create_request(
+                &name, token,
+            )))
+            .await
+            .expect("set firmware artifact access token");
+    }
+
+    assert_eq!(
+        credential_manager
+            .get_credentials_from_writer(&key)
+            .await
+            .expect("read stored token"),
+        Some(Credentials::new("", " rotated-token \r\n"))
+    );
+
+    env.api()
+        .delete_credential(tonic::Request::new(CredentialDeletionRequest {
+            credential_type: RpcCredentialType::FirmwareArtifactAccessToken.into(),
+            username: None,
+            mac_address: None,
+            credential_name: Some(name.to_string()),
+        }))
+        .await
+        .expect("delete firmware artifact access token");
+
+    assert_eq!(
+        credential_manager
+            .get_credentials_from_writer(&key)
+            .await
+            .expect("read deleted token"),
+        None
+    );
+}
+
+#[sqlx_test]
+async fn firmware_artifact_access_token_rejects_missing_name_or_token(pool: PgPool) {
+    let (env, _) = init(pool).await;
+
+    let mut missing_name = firmware_artifact_token_create_request("repository-a", "token");
+    missing_name.credential_name = None;
+
+    for request in [
+        missing_name,
+        firmware_artifact_token_create_request("", "token"),
+        firmware_artifact_token_create_request("repository-a", ""),
+    ] {
+        let error = env
+            .api()
+            .create_credential(tonic::Request::new(request))
+            .await
+            .expect_err("invalid firmware artifact credential input must fail");
+
+        assert_eq!(error.code(), Code::InvalidArgument);
+    }
+
+    for credential_name in [None, Some(String::new())] {
+        let error = env
+            .api()
+            .delete_credential(tonic::Request::new(CredentialDeletionRequest {
+                credential_type: RpcCredentialType::FirmwareArtifactAccessToken.into(),
+                username: None,
+                mac_address: None,
+                credential_name,
+            }))
+            .await
+            .expect_err("invalid firmware artifact credential name must fail");
+
+        assert_eq!(error.code(), Code::InvalidArgument);
     }
 }
 
@@ -202,6 +294,7 @@ async fn test_create_host_uefi_credential_when_missing(pool: PgPool) {
             password: "test-host-uefi-password".to_string(),
             vendor: None,
             mac_address: None,
+            credential_name: None,
         }))
         .await;
     assert!(response.is_ok());
@@ -229,6 +322,7 @@ async fn test_create_host_uefi_credential_when_missing(pool: PgPool) {
             password: "another-password".to_string(),
             vendor: None,
             mac_address: None,
+            credential_name: None,
         }))
         .await;
     assert!(second.is_err());
@@ -247,6 +341,7 @@ async fn test_create_dpu_uefi_credential_when_missing(pool: PgPool) {
             password: "test-dpu-uefi-password".to_string(),
             vendor: None,
             mac_address: None,
+            credential_name: None,
         }))
         .await;
     assert!(response.is_ok());
@@ -274,6 +369,7 @@ async fn test_create_dpu_uefi_credential_when_missing(pool: PgPool) {
             password: "another-password".to_string(),
             vendor: None,
             mac_address: None,
+            credential_name: None,
         }))
         .await;
     assert!(second.is_err());
@@ -293,6 +389,7 @@ async fn test_create_and_delete_bgp_credential(pool: PgPool) {
             password: "test-dpu-bgp-password".to_string(),
             vendor: None,
             mac_address: None,
+            credential_name: None,
         }))
         .await;
     assert!(response.is_ok());
@@ -319,6 +416,7 @@ async fn test_create_and_delete_bgp_credential(pool: PgPool) {
             credential_type: RpcCredentialType::BgpSiteWideLeafPassword.into(),
             username: None,
             mac_address: None,
+            credential_name: None,
         }))
         .await;
     assert!(delete_response.is_ok());
@@ -368,6 +466,7 @@ async fn test_create_bgp_credential_validates_max_password_length(pool: PgPool) 
             password: max_password.clone(),
             vendor: None,
             mac_address: None,
+            credential_name: None,
         }))
         .await;
     assert!(ok_response.is_ok());
@@ -396,6 +495,7 @@ async fn test_create_bgp_credential_validates_max_password_length(pool: PgPool) 
             password: "a".repeat(MAX_BGP_PASSWORD_LENGTH + 1),
             vendor: None,
             mac_address: None,
+            credential_name: None,
         }))
         .await;
     let err = response.expect_err("passwords longer than the max should be rejected");

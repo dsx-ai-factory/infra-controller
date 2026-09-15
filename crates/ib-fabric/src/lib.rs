@@ -28,7 +28,7 @@ use std::time::Duration;
 use carbide_instrument::emit;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::infiniband::IBPartitionId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use chrono::Utc;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{self, DatabaseError};
@@ -385,7 +385,7 @@ impl IbFabricMonitor {
         &self,
         fabric_clients: &mut HashMap<String, Arc<dyn IBFabric>>,
         memberships_in_ufm: &HashSet<IbMembership>,
-        machine_ids_by_guid: &HashMap<String, Option<MachineId>>,
+        machine_ids_by_guid: &HashMap<String, Option<HostMachineId>>,
         current_fabrics_by_guid: &HashMap<String, Option<String>>,
         retired_memberships: Vec<IbMembership>,
         reports: &mut [MachineIbStatusEvaluation],
@@ -552,7 +552,7 @@ impl IbFabricMonitor {
     /// later monitor pass corrects a UFM change that finishes after this check.
     async fn membership_is_still_needed(
         &self,
-        machine_id: MachineId,
+        machine_id: HostMachineId,
         membership: &IbMembership,
     ) -> IbResult<bool> {
         let mut txn = self
@@ -651,8 +651,8 @@ impl IbFabricMonitor {
     async fn get_all_snapshots(
         &self,
         txn: &mut PgConnection,
-    ) -> IbResult<HashMap<MachineId, ManagedHostStateSnapshot>> {
-        let machine_ids = db::machine::find_machine_ids(
+    ) -> IbResult<HashMap<HostMachineId, ManagedHostStateSnapshot>> {
+        let machine_ids = db::machine::find_machine_ids::<HostMachineId>(
             &mut *txn,
             MachineSearchConfig {
                 include_predicted_host: true,
@@ -660,6 +660,7 @@ impl IbFabricMonitor {
             },
         )
         .await?;
+
         db::managed_host::load_by_machine_ids(
             txn,
             &machine_ids,
@@ -685,7 +686,7 @@ enum DuplicateOwnership {
 /// duplicate owner kind so the caller can emit the matching Event.
 fn suppress_duplicate_ownership_changes(
     current_fabrics_by_guid: &HashMap<String, Option<String>>,
-    machine_ids_by_guid: &HashMap<String, Option<MachineId>>,
+    machine_ids_by_guid: &HashMap<String, Option<HostMachineId>>,
     membership: &IbMembership,
     reports: &mut [MachineIbStatusEvaluation],
 ) -> Option<DuplicateOwnership> {
@@ -888,8 +889,8 @@ impl FabricData {
 /// snapshot to the `Machine` that can be locked and read again. A `None` value
 /// means that more than one `Machine` claims the GUID.
 fn machine_ids_by_ib_guid(
-    snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
-) -> HashMap<String, Option<MachineId>> {
+    snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
+) -> HashMap<String, Option<HostMachineId>> {
     unique_machine_ids_by_ib_guid(
         snapshots
             .iter()
@@ -912,13 +913,13 @@ fn machine_ids_by_ib_guid(
 /// `unique_machine_ids_by_ib_guid` keeps unique GUID owners and marks duplicate
 /// ownership by distinct machines as `None`.
 fn unique_machine_ids_by_ib_guid(
-    guid_owners: impl IntoIterator<Item = (String, MachineId)>,
-) -> HashMap<String, Option<MachineId>> {
+    guid_owners: impl IntoIterator<Item = (String, HostMachineId)>,
+) -> HashMap<String, Option<HostMachineId>> {
     let mut machine_ids_by_guid = HashMap::new();
     for (guid, machine_id) in guid_owners {
         machine_ids_by_guid
             .entry(guid)
-            .and_modify(|current_machine_id: &mut Option<MachineId>| {
+            .and_modify(|current_machine_id: &mut Option<HostMachineId>| {
                 if *current_machine_id != Some(machine_id) {
                     *current_machine_id = None;
                 }
@@ -1604,7 +1605,10 @@ async fn record_machine_infiniband_status_observation(
 }
 
 /// Clear the IbCleanupPending alert
-async fn clear_ib_cleanup_alert(db_pool: &PgPool, machine_id: &MachineId) -> Result<(), IbError> {
+async fn clear_ib_cleanup_alert(
+    db_pool: &PgPool,
+    machine_id: &HostMachineId,
+) -> Result<(), IbError> {
     let mut conn = db_pool
         .acquire()
         .await
@@ -1626,7 +1630,7 @@ const IB_PORT_DOWN_OVERRIDE_SOURCE: &str = "ib-port-down-monitor";
 
 async fn set_ib_port_down_alert(
     db_pool: &PgPool,
-    machine_id: &MachineId,
+    machine_id: &HostMachineId,
     down_port_guids: &[String],
     total_ports: usize,
 ) -> Result<(), IbError> {
@@ -1658,7 +1662,10 @@ async fn set_ib_port_down_alert(
     Ok(())
 }
 
-async fn clear_ib_port_down_alert(db_pool: &PgPool, machine_id: &MachineId) -> Result<(), IbError> {
+async fn clear_ib_port_down_alert(
+    db_pool: &PgPool,
+    machine_id: &HostMachineId,
+) -> Result<(), IbError> {
     let mut conn = db_pool
         .acquire()
         .await
@@ -1701,7 +1708,7 @@ fn should_track_port_as_down(
 
 async fn preload_sku_inactive_devices(
     db_pool: &PgPool,
-    snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+    snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
 ) -> Result<SkuInactiveDevicesCache, IbError> {
     let sku_ids: Vec<&str> = snapshots
         .values()
@@ -1794,7 +1801,7 @@ fn is_pkey_in_managed_range(pkey: PartitionKey, fabric_definition: &IbFabricDefi
 #[cfg(test)]
 mod tests {
     use carbide_test_support::value_scenarios;
-    use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 
     use super::*;
 
@@ -1916,7 +1923,7 @@ mod tests {
         value_scenarios!(
             run = |(current_fabrics_by_guid, machine_ids_by_guid): (
                 HashMap<String, Option<String>>,
-                HashMap<String, Option<MachineId>>,
+                HashMap<String, Option<HostMachineId>>,
             )| {
                 let mut reports = vec![MachineIbStatusEvaluation {
                     missing_guid_pkeys: unchanged_missing.clone(),
@@ -1993,10 +2000,14 @@ mod tests {
     /// either one from being selected.
     #[test]
     fn machine_guid_mapping_rejects_duplicate_owners() {
-        let first = MachineId::new(MachineIdSource::Tpm, [1; 32], MachineType::Host);
-        let second = MachineId::new(MachineIdSource::Tpm, [2; 32], MachineType::Host);
+        let first = MachineId::new(MachineIdSource::Tpm, [1; 32], MachineType::Host)
+            .try_into()
+            .unwrap();
+        let second = MachineId::new(MachineIdSource::Tpm, [2; 32], MachineType::Host)
+            .try_into()
+            .unwrap();
         value_scenarios!(
-            run = |machine_ids: Vec<MachineId>| {
+            run = |machine_ids: Vec<HostMachineId>| {
                 unique_machine_ids_by_ib_guid(
                     machine_ids
                         .into_iter()

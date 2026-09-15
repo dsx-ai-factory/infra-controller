@@ -346,6 +346,10 @@ type ExpectedMachineDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (*ExpectedMachine, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedMachine, int, error)
+	// GetDistinctLabelKeys returns the distinct label keys based on the filter and page inputs
+	GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error)
+	// GetDistinctLabelValues returns the distinct values for a label key based on the filter and page inputs
+	GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, expectedMachineID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedMachine, error)
 	// LockForUpdate locks rows in canonical ID order for the transaction
@@ -664,6 +668,89 @@ func (emsd ExpectedMachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 	}
 
 	return expectedMachines, expectedMachinePaginator.Total, nil
+}
+
+// GetDistinctLabelKeys returns paginated, distinct ExpectedMachine label keys.
+func (emsd ExpectedMachineSQLDAO) GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error) {
+	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.GetDistinctLabelKeys")
+	if expectedMachineDAOSpan != nil {
+		defer expectedMachineDAOSpan.End()
+	}
+
+	keys := []string{}
+	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
+		return keys, 0, nil
+	}
+
+	idb := db.GetIDB(tx, emsd.dbSession)
+	distinctQuery := idb.NewSelect().
+		TableExpr("expected_machine AS em").
+		ColumnExpr("DISTINCT label.key AS key").
+		Join("CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(em.labels) = 'object' THEN em.labels ELSE '{}'::jsonb END) AS label(key)")
+
+	distinctQuery, err := emsd.setQueryWithFilter(filter, distinctQuery, expectedMachineDAOSpan)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	query := idb.NewSelect().
+		TableExpr("(?) AS distinct_expected_machine_label_keys", distinctQuery).
+		Column("key")
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(LabelKeyOrderByDefault)
+	}
+	labelPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, LabelKeyOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = labelPaginator.Query.Limit(labelPaginator.Limit).Offset(labelPaginator.Offset).Scan(ctx, &keys)
+	if err != nil {
+		return nil, 0, err
+	}
+	return keys, labelPaginator.Total, nil
+}
+
+// GetDistinctLabelValues returns paginated, distinct ExpectedMachine label values for a label key.
+func (emsd ExpectedMachineSQLDAO) GetDistinctLabelValues(ctx context.Context, tx *db.Tx, labelKey string, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error) {
+	ctx, expectedMachineDAOSpan := emsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedMachineDAO.GetDistinctLabelValues")
+	if expectedMachineDAOSpan != nil {
+		defer expectedMachineDAOSpan.End()
+		emsd.tracerSpan.SetAttribute(expectedMachineDAOSpan, "label_key", labelKey)
+	}
+
+	values := []string{}
+	if filter.SiteIDs != nil && len(filter.SiteIDs) == 0 {
+		return values, 0, nil
+	}
+
+	idb := db.GetIDB(tx, emsd.dbSession)
+	distinctQuery := idb.NewSelect().
+		TableExpr("expected_machine AS em").
+		ColumnExpr("DISTINCT jsonb_extract_path_text(em.labels, ?) AS value", labelKey).
+		Where("jsonb_extract_path_text(em.labels, ?) IS NOT NULL", labelKey)
+
+	distinctQuery, err := emsd.setQueryWithFilter(filter, distinctQuery, expectedMachineDAOSpan)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	query := idb.NewSelect().
+		TableExpr("(?) AS distinct_expected_machine_label_values", distinctQuery).
+		Column("value")
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(LabelValueOrderByDefault)
+	}
+	labelPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, LabelValueOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = labelPaginator.Query.Limit(labelPaginator.Limit).Offset(labelPaginator.Offset).Scan(ctx, &values)
+	if err != nil {
+		return nil, 0, err
+	}
+	return values, labelPaginator.Total, nil
 }
 
 // Update updates specified fields of an existing ExpectedMachine

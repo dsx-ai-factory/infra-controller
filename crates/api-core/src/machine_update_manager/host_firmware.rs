@@ -23,7 +23,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use carbide_firmware::FirmwareConfig;
-use carbide_uuid::machine::{HostMachineId, MachineId};
+use carbide_uuid::machine::HostMachineId;
 use db::{self, desired_firmware, host_firmware_config};
 use model::machine::ManagedHostStateSnapshot;
 use model::machine_update_module::HOST_FW_UPDATE_HEALTH_REPORT_SOURCE;
@@ -54,7 +54,7 @@ impl MachineUpdateModule for HostFirmwareUpdate {
     async fn get_updates_in_progress(
         &self,
         txn: &mut PgConnection,
-    ) -> CarbideResult<HashSet<MachineId>> {
+    ) -> CarbideResult<HashSet<HostMachineId>> {
         let current_updating_machines = db::machine::get_host_reprovisioning_machines(txn).await?;
 
         Ok(current_updating_machines.iter().map(|m| m.id).collect())
@@ -64,9 +64,9 @@ impl MachineUpdateModule for HostFirmwareUpdate {
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
         available_updates: i32,
-        updating_host_machines: &HashSet<MachineId>,
+        updating_host_machines: &HashSet<HostMachineId>,
         _snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
-    ) -> CarbideResult<HashSet<MachineId>> {
+    ) -> CarbideResult<HashSet<HostMachineId>> {
         let mut txn = db::Transaction::begin(pool).await?;
         if let Ok(mut firmware_catalog_last_read) = self.firmware_catalog_last_read.try_lock() {
             let catalog_marker = self.firmware_catalog_marker(&mut txn).await?;
@@ -223,7 +223,7 @@ impl HostFirmwareUpdate {
         &self,
         txn: &mut PgConnection,
         mut available_updates: i32,
-    ) -> CarbideResult<Vec<MachineId>> {
+    ) -> CarbideResult<Vec<HostMachineId>> {
         let mut machines = vec![];
         if available_updates == 0 {
             return Ok(machines);

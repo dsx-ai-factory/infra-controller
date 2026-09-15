@@ -17,7 +17,7 @@
 
 use clap::Parser;
 
-use crate::component_manager::common::{ComputeTraySelection, DeviceTargetArgs};
+use crate::component_manager::common::{ComputeTraySelection, DeviceTargetArgs, SwitchSelection};
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
@@ -26,6 +26,10 @@ EXAMPLES:
 Get firmware update status for switches:
     $ nico-admin-cli component-manager get-firmware-update-status switch \
     --switch-id 12345678-1234-5678-90ab-cdef01234567
+
+Get status for a switch by BMC MAC (targets the switch before ingestion):
+    $ nico-admin-cli component-manager get-firmware-update-status switch \
+    --mac-address 00:11:22:33:44:55
 
 Get status for several compute trays at once:
     $ nico-admin-cli component-manager get-firmware-update-status compute-tray \
@@ -49,11 +53,16 @@ impl From<Args> for rpc::forge::GetComponentFirmwareStatusRequest {
     fn from(args: Args) -> Self {
         match args.target {
             DeviceTargetArgs::Switch(target) => Self {
-                target: Some(
-                    rpc::forge::get_component_firmware_status_request::Target::SwitchIds(
-                        target.into(),
-                    ),
-                ),
+                target: Some(match target.into_selection() {
+                    SwitchSelection::SwitchIds(list) => {
+                        rpc::forge::get_component_firmware_status_request::Target::SwitchIds(list)
+                    }
+                    SwitchSelection::Macs(macs) => {
+                        rpc::forge::get_component_firmware_status_request::Target::SwitchBmcMacs(
+                            macs,
+                        )
+                    }
+                }),
             },
             DeviceTargetArgs::PowerShelf(target) => Self {
                 target: Some(

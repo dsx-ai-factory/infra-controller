@@ -1393,7 +1393,7 @@ func IsProvider(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Sessi
 	infrastructureProvider, err := GetInfrastructureProviderForOrg(ctx, nil, dbSession, org)
 	if err != nil {
 		if errors.Is(err, ErrOrgInstrastructureProviderNotFound) {
-			return nil, cutil.NewAPIError(http.StatusNotFound, "Could not find Infrastructure Provider for org", nil)
+			return nil, cutil.NewAPIError(http.StatusBadRequest, "Current org does not have Infrastructure Provider initialized", nil)
 		}
 		logger.Error().Err(err).Msg("error getting infrastructure provider for org")
 		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve infrastructure provider for org, DB error", nil)
@@ -1512,7 +1512,7 @@ func IsTenant(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session
 	tenant, err := GetTenantForOrg(ctx, nil, dbSession, org)
 	if err != nil {
 		if errors.Is(err, ErrOrgTenantNotFound) {
-			return nil, cutil.NewAPIError(http.StatusNotFound, "Could not find Tenant for org", nil)
+			return nil, cutil.NewAPIError(http.StatusBadRequest, "Current org does not have Tenant initialized", nil)
 		}
 		logger.Error().Err(err).Msg("error getting tenant for org")
 		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve tenant for org, DB error", nil)
@@ -2162,7 +2162,7 @@ func ExecutePowerControlWorkflow(
 		ctx, c, logger, stc,
 		fullMethod,
 		flowRequest, &flowResponse,
-		FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
 		return nil, proxyErr
@@ -2200,7 +2200,7 @@ func ExecuteBringUpRackWorkflow(
 		ctx, c, logger, stc,
 		flowv1.Flow_BringUpRack_FullMethodName,
 		flowRequest, &flowResponse,
-		FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		workflowID, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
 		return nil, proxyErr
@@ -2261,7 +2261,7 @@ func ExecuteFirmwareUpdateWorkflow(
 		ctx, c, logger, stc,
 		flowv1.Flow_UpgradeFirmware_FullMethodName,
 		flowRequest, &flowResponse,
-		FlowWorkflowID(workflowID), conflictPolicy,
+		workflowID, conflictPolicy,
 		siteID, "authenticationData",
 	)
 	if proxyErr != nil {
