@@ -3152,7 +3152,14 @@ func newSpectrumXInventoryFixture(t *testing.T) *spectrumXInventoryFixture {
 // attachment inserts a SpectrumXAttachment row for the fixture's Instance and Partition.
 func (f *spectrumXInventoryFixture) attachment(t *testing.T, deviceInstance int, status string) *cdbm.SpectrumXAttachment {
 	t.Helper()
-	return util.TestBuildSpectrumXAttachment(t, f.dbSession, f.instance.ID, f.site.ID, f.partition.ID, testSpectrumXDevice, deviceInstance, cdbm.SpectrumXAttachmentTypePhysical, status, false)
+	return f.typedAttachment(t, deviceInstance, cdbm.SpectrumXAttachmentTypePhysical, status)
+}
+
+// typedAttachment inserts a row with an explicit attachment type, which the cases covering
+// type-sensitive matching need.
+func (f *spectrumXInventoryFixture) typedAttachment(t *testing.T, deviceInstance int, attachmentType cdbm.SpectrumXAttachmentType, status string) *cdbm.SpectrumXAttachment {
+	t.Helper()
+	return util.TestBuildSpectrumXAttachment(t, f.dbSession, f.instance.ID, f.site.ID, f.partition.ID, testSpectrumXDevice, deviceInstance, attachmentType, status, false)
 }
 
 // age backdates `updated` past the stale inventory threshold, which is the gate the
@@ -3176,13 +3183,31 @@ func (f *spectrumXInventoryFixture) get(t *testing.T, attachmentID uuid.UUID) *c
 func (f *spectrumXInventoryFixture) reportInventory(t *testing.T, deviceInstances []uint32, statuses []*corev1.InstanceSpxAttachmentStatus, syncState corev1.SyncState) error {
 	t.Helper()
 
-	attachments := []*corev1.InstanceSpxAttachment{}
+	entries := []reportedAttachment{}
 	for _, di := range deviceInstances {
+		entries = append(entries, reportedAttachment{deviceInstance: di, attachmentType: corev1.SpxAttachmentType_Physical})
+	}
+	return f.reportAttachments(t, entries, statuses, syncState)
+}
+
+// reportedAttachment is one entry of a reported SpectrumX config.
+type reportedAttachment struct {
+	deviceInstance uint32
+	attachmentType corev1.SpxAttachmentType
+}
+
+// reportAttachments drives one UpdateInstancesInDB iteration with fully specified attachment
+// entries, so a case can report a type that differs from the persisted row.
+func (f *spectrumXInventoryFixture) reportAttachments(t *testing.T, entries []reportedAttachment, statuses []*corev1.InstanceSpxAttachmentStatus, syncState corev1.SyncState) error {
+	t.Helper()
+
+	attachments := []*corev1.InstanceSpxAttachment{}
+	for _, entry := range entries {
 		attachments = append(attachments, &corev1.InstanceSpxAttachment{
 			SpxPartitionId: &corev1.SpxPartitionId{Value: f.partition.ID.String()},
 			Device:         testSpectrumXDevice,
-			DeviceInstance: di,
-			AttachmentType: corev1.SpxAttachmentType_Physical,
+			DeviceInstance: entry.deviceInstance,
+			AttachmentType: entry.attachmentType,
 		})
 	}
 
@@ -3313,5 +3338,43 @@ func TestUpdateInstancesInDB_SpectrumXAttachmentReconciliation(t *testing.T) {
 		assert.Equal(t, 1, total)
 		require.Len(t, remaining, 1)
 		assert.Equal(t, keep.ID, remaining[0].ID)
+	})
+
+	// A synced report says some attachment synced, not that this one is gone, and the stale
+	// threshold only ages the row. While the Site still reports the retiring attachment its
+	// row has to stay, since dropping it also drops the Partition's last link to a live
+	// Instance that the REST deletion guard counts.
+	t.Run("keeps a retiring attachment the Site still reports", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		keep := fx.attachment(t, 0, cdbm.SpectrumXAttachmentStatusReady)
+		remove := fx.attachment(t, 1, cdbm.SpectrumXAttachmentStatusDeleting)
+		fx.age(t, remove.ID)
+
+		require.NoError(t, fx.reportInventory(t, []uint32{0, 1}, []*corev1.InstanceSpxAttachmentStatus{
+			{MacAddr: cutil.GetPtr("00:11:22:33:44:55")},
+			{MacAddr: cutil.GetPtr("00:11:22:33:44:66")},
+		}, corev1.SyncState_SYNCED))
+
+		assert.Equal(t, cdbm.SpectrumXAttachmentStatusReady, fx.get(t, keep.ID).Status)
+		assert.Equal(t, cdbm.SpectrumXAttachmentStatusDeleting, fx.get(t, remove.ID).Status,
+			"the row must survive while the Site still reports the attachment")
+	})
+
+	// Changing the attachment type retires the old row and creates a new one sharing the
+	// Partition, device and device instance, so a stale report for the retired Physical
+	// attachment must not be applied to its OVS replacement.
+	t.Run("does not apply a report of another attachment type", func(t *testing.T) {
+		fx := newSpectrumXInventoryFixture(t)
+		sxa := fx.typedAttachment(t, 0, cdbm.SpectrumXAttachmentTypeOVS, cdbm.SpectrumXAttachmentStatusPending)
+
+		require.NoError(t, fx.reportAttachments(t, []reportedAttachment{
+			{deviceInstance: 0, attachmentType: corev1.SpxAttachmentType_Physical},
+		}, []*corev1.InstanceSpxAttachmentStatus{
+			{MacAddr: cutil.GetPtr("00:11:22:33:44:55")},
+		}, corev1.SyncState_SYNCED))
+
+		persisted := fx.get(t, sxa.ID)
+		assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, persisted.Status)
+		assert.Nil(t, persisted.MacAddress, "a Physical report must not supply the OVS attachment's MAC")
 	})
 }

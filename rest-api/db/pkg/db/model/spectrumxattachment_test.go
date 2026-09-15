@@ -125,6 +125,61 @@ func testBuildSpectrumXFixture(t *testing.T, dbSession *db.Session) spectrumXFix
 
 // TestSpectrumXPartitionSQLDAO_Lifecycle proves the Partition row survives the create,
 // inventory-update, clear and delete path the reconciler and handlers drive it through.
+// TestSpectrumXAttachment_Key proves a row and the same Attachment as Core reports it
+// produce one key, which is what lets inventory match them, and that the attachment type is
+// part of the identity so a retired row and its replacement do not collide.
+func TestSpectrumXAttachment_Key(t *testing.T) {
+	partitionID := uuid.New()
+	const device = "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC"
+
+	build := func(deviceInstance int, attachmentType SpectrumXAttachmentType) *SpectrumXAttachment {
+		return &SpectrumXAttachment{
+			SpectrumXPartitionID: partitionID,
+			Device:               device,
+			DeviceInstance:       deviceInstance,
+			AttachmentType:       attachmentType,
+		}
+	}
+
+	// A row's own proto is what the Site is sent, so reading it back has to land on the same
+	// key. OVS matters most, since it is the one type whose Core name differs.
+	for _, attachmentType := range []SpectrumXAttachmentType{
+		SpectrumXAttachmentTypePhysical,
+		SpectrumXAttachmentTypeVirtual,
+		SpectrumXAttachmentTypeOVS,
+	} {
+		row := build(0, attachmentType)
+
+		reported := &SpectrumXAttachment{}
+		reported.FromProto(row.ToProto())
+
+		assert.Equal(t, row.Key(), reported.Key(), "round-tripping %s must preserve the key", attachmentType)
+	}
+
+	assert.NotEqual(t, build(0, SpectrumXAttachmentTypePhysical).Key(), build(0, SpectrumXAttachmentTypeOVS).Key(),
+		"a type change retires one row and creates another on the same device, so the keys must differ")
+	assert.NotEqual(t, build(0, SpectrumXAttachmentTypePhysical).Key(), build(1, SpectrumXAttachmentTypePhysical).Key())
+
+	// An unrecognized reported type must not fall back to Physical, or a stale report would
+	// be applied to a Physical row.
+	unrecognized := &SpectrumXAttachment{}
+	unrecognized.FromProto(&corev1.InstanceSpxAttachment{
+		SpxPartitionId: &corev1.SpxPartitionId{Value: partitionID.String()},
+		Device:         device,
+		AttachmentType: corev1.SpxAttachmentType(9999),
+	})
+	assert.NotEqual(t, build(0, SpectrumXAttachmentTypePhysical).Key(), unrecognized.Key())
+
+	// An unparseable Partition ID has to match nothing rather than the zero-UUID row.
+	malformed := &SpectrumXAttachment{}
+	malformed.FromProto(&corev1.InstanceSpxAttachment{
+		SpxPartitionId: &corev1.SpxPartitionId{Value: "not-a-uuid"},
+		Device:         device,
+		AttachmentType: corev1.SpxAttachmentType_Physical,
+	})
+	assert.NotEqual(t, build(0, SpectrumXAttachmentTypePhysical).Key(), malformed.Key())
+}
+
 func TestSpectrumXPartitionSQLDAO_Lifecycle(t *testing.T) {
 	ctx := context.Background()
 

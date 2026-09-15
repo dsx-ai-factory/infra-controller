@@ -752,15 +752,14 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 				continue
 			}
 
-			// Key on the Partition ID, device and device instance, which is what Core
-			// reports in the attachment config. An attachment whose Partition the Site has
-			// not created yet simply matches nothing and stays Pending.
-			sxaKey := fmt.Sprintf("%s-%s-%d", sxa.SpectrumXPartitionID.String(), sxa.Device, sxa.DeviceInstance)
-			spectrumXAttachmentMap[sxaKey] = &curSxA
+			// An attachment whose Partition the Site has not created yet simply matches
+			// nothing and stays Pending.
+			spectrumXAttachmentMap[curSxA.Key()] = &curSxA
 		}
 
 		isSpectrumXConfigStatusEmpty := true
 		isSpectrumXConfigSynced := false
+		reportedSxaKeys := map[string]bool{}
 		if controllerInstance.Config.Spxconfig != nil && controllerInstance.Status.SpxStatus != nil {
 			for idx, attachmentConfig := range controllerInstance.Config.Spxconfig.SpxAttachments {
 
@@ -772,7 +771,16 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					continue
 				}
 
-				sxaKey := fmt.Sprintf("%s-%s-%d", attachmentConfig.GetSpxPartitionId().GetValue(), attachmentConfig.Device, attachmentConfig.DeviceInstance)
+				// Normalized onto the fields a persisted row carries, so the reported
+				// attachment and its row produce the same key.
+				reportedSxA := &cdbm.SpectrumXAttachment{}
+				reportedSxA.FromProto(attachmentConfig)
+				sxaKey := reportedSxA.Key()
+
+				// Every reported attachment is recorded, matched or not, so the retirement
+				// sweep below can tell whether the Site has actually dropped one.
+				reportedSxaKeys[sxaKey] = true
+
 				sxa, ok := spectrumXAttachmentMap[sxaKey]
 				if !ok {
 					continue
@@ -847,6 +855,16 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 					// If the SpectrumX Attachment was modified within stale inventory threshold, defer to next inventory update
 					continue
 				}
+
+				// A synced config and an aged row do not show that this attachment is gone,
+				// only that some attachment synced and that the row has not changed
+				// recently. Deleting a row the Site still reports would also drop the last
+				// link its Partition has to a live Instance, which is what the REST
+				// deletion guard counts.
+				if reportedSxaKeys[sxa.Key()] {
+					continue
+				}
+
 				// Continue with deletion
 				spectrumXAttachmentsToDelete = append(spectrumXAttachmentsToDelete, sxa)
 			}

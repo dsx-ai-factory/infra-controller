@@ -3999,8 +3999,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				if existingSxAs[i].Status == cdbm.SpectrumXAttachmentStatusDeleting {
 					continue
 				}
-				key := fmt.Sprintf("%s:%s:%d:%s", existingSxAs[i].SpectrumXPartitionID.String(), existingSxAs[i].Device, existingSxAs[i].DeviceInstance, existingSxAs[i].AttachmentType)
-				existingSxAByKey[key] = existingSxAs[i]
+				existingSxAByKey[existingSxAs[i].Key()] = existingSxAs[i]
 			}
 
 			retainedSxAIDs := map[uuid.UUID]bool{}
@@ -4012,10 +4011,17 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to parse SpectrumX Partition ID specified in request: %s", apiSxA.SpectrumXPartitionID), nil)
 				}
 
-				// The attachment type is part of the key, so changing it retires the old row
-				// and creates a new one rather than silently keeping the previous type.
-				key := fmt.Sprintf("%s:%s:%d:%s", partitionID.String(), apiSxA.Device, *apiSxA.DeviceInstance, apiSxA.AttachmentType)
-				existing, reusable := existingSxAByKey[key]
+				// Keyed through the persisted shape so a requested Attachment and the row it
+				// would reuse cannot disagree. The attachment type is part of that identity,
+				// so changing it retires the old row rather than silently keeping the type.
+				requestedSxA := cdbm.SpectrumXAttachment{
+					SpectrumXPartitionID: partitionID,
+					Device:               apiSxA.Device,
+					DeviceInstance:       *apiSxA.DeviceInstance,
+					AttachmentType:       apiSxA.AttachmentType,
+				}
+
+				existing, reusable := existingSxAByKey[requestedSxA.Key()]
 				if reusable {
 					retainedSxAIDs[existing.ID] = true
 					newOrExistingSxAs = append(newOrExistingSxAs, existing)

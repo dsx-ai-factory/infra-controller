@@ -14,6 +14,7 @@ import (
 	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 
 	"github.com/uptrace/bun"
 )
@@ -41,6 +42,23 @@ const (
 // OVS maps onto Core's `Ovn`, which is the same attachment under its older name. Core renames
 // that enum value to `Ovs` in a separate proto sync, and this mapping follows once that lands.
 // The name matters on the wire because attachments reach the Site as protojson.
+// FromProto maps the attachment type Core reports onto the persisted value, the inverse of
+// ToProto. An unrecognized value leaves the type empty rather than guessing at one, since
+// guessing would let a report match a row of a different type.
+func (t *SpectrumXAttachmentType) FromProto(attachmentType corev1.SpxAttachmentType) {
+	switch attachmentType {
+	case corev1.SpxAttachmentType_Physical:
+		*t = SpectrumXAttachmentTypePhysical
+	case corev1.SpxAttachmentType_Virtual:
+		*t = SpectrumXAttachmentTypeVirtual
+	case corev1.SpxAttachmentType_Ovn:
+		*t = SpectrumXAttachmentTypeOVS
+	default:
+		log.Warn().Str("SpxAttachmentType", attachmentType.String()).Msg("unsupported SpectrumXAttachmentType reported")
+		*t = ""
+	}
+}
+
 func (t SpectrumXAttachmentType) ToProto() corev1.SpxAttachmentType {
 	switch t {
 	case SpectrumXAttachmentTypePhysical:
@@ -124,6 +142,35 @@ type SpectrumXAttachment struct {
 // ToProto converts this SpectrumXAttachment into the attachment entry Core expects inside
 // an Instance's SpectrumX config. Used as the canonical entity-to-proto conversion, so the
 // config sent to a Site always describes the rows that are actually persisted.
+// Key returns the canonical `Partition-Device-DeviceInstance-AttachmentType` string used as
+// a map key when matching a persisted Attachment against one Core reports, which `FromProto`
+// normalizes onto these same fields first. The attachment type is part of the identity
+// because changing it retires the old row and creates a new one that shares the other three,
+// so a stale report for the retired Attachment would otherwise match its replacement.
+func (sxa *SpectrumXAttachment) Key() string {
+	return fmt.Sprintf("%s-%s-%d-%s", sxa.SpectrumXPartitionID, sxa.Device, sxa.DeviceInstance, sxa.AttachmentType)
+}
+
+// FromProto populates the Attachment from one Core reports in the Instance config, the
+// inverse of ToProto. An unparseable Partition ID or an unrecognized attachment type leaves
+// that field at its zero value, which keeps the resulting Key from matching a persisted row
+// rather than matching the wrong one.
+func (sxa *SpectrumXAttachment) FromProto(attachment *corev1.InstanceSpxAttachment) {
+	partitionID, err := uuid.Parse(attachment.GetSpxPartitionId().GetValue())
+	if err == nil {
+		sxa.SpectrumXPartitionID = partitionID
+	}
+
+	sxa.Device = attachment.GetDevice()
+	sxa.DeviceInstance = int(attachment.GetDeviceInstance())
+	sxa.AttachmentType.FromProto(attachment.GetAttachmentType())
+
+	if attachment.VirtualFunctionId != nil {
+		virtualFunctionID := int(attachment.GetVirtualFunctionId())
+		sxa.VirtualFunctionID = &virtualFunctionID
+	}
+}
+
 func (sxa *SpectrumXAttachment) ToProto() *corev1.InstanceSpxAttachment {
 	attachment := &corev1.InstanceSpxAttachment{
 		Device:         sxa.Device,

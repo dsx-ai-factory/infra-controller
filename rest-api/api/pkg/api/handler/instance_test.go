@@ -4884,6 +4884,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		expectedSitePowerProfile              *string
 		expectedSiteSpectrumXAttachmentCount  *int
 		expectedRespSpectrumXAttachmentCount  *int
+		expectedSiteSpectrumXAttachmentType   *corev1.SpxAttachmentType
 		// When true, only assert len(siteReq.Config.Nvlink.GpuConfigs) matches the request (e.g. NVLink no-op where workflow uses DB order).
 		nvLinkGpuConfigsVerifyCountOnly bool
 		// When non-nil, expected len(siteReq.Config.Nvlink.GpuConfigs) for verifySiteControllerRequest (default: len(reqData.NVLinkInterfaces)).
@@ -4960,6 +4961,39 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			verifySiteControllerRequest: true,
 		},
 		{
+			// Only the attachment type differs from the case above. The type is part of the
+			// reuse identity, so the Physical row has to retire and an OVS row take its
+			// place, rather than the Physical row being reused under the new type.
+			name: "test Instance update replaces a SpectrumX Attachment when only its type changes",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					IpxeScript: os2.IpxeScript,
+					SpectrumXAttachments: []model.APISpectrumXAttachmentCreateOrUpdateRequest{
+						{
+							SpectrumXPartitionID: sxp1.ID.String(),
+							Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+							DeviceInstance:       cutil.GetPtr(0),
+							AttachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+						},
+					},
+				},
+				reqInstance:                          inst1.ID.String(),
+				cleanInstanceToStatus:                inst1.Status,
+				reqOrg:                               tnOrg1,
+				reqUser:                              tnu1,
+				respCode:                             http.StatusOK,
+				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(1),
+				expectedSiteSpectrumXAttachmentType:  cutil.GetPtr(corev1.SpxAttachmentType_Ovn),
+			},
+			verifySiteControllerRequest: true,
+		},
+		{
 			name: "test Instance update carries existing SpectrumX Attachments when the request omits them",
 			fields: fields{
 				dbSession: dbSession,
@@ -5003,7 +5037,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqUser:                              tnu1,
 				respCode:                             http.StatusOK,
 				expectedSiteSpectrumXAttachmentCount: cutil.GetPtr(0),
-				expectedRespSpectrumXAttachmentCount: cutil.GetPtr(1),
+				expectedRespSpectrumXAttachmentCount: cutil.GetPtr(2),
 			},
 			verifySiteControllerRequest: true,
 		},
@@ -7964,6 +7998,12 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 							"an update that omits spectrumXAttachments must still carry the persisted set")
 					}
 
+					if tt.args.expectedSiteSpectrumXAttachmentType != nil {
+						require.Len(t, siteReq.Config.Spxconfig.SpxAttachments, 1)
+						assert.Equal(t, *tt.args.expectedSiteSpectrumXAttachmentType, siteReq.Config.Spxconfig.SpxAttachments[0].AttachmentType,
+							"the Site must be sent the requested attachment type, not the retired row's")
+					}
+
 					// Verify the SpectrumX Attachments are in the Site Controller request
 					if len(tt.args.reqData.SpectrumXAttachments) > 0 {
 						require.NotNil(t, siteReq.Config.Spxconfig)
@@ -7976,13 +8016,23 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						}
 
 						// The Site request is built from persisted rows, so the response has to
-						// carry the same attachments back.
-						require.Len(t, rst.SpectrumXAttachments, len(tt.args.reqData.SpectrumXAttachments))
-						for i, apiSxA := range rst.SpectrumXAttachments {
-							assert.Equal(t, tt.args.reqData.SpectrumXAttachments[i].SpectrumXPartitionID, apiSxA.SpectrumXPartitionID)
-							assert.Equal(t, tt.args.reqData.SpectrumXAttachments[i].Device, apiSxA.Device)
-							assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, apiSxA.Status)
-							assert.Equal(t, rst.ID, apiSxA.InstanceID)
+						// carry every requested attachment back as a new Pending row. A row a
+						// request retires also stays in the response, so this checks membership
+						// rather than an exact list; cases that pin the total use
+						// expectedRespSpectrumXAttachmentCount.
+						for _, reqSxA := range tt.args.reqData.SpectrumXAttachments {
+							matched := 0
+							for _, apiSxA := range rst.SpectrumXAttachments {
+								if apiSxA.SpectrumXPartitionID != reqSxA.SpectrumXPartitionID ||
+									apiSxA.Device != reqSxA.Device ||
+									apiSxA.AttachmentType != reqSxA.AttachmentType {
+									continue
+								}
+								matched++
+								assert.Equal(t, cdbm.SpectrumXAttachmentStatusPending, apiSxA.Status)
+								assert.Equal(t, rst.ID, apiSxA.InstanceID)
+							}
+							assert.Equal(t, 1, matched, "the response must carry the requested SpectrumX Attachment back exactly once")
 						}
 					}
 
