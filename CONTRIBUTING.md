@@ -16,6 +16,7 @@ We welcome contributions of all sizes — from fixing a typo in the docs to addi
 - [Contribution Process](#contribution-process)
 - [Engineering Guidelines](#engineering-guidelines)
 - [Pull Request Guidelines](#pull-request-guidelines)
+- [Pull Request Lifecycle and Stale PR Policy](#pull-request-lifecycle-and-stale-pr-policy)
 
 ## Developer Certificate of Origin (DCO)
 
@@ -270,8 +271,83 @@ for the requested behavior.
 - Provide a clear description of the problem and solution.
 - Reference any related issues.
 - Keep pull requests focused on a single change.
+- Open the PR as a **draft** if it is not yet ready for review. Drafts are
+  exempt from the stale PR policy described below.
 - Be responsive to feedback and code review comments.
 - Ensure all CI checks pass before requesting review.
+
+## Pull Request Lifecycle and Stale PR Policy
+
+To keep the review queue healthy and make sure good work does not get lost,
+open pull requests are actively managed with automation. This section explains
+what to expect as an author or reviewer.
+
+### Review expectations
+
+- **Reviewers** aim to give a first response within a few business days. As
+  noted in the project status above, review timelines may vary while the
+  project is experimental — if you are waiting on a maintainer, that is on us,
+  not you. A polite ping in the PR after a week of silence is always welcome.
+- **Authors** are expected to respond to review feedback within about a week.
+  If you are blocked or busy, a one-line comment ("back on this next week")
+  resets the clock and keeps reviewers aligned.
+- If a PR is waiting on an external dependency, a design decision, or another
+  team, say so explicitly in the PR and apply the appropriate exemption label
+  below.
+
+### How the stale policy works
+
+Open pull requests are managed by automation with the following rules:
+
+1. **After 30 days of inactivity**, the PR is labeled `stale` and receives a
+   comment explaining what happens next.
+2. **After 7 more days of inactivity** (37 days total), the PR is
+   automatically closed.
+3. **Any activity resets the clock.** A comment, commit, rebase, or review
+   all count as activity and remove the `stale` label.
+
+The policy applies to author inactivity. If a PR is stalled because it is
+waiting on maintainer review, comment to that effect — that activity both
+resets the timer and surfaces the PR back to the review queue.
+
+### Being closed for staleness is not a rejection
+
+If your PR is closed for inactivity, the work is still welcome. To continue:
+
+1. Sync your fork and rebase your branch on the latest `main`. If you rewrite
+   commits, remember that every commit must carry both the DCO sign-off and a
+   cryptographic signature — see
+   [Signing Off Multiple Commits](#signing-off-multiple-commits).
+2. Reopen the PR (or open a fresh one referencing the old PR number).
+3. Comment so a reviewer knows it is active again.
+
+Closing a PR does not delete your branch — because contributions come from
+forks, your work remains on your fork and nothing is lost.
+
+### Exemptions
+
+Some PRs are intentionally long-lived. Add one of these labels to exempt a PR
+from stale automation:
+
+| Label | Use for |
+| --- | --- |
+| `keep-open` | Long-running work that is still active |
+| `blocked-external` | Waiting on an upstream fix, dependency, or third party |
+| `needs-design` | Waiting on a design decision or roadmap alignment |
+| `security` | Sensitive changes handled on a separate track |
+| `tracking-issue` | Associated with a tracking issue spanning multiple PRs |
+
+Draft PRs are also exempt. If a PR carries an exemption label, its description
+or a recent comment should explain why and who is responsible for moving it
+forward.
+
+### Keeping your PR mergeable
+
+- Rebase or merge `upstream/main` regularly, especially if your PR touches
+  high-churn areas. The longer a PR sits, the more expensive conflict
+  resolution becomes.
+- Keep CI green. A PR with failing checks is unlikely to get review attention
+  and will still age under the stale policy.
 
 ## Build Guide
 
