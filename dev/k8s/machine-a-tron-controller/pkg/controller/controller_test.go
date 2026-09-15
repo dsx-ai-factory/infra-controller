@@ -64,6 +64,7 @@ func TestServiceBuilder_BuildService(t *testing.T) {
 		BaseSelector: map[string]string{
 			"app": "machine-a-tron",
 		},
+		EnableStateAnnotations: true,
 	}
 
 	machine := &matclient.MachineStatus{
@@ -109,6 +110,42 @@ func TestServiceBuilder_BuildService(t *testing.T) {
 
 	// Check selector
 	assert.Equal(t, builder.BaseSelector, svc.Spec.Selector)
+}
+
+func TestServiceBuilder_BuildService_StateAnnotationsDisabled(t *testing.T) {
+	builder := &ServiceBuilder{
+		Namespace: "test-ns",
+		BaseSelector: map[string]string{
+			"app": "machine-a-tron",
+		},
+		EnableStateAnnotations: false, // explicitly disabled
+	}
+
+	machine := &matclient.MachineStatus{
+		MatID:        "host-uuid-12345678",
+		MachineID:    ptr("nico-machine-id"),
+		HardwareType: ptr("GB200"),
+		APIState:     "Ready",
+		PowerState:   "On",
+		BMC: matclient.BMCStatus{
+			IP: ptr("192.168.1.100"),
+			Redfish: matclient.EndpointStatus{
+				ReachablePort: 443,
+				ListenPort:    8443,
+			},
+		},
+	}
+
+	svc := builder.BuildService(machine, MachineTypeHost, "", "")
+
+	// State annotations should be absent
+	assert.Empty(t, svc.Annotations[AnnotationAPIState])
+	assert.Empty(t, svc.Annotations[AnnotationPowerState])
+
+	// Static annotations should still be present
+	assert.Equal(t, "192.168.1.100", svc.Annotations[AnnotationBMCIP])
+	assert.Equal(t, "GB200", svc.Annotations[AnnotationHardwareType])
+	assert.Equal(t, "8443", svc.Annotations[AnnotationRedfishListenPort])
 }
 
 func TestServiceBuilder_BuildService_WithIPMI(t *testing.T) {

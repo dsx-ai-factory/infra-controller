@@ -57,6 +57,11 @@ config:
   ## Log level (debug, info, warn, error)
   logLevel: "info"
 
+  ## Include machine state annotations (api-state, power-state) on Services.
+  ## These annotations change frequently and cause K8s API update churn.
+  ## Disable (default) to reduce cluster load in large-scale deployments.
+  enableStateAnnotations: false
+
 serviceAccount:
   create: true
   name: ""

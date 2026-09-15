@@ -39,6 +39,7 @@ kind load docker-image mat-k8s-controller:latest --name <cluster>
 | `--source-list-debounce` | `SOURCE_LIST_DEBOUNCE` | `5s` | Minimum age of a changed source set before a later discovery pass publishes it with a new `generation` (`0` publishes at once) |
 | `--health-addr` | `HEALTH_ADDR` | `:8091` | Listen address for the liveness endpoint `GET /healthz` on the pod network (empty disables it) |
 | `--health-stale-after` | `HEALTH_STALE_AFTER` | `10m` | How long the reconcile loop may go without completing a pass before `/healthz` reports a stall (`0` disables the check) |
+| `--enable-state-annotations` | `ENABLE_STATE_ANNOTATIONS` | `false` | Include machine state annotations (`mat-api-state`, `mat-power-state`) on Services; causes frequent updates in large deployments |
 
 An environment variable that is set is the flag's default, an empty value
 included: `SOURCE_LIST_ADDR=""` disables the source list endpoint just like
@@ -175,8 +176,8 @@ Created Services have:
 **Annotations:**
 
 - `nvidia-infra-controller/mat-bmc-ip`
-- `nvidia-infra-controller/mat-api-state`
-- `nvidia-infra-controller/mat-power-state`
+- `nvidia-infra-controller/mat-api-state` (when `--enable-state-annotations=true`)
+- `nvidia-infra-controller/mat-power-state` (when `--enable-state-annotations=true`)
 - `nvidia-infra-controller/mat-hardware-type`
 - `nvidia-infra-controller/mat-ipmi-listen-port` (when `bmc.ipmi` reported in status)
 - `nvidia-infra-controller/mat-ssh-listen-port` (when `bmc.ssh` reported in status)
