@@ -120,6 +120,7 @@ impl LiteOnPowerShelf<'_> {
                                 &idx.to_string(),
                             ))
                             .oem_liteon_power_state(true)
+                            .oem_liteon_capacity_watts("5500")
                             // libredfish requires status to be
                             // here...
                             .status(redfish::resource::Status::Ok)

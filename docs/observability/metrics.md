@@ -115,6 +115,86 @@ The telemetry endpoint is high-cardinality due to per-sensor labels. Enable it o
 your metrics backend can handle the volume and you need sensor-level visibility.
 </Tip>
 
+For power-shelf endpoints, the telemetry endpoint also publishes controller and chassis
+power evidence. Status series are informational gauges with a fixed value of `1`; the
+state lives in the labels. The state and health label values listed below are Redfish
+enums rendered in snake case, so they stay bounded. Identity labels such as `manager_id`
+and `firmware_version` are strings, one value per controller.
+
+Series names are exported as `carbide_hardware_health_hw_<series>_<unit>`, for example
+`carbide_hardware_health_hw_manager_status_state`. Every series also carries the
+endpoint labels shared by all telemetry: `endpoint_key` always, plus `serial_number`,
+`rack_id`, and `power_shelf_id` when each is known for the endpoint.
+
+| Series | Unit | Labels | Source |
+|---|---|---|---|
+| `powersupply_capacity` | watts | | `PowerSupply.PowerCapacityWatts`, else the LiteOn OEM `CapacityWatts` string |
+| `powersupply_status` | state | `powersupply_state`, `powersupply_health` | `PowerSupply.Status` |
+| `chassis_max_power` | watts | | `Chassis.MaxPowerWatts` |
+| `chassis_status` | state | `chassis_state`, `chassis_health`, `chassis_power_state` | `Chassis.Status`, `Chassis.PowerState` |
+| `power_subsystem_status` | state | `power_subsystem_state`, `power_subsystem_health` | `Chassis.PowerSubsystem.Status` |
+| `manager_status` | state | `manager_id`, `manager_state`, `manager_health`, `manager_power_state`, `firmware_version` | `Manager.Status`, `Manager.PowerState`, `Manager.FirmwareVersion` |
+| `manager_last_reset` | seconds | `manager_id` | `Manager.LastResetTime`, as seconds since the Unix epoch |
+
+Absent Redfish fields are omitted rather than defaulted: a status gauge is emitted when
+any of its source fields is present, and each label appears only when its own field does.
+`powersupply_capacity` and `powersupply_status` are emitted for every endpoint that exposes
+power supplies; the chassis and manager series are emitted for power-shelf endpoints only.
+The manager series come from the `[collectors.manager]` section, which is enabled by
+default with a five-minute `poll_interval`.
+LiteOn PF-1333-7R firmware r1.3.8 omits `PowerCapacityWatts` and reports the capacity as the
+string `CapacityWatts` in its OEM schema; the collector uses that string only when the
+standard field is absent, and omits the series when the string is not a finite positive
+number. A vendor value
+outside the Redfish enum is rendered as `unsupported_value`; for example, LiteOn
+PF-1333-7R firmware r1.3.8 reports `Status.State` as `Standby`, which is not a Redfish
+`State` member.
+
+Sensor series carry the `upper_critical_threshold` and `lower_critical_threshold` labels
+only when the BMC reports that threshold. An absent threshold is omitted rather than
+written as `0`.
+
+The chassis `PowerSubsystem` on LiteOn PF-1333-7R firmware r1.3.8 exposes `Status` only
+and no `PowerSupplyRedundancy` group, so no redundancy series is published. Consumers
+derive redundancy from `power_subsystem_health` and the per-supply series.
+
+Power-shelf health reports exported over OTLP carry per-alert detail only when the target
+sets `include_alert_details = true` on its `[[sinks.otlp.targets]]` entry. A shelf reports
+far fewer than the 64-alert serialization bound, so `health_report.alerts.dropped` is not
+expected. See the
+[OTLP health-report log contract](../architecture/health_aggregation.md#otlp-health-report-log-contract).
+
+Log records whose Redfish `MessageId` is null or empty carry up to two extra attributes
+derived from the OpenBMC `Family` or `Family ( component ... )` message shape:
+`message_family` (for example `PowerDevicePresence`) and, when the parenthesised form is
+present, `redfish.component` (for example `powerdevice1`). Free-text messages yield
+neither. Records with a `MessageId` keep it unchanged and do not carry these attributes.
+The periodic log collector and the SSE collector derive the attributes the same way.
+
+LiteOn PF-1333-7R firmware r1.3.8 leaves `MessageId` null on every event log entry. The
+message families below were observed across four shelves, 400 retained entries each, on
+2026-09-14, with the listed Redfish `Severity`. The trailing token of the parenthesised
+detail is the IPMI event direction: `Assert` means the family's condition began and
+`Deassert` means it ended. The firmware names most transitions as separate asserted
+families, so `Deassert` appeared only on `PowerDeviceAbsence`, where it records a power
+device becoming present again. `Severity` follows the family, not the direction. The
+collector forwards every entry unchanged; the direction stays in the message text.
+
+| `message_family` | Observed form | Observed `Severity` |
+|---|---|---|
+| `BmcFirmwareUpdateCompleted` | Assert | OK |
+| `BmcFirmwareUpdateFailure` | Assert | Critical |
+| `BmcSystemBootComplete` | Assert | OK |
+| `BmcUnsupportedChassis` | Assert | Warning |
+| `PowerDeviceAbsence` | Deassert | OK |
+| `PowerDeviceFirmwareUpdate` | Assert | OK |
+| `PowerDeviceInputUnderVoltageFault` | Assert | Critical |
+| `PowerDeviceInsufficientInputVoltageOff` | Assert | OK |
+| `PowerDeviceOff` | Assert | OK |
+| `PowerDeviceOn` | Assert | OK |
+| `PowerDevicePowerNotGood` | Assert | OK |
+| `PowerDevicePresence` | Assert | OK |
+
 ### Network services
 
 Supporting services expose their own metrics. nico-dhcp tracks lease operations and

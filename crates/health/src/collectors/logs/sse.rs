@@ -31,7 +31,7 @@ use super::diagnostic::{
 };
 use super::redfish::{
     RedfishLogFields, RedfishSeverity, add_redfish_analyzer_attributes, event_diagnostic_is_cper,
-    nvidia_error_id, redfish_event_type_string, redfish_log_type,
+    nvidia_error_id, push_message_identity, redfish_event_type_string, redfish_log_type,
 };
 use crate::HealthError;
 use crate::collectors::inventory::{
@@ -383,13 +383,15 @@ fn record_to_log(
         .as_ref()
         .map(|log_entry_ref| log_entry_ref.odata_id().to_string());
 
-    let mut attributes = vec![
-        (Cow::Borrowed("message_id"), record.message_id.clone()),
-        (
-            Cow::Borrowed("event_record_id"),
-            record.base.odata_id().to_string(),
-        ),
-    ];
+    let mut attributes = vec![(
+        Cow::Borrowed("event_record_id"),
+        record.base.odata_id().to_string(),
+    )];
+    push_message_identity(
+        &mut attributes,
+        Some(&record.message_id),
+        record.message.as_deref(),
+    );
 
     if let Some(event_type) = redfish_event_type_string(Some(&record.event_type)) {
         attributes.push((Cow::Borrowed("event_type"), event_type));
@@ -952,6 +954,34 @@ mod tests {
         serde_json::from_value(value).expect("valid event record")
     }
 
+    /// A LiteOn-shaped event with an empty `MessageId` carries the same derived
+    /// identity over SSE as the periodic path derives for a null `MessageId`.
+    #[test]
+    fn empty_message_id_derives_identity_from_message() {
+        let record: nv_redfish::schema::event::EventRecord = serde_json::from_value(json!({
+            "@odata.id": "/redfish/v1/EventService/Events/records/1",
+            "MemberId": "0",
+            "EventType": "Alert",
+            "MessageId": "",
+            "Message": "PowerDevicePresence ( powerdevice1 chassis_SN: 613337RXX01X75101UG Assert )",
+        }))
+        .expect("valid event record");
+
+        let event = record_to_log(&record, false, Vec::new());
+        let log = log_record(&event);
+        assert_eq!(attribute(log, "message_id"), None);
+        assert_eq!(
+            attribute(log, "message_family"),
+            Some("PowerDevicePresence")
+        );
+        assert_eq!(attribute(log, "redfish.component"), Some("powerdevice1"));
+
+        let event = record_to_log(&severity_record(None, None), false, Vec::new());
+        let log = log_record(&event);
+        assert_eq!(attribute(log, "message_id"), Some("Example.1.0.Event"));
+        assert_eq!(attribute(log, "message_family"), None);
+    }
+
     /// Exercises the severity chain through `record_to_log`: the schema field
     /// wins, a value the schema could not parse falls back to the raw
     /// `Severity` string, and `message_severity` is emitted only when the
@@ -1064,6 +1094,7 @@ mod gpu_enrichment_tests {
             entities.push(DiscoveredEntity::Chassis {
                 entity: Arc::new(chassis),
                 sensors: Vec::new(),
+                shelf_power: None,
                 gpu,
             });
         }
