@@ -5,7 +5,7 @@
 - [Architecture](../../docs/architecture/flow.md)
 - [Component-manager configuration](../../docs/configuration/flow-component-manager.md)
 - [Flow operations](../../docs/operations/flow/overview.md)
-- [Implementation reference](docs/flow-internals.md)
+- [Implementation reference](../../docs/development/flow/flow-internals.md)
 - [Generated gRPC reference](docs/grpc-api.md)
 
 ## Makefile targets

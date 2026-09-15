@@ -1,6 +1,6 @@
 # Operation Rule Execution
 
-Operator guide: [Operation Rules](../../../docs/operations/flow/operation-rules.md).
+Operator guide: [Operation Rules](../../operations/flow/operation-rules.md).
 
 ## Resolution and execution
 
@@ -16,4 +16,4 @@ Each child runs pre-operation actions, the main action, and post-operation actio
 
 `childWorkflowExecutionTimeout` derives a separate execution budget: a base of the step timeout (30 minutes when zero), multiplied by configured attempts, plus configured backoff, declared pre/post action timeouts, and a two-minute buffer. It does not simply use the step timeout as the whole child-workflow timeout.
 
-See [workflow helpers](../internal/task/executor/temporalworkflow/workflow/helpers.go), [child orchestration](../internal/task/executor/temporalworkflow/workflow/genericcomponentstep.go), and [action executors](../internal/task/executor/temporalworkflow/workflow/actions.go) for the execution paths. The [action validator](../internal/task/operationrules/actions.go) defines accepted user-rule actions; internal executor registration alone does not make an action accepted by that validator.
+See [workflow helpers](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/internal/task/executor/temporalworkflow/workflow/helpers.go), [child orchestration](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/internal/task/executor/temporalworkflow/workflow/genericcomponentstep.go), and [action executors](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/internal/task/executor/temporalworkflow/workflow/actions.go) for the execution paths. The [action validator](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/internal/task/operationrules/actions.go) defines accepted user-rule actions; internal executor registration alone does not make an action accepted by that validator.

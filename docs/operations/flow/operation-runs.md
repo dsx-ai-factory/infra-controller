@@ -1,16 +1,16 @@
-# Operation Run Guide
+# Operation Runs
 
 An operation run executes a firmware rollout over a frozen set of rack targets. Use it to limit concurrency, divide the rollout into phases, and stop further dispatch when safety gates trip. Flow persists the target plan at creation and starts dispatching it in the background.
 
-## gRPC Contracts
+## gRPC API
 
 These RPCs belong to the Flow gRPC service. See the [generated reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/docs/grpc-api.md) for message definitions; this guide describes operational behavior.
 
 ### RPCs
 
-The operation-run API adds the following RPCs:
+The Flow service provides these operation-run RPCs:
 
-```proto
+```text
 CreateOperationRun
 GetOperationRun
 ListOperationRuns
@@ -21,18 +21,13 @@ AdvanceOperationRunPhase
 CancelOperationRun
 ```
 
-An operation run is a durable, phased rollout over selected rack execution
-targets. The create request stores a reusable configuration containing target
-selection, execution options, and an operation template.
-
 Creation freezes the selected components, ordering, and phase assignments in one transaction. Later inventory changes do not re-plan that run. An empty target plan is rejected.
 
-### Create And Read APIs
+### Create and read APIs
 
 `CreateOperationRunRequest` requires a non-empty `name` and
 `OperationRunConfiguration`; `description` is optional. `CreateOperationRunResponse` returns only the
-generated run ID, keeping create lightweight and avoiding expensive target or
-stats computation on the create path.
+generated run ID.
 
 `GetOperationRunRequest` takes an ID and an `include_stats` flag. When
 `include_stats` is false, the response returns the run summary plus
@@ -45,7 +40,7 @@ operation kind, status, and status reason. Status and reason are modeled
 together as `OperationRunStateFilter`; each filter entry ANDs its populated
 fields, and multiple entries OR together.
 
-### Target Listing
+### Target listing
 
 `ListOperationRunTargetsRequest` lists materialized rack execution targets for
 one run. It supports a target status filter, pagination, and phase scope.
@@ -63,7 +58,7 @@ This lets callers inspect just the active phase, prior completed phases, or curr
 
 `OperationRunConfiguration` has three parts:
 
-```proto
+```text
 OperationRunSelector selector
 OperationRunOptions options
 OperationRunOperation operation
@@ -83,7 +78,7 @@ deterministic and auditable. Selection rounds up: 1% of three candidate racks se
 - `phase_policy`: optional; defaults to one phase containing all selected
   targets.
 
-### Safety Gates
+### Safety gates
 
 `OperationRunSafetyPolicy` contains repeated gates. Gates compose with OR
 semantics: any tripped gate pauses the run.
@@ -97,7 +92,7 @@ Both support `CURRENT_PHASE` or `CUMULATIVE_RUN` scope. Omitting `scope` or send
 `UNKNOWN` defaults to `CURRENT_PHASE`. Failure-rate thresholds are integers from 1 through 100 percent; failure-count thresholds must be positive. Failure rate uses
 `failed_targets / planned_targets` for the selected scope.
 
-### Ordering, Conflict, And Phases
+### Ordering, conflict, and phases
 
 Ordering is a `oneof` policy. Random ordering is supported. Physical-location ordering has a protobuf policy branch but is rejected by the planner.
 
@@ -125,7 +120,7 @@ successful non-final phase pauses with `PHASE_GATE` and waits for
 `AdvanceOperationRunPhase`. When true, the dispatcher advances automatically as long
 as safety gates are not tripped.
 
-### Target Scope
+### Target scope
 
 `OperationRunTargetScope` controls how candidate scope is built before applying
 the selector.
@@ -138,7 +133,7 @@ qualified racks"; that field is only valid when `target_spec` is omitted.
 `exclude_operation_run_ids` then removes materialized targets from prior
 operation runs from that base scope before selector application.
 
-### Operation Template
+### Operation template
 
 `OperationRunOperation` is a `oneof`. The supported operation is
 `upgrade_firmware`.
@@ -148,7 +143,7 @@ targets" and is required. Inside `CreateOperationRun`, the embedded
 `target_spec` is optional and defines candidate scope before selector
 application.
 
-### State And Stats
+### State and stats
 
 Run state is modeled as `OperationRunState` with `OperationRunStatus` and
 `OperationRunStatusReason`. Reasons distinguish operator pause, phase gate,
@@ -161,10 +156,7 @@ counts: completed, failed, terminated, skipped.
 
 `OperationRunTarget` represents a materialized rack execution target. It tracks
 rack ID, sequence index, phase index, optional child task ID, target status,
-message, the resolved `components_by_type` execution set, and timestamps. The
-target output uses resolved components grouped by type rather than a
-`ComponentFilter`, because target rows are materialized execution state instead
-of unresolved selection criteria.
+message, the resolved `components_by_type` execution set, and timestamps.
 
 ## Operating a run
 
@@ -181,9 +173,9 @@ Invalid lifecycle transitions return `FailedPrecondition`. Unknown run IDs retur
 
 ## Reading progress
 
-`GetOperationRun` omits stats unless `include_stats` is true. Computing stats reads targets across current and prior phases, so use the lightweight response when only run state is needed. `ListOperationRuns` returns summaries without configuration or target stats and orders by creation time descending.
+`ListOperationRuns` orders by creation time descending.
 
-`ListOperationRunTargets` orders by phase index and then sequence index, both ascending. Phase and sequence indexes are zero-based. Its `total` is the filtered count before pagination. An omitted or `UNKNOWN` target status applies no status filter. Every returned rack must have an external ID; otherwise the call fails with `FailedPrecondition`.
+`ListOperationRunTargets` orders by phase index and then sequence index, both ascending. Phase and sequence indexes are zero-based. Its `total` is the filtered count before pagination. Every returned rack must have an external ID; otherwise the call fails with `FailedPrecondition`.
 
 Current-phase stats describe the latest included phase; cumulative stats include current and prior phases. Future phases are excluded. `selected_targets` counts planned targets within that scope, not successful tasks. Inspect `outcome_counts` and the run state together: completion can include failures, and pending, blocked, claimed, or submitted targets are not terminal outcomes.
 

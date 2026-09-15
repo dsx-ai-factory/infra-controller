@@ -1,29 +1,10 @@
-# User-Defined Task Schedules
+# Task Schedules
 
 User-defined task schedules let operators automate recurring or one-shot
 operations (power control, firmware upgrade, bring-up, ingest) against a
 persistent set of rack targets, without requiring an external scheduler.
 
----
-
-## Table of Contents
-
-- [Concepts](#concepts)
-- [Schedule Types](#schedule-types)
-- [Overlap Policy](#overlap-policy)
-- [Scope and Component Filters](#scope-and-component-filters)
-- [API Reference](#api-reference)
-- [Dispatch and failure behavior](#dispatch-and-failure-behavior)
-- [Conflict Checks](#conflict-checks)
-
----
-
 ## Concepts
-
-A **task schedule** is a persistent record that says:
-
-> "Run *operation X* against *these racks* every *N hours* (or at *this cron
-> expression*, or at *this exact time*)."
 
 A schedule contains timing, an operation template, an overlap policy, and a persistent scope. Each scope entry selects a rack and optional component filter, and records its last submitted task. The dispatcher submits a task for each eligible scope when the schedule fires.
 
@@ -58,16 +39,13 @@ one-time specs are always absolute.
 
 #### Timezone format
 
-The `timezone` field must be a valid **IANA Time Zone Database** name.
-Use `UTC` or an IANA location such as `America/Los_Angeles`, `Europe/London`, or `Asia/Tokyo`. Flow resolves names through Go's timezone database; availability of aliases depends on that database. Use full location names for portable configuration. An unresolvable cron timezone is rejected. The timezone is not used to interpret interval or one-time specs.
+Use `UTC` or an IANA location such as `America/Los_Angeles`, `Europe/London`, or `Asia/Tokyo`. Flow resolves names through Go's timezone database; availability of aliases such as `EST` depends on that database. Use full location names for portable configuration. An unresolvable cron timezone is rejected. The timezone is not used to interpret interval or one-time specs.
 
 ### One-Time
 
 Becomes due at the specified RFC 3339 timestamp, including its explicit offset. Dispatch normalizes it to UTC. A timestamp in the past is due on the next poll. After firing, `enabled` is
 set to `false` and `next_run_at` is cleared. A consumed one-time schedule
 cannot be re-armed (create a new one instead).
-
----
 
 ## Overlap Policy
 
@@ -85,12 +63,9 @@ four racks while skipping the one whose previous task is still running.
 The policy is **not** consulted for manual triggers (`TriggerTaskSchedule`):
 all scopes are submitted unconditionally.
 
----
-
 ## Scope and Component Filters
 
-A schedule's scope is the set of racks it targets. Each scope entry
-(`task_schedule_scope` row) targets one rack, with an optional
+A schedule's scope is the set of racks it targets. Each scope entry targets one rack, with an optional
 `component_filter` that restricts which components in that rack are included.
 
 ### Component filter variants
@@ -137,15 +112,13 @@ For component-level targets (specific component UUIDs), the server resolves
 which rack each component belongs to and groups them into per-rack scope
 entries automatically.
 
----
-
 ## API Reference
 
 All RPCs live in the `Flow` gRPC service.
 
 ### Schedule lifecycle
 
-```proto
+```text
 CreateTaskSchedule(CreateTaskScheduleRequest) → TaskSchedule
 GetTaskSchedule(GetTaskScheduleRequest)       → TaskSchedule
 ListTaskSchedules(ListTaskSchedulesRequest)   → ListTaskSchedulesResponse
@@ -158,7 +131,7 @@ TriggerTaskSchedule(TriggerTaskScheduleRequest) → SubmitTaskResponse
 
 ### Scope management
 
-```proto
+```text
 AddTaskScheduleScope(AddTaskScheduleScopeRequest)       → AddTaskScheduleScopeResponse
 RemoveTaskScheduleScope(RemoveTaskScheduleScopeRequest) → Empty
 UpdateTaskScheduleScope(UpdateTaskScheduleScopeRequest) → UpdateTaskScheduleScopeResponse
@@ -167,11 +140,9 @@ ListTaskScheduleScopes(ListTaskScheduleScopesRequest)   → ListTaskScheduleScop
 
 ### Advisory
 
-```proto
+```text
 CheckScheduleConflicts(CheckScheduleConflictsRequest) → CheckScheduleConflictsResponse
 ```
-
----
 
 ### CreateTaskSchedule
 
@@ -190,13 +161,11 @@ Creates a schedule and its initial scope in a single transaction.
 
 | Field | Default | Notes |
 |---|---|---|
-| `schedule.spec.timezone` | `"UTC"` | IANA timezone name (e.g. `"America/Los_Angeles"`), only used for cron specs. Alias availability (for example, `"EST"`) depends on the deployed Go timezone database; unrecognized names are rejected. Prefer full IANA location names. |
+| `schedule.spec.timezone` | `"UTC"` | Used only for cron specs; see [Timezone format](#timezone-format) for accepted names and alias handling. |
 | `schedule.overlap_policy` | `skip` | `SKIP` or `QUEUE`. |
 
 The initial scope is derived from the operation's `target_spec`. Use the scope
 management RPCs to modify it after creation.
-
----
 
 ### UpdateTaskSchedule
 
@@ -219,8 +188,6 @@ cannot be changed via `UpdateTaskSchedule`. To change the operation, delete the
 schedule and create a new one. To change the scope, use the scope management
 RPCs.
 
----
-
 ### PauseTaskSchedule / ResumeTaskSchedule
 
 **Pause** sets `enabled = false`. The schedule will not fire until resumed.
@@ -233,8 +200,6 @@ if `next_run_at` is still in the past from before the pause. For a one-time
 schedule that was paused before firing, `next_run_at` is left unchanged.
 Resuming a one-time schedule that has already fired (no `next_run_at`) returns
 an error.
-
----
 
 ### TriggerTaskSchedule
 
@@ -249,14 +214,10 @@ After firing:
 
 Returns an error if called on a one-time schedule that has already fired.
 
----
-
 ### DeleteTaskSchedule
 
-Hard-deletes the schedule and all its scope entries (via `ON DELETE CASCADE`).
+Deletes the schedule and all its scope entries.
 In-flight tasks are **not** cancelled.
-
----
 
 ### ListTaskSchedules
 
@@ -269,8 +230,6 @@ Returns schedules ordered by `created_at` ascending.
 | `pagination` | `offset` / `limit` for paging. Omit to return all. |
 
 The response includes `total`: the count before pagination is applied.
-
----
 
 ## Dispatch and failure behavior
 
@@ -294,5 +253,3 @@ rack will still be reported as conflicting. Treat a non-empty response as a
 signal for human review, not a guarantee that tasks will collide at runtime.
 Execution-time conflict detection (the task manager's conflict rules) remains
 the authoritative backstop.
-
----

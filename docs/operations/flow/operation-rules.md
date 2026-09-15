@@ -1,19 +1,7 @@
-# Operation Rules Guide
+# Operation Rules
 
 User-defined operation rules configure power control and firmware operations. Each rule specifies a sequence of steps that determine
 component ordering, parallelism, verification, and retry behavior.
-
-## Table of Contents
-
-- [Concepts](#concepts)
-- [Rule Schema](#rule-schema)
-- [Actions Reference](#actions-reference)
-- [Examples](#examples)
-- [Execution behavior](#execution-behavior)
-- [CLI Usage](#cli-usage)
-- [Reference YAML](#reference-yaml)
-
----
 
 ## Concepts
 
@@ -46,8 +34,6 @@ Each step defines optional `pre_operation` and `post_operation` lists and one re
 - `post_operation` — runs after the main operation (e.g., verify status)
 
 All three phases execute inside a single child workflow per component-type step. The step supplies activity timeout and retry defaults; Flow derives a separate child-workflow execution budget.
-
----
 
 ## Rule Schema
 
@@ -95,8 +81,6 @@ batch file.
 All duration fields accept Go duration strings: `"5s"`, `"30s"`, `"2m"`,
 `"1m30s"`, `"10m"`, `"1h"`.
 
----
-
 ## Actions Reference
 
 The user-rule validator rejects `BringUpControl`, `WaitBringUp`, and `InjectExpectation`. Their presence in internal workflows does not make them accepted user-rule actions. The public operation-rule API exposes power-control and firmware-control operation types.
@@ -129,8 +113,6 @@ main_operation:
 |-------------|----------|-------------|
 | `operation` | no*      | Power operation code. Required when used outside a power workflow. Valid values: `power_on`, `force_power_on`, `power_off`, `force_power_off`, `restart`, `force_restart`, `warm_reset`, `cold_reset` |
 
----
-
 ### FirmwareControl
 
 Starts a firmware update and polls for completion (async start + poll pattern).
@@ -154,8 +136,6 @@ main_operation:
 |-----------------|----------|-------------|
 | `poll_interval` | no       | Time between status polls (default `2m`) |
 | `poll_timeout`  | no       | Max time to wait for completion (default `30m`) |
-
----
 
 ### VerifyPowerStatus
 
@@ -182,8 +162,6 @@ used in `post_operation` to confirm the result of `PowerControl`.
 When used as `main_operation`, the step performs only verification (no power
 command is sent). This is the pattern for forceful operation final-verification
 stages.
-
----
 
 ### VerifyReachability
 
@@ -223,8 +201,6 @@ component IDs).
 | `component_types`  | yes      | Array of component type strings to check |
 | `require_all`      | no       | When `true`, every individual component must respond (default `false`) |
 
----
-
 ### Sleep
 
 Pauses execution for a fixed duration. Implemented as a durable workflow timer
@@ -243,8 +219,6 @@ Pauses execution for a fixed duration. Implemented as a durable workflow timer
 |--------------|----------|-------------|
 | `duration` (param) | yes | How long to sleep. E.g. `"30s"`, `"2m"` |
 
----
-
 ### GetPowerStatus
 
 Queries the current power status of components and returns a status map.
@@ -259,8 +233,6 @@ Queries the current power status of components and returns a status map.
 | Field     | Required | Description |
 |-----------|----------|-------------|
 | `timeout` | yes      | Maximum time for the query |
-
----
 
 ## Examples
 
@@ -350,8 +322,6 @@ verifies status at each stage before proceeding.
 }
 ```
 
----
-
 ### Graceful power off
 
 Reverse dependency order (compute → nvswitch → powershelf). A `Sleep` in the
@@ -431,8 +401,6 @@ before cutting power.
   ]
 }
 ```
-
----
 
 ### Forceful power on
 
@@ -549,7 +517,7 @@ Flow selects a rack-specific rule association first, then a global default for t
 
 Stages run in order. A failed stage stops the task; earlier stages are not rolled back. Steps for component types absent from the rack are skipped. Activity retries can repeat external calls. The child-workflow execution timeout includes the configured retry budget, declared pre/post action timeouts, and a scheduling buffer; it is not equal to the step timeout.
 
-For Temporal workflow and activity details, see [Operation Rule Execution](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/docs/operation-rule-execution.md).
+For Temporal workflow and activity details, see [Operation Rule Execution](../../development/flow/operation-rule-execution.md).
 
 ## CLI Usage
 
@@ -623,8 +591,6 @@ rules:
             parameters:
               expected_status: "on"
 ```
-
----
 
 ## Reference YAML
 

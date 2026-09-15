@@ -342,6 +342,14 @@ navigation:
               path: bootable_artifacts.md
             - page: Local Development
               path: development.md
+            - section: Flow
+              contents:
+                - page: Implementation Overview
+                  path: development/flow/flow-internals.md
+                - page: Operation Rule Execution
+                  path: development/flow/operation-rule-execution.md
+                - page: Task Schedule Implementation
+                  path: development/flow/task-schedule-internals.md
             - page: Instrumentation
               path: observability/instrumentation.md
             - page: Running a PXE Client in a VM

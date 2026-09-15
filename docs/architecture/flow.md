@@ -33,7 +33,7 @@ The task manager resolves a request into rack tasks. The resolved operation rule
 
 Task schedules and operation runs persist their own orchestration state in Flow's database. Their dispatchers submit tasks to the task manager. The internal job scheduler also runs service jobs such as inventory synchronization; it is separate from user-defined task schedules.
 
-See [Flow Operations](../operations/flow/overview.md) for operator workflows and the [implementation reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/docs/flow-internals.md) for package and storage details.
+See [Flow Operations](../operations/flow/overview.md) for operator workflows and the [implementation reference](../development/flow/flow-internals.md) for package and storage details.
 
 ## Persisted firmware authentication
 
