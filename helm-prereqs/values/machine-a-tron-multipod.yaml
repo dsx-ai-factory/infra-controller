@@ -9,7 +9,8 @@
 #       -n nico-system -f <your-copy>.yaml
 #
 # Requirements:
-#  * The BMC network must lie outside the Kubernetes ServiceCIDR and pod CIDR
+#  * The BMC network must lie outside the Kubernetes ServiceCIDR, pod CIDR,
+#    node network, and networks that nodes or pods must otherwise reach
 #    (BMC IPs are Service externalIPs). Default ServiceCIDRs to stay clear of:
 #    - vanilla k8s: 10.96.0.0/12
 #    - kind: 10.96.0.0/16

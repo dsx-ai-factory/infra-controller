@@ -35,7 +35,8 @@ The `mat-k8s-controller` dynamically creates one Service per BMC:
 
 **Requirements:**
 
-- The BMC network must lie outside the Kubernetes ServiceCIDR and pod CIDR
+- The BMC network must lie outside the Kubernetes ServiceCIDR, pod CIDR,
+  node network, and networks that nodes or pods must otherwise reach
   (BMC IPs are Service externalIPs, for which kube-proxy programs forwarding
   rules on every node)
 - NICo siteConfig needs `allow_insecure_discovery = true` and a network

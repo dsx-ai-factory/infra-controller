@@ -3,7 +3,8 @@
 # (Controller Mode). Derived from machine-a-tron-scale.yaml.
 #
 # 4,500 hosts × 3 BMCs = 13,500 BMC addresses, published as Service externalIPs,
-# so the BMC segments must lie outside the cluster ServiceCIDR and pod CIDR.
+# so the BMC segments must lie outside the cluster ServiceCIDR, pod CIDR, node
+# network, and any network the nodes or pods must otherwise reach.
 # They are carved from 10.200.0.0/16 above the default simulated-oob range
 # (SCALE_OOB_PREFIX, 10.200.0.0/18). NICo allows one IPv4 prefix per segment,
 # so each pod gets its own segment:

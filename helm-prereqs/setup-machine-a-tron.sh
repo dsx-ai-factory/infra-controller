@@ -232,7 +232,8 @@ MAT_MODE="${MAT_MODE:-override}"
 #
 # Controller Mode publishes the BMC addresses as Service externalIPs, for which
 # kube-proxy programs forwarding rules on every node, so the OOB range must lie
-# outside the cluster ServiceCIDR and pod CIDR. The default clears the kubeadm
+# outside the cluster ServiceCIDR, pod CIDR, node network, and any network the
+# nodes or pods must otherwise reach. The default clears the kubeadm
 # (10.96.0.0/12), kubespray (10.233.0.0/18) and Kind defaults.
 SCALE_OOB_PREFIX="${SCALE_OOB_PREFIX:-10.200.0.0/18}";  SCALE_OOB_GW="${SCALE_OOB_GW:-10.200.0.1}"
 SCALE_ADMIN_PREFIX="${SCALE_ADMIN_PREFIX:-10.102.0.0/18}"; SCALE_ADMIN_GW="${SCALE_ADMIN_GW:-10.102.0.1}"

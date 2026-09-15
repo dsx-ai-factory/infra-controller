@@ -16,7 +16,8 @@
 #       prefix = "10.200.0.0/18"
 #       gateway = "10.200.0.1"
 #       mtu = 1500
-#   - The BMC network must lie outside the Kubernetes ServiceCIDR and pod CIDR
+#   - The BMC network must lie outside the Kubernetes ServiceCIDR, pod CIDR,
+#     node network, and networks that nodes or pods must otherwise reach
 #     (BMC IPs are Service externalIPs, for which kube-proxy programs
 #     forwarding rules on every node)
 # =============================================================================
