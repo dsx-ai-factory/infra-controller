@@ -1486,6 +1486,7 @@ pub async fn mark_as_deleted(
 #[cfg(test)]
 mod tests {
     use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use sqlx::Acquire as _;
 
     use super::*;
 
@@ -1706,6 +1707,231 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(snapshots.len(), 2);
+    }
+
+    /// Verifies the shipped migration preserves native attachment state while
+    /// assigning durable IDs and rejecting subsequent writes from older binaries.
+    #[crate::sqlx_test]
+    async fn attachment_id_migration_backfills_and_rejects_legacy_writes(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin attachment migration test");
+
+        // Restore the predecessor schema before seeding real instance rows.
+        sqlx::query(
+            "ALTER TABLE instances DROP CONSTRAINT instances_extension_service_attachment_ids_required",
+        )
+        .execute(txn.as_mut())
+        .await
+        .expect("restore predecessor attachment schema");
+        let instance_id = seed_instance(txn.as_mut(), 0x4a, None).await;
+        let empty_instance_id = seed_instance(txn.as_mut(), 0x4b, None).await;
+        let before = find_by_id(txn.as_mut(), instance_id)
+            .await
+            .expect("read predecessor instance")
+            .expect("seeded instance exists");
+        let service_id = ExtensionServiceId::new();
+        let version = ConfigVersion::initial();
+        let existing_id = uuid::Uuid::new_v4();
+        let mut expected = serde_json::json!({
+            "service_configs": [
+                {
+                    "service_id": service_id,
+                    "version": version.increment(),
+                    "removed": null
+                },
+                {
+                    "id": null,
+                    "service_id": service_id,
+                    "version": version,
+                    "removed": Utc::now()
+                },
+                {
+                    "id": existing_id,
+                    "service_id": ExtensionServiceId::new(),
+                    "version": version,
+                    "removed": null
+                }
+            ]
+        });
+        sqlx::query("UPDATE instances SET extension_services_config = $1 WHERE id = $2")
+            .bind(Json(&expected))
+            .bind(instance_id)
+            .execute(txn.as_mut())
+            .await
+            .expect("seed active, terminating, and already identified attachments");
+
+        // Apply exactly what ships, under the same transaction boundary as sqlx.
+        sqlx::raw_sql(include_str!(
+            "../migrations/20260915173514_extension_service_attachment_ids.sql"
+        ))
+        .execute(txn.as_mut())
+        .await
+        .expect("apply attachment ID migration");
+        let migrated: serde_json::Value =
+            sqlx::query_scalar("SELECT extension_services_config FROM instances WHERE id = $1")
+                .bind(instance_id)
+                .fetch_one(txn.as_mut())
+                .await
+                .expect("read migrated attachment JSON");
+        let attachments: InstanceExtensionServicesConfig =
+            serde_json::from_value(migrated.clone()).expect("decode migrated attachments");
+        let active_id = attachments.service_configs[0].id;
+        let terminating_id = attachments.service_configs[1].id;
+
+        // Both native generations receive independent random IDs; all other
+        // fields, ordering, and the already persisted ID remain unchanged.
+        assert_eq!(active_id.get_version(), Some(uuid::Version::Random));
+        assert_eq!(terminating_id.get_version(), Some(uuid::Version::Random));
+        assert_ne!(active_id, terminating_id);
+        assert_ne!(active_id, existing_id);
+        assert_ne!(terminating_id, existing_id);
+        expected["service_configs"][0]["id"] = serde_json::json!(active_id);
+        expected["service_configs"][1]["id"] = serde_json::json!(terminating_id);
+        assert_eq!(migrated, expected);
+        txn.commit().await.expect("commit attachment ID migration");
+
+        // Independent reads use persisted IDs without changing configuration generations.
+        for _ in 0..2 {
+            let persisted = find_by_id(&pool, instance_id)
+                .await
+                .expect("read migrated instance")
+                .expect("migrated instance exists");
+            assert_eq!(persisted.config.extension_services, attachments);
+            assert_eq!(persisted.config_version, before.config_version);
+            assert_eq!(
+                persisted.network_config_version,
+                before.network_config_version
+            );
+            assert_eq!(
+                persisted.extension_services_config_version,
+                before.extension_services_config_version
+            );
+        }
+        assert!(
+            find_by_id(&pool, empty_instance_id)
+                .await
+                .expect("read instance without attachments")
+                .expect("empty instance exists")
+                .config
+                .extension_services
+                .service_configs
+                .is_empty()
+        );
+
+        // Each row exercises a distinct way an invalid ID could bypass a JSON CHECK.
+        let cases = [
+            // The old writer omits IDs entirely when serializing its attachment list.
+            ("missing ID", None),
+            // JSON null must not turn the constraint expression into an accepted SQL NULL.
+            ("null ID", Some(serde_json::Value::Null)),
+            // A number must not pass as an ID merely because the key exists.
+            ("non-string ID", Some(serde_json::json!(42))),
+            // Strings still need the canonical UUID representation emitted by Rust.
+            ("malformed UUID", Some(serde_json::json!("not-a-uuid"))),
+            // Nil parses as a UUID but is never a real attachment identity.
+            ("nil UUID", Some(serde_json::json!(uuid::Uuid::nil()))),
+        ];
+        for (scenario, id) in cases {
+            let mut invalid = expected.clone();
+            let attachment = invalid["service_configs"][1]
+                .as_object_mut()
+                .expect("terminating attachment is an object");
+            if let Some(id) = id {
+                attachment.insert("id".to_string(), id);
+            } else {
+                attachment.remove("id");
+            }
+
+            // Reject the whole legacy rewrite even when the invalid entry is terminating.
+            let mut attempt = pool.begin().await.expect("begin invalid attachment write");
+            let error =
+                sqlx::query("UPDATE instances SET extension_services_config = $1 WHERE id = $2")
+                    .bind(Json(invalid))
+                    .bind(instance_id)
+                    .execute(attempt.as_mut())
+                    .await
+                    .expect_err(scenario);
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.constraint()),
+                Some("instances_extension_service_attachment_ids_required"),
+                "{scenario}",
+            );
+            attempt
+                .rollback()
+                .await
+                .expect("rollback invalid attachment write");
+        }
+
+        // Failed old writes cannot erase the IDs established by the migration.
+        let persisted = find_by_id(&pool, instance_id)
+            .await
+            .expect("read after rejected writes")
+            .expect("instance remains visible");
+        assert_eq!(persisted.config.extension_services, attachments);
+    }
+
+    /// Verifies the shipped migration refuses a malformed non-null predecessor ID,
+    /// because preserving an unusable attachment identity would violate its contract.
+    #[crate::sqlx_test]
+    async fn attachment_id_migration_rejects_preexisting_malformed_id(pool: sqlx::PgPool) {
+        let mut txn = pool
+            .begin()
+            .await
+            .expect("begin malformed ID migration test");
+
+        // Restore the predecessor schema and persist the malformed value before
+        // the migration adds its UUID-shape constraint.
+        sqlx::query(
+            "ALTER TABLE instances DROP CONSTRAINT instances_extension_service_attachment_ids_required",
+        )
+        .execute(txn.as_mut())
+        .await
+        .expect("restore predecessor attachment schema");
+        let instance_id = seed_instance(txn.as_mut(), 0x4c, None).await;
+        let malformed = serde_json::json!({
+            "service_configs": [{
+                "id": "not-a-uuid",
+                "service_id": ExtensionServiceId::new(),
+                "version": ConfigVersion::initial(),
+                "removed": null
+            }]
+        });
+        sqlx::query("UPDATE instances SET extension_services_config = $1 WHERE id = $2")
+            .bind(Json(&malformed))
+            .bind(instance_id)
+            .execute(txn.as_mut())
+            .await
+            .expect("seed malformed predecessor attachment ID");
+
+        // The backfill only owns absent IDs. A malformed identity must stop the
+        // migration instead of being silently replaced with a different one.
+        let mut attempt = txn.begin().await.expect("begin migration savepoint");
+        let error = sqlx::raw_sql(include_str!(
+            "../migrations/20260915173514_extension_service_attachment_ids.sql"
+        ))
+        .execute(attempt.as_mut())
+        .await
+        .expect_err("migration must reject a malformed preserved ID");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some("instances_extension_service_attachment_ids_required")
+        );
+        attempt
+            .rollback()
+            .await
+            .expect("rollback failed migration savepoint");
+
+        // A failed migration must leave the predecessor row available for diagnosis.
+        let persisted: serde_json::Value =
+            sqlx::query_scalar("SELECT extension_services_config FROM instances WHERE id = $1")
+                .bind(instance_id)
+                .fetch_one(txn.as_mut())
+                .await
+                .expect("read malformed predecessor attachment");
+        assert_eq!(persisted, malformed);
     }
 
     /// General and OS updates distinguish missing and deleted `Instance`s from

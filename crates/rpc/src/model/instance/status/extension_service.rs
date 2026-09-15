@@ -136,6 +136,7 @@ impl TryFrom<InstanceExtensionServiceStatus> for rpc::InstanceDpuExtensionServic
             .into(),
             dpu_statuses,
             removed: status.removed,
+            attachment_id: Some(status.attachment_id.into()),
         })
     }
 }
@@ -194,6 +195,32 @@ impl TryFrom<rpc::DpuExtensionServiceStatusObservation> for ExtensionServiceStat
             components,
             message: observation.message,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies status readback preserves the attachment ID so callers can match
+    /// deployment status to the service endpoints owned by that attachment.
+    #[test]
+    fn attachment_id_is_preserved_in_status_readback() {
+        // Build one aggregate status with a known attachment identity.
+        let attachment_id = uuid::Uuid::new_v4();
+        let status = InstanceExtensionServiceStatus {
+            attachment_id,
+            service_id: ExtensionServiceId::new(),
+            version: ConfigVersion::initial(),
+            overall_status: ExtensionServiceDeploymentStatus::Pending,
+            dpu_statuses: vec![],
+            removed: None,
+        };
+
+        // Public readback must carry exactly the stored identity.
+        let readback = rpc::InstanceDpuExtensionServiceStatus::try_from(status)
+            .expect("convert extension-service status");
+        assert_eq!(readback.attachment_id, Some(attachment_id.into()));
     }
 }
 

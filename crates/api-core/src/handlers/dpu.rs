@@ -724,6 +724,10 @@ async fn get_managed_host_network_config_inner(
     let astra_config = get_astra_config(api, &snapshot).await?;
 
     let resp = rpc::ManagedHostNetworkConfigResponse {
+        // TODO(Service VPC): Populate these fields for the authenticated receiving
+        // DPU when managed-host responses include service networking.
+        service_interfaces: vec![],
+        service_vpc_slot_inventory: None,
         instance_id: snapshot.instance.as_ref().map(|instance| instance.id),
         asn,
         dhcp_servers: api

@@ -47,11 +47,22 @@ impl StateHandler for ExtensionServiceStateHandler {
     async fn handle_object_state(
         &self,
         service_id: &ExtensionServiceId,
-        _state: &mut ExtensionService,
+        state: &mut ExtensionService,
         controller_state: &ExtensionServiceLifecycleState,
         ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<ExtensionServiceLifecycleState>, StateHandlerError> {
         match controller_state {
+            ExtensionServiceLifecycleState::Creating | ExtensionServiceLifecycleState::Updating
+                if !state.service_vpc_interfaces.is_empty() =>
+            {
+                // Service VPC reconciliation arrives later. Waiting here prevents the
+                // existing paths from creating or updating the service without its
+                // network resources.
+                Ok(StateHandlerOutcome::wait(
+                    "service VPC registration is unavailable until network resource reconciliation is implemented"
+                        .to_string(),
+                ))
+            }
             ExtensionServiceLifecycleState::Creating => reconcile_create(*service_id, ctx).await,
             ExtensionServiceLifecycleState::Updating => reconcile_update(*service_id, ctx).await,
             ExtensionServiceLifecycleState::Deleting => reconcile_delete(*service_id, ctx).await,

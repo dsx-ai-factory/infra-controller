@@ -963,6 +963,7 @@ mod tests {
         InstanceNetworkConfig {
             interfaces,
             auto_config: None,
+            service_interfaces: vec![],
         }
     }
 
