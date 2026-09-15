@@ -19,7 +19,8 @@ nico-admin-cli expected-machine patch
 [--dpf-enabled] [--bmc-ip-address] [--extended]
 [--bmc-retain-credentials] [--dpu-policy]
 [--bmc-ip-allocation] [--interfaces]
-[--disable-lockdown] [--sort-by] [-h|--help]
+\[**--disable-lockdown**\] \[**--dpu-loopback-reservations**\]
+[--sort-by] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -226,7 +227,22 @@ setting
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
+<<<<<<< HEAD
 Sort output by specified field
+=======
+**--dpu-loopback-reservations** *\<DPU_LOOPBACK_RESERVATIONS\>*  
+Deterministic DPU underlay loopback reservations as a JSON array of
+objects (fields: dpu_serial_number, loopback_ipv4, loopback_ipv6), keyed
+by the trimmed DPU pairing serial number. Replaces the full reservation
+list for the machine: omit the flag to preserve the stored reservations,
+or pass an empty array '\[\]' to clear them. Each reservation requires at
+least one address drawn from the site's non-auto-assignable lo-ip /
+lo-ip-v6 pool. Example:
+'\[{"dpu_serial_number":"MT2000X00001","loopback_ipv4":"192.0.2.10"}\]'.
+
+**--sort-by** *\<SORT_BY\>* \[default: primary-id\]  
+Sort output by specified field\
+>>>>>>> cd3ddd7a7 (feat: add deterministic DPU underlay loopback reservations)
 
 *Possible values:*
 

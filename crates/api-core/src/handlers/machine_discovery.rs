@@ -332,12 +332,31 @@ pub(crate) async fn discover_machine(
             })?;
         }
 
+        // Resolve the operator's deterministic loopback reservation for this
+        // DPU by its globally unique serial. Direct discovery does not read an
+        // ExpectedMachine, so the reservation is looked up by serial alone.
+        // Only the create path applies a reservation; an already-created DPU is
+        // never readdressed. An absent reservation leaves both families on
+        // automatic allocation.
+        let reservation = if machine_discovery_info.create_machine {
+            resolve_dpu_loopback_reservation(&mut txn, &hardware_info).await?
+        } else {
+            None
+        };
+        let requested_loopback_v4 = reservation
+            .as_ref()
+            .and_then(|reservation| reservation.loopback_ipv4.map(std::net::IpAddr::V4));
+        let requested_loopback_v6 = reservation
+            .as_ref()
+            .and_then(|reservation| reservation.loopback_ipv6);
+
         let db_machine = if machine_discovery_info.create_machine {
             let machine = db::machine::get_or_create(
                 &mut txn,
                 Some(&api.common_pools),
                 &stable_machine_id,
                 &caller_interface,
+                requested_loopback_v6,
             )
             .await?;
 
@@ -373,15 +392,24 @@ pub(crate) async fn discover_machine(
         let mut network_config_changed = false;
 
         if network_config.loopback_ip.is_none() {
-            let loopback_ip =
-                db::machine::allocate_loopback_ip(&api.common_pools, &mut txn, &owner_id).await?;
+            let loopback_ip = db::machine::allocate_loopback_ip(
+                &api.common_pools,
+                &mut txn,
+                &owner_id,
+                requested_loopback_v4,
+            )
+            .await?;
             network_config.loopback_ip = Some(loopback_ip);
             network_config_changed = true;
         }
 
+        // The IPv6 reservation is applied at insert inside `get_or_create`; a
+        // machine that already exists keeps the existing automatic backfill
+        // behavior here, so this path never requests a specific value.
         if network_config.loopback_ip_v6.is_none()
             && let Some(loopback_ip_v6) =
-                db::machine::allocate_loopback_ip_v6(&api.common_pools, &mut txn, &owner_id).await?
+                db::machine::allocate_loopback_ip_v6(&api.common_pools, &mut txn, &owner_id, None)
+                    .await?
         {
             network_config.loopback_ip_v6 = Some(loopback_ip_v6);
             network_config_changed = true;
@@ -481,6 +509,8 @@ pub(crate) async fn discover_machine(
                 Some(&api.common_pools),
                 &predicted_machine_id,
                 &machine_interface,
+                // Proactive host creation never carries a DPU loopback reservation.
+                None,
             )
             .await?;
 
@@ -705,6 +735,39 @@ pub(crate) async fn discovery_completed(
         discovery_result, "discovery_completed",
     );
     Ok(Response::new(rpc::MachineDiscoveryCompletedResponse {}))
+}
+
+/// Resolve a DPU's deterministic loopback reservation during direct discovery.
+///
+/// Scout never reports the owning host expected machine, so the reservation is
+/// resolved by the DPU's serial alone. The reservation is keyed by the DPU
+/// pairing serial the operator declares, which matches one of the DPU's DMI
+/// serials; each serial is unique site-wide, so the first non-empty serial that
+/// resolves a reservation wins. An absent reservation (no DMI data, or no serial
+/// matches) leaves both address families on automatic allocation.
+async fn resolve_dpu_loopback_reservation(
+    txn: &mut sqlx::PgConnection,
+    hardware_info: &HardwareInfo,
+) -> Result<Option<model::expected_machine::DpuLoopbackReservation>, CarbideError> {
+    let Some(dmi) = hardware_info.dmi_data.as_ref() else {
+        return Ok(None);
+    };
+    for serial in [
+        dmi.product_serial.as_str(),
+        dmi.board_serial.as_str(),
+        dmi.chassis_serial.as_str(),
+    ] {
+        let serial = serial.trim();
+        if serial.is_empty() {
+            continue;
+        }
+        if let Some(reservation) =
+            db::expected_dpu_loopback_reservation::find_by_dpu_serial(&mut *txn, serial).await?
+        {
+            return Ok(Some(reservation));
+        }
+    }
+    Ok(None)
 }
 
 /// Builds NVLink discovery info from scout `GpuPlatformInfo` for every GPU that reported it.

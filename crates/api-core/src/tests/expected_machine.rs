@@ -736,6 +736,7 @@ async fn test_add_expected_machine_dpu_serials(pool: sqlx::PgPool) {
         bmc_ip_allocation: None,
         replace_host_nics: false,
         host_lifecycle_profile: None,
+        dpu_loopback_reservations: None,
         #[allow(deprecated)]
         dpf_enabled: true,
     };
@@ -4976,4 +4977,171 @@ async fn test_create_missing_from_preallocates_interfaces(
     txn.commit().await?;
 
     Ok(())
+}
+
+fn dpu_loopback_reservation(
+    serial: &str,
+    v4: Option<&str>,
+    v6: Option<&str>,
+) -> rpc::forge::DpuLoopbackReservation {
+    rpc::forge::DpuLoopbackReservation {
+        dpu_serial_number: serial.to_string(),
+        loopback_ipv4: v4.map(str::to_string),
+        loopback_ipv6: v6.map(str::to_string),
+    }
+}
+
+fn expected_machine_with_reservations(
+    bmc_mac_address: &str,
+    chassis_serial_number: &str,
+    reservations: Vec<rpc::forge::DpuLoopbackReservation>,
+) -> rpc::forge::ExpectedMachine {
+    rpc::forge::ExpectedMachine {
+        bmc_mac_address: bmc_mac_address.to_string(),
+        bmc_username: "ADMIN".into(),
+        bmc_password: "PASS".into(),
+        chassis_serial_number: chassis_serial_number.to_string(),
+        is_dpf_enabled: Some(true),
+        dpu_loopback_reservations: Some(rpc::forge::DpuLoopbackReservationList { reservations }),
+        ..Default::default()
+    }
+}
+
+/// The add handler rejects request-shape errors in a reservation set before any
+/// pool lookup: a reservation with no address, an empty serial, or a serial or
+/// address repeated within the request.
+#[crate::sqlx_test()]
+async fn add_rejects_malformed_dpu_loopback_reservations(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+
+    let cases: [(&str, Vec<rpc::forge::DpuLoopbackReservation>); 4] = [
+        (
+            "reservation with no address",
+            vec![dpu_loopback_reservation("SER1", None, None)],
+        ),
+        (
+            "empty serial",
+            vec![dpu_loopback_reservation("   ", Some("192.0.2.10"), None)],
+        ),
+        (
+            "duplicate serial in request",
+            vec![
+                dpu_loopback_reservation("SER1", Some("192.0.2.10"), None),
+                dpu_loopback_reservation("SER1", Some("192.0.2.11"), None),
+            ],
+        ),
+        (
+            "duplicate ipv4 in request",
+            vec![
+                dpu_loopback_reservation("SER1", Some("192.0.2.10"), None),
+                dpu_loopback_reservation("SER2", Some("192.0.2.10"), None),
+            ],
+        ),
+    ];
+
+    for (case, reservations) in cases {
+        let machine =
+            expected_machine_with_reservations("3A:3B:3C:3D:3E:3F", "VVG121GI", reservations);
+        let err = env
+            .api
+            .add_expected_machine(tonic::Request::new(machine))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "case: {case}");
+    }
+}
+
+/// A reserved address must exist in the matching pool, sit in the
+/// non-auto-assign partition, and be free; a free requestable value is
+/// accepted, and re-submitting the identical reservation stays a no-op even
+/// while the pool value is still free.
+#[crate::sqlx_test()]
+async fn dpu_loopback_reservation_pool_membership(pool: sqlx::PgPool) {
+    use std::net::IpAddr;
+
+    use model::resource_pool::OwnerType;
+
+    let env = create_test_env(pool.clone()).await;
+    let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
+
+    // One requestable free value, one auto-assign value, one value already
+    // allocated to a different owner.
+    let free: IpAddr = "192.0.2.10".parse().unwrap();
+    let auto_assign: IpAddr = "192.0.2.20".parse().unwrap();
+    let taken: IpAddr = "192.0.2.30".parse().unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![free, taken], false)
+        .await
+        .unwrap();
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![auto_assign], true)
+        .await
+        .unwrap();
+    db::resource_pool::allocate_exact(
+        loopback_pool,
+        &mut txn,
+        OwnerType::Machine,
+        "other-dpu",
+        taken,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // A value outside the pool is rejected as invalid.
+    let err = env
+        .api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:01",
+            "VVG12101",
+            vec![dpu_loopback_reservation("D1", Some("198.51.100.1"), None)],
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // An auto-assignable value cannot be explicitly reserved.
+    let err = env
+        .api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:02",
+            "VVG12102",
+            vec![dpu_loopback_reservation("D2", Some("192.0.2.20"), None)],
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    // A value already allocated to another DPU is a precondition failure.
+    let err = env
+        .api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:03",
+            "VVG12103",
+            vec![dpu_loopback_reservation("D3", Some("192.0.2.30"), None)],
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+    // A free, requestable value is accepted.
+    env.api
+        .add_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:04",
+            "VVG12104",
+            vec![dpu_loopback_reservation("D4", Some("192.0.2.10"), None)],
+        )))
+        .await
+        .expect("a free requestable value must be accepted");
+
+    // Re-submitting the identical reservation is a no-op: an unchanged value
+    // skips pool re-validation, so it succeeds even though the pool entry is
+    // still free (it is only claimed when the DPU machine is created).
+    env.api
+        .update_expected_machine(tonic::Request::new(expected_machine_with_reservations(
+            "1A:1B:1C:1D:1E:04",
+            "VVG12104",
+            vec![dpu_loopback_reservation("D4", Some("192.0.2.10"), None)],
+        )))
+        .await
+        .expect("re-submitting an unchanged reservation must be a no-op");
 }

@@ -1565,6 +1565,7 @@ async fn test_expected_machine_device_type_metrics(
                 dpu_policy: Default::default(),
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
+                dpu_loopback_reservations: None,
             },
         },
     )
@@ -1591,6 +1592,7 @@ async fn test_expected_machine_device_type_metrics(
                 dpu_policy: Default::default(),
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
+                dpu_loopback_reservations: None,
             },
         },
     )
@@ -1617,6 +1619,7 @@ async fn test_expected_machine_device_type_metrics(
                 dpu_policy: Default::default(),
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
+                dpu_loopback_reservations: None,
             },
         },
     )
@@ -3120,6 +3123,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
                 dpu_policy: Default::default(),
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
+                dpu_loopback_reservations: None,
             },
         },
     )
@@ -3176,6 +3180,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
         dpu_policy: Default::default(),
         bmc_ip_allocation: Default::default(),
         host_lifecycle_profile: Default::default(),
+        dpu_loopback_reservations: None,
     };
     db::expected_machine::update(&mut txn, &host1_expected_machine).await?;
     txn.commit().await?;
