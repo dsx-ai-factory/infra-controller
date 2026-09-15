@@ -57,6 +57,7 @@ impl Run for Args {
                         disable_lockdown: Some(dl),
                     }),
                 self.interfaces,
+                self.dpu_loopback_reservations,
             )
             .await?;
         Ok(())

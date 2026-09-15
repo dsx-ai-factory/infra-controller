@@ -137,6 +137,7 @@ async fn convert_and_print_into_nice_table(
         "DPF Enabled",
         "Disable Lockdown",
         "DPU Policy",
+        "DPU Loopbacks",
     ]);
 
     for expected_machine in &expected_machines.expected_machines {
@@ -193,12 +194,36 @@ async fn convert_and_print_into_nice_table(
                 .unwrap_or_default()
                 .to_string(),
             dpu_policy_display,
+            format_dpu_loopback_reservations(&expected_machine.dpu_loopback_reservations),
         ]);
     }
 
     async_write!(output, "{}", table)?;
 
     Ok(())
+}
+
+/// Formats the DPU loopback reservations for the table, one reservation per
+/// line as `serial: v4=<addr> v6=<addr>`. A missing address in a family renders
+/// as `-`; no reservations renders as an empty cell.
+fn format_dpu_loopback_reservations(
+    reservations: &Option<::rpc::forge::DpuLoopbackReservationList>,
+) -> String {
+    let Some(list) = reservations else {
+        return String::new();
+    };
+    list.reservations
+        .iter()
+        .map(|reservation| {
+            format!(
+                "{}: v4={} v6={}",
+                reservation.dpu_serial_number,
+                reservation.loopback_ipv4.as_deref().unwrap_or("-"),
+                reservation.loopback_ipv6.as_deref().unwrap_or("-"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Formats the stable Forge compatibility field with policy vocabulary.

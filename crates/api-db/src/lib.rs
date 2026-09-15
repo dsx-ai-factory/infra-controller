@@ -37,6 +37,7 @@ pub mod dpa_interface;
 pub mod dpu_agent_upgrade_policy;
 pub mod dpu_machine_update;
 pub mod dpu_remediation;
+pub mod expected_dpu_loopback_reservation;
 pub mod expected_machine;
 pub mod expected_power_shelf;
 pub mod expected_rack;

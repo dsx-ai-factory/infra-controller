@@ -32,7 +32,7 @@ use model::resource_pool::{
     OwnerType, ResourcePool, ResourcePoolEntry, ResourcePoolEntryState, ResourcePoolError,
     ResourcePoolSnapshot, ResourcePoolStats, ValueType,
 };
-use sqlx::{PgConnection, Postgres};
+use sqlx::{PgConnection, Postgres, Row};
 use tokio::sync::oneshot;
 
 use super::BIND_LIMIT;
@@ -543,6 +543,55 @@ WHERE name = $2 AND value = $3
         return Err(error);
     }
     Ok(())
+}
+
+/// A single materialized pool value's assignment partition and current state.
+#[derive(Debug, Clone)]
+pub struct PoolValueInfo {
+    /// Whether the value is in the auto-assign partition. A value that is
+    /// auto-assignable cannot be explicitly requested via [`allocate`], so a
+    /// deterministic reservation must target a non-auto-assign value.
+    pub auto_assign: bool,
+    /// Free, or Allocated with its owner. A new or changed reservation must
+    /// target a Free value; an already-allocated value belongs to some DPU.
+    pub state: ResourcePoolEntryState,
+}
+
+/// Look up one value in a pool without locking or claiming it.
+///
+/// Returns `None` when the value is not a member of the pool. Callers use this
+/// to validate a requested reservation up front: it must exist, sit in the
+/// non-auto-assign partition, and be free (not already allocated to a DPU). The
+/// pool's own constraints remain the authority at allocation time.
+pub async fn find_value_in_pool<T>(
+    pool: &ResourcePool<T>,
+    db: impl DbReader<'_>,
+    value: &T,
+) -> Result<Option<PoolValueInfo>, DatabaseError>
+where
+    T: ToString + FromStr + Send + Sync + 'static,
+    <T as FromStr>::Err: std::error::Error,
+{
+    let query = "SELECT auto_assign, state FROM resource_pool WHERE name = $1 AND value = $2";
+    let row = sqlx::query(query)
+        .bind(pool.name())
+        .bind(value.to_string())
+        .fetch_optional(db)
+        .await
+        .map_err(|err| DatabaseError::query(query, err))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let auto_assign: bool = row
+        .try_get("auto_assign")
+        .map_err(|err| DatabaseError::query(query, err))?;
+    let state: sqlx::types::Json<ResourcePoolEntryState> = row
+        .try_get("state")
+        .map_err(|err| DatabaseError::query(query, err))?;
+    Ok(Some(PoolValueInfo {
+        auto_assign,
+        state: state.0,
+    }))
 }
 
 pub async fn stats<'c, E>(executor: E, name: &str) -> Result<ResourcePoolStats, DatabaseError>

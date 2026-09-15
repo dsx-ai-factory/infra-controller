@@ -52,6 +52,7 @@ use crate::expected_machines::common::HostDpuPolicy;
 "bmc_ip_allocation",
 "dpf_enabled",
 "interfaces",
+"dpu_loopback_reservations",
 ])))]
 #[command(after_long_help = "\
 EXAMPLES:
@@ -229,6 +230,14 @@ pub(crate) struct Args {
         help = "If true, do not lock down the server as part of lifecycle management within the state machine. If unset or false, preserve the default behavior of locking down the server after configuring the BIOS."
     )]
     pub(super) disable_lockdown: Option<bool>,
+
+    #[clap(
+        long = "dpu-loopback-reservations",
+        value_name = "DPU_LOOPBACK_RESERVATIONS",
+        group = "group",
+        help = "Deterministic DPU underlay loopback reservations as a JSON array of objects (fields: dpu_serial_number, loopback_ipv4, loopback_ipv6), keyed by the trimmed DPU pairing serial number. Replaces the full reservation list for the machine: omit the flag to preserve the stored reservations, or pass an empty array '[]' to clear them. Each reservation requires at least one address drawn from the site's non-auto-assignable lo-ip / lo-ip-v6 pool. Example: '[{\"dpu_serial_number\":\"MT2000X00001\",\"loopback_ipv4\":\"192.0.2.10\"}]'."
+    )]
+    pub(super) dpu_loopback_reservations: Option<String>,
 }
 
 impl Args {
@@ -257,8 +266,9 @@ impl Args {
             && self.dpu_policy.is_none()
             && self.bmc_ip_allocation.is_none()
             && self.interfaces.is_none()
+            && self.dpu_loopback_reservations.is_none()
         {
-            return Err(CarbideCliError::GenericError("one of the following options must be specified: bmc-username and bmc-password or chassis-serial-number or fallback-dpu-serial-number or sku-id or rack-id or bmc-ip-address or dpu-policy or bmc-ip-allocation or dpf-enabled or interfaces".to_string()));
+            return Err(CarbideCliError::GenericError("one of the following options must be specified: bmc-username and bmc-password or chassis-serial-number or fallback-dpu-serial-number or sku-id or rack-id or bmc-ip-address or dpu-policy or bmc-ip-allocation or dpf-enabled or interfaces or dpu-loopback-reservations".to_string()));
         }
         if self
             .fallback_dpu_serial_numbers
