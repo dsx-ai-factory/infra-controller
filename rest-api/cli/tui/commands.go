@@ -4,10 +4,13 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -1299,7 +1302,36 @@ func cmdOSList(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return printResourceTable(os.Stdout, "NAME", "STATUS", "ID", items)
+	fmt.Fprintf(os.Stderr, "%d items\n", len(items))
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tSTATUS\tTYPE\tID")
+	for _, item := range items {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", item.Name, item.Status, item.Extra["type"], item.ID)
+	}
+	return tw.Flush()
+}
+
+const (
+	operatingSystemTypeIPXE             = "iPXE"
+	operatingSystemTypeImage            = "Image"
+	operatingSystemTypeTemplatedIPXE    = "Templated iPXE"
+	operatingSystemAPITypeTemplatedIPXE = "TemplatedIpxe"
+	rootFilesystemTypeID                = "ID"
+	rootFilesystemTypeLabel             = "Label"
+	authTypeNone                        = "None"
+	authTypeBasic                       = "Basic"
+	authTypeBearer                      = "Bearer"
+	artifactCacheStrategyAsNeeded       = "Cache as needed"
+	artifactCacheStrategyLocalOnly      = "Local only"
+	artifactCacheStrategyCachedOnly     = "Cached only"
+	artifactCacheStrategyRemoteOnly     = "Remote only"
+)
+
+var artifactCacheStrategyValues = map[string]string{
+	artifactCacheStrategyAsNeeded:   "CacheAsNeeded",
+	artifactCacheStrategyLocalOnly:  "LocalOnly",
+	artifactCacheStrategyCachedOnly: "CachedOnly",
+	artifactCacheStrategyRemoteOnly: "RemoteOnly",
 }
 
 func cmdOSCreate(s *Session, _ []string) error {
@@ -1311,14 +1343,257 @@ func cmdOSCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	tenantID, err := s.getTenantID(context.Background())
-	if err != nil {
-		return fmt.Errorf("resolving tenant id: %w", err)
+	body := map[string]interface{}{
+		"name": name,
 	}
+	if strings.TrimSpace(desc) != "" {
+		body["description"] = strings.TrimSpace(desc)
+	}
+
+	ctx := context.Background()
+	osType, err := promptOperatingSystemType(s, ctx)
+	if err != nil {
+		return err
+	}
+	switch osType {
+	case operatingSystemTypeIPXE:
+		err = promptRawIPXEOperatingSystem(body)
+	case operatingSystemTypeTemplatedIPXE:
+		err = promptTemplatedIPXEOperatingSystem(s, ctx, body)
+	case operatingSystemTypeImage:
+		err = promptImageOperatingSystem(s, ctx, body)
+	default:
+		err = fmt.Errorf("unsupported operating system type %q", osType)
+	}
+	if err != nil {
+		return err
+	}
+	err = promptOperatingSystemOptions(body)
+	if err != nil {
+		return err
+	}
+
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encoding operating system request: %w", err)
+	}
+	logBodyJSON, err := redactAuthTokenJSON(bodyJSON)
+	if err != nil {
+		return fmt.Errorf("redacting operating system request for logging: %w", err)
+	}
+	logBody := shellQuoteCLIArg(string(logBodyJSON))
+	LogCmd(s, "operating-system", "create", "--data", logBody)
+	resp, _, err := s.Client.Do("POST", apiPath(s, "operating-system"), nil, nil, bodyJSON)
+	if err != nil {
+		return fmt.Errorf("creating operating system: %w", err)
+	}
+	s.Cache.Invalidate("operating-system")
+	created, err := parseMutationResponseRequiringID(resp, "created operating system")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s Operating system created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
+	return nil
+}
+
+func promptOperatingSystemType(s *Session, ctx context.Context) (string, error) {
+	_, err := s.getTenantID(ctx)
+	if err == nil {
+		return PromptChoice(
+			"Operating system type",
+			[]string{
+				operatingSystemTypeIPXE,
+				operatingSystemTypeImage,
+				operatingSystemTypeTemplatedIPXE,
+			},
+			"",
+		)
+	}
+
+	apiErr := &cli.APIError{}
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+		return "", fmt.Errorf("determining operating system owner type: %w", err)
+	}
+	_, err = s.getInfrastructureProviderID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("determining operating system owner type: %w", err)
+	}
+	fmt.Printf(
+		"%s %s %s\n",
+		Bold("Operating system type:"),
+		Green(operatingSystemTypeTemplatedIPXE),
+		Dim("(default for providers)"),
+	)
+	return operatingSystemTypeTemplatedIPXE, nil
+}
+
+func promptRawIPXEOperatingSystem(body map[string]interface{}) error {
 	ipxeScript, err := PromptText("iPXE script or URL", true)
 	if err != nil {
 		return err
 	}
+	body["ipxeScript"] = ipxeScript
+	return nil
+}
+
+func promptTemplatedIPXEOperatingSystem(
+	s *Session,
+	ctx context.Context,
+	body map[string]interface{},
+) error {
+	site, err := s.Resolver.Resolve(ctx, "site", "Site")
+	if err != nil {
+		return err
+	}
+	templates, err := s.fetchIPXETemplatesForSite(site.ID)
+	if err != nil {
+		return fmt.Errorf("fetching ipxe-template: %w", err)
+	}
+	template, err := s.Resolver.SelectFromItems("iPXE template", templates)
+	if err != nil {
+		return err
+	}
+	body["siteIds"] = []string{site.ID}
+	body["ipxeTemplateId"] = template.ID
+	err = promptIPXETemplateRequirements(template, body)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func promptIPXETemplateRequirements(template *NamedItem, body map[string]interface{}) error {
+	parameters, err := promptIPXETemplateParameters(template)
+	if err != nil {
+		return err
+	}
+	if len(parameters) > 0 {
+		body["ipxeTemplateParameters"] = parameters
+	}
+	artifacts, err := promptIPXETemplateArtifacts(template)
+	if err != nil {
+		return err
+	}
+	if len(artifacts) > 0 {
+		body["ipxeTemplateArtifacts"] = artifacts
+	}
+	return nil
+}
+
+func promptIPXETemplateParameters(template *NamedItem) ([]map[string]interface{}, error) {
+	requiredParameters, err := namedItemStringList(template, "requiredParams")
+	if err != nil {
+		return nil, fmt.Errorf("reading required iPXE template parameters: %w", err)
+	}
+	parameters := make([]map[string]interface{}, 0, len(requiredParameters))
+	for _, parameterName := range requiredParameters {
+		value, promptErr := PromptText(fmt.Sprintf("Value for parameter %s", parameterName), true)
+		if promptErr != nil {
+			return nil, promptErr
+		}
+		parameters = append(parameters, map[string]interface{}{
+			"name":  parameterName,
+			"value": value,
+		})
+	}
+	return parameters, nil
+}
+
+func promptIPXETemplateArtifacts(template *NamedItem) ([]map[string]interface{}, error) {
+	requiredArtifacts, err := namedItemStringList(template, "requiredArtifacts")
+	if err != nil {
+		return nil, fmt.Errorf("reading required iPXE template artifacts: %w", err)
+	}
+	artifacts := make([]map[string]interface{}, 0, len(requiredArtifacts))
+	for _, artifactName := range requiredArtifacts {
+		artifact, promptErr := promptIPXETemplateArtifact(artifactName)
+		if promptErr != nil {
+			return nil, promptErr
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	return artifacts, nil
+}
+
+func namedItemStringList(item *NamedItem, field string) ([]string, error) {
+	raw, ok := item.Raw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("selected item has no response object")
+	}
+	value, exists := raw[field]
+	if !exists || value == nil {
+		return nil, nil
+	}
+
+	stringsValue, ok := value.([]string)
+	if ok {
+		return append([]string(nil), stringsValue...), nil
+	}
+	interfaceValue, ok := value.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("field %q is not a string list", field)
+	}
+	result := make([]string, 0, len(interfaceValue))
+	for index, entry := range interfaceValue {
+		name, entryOK := entry.(string)
+		if !entryOK {
+			return nil, fmt.Errorf("field %q entry %d is not a string", field, index)
+		}
+		result = append(result, name)
+	}
+	return result, nil
+}
+
+func promptIPXETemplateArtifact(name string) (map[string]interface{}, error) {
+	artifactURL, err := PromptText(fmt.Sprintf("URL for artifact %s", name), true)
+	if err != nil {
+		return nil, err
+	}
+	artifactSHA, err := PromptText(fmt.Sprintf("SHA for artifact %s (optional)", name), false)
+	if err != nil {
+		return nil, err
+	}
+	authType, authToken, err := promptOptionalAuth(
+		fmt.Sprintf("Auth type for artifact %s", name),
+		fmt.Sprintf("Auth token for artifact %s", name),
+	)
+	if err != nil {
+		return nil, err
+	}
+	cacheStrategyLabel, err := PromptChoice(
+		fmt.Sprintf("Cache strategy for artifact %s", name),
+		[]string{
+			artifactCacheStrategyAsNeeded,
+			artifactCacheStrategyLocalOnly,
+			artifactCacheStrategyCachedOnly,
+			artifactCacheStrategyRemoteOnly,
+		},
+		"",
+	)
+	if err != nil {
+		return nil, err
+	}
+	cacheStrategy, ok := artifactCacheStrategyValues[cacheStrategyLabel]
+	if !ok {
+		return nil, fmt.Errorf("unsupported artifact cache strategy %q", cacheStrategyLabel)
+	}
+
+	artifact := map[string]interface{}{
+		"name":          name,
+		"url":           artifactURL,
+		"cacheStrategy": cacheStrategy,
+	}
+	if artifactSHA != "" {
+		artifact["sha"] = artifactSHA
+	}
+	if authType != "" {
+		artifact["authType"] = authType
+		artifact["authToken"] = authToken
+	}
+	return artifact, nil
+}
+
+func promptOperatingSystemOptions(body map[string]interface{}) error {
 	userData, err := PromptText("User data (optional)", false)
 	if err != nil {
 		return err
@@ -1331,37 +1606,154 @@ func cmdOSCreate(s *Session, _ []string) error {
 	if err != nil {
 		return err
 	}
-	body := map[string]interface{}{
-		"name":             name,
-		"tenantId":         tenantID,
-		"ipxeScript":       ipxeScript,
-		"allowOverride":    allowOverride,
-		"phoneHomeEnabled": phoneHomeEnabled,
-	}
-	if strings.TrimSpace(desc) != "" {
-		body["description"] = strings.TrimSpace(desc)
-	}
+	body["allowOverride"] = allowOverride
+	body["phoneHomeEnabled"] = phoneHomeEnabled
 	if strings.TrimSpace(userData) != "" {
 		body["userData"] = strings.TrimSpace(userData)
 	}
-	LogCmd(s, "operating-system", "create", "--name", name)
-	bodyJSON, _ := json.Marshal(body)
-	resp, _, err := s.Client.Do("POST", apiPath(s, "operating-system"), nil, nil, bodyJSON)
-	if err != nil {
-		return fmt.Errorf("creating operating system: %w", err)
-	}
-	s.Cache.Invalidate("operating-system")
-	s.Cache.InvalidateFiltered()
-	created, err := parseMutationResponseRequiringID(resp, "created operating system")
-	if err != nil {
-		return err
-	}
-	fmt.Printf("%s Operating system created: %s (%s)\n", Green("OK"), str(created, "name"), str(created, "id"))
 	return nil
 }
 
+func promptImageOperatingSystem(
+	s *Session,
+	ctx context.Context,
+	body map[string]interface{},
+) error {
+	site, err := s.Resolver.Resolve(ctx, "site", "Site")
+	if err != nil {
+		return err
+	}
+	imageURL, err := PromptText("Image URL", true)
+	if err != nil {
+		return err
+	}
+	imageSHA, err := PromptText("Image SHA", true)
+	if err != nil {
+		return err
+	}
+	body["siteIds"] = []string{site.ID}
+	body["imageUrl"] = imageURL
+	body["imageSha"] = imageSHA
+	err = promptRootFilesystem(body)
+	if err != nil {
+		return err
+	}
+	imageAuthType, imageAuthToken, err := promptOptionalAuth(
+		"Image authentication type",
+		"Image auth token",
+	)
+	if err != nil {
+		return err
+	}
+	if imageAuthType != "" {
+		body["imageAuthType"] = imageAuthType
+		body["imageAuthToken"] = imageAuthToken
+	}
+	imageDisk, err := PromptText("Image disk (optional)", false)
+	if err != nil {
+		return err
+	}
+	if imageDisk != "" {
+		body["imageDisk"] = imageDisk
+	}
+	return nil
+}
+
+func promptRootFilesystem(body map[string]interface{}) error {
+	rootFilesystemType, err := PromptChoice(
+		"Specify root filesystem by",
+		[]string{
+			rootFilesystemTypeID,
+			rootFilesystemTypeLabel,
+		},
+		"",
+	)
+	if err != nil {
+		return err
+	}
+	if rootFilesystemType == rootFilesystemTypeID {
+		rootFilesystemID, promptErr := PromptText("Root filesystem ID", true)
+		if promptErr != nil {
+			return promptErr
+		}
+		body["rootFsId"] = rootFilesystemID
+		return nil
+	}
+	rootFilesystemLabel, err := PromptText("Root filesystem label", true)
+	if err != nil {
+		return err
+	}
+	body["rootFsLabel"] = rootFilesystemLabel
+	return nil
+}
+
+func promptOptionalAuth(authTypeLabel string, authTokenLabel string) (string, string, error) {
+	authType, err := PromptChoice(
+		authTypeLabel,
+		[]string{
+			authTypeNone,
+			authTypeBasic,
+			authTypeBearer,
+		},
+		authTypeNone,
+	)
+	if err != nil {
+		return "", "", err
+	}
+	if authType == authTypeNone {
+		return "", "", nil
+	}
+	authToken, err := PromptSecret(authTokenLabel, true)
+	if err != nil {
+		return "", "", err
+	}
+	return authType, authToken, nil
+}
+
+func redactAuthTokenJSON(bodyJSON []byte) ([]byte, error) {
+	var body interface{}
+	decoder := json.NewDecoder(bytes.NewReader(bodyJSON))
+	decoder.UseNumber()
+	err := decoder.Decode(&body)
+	if err != nil {
+		return nil, err
+	}
+	redactAuthTokenValues(body)
+
+	var redacted bytes.Buffer
+	encoder := json.NewEncoder(&redacted)
+	encoder.SetEscapeHTML(false)
+	err = encoder.Encode(body)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.TrimSpace(redacted.Bytes()), nil
+}
+
+func redactAuthTokenValues(value interface{}) {
+	switch typedValue := value.(type) {
+	case map[string]interface{}:
+		for key, nestedValue := range typedValue {
+			if key == "authToken" || key == "imageAuthToken" {
+				typedValue[key] = "<redacted>"
+				continue
+			}
+			redactAuthTokenValues(nestedValue)
+		}
+	case []interface{}:
+		for _, nestedValue := range typedValue {
+			redactAuthTokenValues(nestedValue)
+		}
+	}
+}
+
 func cmdOSUpdate(s *Session, args []string) error {
-	item, err := s.Resolver.ResolveWithArgs(context.Background(), "operating-system", "Operating System to update", args)
+	ctx := context.Background()
+	item, err := s.Resolver.ResolveWithArgs(ctx, "operating-system", "Operating System to update", args)
+	if err != nil {
+		return err
+	}
+	osType, err := operatingSystemTypeFromItem(item)
 	if err != nil {
 		return err
 	}
@@ -1373,27 +1765,6 @@ func cmdOSUpdate(s *Session, args []string) error {
 	if err != nil {
 		return err
 	}
-	ipxeScript, err := PromptText("iPXE script or URL (optional)", false)
-	if err != nil {
-		return err
-	}
-	userData, err := PromptText("User data (optional)", false)
-	if err != nil {
-		return err
-	}
-	allowOverrideText, err := PromptText("Allow override? (true/false, blank to keep)", false)
-	if err != nil {
-		return err
-	}
-	phoneHomeText, err := PromptText("Phone home enabled? (true/false, blank to keep)", false)
-	if err != nil {
-		return err
-	}
-	activeText, err := PromptText("Set active? (true/false, blank to keep)", false)
-	if err != nil {
-		return err
-	}
-
 	body := map[string]interface{}{}
 	if strings.TrimSpace(name) != "" {
 		body["name"] = strings.TrimSpace(name)
@@ -1401,21 +1772,50 @@ func cmdOSUpdate(s *Session, args []string) error {
 	if strings.TrimSpace(desc) != "" {
 		body["description"] = strings.TrimSpace(desc)
 	}
-	if strings.TrimSpace(ipxeScript) != "" {
-		body["ipxeScript"] = strings.TrimSpace(ipxeScript)
+
+	switch osType {
+	case operatingSystemTypeIPXE:
+		err = promptRawIPXEOperatingSystemUpdate(body)
+	case operatingSystemTypeImage:
+		err = promptImageOperatingSystemUpdate(body)
+	case operatingSystemTypeTemplatedIPXE:
+		err = promptTemplatedIPXEOperatingSystemUpdate(s, item, body)
+	default:
+		err = fmt.Errorf("unsupported operating system type %q", osType)
 	}
+	if err != nil {
+		return err
+	}
+
+	userData, err := PromptText("User data (optional)", false)
+	if err != nil {
+		return err
+	}
+	allowOverride, hasAllowOverride, err := PromptOptionalBool("Allow override?")
+	if err != nil {
+		return err
+	}
+	phoneHomeEnabled, hasPhoneHomeEnabled, err := PromptOptionalBool("Phone home enabled?")
+	if err != nil {
+		return err
+	}
+	isActive, hasIsActive, err := PromptOptionalBool("Set active?")
+	if err != nil {
+		return err
+	}
+
 	if strings.TrimSpace(userData) != "" {
 		body["userData"] = strings.TrimSpace(userData)
 	}
-	if v, ok := parseOptionalBool(allowOverrideText); ok {
-		body["allowOverride"] = v
+	if hasAllowOverride {
+		body["allowOverride"] = allowOverride
 	}
-	if v, ok := parseOptionalBool(phoneHomeText); ok {
-		body["phoneHomeEnabled"] = v
+	if hasPhoneHomeEnabled {
+		body["phoneHomeEnabled"] = phoneHomeEnabled
 	}
-	if v, ok := parseOptionalBool(activeText); ok {
-		body["isActive"] = v
-		if !v {
+	if hasIsActive {
+		body["isActive"] = isActive
+		if !isActive {
 			note, err := PromptText("Deactivation note (optional)", false)
 			if err != nil {
 				return err
@@ -1428,8 +1828,16 @@ func cmdOSUpdate(s *Session, args []string) error {
 	if len(body) == 0 {
 		return fmt.Errorf("no updates provided")
 	}
-	LogCmd(s, "operating-system", "update", item.ID)
-	bodyJSON, _ := json.Marshal(body)
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encoding operating system update request: %w", err)
+	}
+	logBodyJSON, err := redactAuthTokenJSON(bodyJSON)
+	if err != nil {
+		return fmt.Errorf("redacting operating system update request for logging: %w", err)
+	}
+	logBody := shellQuoteCLIArg(string(logBodyJSON))
+	LogCmd(s, "operating-system", "update", item.ID, "--data", logBody)
 	resp, _, err := s.Client.Do("PATCH", apiPath(s, "operating-system/{id}"), map[string]string{"id": item.ID}, nil, bodyJSON)
 	if err != nil {
 		return fmt.Errorf("updating operating system: %w", err)
@@ -1441,6 +1849,148 @@ func cmdOSUpdate(s *Session, args []string) error {
 		return err
 	}
 	fmt.Printf("%s Operating system updated: %s (%s)\n", Green("OK"), str(updated, "name"), str(updated, "id"))
+	return nil
+}
+
+func operatingSystemTypeFromItem(item *NamedItem) (string, error) {
+	osType := ""
+	if item.Extra != nil {
+		osType = strings.TrimSpace(item.Extra["type"])
+	}
+	if osType == "" {
+		raw, err := operatingSystemRaw(item)
+		if err != nil {
+			return "", err
+		}
+		osType = strings.TrimSpace(str(raw, "type"))
+	}
+
+	switch {
+	case strings.EqualFold(osType, operatingSystemTypeIPXE):
+		return operatingSystemTypeIPXE, nil
+	case strings.EqualFold(osType, operatingSystemTypeImage):
+		return operatingSystemTypeImage, nil
+	case strings.EqualFold(osType, operatingSystemTypeTemplatedIPXE),
+		strings.EqualFold(osType, operatingSystemAPITypeTemplatedIPXE):
+		return operatingSystemTypeTemplatedIPXE, nil
+	default:
+		return "", fmt.Errorf("operating system %q has unsupported type %q", item.Name, osType)
+	}
+}
+
+func operatingSystemRaw(item *NamedItem) (map[string]interface{}, error) {
+	raw, ok := item.Raw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("operating system %q has no response object", item.Name)
+	}
+	return raw, nil
+}
+
+func promptRawIPXEOperatingSystemUpdate(body map[string]interface{}) error {
+	ipxeScript, err := PromptText("iPXE script or URL (optional)", false)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(ipxeScript) != "" {
+		body["ipxeScript"] = strings.TrimSpace(ipxeScript)
+	}
+	return nil
+}
+
+func promptImageOperatingSystemUpdate(body map[string]interface{}) error {
+	updateAuth, err := PromptConfirm("Update image authentication?")
+	if err != nil {
+		return err
+	}
+	if updateAuth {
+		authType, authToken, promptErr := promptOptionalAuth(
+			"Image authentication type",
+			"Image auth token",
+		)
+		if promptErr != nil {
+			return promptErr
+		}
+		body["imageAuthType"] = authType
+		body["imageAuthToken"] = authToken
+	}
+
+	updateDisk, err := PromptConfirm("Update image disk?")
+	if err != nil {
+		return err
+	}
+	if updateDisk {
+		imageDisk, promptErr := PromptText("Image disk (blank to clear)", false)
+		if promptErr != nil {
+			return promptErr
+		}
+		body["imageDisk"] = imageDisk
+	}
+
+	return nil
+}
+
+func promptTemplatedIPXEOperatingSystemUpdate(
+	s *Session,
+	item *NamedItem,
+	body map[string]interface{},
+) error {
+	updateParameters, err := PromptConfirm("Update iPXE template parameters?")
+	if err != nil {
+		return err
+	}
+	var template *NamedItem
+	loadTemplate := func() error {
+		if template != nil {
+			return nil
+		}
+		raw, loadErr := operatingSystemRaw(item)
+		if loadErr != nil {
+			return loadErr
+		}
+		templateID := strings.TrimSpace(str(raw, "ipxeTemplateId"))
+		if templateID == "" {
+			return fmt.Errorf("templated iPXE operating system %q has no ipxeTemplateId", item.Name)
+		}
+		templates, loadErr := s.fetchIPXETemplatesForSite("")
+		if loadErr != nil {
+			return fmt.Errorf("fetching ipxe-template: %w", loadErr)
+		}
+		for index := range templates {
+			if templates[index].ID == templateID {
+				template = &templates[index]
+				return nil
+			}
+		}
+		return fmt.Errorf("iPXE template %q used by operating system %q is unavailable", templateID, item.Name)
+	}
+
+	if updateParameters {
+		err = loadTemplate()
+		if err != nil {
+			return err
+		}
+		parameters, promptErr := promptIPXETemplateParameters(template)
+		if promptErr != nil {
+			return promptErr
+		}
+		body["ipxeTemplateParameters"] = parameters
+	}
+
+	updateArtifacts, err := PromptConfirm("Update iPXE template artifacts?")
+	if err != nil {
+		return err
+	}
+	if updateArtifacts {
+		err = loadTemplate()
+		if err != nil {
+			return err
+		}
+		artifacts, promptErr := promptIPXETemplateArtifacts(template)
+		if promptErr != nil {
+			return promptErr
+		}
+		body["ipxeTemplateArtifacts"] = artifacts
+	}
 	return nil
 }
 

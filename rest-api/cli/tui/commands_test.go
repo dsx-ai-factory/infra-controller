@@ -359,6 +359,54 @@ func TestCmdMachineListRendersIPAddresses(t *testing.T) {
 	assert.Empty(t, strings.TrimSpace(blank[ipAddressColumn:statusColumn]))
 }
 
+func TestCmdOSListRendersType(t *testing.T) {
+	cache := NewCache()
+	cache.Set("operating-system", []NamedItem{
+		{
+			Name:   "template-os",
+			ID:     "os-1",
+			Status: "Ready",
+			Extra: map[string]string{
+				"type": "Templated iPXE",
+			},
+		},
+	})
+	session := &Session{
+		Cache: cache,
+	}
+	session.Resolver = NewResolver(cache)
+
+	var runErr error
+	output := captureStdout(func() {
+		runErr = cmdOSList(session, nil)
+	})
+	require.NoError(t, runErr)
+
+	lines := strings.Split(output, "\n")
+	var header string
+	var row string
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "NAME"):
+			header = line
+		case strings.HasPrefix(line, "template-os"):
+			row = line
+		}
+	}
+	require.NotEmpty(t, header)
+	require.NotEmpty(t, row)
+
+	statusColumn := strings.Index(header, "STATUS")
+	typeColumn := strings.Index(header, "TYPE")
+	idColumn := strings.Index(header, "ID")
+	require.Greater(t, statusColumn, 0)
+	require.Greater(t, typeColumn, statusColumn)
+	require.Greater(t, idColumn, typeColumn)
+	assert.Equal(t, "Ready", strings.TrimSpace(row[statusColumn:typeColumn]))
+	assert.Equal(t, "Templated iPXE", strings.TrimSpace(row[typeColumn:idColumn]))
+	assert.Equal(t, "os-1", strings.TrimSpace(row[idColumn:]))
+}
+
 // --- VPC scope coverage tests ---
 
 func TestAppendScopeFlags_SiteOnly(t *testing.T) {
@@ -1386,6 +1434,52 @@ func TestPromptSequenceDoesNotConsumeLaterPipedLines(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "value:true", got)
+}
+
+func TestPromptOptionalBool(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		expected    bool
+		hasExpected bool
+	}{
+		{
+			name:        "blank keeps existing value",
+			input:       "\n",
+			expected:    false,
+			hasExpected: false,
+		},
+		{
+			name:        "yes updates to true",
+			input:       "y\n",
+			expected:    true,
+			hasExpected: true,
+		},
+		{
+			name:        "no updates to false",
+			input:       "n\n",
+			expected:    false,
+			hasExpected: true,
+		},
+		{
+			name:        "invalid input retries",
+			input:       "maybe\nyes\n",
+			expected:    true,
+			hasExpected: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := withStdin(t, test.input, func() (string, error) {
+				value, hasValue, promptErr := PromptOptionalBool("Update value?")
+				return fmt.Sprintf("%t:%t", value, hasValue), promptErr
+			})
+
+			require.NoError(t, err)
+			assert.Equal(t, fmt.Sprintf("%t:%t", test.expected, test.hasExpected), result)
+		})
+	}
 }
 
 func TestReadPromptLinePreservesNonEOFReadError(t *testing.T) {
