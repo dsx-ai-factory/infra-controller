@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -208,7 +207,7 @@ func main() {
 	}
 
 	tc, err = tsdkClient.NewLazyClient(tsdkClient.Options{
-		HostPort:  fmt.Sprintf("%v:%v", tcfg.Host, tcfg.Port),
+		HostPort:  tcfg.GetHostPort(),
 		Namespace: tcfg.Namespace,
 		ConnectionOptions: tsdkClient.ConnectionOptions{
 			TLS: tcfg.ClientTLSCfg,
