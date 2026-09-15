@@ -714,6 +714,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -756,6 +757,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -808,6 +810,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -857,6 +860,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -896,6 +900,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -962,6 +967,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1001,6 +1007,7 @@ async fn test_instance_upgrading_actual_part_2(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1068,6 +1075,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1139,6 +1147,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1211,6 +1220,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1250,6 +1260,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1287,6 +1298,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,
@@ -1319,6 +1331,7 @@ async fn test_instance_upgrading_actual_part_3(
     assert_eq!(
         instance_snapshot_derive_status(
             &instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,

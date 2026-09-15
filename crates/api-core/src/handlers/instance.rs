@@ -2053,7 +2053,7 @@ async fn update_instance_extension_services_config(
     // A service being detached remains durably represented with `removed:
     // true`, so the merged config references every service the instance is
     // attached to before and after this update.
-    let new_extension_services_config =
+    let mut new_extension_services_config =
         current.calculate_new_extension_services_config(extension_services);
     let service_ids = new_extension_services_config
         .service_configs
@@ -2064,6 +2064,11 @@ async fn update_instance_extension_services_config(
 
     // Resolve the services while holding the service and version row locks.
     let (services, versions) = load_extension_services(txn, &service_ids).await?;
+    for config in &mut new_extension_services_config.service_configs {
+        if let Some(service) = services.get(&config.service_id) {
+            config.dpu_target = service.dpu_target;
+        }
+    }
     let existing_active_service_ids = current
         .active_services()
         .into_iter()
