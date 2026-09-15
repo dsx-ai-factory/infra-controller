@@ -33,7 +33,7 @@ use futures::StreamExt;
 use serde_json::{Map, Value};
 
 use crate::http;
-use crate::redfish::expander_router::{BufferError, json_bytes, member_json};
+use crate::redfish::expander_router::{BufferError, MemberRequestError, json_bytes, member_json};
 use crate::redfish::filter::Filter;
 
 /// The `$` parameters some layer of this mock serves. Any other is a 501,
@@ -337,13 +337,18 @@ impl Querying {
     /// whose resource cannot be read — gone since the collection was listed,
     /// or misconfigured — is left out and logged.
     async fn referenced_member_admitted(mut self, filter: &Filter, uri: &str) -> bool {
-        let request = Request::builder()
+        let member = match Request::builder()
             .method(Method::GET)
             .uri(uri)
             .body(Body::empty())
-            .expect("a member's @odata.id is a request URI");
-        let response = self.call_inner_router(request).await;
-        match member_json(response, uri.to_owned()).await {
+        {
+            Ok(request) => {
+                let response = self.call_inner_router(request).await;
+                member_json(response, uri.to_owned()).await
+            }
+            Err(error) => Err(MemberRequestError::InvalidUri(uri.to_owned(), error)),
+        };
+        match member {
             Ok(member) => filter.admits(&member),
             Err(error) => {
                 tracing::warn!(%error, "collection member left out of a filtered answer");
@@ -722,8 +727,11 @@ mod tests {
             axum::routing::get(|| async {
                 axum::Json(serde_json::json!({
                     "@odata.id": "/things",
-                    "Members": [{"@odata.id": "/things/gone"}],
-                    "Members@odata.count": 1,
+                    "Members": [
+                        {"@odata.id": "/things/gone"},
+                        {"@odata.id": "not a request uri"},
+                    ],
+                    "Members@odata.count": 2,
                 }))
             }),
         ));

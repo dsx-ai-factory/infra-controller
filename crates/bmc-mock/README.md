@@ -228,7 +228,7 @@ than an append-only list:
 - Lifecycle entries carry `Created` at one-second resolution, `MessageId`,
   `Severity`, and `Links.OriginOfCondition`, matching the Event published for
   them. A client resuming from the newest entry it holds asks for
-  `$filter=Created gt <that instant>`.
+  `$filter=Created gt 2026-02-12T02:06:58Z`, the `Created` of that entry.
 
 ## Query parameters
 
@@ -241,11 +241,11 @@ then `$skip` and `$top`, then `$expand`.
   `le` against a `'quoted string'`, a number, `true`, `false`, `null`, or a
   bare RFC 3339 instant, combined with `and`, `or`, `not`, and parentheses.
   A string property compares as an instant or a number when the literal is
-  one and the property reads as one, so `Created gt <instant>` works across
-  offsets and `Id gt 12` works although `Id` is a string. Members served as
-  references are judged by the resource they point at and stay references; a
-  member whose resource cannot be read is left out and logged. The service
-  root advertises `ProtocolFeaturesSupported.FilterQuery`.
+  one and the property reads as one, so `Created gt 2026-02-12T02:06:58Z`
+  works across offsets and `Id gt 12` works although `Id` is a string.
+  Members served as references are judged by the resource they point at and
+  stay references; a member whose resource cannot be read is left out and
+  logged. The service root advertises `ProtocolFeaturesSupported.FilterQuery`.
 - `Members@odata.count` is the number of members after `$filter`. `$skip`
   and `$top` page those; a collection with a page size of its own (the Dell
   R750 event log) pages at that size even without `$top`, and `$top` may

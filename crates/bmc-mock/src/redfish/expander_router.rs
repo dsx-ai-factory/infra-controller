@@ -241,6 +241,8 @@ pub(super) async fn member_json(
 
 #[derive(thiserror::Error, Debug)]
 pub(super) enum MemberRequestError {
+    #[error("member @odata.id {0} is not a request URI: {1}")]
+    InvalidUri(String, axum::http::Error),
     #[error("inner request to URI {0} returned failure: {1:?}, body: {2}")]
     UnsuccessfulResponse(String, axum::http::response::Parts, String),
     #[error("inner request to URI {0} returned a non-JSON {1} response")]
