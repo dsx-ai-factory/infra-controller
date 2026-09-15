@@ -29288,7 +29288,9 @@ components:
           type: integer
           format: uint64
           minimum: 0
-          description: Total number of IP addresses in the block (acquired and unused)
+          description: |
+            Total number of IP addresses in the block (acquired and unused), capped at 2,147,483,647.
+            An IP Block allocated to one child prefix of the same size reports zero.
           readOnly: true
         acquiredIPs:
           type: integer
@@ -29307,7 +29309,9 @@ components:
         availableSmallestPrefixes:
           type: integer
           description: |
-            Total number of /30 prefixes that can still be acquired from this block (only reduced if prefixes are acquired, not reduced by acquired IPs)
+            Number of complete `/30` IPv4 prefixes or `/126` IPv6 prefixes remaining after acquired child prefixes are excluded.
+            Both prefix sizes contain four addresses. The count is capped at 2,147,483,647.
+            The `acquiredIPs` count is not subtracted.
           format: uint64
           minimum: 0
           readOnly: true
