@@ -25,6 +25,34 @@ helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
 When `mat-k8s-controller` is enabled, it always deploys into the same namespace
 as nico-machine-a-tron. The controller does not support a separate namespace.
 
+## Helm-only Deployment
+
+The chart creates the namespace, its `nico.nvidia.com/managed` label and the
+image pull Secret that `helm-prereqs/setup-machine-a-tron.sh` otherwise creates,
+so no setup script is required once helm-prereqs (cert-manager ClusterIssuer,
+ESO) is installed:
+
+- `global.namespaceOverride` with `createNamespace: true` creates the namespace
+  and labels it `nico.nvidia.com/managed: "true"`, so the `nico-roots`
+  ClusterExternalSecret from helm-prereqs syncs the site CA into it.
+- `imagePullSecret.create: true` creates the `image-pull-secret` Secret from the
+  base64-encoded docker config JSON in `imagePullSecret.dockerconfigjson`. It is
+  an ordinary release resource, so Helm creates the Namespace before it and the
+  Deployments after it. Reference it from `global.imagePullSecrets`.
+- A pod that defines only `racks` (clearing the default group with
+  `machines.rack-machines: null`) still gets the bare `[machines]` table that
+  machine-a-tron requires at startup. A pod whose racks and machine groups are
+  all `null` renders nothing.
+
+```bash
+helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
+  --set global.namespaceOverride=nico-mat \
+  --set imagePullSecret.create=true \
+  --set imagePullSecret.dockerconfigjson="$(base64 < ~/.docker/config.json | tr -d '\n')" \
+  --set 'global.imagePullSecrets[0].name=image-pull-secret' \
+  -f my-values.yaml
+```
+
 ## Deployment Modes
 
 | Mode | Use Case | Real HW Compatible | Network Setup |
@@ -350,8 +378,8 @@ StorageClass capable of satisfying the request, or an eligible pre-provisioned
 PersistentVolume.
 
 The chart creates one PersistentVolumeClaim for each configured `pods` entry
-that contains at least one machine group. It mounts the claim at
-`machineATron.persistDir`, which defaults to `/tmp/machine-a-tron-data`.
+that contains at least one non-null rack or machine group. It mounts the claim
+at `machineATron.persistDir`, which defaults to `/tmp/machine-a-tron-data`.
 Machine-a-tron stores simulated machine identity and installed operating-system
 state there. On a graceful pod restart it restores the devices and resumes them
 powered on. Without persistence, a restart creates new powered-off simulator

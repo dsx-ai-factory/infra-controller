@@ -50,12 +50,39 @@ app.kubernetes.io/component: machine-a-tron
 {{- end }}
 
 {{/*
+Whether a pods.<name> entry is configured: it has at least one non-null rack
+or one non-null machine group. A values file that clears an entry with
+`<name>: null` leaves the key in the map, so len alone would count a pod that
+renders nothing.
+Returns "true" or "" so callers can test the result with `if`.
+Usage: {{- if include "nico-machine-a-tron.podConfigured" $podConfig }}
+*/}}
+{{- define "nico-machine-a-tron.podConfigured" -}}
+{{- if . -}}
+{{- $sections := 0 -}}
+{{- range $_, $rack := .racks | default dict -}}
+{{- if $rack -}}
+{{- $sections = add1 $sections -}}
+{{- end -}}
+{{- end -}}
+{{- range $_, $group := .machines | default dict -}}
+{{- if $group -}}
+{{- $sections = add1 $sections -}}
+{{- end -}}
+{{- end -}}
+{{- if gt $sections 0 -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Count configured pods.
 */}}
 {{- define "nico-machine-a-tron.activePods" -}}
 {{- $activePods := 0 -}}
 {{- range $podName, $podConfig := .Values.pods -}}
-{{- if and $podConfig (or (gt (len ($podConfig.machines | default dict)) 0) (gt (len ($podConfig.racks | default dict)) 0)) -}}
+{{- if include "nico-machine-a-tron.podConfigured" $podConfig -}}
 {{- $activePods = add $activePods 1 -}}
 {{- end -}}
 {{- end -}}

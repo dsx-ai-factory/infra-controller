@@ -15,7 +15,7 @@
 {{/*
 Skip unconfigured pods
 */}}
-{{- if not (and $podConfig (or (gt (len ($podConfig.machines | default dict)) 0) (gt (len ($podConfig.racks | default dict)) 0))) }}
+{{- if not (include "nico-machine-a-tron.podConfigured" $podConfig) }}
 {{- continue }}
 {{- end }}
 

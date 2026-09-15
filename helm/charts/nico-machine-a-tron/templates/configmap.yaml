@@ -7,7 +7,7 @@ Build ordered list of pod names for consistent MAC address indexing
 */}}
 {{- $podList := list }}
 {{- range $podName, $podConfig := .Values.pods }}
-{{- if and $podConfig (or (gt (len ($podConfig.machines | default dict)) 0) (gt (len ($podConfig.racks | default dict)) 0)) }}
+{{- if include "nico-machine-a-tron.podConfigured" $podConfig }}
 {{- $podList = append $podList $podName }}
 {{- end }}
 {{- end }}
@@ -38,7 +38,7 @@ Build ordered list of pod names for consistent MAC address indexing
 {{/*
 Skip unconfigured pods
 */}}
-{{- if not (and $podConfig (or (gt (len ($podConfig.machines | default dict)) 0) (gt (len ($podConfig.racks | default dict)) 0))) }}
+{{- if not (include "nico-machine-a-tron.podConfigured" $podConfig) }}
 {{- continue }}
 {{- end }}
 
@@ -179,8 +179,24 @@ data:
     {{- end }}
     {{- end }}
 
-    {{- $racks := $podConfig.racks | default dict }}
-    {{- $machines := $podConfig.machines | default dict }}
+    {{/*
+    Drop null racks and machine groups first: a values file that clears an
+    entry with `<name>: null` leaves the key in the map for pods the chart
+    defaults do not define, so len alone would report a section that renders
+    nothing.
+    */}}
+    {{- $racks := dict }}
+    {{- range $sectionName, $section := $podConfig.racks | default dict }}
+    {{- if $section }}
+    {{- $_ := set $racks $sectionName $section }}
+    {{- end }}
+    {{- end }}
+    {{- $machines := dict }}
+    {{- range $sectionName, $section := $podConfig.machines | default dict }}
+    {{- if $section }}
+    {{- $_ := set $machines $sectionName $section }}
+    {{- end }}
+    {{- end }}
 
     {{- range $sectionName, $section := $racks }}
 
@@ -201,7 +217,6 @@ data:
     {{- end }}
 
     {{- range $sectionName, $section := $machines }}
-    {{- if $section }}
 
     [machines.{{ $sectionName }}]
     {{- if $section.hwType }}
@@ -236,8 +251,8 @@ data:
     {{- end }}
     {{- end }}
     {{- end }}
-    {{- end }}
 
+    {{/* machine-a-tron requires the machines table even when only racks are configured */}}
     {{- if and (gt (len $racks) 0) (eq (len $machines) 0) }}
     [machines]
     {{- end }}

@@ -22,6 +22,9 @@ global:
   ## Namespace override (propagates to subcharts). Required when mat-k8s-controller is enabled.
   ## Example: --set global.namespaceOverride=nico-system
   namespaceOverride: ""
+  ## Pull Secrets referenced by the machine-a-tron and controller Deployments.
+  ## Example: [{name: image-pull-secret}] together with imagePullSecret.create.
+  imagePullSecrets: []
   certificate:
     duration: 720h0m0s
     renewBefore: 360h0m0s
@@ -47,6 +50,14 @@ image:
 
 ## Create namespace when global.namespaceOverride is set
 createNamespace: true
+
+## Docker registry pull Secret `image-pull-secret` created by the chart in its
+## namespace. Disabled by default; set create=true and pass the base64-encoded
+## docker config JSON, then reference the Secret in global.imagePullSecrets.
+## The default payload is the empty-auth placeholder ({"auths":{}}).
+imagePullSecret:
+  create: false
+  dockerconfigjson: "eyJhdXRocyI6e319"
 
 automountServiceAccountToken: false
 
@@ -123,14 +134,6 @@ env:
   RUST_LIB_BACKTRACE: "0"
 
 extraEnv: []
-
-envFrom:
-  vaultApproleTokens:
-    secretName: nico-vault-approle-tokens
-  vaultToken:
-    secretName: nico-vault-token
-  vaultClusterInfo:
-    configMapName: vault-cluster-info
 
 # startupProbe gates the livenessProbe until MAT has bound its redfish port.
 # MAT binds the port only after registering all expected machines via the API,
