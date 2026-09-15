@@ -2325,6 +2325,7 @@ dependencies = [
  "async-trait",
  "carbide-instrument",
  "carbide-secrets",
+ "carbide-test-support",
  "carbide-utils",
  "carbide-uuid",
  "eyre",
