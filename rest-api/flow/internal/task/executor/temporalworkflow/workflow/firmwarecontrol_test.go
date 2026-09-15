@@ -123,18 +123,64 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 		Components:     firmwareTestComponents("comp1", "comp2"),
 		RuleDefinition: createFirmwareTestRuleDef(),
 	}
+	// Exercise version selection after the parent passes operationInfo through
+	// Temporal's child-workflow serialization, for every tray type in a rack.
+	rackReqInfo := task.ExecutionInfo{
+		TaskID:         uuid.New(),
+		RuleDefinition: &operationrules.RuleDefinition{Version: "v1"},
+	}
+	for i, componentType := range []devicetypes.ComponentType{
+		devicetypes.ComponentTypeCompute,
+		devicetypes.ComponentTypeNVSwitch,
+		devicetypes.ComponentTypePowerShelf,
+	} {
+		rackReqInfo.Components = append(rackReqInfo.Components, task.WorkflowComponent{
+			ComponentID: devicetypes.ComponentTypeToString(componentType),
+			Type:        componentType,
+		})
+		step := createFirmwareTestRuleDef().Steps[0]
+		step.ComponentType = componentType
+		step.Stage = i + 1
+		rackReqInfo.RuleDefinition.Steps = append(rackReqInfo.RuleDefinition.Steps, step)
+	}
+	const sharedVersion = `{ "Id": "fw-default" }`
 
 	testCases := map[string]struct {
 		reqInfo       task.ExecutionInfo
 		info          *operations.FirmwareControlTaskInfo
 		activityError error
 		expectError   bool
+		versions      map[devicetypes.ComponentType]string
 	}{
 		"success": {
 			reqInfo:       baseReqInfo,
 			info:          baseInfo,
 			activityError: nil,
 			expectError:   false,
+		},
+		"rack shares one firmware object across tray types": {
+			reqInfo: rackReqInfo,
+			info: &operations.FirmwareControlTaskInfo{
+				Operation:     operations.FirmwareOperationUpgrade,
+				TargetVersion: sharedVersion,
+			},
+			versions: map[devicetypes.ComponentType]string{
+				devicetypes.ComponentTypeCompute:    sharedVersion,
+				devicetypes.ComponentTypeNVSwitch:   sharedVersion,
+				devicetypes.ComponentTypePowerShelf: sharedVersion,
+			},
+		},
+		"rack selects each tray type's firmware object": {
+			reqInfo: rackReqInfo,
+			info: &operations.FirmwareControlTaskInfo{
+				Operation:     operations.FirmwareOperationUpgrade,
+				TargetVersion: `{"compute":{"Id":"compute-fw"},"nvswitch":{"Id":"switch-fw"},"powershelf":{"Id":"power-fw"}}`,
+			},
+			versions: map[devicetypes.ComponentType]string{
+				devicetypes.ComponentTypeCompute:    `{"Id":"compute-fw"}`,
+				devicetypes.ComponentTypeNVSwitch:   `{"Id":"switch-fw"}`,
+				devicetypes.ComponentTypePowerShelf: `{"Id":"power-fw"}`,
+			},
 		},
 		"activity fails": {
 			reqInfo:       baseReqInfo,
@@ -175,17 +221,32 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 				Name: activitypkg.NameGetPowerStatus,
 			})
 
-			env.OnActivity(mockFirmwareControl, mock.Anything, mock.Anything, mock.Anything).Return(tc.activityError)
+			if tc.versions == nil {
+				env.OnActivity(mockFirmwareControl, mock.Anything, mock.Anything, mock.Anything).Return(tc.activityError)
+			} else {
+				for componentType, version := range tc.versions {
+					target := common.Target{
+						Type:         componentType,
+						ComponentIDs: []string{devicetypes.ComponentTypeToString(componentType)},
+					}
+					expectedInfo := *tc.info
+					expectedInfo.TargetVersion = version
+					env.OnActivity(mockFirmwareControl, mock.Anything, target, expectedInfo).Return(nil).Once()
+				}
+			}
 			env.OnActivity(mockGetFirmwareStatus, mock.Anything, mock.Anything).Return(
-				&activitypkg.GetFirmwareStatusResult{
-					Statuses: map[string]operations.FirmwareUpdateStatus{
-						"comp1": {ComponentID: "comp1", State: operations.FirmwareUpdateStateCompleted},
-						"comp2": {ComponentID: "comp2", State: operations.FirmwareUpdateStateCompleted},
-					},
-				}, nil)
-			env.OnActivity(mockPowerControl, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-			env.OnActivity(mockGetPowerStatus, mock.Anything, mock.Anything).Return(
-				map[string]operations.PowerStatus{"comp1": operations.PowerStatusOn, "comp2": operations.PowerStatusOn}, nil)
+				func(_ context.Context, target common.Target) (*activitypkg.GetFirmwareStatusResult, error) {
+					statuses := make(map[string]operations.FirmwareUpdateStatus)
+					for _, id := range target.ComponentIDs {
+						statuses[id] = operations.FirmwareUpdateStatus{ComponentID: id, State: operations.FirmwareUpdateStateCompleted}
+					}
+					return &activitypkg.GetFirmwareStatusResult{Statuses: statuses}, nil
+				})
+			if tc.versions == nil {
+				env.OnActivity(mockPowerControl, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+				env.OnActivity(mockGetPowerStatus, mock.Anything, mock.Anything).Return(
+					map[string]operations.PowerStatus{"comp1": operations.PowerStatusOn, "comp2": operations.PowerStatusOn}, nil)
+			}
 
 			expectTaskUpdateActivities(env)
 			env.ExecuteWorkflow(firmwareControl, tc.reqInfo, tc.info)
@@ -196,6 +257,9 @@ func TestFirmwareControlWorkflow(t *testing.T) {
 				assert.Error(t, env.GetWorkflowError())
 			} else {
 				assert.NoError(t, env.GetWorkflowError())
+			}
+			if tc.versions != nil {
+				env.AssertExpectations(t)
 			}
 		})
 	}

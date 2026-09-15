@@ -101,6 +101,12 @@ jq -n \
   '{siteId: $siteId, version: $version, targets: ["bmc", "bios"]}'
 ```
 
+For a rack request, `version` can hold one shared firmware object for all
+selected tray types. No additional flag is required. The firmware object must
+be suitable for every selected tray type. The exact lowercase top-level keys
+`compute`, `nvswitch`, and `powershelf` are reserved for per-tray mappings;
+a shared firmware object must not contain any of them.
+
 For a rack request that needs a different value for each component type,
 `version` can contain a layered JSON document with `compute`, `nvswitch`, and
 `powershelf` keys. Flow extracts the relevant value before calling each
@@ -116,6 +122,9 @@ LAYERED_VERSION=$(jq -cn \
   --argjson nvswitch "$SWITCH_SOT" \
   '{compute: $compute, nvswitch: $nvswitch}')
 ```
+
+Each mapping value may be a JSON object or a string containing the firmware
+input. The outer REST `version` field remains a string in both forms.
 
 If a layered document omits a component-type key, Flow passes an empty target
 to that component manager. Use an operation rule that excludes the component

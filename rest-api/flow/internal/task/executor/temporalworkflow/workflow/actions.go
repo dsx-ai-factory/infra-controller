@@ -897,10 +897,11 @@ var knownComponentTypeKeys = []string{"compute", "nvswitch", "powershelf"}
 // JSON for component managers that parse multi-field version payloads.
 // If the key is absent but the document contains another known
 // component-type key (i.e. it IS the layered format), an empty string
-// is returned so the component manager skips the firmware update. If the
+// is returned; the component backend decides how to handle an empty target.
+// This does not guarantee that the update is skipped. If the
 // document does not look like the layered format (no known keys), the
-// original string is returned as-is for backward compatibility with
-// single-component updates.
+// original string is returned as-is for each selected component type. This
+// supports both a shared rack firmware object and single-component updates.
 func extractComponentTargetVersion(rawVersion string, componentType devicetypes.ComponentType) string {
 	if rawVersion == "" {
 		return ""

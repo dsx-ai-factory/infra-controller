@@ -28,7 +28,7 @@ type BatchRackFirmwareUpdateRequest struct {
 	SiteId string `json:"siteId"`
 	// Filter that selects Racks targeted for firmware update
 	Filter *RackFilter `json:"filter,omitempty"`
-	// Target firmware version.
+	// Firmware input serialized as a string: either one shared value for all selected trays or a JSON mapping from tray type (`compute`, `nvswitch`, `powershelf`) to firmware input. These exact lowercase top-level keys are reserved for per-tray mappings; a shared JSON object must not contain any of them. A missing tray type in the mapping receives an empty input, which does not guarantee a skipped update. Empty, null, or omitted input is handled by the selected backend and operation rule.
 	Version NullableString `json:"version,omitempty"`
 	// Optional, write-only authentication data for firmware downloads. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
 	AuthenticationData NullableFirmwareAuthenticationData `json:"authenticationData,omitempty"`
