@@ -199,8 +199,8 @@ func TestTenantIdentityWorkflowHandlers_TimeoutReturns500AndTerminatesWorkflow(t
 	}
 }
 
-// TestTenantIdentityReencryptSecretsHandler_Handle verifies that only the re-encryption endpoint dispatches through the generic Core gRPC proxy and returns the curated REST response.
-func TestTenantIdentityReencryptSecretsHandler_Handle(t *testing.T) {
+// TestReencryptTenantIdentitySecretsHandler_Handle verifies that only the re-encryption endpoint dispatches through the generic Core gRPC proxy and returns the curated REST response.
+func TestReencryptTenantIdentitySecretsHandler_Handle(t *testing.T) {
 	dbSession := testSiteInitDB(t)
 	defer dbSession.Close()
 
@@ -243,7 +243,7 @@ func TestTenantIdentityReencryptSecretsHandler_Handle(t *testing.T) {
 	temporalConfig, _ := testConfig.GetTemporalConfig()
 	siteClientPool := sc.NewClientPool(temporalConfig)
 	echoServer := echo.New()
-	handler := NewTenantIdentityReencryptSecretsHandler(dbSession, siteClientPool)
+	handler := NewReencryptTenantIdentitySecretsHandler(dbSession, siteClientPool)
 
 	tests := []struct {
 		name       string

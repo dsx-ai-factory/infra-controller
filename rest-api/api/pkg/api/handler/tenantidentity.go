@@ -1024,16 +1024,16 @@ func (goidch GetOpenIDConfigurationHandler) Handle(c echo.Context) error {
 
 // ~~~~~ Reencrypt Secrets Handler ~~~~~ //
 
-// TenantIdentityReencryptSecretsHandler handles POST /tenant-identity/re-encrypt.
-type TenantIdentityReencryptSecretsHandler struct {
+// ReencryptTenantIdentitySecretsHandler handles POST /tenant-identity/re-encrypt.
+type ReencryptTenantIdentitySecretsHandler struct {
 	dbSession  *cdb.Session
 	scp        *sc.ClientPool
 	tracerSpan *cutil.TracerSpan
 }
 
-// NewTenantIdentityReencryptSecretsHandler returns a new TenantIdentityReencryptSecretsHandler.
-func NewTenantIdentityReencryptSecretsHandler(dbSession *cdb.Session, scp *sc.ClientPool) TenantIdentityReencryptSecretsHandler {
-	return TenantIdentityReencryptSecretsHandler{
+// NewReencryptTenantIdentitySecretsHandler returns a new ReencryptTenantIdentitySecretsHandler.
+func NewReencryptTenantIdentitySecretsHandler(dbSession *cdb.Session, scp *sc.ClientPool) ReencryptTenantIdentitySecretsHandler {
+	return ReencryptTenantIdentitySecretsHandler{
 		dbSession:  dbSession,
 		scp:        scp,
 		tracerSpan: cutil.NewTracerSpan(),
@@ -1053,7 +1053,7 @@ func NewTenantIdentityReencryptSecretsHandler(dbSession *cdb.Session, scp *sc.Cl
 // @Success 200 {object} model.APITenantIdentityReencryptSecretsResponse
 // @Failure 503 {object} util.APIError
 // @Router /v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt [post]
-func (rtish TenantIdentityReencryptSecretsHandler) Handle(c echo.Context) error {
+func (rtish ReencryptTenantIdentitySecretsHandler) Handle(c echo.Context) error {
 	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantIdentity", "ReencryptSecrets", c, rtish.tracerSpan)
 	if handlerSpan != nil {
 		defer handlerSpan.End()

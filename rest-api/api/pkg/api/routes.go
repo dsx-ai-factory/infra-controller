@@ -1369,7 +1369,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		{
 			Path:    apiPathPrefix + "/site/:siteID/tenant-identity/re-encrypt",
 			Method:  http.MethodPost,
-			Handler: apiHandler.NewTenantIdentityReencryptSecretsHandler(dbSession, scp),
+			Handler: apiHandler.NewReencryptTenantIdentitySecretsHandler(dbSession, scp),
 		},
 	}
 
