@@ -18,6 +18,7 @@
 | 0.10 | 2026-09-10 | Bill Minckler | Cover every API client in CA rollover, add the installer authentication dependency, and require individual node-credential revocation enforcement |
 | 0.11 | 2026-09-14 | Bill Minckler | Remove the DPF admin-job dependency, define local-source ownership for BMC credential version 0, preserve DPF access through BMC rotation, and retain operator-managed mTLS for the admin CLI |
 | 0.12 | 2026-09-15 | Bill Minckler | Define restart-safe local version-0 ownership, immutable ingestion targets, fenced mutation and validation, target binding and advancement recovery, and rollout, backfill, and downgrade fencing |
+| 0.13 | 2026-09-15 | Bill Minckler | Clarify the detailed DPF design boundary, correct the current Flow deployment state, and record the remaining DPF and KMS decisions |
 
 ## 1. Purpose and Scope
 
@@ -28,8 +29,10 @@ Vault/OpenBao. It covers the three related epics:
 - [Phase 2: API authentication](https://github.com/dsx-ai-factory/infra-controller/issues/5199)
 - [Phase 3: remaining key and certificate services](https://github.com/dsx-ai-factory/infra-controller/issues/5200)
 
-The design is intentionally high level. The following subsystem designs remain
-authoritative for their implementation:
+The design is intentionally high level except for version-0 credential ownership
+and DPF BMC credential delivery, whose cross-component state and recovery
+contracts are defined here. Outside those areas, the following subsystem designs
+remain authoritative for their implementation:
 
 - [PostgreSQL-backed secret storage](postgres-secrets/README.md)
 - [Secrets-storage operator contract](../configuration/secrets-storage.md)
@@ -104,7 +107,7 @@ the epic that owns the replacement.
 | `dsx-exchange-consumer` credentials | Default credential chain, which always constructs a Vault client | Vault-free source and an optional Vault reader, tracked by [#5957](https://github.com/dsx-ai-factory/infra-controller/issues/5957) | 3 |
 | `bmc-proxy` chart configuration | Vault AppRole, token, and cluster information are injected even though BMC credentials are fetched from `nico-api` over gRPC | Remove the Vault environment and configuration references under [#5957](https://github.com/dsx-ai-factory/infra-controller/issues/5957) | 3 |
 | `machine-a-tron` chart values | Stale Vault `envFrom` values remain but are not consumed by the deployment template | Remove the dead values under [#5957](https://github.com/dsx-ai-factory/infra-controller/issues/5957); its live TLS dependency is covered by the service-certificate row | 3 |
-| Legacy Flow PSM and NSM upgrade cleanup | The cleanup script uses the Vault root token when it finds legacy token resources; current Flow deployments do not run PSM or NSM containers | Run the one-time cleanup, when required, before retiring Vault; fresh installations have no runtime dependency | 3 |
+| Legacy Flow PSM and NSM upgrade cleanup | Predecessor Flow deployments can retain bundled PSM and NSM containers and their Vault-backed resources; the current chart is Flow-only, and setup fails closed while an older deployment or active pod remains | Operators upgrade the Flow release through the guarded procedure and rerun setup, which removes the stranded security resources before Vault is retired | 3 |
 | REST `powershelf-manager` and `nvswitch-manager` credentials in persistent mode | Vault-backed credential managers store device credentials | Use a non-Vault credential backend under [#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954) | 3 |
 | Deployment tooling: `helm-prereqs` and chart defaults | Installs and unseals Vault; creates PKI roles, policies, and token jobs; charts default to the Vault issuer, Secrets, and `vault-cluster-info` ConfigMap | Vault-optional installation and defaults under [#5958](https://github.com/dsx-ai-factory/infra-controller/issues/5958) | 3 |
 
@@ -1044,8 +1047,11 @@ file, PostgreSQL, or the rotation table.
    when configured. Persistent `powershelf-manager` and `nvswitch-manager`
    deployments use a non-Vault credential backend. Remove the Vault environment
    and configuration references from `bmc-proxy` and the dead Vault values from
-   `machine-a-tron`. Where an upgraded site still has legacy Flow PSM or NSM
-   token resources, run the existing cleanup while Vault remains available.
+   `machine-a-tron`. On a site with a predecessor Flow deployment, setup stops
+   before mutation while PSM or NSM containers remain. After the operator moves
+   any site-specific manager dependencies and upgrades and verifies the
+   Flow-only release, rerun setup to remove the stranded Vault tokens, policies,
+   Secrets, and RBAC while Vault remains available.
 3. **Migrate API authentication.** Run Scout and DPU-agent bearer JWTs and
    machine mTLS in parallel and verify that both produce the same principals and
    authorization results. Add the operator-managed admin CA to API trust, issue
@@ -1210,6 +1216,8 @@ The overall effort is complete when a supported site can:
    tracked by [#5955](https://github.com/dsx-ai-factory/infra-controller/issues/5955).
 2. Which production KMS, HSM, KMIP, or hardened Integrated deployment is
    qualified first, and what is the minimum supported recovery configuration?
+   This decision is tracked by
+   [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253).
 3. Which non-Vault CA backs the certificate-provider interface, and which
    cert-manager issuer replaces `vault-nico-issuer` for service transport
    certificates? How does API validation enforce individual node signing-
@@ -1223,7 +1231,13 @@ The overall effort is complete when a supported site can:
    configuration, and what upgrade and rollback window remains supported? This
    decision is tracked by
    [#5958](https://github.com/dsx-ai-factory/infra-controller/issues/5958).
-6. If the optional fTPM stretch goal is adopted, is its certificate installed
+6. What Kubernetes resource represents the external DPF restore marker and its
+   acknowledgement? This decision is tracked by
+   [#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147).
+7. Does the host-wide DPF credential barrier extend `DPUNodeMaintenance` or use
+   a new DPF API? This decision is tracked by
+   [#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147).
+8. If the optional fTPM stretch goal is adopted, is its certificate installed
    manually by an operator or issued by the API from an fTPM-signed request?
    The decision also defines supported hardware and the renewal, replacement,
    revocation, and recovery lifecycle for the non-exportable key.
@@ -1232,10 +1246,10 @@ The overall effort is complete when a supported site can:
 
 This section is a status snapshot dated 2026-09-15. Sections 1 through 7 define
 the end-state design and remain independent of implementation order. Phase 1
-([#195](https://github.com/dsx-ai-factory/infra-controller/issues/195)) is complete
-apart from this document
-([#3251](https://github.com/dsx-ai-factory/infra-controller/issues/3251)) and is with
-QA; remaining credential-related work is tracked under
+([#195](https://github.com/dsx-ai-factory/infra-controller/issues/195)) implementation
+is complete; this document
+([#3251](https://github.com/dsx-ai-factory/infra-controller/issues/3251)) remains
+open. Remaining credential-related work is tracked under
 [#5200](https://github.com/dsx-ai-factory/infra-controller/issues/5200). The tables
 below record the intentional intermediate states created when one epic lands
 before a dependency owned by another epic.
@@ -1246,7 +1260,7 @@ before a dependency owned by another epic.
 | :--- | :--- | :--- |
 | Phase 1 credential-storage boundary | After [#195](https://github.com/dsx-ai-factory/infra-controller/issues/195), credentials can be authoritative in PostgreSQL while their per-record DEKs are still wrapped by a KEK in Vault/OpenBao Transit. PostgreSQL removes Vault as the credential database but does not yet remove the transitive KEK dependency. | [#3253](https://github.com/dsx-ai-factory/infra-controller/issues/3253) supplies the production non-Vault KEK provider; the migration then routes new wraps to it, re-wraps live records, and retains Transit only through the rollback and backup-retention windows. |
 | Services outside `nico-api` | Phase 1 made the `nico-api` chain Vault-optional, but the default chain used by `dsx-exchange-consumer` still constructs a Vault client, persistent `powershelf-manager` and `nvswitch-manager` deployments still use Vault credential managers, and the `bmc-proxy` chart still injects Vault configuration. The `machine-a-tron` Vault values are stale and unused rather than a runtime dependency. | [#5957](https://github.com/dsx-ai-factory/infra-controller/issues/5957) covers the DSX Exchange and chart work; [#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954) covers the persistent REST credential backends. |
-| Legacy Flow cleanup before Vault retirement | Current Flow deployments do not include the retired PSM and NSM containers, but upgraded sites may still have their legacy Vault token resources. | [#5324](https://github.com/dsx-ai-factory/infra-controller/issues/5324) owns the existing cleanup path, which runs while Vault is still available; no new runtime credential path is required. |
+| Legacy Flow upgrade before Vault retirement | The current chart is Flow-only, but a site still running the predecessor three-container deployment cannot resume setup until an operator upgrades Flow. Its legacy Vault resources remain until setup resumes. | The Flow-only chart, fail-closed guard, and cleanup landed in the [Flow-only deployment implementation](https://github.com/dsx-ai-factory/infra-controller/pull/5325), tracked by [#5324](https://github.com/dsx-ai-factory/infra-controller/issues/5324). After the operator completes and verifies the supported Flow upgrade, setup removes the stranded security resources while Vault is still available. |
 | DPF BMC bootstrap | The released installer still uses `_dpf_set_bmc_root`, a Vault-issued temporary admin certificate, and a two-stage Core rollout. The BMC-specific local-source selector is not released, and the existing target-wide `bmc-shared-password` mirror cannot represent a fleet on mixed credential versions. | [#5958](https://github.com/dsx-ai-factory/infra-controller/issues/5958) adds the config, Helm, API, and operator-documentation contract for version-0 ownership, removes the job, and deploys Core once with DPF enabled. [#6147](https://github.com/dsx-ai-factory/infra-controller/issues/6147) adds the ingestion-intent and ownership fence plus per-DPU credential Secrets so each registered device remains usable during rotation. |
 | Initial phase 2 JWT boundary | [#355](https://github.com/dsx-ai-factory/infra-controller/issues/355) provides bearer JWTs and permits machine mTLS to be disabled at the transport-authentication layer, but the JWT is still signed with the Vault-issued mTLS certificate key and carries that certificate chain. The validator does not enforce individual certificate revocation, so certificate expiry or CA-wide rotation is the containment path for a compromised key. | [#5956](https://github.com/dsx-ai-factory/infra-controller/issues/5956) reissues the node credential from a lasting non-Vault trust anchor and adds API-side individual disablement or revocation enforcement. The fTPM work in [#5272](https://github.com/dsx-ai-factory/infra-controller/issues/5272) is an optional stretch goal, not the resolution required for Vault retirement. |
 | Optional fTPM credential before PKI retirement | The fTPM stretch goal still needs a certificate that chains to an API trust anchor; moving token signing into the fTPM would not by itself remove Vault PKI. | If the stretch goal is adopted, [#5272](https://github.com/dsx-ai-factory/infra-controller/issues/5272) owns the DPU signing holder and the certificate-provisioning decision remains open. [#5956](https://github.com/dsx-ai-factory/infra-controller/issues/5956) supplies the lasting trust anchor. |
