@@ -41,7 +41,7 @@ fn missing_optional_vendor_class_is_not_logged_as_error() -> Result<(), eyre::Re
         .enable_all()
         .build()?;
     let api_server = runtime.block_on(mock_api_server::MockAPIServer::start());
-    let (kea, socket) = Kea::start(api_server.local_http_addr(), None)?;
+    let (mut kea, socket) = Kea::start(api_server.local_http_addr(), None)?;
     socket.set_read_timeout(Some(READ_TIMEOUT))?;
 
     let mut request = DHCPFactory::discover(1);
@@ -49,8 +49,9 @@ fn missing_optional_vendor_class_is_not_logged_as_error() -> Result<(), eyre::Re
 
     let response = send_and_recv(&socket, request)?;
     assert_eq!(response.opts().msg_type(), Some(v4::MessageType::Offer));
+    kea.stop_process();
     assert!(
-        !kea.wait_for_log("Missing option [60] in packet", Duration::from_millis(500),),
+        !kea.wait_for_log("Missing option [60] in packet", Duration::ZERO),
         "optional vendor-class absence must not be logged as an error"
     );
 

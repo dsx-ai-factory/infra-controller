@@ -105,6 +105,7 @@ pub(crate) struct Kea {
 
     process: Option<Child>,
     logs: Arc<Mutex<Vec<String>>>,
+    log_readers: Vec<thread::JoinHandle<()>>,
     _run_permit: Option<KeaRunPermit>,
 }
 
@@ -164,6 +165,7 @@ impl Kea {
             dhcp_in_port_reservation,
             process: None,
             logs: Arc::new(Mutex::new(Vec::new())),
+            log_readers: Vec::new(),
             _run_permit: None,
         })
     }
@@ -235,21 +237,21 @@ impl Kea {
         let stdout = BufReader::new(process.stdout.take().unwrap());
         let stderr = BufReader::new(process.stderr.take().unwrap());
         let stdout_logs = self.logs.clone();
-        thread::spawn(move || {
+        self.log_readers.push(thread::spawn(move || {
             for line in stdout.lines() {
                 let line = line.unwrap();
                 println!("KEA STDOUT: {line}");
                 stdout_logs.lock().unwrap().push(line);
             }
-        });
+        }));
         let stderr_logs = self.logs.clone();
-        thread::spawn(move || {
+        self.log_readers.push(thread::spawn(move || {
             for line in stderr.lines() {
                 let line = line.unwrap();
                 println!("KEA STDERR: {line}");
                 stderr_logs.lock().unwrap().push(line);
             }
-        });
+        }));
 
         self.process = Some(process);
 
@@ -306,7 +308,8 @@ impl Kea {
         }
     }
 
-    fn stop_process(&mut self) {
+    /// Stop Kea and wait until its captured stdout and stderr have been drained.
+    pub(crate) fn stop_process(&mut self) {
         if let Some(process) = &mut self.process {
             // Rust stdlib can only send a KILL (9) to sub-process. Thankfully dhcp already depends on
             // libc so we can use that.
@@ -321,6 +324,9 @@ impl Kea {
             }
         }
         self.process = None;
+        for reader in self.log_readers.drain(..) {
+            reader.join().unwrap();
+        }
     }
 
     fn config(api_server_url: &str, lease_file: &Path) -> String {
