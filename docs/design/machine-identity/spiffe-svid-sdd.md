@@ -304,7 +304,7 @@ JWT-SVID issued to workload/tenant
 
 *Figure-6 Node Identity request flow (direct, no callback). The hop from IMDS to NICo may be gRPC `SignMachineIdentity` (default) or an HTTP forward to `sign-proxy-url` when configured on the DPU agent.*
 
-#### 3.3.1 DPU agent / FMDS: `[machine-identity]` and optional HTTP sign proxy
+#### 3.3.1 DPU agent / FMDS: [machine-identity] and optional HTTP sign proxy
 
 The embedded IMDS identity handler (`GET …/latest/meta-data/identity` and compatible API versions) shares **rate limits**, **wait**, and **sign** timeouts between both signing modes. These are set in the DPU agent TOML under **`[machine-identity]`** (kebab-case keys), validated at startup:
 
