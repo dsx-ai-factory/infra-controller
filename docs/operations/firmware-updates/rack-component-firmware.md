@@ -72,7 +72,7 @@ The request has four controls in addition to `siteId`:
 |---|---|
 | `version` | Target passed to the component backend. For current rack-scale RMS paths, this is a complete SOT firmware-object JSON document serialized as a string. Legacy backends can accept a plain version string. |
 | `targets` | Optional component subset for tray requests. When present, `version` must also be present. Rack handlers do not forward this field, so do not send it with a rack request. |
-| `ruleId` | Pins the task to a custom Flow operation rule. When omitted, Flow resolves a rule and falls back to its built-in firmware rule. |
+| `ruleId` | Pins the task to a custom Flow operation rule ahead of rack-associated, global-default, and built-in rules. The selected rule must contain a step for at least one requested component type. |
 | `overrideReadinessCheck` | Bypasses Flow's readiness gate and tells Core to bypass its state controller where supported. Use only during supervised maintenance after tenant impact has been accepted. |
 
 Although the API permits `version` to be omitted when `targets` is empty, that
@@ -321,7 +321,7 @@ lower-level execution details.
 | Task fails after about 30 minutes | Inspect the error for component IDs blocked by the readiness gate. Confirm tenant state and the persisted component operation status. |
 | Stage times out | Check Core and backend status. The built-in firmware rule polls for 45 minutes per attempt; a backend job can still be running when Flow times out. |
 | Rack-scale update rejects `version` | Confirm that `version` contains a valid SOT JSON object, serialized as a string, and that referenced artifacts are reachable without a REST-supplied access token. |
-| Power-shelf request succeeds without updating a shelf | Confirm that the resolved operation rule contains a `PowerShelf` step. The built-in rule excludes power shelves. |
+| Power-shelf request fails with `FAILED_PRECONDITION` | The highest-priority resolved rule has no `PowerShelf` step. Select a compatible rule or change the rack association; Flow does not fall through to another rule. The built-in rule excludes power shelves. |
 | Firmware was flashed but is not active | Determine whether the platform requires an AC cycle. The built-in firmware rule does not include one. |
 | Retry begins from an uncertain state | Inspect per-component status and inventory first. A Flow task failure or cancellation does not roll hardware back. |
 

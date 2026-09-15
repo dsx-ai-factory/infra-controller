@@ -58,7 +58,7 @@ type Store interface {
 	// for the requested racks.
 	ListNonTerminalTasksForRacks(ctx context.Context, rackIDs []uuid.UUID) ([]*taskdef.Task, error)
 
-	// UpdateScheduledTask updates task scheduling information (execution ID, executor type).
+	// UpdateScheduledTask atomically updates execution ID, executor type, and applied rule ID.
 	UpdateScheduledTask(ctx context.Context, task *taskdef.Task) error
 
 	// UpdateTaskStatus updates status and message, plus an optional queue deadline.

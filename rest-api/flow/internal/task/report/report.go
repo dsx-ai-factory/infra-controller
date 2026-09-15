@@ -117,7 +117,8 @@ type StepRecord struct {
 //
 // Steps whose ComponentType has zero entries in totalByType (or is
 // absent) are pre-marked StatusSkipped because the workflow will not
-// invoke them. All other steps and every stage start as StatusPending.
+// invoke them. A stage whose every step is skipped is also pre-marked
+// StatusSkipped; all other steps and stages start as StatusPending.
 //
 // Returns a Version-stamped report with empty Stages when ruleDef is nil
 // or has no steps.
@@ -149,6 +150,16 @@ func NewInitial(
 				Status:          status,
 				TotalComponents: total,
 			})
+		}
+		allSkipped := len(stageRec.Steps) > 0
+		for _, step := range stageRec.Steps {
+			if step.Status != StatusSkipped {
+				allSkipped = false
+				break
+			}
+		}
+		if allSkipped {
+			stageRec.Status = StatusSkipped
 		}
 		rep.Stages = append(rep.Stages, stageRec)
 	}
@@ -239,7 +250,7 @@ func (t *Tracker) CompleteStage(stageNum int, now time.Time) {
 		return
 	}
 	stage := t.findStage(stageNum)
-	if stage == nil {
+	if stage == nil || stage.Status == StatusSkipped {
 		return
 	}
 

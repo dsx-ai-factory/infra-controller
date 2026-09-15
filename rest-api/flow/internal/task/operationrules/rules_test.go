@@ -580,3 +580,28 @@ func TestRuleDefinition_Validate(t *testing.T) {
 		assert.NoError(t, ruleDef.Validate())
 	})
 }
+
+func TestRuleDefinition_HasApplicableStep(t *testing.T) {
+	ruleDef := &RuleDefinition{Steps: []SequenceStep{
+		{ComponentType: devicetypes.ComponentTypeNVSwitch},
+		{ComponentType: devicetypes.ComponentTypePowerShelf},
+	}}
+
+	tests := []struct {
+		name        string
+		ruleDef     *RuleDefinition
+		targetTypes []devicetypes.ComponentType
+		want        bool
+	}{
+		{name: "one target type overlaps", ruleDef: ruleDef, targetTypes: []devicetypes.ComponentType{devicetypes.ComponentTypeCompute, devicetypes.ComponentTypeNVSwitch}, want: true},
+		{name: "target types do not overlap", ruleDef: ruleDef, targetTypes: []devicetypes.ComponentType{devicetypes.ComponentTypeCompute}},
+		{name: "empty target scope", ruleDef: ruleDef},
+		{name: "nil rule", targetTypes: []devicetypes.ComponentType{devicetypes.ComponentTypeNVSwitch}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, test.ruleDef.HasApplicableStep(test.targetTypes))
+		})
+	}
+}
