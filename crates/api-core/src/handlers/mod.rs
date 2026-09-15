@@ -49,6 +49,7 @@ pub(super) mod ib_fabric;
 pub(super) mod ib_partition;
 pub(super) mod instance;
 pub(super) mod instance_type;
+pub(super) mod lldp;
 pub(super) mod logical_partition;
 pub(super) mod machine;
 pub(super) mod machine_boot_interfaces;

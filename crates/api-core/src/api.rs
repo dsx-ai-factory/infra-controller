@@ -658,6 +658,13 @@ impl Forge for Api {
         crate::handlers::dpu::update_agent_reported_inventory(self, request).await
     }
 
+    async fn report_lldp_neighbors(
+        &self,
+        request: Request<rpc::LldpNeighborReport>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::lldp::report_lldp_neighbors(self, request).await
+    }
+
     async fn record_dpu_network_status(
         &self,
         request: Request<rpc::DpuNetworkStatus>,

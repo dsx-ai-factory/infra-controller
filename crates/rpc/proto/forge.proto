@@ -493,6 +493,9 @@ service Forge {
   // MachineInventory
   rpc UpdateAgentReportedInventory(DpuAgentInventoryReport) returns (google.protobuf.Empty);
 
+  // Periodic LLDP neighbor report from a running agent (DPU agent or scout).
+  rpc ReportLldpNeighbors(LldpNeighborReport) returns (google.protobuf.Empty);
+
   // Phone Home
   rpc UpdateInstancePhoneHomeLastContact(InstancePhoneHomeLastContactRequest) returns (InstancePhoneHomeLastContactResponse);
 
@@ -4527,6 +4530,54 @@ message MachineInventorySoftwareComponent {
   string url = 3;
 }
 
+// Why a machine's LLDP snapshot is being reported. Lets nico-api tell a fresh
+// snapshot from an unchanged one and from a machine that could not read its
+// neighbors at all.
+enum LldpReportResult {
+  option (carbide.codegen.v1.enum_derive) = "serde::Serialize";
+  // Explicit zero value so an omitted result cannot read as a fresh snapshot.
+  LLDP_REPORT_RESULT_UNSPECIFIED = 0;
+  // `interfaces` holds a snapshot that differs from the last one nico-api
+  // acknowledged. An empty `interfaces` here means the machine genuinely sees
+  // no neighbors.
+  LLDP_REPORT_RESULT_UPDATED = 1;
+  // The snapshot matches the last one nico-api acknowledged; `interfaces` is
+  // empty and nothing needs reconciling.
+  LLDP_REPORT_RESULT_UNCHANGED = 2;
+  // The reporter could not read its LLDP neighbors; `interfaces` is empty. It
+  // repeats on every poll for as long as collection keeps failing.
+  LLDP_REPORT_RESULT_COLLECTION_FAILED = 3;
+}
+
+// One LLDP collection attempt on a machine.
+message LldpReport {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Required. LLDP_REPORT_RESULT_UNSPECIFIED will be rejected, so a
+  // default-constructed report cannot be mistaken for a fresh snapshot.
+  LldpReportResult result = 1;
+  // Populated only for LLDP_REPORT_RESULT_UPDATED, where an empty list is
+  // meaningful: the machine genuinely sees no neighbors.
+  repeated InterfaceLldp interfaces = 2;
+}
+
+// Full snapshot of a machine's current LLDP neighbors, keyed by local NIC MAC.
+// Sent by a scout; a DPU agent reports through DpuNetworkStatus.lldp instead.
+message LldpNeighborReport {
+  // Required. A report that names no machine is rejected.
+  common.MachineId machine_id = 1;
+  // Required. An absent report is rejected; use
+  // LLDP_REPORT_RESULT_COLLECTION_FAILED to say the neighbors could not be
+  // read.
+  LldpReport report = 2;
+}
+
+message InterfaceLldp {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Local NIC MAC address (the machine's own port).
+  string mac_address = 1;
+  machine_discovery.LldpSwitchData lldp = 2;
+}
+
 // Summary of a health report source: its mode and source identifier.
 message HealthSourceOrigin {
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
@@ -5935,6 +5986,9 @@ message DpuNetworkStatus {
   optional string dpu_extension_service_version = 15;
   repeated DpuExtensionServiceStatusObservation dpu_extension_services = 16;
   optional AstraConfigStatus astra_config_status = 17;
+  // LLDP neighbors this DPU sees, attached to the status push rather than sent
+  // on its own RPC. Absent when the agent did not attempt a collection.
+  optional LldpReport lldp = 18;
 }
 
 message LastDhcpRequest {

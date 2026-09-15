@@ -1079,6 +1079,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -2170,6 +2171,7 @@ dependencies = [
 name = "carbide-host-support"
 version = "0.0.0"
 dependencies = [
+ "arc-swap",
  "base64",
  "carbide-dpu-agent-utils",
  "carbide-instrument",
@@ -2196,6 +2198,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tracing",
@@ -3124,6 +3127,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tracing",
  "tryhard",
