@@ -122,9 +122,9 @@ NICo therefore connects directly to each simulated BMC instead of routing every
 Redfish request through the shared machine-a-tron proxy.
 
 The Tilt BMC underlay is `10.200.0.0/18`. BMC addresses are Service externalIPs,
-which the apiserver neither allocates nor validates and kube-proxy binds on
-every node, so this range must stay outside Kind's default `10.96.0.0/16`
-ServiceCIDR and `10.244.0.0/16` pod CIDR.
+which the apiserver neither allocates nor validates and for which kube-proxy
+programs forwarding rules on every node, so this range must stay outside Kind's
+default `10.96.0.0/16` ServiceCIDR and `10.244.0.0/16` pod CIDR.
 
 ## Image builds
 

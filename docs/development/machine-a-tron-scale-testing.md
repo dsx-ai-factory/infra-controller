@@ -27,19 +27,23 @@ MAT_MODE=scale HOST_COUNT=1000 helm-prereqs/setup-machine-a-tron.sh -y
 ## Architecture: Controller Mode
 
 The `mat-k8s-controller` dynamically creates one Service per BMC:
+
 - Discovers machine-a-tron pods via `nvidia-infra-controller/mat-service=true` label
 - Polls `/machines/status` from each pod
 - Creates Services with the BMC IP (assigned by NICo DHCP) as `externalIPs`
 - Services route to correct pod via `nvidia-infra-controller/pod-name` selector
 
 **Requirements:**
+
 - The BMC network must lie outside the Kubernetes ServiceCIDR and pod CIDR
-  (BMC IPs are Service externalIPs, bound by kube-proxy on every node)
+  (BMC IPs are Service externalIPs, for which kube-proxy programs forwarding
+  rules on every node)
 - NICo siteConfig needs `allow_insecure_discovery = true` and a network
   covering the BMC IP range
 - Leave `site_explorer.bmc_proxy` unset - NICo dials each BMC IP directly
 
 **Example NICo siteConfig:**
+
 ```toml
 allow_insecure_discovery = true
 

@@ -261,13 +261,19 @@ adds a dynamic target UDP port for IPMI access.
   belongs to) must not overlap the Kubernetes ServiceCIDR, the pod CIDR, the
   node network, or any network the nodes or pods must otherwise reach. The
   controller publishes BMC IPs as Service `externalIPs`, which the apiserver
-  neither allocates nor validates and kube-proxy binds on every node, so an
-  overlap silently collides with a dynamically allocated clusterIP or hides
-  the real destination.
-- Exception: DHCP relay mode. Its relay Services keep explicit ClusterIPs,
-  which must lie inside the BMC network, so in that mode keep the relay
-  addresses in a small dedicated ServiceCIDR (see DHCP Relay Mode) outside
-  the range NICo leases BMC addresses from.
+  neither allocates nor validates and for which kube-proxy programs
+  forwarding rules on every node, so an overlap silently collides with a
+  dynamically allocated clusterIP or hides the real destination. This is a
+  hard requirement: `helm-prereqs/setup-machine-a-tron.sh` refuses a
+  `SCALE_OOB_PREFIX` inside the ServiceCIDR, and a direct Helm install must
+  verify it before deploying because neither the chart nor the controller
+  checks it.
+- DHCP relay mode (see DHCP Relay Mode) is the exception: NICo resolves the
+  BMC network from the DHCP relay address, which in that mode is each pod's
+  relay Service clusterIP, so the BMC network must contain the relay
+  clusterIPs rather than use the `10.200.0.0/18` example below. Give the
+  relay Services a small dedicated ServiceCIDR (`10.96.127.0/24` in that
+  section) and keep the BMC network clear of every other ServiceCIDR.
 - NICo assigns unique BMC IPs from the configured network
 - Default ServiceCIDR ranges to stay clear of:
   - `10.96.0.0/12` - vanilla Kubernetes (kubeadm)
