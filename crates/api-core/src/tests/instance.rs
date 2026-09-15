@@ -6749,6 +6749,7 @@ async fn test_allocate_instance_with_extension_services(
         .api
         .create_dpu_extension_service(tonic::Request::new(
             rpc::forge::CreateDpuExtensionServiceRequest {
+                service_vpc_interfaces: vec![],
                 service_id: None,
                 service_name: "test-service".to_string(),
                 description: Some("Test service for instance".to_string()),
@@ -6779,6 +6780,7 @@ async fn test_allocate_instance_with_extension_services(
                     .unwrap()
                     .version
                     .clone(),
+                service_vpc_ids: vec![],
             }],
         }),
         power_profile: None,
@@ -6807,6 +6809,226 @@ async fn test_allocate_instance_with_extension_services(
         instance_snapshot.config.extension_services.service_configs[0].service_id,
         service.service_id.parse().unwrap()
     );
+
+    Ok(())
+}
+
+/// Verifies a registered networked service cannot be attached by omitting its
+/// VPC selection while endpoint reconciliation is unavailable.
+#[crate::sqlx_test]
+async fn test_allocate_instance_rejects_networked_service_without_vpc_selection(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Enable DPF registration and prepare a host that must remain unassigned.
+    let pool = PgPoolOptions::new().connect_with(options).await?;
+    let mut config = get_config();
+    config.dpf.enabled = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let managed_host = create_managed_host(&env).await;
+    let requested_instance_id = InstanceId::new();
+
+    // Register a service whose one declared interface requires a VPC selection.
+    env.api
+        .create_tenant(Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: "best_org".to_string(),
+            routing_profile_type: None,
+            metadata: Some(rpc::Metadata {
+                name: "best_org".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+        }))
+        .await?;
+    let service = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::forge::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![rpc::forge::ServiceVpcInterfaceRequirement {
+                address_family: rpc::forge::ServiceVpcAddressFamily::Ipv4 as i32,
+            }],
+            service_id: None,
+            service_name: "networked-allocation-service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::forge::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: r#"{
+                    "repoURL": "oci://registry.example.com/charts",
+                    "chartName": "tenant-service",
+                    "chartVersion": "1.2.3",
+                    "security.privileged": false
+                }"#
+            .to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+
+    // The empty repeated field must not bypass the registered-service guard.
+    let error = env
+        .api
+        .allocate_instance(Request::new(rpc::InstanceAllocationRequest {
+            machine_id: Some(managed_host.id),
+            config: Some(rpc::InstanceConfig {
+                tenant: Some(default_tenant_config()),
+                os: Some(default_os_config()),
+                network: Some(single_interface_network_config(segment_id)),
+                dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+                    service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+                        service_id: service.service_id,
+                        version: service
+                            .latest_version_info
+                            .expect("created service has a version")
+                            .version,
+                        service_vpc_ids: vec![],
+                    }],
+                }),
+                ..Default::default()
+            }),
+            instance_id: Some(requested_instance_id),
+            instance_type_id: None,
+            metadata: Some(rpc::Metadata {
+                name: "networked-allocation".to_string(),
+                description: String::new(),
+                labels: vec![],
+            }),
+            allow_unhealthy_machine: false,
+        }))
+        .await
+        .expect_err("networked attachment without a VPC must be rejected");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "service VPC attachment is unavailable until network resource reconciliation is implemented"
+    );
+
+    // Re-read through the public API to prove rejection happened before persistence.
+    let persisted = env
+        .api
+        .find_instances_by_ids(Request::new(rpc::forge::InstancesByIdsRequest {
+            instance_ids: vec![requested_instance_id],
+        }))
+        .await?
+        .into_inner();
+    assert!(persisted.instances.is_empty());
+
+    Ok(())
+}
+
+/// Verifies instance updates cannot add service-VPC ownership before endpoint
+/// reconciliation exists and that each rejected request leaves intent unchanged.
+#[crate::sqlx_test]
+async fn test_update_instance_rejects_service_vpc_activation(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Create a ready instance with one ordinary attachment and a VPC available to select.
+    let pool = PgPoolOptions::new().connect_with(options).await?;
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let selected_vpc = db::vpc::find_by_segment(&env.pool, segment_id)
+        .await?
+        .expect("created segment belongs to a VPC")
+        .id;
+    let managed_host = create_managed_host(&env).await;
+    let (current_service, new_service, _) = create_dpu_extension_services(&env).await?;
+    let current_version = current_service
+        .latest_version_info
+        .as_ref()
+        .expect("current service has a version")
+        .version
+        .clone();
+    let base_config = rpc::InstanceConfig {
+        tenant: Some(default_tenant_config()),
+        os: Some(default_os_config()),
+        network: Some(single_interface_network_config(segment_id)),
+        dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+            service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+                service_id: current_service.service_id.clone(),
+                version: current_version.clone(),
+                service_vpc_ids: vec![],
+            }],
+        }),
+        ..Default::default()
+    };
+    let instance = managed_host
+        .instance_builer(&env)
+        .config(base_config.clone())
+        .build()
+        .await;
+
+    // Exercise the two different rejection reasons owned by the update guard.
+    let cases = [
+        // Adding a selection to the active attachment would change its endpoint ownership.
+        (
+            current_service.service_id.clone(),
+            current_version,
+            "the VPC selection of an existing extension-service attachment cannot be changed",
+        ),
+        // A selected VPC on another service would activate a new networked attachment.
+        (
+            new_service.service_id,
+            new_service
+                .latest_version_info
+                .expect("new service has a version")
+                .version,
+            "service VPC attachment is unavailable until network resource reconciliation is implemented",
+        ),
+    ];
+
+    for (service_id, version, expected_message) in cases {
+        let mut requested_config = base_config.clone();
+        requested_config
+            .dpu_extension_services
+            .as_mut()
+            .expect("test config contains an extension service")
+            .service_configs[0] = rpc::forge::InstanceDpuExtensionServiceConfig {
+            service_id,
+            version,
+            service_vpc_ids: vec![selected_vpc],
+        };
+
+        // Each request must reach its specific activation boundary.
+        let error = env
+            .api
+            .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: Some(instance.id),
+                if_version_match: None,
+                config: Some(requested_config),
+                metadata: Some(rpc::Metadata {
+                    name: "service-vpc-update".to_string(),
+                    description: String::new(),
+                    labels: vec![],
+                }),
+            }))
+            .await
+            .expect_err("service VPC activation must be rejected");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error.message(), expected_message);
+
+        // Re-read through the public API to prove the rejected selection was not stored.
+        let mut persisted = env
+            .api
+            .find_instances_by_ids(Request::new(rpc::forge::InstancesByIdsRequest {
+                instance_ids: vec![instance.id],
+            }))
+            .await?
+            .into_inner()
+            .instances;
+        let persisted_attachment = persisted
+            .pop()
+            .expect("instance remains visible")
+            .config
+            .expect("instance retains its config")
+            .dpu_extension_services
+            .expect("instance retains its extension service")
+            .service_configs
+            .pop()
+            .expect("instance retains its active attachment");
+        assert_eq!(persisted_attachment.service_id, current_service.service_id);
+        assert!(persisted_attachment.service_vpc_ids.is_empty());
+    }
 
     Ok(())
 }
@@ -6842,6 +7064,7 @@ async fn test_allocate_instance_with_extension_services_rejected_on_dpf_host(
                     service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                         service_id: service.service_id,
                         version: service.latest_version_info.unwrap().version,
+                        service_vpc_ids: vec![],
                     }],
                 }),
                 power_profile: None,
@@ -6898,6 +7121,7 @@ async fn create_dpu_extension_services(
         .api
         .create_dpu_extension_service(tonic::Request::new(
             rpc::forge::CreateDpuExtensionServiceRequest {
+                service_vpc_interfaces: vec![],
                 service_id: None,
                 service_name: "test-service1".to_string(),
                 description: Some("Test service for instance".to_string()),
@@ -6916,6 +7140,7 @@ async fn create_dpu_extension_services(
         .api
         .update_dpu_extension_service(tonic::Request::new(
             rpc::forge::UpdateDpuExtensionServiceRequest {
+                service_vpc_interfaces: vec![],
                 service_id: service1.service_id.clone(),
                 service_name: None,
                 description: Some("Test service for instance".to_string()),
@@ -6932,6 +7157,7 @@ async fn create_dpu_extension_services(
         .api
         .create_dpu_extension_service(tonic::Request::new(
             rpc::forge::CreateDpuExtensionServiceRequest {
+                service_vpc_interfaces: vec![],
                 service_id: None,
                 service_name: "test-service2".to_string(),
                 description: Some("Test service for instance".to_string()),
@@ -6949,6 +7175,7 @@ async fn create_dpu_extension_services(
         .api
         .create_dpu_extension_service(tonic::Request::new(
             rpc::forge::CreateDpuExtensionServiceRequest {
+                service_vpc_interfaces: vec![],
                 service_id: None,
                 service_name: "test-service3".to_string(),
                 description: Some("Test service for instance".to_string()),
@@ -7000,6 +7227,7 @@ async fn test_allocate_instance_with_duplicate_extension_services(
                                 .unwrap()
                                 .version
                                 .clone(),
+                            service_vpc_ids: vec![],
                         },
                         rpc::forge::InstanceDpuExtensionServiceConfig {
                             service_id: service1.service_id.clone(),
@@ -7009,6 +7237,7 @@ async fn test_allocate_instance_with_duplicate_extension_services(
                                 .unwrap()
                                 .version
                                 .clone(),
+                            service_vpc_ids: vec![],
                         },
                     ],
                 }),
@@ -7074,6 +7303,7 @@ async fn test_update_instance_with_extension_services(
             service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                 service_id: service1.service_id.clone(),
                 version: service1_version1.clone(),
+                service_vpc_ids: vec![],
             }],
         }),
         power_profile: None,
@@ -7114,14 +7344,17 @@ async fn test_update_instance_with_extension_services(
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service1.service_id.clone(),
                     version: service1_version2.clone(),
+                    service_vpc_ids: vec![],
                 },
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service2.service_id.clone(),
                     version: service2_version.clone(),
+                    service_vpc_ids: vec![],
                 },
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service3.service_id.clone(),
                     version: service3_version.clone(),
+                    service_vpc_ids: vec![],
                 },
             ],
         }),
@@ -7302,6 +7535,7 @@ async fn test_update_instance_with_extension_services(
             service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                 service_id: service1.service_id.clone(),
                 version: service3_version.clone(),
+                service_vpc_ids: vec![],
             }],
         }),
         power_profile: None,
@@ -7339,10 +7573,12 @@ async fn test_update_instance_with_extension_services(
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service1.service_id.clone(),
                     version: service1_version1.clone(),
+                    service_vpc_ids: vec![],
                 },
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: service1.service_id.clone(),
                     version: service1_version2.clone(),
+                    service_vpc_ids: vec![],
                 },
             ],
         }),
@@ -7409,6 +7645,7 @@ async fn test_attach_extension_service_rejected_on_dpf_host(
                     service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                         service_id: service.service_id,
                         version: service.latest_version_info.unwrap().version,
+                        service_vpc_ids: vec![],
                     }],
                 }),
                 power_profile: None,
@@ -7464,6 +7701,7 @@ async fn test_extension_service_removed_after_all_dpus_report_terminated(
             service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                 service_id: service2.service_id.clone(),
                 version: service2_version,
+                service_vpc_ids: vec![],
             }],
         }),
         power_profile: None,
@@ -7634,6 +7872,7 @@ async fn test_extension_services_status_observation(
             service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
                 service_id: service1.service_id.clone(),
                 version: versions[0].version_string(),
+                service_vpc_ids: vec![],
             }],
         }),
         power_profile: None,

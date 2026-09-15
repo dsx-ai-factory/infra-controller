@@ -108,6 +108,7 @@ impl TryFrom<InstanceConfig> for rpc::InstanceConfig {
     type Error = RpcDataConversionError;
 
     fn try_from(config: InstanceConfig) -> Result<rpc::InstanceConfig, Self::Error> {
+        let service_interfaces = config.network.service_interfaces.clone();
         let tenant = rpc::forge::TenantConfig::try_from(config.tenant)?;
         let os = rpc::forge::InstanceOperatingSystemConfig::try_from(config.os)?;
         let network = rpc::InstanceNetworkConfig::try_from(config.network)?;
@@ -136,10 +137,11 @@ impl TryFrom<InstanceConfig> for rpc::InstanceConfig {
             .collect();
         let extension_services = match active_extension_services.is_empty() {
             true => None,
-            false => Some(rpc::forge::InstanceDpuExtensionServicesConfig::try_from(
+            false => Some(extension_services::to_rpc_config(
                 InstanceExtensionServicesConfig {
                     service_configs: active_extension_services,
                 },
+                &service_interfaces,
             )?),
         };
 
