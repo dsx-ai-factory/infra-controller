@@ -54,9 +54,8 @@ pub(crate) async fn create(
         peer_vpc_id.ok_or_else(|| CarbideError::MissingArgument("peer_vpc_id cannot be null"))?;
 
     let mut txn = api.txn_begin().await?;
-    if api.runtime_config.tenant_prefix_overlap_enabled {
-        ::db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
-    }
+    ::db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    let checks_required = super::tenant_prefix_overlap::checks_required(api, &mut txn).await?;
 
     // Check this VPC peering is permitted under current site vpc_peering_policy
     match api.runtime_config.vpc_peering_policy {
@@ -93,12 +92,25 @@ pub(crate) async fn create(
         }
     }
 
+    let previous_sources = if checks_required && !api.runtime_config.tenant_prefix_overlap_enabled {
+        receiver_sources_before_change(api, &mut txn, &[vpc_id, peer_vpc_id]).await?
+    } else {
+        vec![]
+    };
     let vpc_peering = db::create(&mut txn, vpc_id, peer_vpc_id, id).await?;
 
-    if api.runtime_config.tenant_prefix_overlap_enabled {
+    if checks_required {
         // Only these two receivers gain a source. Peers do not re-export
         // imported prefixes, but each endpoint may already import siblings.
+        validate_gate_off_imports(api, &mut txn, &previous_sources).await?;
         validate_receiver_prefixes(api, &mut txn, &[vpc_id, peer_vpc_id], None).await?;
+        super::tenant_prefix_overlap::validate_affected_instances(
+            api,
+            &mut txn,
+            &[vpc_id, peer_vpc_id],
+            None,
+        )
+        .await?;
     }
 
     txn.commit().await?;
@@ -114,15 +126,19 @@ pub(super) async fn validate_prefix_attachment(
     vpc_id: VpcId,
     prefix: IpNetwork,
 ) -> CarbideResult<()> {
-    if !api.runtime_config.tenant_prefix_overlap_enabled {
+    if !super::tenant_prefix_overlap::checks_required(api, txn).await? {
         return Ok(());
     }
     let mut receivers = db::get_vpc_peer_ids(txn, vpc_id).await?;
-    if receivers.is_empty() {
-        return Ok(());
-    }
     receivers.push(vpc_id);
-    validate_receiver_prefixes(api, txn, &receivers, Some((vpc_id, prefix))).await
+    validate_receiver_prefixes(api, txn, &receivers, Some((vpc_id, prefix))).await?;
+    super::tenant_prefix_overlap::validate_affected_instances(
+        api,
+        txn,
+        &receivers,
+        Some((vpc_id, prefix)),
+    )
+    .await
 }
 
 /// A VPC type change can alter its own imports and what direct peers import
@@ -132,10 +148,65 @@ pub(super) async fn validate_vpc_type_change(
     api: &Api,
     txn: &mut PgConnection,
     vpc_id: VpcId,
+    previous_sources: &[(VpcId, Vec<VpcId>)],
 ) -> CarbideResult<()> {
     let mut receivers = db::get_vpc_peer_ids(txn, vpc_id).await?;
     receivers.push(vpc_id);
-    validate_receiver_prefixes(api, txn, &receivers, None).await
+    validate_gate_off_imports(api, txn, previous_sources).await?;
+    validate_receiver_prefixes(api, txn, &receivers, None).await?;
+    super::tenant_prefix_overlap::validate_affected_instances(api, txn, &receivers, None).await
+}
+
+/// Captures imports before a gate-off writer changes peering visibility.
+pub(super) async fn receiver_sources_before_change(
+    api: &Api,
+    txn: &mut PgConnection,
+    receiver_ids: &[VpcId],
+) -> CarbideResult<Vec<(VpcId, Vec<VpcId>)>> {
+    let mut previous = Vec::with_capacity(receiver_ids.len());
+    for receiver_id in receiver_ids {
+        let receiver = vpc::find_by(
+            &mut *txn,
+            ObjectColumnFilter::One(vpc::IdColumn, receiver_id),
+        )
+        .await?
+        .pop()
+        .ok_or_else(super::tenant_prefix_overlap::overlap_error)?;
+        previous.push((
+            *receiver_id,
+            receiver_sources(&api.runtime_config, txn, &receiver).await?,
+        ));
+    }
+    Ok(previous)
+}
+
+/// Existing imports remain usable with the gate off; new imports cannot gain
+/// duplicate address space, even if only one copy would reach this receiver.
+/// Callers capture prior sources only with the gate off; enabled writers pass
+/// an empty slice and rely on the receiver overlap checks.
+async fn validate_gate_off_imports(
+    api: &Api,
+    txn: &mut PgConnection,
+    previous_sources: &[(VpcId, Vec<VpcId>)],
+) -> CarbideResult<()> {
+    for (receiver_id, previous) in previous_sources {
+        let receiver = vpc::find_by(
+            &mut *txn,
+            ObjectColumnFilter::One(vpc::IdColumn, receiver_id),
+        )
+        .await?
+        .pop()
+        .ok_or_else(super::tenant_prefix_overlap::overlap_error)?;
+        let gained = receiver_sources(&api.runtime_config, txn, &receiver)
+            .await?
+            .into_iter()
+            .filter(|source| !previous.contains(source))
+            .collect::<Vec<_>>();
+        if ::db::tenant_prefix_overlap::vpcs_use_duplicate_space(&mut *txn, &gained).await? {
+            return Err(super::tenant_prefix_overlap::overlap_error());
+        }
+    }
+    Ok(())
 }
 
 /// Only newly visible source VPCs can introduce a prefix collision. Gaining

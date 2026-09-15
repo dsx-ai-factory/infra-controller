@@ -17,6 +17,9 @@
 
 //! Tenant prefix overlap checks shared by prefix, peering, VPC, NSG, and Instance writers.
 
+mod instances;
+mod startup;
+
 use std::collections::HashSet;
 
 use carbide_network::virtualization::VpcVirtualizationType;
@@ -24,6 +27,7 @@ use carbide_uuid::instance::InstanceId;
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::vpc::VpcId;
 use db::ObjectColumnFilter;
+pub(super) use instances::validate_affected_instances;
 use ipnetwork::IpNetwork;
 use model::instance::InstanceSearchFilter;
 use model::instance::config::InstanceConfig;
@@ -40,6 +44,7 @@ use model::site_prefix::{
 };
 use model::vpc::{ALL_VPC_VIRTUALIZATION_TYPES, Vpc, VpcVirtualizationTypeCapabilities};
 use sqlx::PgConnection;
+pub(crate) use startup::{validate_retained_state, validate_retained_state_in_transaction};
 
 use crate::api::Api;
 use crate::cfg::file::{
@@ -85,15 +90,9 @@ pub(super) fn contains_prefix(parent: IpNetwork, child: IpNetwork) -> bool {
 /// `site_prefix_is_eligible` checks the `SitePrefix` requirements for one
 /// `VpcPrefix`.
 ///
-/// `allow_deleting` is true only for an existing `VpcPrefix`. Its CIDR remains
-/// reserved while the `SitePrefix` is `Deleting`, but a new `VpcPrefix`
-/// requires a `Ready` `SitePrefix`.
-fn site_prefix_is_eligible(
-    site_prefix: &SitePrefix,
-    vpc: &Vpc,
-    prefix: IpNetwork,
-    allow_deleting: bool,
-) -> bool {
+/// Retained checks allow deleting roots while their routes drain. Admission
+/// separately requires a `Ready` root for the new `VpcPrefix`.
+fn site_prefix_is_eligible(site_prefix: &SitePrefix, vpc: &Vpc, prefix: IpNetwork) -> bool {
     site_prefix.status.authority == SitePrefixAuthority::TenantManaged
         && site_prefix
             .config
@@ -103,11 +102,10 @@ fn site_prefix_is_eligible(
             == Some(vpc.config.tenant_organization_id.as_str())
         && site_prefix.config.routing_scope == SitePrefixRoutingScope::DatacenterOnly
         && contains_prefix(site_prefix.config.prefix, prefix)
-        && match site_prefix.status.lifecycle_state {
-            SitePrefixLifecycleState::Ready => true,
-            SitePrefixLifecycleState::Deleting => allow_deleting,
-            SitePrefixLifecycleState::Provisioning | SitePrefixLifecycleState::Error => false,
-        }
+        && matches!(
+            site_prefix.status.lifecycle_state,
+            SitePrefixLifecycleState::Ready | SitePrefixLifecycleState::Deleting
+        )
 }
 
 /// `pair_is_eligible` returns whether two `VpcPrefix` records may reuse one
@@ -123,26 +121,52 @@ pub(super) fn pair_is_eligible(
     candidate: VpcPrefixParticipant<'_>,
     existing: VpcPrefixParticipant<'_>,
 ) -> bool {
-    if !runtime_config.tenant_prefix_overlap_enabled
-        || !matches!(
-            runtime_config.vpc_isolation_behavior,
-            VpcIsolationBehaviorType::MutualIsolation
-        )
-        || runtime_config.site_global_vpc_vni.is_some()
+    runtime_config.tenant_prefix_overlap_enabled
+        && !candidate.is_deleted
+        && !existing.is_deleted
+        && candidate.site_prefix.status.lifecycle_state == SitePrefixLifecycleState::Ready
+        && [candidate.vpc, existing.vpc].iter().all(|vpc| {
+            runtime_config.fnn.as_ref().is_some_and(|fnn| {
+                fnn.resolve_vpc_routing_profile(&vpc.config)
+                    .is_ok_and(|profile| profile.tenant_prefix_overlap_eligible)
+            })
+        })
+        && retained_pair_is_isolated(runtime_config, candidate, existing)
+}
+
+/// `site_policy_is_isolated` checks the site-wide routes that could connect
+/// otherwise isolated VPCs. Service VPC slots expose externally configured
+/// connections whose isolation has not been qualified for duplicate prefixes.
+fn site_policy_is_isolated(runtime_config: &CarbideConfig) -> bool {
+    matches!(
+        runtime_config.vpc_isolation_behavior,
+        VpcIsolationBehaviorType::MutualIsolation
+    )
+        && runtime_config.site_global_vpc_vni.is_none()
         // The renderer falls back to this list when profile anycast is empty.
-        || !runtime_config.anycast_site_prefixes.is_empty()
-        || existing.is_deleted
+        && runtime_config.anycast_site_prefixes.is_empty()
+        && runtime_config.dpu_config.service_vpc_slot_count == 0
+        && runtime_config.fnn.as_ref().is_some_and(|fnn| {
+            fnn.common_internal_route_target.is_none()
+                && fnn.additional_route_target_imports.is_empty()
+        })
+}
+
+/// `retained_pair_is_isolated` preserves routing checks during withdrawal.
+/// Admission opt-ins and deletion intent prevent additions, but do not make
+/// a safely isolated pair stop serving before its routes have drained.
+fn retained_pair_is_isolated(
+    runtime_config: &CarbideConfig,
+    candidate: VpcPrefixParticipant<'_>,
+    existing: VpcPrefixParticipant<'_>,
+) -> bool {
+    if !site_policy_is_isolated(runtime_config)
         || candidate.prefix != existing.prefix
         || candidate.vpc.id == existing.vpc.id
         || candidate.vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn
         || existing.vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn
-        || !site_prefix_is_eligible(
-            candidate.site_prefix,
-            candidate.vpc,
-            candidate.prefix,
-            false,
-        )
-        || !site_prefix_is_eligible(existing.site_prefix, existing.vpc, existing.prefix, true)
+        || !site_prefix_is_eligible(candidate.site_prefix, candidate.vpc, candidate.prefix)
+        || !site_prefix_is_eligible(existing.site_prefix, existing.vpc, existing.prefix)
         || !matches!(
             (candidate.vpc.status.vni, existing.vpc.status.vni),
             (Some(candidate_vni), Some(existing_vni)) if candidate_vni != existing_vni
@@ -154,10 +178,6 @@ pub(super) fn pair_is_eligible(
     let Some(fnn) = runtime_config.fnn.as_ref() else {
         return false;
     };
-    if fnn.common_internal_route_target.is_some() || !fnn.additional_route_target_imports.is_empty()
-    {
-        return false;
-    }
     let Ok(candidate_profile) = fnn.resolve_vpc_routing_profile(&candidate.vpc.config) else {
         return false;
     };
@@ -165,8 +185,28 @@ pub(super) fn pair_is_eligible(
         return false;
     };
 
-    candidate_profile.is_eligible_for_tenant_prefix_overlap()
-        && existing_profile.is_eligible_for_tenant_prefix_overlap()
+    candidate_profile.is_isolated_for_tenant_prefixes()
+        && existing_profile.is_isolated_for_tenant_prefixes()
+}
+
+/// `checks_required` keeps admission active after an operator disables the
+/// gate while a tenant-managed `VpcPrefix` still overlaps another VPC's addresses.
+/// Legacy overlaps alone do not enable these safeguards. Callers that mutate
+/// routing acquire the overlap lock before reading their dependencies.
+pub(super) async fn checks_required(api: &Api, txn: &mut PgConnection) -> CarbideResult<bool> {
+    Ok(api.runtime_config.tenant_prefix_overlap_enabled
+        || !db::tenant_prefix_overlap::find_duplicate_vpc_ids(txn, false)
+            .await?
+            .is_empty())
+}
+
+async fn vpc_uses_duplicate_space(
+    api: &Api,
+    txn: &mut PgConnection,
+    vpc: &Vpc,
+) -> CarbideResult<bool> {
+    let sources = receiver_sources(&api.runtime_config, txn, vpc).await?;
+    Ok(db::tenant_prefix_overlap::vpcs_use_duplicate_space(txn, &sources).await?)
 }
 
 /// `nsg_policy_is_safe` requires deny-only rules because permits run before
@@ -287,6 +327,96 @@ fn policy_error() -> CarbideError {
     CarbideError::FailedPrecondition(
         "the requested policy is not safe for tenant prefix reuse".to_string(),
     )
+}
+
+async fn validate_effective_nsg(
+    api: &Api,
+    txn: &mut PgConnection,
+    id: &NetworkSecurityGroupId,
+) -> CarbideResult<()> {
+    let nsg = db::network_security_group::find_by_ids(txn, std::slice::from_ref(id), None, false)
+        .await?
+        .pop()
+        .ok_or_else(policy_error)?;
+    if !nsg_policy_is_safe(
+        &nsg.rules,
+        nsg.stateful_egress,
+        api.runtime_config
+            .network_security_group
+            .stateful_acls_enabled,
+    ) {
+        return Err(policy_error());
+    }
+    Ok(())
+}
+
+/// `validate_retained_host` checks the networks an admitted Instance can use
+/// without another API request, including a pending replacement. The caller
+/// holds the overlap lock before loading the host and through configuration
+/// generation. Admission gates may be off during drain; isolation must remain.
+pub(super) async fn validate_retained_host(
+    api: &Api,
+    txn: &mut PgConnection,
+    host: &ManagedHostStateSnapshot,
+) -> CarbideResult<()> {
+    if !needs_retained_policy_check(host) {
+        return Ok(());
+    }
+    let instance = host.instance.as_ref().ok_or_else(policy_error)?;
+    let vpcs = retained_policy_vpcs(txn, host).await?;
+    let mut sources = HashSet::new();
+    for vpc in &vpcs {
+        sources.extend(receiver_sources(&api.runtime_config, txn, vpc).await?);
+    }
+    let sources = sources.into_iter().collect::<Vec<_>>();
+    if !api.runtime_config.tenant_prefix_overlap_enabled
+        && !db::tenant_prefix_overlap::vpcs_use_duplicate_space(&mut *txn, &sources).await?
+    {
+        return Ok(());
+    }
+    let prefixes = db::vpc_peering::get_retained_prefixes_by_vpcs(&mut *txn, &sources).await?;
+    if prefixes_overlap_across_vpcs(&prefixes) {
+        return Err(overlap_error());
+    }
+    startup::validate_retained_prefixes(api, txn, &sources).await?;
+
+    for network in std::iter::once(&instance.config.network).chain(
+        instance
+            .update_network_config_request
+            .iter()
+            .flat_map(|update| [&update.old_config, &update.new_config]),
+    ) {
+        crate::ethernet_virtualization::validate_instance_interface_routing_profiles(
+            txn,
+            network,
+            api.runtime_config.fnn.as_ref(),
+        )
+        .await?;
+    }
+    for vpc in vpcs {
+        if vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn {
+            continue;
+        }
+        let fnn = api.runtime_config.fnn.as_ref().ok_or_else(policy_error)?;
+        if !site_policy_is_isolated(&api.runtime_config)
+            || !fnn
+                .resolve_vpc_routing_profile(&vpc.config)?
+                .is_isolated_for_tenant_prefixes()
+            || !nsg_policy_is_safe(
+                &api.runtime_config.network_security_group.policy_overrides,
+                false,
+                api.runtime_config
+                    .network_security_group
+                    .stateful_acls_enabled,
+            )
+        {
+            return Err(policy_error());
+        }
+        if let Some(nsg_id) = effective_nsg(host, vpc.config.network_security_group_id.as_ref()) {
+            validate_effective_nsg(api, txn, nsg_id).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Returns the direct source VPCs whose prefixes or VNIs the receiver imports,
@@ -471,24 +601,7 @@ pub(crate) async fn validate_instance_network(
             .as_ref()
             .or(vpc.config.network_security_group_id.as_ref())
         {
-            let nsg = db::network_security_group::find_by_ids(
-                txn,
-                std::slice::from_ref(nsg_id),
-                None,
-                false,
-            )
-            .await?
-            .pop()
-            .ok_or_else(policy_error)?;
-            if !nsg_policy_is_safe(
-                &nsg.rules,
-                nsg.stateful_egress,
-                api.runtime_config
-                    .network_security_group
-                    .stateful_acls_enabled,
-            ) {
-                return Err(policy_error());
-            }
+            validate_effective_nsg(api, txn, nsg_id).await?;
         }
         // A safe NSG replacement cannot add routing visibility. It remains
         // available to restrict a retained configuration, including gate-off.
@@ -499,7 +612,7 @@ pub(crate) async fn validate_instance_network(
         if !fnn
             .resolve_vpc_routing_profile(&vpc.config)?
             .is_eligible_for_tenant_prefix_overlap()
-            || !api.runtime_config.anycast_site_prefixes.is_empty()
+            || !site_policy_is_isolated(&api.runtime_config)
             || !nsg_policy_is_safe(
                 &api.runtime_config.network_security_group.policy_overrides,
                 false,
@@ -525,8 +638,9 @@ pub(super) async fn validate_vpc_policy(
     profile_requires_check: bool,
     nsg_requires_check: bool,
 ) -> CarbideResult<()> {
-    if !api.runtime_config.tenant_prefix_overlap_enabled
-        || candidate.config.network_virtualization_type != VpcVirtualizationType::Fnn
+    if candidate.config.network_virtualization_type != VpcVirtualizationType::Fnn
+        || (!api.runtime_config.tenant_prefix_overlap_enabled
+            && !vpc_uses_duplicate_space(api, txn, candidate).await?)
     {
         return Ok(());
     }
@@ -535,7 +649,7 @@ pub(super) async fn validate_vpc_policy(
     }
 
     for host in load_policy_hosts(txn, &[candidate.id], &[]).await? {
-        if !serves_tenant_network(&host) {
+        if !needs_retained_policy_check(&host) {
             continue;
         }
         let vpcs = retained_policy_vpcs(txn, &host).await?;
@@ -566,17 +680,16 @@ pub(super) async fn validate_nsg_policy(
     txn: &mut PgConnection,
     id: &NetworkSecurityGroupId,
 ) -> CarbideResult<()> {
-    if !api.runtime_config.tenant_prefix_overlap_enabled {
-        return Ok(());
-    }
     let attachments = db::network_security_group::find_retained_attachments(txn, id).await?;
     for host in load_policy_hosts(txn, &attachments.vpc_ids, &attachments.instance_ids).await? {
-        if !serves_tenant_network(&host) {
+        if !needs_retained_policy_check(&host) {
             continue;
         }
         for vpc in retained_policy_vpcs(txn, &host).await? {
             if vpc.config.network_virtualization_type == VpcVirtualizationType::Fnn
                 && effective_nsg(&host, vpc.config.network_security_group_id.as_ref()) == Some(id)
+                && (api.runtime_config.tenant_prefix_overlap_enabled
+                    || vpc_uses_duplicate_space(api, txn, &vpc).await?)
             {
                 tracing::warn!(network_security_group_id = %id, vpc_id = %vpc.id,
                     "NSG policy would make tenant prefix reuse unsafe");
@@ -587,16 +700,21 @@ pub(super) async fn validate_nsg_policy(
     Ok(())
 }
 
-fn serves_tenant_network(host: &ManagedHostStateSnapshot) -> bool {
-    host.instance.is_some()
-        && host.has_managed_dpus()
-        && !host.use_admin_network()
-        && !matches!(
+fn needs_retained_policy_check(host: &ManagedHostStateSnapshot) -> bool {
+    // Even a canceled allocation can advance to tenant networking. Only the
+    // controller's return-to-Admin state guarantees no later activation.
+    let removing_tenant_network = host.use_admin_network()
+        && matches!(
             host.managed_state,
             ManagedHostState::Assigned {
-                instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
+                instance_state: InstanceState::WaitingForNetworkReconfig,
             }
-        )
+        );
+    host.has_managed_dpus()
+        && host
+            .instance
+            .as_ref()
+            .is_some_and(|instance| instance.deleted.is_none() || !removing_tenant_network)
 }
 
 fn effective_nsg<'a>(
@@ -697,13 +815,15 @@ async fn retained_policy_vpcs(
     let loaded_ids: HashSet<_> = vpcs.iter().map(|vpc| vpc.id).collect();
     let direct_ids = vpc_ids.difference(&loaded_ids).copied().collect::<Vec<_>>();
     if !direct_ids.is_empty() {
-        vpcs.extend(
-            db::vpc::find_by(
-                txn,
-                ObjectColumnFilter::List(db::vpc::IdColumn, &direct_ids),
-            )
-            .await?,
-        );
+        let loaded = db::vpc::find_by(
+            txn,
+            ObjectColumnFilter::List(db::vpc::IdColumn, &direct_ids),
+        )
+        .await?;
+        if loaded.len() != direct_ids.len() {
+            return Err(policy_error());
+        }
+        vpcs.extend(loaded);
     }
     Ok(vpcs)
 }
@@ -870,6 +990,71 @@ mod tests {
             version: ConfigVersion::initial(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn retained_pairs_preserve_isolation_when_admission_stops() {
+        enum StopAdmission {
+            SiteGate,
+            ProfileGate,
+            Deletion,
+            ServiceVpcSlots,
+        }
+        for reason in [
+            StopAdmission::SiteGate,
+            StopAdmission::ProfileGate,
+            StopAdmission::Deletion,
+            StopAdmission::ServiceVpcSlots,
+        ] {
+            let mut config = eligible_config();
+            let first = vpc("first", Some(100));
+            let second = vpc("second", Some(200));
+            let prefix = "192.0.2.0/24".parse().unwrap();
+            let mut first_root = site_prefix("first", prefix);
+            let mut second_root = site_prefix("second", prefix);
+            let deleting = matches!(reason, StopAdmission::Deletion);
+            match reason {
+                StopAdmission::SiteGate => config.tenant_prefix_overlap_enabled = false,
+                StopAdmission::ProfileGate => {
+                    config
+                        .fnn
+                        .as_mut()
+                        .unwrap()
+                        .routing_profiles
+                        .get_mut("ELIGIBLE")
+                        .unwrap()
+                        .tenant_prefix_overlap_eligible = false;
+                }
+                StopAdmission::Deletion => {
+                    first_root.status.lifecycle_state = SitePrefixLifecycleState::Deleting;
+                    second_root.status.lifecycle_state = SitePrefixLifecycleState::Deleting;
+                }
+                StopAdmission::ServiceVpcSlots => config.dpu_config.service_vpc_slot_count = 1,
+            }
+            let participants = || {
+                (
+                    VpcPrefixParticipant {
+                        prefix,
+                        is_deleted: deleting,
+                        vpc: &first,
+                        site_prefix: &first_root,
+                    },
+                    VpcPrefixParticipant {
+                        prefix,
+                        is_deleted: deleting,
+                        vpc: &second,
+                        site_prefix: &second_root,
+                    },
+                )
+            };
+            let (a, b) = participants();
+            assert!(!pair_is_eligible(&config, a, b));
+            let (a, b) = participants();
+            assert_eq!(
+                retained_pair_is_isolated(&config, a, b),
+                !matches!(reason, StopAdmission::ServiceVpcSlots)
+            );
         }
     }
 
