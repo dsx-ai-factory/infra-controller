@@ -395,10 +395,22 @@ envFrom:
 
 livenessProbe:
   httpGet:
+    path: /health
     port: 1080
     scheme: HTTP
   initialDelaySeconds: 20
   periodSeconds: 20
+  failureThreshold: 3
+  successThreshold: 1
+  timeoutSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 1080
+    scheme: HTTP
+  initialDelaySeconds: 20
+  periodSeconds: 10
   failureThreshold: 3
   successThreshold: 1
   timeoutSeconds: 20

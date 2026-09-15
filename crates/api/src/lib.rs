@@ -34,6 +34,7 @@
 mod command_line;
 mod logging;
 mod metrics;
+mod readiness;
 mod postgres;
 mod resources;
 mod run;
