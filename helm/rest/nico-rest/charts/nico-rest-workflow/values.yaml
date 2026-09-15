@@ -9,6 +9,23 @@ podAnnotations: {}
 image:
   name: nico-rest-workflow
 
+## Pod-level security context, shared by the cloud-worker and site-worker
+## deployments. 1000 is the `nvs` user the image declares; the image names it
+## rather than giving a UID, which the kubelet cannot verify, so runAsNonRoot
+## needs the number spelled out here. Override for OpenShift, where the
+## restricted SCC assigns UIDs from the namespace range and rejects fixed
+## numeric UIDs:
+## Keep runAsNonRoot: true and null only the fixed UID/GID so the SCC assigns
+## them from the range while the non-root assertion is preserved:
+##   podSecurityContext:
+##     runAsNonRoot: true
+##     runAsUser: null
+##     fsGroup: null
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
 cloudWorker:
   replicaCount: 1
   resources:
