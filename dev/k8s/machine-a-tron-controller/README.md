@@ -8,9 +8,11 @@ Services for mock BMC endpoints.
 - Auto-discovers machine-a-tron pods via `nvidia-infra-controller/mat-service=true`
   label
 - Creates a ClusterIP Service per mock BMC with the BMC IP published as
-  `spec.externalIPs` outside the ServiceCIDR; the clusterIP is allocated by
-  the apiserver, and a host or DPU that has not reported a BMC IP yet is
-  skipped until the IP is known
+  `spec.externalIPs` outside the ServiceCIDR and the pod CIDR (the
+  [chart README Requirements section](../../../helm/charts/nico-machine-a-tron/README.md#requirements)
+  lists every network the BMC range must stay clear of); the clusterIP is
+  allocated by the apiserver, and a host or DPU that has not reported a BMC IP
+  yet is skipped until the IP is known
 - Supports Redfish (TCP 443), IPMI (UDP 623), and per-machine SSH ports
 - IPMI and SSH ports are dynamically added when machine-a-tron reports their endpoints in status
 - Multi-pod deployments with pod-specific routing
@@ -194,9 +196,9 @@ Created Services have:
 
 - `type: ClusterIP` with the `clusterIP` allocated by the apiserver
 - `externalIPs: [<BMC IP>]` - externalIPs are not drawn from the ServiceCIDR, so
-  when the BMC network is outside the ServiceCIDR a BMC lease cannot collide
-  with a dynamically allocated clusterIP, and they are mutable, so a lease
-  change is an in-place update
+  when the BMC network is outside the ServiceCIDR and the pod CIDR a BMC lease
+  cannot collide with a dynamically allocated clusterIP or a pod IP, and they
+  are mutable, so a lease change is an in-place update
 
 ## Development
 
