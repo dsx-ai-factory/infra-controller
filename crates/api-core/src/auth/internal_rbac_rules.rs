@@ -396,7 +396,10 @@ impl InternalRBACRules {
         x.perm("GetTokenDelegation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("SetTokenDelegation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("DeleteTokenDelegation", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("ReencryptTenantIdentitySecrets", vec![ForgeAdminCLI]);
+        x.perm(
+            "ReencryptTenantIdentitySecrets",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
         x.perm("GetJWKS", vec![Anonymous, Agent, ForgeAdminCLI, SiteAgent]);
         x.perm(
             "GetOpenIDConfiguration",
