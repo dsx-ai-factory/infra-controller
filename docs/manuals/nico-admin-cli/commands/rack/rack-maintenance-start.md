@@ -35,7 +35,8 @@ Power shelf IDs to include (omit for full rack)
 
 **--activities** *\<ACTIVITIES\>...*  
 Maintenance activities to perform: firmware-upgrade, nvos-update,
-configure-nmx-cluster, power-sequence (omit for all)
+configure-switch-certificates, configure-nmx-cluster, power-sequence
+(omit for all)
 
 **--firmware-version** *\<FIRMWARE_VERSION\>*  
 Raw SOT JSON for firmware-upgrade activity (prefer --sot-json-file)

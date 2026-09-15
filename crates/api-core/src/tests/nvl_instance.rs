@@ -2568,11 +2568,11 @@ async fn assert_switch_cert_monitor_nmxc_simulator_probe(
             .config
             .maintenance_requested
             .as_ref()
-            .expect("rack NMX cluster maintenance request");
+            .expect("rack switch certificate maintenance request");
         assert!(scope.is_full_rack());
         assert_eq!(
             scope.activities,
-            vec![MaintenanceActivity::ConfigureNmxCluster]
+            vec![MaintenanceActivity::ConfigureSwitchCertificates]
         );
     } else {
         assert!(

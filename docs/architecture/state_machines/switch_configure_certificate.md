@@ -86,9 +86,12 @@ uses the state-controller behavior described above.
 for both switch state-controller and direct RPC operations. A non-empty list
 replaces the default. Omission or an empty list uses all four values below.
 
-`[rack_state_controller].nmx_cluster_switch_mtls_services` is deprecated. The
-field is accepted and ignored because rack maintenance does not configure
-switch certificates.
+`[rack_state_controller].nmx_cluster_switch_mtls_services` controls the
+bindings for the rack-level `ConfigureSwitchCertificates` maintenance
+activity, which submits one RMS `ConfigureSwitchCertificate` batch for every
+scoped switch (see [Rack State Machine](rackstatemachine.md)). Omission or an
+empty list uses the same four values as the per-switch setting. Rack
+`ConfigureNmxCluster` maintenance does not read it.
 
 | Service value | RMS service description |
 |---------------|-------------------------|

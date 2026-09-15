@@ -3487,17 +3487,17 @@ pub struct RackStateControllerConfig {
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
 
-    /// Switch mTLS services for NMX cluster setup. Accepted and ignored: rack
-    /// maintenance does not configure switch certificates. Per-switch
-    /// certificate configuration uses
-    /// `[switch_state_controller].switch_mtls_services`.
+    /// Switch mTLS services bound by the rack-level `ConfigureSwitchCertificates`
+    /// maintenance activity. Omitted or empty selects every supported service,
+    /// matching the per-switch `[switch_state_controller].switch_mtls_services`
+    /// default. Rack `ConfigureNmxCluster` maintenance does not read it.
     #[serde(default)]
     pub nmx_cluster_switch_mtls_services: Vec<component_manager::config::SwitchMtlsService>,
 }
 
 impl RackStateControllerConfig {
-    /// Returns configured NMX cluster switch mTLS services, or the ScaleUpFabric
-    /// defaults when the field was omitted or left empty in config.
+    /// Returns the configured rack-level switch mTLS services, or every
+    /// supported service when the field was omitted or left empty in config.
     pub fn effective_nmx_cluster_switch_mtls_services_as_i32(&self) -> Vec<i32> {
         component_manager::config::switch_mtls_services_as_i32(
             &component_manager::config::effective_nmx_cluster_switch_mtls_services(

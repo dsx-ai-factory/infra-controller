@@ -50,13 +50,14 @@ use db::{
     power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
 };
 use librms::protos::rack_manager as rms;
+use model::component_manager::ConfigureSwitchCertificateState;
 use model::machine::HostMachine;
 use model::rack::{
-    ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceInfo,
-    FirmwareUpgradeDeviceStatus, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
-    NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackFirmwareUpgradeState,
-    RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState, RackState,
-    RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
+    ConfigureNmxClusterState, ConfigureSwitchCertificatesState, FirmwareProgressState,
+    FirmwareUpgradeDeviceInfo, FirmwareUpgradeDeviceStatus, FirmwareUpgradeState,
+    MaintenanceActivity, MaintenanceScope, NvosUpdateState, NvosUpdateSwitchStatus, Rack,
+    RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState,
+    RackState, RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
 };
 use model::rack_type::RackProfile;
 use state_controller::state_handler::{
@@ -288,7 +289,8 @@ async fn terminate_active_rack_maintenance(
                 state.nvos_update_job = Some(job);
             }
         }
-        RackMaintenanceState::ConfigureNmxCluster { .. }
+        RackMaintenanceState::ConfigureSwitchCertificates { .. }
+        | RackMaintenanceState::ConfigureNmxCluster { .. }
         | RackMaintenanceState::PowerSequence { .. }
         | RackMaintenanceState::Completed => {}
     }
@@ -810,6 +812,15 @@ fn requested_nvos_config_json(scope: &MaintenanceScope) -> Option<String> {
     })
 }
 
+/// Switch certificate rotation runs only when requested explicitly. An empty
+/// activity list selects the default cycle, which never rebinds certificates.
+fn switch_certificates_requested(scope: &MaintenanceScope) -> bool {
+    scope
+        .activities
+        .iter()
+        .any(|activity| matches!(activity, MaintenanceActivity::ConfigureSwitchCertificates))
+}
+
 fn profile_hardware_type_or_any(profile: Option<&RackProfile>) -> String {
     profile
         .map(profile_hardware_type_wire_value)
@@ -935,6 +946,18 @@ fn next_state_after_firmware(scope: &MaintenanceScope) -> RackMaintenanceState {
 /// Returns the next maintenance sub-state after NVOS update, skipping
 /// activities not requested in the scope.
 fn next_state_after_nvos(scope: &MaintenanceScope) -> RackMaintenanceState {
+    if switch_certificates_requested(scope) {
+        RackMaintenanceState::ConfigureSwitchCertificates {
+            configure_switch_certificates: ConfigureSwitchCertificatesState::Start,
+        }
+    } else {
+        next_state_after_switch_certificates(scope)
+    }
+}
+
+/// Returns the next maintenance sub-state after switch certificate rotation,
+/// skipping activities not requested in the scope.
+fn next_state_after_switch_certificates(scope: &MaintenanceScope) -> RackMaintenanceState {
     if scope.should_run(&MaintenanceActivity::ConfigureNmxCluster) {
         RackMaintenanceState::ConfigureNmxCluster {
             configure_nmx_cluster: ConfigureNmxClusterState::Start,
@@ -991,6 +1014,10 @@ fn next_state_if_activity_not_requested(
         }
         RackMaintenanceState::NVOSUpdate { .. } => {
             (!nvos_update_requested(scope)).then(|| next_state_after_nvos(scope))
+        }
+        RackMaintenanceState::ConfigureSwitchCertificates { .. } => {
+            (!switch_certificates_requested(scope))
+                .then(|| next_state_after_switch_certificates(scope))
         }
         RackMaintenanceState::ConfigureNmxCluster { .. } => (!scope
             .should_run(&MaintenanceActivity::ConfigureNmxCluster))
@@ -1080,6 +1107,23 @@ fn skip_configure_nmx_cluster_outcome(
         reason = %reason.as_ref(),
         next_state = %next,
         "Skipping ConfigureNmxCluster"
+    );
+    StateHandlerOutcome::transition(RackState::Maintenance {
+        maintenance_state: next,
+    })
+}
+
+fn skip_configure_switch_certificates_outcome(
+    rack_id: &RackId,
+    reason: impl AsRef<str>,
+    scope: &MaintenanceScope,
+) -> StateHandlerOutcome<RackState> {
+    let next = next_state_after_switch_certificates(scope);
+    tracing::info!(
+        rack_id = %rack_id,
+        reason = %reason.as_ref(),
+        next_state = %next,
+        "Skipping ConfigureSwitchCertificates"
     );
     StateHandlerOutcome::transition(RackState::Maintenance {
         maintenance_state: next,
@@ -1519,6 +1563,172 @@ async fn load_nmx_fabric_inventory(
     })?;
 
     Ok(switch_inventory)
+}
+
+/// Submits one RMS `ConfigureSwitchCertificate` batch for the scoped rack
+/// switches and persists the parent job ID before polling.
+///
+/// Submission failures other than an unsupported backend retain `Start` for
+/// retry on the next iteration, so a lost response resubmits the same rebind.
+async fn configure_switch_certificates_start(
+    id: &RackId,
+    state: &mut Rack,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+    scope: &MaintenanceScope,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    if !scope.is_full_rack() && scope.switch_ids.is_empty() {
+        return Ok(skip_configure_switch_certificates_outcome(
+            id,
+            "maintenance scope contains no switches",
+            scope,
+        ));
+    }
+
+    let Some(component_manager) = ctx.services.component_manager.clone() else {
+        return transition_to_rack_error(id, state, "component manager not configured", ctx).await;
+    };
+
+    let switch_inventory = load_rack_switch_firmware_inventory(
+        &ctx.services.db_pool,
+        ctx.services.credential_manager.as_ref(),
+        id,
+    )
+    .await
+    .map_err(|error| {
+        StateHandlerError::GenericError(eyre::eyre!(
+            "failed to load rack switch inventory for ConfigureSwitchCertificates: {}",
+            error
+        ))
+    })?;
+    let switch_inventory = filter_switch_inventory_by_scope(switch_inventory, scope);
+
+    if switch_inventory.switches.is_empty() {
+        return Ok(skip_configure_switch_certificates_outcome(
+            id,
+            "rack has no scoped switches in inventory",
+            scope,
+        ));
+    }
+
+    let endpoints = match switch_inventory
+        .switches
+        .iter()
+        .map(switch_endpoint_from_firmware_device)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(endpoints) => endpoints,
+        Err(cause) => return transition_to_rack_error(id, state, cause, ctx).await,
+    };
+
+    let services = ctx.services.nmx_cluster_switch_mtls_services.clone();
+
+    tracing::info!(
+        rack_id = %id,
+        switch_count = endpoints.len(),
+        service_count = services.len(),
+        "Submitting RMS switch certificate configuration for rack switches"
+    );
+
+    let job_id = match component_manager
+        .configure_switch_certificates(&endpoints, None, Some(&services))
+        .await
+    {
+        Ok(job_id) => job_id,
+        Err(error @ ComponentManagerError::Unsupported(_)) => {
+            return transition_to_rack_error(id, state, error.to_string(), ctx).await;
+        }
+        Err(error) => {
+            tracing::warn!(
+                rack_id = %id,
+                error = %error,
+                "Unable to submit RMS switch certificate configuration; retrying"
+            );
+
+            return Ok(StateHandlerOutcome::wait(format!(
+                "Unable to submit switch certificate configuration: {error}"
+            )));
+        }
+    };
+
+    tracing::info!(
+        rack_id = %id,
+        switch_count = endpoints.len(),
+        job_id,
+        "ConfigureSwitchCertificate submitted; waiting for RMS parent job"
+    );
+
+    Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::ConfigureSwitchCertificates {
+            configure_switch_certificates: ConfigureSwitchCertificatesState::WaitForComplete {
+                job_id,
+            },
+        },
+    }))
+}
+
+/// Polls the RMS parent job for the rack switch certificate batch.
+///
+/// Polling transport failures retain the job ID for retry. A terminal RMS
+/// failure, including a job RMS no longer knows, stops the rack workflow.
+async fn wait_for_switch_certificates_job(
+    id: &RackId,
+    state: &mut Rack,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+    scope: &MaintenanceScope,
+    job_id: &str,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    let Some(component_manager) = ctx.services.component_manager.clone() else {
+        return transition_to_rack_error(id, state, "component manager not configured", ctx).await;
+    };
+
+    let status = match component_manager
+        .get_configure_switch_certificate_job_status(job_id)
+        .await
+    {
+        Ok(status) => status,
+        Err(error @ ComponentManagerError::Unsupported(_)) => {
+            return transition_to_rack_error(id, state, error.to_string(), ctx).await;
+        }
+        Err(error) => {
+            tracing::warn!(
+                rack_id = %id,
+                job_id,
+                error = %error,
+                "Unable to poll RMS switch certificate job; retrying"
+            );
+
+            return Ok(StateHandlerOutcome::wait(format!(
+                "Unable to poll switch certificate job {job_id}: {error}"
+            )));
+        }
+    };
+
+    match status.state {
+        ConfigureSwitchCertificateState::Started | ConfigureSwitchCertificateState::InProgress => {
+            Ok(StateHandlerOutcome::wait(format!(
+                "switch certificate job {job_id} in progress"
+            )))
+        }
+        ConfigureSwitchCertificateState::Completed => {
+            tracing::info!(
+                rack_id = %id,
+                job_id,
+                "Rack switch certificate configuration completed"
+            );
+
+            Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+                maintenance_state: next_state_after_switch_certificates(scope),
+            }))
+        }
+        ConfigureSwitchCertificateState::Failed => {
+            let cause = status.error.map_or_else(
+                || format!("switch certificate job {job_id} failed"),
+                |error| format!("switch certificate job {job_id} failed: {error}"),
+            );
+
+            transition_to_rack_error(id, state, cause, ctx).await
+        }
+    }
 }
 
 /// Submits the complete rack fabric topology to the idempotent RMS V2 API.
@@ -2802,6 +3012,16 @@ pub async fn handle_maintenance(
                 .with_txn(txn))
             }
         },
+        RackMaintenanceState::ConfigureSwitchCertificates {
+            configure_switch_certificates,
+        } => match configure_switch_certificates {
+            ConfigureSwitchCertificatesState::Start => {
+                configure_switch_certificates_start(id, state, ctx, scope).await
+            }
+            ConfigureSwitchCertificatesState::WaitForComplete { job_id } => {
+                wait_for_switch_certificates_job(id, state, ctx, scope, job_id).await
+            }
+        },
         RackMaintenanceState::ConfigureNmxCluster {
             configure_nmx_cluster,
         } => match configure_nmx_cluster {
@@ -2892,9 +3112,9 @@ mod tests {
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
     use model::rack::{
-        ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceInfo,
-        FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosUpdateState,
-        RackMaintenanceState, RackPowerState,
+        ConfigureNmxClusterState, ConfigureSwitchCertificatesState, FirmwareProgressState,
+        FirmwareUpgradeDeviceInfo, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
+        NvosUpdateState, RackMaintenanceState, RackPowerState,
     };
     use model::rack_type::{RackHardwareType, RackProfile};
 
@@ -2902,8 +3122,9 @@ mod tests {
         DeviceFirmwareOutcome, DeviceFirmwareProgress, delete_rack_maintenance_access_token,
         filter_inventory_by_scope, firmware_device_status, first_maintenance_state,
         next_state_after_configure, next_state_after_firmware, next_state_after_nvos,
-        next_state_if_activity_not_requested, profile_hardware_type_or_any,
-        summarize_firmware_outcomes, validate_complete_nmx_fabric_inventory,
+        next_state_after_switch_certificates, next_state_if_activity_not_requested,
+        profile_hardware_type_or_any, summarize_firmware_outcomes,
+        validate_complete_nmx_fabric_inventory,
     };
 
     fn test_machine_id(seed: u8) -> HostMachineId {
@@ -3286,6 +3507,12 @@ mod tests {
         }
     }
 
+    fn certificates_start() -> RackMaintenanceState {
+        RackMaintenanceState::ConfigureSwitchCertificates {
+            configure_switch_certificates: ConfigureSwitchCertificatesState::Start,
+        }
+    }
+
     fn nvos_start() -> RackMaintenanceState {
         RackMaintenanceState::NVOSUpdate {
             nvos_update: NvosUpdateState::Start,
@@ -3328,6 +3555,19 @@ mod tests {
                         nvos_start(),
                         scope_of(vec![MaintenanceActivity::ConfigureNmxCluster]),
                     ),
+                    expect: Some(configure_start()),
+                },
+                Check {
+                    scenario: "requested certificates continues",
+                    input: (
+                        certificates_start(),
+                        scope_of(vec![MaintenanceActivity::ConfigureSwitchCertificates]),
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "all activities does not imply certificates; skips to configure",
+                    input: (certificates_start(), MaintenanceScope::default()),
                     expect: Some(configure_start()),
                 },
                 Check {
@@ -3401,6 +3641,11 @@ mod tests {
                     expect: nvos_start(),
                 },
                 Check {
+                    scenario: "only switch certificates -> certificates",
+                    input: scope_of(vec![MaintenanceActivity::ConfigureSwitchCertificates]),
+                    expect: certificates_start(),
+                },
+                Check {
                     scenario: "only power sequence -> power",
                     input: scope_of(vec![MaintenanceActivity::PowerSequence]),
                     expect: powering_on(),
@@ -3467,8 +3712,45 @@ mod tests {
                     input: scope_of(vec![nvos_update(), MaintenanceActivity::PowerSequence]),
                     expect: powering_on(),
                 },
+                Check {
+                    scenario: "certificates and configure -> certificates first",
+                    input: scope_of(vec![
+                        MaintenanceActivity::ConfigureSwitchCertificates,
+                        MaintenanceActivity::ConfigureNmxCluster,
+                    ]),
+                    expect: certificates_start(),
+                },
             ],
             |scope| next_state_after_nvos(&scope),
+        );
+    }
+
+    // ── next_state_after_switch_certificates ────────────────────────────
+
+    #[test]
+    fn test_next_state_after_switch_certificates() {
+        check_values(
+            [
+                Check {
+                    scenario: "all activities -> configure",
+                    input: MaintenanceScope::default(),
+                    expect: configure_start(),
+                },
+                Check {
+                    scenario: "only certificates -> completed",
+                    input: scope_of(vec![MaintenanceActivity::ConfigureSwitchCertificates]),
+                    expect: RackMaintenanceState::Completed,
+                },
+                Check {
+                    scenario: "certificates and power, no configure -> power",
+                    input: scope_of(vec![
+                        MaintenanceActivity::ConfigureSwitchCertificates,
+                        MaintenanceActivity::PowerSequence,
+                    ]),
+                    expect: powering_on(),
+                },
+            ],
+            |scope| next_state_after_switch_certificates(&scope),
         );
     }
 

@@ -108,24 +108,14 @@ pub fn effective_switch_mtls_services(services: &[SwitchMtlsService]) -> Vec<Swi
     }
 }
 
-/// Default services for the deprecated, ignored rack mTLS service setting.
-pub fn default_nmx_cluster_switch_mtls_services() -> Vec<SwitchMtlsService> {
-    vec![
-        SwitchMtlsService::ScaleUpFabricManager,
-        SwitchMtlsService::ScaleUpFabricTelemetryInterface,
-    ]
-}
-
-/// Returns configured NMX cluster switch mTLS services, or
-/// [`default_nmx_cluster_switch_mtls_services`] when omitted or empty.
+/// Returns the switch mTLS services bound by the rack-level
+/// `ConfigureSwitchCertificates` maintenance activity, or all supported
+/// services when the list was omitted or left empty. The default matches the
+/// per-switch `switch_mtls_services` default so both paths bind the same set.
 pub fn effective_nmx_cluster_switch_mtls_services(
     services: &[SwitchMtlsService],
 ) -> Vec<SwitchMtlsService> {
-    if services.is_empty() {
-        default_nmx_cluster_switch_mtls_services()
-    } else {
-        services.to_vec()
-    }
+    effective_switch_mtls_services(services)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -365,17 +355,14 @@ mod tests {
     }
 
     #[test]
-    fn default_nmx_cluster_switch_mtls_services_matches_scale_up_fabric() {
+    fn default_nmx_cluster_switch_mtls_services_matches_switch_default() {
         assert_eq!(
             effective_nmx_cluster_switch_mtls_services(&[]),
-            default_nmx_cluster_switch_mtls_services()
+            SwitchMtlsService::default_services()
         );
         assert_eq!(
-            default_nmx_cluster_switch_mtls_services(),
-            vec![
-                SwitchMtlsService::ScaleUpFabricManager,
-                SwitchMtlsService::ScaleUpFabricTelemetryInterface,
-            ]
+            effective_nmx_cluster_switch_mtls_services(&[SwitchMtlsService::NvueApi]),
+            vec![SwitchMtlsService::NvueApi]
         );
     }
 

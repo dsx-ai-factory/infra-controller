@@ -233,6 +233,15 @@ impl NvSwitchManager for MockNvSwitchManager {
         Ok("mock-switch-cert-job".to_string())
     }
 
+    async fn configure_switch_certificates(
+        &self,
+        _endpoints: &[SwitchEndpoint],
+        _domain_name: Option<&str>,
+        _services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        Ok("mock-switch-certs-job".to_string())
+    }
+
     async fn get_configure_switch_certificate_job_status(
         &self,
         _job_id: &str,

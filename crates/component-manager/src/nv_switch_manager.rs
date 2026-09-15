@@ -333,6 +333,24 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
         )))
     }
 
+    /// Submits one certificate configuration batch covering every switch in
+    /// `endpoints`, binding the installed mTLS certificates to `services`.
+    ///
+    /// A successful submission returns the non-empty parent job ID; poll it with
+    /// [`Self::get_configure_switch_certificate_job_status`]. The default
+    /// implementation returns [`ComponentManagerError::Unsupported`].
+    async fn configure_switch_certificates(
+        &self,
+        _endpoints: &[SwitchEndpoint],
+        _domain_name: Option<&str>,
+        _services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "batch switch certificate configuration is not supported by the {} backend",
+            self.name()
+        )))
+    }
+
     /// Submits the desired rack-level ScaleUp Fabric Manager configuration.
     ///
     /// A successful submission returns a non-empty, opaque job ID. If the backend may

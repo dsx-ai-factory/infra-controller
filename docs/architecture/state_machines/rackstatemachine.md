@@ -76,11 +76,13 @@ stateDiagram-v2
         state R_Maintenance {
             [*] --> R_Maintenance_FirmwareUpgrade
             R_Maintenance_FirmwareUpgrade --> R_Maintenance_NVOSUpdate
-            R_Maintenance_NVOSUpdate --> R_Maintenance_ConfigureNmxCluster
+            R_Maintenance_NVOSUpdate --> R_Maintenance_ConfigureSwitchCertificates
+            R_Maintenance_ConfigureSwitchCertificates --> R_Maintenance_ConfigureNmxCluster
             R_Maintenance_ConfigureNmxCluster --> R_Maintenance_PowerSequence
             R_Maintenance_PowerSequence --> R_Maintenance_Completed
             state "FirmwareUpgrade" as R_Maintenance_FirmwareUpgrade
             state "NVOSUpdate" as R_Maintenance_NVOSUpdate
+            state "ConfigureSwitchCertificates" as R_Maintenance_ConfigureSwitchCertificates
             state "ConfigureNmxCluster" as R_Maintenance_ConfigureNmxCluster
             state "PowerSequence" as R_Maintenance_PowerSequence
             state "Completed" as R_Maintenance_Completed
@@ -182,6 +184,7 @@ The rack waits until all child devices reach ready before starting the first mai
 ```text
 FirmwareUpgrade(Start -> WaitForComplete)
   -> NVOSUpdate(Start -> WaitForComplete)
+  -> ConfigureSwitchCertificates(Start -> WaitForComplete)  (explicit request only)
   -> ConfigureNmxCluster(Start -> WaitForScaleUpFabricManagerJob)
   -> PowerSequence (optional)
   -> Completed
@@ -192,9 +195,28 @@ FirmwareUpgrade(Start -> WaitForComplete)
 |-----------|-------------|
 | **FirmwareUpgrade** | Rack-level RMS firmware upgrade for scoped machines and switches. Sets per-device `firmware_upgrade_status` and drives switch `ReProvisioning::WaitingForRackFirmwareUpgrade` / machine `HostReprovision`. |
 | **NVOSUpdate** | NVOS image update for scoped switches. Sets `nvos_update_status` and drives switch `ReProvisioning::WaitingForNVOSUpgrade`. |
+| **ConfigureSwitchCertificates** | Switch mTLS certificate rotation for scoped switches. Submits one RMS `ConfigureSwitchCertificate` batch covering every scoped switch, then polls the parent job. Runs only when the activity is requested explicitly; an empty activity list skips it. See sub-states below. |
 | **ConfigureNmxCluster** | NMX cluster setup. Submits the asynchronous RMS ScaleUpFabricManager job for the full rack fabric, then waits for it to complete. See sub-states below. |
 | **PowerSequence** | Optional power-on/off/reset sequencing for scoped devices. |
 | **Completed** | All requested maintenance activities finished; rack advances to validation. |
+
+**ConfigureSwitchCertificates** sub-states:
+
+```text
+Start
+  -> WaitForComplete { job_id }
+```
+
+`Start` loads the scoped switch inventory, resolves each switch endpoint, and
+submits one RMS `ConfigureSwitchCertificate` batch binding the installed
+certificates to the services in
+`[rack_state_controller].nmx_cluster_switch_mtls_services`. A submission
+error other than an unsupported backend retries `Start` on the next
+iteration. `WaitForComplete` polls the RMS parent job: `Completed` advances to
+the next requested activity; `Failed`, or a job RMS no longer knows, moves the
+rack to `Error`. Switches stay `Ready` in the switch state machine throughout.
+The NMX-C certificate monitor requests this activity for the full rack when
+the control-plane switch's certificate enters its rotation window.
 
 **ConfigureNmxCluster** sub-states:
 
@@ -247,6 +269,7 @@ The Rack state machine drives or observes the Switch state machine as follows:
 | R_Discovering | Rack waits until all switches are `Ready` before moving to `Maintenance`. |
 | R_Maintenance (`FirmwareUpgrade`) | Rack sets `switch_reprovisioning_requested` and `firmware_upgrade_status`; switches enter `ReProvisioning::WaitingForRackFirmwareUpgrade`. |
 | R_Maintenance (`NVOSUpdate`) | Rack sets `nvos_update_status`; switches advance to `ReProvisioning::WaitingForNVOSUpgrade`. |
+| R_Maintenance (`ConfigureSwitchCertificates`) | Rack submits one RMS `ConfigureSwitchCertificate` batch for the scoped switches and polls its parent job; switches remain `Ready` and are not driven through `ReProvisioning`. |
 | R_Maintenance (`ConfigureNmxCluster`) | Rack submits the RMS ScaleUpFabricManager job, then persists the RMS-selected primary switch and `fabric_manager_status`; switches advance to `ReProvisioning::WaitingForNMXCConfigure`. |
 | R_Maintenance (any) | If the rack enters `Error`, rack-initiated switch reprovisioning is aborted and switches return to `Ready`. |
 | R_Ready | Rack monitors for switches in `Error`; any failed switch can move the rack to `Error`. |

@@ -801,6 +801,9 @@ pub(crate) async fn on_demand_rack_maintenance(
 
                 MaintenanceActivity::NvosUpdate { config_json }
             }
+            Some(ProtoActivity::ConfigureSwitchCertificates(_)) => {
+                MaintenanceActivity::ConfigureSwitchCertificates
+            }
             Some(ProtoActivity::ConfigureNmxCluster(_)) => MaintenanceActivity::ConfigureNmxCluster,
             Some(ProtoActivity::PowerSequence(_)) => MaintenanceActivity::PowerSequence,
             None => {

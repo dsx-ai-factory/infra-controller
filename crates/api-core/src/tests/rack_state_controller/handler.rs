@@ -37,11 +37,11 @@ use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use model::expected_machine::ExpectedMachineData;
 use model::expected_rack::ExpectedRack;
 use model::rack::{
-    ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
-    FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosUpdateJob,
-    NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackConfig, RackFirmwareUpgradeState,
-    RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState, RackState,
-    RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
+    ConfigureNmxClusterState, ConfigureSwitchCertificatesState, FirmwareProgressState,
+    FirmwareUpgradeDeviceStatus, FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity,
+    MaintenanceScope, NvosUpdateJob, NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackConfig,
+    RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState,
+    RackState, RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
 };
 use model::rack_type::{
     RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -3803,6 +3803,183 @@ async fn run_configure_nmx_cluster_parity_case(
         &topology_type,
     )
     .await
+}
+
+/// The rack-level certificate activity must cover every scoped switch with a
+/// single RMS batch and advance only after the parent job completes.
+#[crate::sqlx_test]
+async fn test_configure_switch_certificates_submits_one_rms_batch_and_completes(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_nmx_cluster_profile()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let rack_id = new_rack_id();
+    let mut txn = pool.acquire().await?;
+    db_rack::create(
+        &mut txn,
+        &rack_id,
+        Some(&RackProfileId::new("NmxCluster")),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    drop(txn);
+
+    let switch_ids = attach_switches_with_nvos_credentials(&env, &rack_id, 2).await?;
+
+    let rack_config = RackConfig {
+        maintenance_requested: Some(MaintenanceScope {
+            activities: vec![MaintenanceActivity::ConfigureSwitchCertificates],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut txn = pool.acquire().await?;
+    db_rack::update(&mut txn, &rack_id, &rack_config).await?;
+    drop(txn);
+
+    env.rms_sim
+        .queue_configure_switch_certificate_response(Ok(rms::ConfigureSwitchCertificateResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "switch-certificates-parent-job".to_string(),
+                ..Default::default()
+            }),
+            jobs: switch_ids
+                .iter()
+                .map(|switch_id| rms::ConfigureSwitchCertificateJobInfo {
+                    node_id: switch_id.to_string(),
+                    job_id: format!("child-{switch_id}"),
+                })
+                .collect(),
+        }))
+        .await;
+    env.rms_sim
+        .queue_get_configure_switch_certificate_job_status_response(Ok(
+            rms::GetConfigureSwitchCertificateJobStatusResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "switch-certificates-parent-job".to_string(),
+                state: "completed".to_string(),
+                ..Default::default()
+            },
+        ))
+        .await;
+
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let handler_instance = RackStateHandler::default();
+    let mut services = env.rack_state_handler_services();
+    services.rms_client = None;
+    let mut metrics = RackMetrics::default();
+    let mut db_writes = DbWriteBatch::default();
+    let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        services: &mut services,
+        metrics: &mut metrics,
+        pending_db_writes: &mut db_writes,
+    };
+
+    let start = RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::ConfigureSwitchCertificates {
+            configure_switch_certificates: ConfigureSwitchCertificatesState::Start,
+        },
+    };
+    let job_wait = match handler_instance
+        .handle_object_state(&rack_id, &mut rack, &start, &mut ctx)
+        .await?
+    {
+        StateHandlerOutcome::Transition { next_state, .. } => next_state,
+        other => panic!(
+            "Expected Transition, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    };
+    assert!(matches!(
+        job_wait,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::ConfigureSwitchCertificates {
+                configure_switch_certificates:
+                    ConfigureSwitchCertificatesState::WaitForComplete { ref job_id },
+            },
+        } if job_id == "switch-certificates-parent-job"
+    ));
+
+    let next = match handler_instance
+        .handle_object_state(&rack_id, &mut rack, &job_wait, &mut ctx)
+        .await?
+    {
+        StateHandlerOutcome::Transition { next_state, .. } => next_state,
+        other => panic!(
+            "Expected Transition, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    };
+    assert!(matches!(
+        next,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::Completed,
+        }
+    ));
+
+    let requests = env
+        .rms_sim
+        .submitted_configure_switch_certificate_requests()
+        .await;
+    assert_eq!(
+        requests.len(),
+        1,
+        "all rack switches must share one RMS batch"
+    );
+    let mut submitted_node_ids = requests[0]
+        .nodes
+        .as_ref()
+        .expect("node set")
+        .nodes
+        .iter()
+        .map(|node| node.node_id.clone())
+        .collect::<Vec<_>>();
+    submitted_node_ids.sort();
+    let mut expected_node_ids = switch_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    expected_node_ids.sort();
+    assert_eq!(submitted_node_ids, expected_node_ids);
+    assert_eq!(requests[0].domain, None);
+    assert_eq!(requests[0].services.len(), 4);
+    assert!(
+        requests[0]
+            .services
+            .contains(&(rms::SwitchService::NvueApi as i32)),
+        "default rack binding must include the NVUE API service RMS uses to reach switches"
+    );
+
+    let polls = env
+        .rms_sim
+        .submitted_get_configure_switch_certificate_job_status_requests()
+        .await;
+    assert_eq!(polls.len(), 1);
+    assert_eq!(polls[0].job_id, "switch-certificates-parent-job");
+
+    let mut conn = pool.acquire().await?;
+    let switches = db_switch::find_by(
+        &mut conn,
+        ObjectColumnFilter::List(db_switch::IdColumn, &switch_ids),
+    )
+    .await?;
+    assert!(
+        switches
+            .iter()
+            .all(|switch| switch.switch_maintenance_requested.is_none()),
+        "rack-level rotation must not queue per-switch maintenance"
+    );
+
+    Ok(())
 }
 
 #[crate::sqlx_test]

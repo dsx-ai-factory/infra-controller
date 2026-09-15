@@ -7249,6 +7249,12 @@ message ConfigureNmxClusterActivity {
   // Per-activity configuration (extend as needed).
 }
 
+// Rotates switch mTLS certificates on every scoped switch through one RMS
+// ConfigureSwitchCertificate batch. Never implied by an empty activities list.
+message ConfigureSwitchCertificatesActivity {
+  // Per-activity configuration (extend as needed).
+}
+
 message PowerSequenceActivity {
   // Per-activity configuration (extend as needed).
 }
@@ -7261,6 +7267,7 @@ message MaintenanceActivityConfig {
     ConfigureNmxClusterActivity configure_nmx_cluster = 2;
     PowerSequenceActivity power_sequence = 3;
     NvosUpdateActivity nvos_update = 4;
+    ConfigureSwitchCertificatesActivity configure_switch_certificates = 5;
   }
 }
 

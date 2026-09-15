@@ -776,7 +776,7 @@ impl SwitchCertificateMonitor {
 
             let (apply_status, apply_error) = if rotation_required {
                 match self
-                    .request_nmx_cluster_configuration_with_rack_state_controller(
+                    .request_switch_certificate_rotation_via_rack_state_controller(
                         &target,
                         cancel_token,
                     )
@@ -795,7 +795,7 @@ impl SwitchCertificateMonitor {
                             target_source,
                             chassis_serials,
                             error = %error,
-                            "Failed to request NMX-C cluster configuration via rack state machine"
+                            "Failed to request switch certificate rotation via rack state machine"
                         );
                         (SwitchCertApplyStatus::Error, error)
                     }
@@ -914,7 +914,7 @@ impl SwitchCertificateMonitor {
         }
     }
 
-    async fn request_nmx_cluster_configuration_with_rack_state_controller(
+    async fn request_switch_certificate_rotation_via_rack_state_controller(
         &self,
         target: &SwitchCertificateMonitorTarget,
         cancel_token: &CancellationToken,
@@ -936,16 +936,16 @@ impl SwitchCertificateMonitor {
 
         if self.component_manager.is_none() {
             return Err(
-                "component manager is not configured; cannot request NMX-C cluster configuration"
+                "component manager is not configured; cannot request switch certificate rotation"
                     .to_string(),
             );
         }
 
-        // Empty device lists intentionally select the full rack. ConfigureNmxCluster runs the
-        // same certificate and fabric-manager workflow as `rack maintenance start
-        // --activities configure-nmx-cluster`.
+        // Empty device lists intentionally select the full rack: every switch in the rack
+        // holds its own copy of the mTLS certificate, so the rotation covers all of them in
+        // one RMS batch rather than only the probed control-plane switch.
         let scope = MaintenanceScope {
-            activities: vec![MaintenanceActivity::ConfigureNmxCluster],
+            activities: vec![MaintenanceActivity::ConfigureSwitchCertificates],
             ..Default::default()
         };
         let outcome = tokio::select! {
@@ -960,7 +960,7 @@ impl SwitchCertificateMonitor {
                 None,
             ) => outcome.map_err(|error| {
                 format!(
-                    "component manager failed to request NMX-C cluster configuration: {error}"
+                    "component manager failed to request switch certificate rotation: {error}"
                 )
             })?,
         };
@@ -971,7 +971,7 @@ impl SwitchCertificateMonitor {
                     switch_id = %switch_id_label,
                     rack_id = %rack_id,
                     endpoint = %target.endpoint_url,
-                    "Requested full-rack NMX-C cluster configuration via component manager"
+                    "Requested full-rack switch certificate rotation via component manager"
                 );
                 Ok(SwitchCertApplyStatus::Pending)
             }
@@ -980,7 +980,7 @@ impl SwitchCertificateMonitor {
                     switch_id = %switch_id_label,
                     rack_id = %rack_id,
                     endpoint = %target.endpoint_url,
-                    "Full-rack NMX-C cluster configuration is already pending"
+                    "Full-rack switch certificate rotation is already pending"
                 );
                 Ok(SwitchCertApplyStatus::Pending)
             }
@@ -989,7 +989,7 @@ impl SwitchCertificateMonitor {
                     switch_id = %switch_id_label,
                     rack_id = %rack_id,
                     endpoint = %target.endpoint_url,
-                    "Deferring NMX-C certificate rotation because different rack maintenance is pending"
+                    "Deferring switch certificate rotation because different rack maintenance is pending"
                 );
                 Ok(SwitchCertApplyStatus::Skipped)
             }
@@ -999,7 +999,7 @@ impl SwitchCertificateMonitor {
                     rack_id = %rack_id,
                     endpoint = %target.endpoint_url,
                     ?state,
-                    "Deferring NMX-C certificate rotation until the rack is ready"
+                    "Deferring switch certificate rotation until the rack is ready"
                 );
                 Ok(SwitchCertApplyStatus::Skipped)
             }

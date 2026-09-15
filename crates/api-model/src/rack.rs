@@ -445,7 +445,8 @@ pub enum RackState {
 /// ## Sub-state Flow
 ///
 /// ```text
-/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> Completed -> Validation(Pending)
+/// FirmwareUpgrade -> NVOSUpdate -> ConfigureSwitchCertificates -> ConfigureNmxCluster
+///   -> Completed -> Validation(Pending)
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RackMaintenanceState {
@@ -454,6 +455,9 @@ pub enum RackMaintenanceState {
     },
     NVOSUpdate {
         nvos_update: NvosUpdateState,
+    },
+    ConfigureSwitchCertificates {
+        configure_switch_certificates: ConfigureSwitchCertificatesState,
     },
     ConfigureNmxCluster {
         configure_nmx_cluster: ConfigureNmxClusterState,
@@ -475,6 +479,15 @@ impl Display for RackMaintenanceState {
             RackMaintenanceState::NVOSUpdate { nvos_update } => {
                 write!(f, "NVOSUpdate({})", nvos_update)
             }
+            RackMaintenanceState::ConfigureSwitchCertificates {
+                configure_switch_certificates,
+            } => {
+                write!(
+                    f,
+                    "ConfigureSwitchCertificates({})",
+                    configure_switch_certificates
+                )
+            }
             RackMaintenanceState::ConfigureNmxCluster {
                 configure_nmx_cluster,
             } => {
@@ -484,6 +497,31 @@ impl Display for RackMaintenanceState {
                 write!(f, "PowerSequence({})", rack_power)
             }
             RackMaintenanceState::Completed => write!(f, "Completed"),
+        }
+    }
+}
+
+/// Sub-states of `RackMaintenanceState::ConfigureSwitchCertificates`.
+///
+/// `Start` submits one asynchronous RMS `ConfigureSwitchCertificate` batch for
+/// every scoped switch in the rack. `WaitForComplete` polls the returned parent
+/// job until RMS reports a terminal state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConfigureSwitchCertificatesState {
+    Start,
+    WaitForComplete {
+        /// RMS parent job identifier returned by submission.
+        job_id: String,
+    },
+}
+
+impl Display for ConfigureSwitchCertificatesState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigureSwitchCertificatesState::Start => write!(f, "Start"),
+            ConfigureSwitchCertificatesState::WaitForComplete { job_id } => {
+                write!(f, "WaitForComplete({job_id})")
+            }
         }
     }
 }
@@ -731,6 +769,10 @@ pub enum MaintenanceActivity {
         /// The access token is stored separately as a maintenance credential.
         config_json: String,
     },
+    /// Rotates the switch mTLS certificates on every scoped switch through one
+    /// RMS `ConfigureSwitchCertificate` batch. Runs only when requested
+    /// explicitly; an empty activity list does not include it.
+    ConfigureSwitchCertificates,
     ConfigureNmxCluster,
     PowerSequence,
     /// Per-device power control, dispatched by the rack state controller to
@@ -754,6 +796,9 @@ impl std::fmt::Display for MaintenanceActivity {
         match self {
             MaintenanceActivity::FirmwareUpgrade { .. } => write!(f, "FirmwareUpgrade"),
             MaintenanceActivity::NvosUpdate { .. } => write!(f, "NvosUpdate"),
+            MaintenanceActivity::ConfigureSwitchCertificates => {
+                write!(f, "ConfigureSwitchCertificates")
+            }
             MaintenanceActivity::ConfigureNmxCluster => write!(f, "ConfigureNmxCluster"),
             MaintenanceActivity::PowerSequence => write!(f, "PowerSequence"),
             MaintenanceActivity::PowerControl { .. } => write!(f, "PowerControl"),

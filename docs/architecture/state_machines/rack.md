@@ -21,6 +21,7 @@ The request also carries an optional list of **maintenance activities** to perfo
 | Activity | Proto `oneof` variant | Per-activity config | Description |
 |----------|----------------------|---------------------|-------------|
 | Firmware Upgrade | `FirmwareUpgradeActivity` | `firmware_version` — target firmware ID (empty = default firmware for the rack hardware type) | Reprovisioning and firmware upgrade via RMS. |
+| Configure Switch Certificates | `ConfigureSwitchCertificatesActivity` | *(extend as needed)* | Rotates switch mTLS certificates on every scoped switch through one RMS `ConfigureSwitchCertificate` batch. Runs only when listed explicitly; an empty activity list does not include it. |
 | Configure NMX Cluster | `ConfigureNmxClusterActivity` | *(extend as needed)* | NMX cluster configuration. |
 | Power Sequence | `PowerSequenceActivity` | *(extend as needed)* | Power-on/off/reset sequencing. |
 
@@ -96,6 +97,7 @@ message FirmwareUpgradeActivity {
   string firmware_version = 1;          // empty = default firmware for rack hardware type
 }
 message ConfigureNmxClusterActivity {}  // extend as needed
+message ConfigureSwitchCertificatesActivity {}  // extend as needed
 message PowerSequenceActivity {}        // extend as needed
 
 message MaintenanceActivityConfig {
@@ -103,6 +105,8 @@ message MaintenanceActivityConfig {
     FirmwareUpgradeActivity firmware_upgrade = 1;
     ConfigureNmxClusterActivity configure_nmx_cluster = 2;
     PowerSequenceActivity power_sequence = 3;
+    NvosUpdateActivity nvos_update = 4;
+    ConfigureSwitchCertificatesActivity configure_switch_certificates = 5;
   }
 }
 

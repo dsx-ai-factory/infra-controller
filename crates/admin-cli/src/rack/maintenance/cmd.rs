@@ -114,6 +114,9 @@ pub(super) async fn on_demand_rack_maintenance(
                     config_json: firmware_version.clone(),
                     access_token: access_token.clone(),
                 })),
+                "configure-switch-certificates" => Ok(ProtoActivity::ConfigureSwitchCertificates(
+                    rpc::ConfigureSwitchCertificatesActivity {},
+                )),
                 "configure-nmx-cluster" => Ok(ProtoActivity::ConfigureNmxCluster(
                     rpc::ConfigureNmxClusterActivity {},
                 )),
@@ -121,7 +124,7 @@ pub(super) async fn on_demand_rack_maintenance(
                     rpc::PowerSequenceActivity {},
                 )),
                 other => Err(eyre::eyre!(
-                    "unknown activity '{}'. valid values: firmware-upgrade, nvos-update, configure-nmx-cluster, power-sequence",
+                    "unknown activity '{}'. valid values: firmware-upgrade, nvos-update, configure-switch-certificates, configure-nmx-cluster, power-sequence",
                     other
                 )),
             }?;

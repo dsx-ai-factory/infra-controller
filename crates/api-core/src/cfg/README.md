@@ -555,7 +555,7 @@ TOML section: `[rack_state_controller]`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
-| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack maintenance does not configure switch certificates. |
+| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | all four services (`nvue_api`, `scale_up_fabric_telemetry`, `scale_up_fabric_manager`, `scale_up_fabric_telemetry_interface`) | Switch services bound by the rack-level `ConfigureSwitchCertificates` maintenance activity, which rotates certificates on every scoped switch in one RMS batch. Omitted or empty selects every supported service, matching [`switch_mtls_services`](#switchstatecontrollerconfig). Not read by `ConfigureNmxCluster`. |
 
 ### `SwitchStateControllerConfig`
 

@@ -94,7 +94,7 @@ pub(crate) struct MaintenanceOptions {
 
     #[clap(
         long,
-        help = "Maintenance activities to perform: firmware-upgrade, nvos-update, configure-nmx-cluster, power-sequence (omit for all)",
+        help = "Maintenance activities to perform: firmware-upgrade, nvos-update, configure-switch-certificates, configure-nmx-cluster, power-sequence (omit for all)",
         num_args = 1..,
         value_delimiter = ','
     )]

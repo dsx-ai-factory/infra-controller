@@ -2590,6 +2590,18 @@ impl NvSwitchManager for RmsBackend {
         rms_configure_switch_certificate(self.client.as_ref(), device, domain_name, services).await
     }
 
+    #[instrument(skip(self, domain_name), fields(backend = "rms"))]
+    async fn configure_switch_certificates(
+        &self,
+        endpoints: &[SwitchEndpoint],
+        domain_name: Option<&str>,
+        services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        let devices = self.resolve_scale_up_fabric_nodes(endpoints).await?;
+        rms_configure_switch_certificates(self.client.as_ref(), devices, domain_name, services)
+            .await
+    }
+
     #[instrument(skip(self), fields(backend = "rms", job_id))]
     async fn get_configure_switch_certificate_job_status(
         &self,
@@ -3296,6 +3308,66 @@ async fn rms_configure_switch_certificate(
             || "RMS switch certificate configuration failed".to_owned(),
         )))
     }
+}
+
+/// Submits one `ConfigureSwitchCertificate` batch for `devices` and returns the
+/// RMS parent job ID, which aggregates the per-switch child jobs.
+async fn rms_configure_switch_certificates(
+    client: &dyn RmsApi,
+    devices: Vec<rms::NodeInfo>,
+    domain_name: Option<&str>,
+    services: Option<&[i32]>,
+) -> Result<String, ComponentManagerError> {
+    let request = rms::ConfigureSwitchCertificateRequest {
+        nodes: Some(rms::NodeSet { nodes: devices }),
+        services: services.map(<[i32]>::to_vec).unwrap_or_default(),
+        test_hello: true,
+        domain: domain_name.map(str::to_owned),
+    };
+
+    let response = red::instrumented(
+        "rms",
+        "configure_switch_certificate",
+        client.configure_switch_certificate(request),
+    )
+    .await
+    .map_err(|e| {
+        ComponentManagerError::Internal(format!(
+            "failed to start RMS switch certificate configuration: {e}"
+        ))
+    })?;
+
+    let Some(batch) = response.response else {
+        return Err(ComponentManagerError::Internal(
+            "RMS switch certificate configuration returned no batch response".to_owned(),
+        ));
+    };
+
+    if batch.status != rms::ReturnCode::Success as i32 {
+        let failed_nodes = batch
+            .node_results
+            .iter()
+            .filter(|result| result.status != rms::ReturnCode::Success as i32)
+            .map(|result| format!("{}: {}", result.node_id, result.error_message))
+            .collect::<Vec<_>>();
+        let detail = if failed_nodes.is_empty() {
+            batch.message
+        } else {
+            failed_nodes.join("; ")
+        };
+        return Err(ComponentManagerError::Internal(format!(
+            "RMS switch certificate configuration failed: {detail}"
+        )));
+    }
+
+    if batch.job_id.trim().is_empty() {
+        return Err(ComponentManagerError::OperationOutcomeUnknown(
+            "RMS switch certificate configuration succeeded but returned no parent job id"
+                .to_owned(),
+        ));
+    }
+
+    Ok(batch.job_id)
 }
 
 async fn rms_get_configure_switch_certificate_job_status(
@@ -6150,6 +6222,83 @@ mod tests {
         assert_eq!(
             calls[0].services,
             crate::config::switch_mtls_services_as_i32(&SwitchMtlsService::default_services())
+        );
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_configure_switch_certificates_submits_one_batch_for_all_switches(
+        pool: sqlx::PgPool,
+    ) {
+        let (mock, backend, rack_id, _, _, sw1, sw2) = make_backend(&pool).await;
+        mock.enqueue_configure_switch_certificate(Ok(rms::ConfigureSwitchCertificateResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "cert-parent-job".to_owned(),
+                ..Default::default()
+            }),
+            jobs: vec![
+                rms::ConfigureSwitchCertificateJobInfo {
+                    node_id: sw1.to_string(),
+                    job_id: "cert-child-1".to_owned(),
+                },
+                rms::ConfigureSwitchCertificateJobInfo {
+                    node_id: sw2.to_string(),
+                    job_id: "cert-child-2".to_owned(),
+                },
+            ],
+        }))
+        .await;
+
+        let endpoints = vec![make_sw_endpoint(SW_MAC_1), make_sw_endpoint(SW_MAC_2)];
+        let services =
+            crate::config::switch_mtls_services_as_i32(&SwitchMtlsService::default_services());
+        let job_id = NvSwitchManager::configure_switch_certificates(
+            &backend,
+            &endpoints,
+            None,
+            Some(&services),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(job_id, "cert-parent-job");
+
+        let calls = mock.configure_switch_certificate_calls().await;
+        assert_eq!(calls.len(), 1, "all switches must share one RMS batch");
+        assert_eq!(calls[0].domain, None);
+        assert_eq!(calls[0].services, services);
+        let nodes = &calls[0].nodes.as_ref().unwrap().nodes;
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node.node_id.clone())
+                .collect::<Vec<_>>(),
+            vec![sw1.to_string(), sw2.to_string()]
+        );
+        assert!(nodes.iter().all(|node| node.rack_id == rack_id.to_string()));
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_configure_switch_certificates_requires_parent_job_id(pool: sqlx::PgPool) {
+        let (mock, backend, _, _, _, sw1, _) = make_backend(&pool).await;
+        mock.enqueue_configure_switch_certificate(Ok(MockRmsApi::configure_switch_certificate_ok(
+            &sw1.to_string(),
+            "cert-child-only",
+        )))
+        .await;
+
+        let error = NvSwitchManager::configure_switch_certificates(
+            &backend,
+            &[make_sw_endpoint(SW_MAC_1)],
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, ComponentManagerError::OperationOutcomeUnknown(_)),
+            "a batch accepted without a parent job id cannot be polled: {error}"
         );
     }
 

@@ -142,6 +142,9 @@ impl StateControllerIO for RackStateControllerIO {
             RackState::Maintenance { maintenance_state } => match maintenance_state {
                 RackMaintenanceState::FirmwareUpgrade { .. } => ("maintenance", "firmware_upgrade"),
                 RackMaintenanceState::NVOSUpdate { .. } => ("maintenance", "nvos_update"),
+                RackMaintenanceState::ConfigureSwitchCertificates { .. } => {
+                    ("maintenance", "configure_switch_certificates")
+                }
                 RackMaintenanceState::ConfigureNmxCluster { .. } => {
                     ("maintenance", "configure_nmx_cluster")
                 }

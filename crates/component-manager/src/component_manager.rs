@@ -459,6 +459,19 @@ impl ComponentManager {
             .await
     }
 
+    /// Submits one certificate configuration batch for every switch in
+    /// `endpoints` and returns the backend's parent job ID.
+    pub async fn configure_switch_certificates(
+        &self,
+        endpoints: &[SwitchEndpoint],
+        domain_name: Option<&str>,
+        services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        self.nv_switch
+            .configure_switch_certificates(endpoints, domain_name, services)
+            .await
+    }
+
     pub async fn get_configure_switch_certificate_job_status(
         &self,
         job_id: &str,
