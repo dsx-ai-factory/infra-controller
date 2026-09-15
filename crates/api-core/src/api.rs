@@ -3809,7 +3809,6 @@ pub struct DefaultCredential {
 
 #[cfg(any(test, feature = "test-support"))]
 impl DefaultCredential {
-    #[cfg(feature = "test-support")]
     pub(crate) fn key(&self) -> &str {
         &self._key
     }
