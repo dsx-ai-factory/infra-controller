@@ -18,7 +18,7 @@ use clap::{Parser, ValueEnum, ValueHint};
 use rpc::admin_cli::OutputFormat;
 
 use crate::{
-    attestation, bmc_machine, boot_interface, boot_override, browse, component_manager,
+    attestation, backend, bmc_machine, boot_interface, boot_override, browse, component_manager,
     compute_allocation, credential, devenv, domain, dpa, dpu, dpu_remediation, expected_machines,
     expected_power_shelf, expected_rack, expected_switch, extension_service, firmware,
     generate_docs, generate_man, generate_shell_complete, host, ib_partition, instance,
@@ -177,6 +177,8 @@ pub(crate) enum CliCommand {
         visible_alias = "att"
     )]
     Attestation(attestation::Cmd),
+    #[clap(about = "NICo backend service operations", subcommand)]
+    Backend(backend::Cmd),
     #[clap(
         about = "BMC Machine related handling",
         subcommand,

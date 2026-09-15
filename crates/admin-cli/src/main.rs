@@ -28,7 +28,6 @@ use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use cfg::cli_options::{CliCommand, CliOptions};
 use clap::CommandFactory;
 use errors::CarbideCliResult;
-use eyre::eyre;
 use forge_tls::client_config::{
     get_api_url, get_client_cert_info, get_config_from_file, get_proxy_info, get_root_ca_path,
 };
@@ -46,6 +45,7 @@ use crate::rpc::ApiClient;
 mod admission_retry;
 mod async_write;
 mod attestation;
+mod backend;
 mod bmc_machine;
 mod bmc_role;
 mod boot_interface;
@@ -225,6 +225,9 @@ async fn main() -> color_eyre::Result<()> {
         Some(s) => s,
     };
 
+    // `version` calls forge/Version which allows anonymous access, so no
+    // client cert is needed. All other commands authenticate via the admin
+    // CLI client cert (trusted-certificate principal).
     let client_cert = if matches!(command, CliCommand::Version(_)) {
         None
     } else {
@@ -256,6 +259,7 @@ async fn main() -> color_eyre::Result<()> {
     // Command to talk to Carbide API.
     match command {
         CliCommand::Attestation(cmd) => cmd.dispatch(ctx).await?,
+        CliCommand::Backend(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::BmcMachine(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::BootInterface(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::BootOverride(cmd) => cmd.dispatch(ctx).await?,
@@ -325,7 +329,7 @@ async fn main() -> color_eyre::Result<()> {
         CliCommand::Browse(cmd) => cmd.dispatch(ctx).await?,
         // Redfish is handled before the API client is built (see above).
         CliCommand::Redfish(_) => unreachable!("redfish is dispatched before client init"),
-        _ => return Err(eyre!("unsupported command")),
+        _ => return Err(eyre::eyre!("unsupported command")),
     }
 
     Ok(())

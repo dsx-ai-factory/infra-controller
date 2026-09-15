@@ -125,6 +125,13 @@ impl Forge for Api {
         crate::handlers::api::version(self, request)
     }
 
+    async fn get_rms_version(
+        &self,
+        request: Request<rpc::GetRmsVersionRequest>,
+    ) -> Result<Response<rpc::GetRmsVersionResponse>, Status> {
+        crate::handlers::rms::get_rms_version(self, request).await
+    }
+
     async fn create_domain(
         &self,
         request: Request<CreateDomainRequest>,
