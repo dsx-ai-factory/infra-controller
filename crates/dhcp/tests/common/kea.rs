@@ -19,7 +19,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -104,6 +104,7 @@ pub(crate) struct Kea {
     temp_base_directory: TempDir,
 
     process: Option<Child>,
+    logs: Arc<Mutex<Vec<String>>>,
     _run_permit: Option<KeaRunPermit>,
 }
 
@@ -162,6 +163,7 @@ impl Kea {
             dhcp_out_port,
             dhcp_in_port_reservation,
             process: None,
+            logs: Arc::new(Mutex::new(Vec::new())),
             _run_permit: None,
         })
     }
@@ -232,14 +234,20 @@ impl Kea {
 
         let stdout = BufReader::new(process.stdout.take().unwrap());
         let stderr = BufReader::new(process.stderr.take().unwrap());
+        let stdout_logs = self.logs.clone();
         thread::spawn(move || {
             for line in stdout.lines() {
-                println!("KEA STDOUT: {}", line.unwrap());
+                let line = line.unwrap();
+                println!("KEA STDOUT: {line}");
+                stdout_logs.lock().unwrap().push(line);
             }
         });
+        let stderr_logs = self.logs.clone();
         thread::spawn(move || {
             for line in stderr.lines() {
-                println!("KEA STDERR: {}", line.unwrap());
+                let line = line.unwrap();
+                println!("KEA STDERR: {line}");
+                stderr_logs.lock().unwrap().push(line);
             }
         });
 
@@ -277,6 +285,25 @@ impl Kea {
         }
 
         Ok(None)
+    }
+
+    pub(crate) fn wait_for_log(&self, needle: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self
+                .logs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains(needle))
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn stop_process(&mut self) {
@@ -362,7 +389,7 @@ impl Kea {
                 {
                     "name": "kea-dhcp4.carbide-callouts",
                     "output_options": [{"output": "stdout"}],
-                    "severity": "FATAL",
+                    "severity": "ERROR",
                     "debuglevel": 10
                 }
             ]
