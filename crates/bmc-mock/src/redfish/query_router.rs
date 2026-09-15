@@ -22,9 +22,6 @@
 //! parameters and misuse with the Base registry messages the specification
 //! names.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
@@ -32,40 +29,30 @@ use axum::http::{Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use carbide_axum_utils::router::call_router_with_new_request;
-use futures::future::join_all;
+use futures::StreamExt;
 use serde_json::{Map, Value};
 
 use crate::http;
-use crate::redfish::expander_router::{BufferError, json_bytes};
+use crate::redfish::expander_router::{BufferError, json_bytes, member_json};
 use crate::redfish::filter::Filter;
 
 /// The `$` parameters some layer of this mock serves. Any other is a 501,
 /// as the specification requires; parameters without a `$` are ignored.
 const SUPPORTED: [&str; 4] = ["$filter", "$skip", "$top", "$expand"];
 
-/// Entries per page of the collections that page, by `@odata.id`. A
-/// collection absent here is served whole unless the client asks for
-/// `$top`.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct PageSizes(Arc<HashMap<String, usize>>);
+/// Members a filtered collection reads from the inner router at a time.
+const MEMBER_READS_IN_FLIGHT: usize = 16;
 
-impl PageSizes {
-    pub(crate) fn new(sizes: impl IntoIterator<Item = (String, usize)>) -> Self {
-        Self(Arc::new(sizes.into_iter().collect()))
-    }
+/// Set on a collection response by a handler whose collection pages at this
+/// size even when the client does not ask: `$top` may shrink such a page but
+/// not grow it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PageSize(pub(crate) usize);
 
-    fn of(&self, odata_id: &str) -> Option<usize> {
-        self.0.get(odata_id).copied()
-    }
-}
-
-pub(crate) fn append(router: Router, page_sizes: PageSizes) -> Router {
+pub(crate) fn append(router: Router) -> Router {
     Router::new()
         .route("/{*all}", get(process).fallback(fallback))
-        .with_state(Querying {
-            inner: router,
-            page_sizes,
-        })
+        .with_state(Querying { inner: router })
 }
 
 async fn fallback(State(mut state): State<Querying>, request: Request<Body>) -> Response {
@@ -79,20 +66,17 @@ async fn process(State(mut state): State<Querying>, request: Request<Body>) -> R
             .collect()
     });
     let query = match Query::parse(&params) {
-        Ok(Some(query)) => query,
-        // A collection with a page size of its own pages unasked.
-        Ok(None) if state.page_sizes.of(request.uri().path()).is_none() => {
-            return state.call_inner_router(request).await;
-        }
-        Ok(None) => Query::default(),
+        Ok(query) => query,
         Err(error) => return error.into_response(),
     };
 
     let path = request.uri().path().to_owned();
     let response = state.call_inner_router(request).await;
-    if !response.status().is_success() {
+    let page_size = response.extensions().get::<PageSize>().map(|size| size.0);
+    if (query.is_none() && page_size.is_none()) || !response.status().is_success() {
         return response;
     }
+    let query = query.unwrap_or_default();
     let (parts, bytes) = match json_bytes(response).await {
         Ok(buffered) => buffered,
         // Collection queries are defined for JSON, never streaming bodies.
@@ -111,14 +95,10 @@ async fn process(State(mut state): State<Querying>, request: Request<Body>) -> R
         return QueryError::NotSupportedOnResource.into_response();
     };
 
-    let admitted = match state.admitted(query.filter.as_ref(), members).await {
-        Ok(admitted) => admitted,
-        Err(message) => return http::redfish_error(StatusCode::INTERNAL_SERVER_ERROR, &message),
+    let admitted = match &query.filter {
+        Some(filter) => state.admitted(filter, members).await,
+        None => members,
     };
-    let page_size = document
-        .get("@odata.id")
-        .and_then(Value::as_str)
-        .and_then(|odata_id| state.page_sizes.of(odata_id));
     let page = query.paging.page(admitted, page_size);
     document.insert("Members".to_owned(), Value::Array(page.members));
     document.insert("Members@odata.count".to_owned(), page.total.into());
@@ -150,8 +130,7 @@ struct Query {
 }
 
 impl Query {
-    /// `None` when the request carries no collection option and can pass
-    /// through untouched.
+    /// `None` when the request carries no collection option.
     fn parse(params: &[(String, String)]) -> Result<Option<Self>, QueryError> {
         let mut filter = None;
         let mut paging = Paging::default();
@@ -159,9 +138,20 @@ impl Query {
         for (key, value) in params {
             match key.as_str() {
                 "$filter" => {
-                    filter = Some(Filter::parse(value).map_err(|_| QueryError::ValueFormat {
-                        parameter: key.clone(),
-                        value: value.clone(),
+                    filter = Some(Filter::parse(value).map_err(|cause| {
+                        // The expression itself stays out of the log: its
+                        // literals are the client's data. `FilterError`
+                        // names only property paths and token positions.
+                        tracing::warn!(
+                            parameter = "$filter",
+                            %cause,
+                            expression_length = value.len(),
+                            "rejected query parameter"
+                        );
+                        QueryError::ValueFormat {
+                            parameter: key.clone(),
+                            value: value.clone(),
+                        }
                     })?);
                 }
                 "$skip" => paging.skip = Paging::bound(key, value, 0)?,
@@ -180,7 +170,7 @@ impl Query {
 }
 
 /// `$skip` and `$top`, applied after `$filter`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct Paging {
     skip: usize,
     top: Option<usize>,
@@ -198,18 +188,18 @@ impl Paging {
     /// An integer option no smaller than `least`. `$top=0` is out of range
     /// because a zero-member page makes no progress: its continuation would
     /// point at itself.
-    fn bound(parameter: &str, value: &str, least: i64) -> Result<usize, QueryError> {
-        let number: i64 = value.parse().map_err(|_| QueryError::ValueFormat {
+    fn bound(parameter: &str, value: &str, least: usize) -> Result<usize, QueryError> {
+        let number: i128 = value.parse().map_err(|_| QueryError::ValueFormat {
             parameter: parameter.to_owned(),
             value: value.to_owned(),
         })?;
         usize::try_from(number)
             .ok()
-            .filter(|_| number >= least)
+            .filter(|number| *number >= least)
             .ok_or_else(|| QueryError::OutOfRange {
                 parameter: parameter.to_owned(),
                 value: value.to_owned(),
-                range: format!("{least} or more"),
+                least,
             })
     }
 
@@ -254,7 +244,7 @@ enum QueryError {
     OutOfRange {
         parameter: String,
         value: String,
-        range: String,
+        least: usize,
     },
 }
 
@@ -288,27 +278,35 @@ impl IntoResponse for QueryError {
             Self::OutOfRange {
                 parameter,
                 value,
-                range,
-            } => http::registry_error(
-                StatusCode::BAD_REQUEST,
-                &format!("{BASE}.QueryParameterOutOfRange"),
-                &format!(
-                    "The value '{value}' for the query parameter '{parameter}' is out of range {range}."
-                ),
-                &[&value, &parameter, &range],
-                "Reduce the value for the query parameter to a value that is within range, such as a start or count value that is within bounds of the number of resources in a collection or a page that is within the range of valid pages.",
-            ),
+                least,
+            } => {
+                let range = format!("{least} or more");
+                http::registry_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("{BASE}.QueryParameterOutOfRange"),
+                    &format!(
+                        "The value '{value}' for the query parameter '{parameter}' is out of range {range}."
+                    ),
+                    &[&value, &parameter, &range],
+                    "Reduce the value for the query parameter to a value that is within range, such as a start or count value that is within bounds of the number of resources in a collection or a page that is within the range of valid pages.",
+                )
+            }
         }
     }
 }
 
-/// `?key=value&...` with values encoded and Redfish's `$` keys left legible,
-/// or nothing when there are no options.
+/// `?key=value&...`, encoded for the form-style decoding the request went
+/// through, with Redfish's `$` keys left legible; nothing when there are no
+/// options.
 fn query_string<'a>(params: impl Iterator<Item = &'a (String, String)>) -> String {
     let mut query = String::new();
     for (key, value) in params {
         query.push(if query.is_empty() { '?' } else { '&' });
-        query.push_str(key);
+        if key.starts_with('$') {
+            query.push_str(key);
+        } else {
+            query.extend(form_urlencoded::byte_serialize(key.as_bytes()));
+        }
         query.push('=');
         query.extend(form_urlencoded::byte_serialize(value.as_bytes()));
     }
@@ -327,7 +325,6 @@ fn reference(member: &Value) -> Option<&str> {
 #[derive(Debug, Clone)]
 struct Querying {
     inner: Router,
-    page_sizes: PageSizes,
 }
 
 impl Querying {
@@ -336,56 +333,40 @@ impl Querying {
         call_router_with_new_request(&mut self.inner, request).await
     }
 
-    async fn get_json(&mut self, uri: &str) -> Result<Map<String, Value>, String> {
+    /// Whether the member referenced at `uri` satisfies `filter`. A member
+    /// whose resource cannot be read — gone since the collection was listed,
+    /// or misconfigured — is left out and logged.
+    async fn referenced_member_admitted(mut self, filter: &Filter, uri: &str) -> bool {
         let request = Request::builder()
             .method(Method::GET)
             .uri(uri)
             .body(Body::empty())
-            .map_err(|e| format!("`{uri}` is not a request URI: {e}"))?;
+            .expect("a member's @odata.id is a request URI");
         let response = self.call_inner_router(request).await;
-        let (parts, bytes) = match json_bytes(response).await {
-            Ok(buffered) => buffered,
-            Err(BufferError::NotJson(response)) => {
-                return Err(format!("`{uri}` answered a non-JSON {}", response.status()));
+        match member_json(response, uri.to_owned()).await {
+            Ok(member) => filter.admits(&member),
+            Err(error) => {
+                tracing::warn!(%error, "collection member left out of a filtered answer");
+                false
             }
-            Err(BufferError::Read(e)) => return Err(format!("could not read `{uri}`: {e}")),
-        };
-        if !parts.status.is_success() {
-            return Err(format!(
-                "`{uri}` answered {}: {}",
-                parts.status,
-                String::from_utf8_lossy(&bytes)
-            ));
         }
-        serde_json::from_slice(&bytes).map_err(|e| format!("`{uri}` is not a JSON object: {e}"))
     }
 
     /// The members `filter` admits, in order. A member served as a reference
     /// is read from the inner router to be judged, and stays a reference.
-    async fn admitted(
-        &self,
-        filter: Option<&Filter>,
-        members: Vec<Value>,
-    ) -> Result<Vec<Value>, String> {
-        let Some(filter) = filter else {
-            return Ok(members);
-        };
-        let judged = join_all(members.into_iter().map(|member| {
-            let mut state = self.clone();
-            async move {
+    async fn admitted(&self, filter: &Filter, members: Vec<Value>) -> Vec<Value> {
+        futures::stream::iter(members)
+            .map(|member| async move {
                 let admitted = match reference(&member) {
-                    Some(uri) => filter.admits(&Value::Object(state.get_json(uri).await?)),
+                    Some(uri) => self.clone().referenced_member_admitted(filter, uri).await,
                     None => filter.admits(&member),
                 };
-                Ok::<_, String>(admitted.then_some(member))
-            }
-        }))
-        .await;
-        judged
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map(|members| members.into_iter().flatten().collect())
-            .map_err(|message| format!("could not read a collection member: {message}"))
+                admitted.then_some(member)
+            })
+            .buffered(MEMBER_READS_IN_FLIGHT)
+            .filter_map(std::future::ready)
+            .collect()
+            .await
     }
 }
 
@@ -512,10 +493,15 @@ mod tests {
             parameter: parameter.to_owned(),
             value: value.to_owned(),
         };
+        let low = |parameter: &str, value: &str, least: usize| QueryError::OutOfRange {
+            parameter: parameter.to_owned(),
+            value: value.to_owned(),
+            least,
+        };
         check_values(
             [
                 Check {
-                    scenario: "no collection option passes through",
+                    scenario: "no collection option",
                     input: "only&excerpt&vendor=1",
                     expect: Ok(None),
                 },
@@ -547,20 +533,17 @@ mod tests {
                 Check {
                     scenario: "a negative $skip",
                     input: "$skip=-1",
-                    expect: Err(QueryError::OutOfRange {
-                        parameter: "$skip".to_owned(),
-                        value: "-1".to_owned(),
-                        range: "0 or more".to_owned(),
-                    }),
+                    expect: Err(low("$skip", "-1", 0)),
                 },
                 Check {
                     scenario: "$top=0 would never make progress",
                     input: "$top=0",
-                    expect: Err(QueryError::OutOfRange {
-                        parameter: "$top".to_owned(),
-                        value: "0".to_owned(),
-                        range: "1 or more".to_owned(),
-                    }),
+                    expect: Err(low("$top", "0", 1)),
+                },
+                Check {
+                    scenario: "a $top beyond any collection is out of range, not malformed",
+                    input: "$top=99999999999999999999",
+                    expect: Err(low("$top", "99999999999999999999", 1)),
                 },
                 Check {
                     scenario: "a $filter the grammar does not cover",
@@ -569,6 +552,58 @@ mod tests {
                 },
             ],
             parse,
+        );
+    }
+
+    #[test]
+    fn continuations_encode_what_the_request_decoded() {
+        let params = [
+            ("$skip".to_owned(), "2".to_owned()),
+            (
+                "$filter".to_owned(),
+                "Created gt '2026-02-12T02:06:58+00:00'".to_owned(),
+            ),
+            ("a b".to_owned(), "c#d".to_owned()),
+        ];
+        let continuation = query_string(params.iter());
+        assert_eq!(
+            continuation,
+            "?$skip=2&$filter=Created+gt+%272026-02-12T02%3A06%3A58%2B00%3A00%27&a+b=c%23d"
+        );
+        let decoded: Vec<(String, String)> = form_urlencoded::parse(&continuation.as_bytes()[1..])
+            .into_owned()
+            .collect();
+        assert_eq!(decoded, params);
+    }
+
+    #[tokio::test]
+    async fn a_collection_with_a_page_size_pages_unasked() {
+        let (router, state) = dell_router();
+        for _ in 0..59 {
+            state.record_log(LogEntryDraft::powered_on(SYSTEM));
+        }
+        // The Dell profile pages fifty at a time; a percent-encoded spelling
+        // of the path reaches the same collection.
+        let first = get_ok(
+            &router,
+            &ENTRIES.replace("System.Embedded.1", "System%2EEmbedded%2E1"),
+        )
+        .await;
+        assert_eq!(first["Members"].as_array().unwrap().len(), 50);
+        assert_eq!(first["Members@odata.count"], 60);
+        assert_eq!(first["Members"][0]["Id"], "0");
+        let last = get_ok(&router, first["Members@odata.nextLink"].as_str().unwrap()).await;
+        assert_eq!(last["Members"].as_array().unwrap().len(), 10);
+        assert_eq!(last["Members"][9]["Id"], "59");
+        assert!(last.get("Members@odata.nextLink").is_none());
+
+        let capped = get_ok(&router, &format!("{ENTRIES}?$top=5&$skip=2")).await;
+        assert_eq!(capped["Members"].as_array().unwrap().len(), 5);
+        assert_eq!(capped["Members"][0]["Id"], "2");
+        assert_eq!(
+            capped["Members@odata.nextLink"],
+            format!("{ENTRIES}?$skip=7&$top=5"),
+            "the continuation keeps the client's page size"
         );
     }
 
@@ -592,13 +627,21 @@ mod tests {
             "the count is of what matched"
         );
         assert_eq!(resumed["Members"][0]["Id"], "1");
-        // A `+` a client left unencoded decodes as a space and is still an offset.
-        let from_seed = get_ok(
-            &router,
-            &format!("{ENTRIES}?$filter=Created%20ge%202026-02-12T02:06:58+00:00"),
-        )
-        .await;
-        assert_eq!(from_seed["Members@odata.count"], 4);
+        // The health collector resumes by `Id gt <last seen>`, an integer
+        // against a string property.
+        let by_id = get_ok(&router, &format!("{ENTRIES}?$filter=Id%20gt%201")).await;
+        assert_eq!(by_id["Members@odata.count"], 2);
+        assert_eq!(by_id["Members"][0]["Id"], "2");
+        // A `+` a client left unencoded decodes as a space and is still an
+        // offset, quoted or not; the boundary entry is not re-admitted.
+        for literal in ["2026-02-12T02:06:58+00:00", "'2026-02-12T02:06:58+00:00'"] {
+            let from_seed = get_ok(
+                &router,
+                &format!("{ENTRIES}?$filter=Created%20gt%20{literal}"),
+            )
+            .await;
+            assert_eq!(from_seed["Members@odata.count"], 3, "{literal}");
+        }
 
         // A filtered page continues under the same filter.
         let paged = get_ok(
@@ -670,6 +713,24 @@ mod tests {
             expanded["Members"][0]["Manufacturer"],
             "Broadcom Inc. and subsidiaries"
         );
+    }
+
+    #[tokio::test]
+    async fn a_member_that_cannot_be_read_is_left_out() {
+        let router = append(Router::new().route(
+            "/things",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "@odata.id": "/things",
+                    "Members": [{"@odata.id": "/things/gone"}],
+                    "Members@odata.count": 1,
+                }))
+            }),
+        ));
+        let (status, body) = get(&router, "/things?$filter=Id%20eq%20'gone'").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["Members"], serde_json::json!([]));
+        assert_eq!(body["Members@odata.count"], 0);
     }
 
     #[tokio::test]

@@ -362,8 +362,8 @@ impl EventLog {
     }
 
     /// Every entry under `collection`, oldest first. Paging is the query
-    /// layer's, at [`page_size`](Self::page_size).
-    pub(crate) fn entries(&self, collection: &redfish::Collection<'_>) -> Vec<Value> {
+    /// layer's, told [`page_size`](Self::page_size) by the handler.
+    pub(super) fn entries(&self, collection: &redfish::Collection<'_>) -> Vec<Value> {
         self.lock()
             .entries
             .iter()
@@ -372,7 +372,7 @@ impl EventLog {
     }
 
     /// Entries per collection page, when the profile pages this log.
-    pub(crate) fn page_size(&self) -> Option<usize> {
+    pub(super) fn page_size(&self) -> Option<usize> {
         self.page_size
     }
 

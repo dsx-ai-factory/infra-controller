@@ -131,7 +131,7 @@ pub(crate) mod update_service;
 pub(crate) mod virtual_media;
 
 pub(crate) mod expander_router;
-pub(crate) mod filter;
+mod filter;
 pub(crate) mod query_router;
 
 pub(super) use collection::Collection;

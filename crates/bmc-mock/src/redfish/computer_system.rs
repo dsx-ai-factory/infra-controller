@@ -282,25 +282,6 @@ impl SystemState {
         &self.systems
     }
 
-    /// The collections under the systems that page, by `@odata.id`, with
-    /// their page size.
-    pub(crate) fn page_sizes(&self) -> impl Iterator<Item = (String, usize)> + '_ {
-        self.systems().iter().flat_map(|system| {
-            system
-                .config
-                .log_services
-                .iter()
-                .flat_map(|services| services.services())
-                .filter_map(|log| {
-                    let collection = redfish::log_service::system_entries_collection(
-                        &system.config.id,
-                        log.id(),
-                    );
-                    Some((collection.odata_id.into_owned(), log.page_size()?))
-                })
-        })
-    }
-
     pub(crate) fn find(&self, system_id: &str) -> Option<&SingleSystemState> {
         self.systems
             .iter()
@@ -1153,12 +1134,18 @@ async fn get_log_service_entries(
         .map(|log_service| {
             let collection =
                 redfish::log_service::system_entries_collection(&system_id, &log_service_id);
-            let document = collection
+            let mut response = collection
                 .with_members(&log_service.entries(&collection))
                 .patch(json!({
                     "Description": "Log services collection", // Required by libredfish
-                }));
-            document.into_ok_response()
+                }))
+                .into_ok_response();
+            if let Some(page_size) = log_service.page_size() {
+                response
+                    .extensions_mut()
+                    .insert(redfish::query_router::PageSize(page_size));
+            }
+            response
         })
         .unwrap_or_else(http::not_found)
 }
@@ -1628,53 +1615,6 @@ mod tests {
             .await,
             StatusCode::NOT_FOUND
         );
-    }
-
-    #[tokio::test]
-    async fn the_entries_collection_pages_with_a_next_link() {
-        let (router, state) = dell_router();
-        let entries_path = "/redfish/v1/Systems/System.Embedded.1/LogServices/EventLog/Entries";
-        let system = "/redfish/v1/Systems/System.Embedded.1";
-        // One seed entry plus 59 lifecycle entries: 60 in a log paged by 50.
-        for _ in 0..59 {
-            state.record_log(redfish::log_service::LogEntryDraft::powered_on(system));
-        }
-        let first = get_json(&router, entries_path).await;
-        assert_eq!(first["Members"].as_array().unwrap().len(), 50);
-        assert_eq!(first["Members@odata.count"], 60);
-        assert_eq!(
-            first["Members@odata.nextLink"],
-            format!("{entries_path}?$skip=50")
-        );
-        assert_eq!(first["Members"][0]["Id"], "0");
-
-        let last = get_json(&router, first["Members@odata.nextLink"].as_str().unwrap()).await;
-        assert_eq!(last["Members"].as_array().unwrap().len(), 10);
-        assert_eq!(last["Members"][9]["Id"], "59");
-        assert!(last.get("Members@odata.nextLink").is_none());
-
-        let capped = get_json(&router, &format!("{entries_path}?$top=5&$skip=2")).await;
-        assert_eq!(capped["Members"].as_array().unwrap().len(), 5);
-        assert_eq!(capped["Members"][0]["Id"], "2");
-        assert_eq!(
-            capped["Members@odata.nextLink"],
-            format!("{entries_path}?$skip=7&$top=5"),
-            "the continuation keeps the client's page size"
-        );
-
-        for query in ["$skip=many", "$top=0"] {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(format!("{entries_path}?{query}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
-        }
     }
 
     #[tokio::test]

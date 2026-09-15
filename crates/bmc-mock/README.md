@@ -240,10 +240,12 @@ then `$skip` and `$top`, then `$expand`.
   `Links/OriginOfCondition/@odata.id`) with `eq`, `ne`, `gt`, `ge`, `lt`, or
   `le` against a `'quoted string'`, a number, `true`, `false`, `null`, or a
   bare RFC 3339 instant, combined with `and`, `or`, `not`, and parentheses.
-  Two strings that are both RFC 3339 instants compare as instants, whatever
-  their offsets. Members served as references are judged by the resource they
-  point at and stay references. The service root advertises
-  `ProtocolFeaturesSupported.FilterQuery`.
+  A string property compares as an instant or a number when the literal is
+  one and the property reads as one, so `Created gt <instant>` works across
+  offsets and `Id gt 12` works although `Id` is a string. Members served as
+  references are judged by the resource they point at and stay references; a
+  member whose resource cannot be read is left out and logged. The service
+  root advertises `ProtocolFeaturesSupported.FilterQuery`.
 - `Members@odata.count` is the number of members after `$filter`. `$skip`
   and `$top` page those; a collection with a page size of its own (the Dell
   R750 event log) pages at that size even without `$top`, and `$top` may
