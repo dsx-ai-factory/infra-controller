@@ -51,7 +51,7 @@ fn missing_optional_vendor_class_is_not_logged_as_error() -> Result<(), eyre::Re
     assert_eq!(response.opts().msg_type(), Some(v4::MessageType::Offer));
     kea.stop_process();
     assert!(
-        !kea.wait_for_log("Missing option [60] in packet", Duration::ZERO),
+        !kea.has_log("Missing option [60] in packet"),
         "optional vendor-class absence must not be logged as an error"
     );
 

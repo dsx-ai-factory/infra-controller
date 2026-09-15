@@ -239,17 +239,31 @@ impl Kea {
         let stdout_logs = self.logs.clone();
         self.log_readers.push(thread::spawn(move || {
             for line in stdout.lines() {
-                let line = line.unwrap();
-                println!("KEA STDOUT: {line}");
-                stdout_logs.lock().unwrap().push(line);
+                match line {
+                    Ok(line) => {
+                        println!("KEA STDOUT: {line}");
+                        stdout_logs.lock().unwrap().push(line);
+                    }
+                    Err(error) => {
+                        eprintln!("failed to read Kea stdout: {error}");
+                        break;
+                    }
+                }
             }
         }));
         let stderr_logs = self.logs.clone();
         self.log_readers.push(thread::spawn(move || {
             for line in stderr.lines() {
-                let line = line.unwrap();
-                println!("KEA STDERR: {line}");
-                stderr_logs.lock().unwrap().push(line);
+                match line {
+                    Ok(line) => {
+                        println!("KEA STDERR: {line}");
+                        stderr_logs.lock().unwrap().push(line);
+                    }
+                    Err(error) => {
+                        eprintln!("failed to read Kea stderr: {error}");
+                        break;
+                    }
+                }
             }
         }));
 
@@ -289,23 +303,13 @@ impl Kea {
         Ok(None)
     }
 
-    pub(crate) fn wait_for_log(&self, needle: &str, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if self
-                .logs
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|line| line.contains(needle))
-            {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
+    /// Return whether the captured stdout or stderr contains `needle`.
+    pub(crate) fn has_log(&self, needle: &str) -> bool {
+        self.logs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains(needle))
     }
 
     /// Stop Kea and wait until its captured stdout and stderr have been drained.
@@ -326,7 +330,9 @@ impl Kea {
         }
         self.process = None;
         for reader in self.log_readers.drain(..) {
-            reader.join().unwrap();
+            if reader.join().is_err() {
+                eprintln!("Kea log-reader thread panicked");
+            }
         }
     }
 
