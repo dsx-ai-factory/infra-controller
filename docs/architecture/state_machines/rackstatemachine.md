@@ -217,7 +217,7 @@ stateDiagram-v2
     WaitForSwitchCertificateJob --> Error : certificate failed, job missing, or V2 validation failed
     WaitForScaleUpFabricManagerJob --> WaitForScaleUpFabricManagerJob : pending, poll or verification retry, restart, or V2 resubmission
     WaitForScaleUpFabricManagerJob --> NextActivity : V2 complete and observed primary persisted
-    WaitForScaleUpFabricManagerJob --> Error : V2 failed or returned invalid state
+    WaitForScaleUpFabricManagerJob --> Error : V2 failed or returned invalid state, Component Manager is absent, polling is unsupported, or terminal verification failed
 ```
 
 `Start` submits one `ConfigureSwitchCertificate` request containing every rack
