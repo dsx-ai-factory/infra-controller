@@ -1,4 +1,4 @@
--- Historical Helm registrations explicitly adopt all attached DPUs.
+-- Historical Helm registrations explicitly adopt all active/previously used DPUs.
 -- Quiesce Helm registration and instance configuration writers before applying this migration.
 ALTER TABLE extension_services ADD COLUMN dpu_target text;
 UPDATE extension_services SET dpu_target = 'all_active' WHERE type = 'dpf_helm_chart';
