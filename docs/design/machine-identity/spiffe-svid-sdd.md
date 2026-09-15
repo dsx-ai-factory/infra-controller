@@ -370,10 +370,10 @@ A new table will be created to store tenant signing key pairs and optional token
 | :---- | :---- | :---- |
 | `VARCHAR(255)` | `organization_id` | PK |
 | `issuer` domain type | `issuer` | JWT `iss`; normalized URL / SPIFFE / host form |
-| `VARCHAR(…)` | `default_audience` | Default JWT audience |
+| `VARCHAR(...)` | `default_audience` | Default JWT audience |
 | `JSONB` | `allowed_audiences` | Allowed audience list |
 | `INTEGER` | `token_ttl_sec` | JWT lifetime (seconds) |
-| `VARCHAR(…)` | `subject_prefix` | SPIFFE prefix for `sub` |
+| `VARCHAR(...)` | `subject_prefix` | SPIFFE prefix for `sub` |
 | `BOOLEAN` | `enabled` | Org-level enable |
 | `TEXT` | `encrypted_signing_key_1` | Encrypted private key slot 1 (nullable) |
 | `TEXT` | `encrypted_signing_key_2` | Encrypted private key slot 2 (nullable) |
