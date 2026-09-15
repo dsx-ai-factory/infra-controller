@@ -6,7 +6,7 @@ This is **not** the same as **per-org JWT signing key rotation** (see [JWT Signi
 
 Design background: [SPIFFE JWT-SVID SDD §3.1.1](../design/machine-identity/spiffe-svid-sdd.md).
 
-> **API surface:** Re-wrap is available through NICo-rest at `POST /v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt` for provider admins and directly through Core gRPC (`ReencryptTenantIdentitySecrets`) with a Forge Admin CLI mTLS certificate. There is no `nico-admin-cli` subcommand for re-wrap.
+**API surface:** Re-wrap is available through NICo-rest at `POST /v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt` for provider admins and directly through Core gRPC (`ReencryptTenantIdentitySecrets`) with a Forge Admin CLI mTLS certificate. There is no `nico-admin-cli` subcommand for re-wrap.
 
 ---
 
