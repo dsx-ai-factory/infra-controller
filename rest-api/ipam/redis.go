@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 
@@ -50,8 +51,13 @@ func (r *redis) Name() string {
 }
 
 func newRedisFromConfig(ctx context.Context, cfg RedisConfig) (*redis, error) {
+	host := cfg.IP
+	// JoinHostPort adds IPv6 brackets; accept hosts that already include them.
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
 	opts := &redigo.Options{
-		Addr:      fmt.Sprintf("%s:%s", cfg.IP, cfg.Port),
+		Addr:      net.JoinHostPort(host, cfg.Port),
 		Username:  cfg.Username,
 		Password:  cfg.Password,
 		DB:        0,
