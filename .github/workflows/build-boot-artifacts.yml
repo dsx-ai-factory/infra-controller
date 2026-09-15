@@ -154,9 +154,12 @@ jobs:
           path: .
         continue-on-error: false
 
-      # Setup mkosi environment for ephemeral builds (runs on shell)
+      # Install the mkosi toolchain on the runner only for the non-container
+      # (shell) path. Container-mode ephemeral builds get the toolchain from
+      # pxe-build-container instead, keeping the flaky distro mirror off the
+      # per-run critical path (#5249).
       - name: Setup mkosi environment
-        if: inputs.build_type == 'ephemeral'
+        if: inputs.build_type == 'ephemeral' && inputs.use_container == false
         uses: ./.github/actions/setup-mkosi-environment
         with:
           rust-version: '1.96.0'
@@ -421,6 +424,14 @@ jobs:
           echo "============================================"
 
           EXTRA_DOCKER_ARGS="-v ${SCCACHE_SECRETS}:/run/secrets:ro"
+
+          # mkosi needs Linux user namespaces plus loop/device access to assemble
+          # the image, so the ephemeral build runs privileged -- the same way the
+          # local `cargo make pxe-docker-x86` flow invokes pxe-build-container.
+          if [[ "${{ inputs.build_type }}" == "ephemeral" ]]; then
+            EXTRA_DOCKER_ARGS="${EXTRA_DOCKER_ARGS} --privileged"
+          fi
+
           if [[ "${{ inputs.cargo_make_task }}" == "build-boot-artifacts-bfb-ci" ]]; then
             # bfb build runs `docker pull/save` (see pxe/Makefile.toml tasks.bfb-hbn-pull/export).
             # Allow docker CLI inside the build container to talk to the host Docker daemon.
