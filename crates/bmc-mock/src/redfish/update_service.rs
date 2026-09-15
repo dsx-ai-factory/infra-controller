@@ -304,6 +304,26 @@ impl UpdateServiceState {
             .map(|sw| sw.to_json())
     }
 
+    /// Re-stage one component's upgrade target on a live mock. Only the
+    /// pending target changes - active inventory and staged uploads are left
+    /// alone. `Some(v)` stages `v` unless the active version already equals it
+    /// (no re-queueing completed upgrades); `None` clears the target.
+    pub fn retarget_pending_upgrade(&self, component_id: &str, desired: Option<&str>) {
+        let inventory = self.firmware_inventory.read().unwrap();
+        let mut pending = self.pending_upgrades.write().unwrap();
+        let active_version = inventory
+            .get(component_id)
+            .and_then(|sw| sw.to_json()["Version"].as_str().map(str::to_owned));
+        match desired {
+            Some(version) if active_version.as_deref() != Some(version) => {
+                pending.insert(component_id.to_string(), version.to_string());
+            }
+            _ => {
+                pending.shift_remove(component_id);
+            }
+        }
+    }
+
     pub(crate) fn all_firmware_inventory_ids(&self) -> Vec<String> {
         self.firmware_inventory
             .read()
@@ -481,9 +501,12 @@ impl UpdateServiceState {
                 Some(target_version) => {
                     if let Some(entry) = inventory.get_mut(component_id) {
                         entry.set_version(&target_version);
-                        // Remove from pending_upgrades so the next peek returns
-                        // the following entry (if any).
-                        pending.shift_remove(component_id);
+                        // Only remove the pending entry when the applied
+                        // version is still the target: a retarget that landed
+                        // mid-upload must survive for the next upload pass.
+                        if pending.get(component_id.as_str()) == Some(&target_version) {
+                            pending.shift_remove(component_id);
+                        }
                     } else {
                         tracing::warn!(
                             component_id,
@@ -673,6 +696,59 @@ mod tests {
             task_completion_jitter: Duration::ZERO,
             ..Default::default()
         }))
+    }
+
+    fn pending_pairs(state: &UpdateServiceState) -> Vec<(String, String)> {
+        let pending = state.pending_upgrades.read().unwrap();
+        pending
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn retarget_stages_clears_and_scopes_pending_targets() {
+        let state = make_state(
+            &[("BMC_Firmware", "24.09"), ("UEFI", "1.0")],
+            &[("BMC_Firmware", "24.09"), ("UEFI", "1.1")],
+        );
+        // Drift vs active: stages the new target; other components untouched.
+        state.retarget_pending_upgrade("BMC_Firmware", Some("24.10"));
+        assert_eq!(
+            pending_pairs(&state),
+            vec![
+                ("BMC_Firmware".to_string(), "24.10".to_string()),
+                ("UEFI".to_string(), "1.1".to_string()),
+            ]
+        );
+        // Active inventory is never touched by a retarget.
+        let active = state.find_firmware_inventory("BMC_Firmware").unwrap();
+        assert_eq!(active["Version"], "24.09");
+        // Already at target: the pending entry clears (no re-queue).
+        state.retarget_pending_upgrade("BMC_Firmware", Some("24.09"));
+        // None withdraws a target.
+        state.retarget_pending_upgrade("UEFI", None);
+        assert!(pending_pairs(&state).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retarget_does_not_disturb_staged_uploads() {
+        // An upload already staged for the old target stays staged: the
+        // realistic sequence is old version applies on the next power cycle,
+        // then the new drift is observed and upgraded in a later pass.
+        let state = make_state(&[("BMC_Firmware", "24.09")], &[("BMC_Firmware", "24.10")]);
+        state.record_upload("BMC_Firmware", "24.10".to_string());
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        state.retarget_pending_upgrade("BMC_Firmware", Some("24.11"));
+        state.apply_staged_firmware();
+        let active = state.find_firmware_inventory("BMC_Firmware").unwrap();
+        assert_eq!(active["Version"], "24.10", "staged upload still applies");
+        // 24.11 remains pending because the freshly-applied 24.10 != 24.11.
+        assert_eq!(
+            pending_pairs(&state),
+            vec![("BMC_Firmware".to_string(), "24.11".to_string())]
+        );
     }
 
     #[tokio::test(start_paused = true)]
