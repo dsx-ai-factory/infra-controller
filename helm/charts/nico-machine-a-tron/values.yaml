@@ -215,6 +215,8 @@ machineDefaults:
   runIntervalIdle: "10s"
   networkStatusRunInterval: "20s"
   dpusInNicMode: false
+  ## Register hosts as DPF-managed; their DPUs start with the DPU agent installed. Set false for non-DPF sites.
+  dpfEnabled: true
   ## Host firmware upgrade simulation. Set initial BMC/UEFI versions here to
   ## apply to all machine groups. Override per-group in pods.*.machines.*.
   ## When set, NICo detects version delta and triggers the upgrade flow.

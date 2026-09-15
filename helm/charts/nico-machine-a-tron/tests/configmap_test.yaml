@@ -161,6 +161,44 @@ tests:
           path: data["mat.toml"]
           pattern: 'acceleration_factor = 0\.02'
 
+  - it: should register hosts as DPF-managed by default
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'dpf_enabled = true'
+      - notMatchRegex:
+          path: data["mat.toml"]
+          pattern: 'dpf_enabled = false'
+
+  - it: should allow disabling DPF per machine group
+    set:
+      pods:
+        mat-0:
+          machines:
+            dell-hosts:
+              hwType: dell_poweredge_r750
+              hostCount: 2
+              dpfEnabled: false
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[machines\.dell-hosts\][^\[]*dpf_enabled = false'
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: '\[machines\.rack-machines\][^\[]*dpf_enabled = true'
+
+  - it: should allow disabling DPF via machineDefaults
+    set:
+      machineDefaults:
+        dpfEnabled: false
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'dpf_enabled = false'
+      - notMatchRegex:
+          path: data["mat.toml"]
+          pattern: 'dpf_enabled = true'
+
   - it: should not include enable_ipmi_simulation by default
     asserts:
       - notMatchRegex:

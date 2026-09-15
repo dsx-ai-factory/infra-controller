@@ -264,6 +264,7 @@ pods:
         dpuPerHostCount: 2
         bmcDhcpRelayAddress: "10.96.64.1"
         underlayDhcpRelayAddress: "10.104.0.1"
+        dpfEnabled: true  # optional; set false for non-DPF sites
 ```
 
 ### IPMI/SOL Simulation
