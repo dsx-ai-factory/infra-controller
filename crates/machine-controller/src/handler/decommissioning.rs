@@ -278,13 +278,10 @@ pub(super) async fn handle_deconfiguring_host(
                     ))
                 })?;
             let next = match job_state {
-                // A scheduled config job only runs once the host reboots.
                 JobState::Scheduled => DeconfiguringHostState::RebootAfterUefiPassword {
                     job_id: job_id.clone(),
                 },
-                // iDRAC runs the SCP-import fallback immediately, power
-                // cycling the host itself, so that job never reports
-                // Scheduled and there is nothing for a reboot to trigger.
+                // Some platforms skip Scheduled.
                 JobState::Completed => DeconfiguringHostState::WaitForUefiPasswordJobCompletion {
                     job_id: job_id.clone(),
                 },
