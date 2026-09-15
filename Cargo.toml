@@ -265,6 +265,13 @@ zeroize = { version = "1", features = ["derive"] }
 zip = { version = "8.6", default-features = false }
 jsonpath-rust = "1.0.4"
 
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test-debug]
+inherits = "test"
+debug = "full"
+
 [profile.ci-tests]
 inherits = "dev"
 debug = "line-tables-only"
