@@ -77,7 +77,7 @@ type APISpectrumXPartition struct {
 	// VNI is the VXLAN Network Identifier allocated for the SpectrumX Partition
 	VNI *int `json:"vni"`
 	// Labels is the labels of the SpectrumX Partition
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// Status is the status of the SpectrumX Partition
 	Status cdbm.SpectrumXPartitionStatus `json:"status"`
 	// StatusHistory is the status detail records for the SpectrumX Partition over time
@@ -101,7 +101,7 @@ func (asxp *APISpectrumXPartition) FromDB(dsxp *cdbm.SpectrumXPartition, dbsds [
 	asxp.SiteID = dsxp.SiteID.String()
 	asxp.TenantID = dsxp.TenantID.String()
 	asxp.VNI = dsxp.VNI
-	asxp.Labels = dsxp.Labels
+	asxp.Labels = APILabels(dsxp.Labels)
 	asxp.Status = dsxp.Status
 	asxp.Created = dsxp.Created
 	asxp.Updated = dsxp.Updated

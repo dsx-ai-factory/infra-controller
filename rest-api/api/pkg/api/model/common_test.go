@@ -76,6 +76,8 @@ func TestAPIList_MarshalJSON(t *testing.T) {
 func TestAPIResponseLabels(t *testing.T) {
 	siteID := uuid.New()
 	dpus := NewAPIDpuMachines([]*corev1.DpuMachine{{Machine: &corev1.Machine{}}}, APIDpuMachineProtoContext{})
+	spectrumXPartition := &APISpectrumXPartition{}
+	spectrumXPartition.FromDB(&cdbm.SpectrumXPartition{}, nil)
 	tests := []struct {
 		name     string
 		response any
@@ -91,6 +93,7 @@ func TestAPIResponseLabels(t *testing.T) {
 		{"Machine", NewAPIMachine(&cdbm.Machine{}, nil, nil, nil, nil, false, true)},
 		{"Instance", NewAPIInstance(&cdbm.Instance{}, &cdbm.Site{}, nil, nil, nil, nil, nil, nil, nil)},
 		{"DpuMachine", dpus[0]},
+		{"SpectrumXPartition", spectrumXPartition},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

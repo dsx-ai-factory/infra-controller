@@ -134,6 +134,7 @@ func TestAPISpectrumXPartition_FromDB(t *testing.T) {
 		assert.Equal(t, tenantID.String(), apiSXP.TenantID)
 		require.NotNil(t, apiSXP.VNI)
 		assert.Equal(t, 10200, *apiSXP.VNI)
+		assert.Equal(t, APILabels{"env": "prod"}, apiSXP.Labels)
 		assert.Equal(t, cdbm.SpectrumXPartitionStatusReady, apiSXP.Status)
 		assert.Len(t, apiSXP.StatusHistory, 1)
 	})
