@@ -159,6 +159,7 @@ Collector defaults from the example config:
 | Entity discovery | `discovery_concurrency` | `1` | Concurrent endpoint identity resolutions. |
 | Entity metrics collector | `fetch_interval` | `"2m"` | Entity metrics polling cadence. |
 | Firmware collector | `firmware_refresh_interval` | `"30m"` | Firmware refresh cadence. |
+| Manager collector | `poll_interval` | `"5m"` | Power-shelf manager (PMC) status polling cadence. Power-shelf endpoints only. |
 | Logs collector | `mode` | `"sse"` | Preferred BMC log collection mode. |
 | NMX-C collector | `grpc_port` | `9370` | Switch-host NMX-C gRPC endpoint port. |
 | NMX-C collector | `heartbeat_rate` | `30` | Subscribe heartbeat for NMX-C `DomainStateInfo` updates. |

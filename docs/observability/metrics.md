@@ -140,6 +140,8 @@ Absent Redfish fields are omitted rather than defaulted: a status gauge is emitt
 any of its source fields is present, and each label appears only when its own field does.
 `powersupply_capacity` and `powersupply_status` are emitted for every endpoint that exposes
 power supplies; the chassis and manager series are emitted for power-shelf endpoints only.
+The manager series come from the `[collectors.manager]` section, which is enabled by
+default with a five-minute `poll_interval`.
 LiteOn PF-1333-7R firmware r1.3.8 omits `PowerCapacityWatts` and reports the capacity as the
 string `CapacityWatts` in its OEM schema; the collector uses that string only when the
 standard field is absent, and omits the series when the string is not a finite positive
