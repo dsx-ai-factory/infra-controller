@@ -321,6 +321,7 @@ impl Kea {
             thread::sleep(Duration::from_millis(100));
             if let Ok(None) = process.try_wait() {
                 process.kill().unwrap(); // -9
+                process.wait().unwrap();
             }
         }
         self.process = None;
