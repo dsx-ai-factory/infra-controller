@@ -8,7 +8,9 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -160,9 +162,14 @@ func workflowOrchestrator() error {
 	// Initialize client for publish namespace
 	tLogger := logur.LoggerToKV(zlogadapter.New(zerolog.New(os.Stderr)))
 
-	log.Info().Msgf("Workflow: Connecting to Host %v, Port %v", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port)
+	host := ManagerAccess.Conf.EB.Temporal.Host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	target := net.JoinHostPort(host, ManagerAccess.Conf.EB.Temporal.Port)
+	log.Info().Msgf("Workflow: Connecting to %s", target)
 	clientOptions := client.Options{
-		HostPort:          fmt.Sprintf("%s:%s", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port),
+		HostPort:          target,
 		Namespace:         ManagerAccess.Conf.EB.Temporal.TemporalPublishNamespace,
 		ConnectionOptions: publishClientConnOptions,
 		DataConverter:     swu.NewTemporalDataConverter(),
@@ -183,7 +190,7 @@ func workflowOrchestrator() error {
 
 	// Initialize client for subscribe namespace
 	clientOptions = client.Options{
-		HostPort:          fmt.Sprintf("%s:%s", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port),
+		HostPort:          target,
 		Namespace:         ManagerAccess.Conf.EB.Temporal.TemporalSubscribeNamespace,
 		ConnectionOptions: subscribeClientConnOptions,
 		DataConverter:     swu.NewTemporalDataConverter(),
