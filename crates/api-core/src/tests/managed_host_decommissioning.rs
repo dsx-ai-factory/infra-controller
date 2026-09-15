@@ -29,6 +29,45 @@ use tonic::{Code, Request};
 use crate::tests::common::api_fixtures::{create_managed_host, create_test_env};
 
 #[crate::sqlx_test]
+async fn uefi_password_job_advances_without_a_scheduled_phase(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let managed_host = create_managed_host(&env).await;
+    let host_id: HostMachineId = managed_host.id.into();
+
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        &mut txn,
+        &host_id,
+        &ManagedHostState::Decommissioning {
+            decommissioning_state: DecommissioningState::DeconfiguringHost {
+                deconfiguring_state: DeconfiguringHostState::WaitForUefiPasswordJobScheduled {
+                    job_id: "JID_893866234996".to_string(),
+                },
+            },
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    env.redfish_sim
+        .set_job_state_sequence(vec![libredfish::JobState::Completed]);
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.db_txn().await;
+    let host = managed_host.host().db_machine(&mut txn).await;
+    assert!(matches!(
+        host.current_state(),
+        ManagedHostState::Decommissioning {
+            decommissioning_state: DecommissioningState::DeconfiguringHost {
+                deconfiguring_state: DeconfiguringHostState::WaitForUefiPasswordJobCompletion { .. },
+            },
+        }
+    ));
+    txn.commit().await.unwrap();
+}
+
+#[crate::sqlx_test]
 async fn stale_supernic_unlock_rolls_back_before_a_fresh_iteration(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let managed_host = create_managed_host(&env).await;
