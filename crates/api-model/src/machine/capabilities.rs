@@ -268,6 +268,10 @@ pub enum MachineCapabilityDeviceType {
     Unknown,
     Dpu,
     NvLink,
+    /// Identifies DPA-interface inventory usable as SpectrumX attachment
+    /// selectors. This does not indicate site-level enablement or full
+    /// reference-architecture readiness.
+    SpectrumX,
 }
 
 impl fmt::Display for MachineCapabilityDeviceType {
@@ -276,6 +280,7 @@ impl fmt::Display for MachineCapabilityDeviceType {
             MachineCapabilityDeviceType::Unknown => write!(f, "UNKNOWN"),
             MachineCapabilityDeviceType::Dpu => write!(f, "DPU"),
             MachineCapabilityDeviceType::NvLink => write!(f, "NVLINK"),
+            MachineCapabilityDeviceType::SpectrumX => write!(f, "SpectrumX"),
         }
     }
 }
@@ -741,6 +746,10 @@ mod tests {
 
             "nvlink" {
                 MachineCapabilityDeviceType::NvLink => "NVLINK".to_string(),
+            }
+
+            "spectrum_x" {
+                MachineCapabilityDeviceType::SpectrumX => "SpectrumX".to_string(),
             }
         );
     }
