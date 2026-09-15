@@ -33,6 +33,7 @@ test-support = [
   "dep:opentelemetry-prometheus",
   "dep:rcgen",
 ]
+shutdown-handler = ["dep:tokio-util"]
 
 [dependencies]
 carbide-instrument = { path = "../instrument" }
@@ -54,6 +55,7 @@ serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["postgres"], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true, optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
