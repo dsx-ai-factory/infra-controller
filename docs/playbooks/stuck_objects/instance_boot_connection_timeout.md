@@ -16,8 +16,10 @@ Collect the following before changing the network configuration:
 
 - The failing tenant instance ID.
 - The complete URL from the console, including IP address and port.
-- The tenant instance VPC ID.
-- The PXE server instance ID and VPC ID.
+- The source address and interface that the boot client uses to reach the
+  timed-out address, and that interface's VPC ID.
+- The PXE server instance ID, the interface that owns the timed-out address,
+  and that interface's VPC ID.
 
 If the instances use different VPCs without peering, the boot path is
 unreachable. If they use the same VPC or peered VPCs, investigate routing and
@@ -25,11 +27,17 @@ tenant-defined security controls.
 
 ## Identify Both VPCs
 
-1. Show the failing instance and record its `VPC ID`:
+1. Show the failing instance:
 
    ```bash
    nico-admin-cli instance show <tenant-instance-id>
    ```
+
+   In the `INTERFACES` section, match the source address used by the boot
+   client to the corresponding `ADDRESSES` row and record that row's `VPC ID`.
+   An instance can have interfaces in multiple VPCs, so do not use a VPC ID
+   from another interface. If the source interface is not known, determine the
+   boot route before continuing with the peering checks.
 
 1. Find the instance that owns the IP address in the timed-out URL:
 
@@ -37,7 +45,8 @@ tenant-defined security controls.
    nico-admin-cli instance show | grep -F '<pxe-server-ip>'
    ```
 
-1. Show that instance and record its `VPC ID`:
+1. Show that instance. In the `INTERFACES` section, find the `ADDRESSES` row
+   containing the timed-out IP address and record that row's `VPC ID`:
 
    ```bash
    nico-admin-cli instance show <pxe-server-instance-id>
