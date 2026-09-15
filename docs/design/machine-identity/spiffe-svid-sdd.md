@@ -389,7 +389,7 @@ A new table will be created to store tenant signing key pairs and optional token
 | `VARCHAR(255)` | `subject_token_audience` | Subject JWT audience for exchange (optional) |
 | `TIMESTAMPTZ` | `token_delegation_created_at` | First delegation registration (optional) |
 
-*Previous single-column layout (`encrypted_signing_key`, `signing_key_public`, `key_id`, `algorithm`) is replaced by the slotted model above via migration. The per-row **`encryption_key_id`** column was removed; master key selection for **new** encryption uses site **`current_encryption_key_id`**, while **decrypt** uses the **`key_id` field inside each stored envelope** (see §3.1.1).*
+*The previous single-column layout (`encrypted_signing_key`, `signing_key_public`, `key_id`, `algorithm`) is replaced by the slotted model above via migration. The per-row **`encryption_key_id`** column was removed; master key selection for **new** encryption uses site **`current_encryption_key_id`**, while **decrypt** uses the **`key_id` field inside each stored envelope** (refer to §3.1.1).*
 
 #### 3.4.2 Configuration
 
