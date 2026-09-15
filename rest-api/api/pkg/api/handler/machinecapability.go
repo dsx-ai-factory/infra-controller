@@ -82,9 +82,12 @@ func (gamch GetAllMachineCapabilityHandler) Handle(c echo.Context) error {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
 	}
+	if pageRequest.OrderByStr == nil {
+		pageRequest.OrderByStr = cutil.GetPtr("TYPE_ASC")
+	}
 
 	// Validate request attributes
-	err = pageRequest.Validate(cdbm.MachineCapabilityOrderByFields)
+	err = pageRequest.Validate(cdbm.MachineCapabilityDistinctOrderByFields)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error validating pagination request data")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate pagination request data", err)

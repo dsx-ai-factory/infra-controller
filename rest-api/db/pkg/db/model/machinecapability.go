@@ -65,6 +65,10 @@ const (
 
 	// MachineCapabilityOrderByDefault default field to be used for ordering when none specified
 	MachineCapabilityOrderByDefault = "created"
+
+	// MachineCapabilityDistinctOrderByDefault is the default field used when
+	// ordering the distinct capabilities returned by the REST list endpoint.
+	MachineCapabilityDistinctOrderByDefault = "type"
 )
 
 var (
@@ -82,6 +86,10 @@ var (
 
 	// MachineCapabilityOrderByFields is a list of valid order by fields for the MachineCapability model
 	MachineCapabilityOrderByFields = []string{"type", "created", "updated"}
+
+	// MachineCapabilityDistinctOrderByFields is the list of fields exposed for
+	// ordering distinct Machine Capabilities.
+	MachineCapabilityDistinctOrderByFields = []string{"type"}
 
 	// MachineCapabilityDeviceTypeChoiceMap is a map of valid MachineCapability device types
 	MachineCapabilityDeviceTypeChoiceMap = map[MachineCapabilityDeviceType]bool{
@@ -944,17 +952,24 @@ func (mcd MachineCapabilitySQLDAO) GetAllDistinct(
 		}
 	}
 
-	paginator, err := paginator.NewPaginator(ctx, query, offset, limit, orderBy, MachineCapabilityOrderByFields)
+	if orderBy == nil {
+		orderBy = paginator.NewDefaultOrderBy(MachineCapabilityDistinctOrderByDefault)
+	}
+	dbPaginator, err := paginator.NewPaginator(ctx, query, offset, limit, orderBy, MachineCapabilityDistinctOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+	// DISTINCT ON requires the distinct fields to be the leftmost ordering
+	// expressions. The remaining capability key and ID make every page stable
+	// when multiple capabilities share the same type.
+	dbPaginator.Query = dbPaginator.Query.OrderExpr("mc.name ASC, mc.frequency ASC, mc.capacity ASC, mc.vendor ASC, mc.count ASC, mc.device_type ASC, mc.inactive_devices ASC, mc.id ASC")
+
+	err = dbPaginator.Query.Limit(dbPaginator.Limit).Offset(dbPaginator.Offset).Scan(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	err = paginator.Query.Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return mcs, paginator.Total, nil
+	return mcs, dbPaginator.Total, nil
 }
 
 // Update updates specified fields of an existing MachineCapability

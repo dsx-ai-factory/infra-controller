@@ -752,7 +752,7 @@ func (r ApiGetAllMachineCapabilitiesRequest) PageSize(pageSize int32) ApiGetAllM
 	return r
 }
 
-// Ordering for pagination query
+// Ordering for pagination query. TYPE_ASC orders capability type ascending and TYPE_DESC orders it descending. Defaults to TYPE_ASC. Ties are ordered by name, frequency, capacity, vendor, count, deviceType, inactiveDevices, and internal ID, all ascending with null values last.
 func (r ApiGetAllMachineCapabilitiesRequest) OrderBy(orderBy string) ApiGetAllMachineCapabilitiesRequest {
 	r.orderBy = &orderBy
 	return r
@@ -844,6 +844,10 @@ func (a *MachineAPIService) GetAllMachineCapabilitiesExecute(r ApiGetAllMachineC
 	}
 	if r.orderBy != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", r.orderBy, "form", "")
+	} else {
+		var defaultValue string = "TYPE_ASC"
+		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", defaultValue, "form", "")
+		r.orderBy = &defaultValue
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
@@ -883,6 +887,17 @@ func (a *MachineAPIService) GetAllMachineCapabilitiesExecute(r ApiGetAllMachineC
 		newErr := &GenericOpenAPIError{
 			body:  localVarBody,
 			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 403 {
 			var v NICoAPIError
