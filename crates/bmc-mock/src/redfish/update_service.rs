@@ -309,10 +309,11 @@ impl UpdateServiceState {
     /// alone. `Some(v)` stages `v` unless the active version already equals it
     /// (no re-queueing completed upgrades); `None` clears the target.
     pub fn retarget_pending_upgrade(&self, component_id: &str, desired: Option<&str>) {
-        let active_version = self
-            .find_firmware_inventory(component_id)
-            .and_then(|v| v["Version"].as_str().map(str::to_owned));
+        let inventory = self.firmware_inventory.read().unwrap();
         let mut pending = self.pending_upgrades.write().unwrap();
+        let active_version = inventory
+            .get(component_id)
+            .and_then(|sw| sw.to_json()["Version"].as_str().map(str::to_owned));
         match desired {
             Some(version) if active_version.as_deref() != Some(version) => {
                 pending.insert(component_id.to_string(), version.to_string());

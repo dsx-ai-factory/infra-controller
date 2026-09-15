@@ -1019,6 +1019,43 @@ pub struct MachineATronContext {
     pub mac_address_pool: Arc<Mutex<MacAddressPool>>,
 }
 
+/// Spawn the background task that re-fetches desired firmware versions on the
+/// API refresh cadence (#4688). Machines pick changes up on their own tick.
+/// Empty responses and fetch errors keep the last known targets.
+pub fn spawn_desired_firmware_refresher(app_context: std::sync::Arc<MachineATronContext>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(app_context.app_config.api_refresh_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await; // the startup fetch already populated the context
+        loop {
+            interval.tick().await;
+            match app_context
+                .forge_api_client
+                .get_desired_firmware_versions()
+                .await
+            {
+                Ok(response) => {
+                    if response.entries.is_empty() {
+                        continue;
+                    }
+                    let mut current = app_context.desired_firmware_versions.write().unwrap();
+                    if *current != response.entries {
+                        tracing::info!(
+                            desired_firmware_versions = ?response.entries,
+                            "Desired firmware versions changed",
+                        );
+                        *current = response.entries;
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Failed to refresh desired firmware versions; keeping last known",
+                ),
+            }
+        }
+    });
+}
+
 impl MachineATronContext {
     pub fn api_client(&self) -> ApiClient {
         self.forge_api_client.clone().into()
