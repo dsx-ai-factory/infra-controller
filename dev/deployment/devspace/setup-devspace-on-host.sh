@@ -9,11 +9,10 @@
 
 set -euo pipefail
 
-DEVSPACE_VERSION="v6.3.21"
-KIND_VERSION="v0.32.0"
-KUBECTL_VERSION="v1.36.3"
-HELM_VERSION="v3.21.3"
-KIND_NODE_IMAGE="kindest/node:v1.36.1"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=versions.env
+source "${SCRIPT_DIR}/versions.env"
 
 DEV_USER=""
 REPO_DIR=""
@@ -499,8 +498,8 @@ kind_node_has_image() {
 
 preload_postgres_image() {
   local node="${CLUSTER_NAME}-control-plane"
-  local host_image="postgres:14.5-alpine"
-  local node_image="docker.io/library/postgres:14.5-alpine"
+  local host_image="${CORE_POSTGRES_IMAGE}"
+  local node_image="docker.io/library/${CORE_POSTGRES_IMAGE}"
 
   if kind_node_has_image "${node}" "${node_image}"; then
     log "Reusing ${node_image} inside ${node}"
@@ -532,8 +531,8 @@ preload_postgres_image() {
 
 cache_postgres_wait_image() {
   local node="${CLUSTER_NAME}-control-plane"
-  local source_image="docker.io/library/postgres:14.5-alpine"
-  local wait_image="docker.io/library/postgres:14.4-alpine"
+  local source_image="docker.io/library/${CORE_POSTGRES_IMAGE}"
+  local wait_image="docker.io/library/${REST_POSTGRES_IMAGE}"
 
   if kind_node_has_image "${node}" "${wait_image}"; then
     return
