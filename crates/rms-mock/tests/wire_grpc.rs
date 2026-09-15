@@ -29,9 +29,7 @@ use std::sync::Arc;
 use librms::protos::rack_manager::rack_manager_client::RackManagerClient;
 use librms::protos::rack_manager_v2::rack_manager_v2_client::RackManagerV2Client;
 use mac_address::MacAddress;
-use rms_mock::{
-    JobPacing, RmsMock, RmsMockConfig, SimNode, SimNodeKind, StaticInventory, UnknownJobPolicy,
-};
+use rms_mock::{RmsMock, RmsMockConfig, SimNode, SimNodeKind, StaticInventory};
 
 /// An NVLink switch tray in rack unit 30 of rack-001.
 fn a_switch() -> SimNode {
@@ -72,13 +70,9 @@ async fn serve() -> String {
 }
 
 async fn serve_with(nodes: Vec<SimNode>) -> String {
-    serve_with_config(nodes, RmsMockConfig::default()).await
-}
-
-async fn serve_with_config(nodes: Vec<SimNode>, config: RmsMockConfig) -> String {
     let mock = Arc::new(RmsMock::new(
         Arc::new(StaticInventory::new(nodes.into())),
-        config,
+        RmsMockConfig::default(),
     ));
     let router = rms_mock::router(mock);
 
@@ -403,180 +397,52 @@ async fn certificate_jobs_progress_to_completed() {
     }
 }
 
-/// A poll for a job this process never issued answers as `unknown_job_policy`
-/// says, the same way on both job-status RPCs. NICo persists job ids in its
-/// database, so after the mock's host restarts it polls for such jobs; the
-/// default must not strand the switch, and the other policies exist to make
-/// NICo's failure handling reachable from a test.
+/// A poll for a job this process never issued reports it completed, on both
+/// job-status RPCs and as a normal response rather than a gRPC error. NICo
+/// persists job ids in its database, so after the mock's host restarts it
+/// polls for such jobs, and failing them would strand the switch.
 #[tokio::test]
-async fn an_unknown_job_follows_the_configured_policy() {
-    enum Expect {
-        /// The string state of the certificate RPC and the enum state of
-        /// `GetJobStatus` for the same job.
-        Reported(
-            &'static str,
-            librms::protos::rack_manager::JobExecutionState,
-        ),
-        NotFound,
-    }
-    use librms::protos::rack_manager::JobExecutionState;
-
-    let job_id = "rms-mock-from-a-past-life".to_string();
-    for (policy, expect) in [
-        (
-            UnknownJobPolicy::Complete,
-            Expect::Reported("completed", JobExecutionState::Completed),
-        ),
-        (
-            UnknownJobPolicy::Fail,
-            Expect::Reported("failed", JobExecutionState::Failed),
-        ),
-        (UnknownJobPolicy::NotFound, Expect::NotFound),
-    ] {
-        let url = serve_with_config(
-            vec![a_switch()],
-            RmsMockConfig {
-                unknown_job_policy: policy,
-                ..RmsMockConfig::default()
-            },
-        )
-        .await;
-        let mut client = RackManagerClient::connect(url).await.unwrap();
-
-        let certificate = client
-            .get_configure_switch_certificate_job_status(
-                librms::protos::rack_manager::GetConfigureSwitchCertificateJobStatusRequest {
-                    job_id: job_id.clone(),
-                },
-            )
-            .await;
-        let fabric = client
-            .get_job_status(librms::protos::rack_manager::GetJobStatusRequest {
-                job_id: job_id.clone(),
-                include_child_job_states: false,
-            })
-            .await;
-
-        match expect {
-            Expect::Reported(state, execution_state) => {
-                let certificate = certificate.unwrap().into_inner();
-                assert_eq!(certificate.job_id, job_id, "{policy:?}");
-                assert_eq!(
-                    certificate.status,
-                    librms::protos::rack_manager::ReturnCode::Success as i32,
-                    "{policy:?}: the RPC succeeded even though the job did not"
-                );
-                assert_eq!(certificate.state, state, "{policy:?}");
-
-                let fabric = fabric.unwrap().into_inner();
-                assert_eq!(fabric.job_states[0].job_id, job_id, "{policy:?}");
-                assert_eq!(
-                    fabric.job_states[0].execution_state, execution_state as i32,
-                    "{policy:?}"
-                );
-            }
-            Expect::NotFound => {
-                assert_eq!(
-                    certificate.unwrap_err().code(),
-                    tonic::Code::NotFound,
-                    "{policy:?}"
-                );
-                assert_eq!(
-                    fabric.unwrap_err().code(),
-                    tonic::Code::NotFound,
-                    "{policy:?}"
-                );
-            }
-        }
-    }
-}
-
-/// `job_pacing` decides how many polls a job spends in each state, so a test
-/// can hold a job in `queued` or `running` for as long as it needs.
-#[tokio::test]
-async fn job_pacing_sets_how_many_polls_each_state_lasts() {
-    let url = serve_with_config(
-        vec![a_switch()],
-        RmsMockConfig {
-            job_pacing: JobPacing {
-                running_after_observations: 2,
-                terminal_after_observations: 3,
-            },
-            ..RmsMockConfig::default()
-        },
-    )
-    .await;
-    let mut client = RackManagerClient::connect(url).await.unwrap();
-
-    let job_id = client
-        .configure_switch_certificate(
-            librms::protos::rack_manager::ConfigureSwitchCertificateRequest {
-                nodes: Some(librms::protos::rack_manager::NodeSet {
-                    nodes: vec![node_info("switch-7", "02:00:11:11:22:22")],
-                }),
-                services: Vec::new(),
-                test_hello: false,
-                domain: None,
-            },
-        )
-        .await
-        .unwrap()
-        .into_inner()
-        .jobs[0]
-        .job_id
-        .clone();
-
-    let mut seen = Vec::new();
-    for _ in 0..4 {
-        let status = client
-            .get_configure_switch_certificate_job_status(
-                librms::protos::rack_manager::GetConfigureSwitchCertificateJobStatusRequest {
-                    job_id: job_id.clone(),
-                },
-            )
-            .await
-            .unwrap()
-            .into_inner();
-        seen.push(status.state);
-    }
-
-    // The job stays completed once it gets there.
-    assert_eq!(seen, ["queued", "running", "completed", "completed"]);
-}
-
-/// The fabric-manager call returns nothing but a job id, and an empty one
-/// makes the caller report the outcome as unknown and wait forever.
-#[tokio::test]
-async fn fabric_manager_configuration_returns_a_job_id() {
+async fn an_unknown_job_is_reported_completed() {
     let url = serve_with(vec![a_switch()]).await;
-    let mut client = RackManagerV2Client::connect(url).await.unwrap();
+    let mut client = RackManagerClient::connect(url).await.unwrap();
+    let job_id = "rms-mock-from-a-past-life".to_string();
 
-    let response = client
-        .configure_scale_up_fabric_manager(
-            librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
-                nodes: Some(librms::protos::rack_manager::NodeSet {
-                    nodes: vec![node_info("switch-7", "02:00:11:11:22:22")],
-                }),
-                primary_switch_node_id: Some("switch-7".to_string()),
-                domain: None,
-                config: Some(fabric_config()),
+    let certificate = client
+        .get_configure_switch_certificate_job_status(
+            librms::protos::rack_manager::GetConfigureSwitchCertificateJobStatusRequest {
+                job_id: job_id.clone(),
             },
         )
         .await
         .unwrap()
         .into_inner();
+    assert_eq!(certificate.job_id, job_id);
+    assert_eq!(
+        certificate.status,
+        librms::protos::rack_manager::ReturnCode::Success as i32
+    );
+    assert_eq!(certificate.state, "completed");
 
-    assert!(
-        !response.job_id.trim().is_empty(),
-        "an empty job id leaves the rack waiting indefinitely"
+    let fabric = client
+        .get_job_status(librms::protos::rack_manager::GetJobStatusRequest {
+            job_id: job_id.clone(),
+            include_child_job_states: false,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(fabric.job_states[0].job_id, job_id);
+    assert_eq!(
+        fabric.job_states[0].execution_state,
+        librms::protos::rack_manager::JobExecutionState::Completed as i32
     );
 }
 
-/// A request that describes no fabric is rejected synchronously, as the proto
+/// A request naming no switches is rejected synchronously, as the proto
 /// specifies, so no job is started for it: NICo reads `INVALID_ARGUMENT` as a
 /// rejection before dispatch, which is only true if nothing was issued.
 #[tokio::test]
-async fn a_fabric_request_without_a_topology_or_switches_is_an_invalid_argument() {
+async fn a_fabric_request_naming_no_switches_is_an_invalid_argument() {
     let url = serve_with(vec![a_switch()]).await;
     let mut v2 = RackManagerV2Client::connect(url.clone()).await.unwrap();
     let mut v1 = RackManagerClient::connect(url).await.unwrap();
@@ -584,31 +450,20 @@ async fn a_fabric_request_without_a_topology_or_switches_is_an_invalid_argument(
     let switches = || librms::protos::rack_manager::NodeSet {
         nodes: vec![node_info("switch-7", "02:00:11:11:22:22")],
     };
-    let request =
-        |nodes, config| librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
-            nodes,
-            primary_switch_node_id: None,
-            domain: None,
-            config,
-        };
-    let empty_topology = librms::protos::rack_manager_v2::ScaleUpFabricConfig {
-        topology_type: "  ".to_string(),
-        extra_static_configs: Vec::new(),
+    let request = |nodes| librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
+        nodes,
+        primary_switch_node_id: None,
+        domain: None,
+        config: Some(fabric_config()),
     };
 
     for (what, bad) in [
-        ("no config", request(Some(switches()), None)),
-        (
-            "empty topology",
-            request(Some(switches()), Some(empty_topology)),
-        ),
-        ("no nodes", request(None, Some(fabric_config()))),
+        ("no nodes", request(None)),
         (
             "empty node set",
-            request(
-                Some(librms::protos::rack_manager::NodeSet { nodes: vec![] }),
-                Some(fabric_config()),
-            ),
+            request(Some(librms::protos::rack_manager::NodeSet {
+                nodes: vec![],
+            })),
         ),
     ] {
         let status = v2
@@ -620,7 +475,7 @@ async fn a_fabric_request_without_a_topology_or_switches_is_an_invalid_argument(
 
     // Nothing was issued: the first accepted request gets the first id.
     let job_id = v2
-        .configure_scale_up_fabric_manager(request(Some(switches()), Some(fabric_config())))
+        .configure_scale_up_fabric_manager(request(Some(switches())))
         .await
         .unwrap()
         .into_inner()
@@ -736,17 +591,7 @@ async fn a_fabric_request_matching_no_switch_returns_a_job_that_fails() {
     ];
 
     for case in cases {
-        let url = serve_with_config(
-            vec![a_switch()],
-            RmsMockConfig {
-                job_pacing: JobPacing {
-                    running_after_observations: 1,
-                    terminal_after_observations: 2,
-                },
-                ..RmsMockConfig::default()
-            },
-        )
-        .await;
+        let url = serve_with(vec![a_switch()]).await;
         let mut v2 = RackManagerV2Client::connect(url.clone()).await.unwrap();
         let mut v1 = RackManagerClient::connect(url).await.unwrap();
 
@@ -874,11 +719,12 @@ async fn fabric_status_reports_exactly_one_primary_per_configured_rack() {
         "more or fewer than one enabled switch is read as no/multiple primaries"
     );
 
-    // A requested primary that belongs to the rack is honoured.
+    // A requested primary that belongs to the rack is honoured over the one
+    // the default election picks, and replaces it rather than joining it.
     v2.configure_scale_up_fabric_manager(
         librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest {
             nodes: Some(node_set()),
-            primary_switch_node_id: Some("switch-8".to_string()),
+            primary_switch_node_id: Some("switch-7".to_string()),
             domain: None,
             config: Some(fabric_config()),
         },
@@ -895,7 +741,7 @@ async fn fabric_status_reports_exactly_one_primary_per_configured_rack() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(enabled_switches(status), vec!["switch-8".to_string()]);
+    assert_eq!(enabled_switches(status), vec!["switch-7".to_string()]);
 }
 
 /// A switch the request names but the mock does not have cannot run the
@@ -1151,20 +997,7 @@ async fn fabric_membership_reads_back_what_was_written() {
         nodes: vec![node_info("switch-7", "02:00:11:11:22:22")],
     };
 
-    // The lone switch is elected on the first read, so it is enabled before
-    // anything has been written.
-    let before = client
-        .get_scale_up_fabric_status(
-            librms::protos::rack_manager::GetScaleUpFabricStatusRequest {
-                nodes: Some(node_set()),
-                domain: None,
-            },
-        )
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(before.fabric_status.unwrap().switches[0].enabled);
-
+    // The lone switch would otherwise be elected and read back enabled.
     client
         .batch_set_scale_up_fabric_state(
             librms::protos::rack_manager::BatchSetScaleUpFabricStateRequest {

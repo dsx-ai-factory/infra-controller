@@ -136,9 +136,7 @@ rack_manager_impl! {
             request: tonic::Request<rms::GetJobStatusRequest>,
         ) -> std::result::Result<tonic::Response<rms::GetJobStatusResponse>, tonic::Status> {
             let job_id = &request.get_ref().job_id;
-            let Some(status) = self.jobs.observe(job_id) else {
-                return Err(tonic::Status::not_found(format!("unknown job {job_id}")));
-            };
+            let status = self.jobs.observe(job_id);
 
             Ok(tonic::Response::new(rms::GetJobStatusResponse {
                 job_states: vec![rms::JobStatus {
@@ -215,7 +213,7 @@ rack_manager_impl! {
                         rms::ScaleUpFabricSwitchStatus {
                             node_id: r.node_id.to_owned(),
                             enabled: self.fabric.is_enabled(r.rack_id, r.node_id),
-                            fabric_manager_status: crate::fabric::healthy_status(),
+                            fabric_manager_status: crate::fabric::FABRIC_MANAGER_OK.to_owned(),
                             error_message: String::new(),
                         }
                     } else {
@@ -233,7 +231,8 @@ rack_manager_impl! {
             Ok(tonic::Response::new(rms::GetScaleUpFabricStatusResponse {
                 status: rms::ReturnCode::Success as i32,
                 fabric_status: Some(rms::ScaleUpFabricStatus {
-                    topology_type: self.config.fabric_topology_type.clone(),
+                    // Not read by NICo, which takes the topology from the rack profile.
+                    topology_type: String::new(),
                     extra_static_configs: Vec::new(),
                     switches,
                 }),
@@ -341,6 +340,9 @@ rack_manager_impl! {
         /// caller maps only a fixed vocabulary; anything it does not
         /// recognise it reads as still running and polls forever. So the
         /// spelling comes from `JobState` rather than being written inline.
+        ///
+        /// A job id the mock has no record of is reported completed, so a poll
+        /// that survives the host's restart does not strand the switch.
         async fn get_configure_switch_certificate_job_status(
             &self,
             request: tonic::Request<rms::GetConfigureSwitchCertificateJobStatusRequest>,
@@ -349,9 +351,7 @@ rack_manager_impl! {
             tonic::Status,
         > {
             let job_id = &request.get_ref().job_id;
-            let Some(status) = self.jobs.observe(job_id) else {
-                return Err(tonic::Status::not_found(format!("unknown job {job_id}")));
-            };
+            let status = self.jobs.observe(job_id);
 
             Ok(tonic::Response::new(
                 rms::GetConfigureSwitchCertificateJobStatusResponse {

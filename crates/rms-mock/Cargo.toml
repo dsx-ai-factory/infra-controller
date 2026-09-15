@@ -38,4 +38,3 @@ tokio = { features = ["full"], workspace = true }
 axum = { features = ["http2"], workspace = true }
 carbide-test-support = { path = "../test-support" }
 serde_json = { workspace = true }
-toml = { workspace = true }

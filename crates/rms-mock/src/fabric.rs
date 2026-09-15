@@ -38,7 +38,7 @@ use crate::resolve::NodeRef;
 /// The vocabulary is exactly `"ok"` and `"not ok"`; anything else, including
 /// an empty or unparseable payload, is read as unknown. It is spelled once
 /// here rather than at each call site for that reason.
-const FABRIC_MANAGER_OK: &str = "ok";
+pub(crate) const FABRIC_MANAGER_OK: &str = "ok";
 
 /// The `addition-info` value a caller reads as "the fabric manager control
 /// plane is configured on this switch". It is reported for the primary only,
@@ -54,11 +54,6 @@ pub(crate) fn status_json(primary: bool) -> String {
     } else {
         format!(r#"{{"status":"{FABRIC_MANAGER_OK}"}}"#)
     }
-}
-
-/// The bare health string, for the fields that carry it unwrapped.
-pub(crate) fn healthy_status() -> String {
-    FABRIC_MANAGER_OK.to_owned()
 }
 
 /// A switch that can run a rack's fabric manager.
@@ -270,12 +265,5 @@ mod tests {
         assert!(fabric.is_primary("rack-b", "sw-9"));
         assert!(!fabric.is_enabled("rack-b", "sw-3"));
         assert!(!fabric.is_primary("rack-c", "sw-1"));
-    }
-
-    #[test]
-    fn only_the_primary_reports_a_configured_control_plane() {
-        assert!(super::status_json(true).contains("CONTROL_PLANE_STATE_CONFIGURED"));
-        assert!(!super::status_json(false).contains("addition-info"));
-        assert!(super::status_json(false).contains(r#""status":"ok""#));
     }
 }

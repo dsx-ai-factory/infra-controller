@@ -38,10 +38,9 @@ impl RackManagerV2 for RmsMock {
     /// So the job is registered before responding, and the id it returns is
     /// the one `GetJobStatus` will answer for.
     ///
-    /// A request that describes no fabric is rejected before any job exists,
-    /// as the proto specifies: no configuration, an empty topology type, or
-    /// no switches to configure is `INVALID_ARGUMENT`. NICo always sends the
-    /// topology of the rack profile and the rack's switches.
+    /// A request naming no switches is `INVALID_ARGUMENT` before any job
+    /// exists, as the proto specifies. NICo always sends the switches of one
+    /// rack.
     ///
     /// A request whose switches are all unknown to the mock is accepted, since
     /// the proto rejects only a malformed request synchronously, but its job
@@ -61,17 +60,6 @@ impl RackManagerV2 for RmsMock {
         tonic::Status,
     > {
         let req = request.get_ref();
-        let topology_type = req
-            .config
-            .as_ref()
-            .map(|config| config.topology_type.trim())
-            .ok_or_else(|| tonic::Status::invalid_argument("config is required"))?;
-        if topology_type.is_empty() {
-            return Err(tonic::Status::invalid_argument(
-                "config.topology_type is required",
-            ));
-        }
-
         let inventory = self.inventory.nodes();
         let refs = crate::resolve::resolve_nodes(&inventory, req.nodes.as_ref());
         let Some(first) = refs.first() else {
