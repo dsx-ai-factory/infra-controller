@@ -2293,7 +2293,7 @@ func (r ApiResetMachineChassisRequest) Execute() (*MessageResponse, *http.Respon
 ResetMachineChassis Reset Machine Chassis
 
 Queue a case-sensitive Redfish chassis reset on an unassigned Machine owned by the Provider Admin's Org.
-The Machine must be a managed host in the `Ready` lifecycle state with operator maintenance enabled. The chassis ID is required; each request targets one chassis.
+The Machine must be present on a Registered Site and be a managed host in the `Ready` lifecycle state with operator maintenance enabled and no pending maintenance operation. The chassis ID is required; each request targets one chassis.
 A `202` response means queued, not completed; `metadata.lifecycleState.value` transitions through `Maintenance(...)` to `Ready` when the BMC accepts the reset, or `Failed/...` if dispatch fails. `Ready` does not confirm hardware recovery; verify recovery before clearing operator maintenance.
 Read the Machine with `includeMetadata=true` to inspect its lifecycle state.
 The reset sends the Redfish `ForceRestart` action to the selected chassis.

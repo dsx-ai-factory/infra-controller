@@ -3677,6 +3677,30 @@ func TestResetMachineChassisHandler_Handle(t *testing.T) {
 			wantStatus: http.StatusNotFound,
 		},
 		{
+			name:      "rejects Machine missing on Site",
+			chassisID: "Chassis_0",
+			setup: func(t *testing.T, fixture *common.TestSetupProviderMachineHandlerFixture) {
+				_, err := cdbm.NewMachineDAO(fixture.DBSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
+					MachineID:       fixture.MachineID,
+					IsMissingOnSite: cutil.GetPtr(true),
+				})
+				require.NoError(t, err)
+			},
+			wantStatus: http.StatusPreconditionFailed,
+		},
+		{
+			name:      "rejects Site that is not Registered",
+			chassisID: "Chassis_0",
+			setup: func(t *testing.T, fixture *common.TestSetupProviderMachineHandlerFixture) {
+				_, err := cdbm.NewSiteDAO(fixture.DBSession).Update(context.Background(), nil, cdbm.SiteUpdateInput{
+					SiteID: uuid.MustParse(fixture.SiteID),
+					Status: cutil.GetPtr(cdbm.SiteStatusPending),
+				})
+				require.NoError(t, err)
+			},
+			wantStatus: http.StatusPreconditionFailed,
+		},
+		{
 			name:      "rejects assigned Machine",
 			chassisID: "Chassis_0",
 			setup: func(t *testing.T, fixture *common.TestSetupProviderMachineHandlerFixture) {

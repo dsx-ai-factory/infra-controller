@@ -70,6 +70,19 @@ async fn admin_chassis_reset_requires_and_preserves_operator_maintenance(
         .admin_chassis_reset(reset_request(host.id.into()))
         .await?;
 
+    let mut conflicting_request = reset_request(host.id.into());
+    conflicting_request.get_mut().chassis_id = "HGX_Chassis_1".into();
+    let error = env
+        .api
+        .admin_chassis_reset(conflicting_request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "host already has a pending maintenance operation"
+    );
+
     let mut txn = env.db_txn().await;
     let machine = host.db_machine(&mut txn).await;
     assert_eq!(machine.current_state(), &ManagedHostState::Ready);

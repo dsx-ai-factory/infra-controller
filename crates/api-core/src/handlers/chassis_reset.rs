@@ -91,6 +91,12 @@ pub(crate) async fn admin_chassis_reset(
         ));
     }
 
+    if host_machine.machine_maintenance_requested.is_some() {
+        return Err(Status::failed_precondition(
+            "host already has a pending maintenance operation",
+        ));
+    }
+
     db::machine::set_machine_maintenance_requested(
         &mut txn,
         machine_id,

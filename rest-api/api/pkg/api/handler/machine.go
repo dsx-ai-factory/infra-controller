@@ -2327,7 +2327,7 @@ func (h ResetMachineChassisHandler) Handle(c echo.Context) error {
 	}
 	if machine.IsMissingOnSite {
 		logger.Error().Msg("Machine is missing on site, unable to reset chassis")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Machine is missing on site, unable to reset chassis", nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Machine is missing on site, unable to reset chassis", nil)
 	}
 	if machine.IsAssigned {
 		logger.Error().Msg("Machine is currently in use by an Instance and cannot have its chassis reset")
@@ -2341,7 +2341,7 @@ func (h ResetMachineChassisHandler) Handle(c echo.Context) error {
 	site := machine.Site
 	if site.Status != cdbm.SiteStatusRegistered {
 		logger.Warn().Msg("Site specified in request data is not in Registered state")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data is not in Registered state, cannot execute admin operation", nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusPreconditionFailed, "Site specified in request data is not in Registered state, cannot execute admin operation", nil)
 	}
 
 	stc, err := h.scp.GetClientByID(site.ID)
