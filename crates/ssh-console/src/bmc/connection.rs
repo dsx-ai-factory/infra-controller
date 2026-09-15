@@ -79,6 +79,13 @@ impl SpawnError {
     pub(crate) fn retry_immediately(&self) -> bool {
         matches!(self, Self::Ipmi(error) if error.retry_immediately())
     }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        match self {
+            SpawnError::Ssh(e) => e.is_cancelled(),
+            SpawnError::Ipmi(e) => e.is_cancelled(),
+        }
+    }
 }
 
 /// Get the address and auth details to use for a connection to a given machine or instance ID.

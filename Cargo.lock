@@ -1106,6 +1106,7 @@ dependencies = [
  "carbide-secrets",
  "carbide-site-explorer",
  "carbide-test-support",
+ "carbide-utils",
  "carbide-version",
  "clap",
  "eyre",
@@ -3306,6 +3307,7 @@ dependencies = [
  "carbide-ssh-console-mock-api-server",
  "carbide-test-support",
  "carbide-tls",
+ "carbide-utils",
  "carbide-uuid",
  "chrono",
  "clap",
@@ -3532,6 +3534,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

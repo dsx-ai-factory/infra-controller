@@ -58,7 +58,6 @@ use carbide_rack_controller::context::RackStateHandlerServices;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
-use carbide_secrets::certificates::CertificateProvider;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
 use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
@@ -74,7 +73,6 @@ use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
 use db::Transaction;
 use db::machine::{update_dpu_asns, update_dpu_loopback_ips_v6};
 use db::resource_pool::DefineResourcePoolError;
-use db::work_lock_manager::WorkLockManagerHandle;
 use eyre::WrapErr;
 use futures_util::TryFutureExt;
 use itertools::Itertools;
@@ -98,12 +96,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::api::Api;
 use crate::api::metrics::ApiMetricsEmitter;
+use crate::bootstrap::{RuntimeInputs, RuntimePrelude};
 use crate::cfg::file::{CarbideConfig, InitialObjectsConfig, ListenMode, VmaasConfig};
 use crate::cfg::load::all_configuration_files;
 use crate::dpa::handler::start_svpc_handler;
-use crate::dynamic_settings::DynamicSettings;
 use crate::handlers::machine_validation::apply_config_on_startup;
-use crate::listener::{AdminUiRoutesBuilder, ApiListenMode};
+use crate::listener::ApiListenMode;
 use crate::logging::log_limiter::LogLimiter;
 use crate::logging::service_health_metrics::{
     ServiceHealthContext, start_export_service_health_metrics,
@@ -248,23 +246,35 @@ fn create_redfish_pool(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Enter api-core's private service runtime with fully prepared resources.
+///
+/// `admin_ui_routes_builder` is how the admin web UI's pages (everything under
+/// `/admin`) get plugged in, particularly via `Box::new(carbide_api_web::routes)`.
+/// It's passed in rather than called directly to avoid a dependency cycle — see
+/// [`AdminUiRoutesBuilder`] for why.
+///
+/// The admin UI is only mounted if the `enable_admin_ui` config flag is true (the default).
+///
+/// Returns the effective API listener address after startup completes.
 #[tracing::instrument(skip_all)]
-pub(crate) async fn start_runtime(
-    join_set: &mut JoinSet<()>,
-    carbide_config: Arc<CarbideConfig>,
-    initial_objects: Option<InitialObjectsConfig>,
-    meter: Meter,
-    per_object_prometheus_registry: Option<prometheus::Registry>,
-    dynamic_settings: DynamicSettings,
-    credential_manager: Arc<dyn CredentialManager>,
-    certificate_provider: Arc<dyn CertificateProvider>,
-    db_pool: PgPool,
-    work_lock_manager_handle: WorkLockManagerHandle,
-    secrets_context: Option<crate::secrets::SecretsContext>,
-    admin_ui_routes_builder: Option<AdminUiRoutesBuilder>,
-    cancel_token: CancellationToken,
-) -> eyre::Result<SocketAddr> {
+pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<SocketAddr> {
+    // Destructure inputs
+    let RuntimeInputs {
+        carbide_config,
+        initial_objects,
+        meter,
+        per_object_metrics,
+        join_set,
+        runtime_prelude: RuntimePrelude { dynamic_settings },
+        credential_manager,
+        certificate_provider,
+        db_pool,
+        work_lock_manager_handle,
+        secrets_context,
+        admin_ui_routes_builder,
+        cancel_token,
+    } = runtime_inputs;
+
     let (shared_redfish_pool, bmc_credential_ops) =
         create_redfish_pool(&carbide_config, credential_manager.clone())?;
     // Ordinary BMC traffic goes through nico-bmc-proxy when configured,
@@ -657,7 +667,7 @@ pub(crate) async fn start_runtime(
             api_service.clone(),
             site_explorer_rms_client,
             meter.clone(),
-            per_object_prometheus_registry,
+            per_object_metrics,
             ipmi_tool.clone(),
             seed_data,
             cancel_token.clone(),
@@ -670,7 +680,7 @@ pub(crate) async fn start_runtime(
     // top-level binary always supplies the builder; the decision to use it lives
     // here, next to the parsed config.
     let admin_ui_routes_builder = if carbide_config.enable_admin_ui {
-        admin_ui_routes_builder
+        Some(admin_ui_routes_builder)
     } else {
         tracing::info!("admin web UI disabled via enable_admin_ui=false");
         None

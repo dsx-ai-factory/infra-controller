@@ -31,10 +31,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Command::Run(run_command) => {
-            let spawn_handle = ssh_console::spawn((*run_command).try_into()?).await?;
+            let sigterm_cancel_token = carbide_utils::shutdown_handler::start()?;
+            let spawn_handle =
+                ssh_console::spawn((*run_command).try_into()?, Some(sigterm_cancel_token)).await?;
             // Let the service run forever by awaiting the join handle, while holding onto the
             // shutdown handle.
-            let (_shutdown_tx, join_handle) = spawn_handle.into_parts();
+            let (_drop_guard, join_handle) = spawn_handle.into_parts();
             join_handle.await.expect("ssh-console task panicked");
         }
         Command::DefaultRunConfig => {

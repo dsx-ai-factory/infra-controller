@@ -103,6 +103,7 @@ pub async fn start(
         bypass_rbac = true
         allow_insecure_discovery = {insecure_discovery}
         scout_boot_interface_correction_enabled = true
+        enable_admin_ui = false
 
         [ib_config]
         max_partition_per_tenant = 31
@@ -319,8 +320,6 @@ pub async fn start(
         None,
         credential_config,
         true,
-        // The in-process test server does not serve the admin web UI.
-        None,
         cancel_token,
         ready_channel,
     )

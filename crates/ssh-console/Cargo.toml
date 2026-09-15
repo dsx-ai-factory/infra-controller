@@ -36,6 +36,7 @@ path = "src/main.rs"
 carbide-rpc = { path = "../rpc" }
 carbide-authn = { path = "../authn" }
 carbide-instrument = { path = "../instrument" }
+carbide-utils = { path = "../utils", default-features = false, features = ["shutdown-handler"] }
 carbide-uuid = { path = "../uuid" }
 carbide-tls = { path = "../tls" }
 bmc-vendor = { path = "../bmc-vendor" }

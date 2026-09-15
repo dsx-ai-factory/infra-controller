@@ -45,14 +45,20 @@ pub static POWER_RESET_COMMAND: &str = "power reset";
 
 /// Run a ssh-console server in the background, returning a [`SpawnHandle`] once the service is
 /// healthy and ready. When the handle is dropped, the server will exit.
-pub async fn spawn(config: Config) -> Result<SpawnHandle, SpawnError> {
+///
+/// Takes an optional `CancellationToken`, which will be used if provided as a `DropGuard` in
+/// `SpawnHandle`, otherwise a new cancel token will be created.
+pub async fn spawn(
+    config: Config,
+    cancel_token: Option<CancellationToken>,
+) -> Result<SpawnHandle, SpawnError> {
     let config = Arc::new(config);
     let metrics = Arc::new(MetricsState::new());
     let forge_api_client = config.make_forge_api_client();
 
     let (cancel_token, drop_guard) = {
-        let t = CancellationToken::new();
-        (t.clone(), t.drop_guard())
+        let cancel_token = cancel_token.unwrap_or_default();
+        (cancel_token.clone(), cancel_token.drop_guard())
     };
 
     // 1) Start BMC client pool
