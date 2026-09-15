@@ -938,6 +938,7 @@ async fn assert_reprov_tenant_state(
     assert_eq!(
         instance_snapshot_derive_status(
             &db_instance,
+            &[],
             device_id_maps.1,
             host.primary_attached_dpu_machine_id(),
             host.state.clone().value,

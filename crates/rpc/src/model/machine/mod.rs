@@ -107,17 +107,44 @@ impl RpcTryFrom<ManagedHostStateSnapshot> for Option<rpc::Instance> {
                 reprovision_request = Some(reprovision_requested.clone());
             }
         }
-        let (_, dpu_id_to_device_map) = snapshot
-            .host_snapshot
-            .get_dpu_device_and_id_mappings()
-            .map_err(|e| {
-                RpcDataConversionError::InvalidValue(
-                    "dpu_id_to_device_map".to_string(),
-                    e.to_string(),
-                )
-            })?;
+        let (_, dpu_id_to_device_map) =
+            match snapshot.host_snapshot.get_dpu_device_and_id_mappings() {
+                Ok(mappings) => mappings,
+                Err(_)
+                    if instance
+                        .config
+                        .extension_services
+                        .service_configs
+                        .iter()
+                        .any(|config| config.dpu_target.is_some())
+                        && !instance
+                            .config
+                            .extension_services
+                            .service_configs
+                            .iter()
+                            .any(|config| {
+                                config.dpu_target
+                                    == Some(model::extension_service::DpuTarget::AllActive)
+                                    && config.removed.is_none()
+                                    && instance.deleted.is_none()
+                            }) =>
+                {
+                    Default::default()
+                }
+                Err(error) => {
+                    return Err(RpcDataConversionError::InvalidValue(
+                        "dpu_id_to_device_map".into(),
+                        error.to_string(),
+                    ));
+                }
+            };
         let status = instance_snapshot_derive_status(
             &instance,
+            &snapshot
+                .dpu_snapshots
+                .iter()
+                .map(|dpu| dpu.id)
+                .collect::<Vec<_>>(),
             dpu_id_to_device_map,
             snapshot.host_snapshot.primary_attached_dpu_machine_id(),
             snapshot.managed_state.clone(),
