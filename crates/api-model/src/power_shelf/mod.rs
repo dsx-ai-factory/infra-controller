@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 
+use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use chrono::prelude::*;
@@ -96,6 +97,11 @@ pub struct PowerShelf {
     /// The rack that this power shelf is associated with.
     pub rack_id: Option<RackId>,
 
+    /// The NVLink domain of the shelf's rack, as last reported by the rack's
+    /// NMX-C endpoint. Written by NVLink Manager alongside the rack's switches;
+    /// `None` until a valid domain has been observed.
+    pub nvlink_domain_uuid: Option<NvLinkDomainId>,
+
     pub power_shelf_maintenance_requested: Option<PowerShelfMaintenanceRequest>,
 
     /// Set by rack maintenance to request power-shelf participation in a
@@ -169,6 +175,7 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
             metadata,
             version: row.try_get("version")?,
             rack_id: row.try_get("rack_id").ok().flatten(),
+            nvlink_domain_uuid: row.try_get("nvlink_domain_uuid").ok().flatten(),
             power_shelf_maintenance_requested: power_shelf_maintenance_requested.map(|r| r.0),
             power_shelf_reprovisioning_requested: power_shelf_reprovisioning_requested.map(|r| r.0),
             firmware_upgrade_status: firmware_upgrade_status.map(|j| j.0),
