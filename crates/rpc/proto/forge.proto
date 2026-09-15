@@ -9312,6 +9312,16 @@ message SetPrimaryInterfaceRequest {
 }
 
 // DPU Extension Service Types and Messages
+// Immutable registration placement policy; required for DPF_HELM_CHART only.
+enum DpuExtensionServiceDpuTarget {
+  // The host's primary attached DPU.
+  DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY = 0;
+  // DPUs used by the instance network configuration (including its legacy fallbacks).
+  DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE = 1;
+  // Every attached DPU, including DPUs unused by the instance network configuration.
+  DPU_EXTENSION_SERVICE_DPU_TARGET_ALL = 2;
+}
+
 enum DpuExtensionServiceType {
   option (carbide.codegen.v1.enum_derive) = "serde::Serialize";
   option (carbide.codegen.v1.enum_derive) = "serde::Deserialize";
@@ -9395,6 +9405,9 @@ message DpuExtensionService {
   // The lifecycle of the extension service registration itself. This is
   // independent from deployment status on individual instances.
   LifecycleStatus lifecycle_status = 11;
+
+  // Required primary/all-active/all policy for Helm; absent for Kubernetes Pod services.
+  optional DpuExtensionServiceDpuTarget dpu_target = 12;
 }
 
 message CreateDpuExtensionServiceRequest {
@@ -9413,6 +9426,9 @@ message CreateDpuExtensionServiceRequest {
   // Metrics configuration to be added to the existing
   // metrics collection service that runs on the DPU.
   optional DpuExtensionServiceObservability observability = 8;
+
+  // Required for Helm: PRIMARY, ALL_ACTIVE, or ALL. Immutable; forbidden for Kubernetes Pod.
+  optional DpuExtensionServiceDpuTarget dpu_target = 9;
 }
 
 message UpdateDpuExtensionServiceRequest {

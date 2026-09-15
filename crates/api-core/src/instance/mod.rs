@@ -1967,7 +1967,12 @@ pub(crate) async fn batch_allocate_instances(
     if !service_ids.is_empty() {
         let (services, versions) = load_extension_services(&mut txn, &service_ids).await?;
 
-        for request in &requests {
+        for request in &mut requests {
+            for config in &mut request.config.extension_services.service_configs {
+                if let Some(service) = services.get(&config.service_id) {
+                    config.dpu_target = service.dpu_target;
+                }
+            }
             let mh_snapshot = snapshot_map
                 .get(&request.machine_id)
                 .expect("requested managed-host snapshot was validated above");
