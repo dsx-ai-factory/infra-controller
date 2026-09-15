@@ -194,6 +194,20 @@ navigation:
           path: operations/nico-mcp.md
         - page: Tenant Lifecycle Cleanup
           path: operations/tenant-lifecycle-cleanup.md
+        - section: Decommissioning
+          contents:
+            - page: Overview
+              path: decommissioning/index.md
+            - page: Decommission Managed Hosts and DPUs
+              path: decommissioning/hosts.md
+            - page: Decommission Managed Switches
+              path: decommissioning/switches.md
+            - page: Decommission Managed Power Shelves
+              path: decommissioning/power-shelves.md
+            - page: Rack-Scale Decommissioning
+              path: decommissioning/racks.md
+        - page: DHCP Suppression
+          path: operations/dhcp-suppression.md
         - page: Network Isolation
           path: manuals/network_isolation.md
         - page: Network Security Groups

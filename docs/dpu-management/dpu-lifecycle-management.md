@@ -62,7 +62,7 @@ DPU OS installation happens as part of the managed host state machine after Site
 NICo uses two different BFB images. They are not interchangeable:
 
 - **NICo BFB**: The image installed during the managed host state machine and reprovisioning. It is built from the vanilla DOCA BFB and customized with NICo services: `dpu-agent`, the DPU DHCP server, MDS, HBN installer and configuration, NICo root CA, and scout. This is the image that makes the DPU a fully managed component. For build instructions, see [Building NICo Containers](../manuals/building_nico_containers.md#building-the-dpu-bfb).
-- **Preingestion BFB** (`preingestion.bfb`): The unmodified vanilla DOCA BFB, saved as-is during the build process before any NICo customization is applied. It does **not** contain `dpu-agent`, HBN, MDS, or any other NICo services. This image is used only for pre-ingestion recovery via rshim (`copy-bfb-to-dpu-rshim`) to return a DPU to a clean factory state so that NICo can discover and pair it. After the preingestion BFB is installed, the normal state machine installs the NICo BFB.
+- **Preingestion BFB** (`preingestion.bfb`): The unmodified vanilla DOCA BFB, saved as-is during the build process before any NICo customization is applied. It does **not** contain `dpu-agent`, HBN, MDS, or any other NICo services. This image is used for pre-ingestion recovery using rshim (`copy-bfb-to-dpu-rshim`) or [between-install decommissioning](../decommissioning/hosts.md) to return a DPU to a clean factory state so that NICo can discover and pair it. After the preingestion BFB is installed, the normal state machine installs the NICo BFB.
 
 ### How NICo Chooses the Install Method
 
