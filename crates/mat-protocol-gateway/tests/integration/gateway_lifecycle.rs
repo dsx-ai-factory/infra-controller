@@ -276,6 +276,7 @@ async fn run_serves_over_tls_and_restarts_on_the_same_tls_port() {
     assert!(
         reqwest::Client::new()
             .get(format!("http://{listen}/livez"))
+            .timeout(crate::common::WAIT)
             .send()
             .await
             .is_err(),

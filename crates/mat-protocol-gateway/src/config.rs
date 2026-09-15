@@ -24,6 +24,7 @@ use duration_str::deserialize_duration;
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use serde::{Deserialize, Serialize};
+pub use ufm_mock::TlsConfig;
 use ufm_mock::UfmMockConfig;
 use url::Url;
 
@@ -136,14 +137,6 @@ impl Default for GatewayConfig {
             },
         }
     }
-}
-
-/// PEM certificate chain and private key for the gateway listener.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct TlsConfig {
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
 }
 
 /// How the gateway reaches the Go controller's pod-local source list.

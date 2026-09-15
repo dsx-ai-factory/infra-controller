@@ -15,19 +15,17 @@
  * limitations under the License.
  */
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::Router;
 use metrics_endpoint::{
     MetricsEndpointConfig, MetricsSetup, new_metrics_setup, run_metrics_endpoint_with_cancellation,
 };
-use tokio::net::TcpListener;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use ufm_mock::{InventoryConfig, UfmAuthToken, UfmMock};
 
-use crate::config::{ControllerConfig, GatewayConfig, TlsConfig};
+use crate::config::{ControllerConfig, GatewayConfig};
 use crate::health;
 use crate::sources::{SourceList, SourceListCheck, SourceListClient, SourceSetChange};
 
@@ -215,7 +213,11 @@ pub async fn watch_source_list(
             _ = cancellation.cancelled() => return None,
             _ = interval.tick() => {}
         }
-        let list = match client.fetch().await {
+        let fetched = tokio::select! {
+            _ = cancellation.cancelled() => return None,
+            result = client.fetch() => result,
+        };
+        let list = match fetched {
             Ok(list) => list,
             Err(error) => {
                 tracing::warn!(url = %client.url, error = %error, "Could not refresh controller source list");
@@ -281,7 +283,7 @@ pub async fn run(
         tls = gateway.config.tls.is_some(),
         "Starting machine-a-tron protocol gateway"
     );
-    let mut server = tokio::spawn(serve(
+    let mut server = tokio::spawn(ufm_mock::serve(
         gateway.config.listen_address,
         gateway.config.tls.clone(),
         gateway.router(),
@@ -359,38 +361,6 @@ async fn finish(
     gateway.shutdown().await?;
     if let Some(metrics_task) = metrics_task {
         metrics_task.await?;
-    }
-    Ok(())
-}
-
-async fn serve(
-    address: SocketAddr,
-    tls: Option<TlsConfig>,
-    router: Router,
-    cancellation: CancellationToken,
-) -> eyre::Result<()> {
-    match tls {
-        Some(tls) => {
-            let tls =
-                axum_server::tls_rustls::RustlsConfig::from_pem_file(tls.cert_path, tls.key_path)
-                    .await?;
-            let handle = axum_server::Handle::new();
-            let shutdown_handle = handle.clone();
-            tokio::spawn(async move {
-                cancellation.cancelled().await;
-                shutdown_handle.graceful_shutdown(Some(Duration::from_secs(10)));
-            });
-            axum_server::bind_rustls(address, tls)
-                .handle(handle)
-                .serve(router.into_make_service())
-                .await?;
-        }
-        None => {
-            let listener = TcpListener::bind(address).await?;
-            axum::serve(listener, router)
-                .with_graceful_shutdown(cancellation.cancelled_owned())
-                .await?;
-        }
     }
     Ok(())
 }

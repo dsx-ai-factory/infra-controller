@@ -35,7 +35,6 @@ path = "tests/integration/main.rs"
 
 [dependencies]
 axum = { workspace = true }
-axum-server = { features = ["tls-rustls"], workspace = true }
 carbide-ufm-mock = { path = "../ufm-mock" }
 carbide-utils = { path = "../utils" }
 clap = { features = ["derive"], workspace = true }

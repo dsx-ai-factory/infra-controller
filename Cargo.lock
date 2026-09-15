@@ -2585,7 +2585,6 @@ name = "carbide-mat-protocol-gateway"
 version = "0.0.1"
 dependencies = [
  "axum",
- "axum-server",
  "carbide-test-support",
  "carbide-ufm-mock",
  "carbide-utils",
@@ -3492,6 +3491,7 @@ dependencies = [
  "metrics-endpoint",
  "opentelemetry 0.32.0",
  "reqwest 0.13.4",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
