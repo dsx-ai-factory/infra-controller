@@ -1,0 +1,25 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package console_log;
+
+import "common_nico.proto";
+
+option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+
+// Private service implemented by nico-ssh-console and proxied by NICo.
+service ConsoleLogService {
+  rpc StreamConsoleLogs(StreamConsoleLogsRequest)
+      returns (stream ConsoleLogLine);
+}
+
+message StreamConsoleLogsRequest {
+  common.MachineId machine_id = 1;
+  uint32 tail_lines = 2;
+}
+
+message ConsoleLogLine {
+  bytes data = 1;
+}

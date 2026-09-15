@@ -76,6 +76,11 @@ struct RunCommand {
         help = "Address to listen on for prometheus metrics requests (HTTP), overriding configuration file"
     )]
     metrics_address: Option<String>,
+    #[clap(
+        long,
+        help = "Address to listen on for the private console-log gRPC API"
+    )]
+    api_listen_address: Option<String>,
     #[clap(long, short = 'u', help = "Address of carbide-api (forge)")]
     forge_url: Option<http::Uri>,
     #[clap(
@@ -189,6 +194,14 @@ impl TryInto<Config> for RunCommand {
         if let Some(client_key_path) = self.client_key_path {
             config.client_key_path = client_key_path;
         }
+        if let Some(api_listen_address) = self.api_listen_address {
+            config.api_listen_address = api_listen_address.parse().map_err(|error| {
+                CliError::InvalidApiListeningAddress {
+                    addr: api_listen_address,
+                    error,
+                }
+            })?;
+        }
         if let Some(override_bmc_ssh_host) = self.override_bmc_ssh_host {
             config.override_bmc_ssh_host = Some(override_bmc_ssh_host);
         }
@@ -203,6 +216,8 @@ enum CliError {
     InvalidListeningAddress { addr: String, error: AddrParseError },
     #[error("invalid metrics address {addr}: {error}")]
     InvalidMetricsAddress { addr: String, error: AddrParseError },
+    #[error("invalid API listening address {addr}: {error}")]
+    InvalidApiListeningAddress { addr: String, error: AddrParseError },
     #[error("configuration error: {0}")]
     Config(#[from] ConfigError),
 }

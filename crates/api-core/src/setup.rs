@@ -591,6 +591,14 @@ pub(crate) async fn start_runtime(
         None
     };
 
+    let console_log_source = crate::console_logs::build_source(
+        carbide_config.ssh_console_url.as_ref(),
+        carbide_config.tls.as_ref(),
+        join_set,
+        cancel_token.clone(),
+    )
+    .await?;
+
     let api_service = Arc::new(Api {
         certificate_provider,
         common_pools,
@@ -622,6 +630,7 @@ pub(crate) async fn start_runtime(
         component_manager,
         bms_client: std::sync::OnceLock::new(),
         secrets_context,
+        console_log_source,
     });
 
     if carbide_config.listen_only {

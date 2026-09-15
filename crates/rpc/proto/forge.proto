@@ -7,6 +7,7 @@ import "codegen/v1/extern_path.proto";
 import "codegen/v1/rust_type.proto";
 
 import "common.proto";
+import "console_log.proto";
 import "dns.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
@@ -31,6 +32,10 @@ option (carbide.codegen.v1.imported_extern_path) = {
 service Forge {
   // What version of Forge is this service running? Matches `--version` command line.
   rpc Version(VersionRequest) returns (BuildInfo);
+
+  // Stream recent and live machine console output.
+  rpc StreamConsoleLogs(console_log.StreamConsoleLogsRequest)
+      returns (stream console_log.ConsoleLogLine);
 
   // Domain
   rpc CreateDomain(dns.CreateDomainRequest) returns (dns.Domain);
