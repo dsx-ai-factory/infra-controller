@@ -510,11 +510,13 @@ mod tests {
             ExtensionServiceId::from_str("00000000-0000-0000-0000-000000000002").unwrap();
         let version = ConfigVersion::initial();
         let active = InstanceExtensionServiceConfig {
+            id: uuid::Uuid::new_v4(),
             service_id: active_service,
             version,
             removed: None,
         };
         let removed = InstanceExtensionServiceConfig {
+            id: uuid::Uuid::new_v4(),
             service_id: removed_service,
             version,
             removed: Some(Utc::now()),
@@ -549,11 +551,13 @@ mod tests {
             ExtensionServiceId::from_str("00000000-0000-0000-0000-000000000002").unwrap();
         let version = ConfigVersion::initial();
         let active = InstanceExtensionServiceConfig {
+            id: uuid::Uuid::new_v4(),
             service_id: active_service,
             version,
             removed: None,
         };
         let removed = InstanceExtensionServiceConfig {
+            id: uuid::Uuid::new_v4(),
             service_id: removed_service,
             version,
             removed: Some(Utc::now()),
@@ -624,11 +628,13 @@ mod tests {
             ExtensionServiceId::from_str("00000000-0000-0000-0000-000000000002").unwrap();
         let version = ConfigVersion::initial();
         let first = InstanceExtensionServiceConfig {
+            id: uuid::Uuid::new_v4(),
             service_id: first_service,
             version,
             removed: None,
         };
         let second = InstanceExtensionServiceConfig {
+            id: uuid::Uuid::new_v4(),
             service_id: second_service,
             version,
             removed: None,

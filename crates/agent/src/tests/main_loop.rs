@@ -164,6 +164,8 @@ fn comparison_interface(id: &str, vlan_id: u32, vni: u32) -> rpc::FlatInterfaceC
 /// ordering comparison cases.
 fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
     ManagedHostNetworkConfigResponse {
+        service_interfaces: vec![],
+        service_vpc_slot_inventory: None,
         asn: 65_000,
         dhcp_servers: vec!["10.10.0.1".to_string(), "10.10.0.2".to_string()],
         vni_device: "vxlan48".to_string(),

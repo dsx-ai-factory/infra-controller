@@ -130,6 +130,8 @@ impl TryFrom<Args> for ::rpc::forge::UpdateDpuExtensionServiceRequest {
             };
 
         Ok(Self {
+            // TODO(Service VPC 03): Expose complete service interface requirements on update.
+            service_vpc_interfaces: vec![],
             service_id: args.service_id,
             service_name: args.service_name,
             description: args.description,
