@@ -395,6 +395,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ServiceAccount'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-current-service-account
@@ -430,6 +432,8 @@ paths:
                     orgDisplayName: Dell Corporation
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-current-infrastructure-provider
@@ -457,6 +461,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InfrastructureProviderStats'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-current-infrastructure-provider-stats
@@ -501,6 +507,8 @@ paths:
                         replacedBy: tenantAccount.siteCapabilities
                         takeActionBy: '2026-10-01T00:00:00Z'
                         notice: '''capabilities.targetedInstanceCreation'' is being deprecated in favor of ''tenantAccount.siteCapabilities''. Please take action prior to the specified date'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-current-tenant
@@ -530,6 +538,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TenantStats'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-current-tenant-stats
@@ -572,6 +582,8 @@ paths:
                 $ref: '#/components/schemas/TenantRoutingProfile'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -629,6 +641,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-tenant-account
@@ -736,6 +750,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -812,6 +828,8 @@ paths:
                       - targetedInstanceCreation: true
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-tenant-account
@@ -884,6 +902,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -924,6 +944,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -961,6 +983,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-site
@@ -1077,6 +1101,8 @@ paths:
                 $ref: '#/components/schemas/Site'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -1131,6 +1157,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Site'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-site
@@ -1156,6 +1184,8 @@ paths:
                 $ref: '#/components/schemas/Site'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -1205,6 +1235,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -1261,6 +1293,8 @@ paths:
               schema:
                 type: string
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-site-status-history
@@ -1368,6 +1402,8 @@ paths:
               description: Pagination result in JSON format.
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
@@ -1405,6 +1441,8 @@ paths:
                 $ref: '#/components/schemas/BMCCredential'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: create-or-update-bmc-credential
@@ -1440,6 +1478,8 @@ paths:
                 $ref: '#/components/schemas/UEFICredential'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
@@ -1486,6 +1526,8 @@ paths:
                 $ref: '#/components/schemas/MeasuredBootTrustedMachine'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -1520,6 +1562,8 @@ paths:
                   $ref: '#/components/schemas/MeasuredBootTrustedMachine'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -1575,6 +1619,8 @@ paths:
                 $ref: '#/components/schemas/MeasuredBootTrustedMachine'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -1613,6 +1659,8 @@ paths:
                 $ref: '#/components/schemas/MeasuredBootTrustedProfile'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -1647,6 +1695,8 @@ paths:
                   $ref: '#/components/schemas/MeasuredBootTrustedProfile'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -1703,6 +1753,8 @@ paths:
                 $ref: '#/components/schemas/MeasuredBootTrustedProfile'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -1736,6 +1788,8 @@ paths:
                 $ref: '#/components/schemas/CredentialRotationResult'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: rotate-credential
@@ -1785,6 +1839,8 @@ paths:
                 $ref: '#/components/schemas/CredentialRotationStatus'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -1862,6 +1918,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/GenericHttpError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -1908,6 +1966,8 @@ paths:
                 $ref: '#/components/schemas/SiteExplorerEndpointAction'
         '400':
           $ref: '#/components/responses/GenericHttpError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -1986,6 +2046,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-allocation
@@ -2144,6 +2206,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
@@ -2242,6 +2306,8 @@ paths:
                           status: Ready
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-allocation
@@ -2289,6 +2355,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -2338,6 +2406,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -2418,6 +2488,8 @@ paths:
                     source: nico
                     message: "Failed to update Allocation Constraint's parent IP Block. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 linked to an OperatorManaged SitePrefix is not Ready"
                     data: null
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |
@@ -2491,6 +2563,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-ipblock
@@ -2607,6 +2681,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
@@ -2701,6 +2777,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -2755,6 +2833,8 @@ paths:
                     message: Deletion request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -2812,6 +2892,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -2888,6 +2970,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -3017,6 +3101,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-vpc
@@ -3129,6 +3215,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
@@ -3281,6 +3369,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-vpc
@@ -3313,6 +3403,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -3359,6 +3451,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
@@ -3432,6 +3526,8 @@ paths:
                 $ref: '#/components/schemas/VpcRoutingState'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -3487,6 +3583,8 @@ paths:
                 $ref: '#/components/schemas/VpcRoutingState'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           description: Provider authorization or resource ownership failed.
           $ref: '#/components/responses/ForbiddenError'
@@ -3554,6 +3652,8 @@ paths:
                 $ref: '#/components/schemas/VpcInactiveVniReleaseResult'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -3626,6 +3726,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -3675,6 +3777,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-vpc-peering
@@ -3789,6 +3893,8 @@ paths:
                 $ref: '#/components/schemas/VpcPeering'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -3829,6 +3935,8 @@ paths:
                 $ref: '#/components/schemas/VpcPeering'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -3862,6 +3970,8 @@ paths:
           description: No Content
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -3893,6 +4003,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-vpc-prefix
@@ -3980,6 +4092,8 @@ paths:
                 $ref: '#/components/schemas/VpcPrefix'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -4021,6 +4135,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/VpcPrefix'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-vpc-prefix
@@ -4051,6 +4167,8 @@ paths:
       responses:
         '204':
           description: No Content
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -4071,6 +4189,8 @@ paths:
                 $ref: '#/components/schemas/VpcPrefix'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -4139,6 +4259,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-subnet
@@ -4251,6 +4373,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -4327,6 +4451,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-subnet
@@ -4358,6 +4484,8 @@ paths:
       responses:
         '204':
           description: No Content
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -4403,6 +4531,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -4468,6 +4598,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedMachine'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -4542,6 +4674,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -4614,6 +4748,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -4695,6 +4831,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -4740,6 +4878,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedMachine'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -4783,6 +4923,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedMachine'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -4806,6 +4948,8 @@ paths:
           description: Expected Machine deleted successfully
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -4878,6 +5022,8 @@ paths:
                   $ref: '#/components/schemas/ExpectedMachine'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -4936,6 +5082,8 @@ paths:
                   $ref: '#/components/schemas/ExpectedMachine'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -4991,6 +5139,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedPowerShelf'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -5064,6 +5214,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -5108,6 +5260,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedPowerShelf'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -5152,6 +5306,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedPowerShelf'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -5175,6 +5331,8 @@ paths:
           description: Expected Power Shelf deleted successfully
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -5234,6 +5392,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedRack'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -5307,6 +5467,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -5367,6 +5529,8 @@ paths:
                   $ref: '#/components/schemas/ExpectedRack'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -5403,6 +5567,8 @@ paths:
           description: All Expected Racks deleted successfully
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -5448,6 +5614,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedRack'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -5495,6 +5663,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedRack'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -5517,6 +5687,8 @@ paths:
           description: Expected Rack deleted successfully
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -5572,6 +5744,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedSwitch'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -5645,6 +5819,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -5689,6 +5865,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedSwitch'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -5737,6 +5915,8 @@ paths:
                 $ref: '#/components/schemas/ExpectedSwitch'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -5760,6 +5940,8 @@ paths:
           description: Expected Switch deleted successfully
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -5875,6 +6057,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -5901,6 +6085,8 @@ paths:
                 $ref: '#/components/schemas/Sku'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -5975,6 +6161,8 @@ paths:
                     created: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -5993,6 +6181,8 @@ paths:
           description: No Content
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -6024,6 +6214,8 @@ paths:
                 $ref: '#/components/schemas/Sku'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -6081,6 +6273,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-infiniband-partition
@@ -6183,6 +6377,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -6253,6 +6449,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-infiniband-partition
@@ -6288,6 +6486,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -6336,6 +6536,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -6404,6 +6606,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-spectrumx-partition
@@ -6506,6 +6710,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
@@ -6578,6 +6784,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -6616,6 +6824,8 @@ paths:
                     message: Deletion request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -6669,6 +6879,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-nvlink-logical-partition
@@ -6773,6 +6985,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -6814,6 +7028,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NVLinkLogicalPartition'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-nvlink-logical-partition
@@ -6859,6 +7075,8 @@ paths:
                 $ref: '#/components/schemas/NVLinkLogicalPartition'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -6886,6 +7104,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -6995,6 +7215,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-instance-type
@@ -7131,6 +7353,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |
@@ -7237,6 +7461,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-instance-type
@@ -7279,6 +7505,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -7325,6 +7553,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -7400,6 +7630,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-instance-type-machine-association
@@ -7465,6 +7697,8 @@ paths:
                       updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -7522,6 +7756,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -7836,6 +8072,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-instance
@@ -8116,6 +8354,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
@@ -8302,6 +8542,8 @@ paths:
                       updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
@@ -8519,6 +8761,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-instance
@@ -8555,6 +8799,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -8707,6 +8953,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
@@ -8823,6 +9071,8 @@ paths:
               schema:
                 type: string
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-instance-status-history
@@ -8906,6 +9156,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-interface
@@ -9012,6 +9264,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-instance-infiniband-interface
@@ -9114,6 +9368,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-instance-nvlink-interface
@@ -9204,6 +9460,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-infiniband-interface
@@ -9307,6 +9565,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-nvlink-interface
@@ -9514,6 +9774,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-operating-system
@@ -9646,6 +9908,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -9847,6 +10111,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-operating-system
@@ -9881,6 +10147,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -9950,6 +10218,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -10074,6 +10344,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-machine
@@ -10253,6 +10525,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -10334,6 +10608,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -10706,6 +10982,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-machine
@@ -10818,6 +11096,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -10875,6 +11155,8 @@ paths:
                     message: Deletion request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -10924,6 +11206,8 @@ paths:
                     message: Machine BMC reset request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -10978,6 +11262,8 @@ paths:
                     message: DPU reprovisioning request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -11022,6 +11308,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/MachineHealthReportEntry'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -11054,6 +11342,8 @@ paths:
                 $ref: '#/components/schemas/MachineHealthReportEntry'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -11096,6 +11386,8 @@ paths:
           description: Machine health report was successfully removed
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -11153,6 +11445,8 @@ paths:
                     message: ''
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -11196,6 +11490,8 @@ paths:
                     message: Machine decommissioning request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -11259,6 +11555,8 @@ paths:
                   $ref: '#/components/schemas/MachineValidationRun'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -11288,6 +11586,8 @@ paths:
                 $ref: '#/components/schemas/MachineValidationRun'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -11328,6 +11628,8 @@ paths:
                   $ref: '#/components/schemas/MachineValidationResult'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -11378,6 +11680,8 @@ paths:
               schema:
                 type: string
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-machine-status-history
@@ -11473,6 +11777,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
   '/v2/org/{org}/nico/dpu/{dpuMachineId}':
@@ -11521,6 +11827,8 @@ paths:
                 $ref: '#/components/schemas/DpuMachineSummary'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -11614,6 +11922,8 @@ paths:
                         trayIndex: 0
         '400':
           $ref: '#/components/responses/GenericHttpError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -11642,6 +11952,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/MachineGPUStats'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-machine-gpu-stats
@@ -11676,6 +11988,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MachineInstanceTypeSummary'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-machine-instance-type-stats-summary
@@ -11712,6 +12026,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/MachineInstanceTypeStats'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-machine-instance-type-stats
@@ -11748,6 +12064,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/TenantInstanceTypeStats'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-tenant-instance-type-stats
@@ -11817,6 +12135,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-machine-capabilities
@@ -12013,6 +12333,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy":"NAME_ASC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -12095,6 +12417,8 @@ paths:
                             macAddress: 'AA:BB:CC:DD:EE:01'
                             ipAddress: 10.0.0.101
                         powerState: 'on'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -12192,6 +12516,8 @@ paths:
                     matchCount: 8
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -12279,6 +12605,8 @@ paths:
                     matchCount: 3
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -12336,6 +12664,8 @@ paths:
                       - 660e8400-e29b-41d4-a716-446655440001
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -12398,6 +12728,8 @@ paths:
                       - 550e8400-e29b-41d4-a716-446655440000
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -12451,6 +12783,8 @@ paths:
                       - 660e8400-e29b-41d4-a716-446655440001
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -12506,6 +12840,8 @@ paths:
                       - 550e8400-e29b-41d4-a716-446655440000
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -12559,6 +12895,8 @@ paths:
                       - 660e8400-e29b-41d4-a716-446655440001
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -12614,6 +12952,8 @@ paths:
                       - 550e8400-e29b-41d4-a716-446655440000
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -12670,6 +13010,8 @@ paths:
                     message: 'Processing 3 of 5 components'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -12749,6 +13091,8 @@ paths:
                     message: Cancelled by user
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -12868,6 +13212,8 @@ paths:
                 $ref: '#/components/schemas/OperationRule'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -12926,6 +13272,8 @@ paths:
                   $ref: '#/components/schemas/OperationRule'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -13023,6 +13371,8 @@ paths:
                                 require_all: true
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -13089,6 +13439,8 @@ paths:
           description: Rule was updated.
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -13121,6 +13473,8 @@ paths:
           description: Rule was deleted.
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -13240,6 +13594,8 @@ paths:
                 $ref: '#/components/schemas/TaskRun'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -13318,6 +13674,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -13426,6 +13784,8 @@ paths:
                     finished: null
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -13561,6 +13921,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -13616,6 +13978,8 @@ paths:
                 $ref: '#/components/schemas/TaskRun'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -13671,6 +14035,8 @@ paths:
                 $ref: '#/components/schemas/TaskRun'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -13733,6 +14099,8 @@ paths:
                 $ref: '#/components/schemas/TaskRun'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -13789,6 +14157,8 @@ paths:
                 $ref: '#/components/schemas/TaskRun'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -13874,6 +14244,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -13922,6 +14294,8 @@ paths:
                 $ref: '#/components/schemas/UpdatePowerStateResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -13978,6 +14352,8 @@ paths:
                 $ref: '#/components/schemas/UpdatePowerStateResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -14028,6 +14404,8 @@ paths:
                 $ref: '#/components/schemas/FirmwareUpdateResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -14085,6 +14463,8 @@ paths:
                 $ref: '#/components/schemas/FirmwareUpdateResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -14222,6 +14602,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy":"NAME_ASC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -14287,6 +14669,8 @@ paths:
                     taskStats:
                       pendingTaskCount: 0
                       activeTaskCount: 0
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -14392,6 +14776,8 @@ paths:
                     matchCount: 10
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -14447,6 +14833,8 @@ paths:
                     matchCount: 5
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
@@ -14508,6 +14896,8 @@ paths:
                       - 550e8400-e29b-41d4-a716-446655440000
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -14570,6 +14960,8 @@ paths:
                       - 550e8400-e29b-41d4-a716-446655440000
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
@@ -14628,6 +15020,8 @@ paths:
                       - 550e8400-e29b-41d4-a716-446655440000
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '504':
@@ -14683,6 +15077,8 @@ paths:
                       - 550e8400-e29b-41d4-a716-446655440000
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
@@ -14769,6 +15165,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -14849,6 +15247,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "NAME_ASC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
   '/v2/org/{org}/nico/ipxe-template/{ipxeTemplateId}':
@@ -14882,6 +15282,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/IpxeTemplate'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -14913,6 +15315,8 @@ paths:
               description: Pagination result in JSON format
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '412':
@@ -15001,6 +15405,8 @@ paths:
                 $ref: '#/components/schemas/NetworkSecurityGroup'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -15051,6 +15457,8 @@ paths:
                 $ref: '#/components/schemas/NetworkSecurityGroup'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -15090,6 +15498,8 @@ paths:
                 $ref: '#/components/schemas/NetworkSecurityGroup'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -15130,6 +15540,8 @@ paths:
                     message: Deletion request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           description: Describes an error response for 403 Forbidden
           $ref: '#/components/responses/GenericHttpError'
@@ -15178,6 +15590,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-dpu-extension-service
@@ -15257,6 +15671,8 @@ paths:
                 $ref: '#/components/schemas/DpuExtensionService'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -15294,6 +15710,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DpuExtensionService'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -15320,6 +15738,8 @@ paths:
                     message: Deletion request was accepted
         '204':
           description: Kubernetes Pod service deleted synchronously
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -15342,6 +15762,8 @@ paths:
                 $ref: '#/components/schemas/DpuExtensionService'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -15391,6 +15813,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DpuExtensionServiceVersionInfo'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -15409,6 +15833,8 @@ paths:
       responses:
         '204':
           description: No Content
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -15482,6 +15908,8 @@ paths:
                           updated: '2019-08-24T14:15:22Z'
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-ssh-key-group
@@ -15606,6 +16034,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -15695,6 +16125,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-ssh-key-group
@@ -15720,6 +16152,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -15805,6 +16239,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -15861,6 +16297,8 @@ paths:
                       fingerprint: CaK2yoj5fDOhf1swM2kFyjQrd3bwZfDYlWnVjBHgveQ
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-ssh-key
@@ -15939,6 +16377,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       tags:
@@ -15991,6 +16431,8 @@ paths:
                     fingerprint: CaK2yoj5fDOhf1swM2kFyjQrd3bwZfDYlWnVjBHgveQ
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-ssh-key
@@ -16016,6 +16458,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -16048,6 +16492,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -16188,6 +16634,8 @@ paths:
                       timestamp: '2024-12-04T21:06:33.849293-08:00'
                       durationMs: 50
                       apiVersion: 0.1.91
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-audit-entry
@@ -16269,6 +16717,8 @@ paths:
                     timestamp: '2024-12-04T21:06:33.849293-08:00'
                     durationMs: 250
                     apiVersion: 0.1.91
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-audit-entry
@@ -16315,6 +16765,8 @@ paths:
                 $ref: '#/components/schemas/HostFirmwareConfig'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -16346,6 +16798,8 @@ paths:
           description: Host firmware config deleted
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -16407,6 +16861,8 @@ paths:
                 $ref: '#/components/schemas/TenantIdentityConfig'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -16440,6 +16896,8 @@ paths:
                 $ref: '#/components/schemas/TenantIdentityConfig'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -16468,6 +16926,8 @@ paths:
           description: Tenant identity configuration deleted
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -16533,6 +16993,8 @@ paths:
                 $ref: '#/components/schemas/TenantIdentityTokenDelegation'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -16566,6 +17028,8 @@ paths:
                 $ref: '#/components/schemas/TenantIdentityTokenDelegation'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -16591,6 +17055,8 @@ paths:
           description: Token delegation deleted
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
