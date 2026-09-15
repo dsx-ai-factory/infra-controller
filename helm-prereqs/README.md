@@ -184,7 +184,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_DPF_K8S_API_VIP` / `NICO_DPF_K8S_API_PORT` | No | Host-cluster API server address/port that DPUs must reach. Defaults are derived from the `kubernetes` Endpoints — override when the derived address is not routable from the DPUs. |
 | `NICO_DPF_DPU_INTERFACE` | Unless `--skip-dpf` | Controller interface on which keepalived advertises the DPU cluster VIP. |
 | `NICO_DPF_DPU_CLUSTER_VIP` | Unless `--skip-dpf` | Floating IP the DPUs use to reach their (Kamaji) control plane. |
-| `NICO_DPF_BMC_ROOT_PASSWORD` | Unless `--skip-dpf` | Site-wide BMC root password. setup.sh sets it via `nico-admin-cli` between the DPF-off and DPF-on Core deploys (phase 6b). When a BMC refresh interval is configured (the default), carbide-api starts without it and writes the credential asynchronously once it is set — so startup is not blocked. Without a refresh interval the credential must be seeded before first startup. |
+| `NICO_DPF_BMC_ROOT_PASSWORD` | Unless `--skip-dpf` | Site-wide BMC root password. setup.sh sets it via `nico-admin-cli` between the DPF-off and DPF-on Core deploys (phase 6b). When a BMC refresh interval is configured (the default), carbide-api starts without it and writes the credential asynchronously once it is set — so startup is not blocked. Without a refresh interval the credential must be seeded before first startup. `vault.siteCredentials.bmcRoot` in `values.yaml` seeds the same Vault path from the chart and every `nico-prereqs` sync rewrites it; see [Seeding site credentials](#seeding-site-credentials) before setting both. |
 | `NICO_DPF_METALLB_POOL` | No | MetalLB address pool used to advertise the DPU cluster VIP. When unset, the VIP LoadBalancer Service is skipped — the VIP must then be routable from the DPUs by other means. |
 | `NICO_DPF_IMAGE_REPO` | No | DPF operator image repository. Defaults to the public `nvcr.io/nvidia/doca/dpf-system`. Point at your own registry (mirror or self-built) to match where you push Core/REST images. See [DPF images and registries](#dpf-images-and-registries). |
 | `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to `NICO_DPF_VERSION`. Set separately when your self-built image uses a different tag than the chart version. |
@@ -201,11 +201,78 @@ The tables below summarize the keys that must be set per site.
 | `vault.nicoCliClientRole.name` | `"nico-cli-client"` | No | Vault role name, and the certificate `SubjectOU` when `ou` is empty. |
 | `vault.nicoCliClientRole.ou` | `""` | No | Certificate `SubjectOU` stamped on issued CLI client certs; empty means use `name`. nico-api maps the OU to the ExternalUser group, but admin-CLI authorization is gated by the issuer CN (`auth.additionalIssuerCns`), not the OU value. Do not set `"Invalid"`. |
 | `vault.nicoCliClientRole.organization` | `""` | No | Optional certificate `SubjectO` value for deployments that want an additional identity marker. |
+| `vault.siteCredentials.enabled` | `false` | No | Seed the site-wide BMC root and the DPU/host site-default UEFI credentials into the Vault KV mount through the `nico-site-credentials` Secret. See [Seeding site credentials](#seeding-site-credentials). |
+| `vault.siteCredentials.bmcRoot.username` / `.password` | `"root"` / `""` | When enabled | `machines/bmc/site/root`, the password site-explorer rotates every BMC to. Both must be non-empty. Keep the password distinct from the factory-default BMC passwords; the chart does not check this. `NICO_DPF_BMC_ROOT_PASSWORD` (setup.sh phase 6b) writes the same path through `nico-admin-cli`, which stores an empty username, and every `nico-prereqs` sync rewrites it with this value: set exactly one of the two, or give both the same password. |
+| `vault.siteCredentials.uefi.dpu.username` / `.password` | `"admin"` / `""` | When enabled | `machines/all_dpus/site_default/uefi-metadata-items/auth`. The password must be non-empty (site-explorer's precondition check rejects an empty one); the username may be empty. |
+| `vault.siteCredentials.uefi.host.username` / `.password` | `"admin"` / `""` | When enabled | `machines/all_hosts/site_default/uefi-metadata-items/auth`. Same requirements as the DPU entry. |
 | `postgresql.instances` | `3` | No | Number of PostgreSQL replicas |
 | `postgresql.volumeSize` | `"10Gi"` | No | PVC size per PostgreSQL replica |
 | `postgresql.storageClass` | `"local-path-persistent"` | No | StorageClass for the nico-prereqs PostgreSQL PVCs. Override through Helm values when using a non-local StorageClass. |
 | `temporal.useHaPostgres` | `false` | No | Move Temporal's default/visibility stores onto `nico-pg-cluster` instead of `postgres.postgres`. Named `useHaPostgres`, not `enabled`, because it only moves the database — it doesn't gate whether Temporal is deployed. See [Consolidating Temporal/Keycloak onto nico-pg-cluster](#consolidating-temporalkeycloak-onto-nico-pg-cluster). |
 | `keycloak.useHaPostgres` | `false` | No | Move Keycloak's database onto `nico-pg-cluster` instead of `postgres.postgres`. Distinct from `nico-rest-api.config.keycloak.enabled` in `values/nico-rest.yaml`, which controls whether Keycloak is deployed at all — this toggle provisions the database regardless, so it just goes unused if Keycloak itself isn't deployed. |
+
+#### Seeding site credentials
+
+site-explorer and machine-a-tron read three `UsernamePassword` entries from the
+Vault KV mount: the site-wide BMC root (`machines/bmc/site/root`) and the DPU
+and host site-default UEFI credentials
+(`machines/all_{dpus,hosts}/site_default/uefi-metadata-items/auth`). When
+`vault.siteCredentials.enabled` is true, the chart renders them into the
+`nico-site-credentials` Secret in `namespace`, and the `vault-pki-config` job
+reads each entry through a `secretKeyRef` environment variable and pipes it
+into `vault kv put`, so the passwords do not appear in the Job pod spec. The
+job writes them after the `vault.kvSeeds` list, so they take precedence over a
+`kvSeeds` entry at the same path, and it rewrites all three on every install
+and upgrade, replacing whatever is stored at those paths.
+
+The three paths are version 0 of the site-wide credential rotation model.
+Until `nico-admin-cli credential rotate` has published a later version,
+version 0 is the live credential. Once a rotation has published version N, the
+live credential is `<path>/v{N}`, resolved from the
+`sitewide_credential_rotation` table, and these values no longer define it:
+changing them on an upgrade rewrites version 0 only and rotates no device, so
+change a rotated site's credential with `nico-admin-cli credential rotate`
+instead. nico-api seeds the SuperNIC lockdown IKM by copying the version 0 BMC
+root once, only while the IKM is absent, so a later rewrite does not change
+the IKM.
+
+Rendering fails if any password or `bmcRoot.username` is empty while enabled.
+Usernames and passwords are written as JSON strings even when YAML parses them
+as numbers or booleans; quote them anyway, because an unquoted `0123` is read
+as a number before the chart sees it. Keep the BMC root password distinct from
+every factory-default BMC password (the `vault.kvSeeds` entries and any
+per-vendor host default): the chart does not check this, and site-explorer's
+rotation away from the factory password is a no-op when they match.
+
+The default usernames match what `setup-machine-a-tron.sh` writes. The
+passwords are site secrets. `helmfile` passes `values.yaml` to the
+`nico-prereqs` release and `setup.sh` takes no separate values file for this
+chart, so set them in your site copy of `values.yaml` and blank them before
+committing, or pass them with `--set` or `--values` when running
+`helmfile sync -l name=nico-prereqs` directly. The values below are the
+machine-a-tron test environment defaults and are only suitable for a simulated
+site.
+
+`setup.sh` also writes `machines/bmc/site/root` when `NICO_DPF_BMC_ROOT_PASSWORD`
+is set (phase 6b): it runs `nico-admin-cli credential add-bmc
+--kind=site-wide-root`, and nico-api stores that password with an empty
+username. The two writers do not coordinate, and every
+`helmfile sync -l name=nico-prereqs` re-runs the job and rewrites the path with
+`bmcRoot`, so set exactly one of `vault.siteCredentials.bmcRoot` and
+`NICO_DPF_BMC_ROOT_PASSWORD`, or give both the same password.
+
+```yaml
+vault:
+  siteCredentials:
+    enabled: true
+    bmcRoot:
+      password: "NicoSiteRoot1"
+    uefi:
+      dpu:
+        password: "bluefield"
+      host:
+        password: "bluefield"
+```
 
 ### `values/nico-core.yaml`
 
