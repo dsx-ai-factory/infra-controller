@@ -21,6 +21,7 @@ use std::time::Duration;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
+use carbide_uuid::vpc_peering::VpcPeeringId;
 use config_version::ConfigVersion;
 use ipnetwork::IpNetwork;
 use model::instance::config::network::{
@@ -517,12 +518,18 @@ async fn change_vpc_routing_profile_preserves_workload_and_checks_interface_over
     Ok(())
 }
 
-/// Test-specific function that checks an eligible pair reaches the existing database exclusion.
+/// Eligible reuse still needs isolation from peers and the database cutover.
 #[crate::sqlx_test]
-async fn eligible_exact_overlap_reaches_legacy_database_exclusion(
+async fn eligible_exact_overlap_requires_isolation_and_database_cutover(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env_with_overrides(pool, tenant_prefix_overlap_overrides(true)).await;
+    let mut overrides = tenant_prefix_overlap_overrides(true);
+    overrides
+        .config
+        .as_mut()
+        .unwrap()
+        .vpc_peering_policy_on_existing = Some(crate::cfg::file::VpcPeeringPolicy::None);
+    let env = create_test_env_with_overrides(pool, overrides).await;
     let tenant_a = "overlap-eligible-a";
     let tenant_b = "overlap-eligible-b";
     create_overlap_tenant(&env, tenant_a).await?;
@@ -583,6 +590,44 @@ async fn eligible_exact_overlap_reaches_legacy_database_exclusion(
             "{scenario}"
         );
     }
+
+    // FNN still imports peer VNIs when prefix imports are disabled. Hold the
+    // new peering until the prefix request waits, then prove it sees that
+    // peering and rejects reuse before reaching the database exclusion.
+    let mut peering_txn = env.pool.begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut peering_txn).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *peering_txn)
+        .await?;
+    let peering_id = VpcPeeringId::new();
+    db::vpc_peering::create(&mut peering_txn, vpc_a, vpc_b, peering_id).await?;
+    let rejected_id = VpcPrefixId::new();
+    let create_prefix = env
+        .api
+        .create_vpc_prefix(Request::new(site_prefix_child_request(
+            rejected_id,
+            vpc_b,
+            Some(root_b),
+            "10.100.1.0/24",
+        )));
+    let release_peering = async {
+        wait_for_blocked_query(&env.pool, blocker_pid, "tenant_prefix_overlap:checks").await;
+        peering_txn.commit().await
+    };
+    let (prefix_result, release_result) = tokio::join!(create_prefix, release_peering);
+    release_result?;
+    let error = prefix_result.expect_err("peered VPCs cannot reuse the same prefix");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        error.message(),
+        "the requested prefix overlaps address space that is not eligible for reuse"
+    );
+    assert_eq!(stored_vpc_prefix_count(&env, rejected_id).await, 0);
+    let peering_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vpc_peerings WHERE id = $1")
+        .bind(peering_id)
+        .fetch_one(&env.pool)
+        .await?;
+    assert_eq!(peering_count, 1);
     Ok(())
 }
 

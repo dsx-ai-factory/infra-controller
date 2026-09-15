@@ -199,6 +199,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 	tests := []struct {
 		name             string
 		requestBody      model.APIExpectedMachineCreateRequest
+		requestBodyJSON  string
 		setupContext     func(c echo.Context)
 		expectedStatus   int
 		expectedErrorMsg *string
@@ -214,6 +215,16 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				FallbackDPUSerialNumbers: []string{"DPU001", "DPU002"},
 				Labels:                   map[string]string{"env": "test"},
 			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name:            "successful creation with omitted collections",
+			requestBodyJSON: fmt.Sprintf(`{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:56","chassisSerialNumber":"CHASSIS-EMPTY"}`, site.ID.String()),
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
 				c.SetParamNames("orgName")
@@ -381,7 +392,11 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create request
-			reqBody, _ := json.Marshal(tt.requestBody)
+			reqBody, err := json.Marshal(tt.requestBody)
+			require.NoError(t, err)
+			if tt.requestBodyJSON != "" {
+				reqBody = []byte(tt.requestBodyJSON)
+			}
 			req := httptest.NewRequest(http.MethodPost, "/v2/org/test-org/nico/expected-machine", bytes.NewReader(reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			req = req.WithContext(context.Background())
@@ -393,7 +408,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			tt.setupContext(c)
 
 			// Execute
-			err := handler.Handle(c)
+			err = handler.Handle(c)
 
 			// Assert
 			assert.Nil(t, err)
@@ -407,9 +422,15 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				var response model.APIExpectedMachine
 				err := json.Unmarshal(rec.Body.Bytes(), &response)
 				assert.Nil(t, err)
+				if tt.requestBodyJSON != "" {
+					var fields map[string]json.RawMessage
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &fields))
+					assert.JSONEq(t, `{}`, string(fields["labels"]))
+					assert.JSONEq(t, `[]`, string(fields["fallbackDPUSerialNumbers"]))
+				}
 				if tt.requestBody.Labels != nil {
 					assert.NotNil(t, response.Labels, "Labels should not be nil in response")
-					assert.Equal(t, tt.requestBody.Labels, response.Labels, "Labels in response should match request")
+					assert.Equal(t, tt.requestBody.Labels, map[string]string(response.Labels), "Labels in response should match request")
 				}
 				if tt.requestBody.RackID != nil {
 					if assert.NotNil(t, response.RackID, "RackID should not be nil in response") {
@@ -2316,13 +2337,11 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 					Labels:                   map[string]string{"env": "test"},
 				},
 				{
-					SiteID:                   site.ID.String(),
-					BmcMacAddress:            "00:11:22:33:44:02",
-					DefaultBmcUsername:       cutil.GetPtr("admin"),
-					DefaultBmcPassword:       cutil.GetPtr("password"),
-					ChassisSerialNumber:      "BATCH-CHASSIS-002",
-					FallbackDPUSerialNumbers: []string{"DPU002"},
-					Labels:                   map[string]string{"env": "test"},
+					SiteID:              site.ID.String(),
+					BmcMacAddress:       "00:11:22:33:44:02",
+					DefaultBmcUsername:  cutil.GetPtr("admin"),
+					DefaultBmcPassword:  cutil.GetPtr("password"),
+					ChassisSerialNumber: "BATCH-CHASSIS-002",
 				},
 			},
 			setupContext: func(c echo.Context) {
@@ -2335,7 +2354,16 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 				var response []model.APIExpectedMachine
 				err := json.Unmarshal(body, &response)
 				assert.Nil(t, err)
-				assert.Equal(t, 2, len(response))
+				require.Len(t, response, 2)
+				assert.Equal(t, "BATCH-CHASSIS-001", response[0].ChassisSerialNumber)
+				assert.Equal(t, "BATCH-CHASSIS-002", response[1].ChassisSerialNumber)
+				var fields []map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(body, &fields))
+				assert.JSONEq(t, `{"env":"test"}`, string(fields[0]["labels"]))
+				assert.JSONEq(t, `{}`, string(fields[1]["labels"]))
+				assert.JSONEq(t, `[]`, string(fields[1]["fallbackDPUSerialNumbers"]))
+				assert.Contains(t, fields[0], "id")
+				assert.NotContains(t, fields[0], "Labels")
 			},
 		},
 		{
@@ -3066,7 +3094,7 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 				{
 					ID:                  cutil.GetPtr(testEM2.ID.String()),
 					ChassisSerialNumber: cutil.GetPtr("UPDATED-BATCH-002"),
-					Labels:              map[string]string{"env": "updated"},
+					Labels:              map[string]string{},
 				},
 			},
 			setupContext: func(c echo.Context) {
@@ -3079,7 +3107,13 @@ func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 				var response []model.APIExpectedMachine
 				err := json.Unmarshal(body, &response)
 				assert.Nil(t, err)
-				assert.Equal(t, 2, len(response))
+				require.Len(t, response, 2)
+				var fields []map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(body, &fields))
+				assert.JSONEq(t, `{"env":"updated"}`, string(fields[0]["labels"]))
+				assert.JSONEq(t, `{}`, string(fields[1]["labels"]))
+				assert.Contains(t, fields[0], "id")
+				assert.NotContains(t, fields[0], "Labels")
 			},
 		},
 		{

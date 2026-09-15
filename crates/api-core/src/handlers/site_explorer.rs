@@ -21,6 +21,8 @@ use std::str::FromStr;
 use ::rpc::forge::{self as rpc, IsBmcInManagedHostResponse};
 use carbide_site_explorer::EndpointExplorationServiceError;
 use config_version::ConfigVersion;
+use db::ConditionalWrite::{Applied, NotApplied};
+use db::explored_endpoints::EndpointReportNotCurrent;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use tonic::{Request, Response, Status};
 
@@ -322,8 +324,11 @@ pub(crate) async fn re_explore_endpoint(
         )
         .await
         {
-            Ok(true) => {}
-            Ok(false) => {
+            Ok(Applied(())) => {}
+            Ok(NotApplied(EndpointReportNotCurrent)) => {
+                // This API reports `FailedPrecondition` for a conditional miss,
+                // whether the report version changed or the endpoint was removed
+                // after the initial lookup.
                 return Err(CarbideError::ConcurrentModificationError(
                     "explored_endpoint",
                     expected_version.to_string(),

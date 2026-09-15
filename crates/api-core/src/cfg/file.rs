@@ -2897,14 +2897,13 @@ impl FnnRoutingProfileConfig {
     ///
     /// Evaluate the profile returned by [`FnnConfig::resolve_vpc_routing_profile`],
     /// not the raw base profile, so VPC overrides participate in the decision.
-    /// The caller adds the site-wide conditions for these prefix writers.
-    /// Peering and VPC policy changes are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5114>, and retained
-    /// Instance paths are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5115>. Startup and
-    /// complete writer coverage are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5116>. All three must
-    /// land before the database cutover in
+    /// Admission callers add the site-wide conditions and retained-network
+    /// checks. See peering and policy admission in
+    /// <https://github.com/NVIDIA/infra-controller/issues/5114> and Instance
+    /// admission in <https://github.com/NVIDIA/infra-controller/issues/5115>.
+    /// Startup and complete writer coverage remain tracked in
+    /// <https://github.com/NVIDIA/infra-controller/issues/5116> and must land
+    /// before the database cutover in
     /// <https://github.com/NVIDIA/infra-controller/issues/3892>.
     pub(crate) fn is_eligible_for_tenant_prefix_overlap(&self) -> bool {
         // Keep this exhaustive so new profile fields require an explicit eligibility decision.
@@ -3488,9 +3487,9 @@ pub struct RackStateControllerConfig {
     pub controller: StateControllerConfig,
 
     /// Switch mTLS services for NMX cluster setup. Accepted and ignored: rack
-    /// maintenance does not configure switch certificates. Per-switch
-    /// certificate configuration uses
-    /// `[switch_state_controller].switch_mtls_services`.
+    /// `ConfigureNmxCluster` uses the fixed `nvue_api` and
+    /// `scale_up_fabric_manager` bindings. Per-switch certificate configuration
+    /// uses `[switch_state_controller].switch_mtls_services`.
     #[serde(default)]
     pub nmx_cluster_switch_mtls_services: Vec<component_manager::config::SwitchMtlsService>,
 }

@@ -15,18 +15,37 @@
  * limitations under the License.
  */
 
-//! Tenant prefix overlap policy shared by `VpcPrefix` and `NetworkSegment`
-//! handlers.
+//! Tenant prefix overlap checks shared by prefix, peering, VPC, NSG, and Instance writers.
+
+use std::collections::HashSet;
 
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_uuid::instance::InstanceId;
+use carbide_uuid::network_security_group::NetworkSecurityGroupId;
+use carbide_uuid::vpc::VpcId;
+use db::ObjectColumnFilter;
 use ipnetwork::IpNetwork;
+use model::instance::InstanceSearchFilter;
+use model::instance::config::InstanceConfig;
+use model::instance::config::network::InstanceNetworkConfig;
+use model::instance::snapshot::InstanceSnapshot;
+use model::machine::{
+    InstanceState, LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot,
+};
+use model::network_security_group::{
+    NetworkSecurityGroup, NetworkSecurityGroupRule, NetworkSecurityGroupRuleAction,
+};
 use model::site_prefix::{
     SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState, SitePrefixRoutingScope,
 };
-use model::vpc::Vpc;
+use model::vpc::{ALL_VPC_VIRTUALIZATION_TYPES, Vpc, VpcVirtualizationTypeCapabilities};
+use sqlx::PgConnection;
 
-use crate::CarbideError;
-use crate::cfg::file::VpcIsolationBehaviorType;
+use crate::api::Api;
+use crate::cfg::file::{
+    CarbideConfig, FnnRoutingProfileConfig, VpcIsolationBehaviorType, VpcPeeringPolicy,
+};
+use crate::{CarbideError, CarbideResult};
 
 const INELIGIBLE_OVERLAP: &str =
     "the requested prefix overlaps address space that is not eligible for reuse";
@@ -150,22 +169,607 @@ pub(super) fn pair_is_eligible(
         && existing_profile.is_eligible_for_tenant_prefix_overlap()
 }
 
+/// `nsg_policy_is_safe` requires deny-only rules because permits run before
+/// SitePrefix isolation. Stateful egress also generates established-flow permits
+/// in the FNN template.
+pub(super) fn nsg_policy_is_safe(
+    rules: &[NetworkSecurityGroupRule],
+    stateful_egress: bool,
+    stateful_acls_enabled: bool,
+) -> bool {
+    !(stateful_egress && stateful_acls_enabled)
+        && rules
+            .iter()
+            .all(|rule| rule.action == NetworkSecurityGroupRuleAction::Deny)
+}
+
+/// Accepts a safe final policy or the existing rules with only permits removed.
+/// Keeping every remaining rule unchanged and in order preserves priority ties
+/// after the agent sorts them. Removing a deny could expose a later permit.
+pub(super) fn nsg_policy_is_nonexpanding(
+    previous: &NetworkSecurityGroup,
+    rules: &[NetworkSecurityGroupRule],
+    stateful_egress: bool,
+    stateful_acls_enabled: bool,
+) -> bool {
+    if nsg_policy_is_safe(rules, stateful_egress, stateful_acls_enabled) {
+        return true;
+    }
+    // Disabling statefulness also removes conntrack matches from egress
+    // rules, so it is not necessarily a restriction on remaining permits.
+    if (previous.stateful_egress && stateful_acls_enabled)
+        != (stateful_egress && stateful_acls_enabled)
+    {
+        return false;
+    }
+    let mut requested = rules.iter().peekable();
+    for rule in &previous.rules {
+        if requested.peek().is_some_and(|requested_rule| {
+            // IDs may be regenerated on update; they do not change ACL policy.
+            let mut previous_rule = rule.clone();
+            previous_rule.id = requested_rule.id.clone();
+            previous_rule == **requested_rule
+        }) {
+            requested.next();
+        } else if rule.action != NetworkSecurityGroupRuleAction::Permit {
+            return false;
+        }
+    }
+    requested.next().is_none()
+}
+
+/// Accepts a safe final profile or a restriction of its resolved routing
+/// behavior. This compares effective defaults, not whether an override was supplied.
+pub(super) fn routing_profile_is_nonexpanding(
+    runtime_config: &CarbideConfig,
+    previous: &FnnRoutingProfileConfig,
+    candidate: &FnnRoutingProfileConfig,
+) -> bool {
+    let previous_anycast = previous
+        .allowed_anycast_prefixes
+        .as_deref()
+        .unwrap_or_default();
+    let candidate_anycast = candidate
+        .allowed_anycast_prefixes
+        .as_deref()
+        .unwrap_or_default();
+    // An empty IPv4 profile list exposes the legacy site list, bypassing
+    // per-interface narrowing. It is not a safe final policy in that case.
+    if !runtime_config.anycast_site_prefixes.is_empty()
+        && previous_anycast.iter().any(|entry| entry.prefix.is_ipv4())
+        && !candidate_anycast.iter().any(|entry| entry.prefix.is_ipv4())
+    {
+        return false;
+    }
+    if candidate.is_eligible_for_tenant_prefix_overlap() {
+        return true;
+    }
+    // New profile fields need an explicit decision here as well as in the
+    // eligibility check. Access tiers authorize selection; they do not route.
+    let FnnRoutingProfileConfig {
+        route_target_imports,
+        route_targets_on_exports,
+        internal,
+        tenant_prefix_overlap_eligible,
+        leak_default_route_from_underlay,
+        leak_tenant_host_routes_to_underlay,
+        tenant_leak_communities_accepted,
+        accepted_leaks_from_underlay,
+        allowed_anycast_prefixes: _,
+        access_tier: _,
+    } = candidate;
+    internal.unwrap_or_default() == previous.internal.unwrap_or_default()
+        && *tenant_prefix_overlap_eligible == previous.tenant_prefix_overlap_eligible
+        && route_target_imports.as_deref().unwrap_or_default().iter().all(|target| {
+            previous.route_target_imports.as_deref().unwrap_or_default().contains(target)
+        })
+        && route_targets_on_exports.as_deref().unwrap_or_default().iter().all(|target| {
+            previous.route_targets_on_exports.as_deref().unwrap_or_default().contains(target)
+        })
+        && (!leak_default_route_from_underlay.unwrap_or_default()
+            || previous.leak_default_route_from_underlay.unwrap_or_default())
+        && (!leak_tenant_host_routes_to_underlay.unwrap_or_default()
+            || previous.leak_tenant_host_routes_to_underlay.unwrap_or_default())
+        // Disabling community handling can make suppressed routes exportable
+        // through EVPN, so neither direction is assumed to restrict access.
+        && tenant_leak_communities_accepted.unwrap_or_default()
+            == previous.tenant_leak_communities_accepted.unwrap_or_default()
+        && accepted_leaks_from_underlay.as_deref().unwrap_or_default().iter().all(|entry| {
+            previous.accepted_leaks_from_underlay.as_deref().unwrap_or_default().iter()
+                .any(|allowed| contains_prefix(allowed.prefix, entry.prefix))
+        })
+        && candidate_anycast.iter().all(|entry| {
+            previous_anycast.iter().any(|allowed| contains_prefix(allowed.prefix, entry.prefix))
+        })
+}
+
+fn policy_error() -> CarbideError {
+    CarbideError::FailedPrecondition(
+        "the requested policy is not safe for tenant prefix reuse".to_string(),
+    )
+}
+
+/// Returns the direct source VPCs whose prefixes or VNIs the receiver imports,
+/// including the receiver itself. This follows the renderer's directional rules.
+pub(super) async fn receiver_sources(
+    runtime_config: &CarbideConfig,
+    txn: &mut PgConnection,
+    receiver: &Vpc,
+) -> CarbideResult<Vec<VpcId>> {
+    let Some(policy) = runtime_config
+        .vpc_peering_policy_on_existing
+        .or(runtime_config.vpc_peering_policy)
+    else {
+        return Ok(vec![receiver.id]);
+    };
+    let receiver_type = receiver.config.network_virtualization_type;
+    let mut sources = match policy {
+        VpcPeeringPolicy::Exclusive => db::vpc_peering::get_vpc_peer_vnis(
+            txn,
+            receiver.id,
+            receiver_type.capabilities().peers_with.to_vec(),
+        )
+        .await?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>(),
+        VpcPeeringPolicy::Mixed => db::vpc_peering::get_vpc_peer_ids(txn, receiver.id).await?,
+        VpcPeeringPolicy::None => Vec::new(),
+    };
+    // VNI imports are independent of prefix imports, including an explicit
+    // `VpcPeeringPolicy::None`.
+    if receiver_type.imports_peer_vnis_into_overlay() {
+        let peer_types = ALL_VPC_VIRTUALIZATION_TYPES
+            .iter()
+            .copied()
+            .filter(|peer_type| peer_type.vni_advertised_to_peers())
+            .collect();
+        sources.extend(
+            db::vpc_peering::get_vpc_peer_vnis(txn, receiver.id, peer_types)
+                .await?
+                .into_iter()
+                .map(|(id, _)| id),
+        );
+    }
+    sources.push(receiver.id);
+    sources.sort_unstable();
+    sources.dedup();
+    Ok(sources)
+}
+
+/// Repeated paths to one source do not create a collision. Distinct source
+/// VPCs must not contribute overlapping address space to the same receiver.
+pub(super) fn prefixes_overlap_across_vpcs(prefixes: &[(VpcId, IpNetwork)]) -> bool {
+    prefixes
+        .iter()
+        .enumerate()
+        .any(|(index, (vpc_id, prefix))| {
+            prefixes[index + 1..].iter().any(|(other_vpc_id, other)| {
+                vpc_id != other_vpc_id
+                    && (contains_prefix(*prefix, *other) || contains_prefix(*other, *prefix))
+            })
+        })
+}
+
+/// Accepts an unchanged network or removal of interfaces without changing the
+/// retained interfaces. Use the model's intent comparison so generated addresses
+/// and omitted resolved VPC IDs do not turn metadata edits into routing changes.
+pub(super) fn instance_network_is_nonexpanding(
+    previous: &InstanceNetworkConfig,
+    candidate: &InstanceNetworkConfig,
+) -> bool {
+    if previous.auto_config != candidate.auto_config
+        || candidate.interfaces.len() > previous.interfaces.len()
+    {
+        return false;
+    }
+    candidate.interfaces.iter().all(|requested| {
+        previous.interfaces.iter().any(|retained| {
+            let previous_interface = InstanceNetworkConfig {
+                interfaces: vec![retained.clone()],
+                auto_config: previous.auto_config,
+            };
+            let requested_interface = InstanceNetworkConfig {
+                interfaces: vec![requested.clone()],
+                auto_config: candidate.auto_config,
+            };
+            !previous_interface.is_network_config_update_requested(&requested_interface)
+        })
+    })
+}
+
+/// Checks the resolved candidate together with every network configuration
+/// retained by the Instance. The caller holds the overlap lock before reading
+/// dependencies and keeps it through the Instance write. Allocation deliberately
+/// does not use the policy writers' active-host filter: this configuration has
+/// not started serving tenant traffic yet.
+/// `network_expands` is classified from caller intent before resource resolution;
+/// false permits a safe NSG replacement without requiring retained routes to drain.
+pub(crate) async fn validate_instance_network(
+    api: &Api,
+    txn: &mut PgConnection,
+    candidate: &InstanceConfig,
+    retained: Option<&InstanceSnapshot>,
+    network_expands: bool,
+) -> CarbideResult<()> {
+    let mut networks = vec![&candidate.network];
+    if let Some(instance) = retained {
+        networks.push(&instance.config.network);
+        if let Some(update) = &instance.update_network_config_request {
+            networks.extend([&update.old_config, &update.new_config]);
+        }
+    }
+    let mut sources = HashSet::new();
+    let mut checked_vpcs = HashSet::new();
+    let mut vpcs = Vec::new();
+    for network in networks {
+        if network_expands {
+            crate::ethernet_virtualization::validate_instance_interface_routing_profiles(
+                txn,
+                network,
+                api.runtime_config.fnn.as_ref(),
+            )
+            .await?;
+        }
+        for interface in &network.interfaces {
+            let segment_id = interface.network_segment_id.ok_or_else(policy_error)?;
+            let vpc = db::vpc::find_by_segment(&mut *txn, segment_id)
+                .await?
+                .ok_or_else(policy_error)?;
+            if interface.vpc_id.is_some_and(|id| id != vpc.id) {
+                return Err(policy_error());
+            }
+            if !checked_vpcs.insert(vpc.id) {
+                continue;
+            }
+            sources.extend(receiver_sources(&api.runtime_config, txn, &vpc).await?);
+            vpcs.push(vpc);
+        }
+    }
+    let sources = sources.into_iter().collect::<Vec<_>>();
+    let prefixes = db::vpc_peering::get_retained_prefixes_by_vpcs(&mut *txn, &sources).await?;
+    if network_expands && prefixes_overlap_across_vpcs(&prefixes) {
+        return Err(overlap_error());
+    }
+
+    // Turning the gate off freezes expansion where another VPC still uses
+    // the same addresses, even when that VPC is isolated from this receiver.
+    // Both probes retain deleting rows; no site inventory scan is needed.
+    if !api.runtime_config.tenant_prefix_overlap_enabled {
+        let mut duplicate_space = false;
+        for (source_vpc_id, prefix) in &prefixes {
+            if db::vpc_prefix::probe(*prefix, txn)
+                .await?
+                .iter()
+                .any(|other| other.vpc_id != *source_vpc_id)
+                || db::vpc_prefix::probe_segment_prefixes(*prefix, txn)
+                    .await?
+                    .iter()
+                    .any(|other| other.vpc_id != *source_vpc_id)
+            {
+                duplicate_space = true;
+                break;
+            }
+        }
+        if !duplicate_space {
+            return Ok(());
+        }
+        if network_expands {
+            return Err(overlap_error());
+        }
+    }
+
+    for vpc in vpcs {
+        if vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn {
+            continue;
+        }
+        // An Instance attachment replaces the VPC default. Apply the
+        // requested attachment to old interfaces too: they can remain active
+        // until the network update is acknowledged.
+        if let Some(nsg_id) = candidate
+            .network_security_group_id
+            .as_ref()
+            .or(vpc.config.network_security_group_id.as_ref())
+        {
+            let nsg = db::network_security_group::find_by_ids(
+                txn,
+                std::slice::from_ref(nsg_id),
+                None,
+                false,
+            )
+            .await?
+            .pop()
+            .ok_or_else(policy_error)?;
+            if !nsg_policy_is_safe(
+                &nsg.rules,
+                nsg.stateful_egress,
+                api.runtime_config
+                    .network_security_group
+                    .stateful_acls_enabled,
+            ) {
+                return Err(policy_error());
+            }
+        }
+        // A safe NSG replacement cannot add routing visibility. It remains
+        // available to restrict a retained configuration, including gate-off.
+        if !network_expands {
+            continue;
+        }
+        let fnn = api.runtime_config.fnn.as_ref().ok_or_else(policy_error)?;
+        if !fnn
+            .resolve_vpc_routing_profile(&vpc.config)?
+            .is_eligible_for_tenant_prefix_overlap()
+            || !api.runtime_config.anycast_site_prefixes.is_empty()
+            || !nsg_policy_is_safe(
+                &api.runtime_config.network_security_group.policy_overrides,
+                false,
+                api.runtime_config
+                    .network_security_group
+                    .stateful_acls_enabled,
+            )
+        {
+            return Err(policy_error());
+        }
+    }
+    Ok(())
+}
+
+/// `validate_vpc_policy` checks a changed VPC policy against the tenant
+/// interfaces that use it. Each flag identifies a policy change not proven
+/// safe or nonexpanding. The caller holds the overlap lock before locking
+/// the VPC and NSG, and keeps it through the write.
+pub(super) async fn validate_vpc_policy(
+    api: &Api,
+    txn: &mut PgConnection,
+    candidate: &Vpc,
+    profile_requires_check: bool,
+    nsg_requires_check: bool,
+) -> CarbideResult<()> {
+    if !api.runtime_config.tenant_prefix_overlap_enabled
+        || candidate.config.network_virtualization_type != VpcVirtualizationType::Fnn
+    {
+        return Ok(());
+    }
+    if !profile_requires_check && !nsg_requires_check {
+        return Ok(());
+    }
+
+    for host in load_policy_hosts(txn, &[candidate.id], &[]).await? {
+        if !serves_tenant_network(&host) {
+            continue;
+        }
+        let vpcs = retained_policy_vpcs(txn, &host).await?;
+        if !vpcs.iter().any(|vpc| vpc.id == candidate.id) {
+            continue;
+        }
+        if profile_requires_check
+            || (nsg_requires_check
+                && host
+                    .instance
+                    .as_ref()
+                    .is_some_and(|instance| instance.config.network_security_group_id.is_none())
+                && effective_nsg(&host, candidate.config.network_security_group_id.as_ref())
+                    == candidate.config.network_security_group_id.as_ref())
+        {
+            tracing::warn!(vpc_id = %candidate.id, machine_id = %host.host_snapshot.id,
+                "VPC policy would make tenant prefix reuse unsafe");
+            return Err(policy_error());
+        }
+    }
+    Ok(())
+}
+
+/// `validate_nsg_policy` checks an unsafe NSG replacement only where that NSG
+/// is effective. The caller holds the overlap lock and the NSG row lock.
+pub(super) async fn validate_nsg_policy(
+    api: &Api,
+    txn: &mut PgConnection,
+    id: &NetworkSecurityGroupId,
+) -> CarbideResult<()> {
+    if !api.runtime_config.tenant_prefix_overlap_enabled {
+        return Ok(());
+    }
+    let attachments = db::network_security_group::find_retained_attachments(txn, id).await?;
+    for host in load_policy_hosts(txn, &attachments.vpc_ids, &attachments.instance_ids).await? {
+        if !serves_tenant_network(&host) {
+            continue;
+        }
+        for vpc in retained_policy_vpcs(txn, &host).await? {
+            if vpc.config.network_virtualization_type == VpcVirtualizationType::Fnn
+                && effective_nsg(&host, vpc.config.network_security_group_id.as_ref()) == Some(id)
+            {
+                tracing::warn!(network_security_group_id = %id, vpc_id = %vpc.id,
+                    "NSG policy would make tenant prefix reuse unsafe");
+                return Err(policy_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn serves_tenant_network(host: &ManagedHostStateSnapshot) -> bool {
+    host.instance.is_some()
+        && host.has_managed_dpus()
+        && !host.use_admin_network()
+        && !matches!(
+            host.managed_state,
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
+            }
+        )
+}
+
+fn effective_nsg<'a>(
+    host: &'a ManagedHostStateSnapshot,
+    vpc_nsg: Option<&'a NetworkSecurityGroupId>,
+) -> Option<&'a NetworkSecurityGroupId> {
+    // Discovery still uses the tenant routing profile, but omits tenant NSGs.
+    if matches!(
+        host.managed_state,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::BootingWithDiscoveryImage { .. },
+        }
+    ) {
+        return None;
+    }
+    host.instance
+        .as_ref()
+        .and_then(|instance| instance.config.network_security_group_id.as_ref())
+        .or(vpc_nsg)
+}
+
+async fn load_policy_hosts(
+    txn: &mut PgConnection,
+    vpc_ids: &[VpcId],
+    instance_ids: &[InstanceId],
+) -> CarbideResult<Vec<ManagedHostStateSnapshot>> {
+    let mut instance_ids: HashSet<_> = instance_ids.iter().copied().collect();
+    for vpc_id in vpc_ids {
+        instance_ids.extend(
+            db::instance::find_ids(
+                &mut *txn,
+                InstanceSearchFilter {
+                    vpc_id: Some(vpc_id.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?,
+        );
+    }
+    if instance_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let instance_ids = instance_ids.into_iter().collect::<Vec<_>>();
+    Ok(
+        db::managed_host::load_by_instance_ids(txn, &instance_ids, LoadSnapshotOptions::default())
+            .await?,
+    )
+}
+
+async fn retained_policy_vpcs(
+    txn: &mut PgConnection,
+    host: &ManagedHostStateSnapshot,
+) -> CarbideResult<Vec<Vpc>> {
+    let Some(instance) = &host.instance else {
+        return Ok(Vec::new());
+    };
+    // A queued network change can start serving its new interfaces without
+    // another API request. The old interfaces remain until DPU acknowledgement.
+    let configs = std::iter::once(&instance.config.network).chain(
+        instance
+            .update_network_config_request
+            .iter()
+            .flat_map(|update| [&update.old_config, &update.new_config]),
+    );
+    let mut vpc_ids = HashSet::new();
+    let mut segment_ids = HashSet::new();
+    for interface in configs.flat_map(|config| &config.interfaces) {
+        let has_dpu =
+            host.dpu_snapshots
+                .iter()
+                .any(|dpu| match interface.device_locator.as_ref() {
+                    None => host.host_snapshot.primary_attached_dpu_machine_id() == Some(dpu.id),
+                    Some(locator) => host
+                        .host_snapshot
+                        .get_device_locator_for_dpu_id(&dpu.id)
+                        .is_ok_and(|device| device == *locator),
+                });
+        if !has_dpu {
+            continue;
+        }
+        // Allocation records the VPC before staging a network update. Legacy
+        // interfaces derive their VPC from the segment instead.
+        if let Some(vpc_id) = interface.vpc_id {
+            vpc_ids.insert(vpc_id);
+        } else if let Some(segment_id) = interface.network_segment_id {
+            segment_ids.insert(segment_id);
+        }
+    }
+    let mut vpcs = Vec::new();
+    for segment_id in segment_ids {
+        let vpc = db::vpc::find_by_segment(&mut *txn, segment_id)
+            .await?
+            .ok_or_else(policy_error)?;
+        if vpc_ids.insert(vpc.id) {
+            vpcs.push(vpc);
+        }
+    }
+    let loaded_ids: HashSet<_> = vpcs.iter().map(|vpc| vpc.id).collect();
+    let direct_ids = vpc_ids.difference(&loaded_ids).copied().collect::<Vec<_>>();
+    if !direct_ids.is_empty() {
+        vpcs.extend(
+            db::vpc::find_by(
+                txn,
+                ObjectColumnFilter::List(db::vpc::IdColumn, &direct_ids),
+            )
+            .await?,
+        );
+    }
+    Ok(vpcs)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use carbide_network::virtualization::VpcVirtualizationType;
     use carbide_test_support::{Check, check_values};
+    use carbide_uuid::network::NetworkSegmentId;
     use carbide_uuid::site_prefix::SitePrefixId;
     use carbide_uuid::vpc::VpcId;
     use chrono::Utc;
     use config_version::ConfigVersion;
     use model::metadata::Metadata;
+    use model::network_security_group::{
+        NetworkSecurityGroupRuleDirection, NetworkSecurityGroupRuleNet,
+        NetworkSecurityGroupRuleProtocol,
+    };
     use model::site_prefix::{SitePrefixConfig, SitePrefixStatus};
     use model::vpc::{VpcConfig, VpcStatus};
 
     use super::*;
-    use crate::cfg::file::{FnnConfig, FnnRoutingProfileConfig};
+    use crate::cfg::file::{
+        FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry, RouteTargetConfig,
+    };
+
+    #[test]
+    fn instance_network_contraction_keeps_retained_interface_intent() {
+        let segment_ids = [NetworkSegmentId::new(), NetworkSegmentId::new()];
+        let current = InstanceNetworkConfig::for_segment_ids(&segment_ids, &[], &[]);
+        let mut removed = current.clone();
+        removed.interfaces.clear();
+        let mut changed = current.clone();
+        changed.interfaces[0].network_segment_id = Some(segment_ids[1]);
+        changed.interfaces[0].network_details = None;
+        let mut expanded = current.clone();
+        expanded.interfaces.push(current.interfaces[0].clone());
+
+        check_values(
+            [
+                Check {
+                    scenario: "unchanged",
+                    input: current.clone(),
+                    expect: true,
+                },
+                Check {
+                    scenario: "removed interface",
+                    input: removed,
+                    expect: true,
+                },
+                Check {
+                    scenario: "changed network",
+                    input: changed,
+                    expect: false,
+                },
+                Check {
+                    scenario: "duplicated interface is not contraction",
+                    input: expanded,
+                    expect: false,
+                },
+            ],
+            |candidate| instance_network_is_nonexpanding(&current, &candidate),
+        );
+    }
 
     /// Test-specific enum that selects one eligibility rule to vary.
     #[derive(Clone, Copy, Debug)]
@@ -267,6 +871,168 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn nsg_contractions_preserve_denies_and_stateful_matches() {
+        let rule = |id: &str, port, action| NetworkSecurityGroupRule {
+            id: Some(id.to_string()),
+            src_net: NetworkSecurityGroupRuleNet::Prefix("0.0.0.0/0".parse().unwrap()),
+            dst_net: NetworkSecurityGroupRuleNet::Prefix("0.0.0.0/0".parse().unwrap()),
+            direction: NetworkSecurityGroupRuleDirection::Egress,
+            ipv6: false,
+            src_port_start: None,
+            src_port_end: None,
+            dst_port_start: Some(port),
+            dst_port_end: Some(port),
+            protocol: NetworkSecurityGroupRuleProtocol::Tcp,
+            action,
+            priority: 100,
+        };
+        let permit_http = rule("http", 80, NetworkSecurityGroupRuleAction::Permit);
+        let deny_https = rule("deny-https", 443, NetworkSecurityGroupRuleAction::Deny);
+        let permit_https = rule("permit-https", 443, NetworkSecurityGroupRuleAction::Permit);
+        let previous = NetworkSecurityGroup {
+            id: "d1d2a22e-2472-4aab-8ea0-7eb3375e4739".parse().unwrap(),
+            tenant_organization_id: "policy-test".parse().unwrap(),
+            stateful_egress: true,
+            rules: vec![
+                permit_http.clone(),
+                deny_https.clone(),
+                permit_https.clone(),
+            ],
+            version: ConfigVersion::initial(),
+            created: Utc::now(),
+            deleted: None,
+            metadata: Metadata::default(),
+            created_by: None,
+            updated_by: None,
+        };
+        check_values(
+            [
+                Check {
+                    scenario: "remove only a permit while another remains",
+                    input: (vec![deny_https.clone(), permit_https.clone()], true),
+                    expect: true,
+                },
+                Check {
+                    scenario: "removing a deny exposes the later permit",
+                    input: (vec![permit_http.clone(), permit_https.clone()], true),
+                    expect: false,
+                },
+                Check {
+                    scenario: "a priority tie preserves input order",
+                    input: (vec![permit_http, permit_https, deny_https], true),
+                    expect: false,
+                },
+                Check {
+                    scenario: "disabling statefulness broadens remaining egress matches",
+                    input: (previous.rules.clone(), false),
+                    expect: false,
+                },
+            ],
+            |(rules, stateful)| nsg_policy_is_nonexpanding(&previous, &rules, stateful, true),
+        );
+    }
+
+    #[test]
+    fn routing_profile_contractions_use_effective_policy() {
+        let target_a = RouteTargetConfig {
+            asn: 65000,
+            vni: 100,
+        };
+        let target_b = RouteTargetConfig {
+            asn: 65000,
+            vni: 200,
+        };
+        let previous = FnnRoutingProfileConfig {
+            tenant_prefix_overlap_eligible: true,
+            internal: Some(true),
+            route_target_imports: Some(vec![target_a, target_b.clone()]),
+            ..Default::default()
+        };
+        let explicit_defaults = FnnRoutingProfileConfig {
+            route_targets_on_exports: Some(vec![]),
+            leak_default_route_from_underlay: Some(false),
+            leak_tenant_host_routes_to_underlay: Some(false),
+            tenant_leak_communities_accepted: Some(false),
+            accepted_leaks_from_underlay: Some(vec![]),
+            allowed_anycast_prefixes: Some(vec![]),
+            ..previous.clone()
+        };
+        let broad_prefix = PrefixFilterPolicyEntry {
+            prefix: "10.0.0.0/16".parse().unwrap(),
+        };
+        let narrow_prefix = PrefixFilterPolicyEntry {
+            prefix: "10.0.1.0/24".parse().unwrap(),
+        };
+        let with_prefixes = FnnRoutingProfileConfig {
+            accepted_leaks_from_underlay: Some(vec![broad_prefix.clone()]),
+            allowed_anycast_prefixes: Some(vec![broad_prefix]),
+            ..previous.clone()
+        };
+        let narrowed = FnnRoutingProfileConfig {
+            accepted_leaks_from_underlay: Some(vec![narrow_prefix.clone()]),
+            allowed_anycast_prefixes: Some(vec![narrow_prefix]),
+            ..previous.clone()
+        };
+        let otherwise_eligible = FnnRoutingProfileConfig {
+            tenant_prefix_overlap_eligible: true,
+            internal: Some(true),
+            ..Default::default()
+        };
+        check_values(
+            [
+                Check {
+                    scenario: "explicit false and empty values preserve omitted defaults",
+                    input: (previous.clone(), explicit_defaults, vec![]),
+                    expect: true,
+                },
+                Check {
+                    scenario: "remove one import while another remains",
+                    input: (
+                        previous.clone(),
+                        FnnRoutingProfileConfig {
+                            route_target_imports: Some(vec![target_b]),
+                            ..previous
+                        },
+                        vec![],
+                    ),
+                    expect: true,
+                },
+                Check {
+                    scenario: "prefix filters narrow without removing other imports",
+                    input: (with_prefixes.clone(), narrowed, vec![]),
+                    expect: true,
+                },
+                Check {
+                    scenario: "disabling community handling can newly export a route",
+                    input: (
+                        FnnRoutingProfileConfig {
+                            tenant_leak_communities_accepted: Some(true),
+                            ..with_prefixes.clone()
+                        },
+                        with_prefixes.clone(),
+                        vec![],
+                    ),
+                    expect: false,
+                },
+                Check {
+                    scenario: "empty IPv4 anycast exposes legacy fallback even with an eligible profile",
+                    input: (
+                        with_prefixes,
+                        otherwise_eligible,
+                        vec!["10.0.0.0/8".parse().unwrap()],
+                    ),
+                    expect: false,
+                },
+            ],
+            |(previous, candidate, legacy_anycast)| {
+                let mut config = eligible_config();
+                config.anycast_site_prefixes = legacy_anycast;
+                routing_profile_is_nonexpanding(&config, &previous, &candidate)
+            },
+        );
     }
 
     /// Test-specific function that checks each pair eligibility rule from an eligible pair.

@@ -6,6 +6,28 @@ global:
       group: cert-manager.io
 
 nico-api:
+  siteConfig:
+    adminRootCertPem: |
+      -----BEGIN CERTIFICATE-----
+      MIIDPjCCAiagAwIBAgIUUK8LQ2ST54BMPRMKgXUvE6AYntowDQYJKoZIhvcNAQEL
+      BQAwGTEXMBUGA1UEAxMObG9jYWwtdmF1bHQtY2EwHhcNMjYwOTA5MjEyOTEzWhcN
+      MjYxMDExMjEyOTQzWjAZMRcwFQYDVQQDEw5sb2NhbC12YXVsdC1jYTCCASIwDQYJ
+      KoZIhvcNAQEBBQADggEPADCCAQoCggEBALR7OKVdihDftnb8uMeS/7GaoFlrL6e8
+      R/zG81n4hlMKUZPKdG8HgJmw6HvZ4PyzqDZqhKPoFP76xCDk0epVtyIpyKC1ZPl7
+      hk4unHTVmQX4WKEVv5nr3oDAkItvJ6ThJEIMMSa0oQdE56zag7vN9I1WNj9R1iuM
+      JrHQIAEGST5pRTZ+9HUi5UorUBSnZghHRC69x4KhtMIGnX2HyHdQ7NF+dW53pjDS
+      zvLHxbjkVqgzRiGPSBsz/H+BxZilba7vQF1zo2r0v8JqcLp/VXTsDZAzHhiLH/wN
+      sPtR4CUrsp5Nrl/N3cbUT5w12lYtPDxFhF/CFPr1uyEGrW2hPqZhyksCAwEAAaN+
+      MHwwDgYDVR0PAQH/BAQDAgEGMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFGpw
+      LZt1t7ywhFXHtFFaPfP2Ek7KMB8GA1UdIwQYMBaAFGpwLZt1t7ywhFXHtFFaPfP2
+      Ek7KMBkGA1UdEQQSMBCCDmxvY2FsLXZhdWx0LWNhMA0GCSqGSIb3DQEBCwUAA4IB
+      AQCp5+JKZRg3Me2tjPYlmLZ/VxwPygAywzGZkFF3LwYyWqYsgpPzlcBDLGqfkeci
+      WCY+eY5PjyIpRc9nICdRPh6oK7FAkLmDaCFQWZYBcQoo5WXS4FuqkKU6aUuixNs7
+      gY+SSA4D+4Kx+zTHPu+0BVjiljX8OyGQdvpmWYDtUoVYMZ1Fi9rE1E8XveyZpWNS
+      NuNy5MZxiKBAE4e3RiLLsuyHGhoVilNGPUnWunFdx5ouDtbUIRWCz4lZ942aQoBy
+      ivJ5NA1BnRrXflpR96UF2byy6XBwCeuHmOdjWeQVzhwNEsoZxdStL2O+/WrjgeRm
+      lVKLtZq/yKKgQdcMujrRjh5J
+      -----END CERTIFICATE-----
   automountServiceAccountToken: false
   migrationJob:
     enabled: true

@@ -355,7 +355,7 @@ const (
 	Forge_UpdateMachineValidationRun_FullMethodName                         = "/forge.Forge/UpdateMachineValidationRun"
 	Forge_AdminBmcReset_FullMethodName                                      = "/forge.Forge/AdminBmcReset"
 	Forge_AdminPowerControl_FullMethodName                                  = "/forge.Forge/AdminPowerControl"
-	Forge_AdminGpuReset_FullMethodName                                      = "/forge.Forge/AdminGpuReset"
+	Forge_AdminChassisReset_FullMethodName                                  = "/forge.Forge/AdminChassisReset"
 	Forge_DisableSecureBoot_FullMethodName                                  = "/forge.Forge/DisableSecureBoot"
 	Forge_Lockdown_FullMethodName                                           = "/forge.Forge/Lockdown"
 	Forge_LockdownStatus_FullMethodName                                     = "/forge.Forge/LockdownStatus"
@@ -1119,8 +1119,22 @@ type ForgeClient interface {
 	AdminBmcReset(ctx context.Context, in *AdminBmcResetRequest, opts ...grpc.CallOption) (*AdminBmcResetResponse, error)
 	// Admin Power Control
 	AdminPowerControl(ctx context.Context, in *AdminPowerControlRequest, opts ...grpc.CallOption) (*AdminPowerControlResponse, error)
-	// Reset a GPU baseboard (e.g. HGX) via Redfish Chassis.Reset, resetting all GPUs on it; v1 accepts only ForceRestart and rejects all other actions.
-	AdminGpuReset(ctx context.Context, in *AdminGpuResetRequest, opts ...grpc.CallOption) (*AdminGpuResetResponse, error)
+	// Queues a Redfish Chassis.Reset request for later execution by the machine
+	// controller through Maintenance state. Success means the request was accepted,
+	// not that the reset completed. Requests are accepted only for hosts in Ready.
+	// The controller returns the host to Ready after the Redfish command succeeds,
+	// and to Failed if execution fails.
+	// Operator maintenance must be enabled with SetMaintenance and is preserved
+	// after execution. Disable it only after verifying target chassis readiness.
+	//
+	// v1 accepts only ForceRestart. An omitted action has proto3's On default and
+	// is rejected with INVALID_ARGUMENT, as are a missing/invalid machine_id or
+	// missing chassis_id.
+	// NOT_FOUND means the machine does not exist. FAILED_PRECONDITION means
+	// operator maintenance is disabled, an instance exists, or the host is not in Ready.
+	//
+	// This replaces the unused AdminGpuReset RPC; no compatibility alias is kept.
+	AdminChassisReset(ctx context.Context, in *AdminChassisResetRequest, opts ...grpc.CallOption) (*AdminChassisResetResponse, error)
 	// Disable Secure Boot
 	DisableSecureBoot(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*DisableSecureBootResponse, error)
 	// Set Lockdown (Enable or Disable)
@@ -4762,10 +4776,10 @@ func (c *forgeClient) AdminPowerControl(ctx context.Context, in *AdminPowerContr
 	return out, nil
 }
 
-func (c *forgeClient) AdminGpuReset(ctx context.Context, in *AdminGpuResetRequest, opts ...grpc.CallOption) (*AdminGpuResetResponse, error) {
+func (c *forgeClient) AdminChassisReset(ctx context.Context, in *AdminChassisResetRequest, opts ...grpc.CallOption) (*AdminChassisResetResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AdminGpuResetResponse)
-	err := c.cc.Invoke(ctx, Forge_AdminGpuReset_FullMethodName, in, out, cOpts...)
+	out := new(AdminChassisResetResponse)
+	err := c.cc.Invoke(ctx, Forge_AdminChassisReset_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6976,8 +6990,22 @@ type ForgeServer interface {
 	AdminBmcReset(context.Context, *AdminBmcResetRequest) (*AdminBmcResetResponse, error)
 	// Admin Power Control
 	AdminPowerControl(context.Context, *AdminPowerControlRequest) (*AdminPowerControlResponse, error)
-	// Reset a GPU baseboard (e.g. HGX) via Redfish Chassis.Reset, resetting all GPUs on it; v1 accepts only ForceRestart and rejects all other actions.
-	AdminGpuReset(context.Context, *AdminGpuResetRequest) (*AdminGpuResetResponse, error)
+	// Queues a Redfish Chassis.Reset request for later execution by the machine
+	// controller through Maintenance state. Success means the request was accepted,
+	// not that the reset completed. Requests are accepted only for hosts in Ready.
+	// The controller returns the host to Ready after the Redfish command succeeds,
+	// and to Failed if execution fails.
+	// Operator maintenance must be enabled with SetMaintenance and is preserved
+	// after execution. Disable it only after verifying target chassis readiness.
+	//
+	// v1 accepts only ForceRestart. An omitted action has proto3's On default and
+	// is rejected with INVALID_ARGUMENT, as are a missing/invalid machine_id or
+	// missing chassis_id.
+	// NOT_FOUND means the machine does not exist. FAILED_PRECONDITION means
+	// operator maintenance is disabled, an instance exists, or the host is not in Ready.
+	//
+	// This replaces the unused AdminGpuReset RPC; no compatibility alias is kept.
+	AdminChassisReset(context.Context, *AdminChassisResetRequest) (*AdminChassisResetResponse, error)
 	// Disable Secure Boot
 	DisableSecureBoot(context.Context, *BmcEndpointRequest) (*DisableSecureBootResponse, error)
 	// Set Lockdown (Enable or Disable)
@@ -8287,8 +8315,8 @@ func (UnimplementedForgeServer) AdminBmcReset(context.Context, *AdminBmcResetReq
 func (UnimplementedForgeServer) AdminPowerControl(context.Context, *AdminPowerControlRequest) (*AdminPowerControlResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AdminPowerControl not implemented")
 }
-func (UnimplementedForgeServer) AdminGpuReset(context.Context, *AdminGpuResetRequest) (*AdminGpuResetResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method AdminGpuReset not implemented")
+func (UnimplementedForgeServer) AdminChassisReset(context.Context, *AdminChassisResetRequest) (*AdminChassisResetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AdminChassisReset not implemented")
 }
 func (UnimplementedForgeServer) DisableSecureBoot(context.Context, *BmcEndpointRequest) (*DisableSecureBootResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DisableSecureBoot not implemented")
@@ -14766,20 +14794,20 @@ func _Forge_AdminPowerControl_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_AdminGpuReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AdminGpuResetRequest)
+func _Forge_AdminChassisReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdminChassisResetRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).AdminGpuReset(ctx, in)
+		return srv.(ForgeServer).AdminChassisReset(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_AdminGpuReset_FullMethodName,
+		FullMethod: Forge_AdminChassisReset_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).AdminGpuReset(ctx, req.(*AdminGpuResetRequest))
+		return srv.(ForgeServer).AdminChassisReset(ctx, req.(*AdminChassisResetRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -18989,8 +19017,8 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_AdminPowerControl_Handler,
 		},
 		{
-			MethodName: "AdminGpuReset",
-			Handler:    _Forge_AdminGpuReset_Handler,
+			MethodName: "AdminChassisReset",
+			Handler:    _Forge_AdminChassisReset_Handler,
 		},
 		{
 			MethodName: "DisableSecureBoot",

@@ -437,7 +437,11 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 				// validate response fields
 				assert.Equal(t, len(rsp.StatusHistory), 1)
 				assert.Equal(t, rsp.Name, tc.reqBodyModel.Name)
-				assert.Equal(t, rsp.Labels, tc.reqBodyModel.Labels)
+				wantLabels := tc.reqBodyModel.Labels
+				if wantLabels == nil {
+					wantLabels = map[string]string{}
+				}
+				assert.Equal(t, wantLabels, map[string]string(rsp.Labels))
 				assert.Equal(t, rsp.Status, cdbm.InfiniBandPartitionStatusPending)
 			}
 			if tc.verifyChildSpanner {

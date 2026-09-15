@@ -16,6 +16,7 @@
  */
 
 use carbide_uuid::machine::MachineId;
+use config_version::ConfigVersion;
 use itertools::Itertools;
 use model::attestation::spdm::{
     CaCertificate, Evidence, SpdmAttestationState, SpdmAttestationStatus, SpdmDeviceAttestation,
@@ -472,41 +473,37 @@ pub async fn persist_outcome(
     Ok(())
 }
 
-/// stores the controller state inside device attestation
-/// if the state has changed, the ConfigVersion is incremented
+/// `persist_controller_state` writes the state and supplied replacement version
+/// only when the device's state version matches `old_version`.
+///
+/// Returns `false` for a missing device or changed version; database failures
+/// remain errors. An accepted write stores `new_version` even when the state
+/// itself is unchanged. The caller owns the transaction and its commit.
 pub async fn persist_controller_state(
     txn: &mut PgConnection,
     object_id: &SpdmObjectId,
+    old_version: ConfigVersion,
+    new_version: ConfigVersion,
     new_state: &SpdmAttestationState,
 ) -> Result<bool, DatabaseError> {
-    // fetch the existing device attestation to access its ConfigVersion
-    let device_attestation =
-        load_snapshot_for_machine_and_device_id(txn, &object_id.0, &object_id.1).await?;
-
-    // increment ConfigVersion if the state has changed
-    let new_version = if &device_attestation.state != new_state {
-        device_attestation.state_version.increment()
-    } else {
-        device_attestation.state_version
-    };
-
     let query = r#"
             UPDATE 
                 spdm_machine_devices_attestation
             SET state= $1, state_version=$2
-            WHERE machine_id = $3 AND device_id = $4
+            WHERE machine_id = $3 AND device_id = $4 AND state_version = $5
         "#;
-    let _rows_affected = sqlx::query(query)
+    let rows_affected = sqlx::query(query)
         .bind(sqlx::types::Json(new_state))
         .bind(new_version)
         .bind(object_id.0)
         .bind(object_id.1.clone())
+        .bind(old_version)
         .execute(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?
         .rows_affected();
 
-    Ok(true)
+    Ok(rows_affected > 0)
 }
 
 pub async fn update_history(

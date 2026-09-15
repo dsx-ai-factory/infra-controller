@@ -146,23 +146,48 @@ impl StateHandler for TestRackStateHandler {
 }
 
 fn validate_state_change_history(histories: &[StateHistoryRecord], expected: &[&str]) -> bool {
-    let parsed_histories = histories
+    let mut parsed_histories = histories
         .iter()
-        .filter_map(|history| serde_json::from_str::<serde_json::Value>(&history.state).ok())
-        .collect::<Vec<_>>();
+        .filter_map(|history| serde_json::from_str::<serde_json::Value>(&history.state).ok());
 
-    for &state in expected {
+    // Each search resumes after its match. Expected states therefore require
+    // distinct records in order, while unrelated records may appear anywhere.
+    expected.iter().all(|state| {
         let Ok(expected_state) = serde_json::from_str::<serde_json::Value>(state) else {
             return false;
         };
-        if !parsed_histories
-            .iter()
-            .any(|history| history == &expected_state)
-        {
-            return false;
-        }
-    }
-    true
+
+        parsed_histories.any(|history| history == expected_state)
+    })
+}
+
+#[test]
+fn validate_state_change_history_requires_distinct_ordered_records() {
+    const DISCOVERING: &str = r#"{"state":"discovering"}"#;
+    const MAINTENANCE: &str = r#"{"state":"maintenance"}"#;
+
+    let histories = [DISCOVERING, r#"{"state":"unrelated"}"#, MAINTENANCE]
+        .into_iter()
+        .map(|state| StateHistoryRecord {
+            state: state.to_string(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(validate_state_change_history(
+        &histories,
+        &[DISCOVERING, MAINTENANCE]
+    ));
+
+    assert!(!validate_state_change_history(
+        &histories,
+        &[MAINTENANCE, DISCOVERING]
+    ));
+
+    assert!(!validate_state_change_history(
+        &histories,
+        &[DISCOVERING, DISCOVERING]
+    ));
 }
 
 #[crate::sqlx_test]
@@ -266,13 +291,15 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 
     //--------------------------------------------------------------------------
 
-    // Iterations 3-6: FirmwareUpgrade(Start) -> Validating(Pending).
+    // Iterations 3-7: FirmwareUpgrade(Start) -> Validating(Pending).
     //
     // Simple rack has no switches, so the real handler takes a shortened path:
     // FirmwareUpgrade(Start) skips (no firmware-object JSON configured)
+    // -> NVOSUpdate(Start) skips (no switches)
     // -> ConfigureNmxCluster(Start) skips (no switches)
     // -> PowerSequence(PoweringOn) -> Completed -> Validating(Pending).
-    controller.run_single_iteration().await; // FirmwareUpgrade(Start) -> ConfigureNmxCluster(Start)
+    controller.run_single_iteration().await; // FirmwareUpgrade(Start) -> NVOSUpdate(Start)
+    controller.run_single_iteration().await; // NVOSUpdate(Start) -> ConfigureNmxCluster(Start)
     controller.run_single_iteration().await; // ConfigureNmxCluster(Start) -> PowerSequence(PoweringOn)
     controller.run_single_iteration().await; // PowerSequence(PoweringOn) -> Completed
     controller.run_single_iteration().await; // Completed -> Validating(Pending)
@@ -291,7 +318,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 
     //--------------------------------------------------------------------------
 
-    // --- Setup for iterations 7-10: Validation states ---
+    // --- Setup for iterations 8-11: Validation states ---
     //
     // Set rv.* labels on both compute trays so the real handler can drive the
     // validation sub-state machine. Both machines are assigned to the same
@@ -321,7 +348,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
         txn.commit().await?;
     }
 
-    // Iteration 7: Validating(Pending) -> Validating(InProgress).
+    // Iteration 8: Validating(Pending) -> Validating(InProgress).
     // The handler finds rv.run-id on a machine and promotes to InProgress.
     controller.run_single_iteration().await;
 
@@ -339,7 +366,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 
     //--------------------------------------------------------------------------
 
-    // Iteration 8: Validating(InProgress) -> Validating(Partial).
+    // Iteration 9: Validating(InProgress) -> Validating(Partial).
     // Partition p0 has validated > 0 (both nodes pass), so InProgress -> Partial.
     controller.run_single_iteration().await;
 
@@ -357,7 +384,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 
     //--------------------------------------------------------------------------
 
-    // Iteration 9: Validating(Partial) -> Validating(Validated).
+    // Iteration 10: Validating(Partial) -> Validating(Validated).
     // validated(1) == total_partitions(1) -> Validated.
     controller.run_single_iteration().await;
 
@@ -375,7 +402,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
 
     //--------------------------------------------------------------------------
 
-    // Iteration 10: Validating(Validated) -> Ready.
+    // Iteration 11: Validating(Validated) -> Ready.
     controller.run_single_iteration().await;
 
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
@@ -404,6 +431,7 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
     let expected = vec![
         "{\"state\": \"discovering\"}",
         "{\"state\": \"maintenance\", \"maintenance_state\": {\"FirmwareUpgrade\": {\"rack_firmware_upgrade\": \"Start\"}}}",
+        "{\"state\": \"maintenance\", \"maintenance_state\": {\"NVOSUpdate\": {\"nvos_update\": \"Start\"}}}",
         "{\"state\": \"maintenance\", \"maintenance_state\": {\"ConfigureNmxCluster\": {\"configure_nmx_cluster\": \"Start\"}}}",
         "{\"state\": \"maintenance\", \"maintenance_state\": {\"PowerSequence\": {\"rack_power\": \"PoweringOn\"}}}",
         "{\"state\": \"maintenance\", \"maintenance_state\": \"Completed\"}",

@@ -151,7 +151,7 @@ type APIExpectedRack struct {
 	Description string `json:"description"`
 	// Labels carries arbitrary key/value pairs. Well-known keys (chassis.*,
 	// location.*) are used to convey chassis identity and physical location.
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// Created indicates the ISO datetime string for when the ExpectedRack was created
 	Created time.Time `json:"created"`
 	// Updated indicates the ISO datetime string for when the ExpectedRack was last updated
@@ -171,7 +171,7 @@ func NewAPIExpectedRack(dbModel *cdbm.ExpectedRack) *APIExpectedRack {
 		RackProfileID: dbModel.RackProfileID,
 		Name:          dbModel.Name,
 		Description:   dbModel.Description,
-		Labels:        dbModel.Labels,
+		Labels:        APILabels(dbModel.Labels),
 		Created:       dbModel.Created,
 		Updated:       dbModel.Updated,
 	}

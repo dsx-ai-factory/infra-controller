@@ -17,10 +17,12 @@
 use std::collections::HashMap;
 
 use carbide_uuid::machine::{DpuMachineId, MachineId};
-use carbide_uuid::vpc::VpcId;
+use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use carbide_uuid::vpc_peering::VpcPeeringId;
+use config_version::ConfigVersion;
 use futures_util::{FutureExt, TryFutureExt};
 use model::metadata::Metadata;
+use model::vpc_prefix::{DeleteVpcPrefix, NewVpcPrefix, VpcPrefixConfig};
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{
     ManagedHostNetworkConfigRequest, VpcPeeringCreationRequest, VpcPeeringDeletionRequest,
@@ -31,6 +33,7 @@ use tonic::{IntoRequest, Request, Response, Status};
 use uuid::Uuid;
 
 use super::common::api_fixtures::{self, TestEnv, TestManagedHost};
+use crate::cfg::file::VpcPeeringPolicy;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common::api_fixtures::instance::default_tenant_config;
 use crate::tests::common::api_fixtures::network_segment::{
@@ -40,6 +43,7 @@ use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host, create_test_env, create_test_env_with_overrides,
 };
+use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 async fn create_test_vpcs(
@@ -262,6 +266,254 @@ async fn test_create_vpc_peering(pool: PgPool) -> Result<(), Box<dyn std::error:
 
     assert!(response.is_ok());
 
+    Ok(())
+}
+
+async fn create_peering_overlap_fixture(
+    pool: PgPool,
+    existing_policy: Option<VpcPeeringPolicy>,
+    source_type: VpcVirtualizationType,
+) -> Result<(TestEnv, Vec<rpc::forge::Vpc>), Box<dyn std::error::Error>> {
+    let mut config = crate::test_support::default_config::get();
+    config.tenant_prefix_overlap_enabled = true;
+    config.vpc_peering_policy = Some(VpcPeeringPolicy::Mixed);
+    config.vpc_peering_policy_on_existing = existing_policy;
+    let mut overrides = TestEnvOverrides::with_config(config);
+    if source_type == VpcVirtualizationType::Fnn {
+        overrides = overrides.with_fnn_config(None);
+    }
+    overrides.site_prefixes = Some(vec!["10.0.0.0/8".parse()?]);
+    overrides.create_network_segments = Some(false);
+    let env = create_test_env_with_overrides(pool, overrides).await;
+    let mut vpcs = Vec::new();
+    for (index, (name, virtualization_type)) in [
+        ("receiver", VpcVirtualizationType::EthernetVirtualizer),
+        ("segment source", source_type),
+        ("retained prefix source", source_type),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let tenant_id = format!("tenant-{index}");
+        if virtualization_type == VpcVirtualizationType::Fnn {
+            create_fixture_tenant(&env, tenant_id.clone()).await?;
+        }
+        vpcs.push(
+            env.api
+                .create_vpc(
+                    VpcCreationRequest::builder(tenant_id)
+                        .metadata(Metadata {
+                            name: name.to_string(),
+                            ..Default::default()
+                        })
+                        .network_virtualization_type(virtualization_type)
+                        .tonic_request(),
+                )
+                .await?
+                .into_inner(),
+        );
+    }
+    let segment_source_id = vpcs[1].id.unwrap();
+    create_tenant_network_segment(
+        &env.api,
+        Some(segment_source_id),
+        "10.120.1.1/24".parse()?,
+        "direct segment prefix",
+        false,
+    )
+    .await;
+    Ok((env, vpcs))
+}
+
+async fn retain_peering_overlap_prefix(
+    txn: &mut sqlx::PgConnection,
+    source: &rpc::forge::Vpc,
+) -> Result<VpcPrefixId, Box<dyn std::error::Error>> {
+    // Separate table constraints permit this mixed-table fixture. Normal
+    // prefix creation rejects it; no global exclusion is removed for the test.
+    let retained_prefix_id = VpcPrefixId::new();
+    let source_version: ConfigVersion = source.version.parse()?;
+    db::vpc_prefix::persist(
+        NewVpcPrefix {
+            id: retained_prefix_id,
+            site_prefix_id: None,
+            vpc_id: source.id.unwrap(),
+            config: VpcPrefixConfig {
+                prefix: "10.120.1.0/24".parse()?,
+            },
+            metadata: Metadata {
+                name: "retained source prefix".to_string(),
+                ..Default::default()
+            },
+        },
+        source_version,
+        txn,
+    )
+    .await?;
+    let source_version = sqlx::query_scalar("SELECT version FROM vpcs WHERE id = $1")
+        .bind(source.id.unwrap())
+        .fetch_one(&mut *txn)
+        .await?;
+    db::vpc_prefix::mark_as_deleted(
+        &DeleteVpcPrefix {
+            id: retained_prefix_id,
+        },
+        source_version,
+        txn,
+    )
+    .await?;
+    Ok(retained_prefix_id)
+}
+
+#[crate::sqlx_test]
+async fn vpc_peering_rejects_direct_and_sibling_retained_prefixes(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (env, vpcs) =
+        create_peering_overlap_fixture(pool, None, VpcVirtualizationType::EthernetVirtualizer)
+            .await?;
+    let receiver_id = vpcs[0].id.unwrap();
+    let segment_source_id = vpcs[1].id.unwrap();
+    let retained_source_id = vpcs[2].id.unwrap();
+    env.api
+        .create_vpc_peering(Request::new(VpcPeeringCreationRequest {
+            id: None,
+            vpc_id: Some(receiver_id),
+            peer_vpc_id: Some(segment_source_id),
+        }))
+        .await?;
+
+    let mut txn = env.pool.begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *txn)
+        .await?;
+    let retained_prefix_id = retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
+
+    // The public peering request must wait for the prefix transaction, then
+    // reject the retained prefix that was not visible before that commit.
+    let direct_id = VpcPeeringId::new();
+    let direct_create = env
+        .api
+        .create_vpc_peering(Request::new(VpcPeeringCreationRequest {
+            id: Some(direct_id),
+            vpc_id: Some(segment_source_id),
+            peer_vpc_id: Some(retained_source_id),
+        }));
+    let commit_prefix = async {
+        wait_for_blocked_query(&env.pool, blocker_pid, "tenant_prefix_overlap:checks").await;
+        txn.commit().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let (direct_result, commit_result) = tokio::join!(direct_create, commit_prefix);
+    commit_result?;
+
+    let sibling_id = VpcPeeringId::new();
+    let sibling_result = env
+        .api
+        .create_vpc_peering(Request::new(VpcPeeringCreationRequest {
+            id: Some(sibling_id),
+            vpc_id: Some(receiver_id),
+            peer_vpc_id: Some(retained_source_id),
+        }))
+        .await;
+
+    for (scenario, peering_id, result) in [
+        (
+            "direct receiver waits for prefix commit",
+            direct_id,
+            direct_result,
+        ),
+        (
+            "receiver already imports an overlapping sibling",
+            sibling_id,
+            sibling_result,
+        ),
+    ] {
+        let error = result.expect_err(scenario);
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{scenario}");
+        assert_eq!(
+            error.message(),
+            "the requested prefix overlaps address space that is not eligible for reuse",
+            "{scenario}"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vpc_peerings WHERE id = $1")
+            .bind(peering_id)
+            .fetch_one(&env.pool)
+            .await?;
+        assert_eq!(count, 0, "{scenario}: rejected peering must roll back");
+    }
+    let retained: bool =
+        sqlx::query_scalar("SELECT deleted IS NOT NULL FROM network_vpc_prefixes WHERE id = $1")
+            .bind(retained_prefix_id)
+            .fetch_one(&env.pool)
+            .await?;
+    assert!(retained);
+    Ok(())
+}
+
+#[crate::sqlx_test]
+#[allow(deprecated)] // Preserve the existing ETV-to-NVUE update path.
+async fn vpc_peering_receiver_type_change_rejects_new_vni_imports(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (env, vpcs) = create_peering_overlap_fixture(
+        pool,
+        Some(VpcPeeringPolicy::None),
+        VpcVirtualizationType::Fnn,
+    )
+    .await?;
+    let receiver_id = vpcs[0].id.unwrap();
+    let mut txn = env.pool.begin().await?;
+    retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
+    txn.commit().await?;
+
+    // ETV imports neither source under this policy. Becoming FNN would
+    // import both VNIs even though CIDR imports remain disabled.
+    for source in &vpcs[1..] {
+        env.api
+            .create_vpc_peering(Request::new(VpcPeeringCreationRequest {
+                id: None,
+                vpc_id: Some(receiver_id),
+                peer_vpc_id: source.id,
+            }))
+            .await?;
+    }
+    let error = env
+        .api
+        .update_vpc_virtualization(Request::new(rpc::forge::VpcUpdateVirtualizationRequest {
+            id: Some(receiver_id),
+            if_version_match: None,
+            network_virtualization_type: Some(VpcVirtualizationType::Fnn as i32),
+        }))
+        .await
+        .expect_err("an empty receiver must not import overlapping peer VNIs");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        error.message(),
+        "the requested prefix overlaps address space that is not eligible for reuse"
+    );
+    let persisted = db::vpc::find_by(
+        &env.pool,
+        db::ObjectColumnFilter::One(db::vpc::IdColumn, &receiver_id),
+    )
+    .await?
+    .pop()
+    .unwrap();
+    assert_eq!(
+        persisted.config.network_virtualization_type,
+        carbide_network::virtualization::VpcVirtualizationType::EthernetVirtualizer
+    );
+    env.api
+        .update_vpc_virtualization(Request::new(rpc::forge::VpcUpdateVirtualizationRequest {
+            id: Some(receiver_id),
+            if_version_match: None,
+            network_virtualization_type: Some(
+                VpcVirtualizationType::EthernetVirtualizerWithNvue as i32,
+            ),
+        }))
+        .await
+        .expect("switching ETV renderers adds no peer imports");
     Ok(())
 }
 

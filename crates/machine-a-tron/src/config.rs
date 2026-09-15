@@ -16,6 +16,7 @@
  */
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -540,6 +541,10 @@ pub struct MachineATronConfig {
 
     /// If set, host BMC mocks start with this password instead of the factory default
     /// (`DUMMY_FACTORY_PASSWORD`). Emulates a BMC that was already rotated by an operator.
+    ///
+    /// When persistence is enabled and a snapshot exists for a given machine, the
+    /// snapshot's saved credentials are restored *after* this override is applied
+    /// and take precedence over it (see `MachineStateMachine::run_bmc_mock`).
     #[serde(default)]
     pub host_bmc_password: Option<String>,
 
@@ -776,10 +781,16 @@ impl MachineATronConfig {
         }
 
         for (config_section, persisted_devices) in persisted_devices_by_section {
-            std::fs::write(
-                devices_persist_dir.join(format!("{config_section}.json")),
-                serde_json::to_vec(&persisted_devices)?,
-            )?;
+            // Write-then-rename so a crash mid-write can never leave a
+            // truncated snapshot behind.
+            let final_path = devices_persist_dir.join(format!("{config_section}.json"));
+            let tmp_path = devices_persist_dir.join(format!("{config_section}.json.tmp"));
+            std::fs::write(&tmp_path, serde_json::to_vec(&persisted_devices)?)?;
+            // Snapshots hold plaintext BMC passwords (`bmc_accounts`), so lock
+            // them to owner-only rather than trusting the process umask
+            // (issue #5966, CWE-732). The mode carries across the rename.
+            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::rename(&tmp_path, &final_path)?;
         }
 
         Ok(())
@@ -851,6 +862,19 @@ pub struct PersistedDevice {
     /// the versions last observed, not the operator-configured starting point.
     #[serde(default)]
     pub active_host_firmware: Option<HostFirmwareVersions>,
+    /// Current BMC account passwords at the time this snapshot was taken.
+    /// Restored on restart so a rotated password survives a pod restart
+    /// instead of resetting to the factory default (issue #5966).
+    ///
+    /// `None` means the credentials are simply absent from this snapshot — e.g.
+    /// a legacy snapshot written before this field existed, or a device type
+    /// that never populates it. This is not an error: the configured or
+    /// factory-default credentials remain in effect rather than being cleared.
+    ///
+    /// Power shelves are intentionally excluded from credential restoration
+    /// entirely, so they never populate this field.
+    #[serde(default)]
+    pub bmc_accounts: Option<Vec<bmc_mock::BmcAccountCredential>>,
 }
 
 impl PersistedDevice {
@@ -874,6 +898,17 @@ pub struct PersistedDpuMachine {
     pub serial: String,
     pub installed_os: OsImage,
     pub dpu_index: u8,
+    /// Current BMC account passwords for this DPU at the time this snapshot was
+    /// taken. Restored on restart so a rotated password survives a pod restart
+    /// instead of resetting to the factory default (issue #5966).
+    ///
+    /// `None` means the credentials are simply absent from this snapshot — e.g.
+    /// a legacy snapshot written before this field existed, or a device type
+    /// that never populates it. This is not an error: the configured or
+    /// factory-default credentials remain in effect rather than being cleared.
+    /// See also [`PersistedDevice::bmc_accounts`].
+    #[serde(default)]
+    pub bmc_accounts: Option<Vec<bmc_mock::BmcAccountCredential>>,
     #[serde(flatten)]
     pub settings: DpuSettings,
 }
@@ -1747,5 +1782,57 @@ server_address = "127.0.0.1:6767""#,
                 machine.missing_host_inband_relay_for_direct_host_dhcp()
             },
         );
+    }
+
+    fn persisted_device_fixture() -> PersistedDevice {
+        PersistedDevice {
+            mat_id: Uuid::new_v4(),
+            machine_config_section: "config".to_string(),
+            hw_type: HardwareType::GenericAmi,
+            bmc_mac_address: MacAddress::new([2, 0, 0, 0, 0, 1]),
+            serial: "SER123".to_string(),
+            dpus: Vec::new(),
+            non_dpu_mac_address: None,
+            nvos_mac_addresses: Vec::new(),
+            switch_serial_number: None,
+            observed_machine_id: None,
+            installed_os: OsImage::None,
+            tpm_ek_certificate: None,
+            hw_mac_addr_pool: None,
+            active_host_firmware: None,
+            bmc_accounts: None,
+        }
+    }
+
+    #[test]
+    fn persisted_device_bmc_accounts_round_trip() {
+        let mut device = persisted_device_fixture();
+        device.bmc_accounts = Some(vec![bmc_mock::BmcAccountCredential {
+            account_id: "1".to_string(),
+            username: "root".to_string(),
+            password: "rotated-password".to_string(),
+        }]);
+
+        let json = serde_json::to_string(&device).unwrap();
+        let restored: PersistedDevice = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.bmc_accounts, device.bmc_accounts);
+    }
+
+    #[test]
+    fn persisted_device_snapshot_without_bmc_accounts_still_loads() {
+        // Snapshots written by pre-#5966 machine-a-tron versions have no
+        // bmc_accounts field and must keep loading.
+        let device = persisted_device_fixture();
+        let mut json = serde_json::to_value(&device).unwrap();
+        assert!(
+            json.as_object_mut()
+                .unwrap()
+                .remove("bmc_accounts")
+                .is_some()
+        );
+
+        let restored: PersistedDevice = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.bmc_accounts, None);
+        assert_eq!(restored.serial, device.serial);
     }
 }

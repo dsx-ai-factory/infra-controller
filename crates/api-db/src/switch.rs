@@ -760,6 +760,43 @@ pub struct SwitchEndpointRow {
     pub nvos_hostname: Option<String>,
 }
 
+/// Persisted switch identity and one possible NVOS certificate endpoint.
+///
+/// A switch may produce multiple rows when inventory contains multiple NVOS
+/// interfaces or addresses. Nullable fields preserve switches with incomplete
+/// inventory so the caller can report the missing data.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use carbide_uuid::rack::RackId;
+/// # async fn load(pool: &sqlx::PgPool, rack_id: &RackId) -> Result<(), db::DatabaseError> {
+/// let rows =
+///     db::switch::find_switch_certificate_endpoint_candidates_by_rack_id(pool, rack_id).await?;
+/// for row in rows {
+///     println!("{}: {:?}", row.switch_id, row.nvos_ip);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, sqlx::FromRow)]
+pub struct SwitchCertificateEndpointCandidateRow {
+    /// Persisted switch identifier.
+    pub switch_id: SwitchId,
+
+    /// BMC MAC used as the persisted switch identity.
+    pub bmc_mac: Option<MacAddress>,
+
+    /// NVOS management interface MAC, when inventory contains one.
+    pub nvos_mac: Option<MacAddress>,
+
+    /// NVOS management address, when the interface has one.
+    pub nvos_ip: Option<IpAddr>,
+
+    /// Fully qualified NVOS hostname used for TLS SNI, when configured.
+    pub nvos_hostname: Option<String>,
+}
+
 /// Ready switch endpoint selected for NMX-C rack-level operations.
 #[derive(Debug, sqlx::FromRow)]
 pub struct ReadyControlPlaneSwitchEndpointRow {
@@ -822,6 +859,58 @@ pub async fn find_switch_endpoints_by_ids(
         .fetch_all(db)
         .await
         .map_err(|err| DatabaseError::new("switch::find_switch_endpoints_by_ids", err))
+}
+
+/// Resolves all non-deleted switches in a rack to possible NVOS certificate endpoints.
+///
+/// The query returns every distinct NVOS interface and address candidate. Each
+/// switch appears at least once, with nullable fields when its persisted identity
+/// or NVOS endpoint data is incomplete. BMC interface and address data are not
+/// required. Rows are ordered by switch ID so each switch's candidates are
+/// contiguous.
+///
+/// # Errors
+///
+/// Returns [`DatabaseError`] when the database query fails.
+pub async fn find_switch_certificate_endpoint_candidates_by_rack_id(
+    db: impl crate::db_read::DbReader<'_>,
+    rack_id: &RackId,
+) -> DatabaseResult<Vec<SwitchCertificateEndpointCandidateRow>> {
+    let sql = r#"
+        SELECT DISTINCT
+            s.id                 AS switch_id,
+            s.bmc_mac_address    AS bmc_mac,
+            nvos_mi.mac_address  AS nvos_mac,
+            nvos_mia.address     AS nvos_ip,
+            CASE
+                WHEN nvos_d.name IS NOT NULL AND nvos_d.name <> '' THEN
+                    nvos_mi.hostname || '.' || nvos_d.name
+                ELSE nvos_mi.hostname
+            END                  AS nvos_hostname
+        FROM switches s
+        LEFT JOIN expected_switches es
+            ON es.bmc_mac_address = s.bmc_mac_address
+        LEFT JOIN machine_interfaces nvos_mi
+            ON nvos_mi.mac_address = ANY(es.nvos_mac_addresses)
+        LEFT JOIN machine_interface_addresses nvos_mia
+            ON nvos_mia.interface_id = nvos_mi.id
+        LEFT JOIN domains nvos_d
+            ON nvos_d.id = nvos_mi.domain_id
+        WHERE s.rack_id = $1
+          AND s.deleted IS NULL
+        ORDER BY s.id, nvos_mi.mac_address NULLS LAST, nvos_mia.address NULLS LAST
+    "#;
+
+    sqlx::query_as(sql)
+        .bind(rack_id)
+        .fetch_all(db)
+        .await
+        .map_err(|err| {
+            DatabaseError::new(
+                "switch::find_switch_certificate_endpoint_candidates_by_rack_id",
+                err,
+            )
+        })
 }
 
 /// Endpoint info for a pre-ingestion switch, resolved by BMC MAC without a

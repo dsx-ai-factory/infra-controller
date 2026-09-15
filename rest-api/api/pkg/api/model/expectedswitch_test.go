@@ -401,7 +401,7 @@ func TestNewAPIExpectedSwitch(t *testing.T) {
 			assert.Equal(t, tc.dbObj.SwitchSerialNumber, got.SwitchSerialNumber)
 			assert.Equal(t, tc.dbObj.BmcIpAddress, got.BmcIpAddress)
 			assert.Equal(t, APINvosMacAddresses(tc.dbObj.NvosMacAddresses), got.NvosMacAddresses)
-			assert.Equal(t, map[string]string(tc.dbObj.Labels), got.Labels)
+			assert.Equal(t, APILabels(tc.dbObj.Labels), got.Labels)
 			assert.Equal(t, tc.dbObj.Created, got.Created)
 			assert.Equal(t, tc.dbObj.Updated, got.Updated)
 		})
@@ -708,7 +708,7 @@ func TestNewAPIExpectedSwitchEdgeCases(t *testing.T) {
 
 		got := NewAPIExpectedSwitch(dbES)
 		assert.NotNil(t, got)
-		assert.Equal(t, map[string]string(dbES.Labels), got.Labels)
+		assert.Equal(t, APILabels(dbES.Labels), got.Labels)
 		assert.Equal(t, "cloud-api", got.Labels["app.kubernetes.io/name"])
 	})
 

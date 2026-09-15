@@ -23,7 +23,8 @@ use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::machine::DpuMachineId;
 use chrono::{DateTime, Utc};
 use config_version::Versioned;
-use db::extension_service as db_extension_service;
+use db::machine::ExtensionServiceObservationNotCurrent;
+use db::{ConditionalWrite, extension_service as db_extension_service};
 use eyre::eyre;
 use itertools::Itertools;
 use model::extension_service::{
@@ -332,7 +333,7 @@ async fn persist_dpf_helm_chart_placement_observation(
     );
 
     let mut txn = db_pool.begin().await?;
-    let applied = db::machine::update_extension_service_status_observation(
+    let observation_write = db::machine::update_extension_service_status_observation(
         txn.as_mut(),
         &dpu_id,
         ExtensionServiceType::DpfHelmChart,
@@ -341,19 +342,22 @@ async fn persist_dpf_helm_chart_placement_observation(
     .await?;
     txn.commit().await?;
 
-    warn_if_superseded(applied, dpu_id, observed_at);
+    warn_if_superseded(observation_write, dpu_id, observed_at);
 
     Ok(observation)
 }
 
-/// A rejected write means another writer stored a newer observation for this
-/// DPU, so the caller is racing a concurrent reconciliation of the same host.
-fn warn_if_superseded(applied: bool, dpu_id: DpuMachineId, observed_at: chrono::DateTime<Utc>) {
-    if !applied {
+/// Logs a rejected observation without failing reconciliation for the DPU.
+fn warn_if_superseded(
+    observation_write: ConditionalWrite<(), ExtensionServiceObservationNotCurrent>,
+    dpu_id: DpuMachineId,
+    observed_at: chrono::DateTime<Utc>,
+) {
+    if let ConditionalWrite::NotApplied(ExtensionServiceObservationNotCurrent) = observation_write {
         tracing::warn!(
             dpu_machine_id = %dpu_id,
             %observed_at,
-            "a newer DPF Helm chart placement observation already exists; discarding this one"
+            "DPF Helm chart placement observation write was rejected"
         );
     }
 }

@@ -29,10 +29,11 @@ use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials
 use carbide_utils::arch::CpuArchitecture;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtype};
+use db::machine::{AdminNetworkChangeNotPending, ExtensionServiceObservationNotCurrent};
 use db::vpc_prefix::VpcId;
 use db::{
-    DatabaseError, ObjectColumnFilter, dpu_agent_upgrade_policy, network_security_group,
-    network_segment,
+    ConditionalWrite, DatabaseError, ObjectColumnFilter, dpu_agent_upgrade_policy,
+    network_security_group, network_segment,
 };
 use futures_util::future::join_all;
 use ipnetwork::IpNetwork;
@@ -1028,18 +1029,24 @@ pub(crate) async fn record_dpu_network_status(
     if dpu_machine.network_config.value.use_admin_network_changed == Some(true)
         && machine_obs.network_config_version.as_ref() == Some(&dpu_machine.network_config.version)
     {
-        tracing::info!(
-            dpu_machine_id = %dpu_machine_id,
-            network_config_version = %dpu_machine.network_config.version,
-            agent_version = ?machine_obs.agent_version,
-            "Clearing use_admin_network_changed after matching-version ACK; OVS restart may have been skipped by agents that do not support the flag"
-        );
-        db::machine::clear_use_admin_network_changed_if_version_matches(
+        match db::machine::clear_use_admin_network_changed_if_version_matches(
             &mut txn,
             &dpu_machine_id,
             &dpu_machine.network_config.version,
         )
-        .await?;
+        .await?
+        {
+            ConditionalWrite::Applied(()) => tracing::info!(
+                dpu_machine_id = %dpu_machine_id,
+                network_config_version = %dpu_machine.network_config.version,
+                agent_version = ?machine_obs.agent_version,
+                "Cleared use_admin_network_changed after matching-version ACK; OVS restart may have been skipped by agents that do not support the flag"
+            ),
+            ConditionalWrite::NotApplied(AdminNetworkChangeNotPending) => {
+                // Another writer cleared the flag or changed the configuration
+                // after our read. Keep processing the network status report.
+            }
+        }
     }
     tracing::trace!(
         machine_id = %dpu_machine_id,
@@ -1066,13 +1073,18 @@ pub(crate) async fn record_dpu_network_status(
             observation
         });
     if let Some(extension_service_observation) = &extension_service_observation {
-        db::machine::update_extension_service_status_observation(
+        match db::machine::update_extension_service_status_observation(
             &mut txn,
             &dpu_machine_id,
             model::extension_service::ExtensionServiceType::KubernetesPod,
             extension_service_observation,
         )
-        .await?;
+        .await?
+        {
+            // A late observation must not fail the rest of this network status report.
+            ConditionalWrite::Applied(())
+            | ConditionalWrite::NotApplied(ExtensionServiceObservationNotCurrent) => {}
+        }
     }
 
     // Store the DPU submitted health-report

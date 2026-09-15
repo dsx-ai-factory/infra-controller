@@ -201,10 +201,15 @@ pub(in crate::tests) struct TestEnvOverrides {
     pub(in crate::tests) nmxc_fail_after_n_creates: Option<usize>,
     pub(in crate::tests) compute_allocation_enforcement: Option<ComputeAllocationEnforcement>,
     pub(in crate::tests) nmxc_simulator: Option<bool>,
+    pub(in crate::tests) rack_component_manager_enabled: Option<bool>,
 
     /// Optional compute-tray backend injected into the component manager.
     pub(in crate::tests) compute_tray_manager:
         Option<Arc<dyn component_manager::compute_tray_manager::ComputeTrayManager>>,
+
+    /// Optional NV-Switch backend injected into the component manager.
+    pub(in crate::tests) nv_switch_manager:
+        Option<Arc<dyn component_manager::nv_switch_manager::NvSwitchManager>>,
 
     /// Optional firmware-object fetcher injected into the rack state handler.
     pub(in crate::tests) firmware_object_fetcher: Option<Arc<dyn FirmwareObjectFetcher>>,
@@ -1384,6 +1389,11 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
     if let Some(compute_tray_manager) = overrides.compute_tray_manager.clone() {
         test_component_manager.compute_tray = compute_tray_manager;
     }
+
+    if let Some(nv_switch_manager) = overrides.nv_switch_manager.clone() {
+        test_component_manager.nv_switch = nv_switch_manager;
+    }
+
     let test_component_manager = Some(Arc::new(test_component_manager));
     let fake_endpoint_explorer = MockEndpointExplorer::default();
 
@@ -1676,7 +1686,11 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
                 nvos_update_manager: test_nvos_update_manager(&rms_sim),
                 rack_firmware_update_manager: test_rack_firmware_update_manager(&rms_sim),
                 credential_manager: credential_manager.clone(),
-                component_manager: test_component_manager.clone(),
+                component_manager: if overrides.rack_component_manager_enabled.unwrap_or(true) {
+                    test_component_manager.clone()
+                } else {
+                    None
+                },
                 nmx_cluster_switch_mtls_services:
                     component_manager::config::switch_mtls_services_as_i32(
                         &component_manager::config::effective_nmx_cluster_switch_mtls_services(&[]),

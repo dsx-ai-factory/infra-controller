@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"fmt"
 
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/endpoint"
 	ctls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
 	cwfns "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/namespace"
 )
@@ -24,9 +25,11 @@ type TemporalConfig struct {
 	dynTLS        *ctls.DynTLSCfg
 }
 
-// GetHostPort returns the concatenated host & port
+// GetHostPort returns the Temporal host:port connection target.
+// IPv6 hosts may be supplied with or without brackets.
 func (tcfg *TemporalConfig) GetHostPort() string {
-	return fmt.Sprintf("%v:%v", tcfg.Host, tcfg.Port)
+	config := endpoint.Config{Host: tcfg.Host, Port: tcfg.Port}
+	return config.Target()
 }
 
 // Close cleans up TLS resources

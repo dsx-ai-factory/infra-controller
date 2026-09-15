@@ -23,7 +23,8 @@ use carbide_secrets::credentials::{
 };
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId};
-use db::Transaction;
+use db::machine::MachineNetworkConfigNotCurrent;
+use db::{ConditionalWrite, Transaction};
 use itertools::Itertools;
 use librms::RmsApi;
 use librms::protos::rack_manager as rms;
@@ -1329,10 +1330,11 @@ impl MachineCreator {
             .await?;
         }
 
-        // A stale version must fail the whole transaction so any addresses
-        // allocated above return to their pools.
-        if !db::machine::try_update_network_config(txn, &dpu_machine.id, version, &network_config)
-            .await?
+        // Missing and changed targets share this rejection. Fail the whole
+        // transaction so any addresses allocated above return to their pools.
+        if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
+            db::machine::try_update_network_config(txn, &dpu_machine.id, version, &network_config)
+                .await?
         {
             return Err(db::DatabaseError::ConcurrentModificationError(
                 "machine",
@@ -1359,13 +1361,20 @@ impl MachineCreator {
                 db::machine::get_network_config(&mut *txn, host_machine_id)
                     .await?
                     .take();
-            db::machine::try_update_network_config(
-                txn,
-                host_machine_id,
-                network_config_version,
-                &network_config,
-            )
-            .await?;
+            if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
+                db::machine::try_update_network_config(
+                    txn,
+                    host_machine_id,
+                    network_config_version,
+                    &network_config,
+                )
+                .await?
+            {
+                return Err(db::DatabaseError::FailedPrecondition(format!(
+                    "network configuration for machine {host_machine_id} changed or is no longer available"
+                ))
+                .into());
+            }
         }
         Ok(active_config_changed)
     }

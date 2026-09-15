@@ -492,6 +492,10 @@ impl DpuMachineHandle {
     }
 
     pub fn persisted(&self) -> PersistedDpuMachine {
+        let live_state = self.0.live_state.read().unwrap();
+        let installed_os = live_state.installed_os;
+        let bmc_accounts = live_state.bmc_accounts_for_snapshot();
+        drop(live_state);
         PersistedDpuMachine {
             mat_id: self.0.mat_id,
             hw_type: self.0.dpu_info.hw_type,
@@ -500,8 +504,9 @@ impl DpuMachineHandle {
             oob_mac_address: self.0.dpu_info.oob_mac_address,
             serial: self.0.dpu_info.serial.clone(),
             settings: self.0.dpu_info.settings.clone(),
-            installed_os: self.0.live_state.read().unwrap().installed_os,
+            installed_os,
             dpu_index: self.0.dpu_index,
+            bmc_accounts,
         }
     }
 
