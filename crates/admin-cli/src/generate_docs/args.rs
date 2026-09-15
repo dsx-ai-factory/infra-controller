@@ -34,8 +34,8 @@ pub(crate) struct Cmd {
     /// Directory to write the generated markdown into. Created if it does not
     /// exist. One `commands/<command>.md` page is written per top-level
     /// command, plus the four domain index pages
-    /// (`hardware.md`/`network.md`/`tenant.md`/`admin.md`). Hand-authored
-    /// pages (`README.md`, `workflows.md`, `setup.md`, …) are left untouched.
+    /// (`hardware.md`/`network.md`/`tenant.md`/`admin.md`). The hand-authored
+    /// `README.md` overview is left untouched.
     #[clap(long, default_value = "docs/manuals/nico-admin-cli")]
     pub(super) out_dir: PathBuf,
 }

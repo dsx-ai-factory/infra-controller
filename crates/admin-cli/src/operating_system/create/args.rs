@@ -27,9 +27,9 @@ EXAMPLES:
 Create an OS definition:
     $ nico-admin-cli operating-system create --name ubuntu-22.04 --org fds34511233a
 
-Create one with a description, inactive, allowing parameter overrides:
+Create one with a description and mark it inactive:
     $ nico-admin-cli operating-system create --name ubuntu-22.04 --org fds34511233a \
-    --description \"Ubuntu 22.04 base\" --is-active false --allow-override
+    --description \"Ubuntu 22.04 base\" --is-active false
 
 ")]
 pub(crate) struct Args {
@@ -58,14 +58,14 @@ pub(crate) struct Args {
     #[clap(
         long,
         default_value = "false",
-        help = "Allow users to override OS parameters."
+        help = "Allow instance requests to override the raw iPXE boot script stored by this OS definition. Applies only when the definition stores a raw iPXE script; does not affect templated definitions or user data."
     )]
     pub(super) allow_override: bool,
 
     #[clap(
         long,
         default_value = "false",
-        help = "Enable phone-home on first boot."
+        help = "Whether instances using this OS definition wait for a guest phone-home callback before reporting ready. If the callback never arrives, the instance remains in a provisioning state. REST workflows inject the cloud-init phone_home block and require valid cloud-init YAML; callers using Core directly must arrange the callback. See https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home."
     )]
     pub(super) phone_home_enabled: bool,
 
