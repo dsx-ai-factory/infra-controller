@@ -304,21 +304,25 @@ impl UpdateServiceState {
             .map(|sw| sw.to_json())
     }
 
-    /// Re-stage one component's upgrade target on a live mock. Only the
-    /// pending target changes - active inventory and staged uploads are left
-    /// alone. `Some(v)` stages `v` unless the active version already equals it
-    /// (no re-queueing completed upgrades); `None` clears the target.
+    /// Re-stage one component's upgrade target on a live mock without touching
+    /// the active inventory. `Some(v)` stages `v` unless the active version
+    /// already equals it; otherwise the target and any staged upload for the
+    /// component are dropped so a withdrawn version cannot land at PowerOn.
     pub fn retarget_pending_upgrade(&self, component_id: &str, desired: Option<&str>) {
-        let active_version = self
-            .find_firmware_inventory(component_id)
-            .and_then(|v| v["Version"].as_str().map(str::to_owned));
+        // Same lock order as apply_staged_firmware: staged -> inventory -> pending.
+        let mut staged = self.staged_firmware.write().unwrap();
+        let inventory = self.firmware_inventory.read().unwrap();
         let mut pending = self.pending_upgrades.write().unwrap();
+        let active_version = inventory
+            .get(component_id)
+            .and_then(|sw| sw.to_json()["Version"].as_str().map(str::to_owned));
         match desired {
             Some(version) if active_version.as_deref() != Some(version) => {
                 pending.insert(component_id.to_string(), version.to_string());
             }
             _ => {
                 pending.shift_remove(component_id);
+                staged.remove(component_id);
             }
         }
     }
@@ -397,11 +401,17 @@ impl UpdateServiceState {
                 let version = task.target_version.clone();
                 task.state = TaskState::Completed;
                 if !version.is_empty() {
-                    state
-                        .staged_firmware
-                        .write()
+                    let mut staged = state.staged_firmware.write().unwrap();
+                    // A retarget that withdrew the target mid-upload leaves
+                    // nothing to stage.
+                    if state
+                        .pending_upgrades
+                        .read()
                         .unwrap()
-                        .insert(component, version);
+                        .contains_key(&component)
+                    {
+                        staged.insert(component, version);
+                    }
                 }
             }
         }));
@@ -729,11 +739,10 @@ mod tests {
         assert!(pending_pairs(&state).is_empty());
     }
 
+    /// A staged upload for the old target still applies when the target moves
+    /// forward; only withdrawing the target drops it.
     #[tokio::test(start_paused = true)]
-    async fn retarget_does_not_disturb_staged_uploads() {
-        // An upload already staged for the old target stays staged: the
-        // realistic sequence is old version applies on the next power cycle,
-        // then the new drift is observed and upgraded in a later pass.
+    async fn retarget_drops_staged_uploads_only_when_the_target_is_withdrawn() {
         let state = make_state(&[("BMC_Firmware", "24.09")], &[("BMC_Firmware", "24.10")]);
         state.record_upload("BMC_Firmware", "24.10".to_string());
         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -747,6 +756,31 @@ mod tests {
             pending_pairs(&state),
             vec![("BMC_Firmware".to_string(), "24.11".to_string())]
         );
+        // Rolling back to the active version withdraws the pending entry and the staged upload.
+        state.record_upload("BMC_Firmware", "24.11".to_string());
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        state.retarget_pending_upgrade("BMC_Firmware", Some("24.10"));
+        state.apply_staged_firmware();
+        let active = state.find_firmware_inventory("BMC_Firmware").unwrap();
+        assert_eq!(
+            active["Version"], "24.10",
+            "withdrawn upload does not apply"
+        );
+        assert!(pending_pairs(&state).is_empty());
+        // Withdrawn while the upload task is still Running: completion stages nothing.
+        state.retarget_pending_upgrade("BMC_Firmware", Some("24.11"));
+        state.record_upload("BMC_Firmware", "24.11".to_string());
+        state.retarget_pending_upgrade("BMC_Firmware", Some("24.10"));
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        state.apply_staged_firmware();
+        let active = state.find_firmware_inventory("BMC_Firmware").unwrap();
+        assert_eq!(
+            active["Version"], "24.10",
+            "in-flight withdrawn upload does not apply"
+        );
+        assert!(pending_pairs(&state).is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -835,7 +869,8 @@ mod tests {
     /// must overwrite the staged version (last-upload-wins).
     #[tokio::test(start_paused = true)]
     async fn double_upload_last_wins() {
-        let state = make_state(&[("HostBMC_0", "24.09.17")], &[]);
+        // Completion only stages while the component is still pending.
+        let state = make_state(&[("HostBMC_0", "24.09.17")], &[("HostBMC_0", "24.11.00")]);
         state.record_upload("HostBMC_0", "24.10.00".into());
         state.record_upload("HostBMC_0", "24.11.00".into());
 

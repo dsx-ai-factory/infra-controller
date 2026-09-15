@@ -20,6 +20,7 @@ pub mod api_throttler;
 mod bmc_mock_wrapper;
 mod config;
 mod control_router;
+mod desired_firmware;
 mod device_handle;
 mod device_simulator;
 mod dhcp_retry_fsm;
@@ -52,6 +53,7 @@ pub use config::{
     RackModelConfig, WiwynnGb200RackConfig,
 };
 pub use control_router::{ControlState, append as append_control_routes};
+pub use desired_firmware::spawn_desired_firmware_refresher;
 pub use device_handle::DeviceHandle;
 pub use device_simulator::{
     DeviceSimulator, MachineSimulator, PowerShelfSimulator, SimulatorLifecycle, SwitchSimulator,
