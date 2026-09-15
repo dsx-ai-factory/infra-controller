@@ -312,38 +312,6 @@ vendor = "delta"
 count = 6
 ```
 
-### Power Shelves Use RMS; Compute and Switch Do Not
-
-The compute and switch backends are set to non-RMS values, so startup validation requires the
-power shelf vendor field and no others:
-
-```toml
-[component_manager]
-compute_tray_backend = "core"
-nv_switch_backend = "nsm"
-power_shelf_backend = "rms"
-
-[rms]
-api_url = "https://rms-api-server.rack-manager.svc.cluster.local:8801"
-
-[component_manager.nsm]
-url = "http://nsm.example.internal:50052"
-
-[rack_profiles.NVL72_POWER]
-product_family = "gb200"
-rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
-
-[rack_profiles.NVL72_POWER.rack_capabilities.compute]
-count = 18
-
-[rack_profiles.NVL72_POWER.rack_capabilities.switch]
-count = 9
-
-[rack_profiles.NVL72_POWER.rack_capabilities.power_shelf]
-vendor = "Lite-On"
-count = 8
-```
-
 ---
 
 ## Machine Slot and Tray Enrichment
