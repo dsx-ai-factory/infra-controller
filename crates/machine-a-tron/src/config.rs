@@ -539,13 +539,6 @@ pub struct MachineATronConfig {
     #[serde(default = "default_true")]
     pub register_expected_machines: bool,
 
-    /// Retry and concurrency policy for the startup registration of expected
-    /// racks, machines, switches, and power shelves. Only consulted when
-    /// `register_expected_machines` is true. Every key has a default, so the
-    /// `[expected_inventory_registration]` table may be omitted entirely.
-    #[serde(default)]
-    pub expected_inventory_registration: ExpectedInventoryRegistrationConfig,
-
     /// If set, host BMC mocks start with this password instead of the factory default
     /// (`DUMMY_FACTORY_PASSWORD`). Emulates a BMC that was already rotated by an operator.
     ///
@@ -603,15 +596,6 @@ impl MachineATronConfig {
         if let Some(ufm_mock) = self.ufm_mock.as_ref() {
             ufm_mock.validate()?;
         }
-
-        eyre::ensure!(
-            self.expected_inventory_registration.max_attempts >= 1,
-            "expected_inventory_registration.max_attempts must be at least 1"
-        );
-        eyre::ensure!(
-            self.expected_inventory_registration.concurrency >= 1,
-            "expected_inventory_registration.concurrency must be at least 1"
-        );
 
         if let DhcpType::UdpRelay {
             server_address,
@@ -997,79 +981,6 @@ fn default_scout_run_interval() -> Duration {
     Duration::from_secs(60)
 }
 
-/// Retry policy for transient failures while registering expected inventory
-/// records at startup.
-///
-/// An attempt that fails with a transient error (gRPC `Unavailable`,
-/// `DeadlineExceeded`, `ResourceExhausted`, `Internal`, `Unknown`, `Aborted`,
-/// `Cancelled`, or a connection failure) is retried after an exponential
-/// backoff that starts at `initial_backoff`, doubles per retry, and is capped
-/// at `max_backoff`. Uniform jitter places each delay between half and all of
-/// the capped value. A record that still fails after `max_attempts` attempts
-/// is reported as failed; a record the API already holds counts as present.
-/// `concurrency` bounds how many records are in flight at once so several
-/// machine-a-tron instances starting together do not overwhelm the API.
-///
-/// TOML example with the defaults spelled out:
-///
-/// ```toml
-/// [expected_inventory_registration]
-/// max_attempts = 10
-/// initial_backoff = "500ms"
-/// max_backoff = "30s"
-/// concurrency = 8
-/// ```
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ExpectedInventoryRegistrationConfig {
-    /// Attempts per record including the first one. Must be at least 1.
-    #[serde(default = "default_registration_max_attempts")]
-    pub max_attempts: u32,
-    /// Backoff before the first retry; doubles on each further retry.
-    #[serde(
-        default = "default_registration_initial_backoff",
-        deserialize_with = "deserialize_duration",
-        serialize_with = "as_std_duration"
-    )]
-    pub initial_backoff: Duration,
-    /// Upper bound on the backoff between attempts.
-    #[serde(
-        default = "default_registration_max_backoff",
-        deserialize_with = "deserialize_duration",
-        serialize_with = "as_std_duration"
-    )]
-    pub max_backoff: Duration,
-    /// Maximum number of records registered concurrently. Must be at least 1.
-    #[serde(default = "default_registration_concurrency")]
-    pub concurrency: usize,
-}
-
-impl Default for ExpectedInventoryRegistrationConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: default_registration_max_attempts(),
-            initial_backoff: default_registration_initial_backoff(),
-            max_backoff: default_registration_max_backoff(),
-            concurrency: default_registration_concurrency(),
-        }
-    }
-}
-
-fn default_registration_max_attempts() -> u32 {
-    10
-}
-
-fn default_registration_initial_backoff() -> Duration {
-    Duration::from_millis(500)
-}
-
-fn default_registration_max_backoff() -> Duration {
-    Duration::from_secs(30)
-}
-
-fn default_registration_concurrency() -> usize {
-    8
-}
-
 fn default_false() -> bool {
     false
 }
@@ -1159,7 +1070,9 @@ mod tests {
 
     use super::*;
 
-    const RACK_CONFIG_TOML: &str = r#"
+    fn rack_config() -> MachineATronConfig {
+        toml::from_str(
+            r#"
 carbide_api_url = "https://carbide-api.forge:443"
 log_file = "mat.log"
 pxe_server_host = "192.168.176.7"
@@ -1182,71 +1095,9 @@ run_interval_working = "100ms"
 run_interval_idle = "1s"
 network_status_run_interval = "5s"
 scout_run_interval = "5s"
-    "#;
-
-    fn rack_config() -> MachineATronConfig {
-        toml::from_str(RACK_CONFIG_TOML).expect("Could not parse config")
-    }
-
-    #[test]
-    fn expected_inventory_registration_defaults_apply_per_key() {
-        check_values(
-            [
-                Check {
-                    scenario: "omitted table keeps existing TOML working",
-                    input: "",
-                    expect: ExpectedInventoryRegistrationConfig::default(),
-                },
-                Check {
-                    scenario: "partial table defaults the omitted keys",
-                    input: "[expected_inventory_registration]\nmax_attempts = 3\ninitial_backoff = \"250ms\"\n",
-                    expect: ExpectedInventoryRegistrationConfig {
-                        max_attempts: 3,
-                        initial_backoff: Duration::from_millis(250),
-                        ..ExpectedInventoryRegistrationConfig::default()
-                    },
-                },
-            ],
-            |suffix| {
-                toml::from_str::<MachineATronConfig>(&format!("{RACK_CONFIG_TOML}\n{suffix}"))
-                    .expect("Could not parse config")
-                    .expected_inventory_registration
-            },
-        );
-    }
-
-    #[test]
-    fn expected_inventory_registration_bounds_are_validated() {
-        let mut minimum = rack_config();
-        minimum.expected_inventory_registration.max_attempts = 1;
-        minimum.expected_inventory_registration.concurrency = 1;
-
-        let mut zero_attempts = rack_config();
-        zero_attempts.expected_inventory_registration.max_attempts = 0;
-
-        let mut zero_concurrency = rack_config();
-        zero_concurrency.expected_inventory_registration.concurrency = 0;
-
-        check_cases(
-            [
-                Case {
-                    scenario: "one attempt with one registration in flight",
-                    input: minimum,
-                    expect: Yields(()),
-                },
-                Case {
-                    scenario: "zero attempts",
-                    input: zero_attempts,
-                    expect: Fails,
-                },
-                Case {
-                    scenario: "zero concurrency",
-                    input: zero_concurrency,
-                    expect: Fails,
-                },
-            ],
-            |config| config.validate().map_err(drop),
-        );
+    "#,
+        )
+        .expect("Could not parse config")
     }
 
     fn wiwynn_gb200_rack_from_machine(machine: &MachineConfig) -> WiwynnGb200RackConfig {

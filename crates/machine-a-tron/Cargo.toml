@@ -81,6 +81,7 @@ rms-mock = { package = "carbide-rms-mock", path = "../rms-mock" }
 
 [dev-dependencies]
 carbide-test-support = { path = "../test-support" }
+tokio = { workspace = true, features = ["test-util"] }
 toml = { workspace = true }
 
 [build-dependencies]

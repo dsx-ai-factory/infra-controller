@@ -209,7 +209,6 @@ async fn run_machine_a_tron_racks_test(
         persist_dir: None,
         cleanup_on_quit: false,
         register_expected_machines: true,
-        expected_inventory_registration: Default::default(),
         host_bmc_password: None,
         dpu_bmc_password: None,
         api_refresh_interval: Duration::from_millis(500),

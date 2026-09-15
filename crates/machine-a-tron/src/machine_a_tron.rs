@@ -29,7 +29,9 @@ use crate::config::MachineATronContext;
 use crate::device_simulator::{
     DeviceSimulator, MachineSimulator, PowerShelfSimulator, SimulatorLifecycle, SwitchSimulator,
 };
-use crate::expected_inventory::{ExpectedInventorySummary, register_all, register_with_retry};
+use crate::expected_inventory::{
+    CONCURRENCY, ExpectedInventorySummary, register_all, register_with_retry,
+};
 use crate::host_machine::HostMachine;
 use crate::power_shelf_simulator::PowerShelfActor;
 use crate::simulator_registry::SimulatorRegistry;
@@ -262,20 +264,15 @@ impl MachineATron {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
-        let registration_config = &self.app_context.app_config.expected_inventory_registration;
         if self.app_context.app_config.register_expected_machines {
             let api_client = self.app_context.api_client();
+            // A rack that cannot be registered aborts startup; only device
+            // records are counted in the registration summary.
             for rack in &resolved_configs.racks {
-                register_with_retry(
-                    &format!("rack {}", rack.rack_id),
-                    registration_config,
-                    || {
-                        api_client.ensure_expected_rack(
-                            rack.rack_id.clone(),
-                            rack.rack_profile_id.clone(),
-                        )
-                    },
-                )
+                register_with_retry(&format!("rack {}", rack.rack_id), || {
+                    api_client
+                        .ensure_expected_rack(rack.rack_id.clone(), rack.rack_profile_id.clone())
+                })
                 .await?;
             }
         }
@@ -343,7 +340,7 @@ impl MachineATron {
                 .collect::<Vec<_>>();
 
             let api_client = self.app_context.api_client();
-            let summary = register_all(records, registration_config, |record| {
+            let summary = register_all(records, CONCURRENCY, |record| {
                 let api_client = api_client.clone();
                 async move { api_client.add_expected_record(record).await }
             })

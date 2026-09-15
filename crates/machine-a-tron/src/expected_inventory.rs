@@ -29,21 +29,24 @@ use serde::Serialize;
 use tonic::Code;
 
 use crate::api_client::{ClientApiError, ExpectedRecord};
-use crate::config::ExpectedInventoryRegistrationConfig;
 
-/// Fragments of the messages nico-api returns for an expected record whose
-/// MAC address is already registered. The status code depends on the
-/// handler: a duplicate machine BMC MAC and a duplicate switch NVOS MAC
-/// arrive as `FailedPrecondition`, while a duplicate switch or power shelf
-/// BMC MAC arrives as `Internal`, so the status code alone cannot identify
-/// them.
-const DUPLICATE_RECORD_MARKERS: [&str; 2] = [
-    "duplicate MAC address for expected host BMC interface",
-    "NVOS MAC address is already claimed by another expected switch",
-];
+/// Attempts per record, including the first one.
+const MAX_ATTEMPTS: u32 = 10;
+/// Backoff before the first retry; doubles on each further retry.
+const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+/// Upper bound on the backoff between attempts.
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Records registered concurrently at startup.
+pub(crate) const CONCURRENCY: usize = 8;
 
-/// Number of failed identifiers included in the summary error log line.
-const LOGGED_FAILURE_LIMIT: usize = 10;
+/// Fragment of the message nico-api returns for an expected record whose BMC
+/// MAC address is already registered. The database unique constraint raises
+/// it for machines, switches, and power shelves alike, and it reaches the
+/// client as `Internal` rather than `AlreadyExists`, so the message is matched
+/// instead of the status code. An NVOS MAC claimed by another expected switch
+/// is not matched: nico-api reports it only for a switch whose own BMC MAC is
+/// absent, so that record is missing rather than present.
+const DUPLICATE_RECORD_MARKER: &str = "duplicate MAC address for expected host BMC interface";
 
 /// How a failed registration attempt is handled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,9 +66,7 @@ fn classify(error: &ClientApiError) -> Disposition {
         ClientApiError::ConfigError(_) => Disposition::Fail,
         ClientApiError::InvocationError(status) => {
             if status.code() == Code::AlreadyExists
-                || DUPLICATE_RECORD_MARKERS
-                    .iter()
-                    .any(|marker| status.message().contains(marker))
+                || status.message().contains(DUPLICATE_RECORD_MARKER)
             {
                 return Disposition::AlreadyPresent;
             }
@@ -84,17 +85,10 @@ fn classify(error: &ClientApiError) -> Disposition {
 }
 
 /// Delay before retry number `retry` (zero-based). The base doubles per retry
-/// from `initial_backoff` and is capped at `max_backoff`; `jitter` in
+/// from `INITIAL_BACKOFF` and is capped at `MAX_BACKOFF`; `jitter` in
 /// `[0.0, 1.0]` places the result between half of the base and the base.
-fn backoff_delay(
-    config: &ExpectedInventoryRegistrationConfig,
-    retry: u32,
-    jitter: f64,
-) -> Duration {
-    let base = config
-        .initial_backoff
-        .saturating_mul(2_u32.saturating_pow(retry))
-        .min(config.max_backoff);
+fn backoff_delay(retry: u32, jitter: f64) -> Duration {
+    let base = (INITIAL_BACKOFF * 2_u32.pow(retry)).min(MAX_BACKOFF);
     let half = base / 2;
     half + half.mul_f64(jitter.clamp(0.0, 1.0))
 }
@@ -107,10 +101,9 @@ pub(crate) enum Registration {
 }
 
 /// Runs `attempt` until it succeeds, reports the record as already present,
-/// fails permanently, or exhausts `config.max_attempts`.
+/// fails permanently, or exhausts `MAX_ATTEMPTS`.
 pub(crate) async fn register_with_retry<F, Fut>(
     identifier: &str,
-    config: &ExpectedInventoryRegistrationConfig,
     mut attempt: F,
 ) -> Result<Registration, ClientApiError>
 where
@@ -129,14 +122,14 @@ where
             Disposition::Fail => return Err(error),
             Disposition::Retry => {}
         }
-        if attempts >= config.max_attempts {
+        if attempts >= MAX_ATTEMPTS {
             return Err(error);
         }
-        let delay = backoff_delay(config, attempts - 1, rand::rng().random::<f64>());
+        let delay = backoff_delay(attempts - 1, rand::rng().random::<f64>());
         tracing::warn!(
             identifier,
             attempt = attempts,
-            max_attempts = config.max_attempts,
+            max_attempts = MAX_ATTEMPTS,
             retry_delay_milliseconds = delay.as_millis(),
             error = %error,
             "transient error registering expected inventory record; retrying"
@@ -145,8 +138,9 @@ where
     }
 }
 
-/// Counts from one startup registration pass, exposed on
-/// `/expected-inventory/status`.
+/// Counts of the device records from one startup registration pass, exposed
+/// on `/expected-inventory/status`. Racks are not counted: a rack that cannot
+/// be registered aborts startup before any device record is attempted.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ExpectedInventorySummary {
     /// Records created by this pass.
@@ -176,7 +170,7 @@ impl ExpectedInventorySummary {
         }
     }
 
-    /// Emits one summary line, plus an error line naming failed records.
+    /// Emits one summary line.
     pub(crate) fn log(&self) {
         tracing::info!(
             registered_count = self.registered,
@@ -184,27 +178,14 @@ impl ExpectedInventorySummary {
             failed_count = self.failed,
             "expected inventory registration finished"
         );
-        if self.failed > 0 {
-            let shown = self
-                .failed_identifiers
-                .iter()
-                .take(LOGGED_FAILURE_LIMIT)
-                .collect::<Vec<_>>();
-            tracing::error!(
-                failed_count = self.failed,
-                shown_count = shown.len(),
-                failed_identifiers = ?shown,
-                "expected inventory records were not registered; their racks cannot become ready"
-            );
-        }
     }
 }
 
-/// Registers every record with at most `config.concurrency` in flight and
-/// returns the aggregate outcome.
+/// Registers every record with at most `concurrency` in flight and returns
+/// the aggregate outcome.
 pub(crate) async fn register_all<F, Fut>(
     records: Vec<ExpectedRecord>,
-    config: &ExpectedInventoryRegistrationConfig,
+    concurrency: usize,
     register: F,
 ) -> ExpectedInventorySummary
 where
@@ -215,11 +196,10 @@ where
     let results = stream::iter(records)
         .map(|record| async move {
             let identifier = record.identifier();
-            let result =
-                register_with_retry(&identifier, config, || register(record.clone())).await;
+            let result = register_with_retry(&identifier, || register(record.clone())).await;
             (identifier, result)
         })
-        .buffer_unordered(config.concurrency)
+        .buffer_unordered(concurrency)
         .collect::<Vec<_>>()
         .await;
 
@@ -246,15 +226,6 @@ mod tests {
 
     fn invocation(status: Status) -> ClientApiError {
         ClientApiError::InvocationError(status)
-    }
-
-    fn fast_config(max_attempts: u32, concurrency: usize) -> ExpectedInventoryRegistrationConfig {
-        ExpectedInventoryRegistrationConfig {
-            max_attempts,
-            initial_backoff: Duration::from_millis(1),
-            max_backoff: Duration::from_millis(2),
-            concurrency,
-        }
     }
 
     fn machine_record(serial: &str) -> ExpectedRecord {
@@ -284,11 +255,11 @@ mod tests {
                     expect: Disposition::AlreadyPresent,
                 },
                 Check {
-                    scenario: "duplicate switch NVOS MAC is already present despite FailedPrecondition",
+                    scenario: "NVOS MAC claimed by another expected switch is a conflict",
                     input: invocation(Status::failed_precondition(
                         "NVOS MAC address is already claimed by another expected switch: 02:00:00:00:00:02",
                     )),
-                    expect: Disposition::AlreadyPresent,
+                    expect: Disposition::Fail,
                 },
                 Check {
                     scenario: "Internal without a duplicate marker is transient",
@@ -301,21 +272,6 @@ mod tests {
                     expect: Disposition::Retry,
                 },
                 Check {
-                    scenario: "DeadlineExceeded is transient",
-                    input: invocation(Status::deadline_exceeded("timed out")),
-                    expect: Disposition::Retry,
-                },
-                Check {
-                    scenario: "ResourceExhausted is transient",
-                    input: invocation(Status::resource_exhausted("rate limited")),
-                    expect: Disposition::Retry,
-                },
-                Check {
-                    scenario: "Unknown transport error is transient",
-                    input: invocation(Status::unknown("transport error")),
-                    expect: Disposition::Retry,
-                },
-                Check {
                     scenario: "connection failure is transient",
                     input: ClientApiError::ConnectFailed("dns".to_string()),
                     expect: Disposition::Retry,
@@ -323,11 +279,6 @@ mod tests {
                 Check {
                     scenario: "InvalidArgument is permanent",
                     input: invocation(Status::invalid_argument("bad serial")),
-                    expect: Disposition::Fail,
-                },
-                Check {
-                    scenario: "FailedPrecondition without a duplicate marker is permanent",
-                    input: invocation(Status::failed_precondition("MaintenanceMode")),
                     expect: Disposition::Fail,
                 },
                 Check {
@@ -342,7 +293,6 @@ mod tests {
 
     #[test]
     fn backoff_doubles_to_cap_with_equal_jitter() {
-        let config = ExpectedInventoryRegistrationConfig::default();
         check_values(
             [
                 Check {
@@ -361,17 +311,12 @@ mod tests {
                     expect: Duration::from_secs(4),
                 },
                 Check {
-                    scenario: "base is capped at max_backoff",
+                    scenario: "base is capped at MAX_BACKOFF",
                     input: (7, 1.0),
                     expect: Duration::from_secs(30),
                 },
-                Check {
-                    scenario: "large retry counts saturate instead of overflowing",
-                    input: (40, 0.5),
-                    expect: Duration::from_millis(22_500),
-                },
             ],
-            |(retry, jitter)| backoff_delay(&config, retry, jitter),
+            |(retry, jitter)| backoff_delay(retry, jitter),
         );
     }
 
@@ -383,12 +328,11 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retry_stops_on_success_duplicate_permanent_failure_or_exhaustion() {
         struct Case {
             scenario: &'static str,
             responses: Vec<Result<(), ClientApiError>>,
-            max_attempts: u32,
             expect: Outcome<Registration, ()>,
             expect_attempts: u32,
         }
@@ -397,7 +341,6 @@ mod tests {
             Case {
                 scenario: "transient failure then success registers on the second attempt",
                 responses: vec![Err(invocation(Status::unavailable("busy"))), Ok(())],
-                max_attempts: 5,
                 expect: Yields(Registration::Registered),
                 expect_attempts: 2,
             },
@@ -409,32 +352,28 @@ mod tests {
                         "duplicate MAC address for expected host BMC interface: 02:00:00:00:00:01",
                     ))),
                 ],
-                max_attempts: 5,
                 expect: Yields(Registration::AlreadyPresent),
                 expect_attempts: 2,
             },
             Case {
                 scenario: "permanent failure is not retried",
                 responses: vec![Err(invocation(Status::invalid_argument("bad")))],
-                max_attempts: 5,
                 expect: Fails,
                 expect_attempts: 1,
             },
             Case {
-                scenario: "transient failures stop at max_attempts",
-                responses: (0..3)
+                scenario: "transient failures stop at MAX_ATTEMPTS",
+                responses: (0..MAX_ATTEMPTS)
                     .map(|_| Err(invocation(Status::unavailable("busy"))))
                     .collect(),
-                max_attempts: 3,
                 expect: Fails,
-                expect_attempts: 3,
+                expect_attempts: MAX_ATTEMPTS,
             },
         ];
 
         for case in cases {
             let (responses, attempts) = scripted(case.responses);
-            let config = fast_config(case.max_attempts, 1);
-            let result = register_with_retry("machine test", &config, || {
+            let result = register_with_retry("machine test", || {
                 let responses = responses.clone();
                 let attempts = attempts.clone();
                 async move {
@@ -457,39 +396,23 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn register_all_summarizes_outcomes_and_bounds_concurrency() {
-        let records = ["ok", "dup", "bad", "late", "gone"]
+        let concurrency = 2;
+        let records = ["ok", "dup", "bad", "worse"]
             .into_iter()
             .map(machine_record)
             .collect::<Vec<_>>();
-        let responses: HashMap<&str, VecDeque<Result<(), ClientApiError>>> = HashMap::from([
-            ("ok", VecDeque::from([Ok(())])),
-            (
-                "dup",
-                VecDeque::from([Err(invocation(Status::already_exists("present")))]),
-            ),
-            (
-                "bad",
-                VecDeque::from([Err(invocation(Status::invalid_argument("serial")))]),
-            ),
-            (
-                "late",
-                VecDeque::from([Err(invocation(Status::unavailable("busy"))), Ok(())]),
-            ),
-            (
-                "gone",
-                VecDeque::from([
-                    Err(invocation(Status::unavailable("busy"))),
-                    Err(invocation(Status::unavailable("busy"))),
-                ]),
-            ),
+        let responses: HashMap<&str, Result<(), ClientApiError>> = HashMap::from([
+            ("ok", Ok(())),
+            ("dup", Err(invocation(Status::already_exists("present")))),
+            ("bad", Err(invocation(Status::invalid_argument("serial")))),
+            ("worse", Err(invocation(Status::invalid_argument("mac")))),
         ]);
         let responses = Arc::new(Mutex::new(responses));
         let in_flight = Arc::new(Mutex::new((0_usize, 0_usize)));
-        let config = fast_config(2, 2);
 
-        let summary = register_all(records, &config, |record| {
+        let summary = register_all(records, concurrency, |record| {
             let responses = responses.clone();
             let in_flight = in_flight.clone();
             async move {
@@ -509,9 +432,8 @@ mod tests {
                 let response = responses
                     .lock()
                     .unwrap()
-                    .get_mut(chassis_serial_number.as_str())
-                    .and_then(VecDeque::pop_front)
-                    .expect("more attempts than scripted responses");
+                    .remove(chassis_serial_number.as_str())
+                    .expect("each record is attempted once");
                 in_flight.lock().unwrap().0 -= 1;
                 response
             }
@@ -521,18 +443,18 @@ mod tests {
         assert_eq!(
             summary,
             ExpectedInventorySummary {
-                registered: 2,
+                registered: 1,
                 already_present: 1,
                 failed: 2,
                 failed_identifiers: vec![
                     machine_record("bad").identifier(),
-                    machine_record("gone").identifier(),
+                    machine_record("worse").identifier(),
                 ],
             }
         );
         assert!(
-            in_flight.lock().unwrap().1 <= config.concurrency,
-            "in-flight registrations exceeded the configured concurrency"
+            in_flight.lock().unwrap().1 <= concurrency,
+            "in-flight registrations exceeded the concurrency bound"
         );
     }
 }

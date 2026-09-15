@@ -75,7 +75,6 @@ impl From<ForgeApiClient> for ApiClient {
 /// rebuilding it from the simulator.
 #[derive(Clone, Debug)]
 pub(crate) enum ExpectedRecord {
-    /// Expected host registered through [`ApiClient::add_expected_machine`].
     Machine {
         bmc_mac_address: String,
         chassis_serial_number: String,
@@ -83,15 +82,12 @@ pub(crate) enum ExpectedRecord {
         dpu_policy: Option<HostDpuPolicy>,
         interfaces: Vec<ExpectedInterface>,
     },
-    /// Expected switch registered through [`ApiClient::add_expected_switch`].
     Switch {
         bmc_mac_address: String,
         switch_serial_number: String,
         nvos_mac_addresses: Vec<String>,
         rack_id: Option<RackId>,
     },
-    /// Expected power shelf registered through
-    /// [`ApiClient::add_expected_power_shelf`].
     PowerShelf {
         bmc_mac_address: String,
         shelf_serial_number: String,
@@ -100,34 +96,26 @@ pub(crate) enum ExpectedRecord {
 }
 
 impl ExpectedRecord {
-    fn kind(&self) -> DeviceKind {
-        match self {
-            Self::Machine { .. } => DeviceKind::Machine,
-            Self::Switch { .. } => DeviceKind::Switch,
-            Self::PowerShelf { .. } => DeviceKind::PowerShelf,
-        }
-    }
-
     /// Human-readable identity used in logs and the registration summary.
     pub(crate) fn identifier(&self) -> String {
-        let (serial, bmc_mac_address) = match self {
+        let (kind, serial, bmc_mac_address) = match self {
             Self::Machine {
                 chassis_serial_number,
                 bmc_mac_address,
                 ..
-            } => (chassis_serial_number, bmc_mac_address),
+            } => (DeviceKind::Machine, chassis_serial_number, bmc_mac_address),
             Self::Switch {
                 switch_serial_number,
                 bmc_mac_address,
                 ..
-            } => (switch_serial_number, bmc_mac_address),
+            } => (DeviceKind::Switch, switch_serial_number, bmc_mac_address),
             Self::PowerShelf {
                 shelf_serial_number,
                 bmc_mac_address,
                 ..
-            } => (shelf_serial_number, bmc_mac_address),
+            } => (DeviceKind::PowerShelf, shelf_serial_number, bmc_mac_address),
         };
-        format!("{} {serial} ({bmc_mac_address})", self.kind())
+        format!("{kind} {serial} ({bmc_mac_address})")
     }
 }
 
