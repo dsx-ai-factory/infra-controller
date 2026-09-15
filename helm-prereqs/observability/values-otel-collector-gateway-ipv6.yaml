@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Optional overlay for the installed gateway (opentelemetry-collector chart 0.106.0).
+# Apply with otel-collector-gateway-metrics.yaml before the IPv6 scrape overlay.
+config:
+  exporters:
+    prometheus/site:
+      # The chart templates config values; follow any existing container port override.
+      endpoint: ":{{ .Values.ports.prometheus.containerPort }}"

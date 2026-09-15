@@ -56,10 +56,12 @@ The templates in `deploy/files/` are mounted into services and must be filled wi
 - `deploy/files/kea_config.json` – provide the Kea DHCPv4 configuration tailored to your admin/tenant networks, including option definitions, subnets, pools, and relay settings. Reference the same service IPs used elsewhere and ensure leases align with the admin network pool.
 - `deploy/files/vtysh.conf` – FRRouting vtysh shell configuration. Align hostname and service addresses here with the FRR service IPs chosen from your service VIP pool.
 
-After populating `deploy/kustomization.yaml` and all files under `deploy/files/`, deploy everything with:
+Rendering the complete root also requires standalone `kustomize` and `ksops` on `PATH`, with credentials to decrypt the SOPS-encrypted `deploy/nico-base/ssh-console-rs/secrets/ssh_host_key.enc.yaml`. That file must contain the `ssh-host-key` Secret with `ssh_host_ed25519_key` and `ssh_host_ed25519_key_pub` keys. Supply `deploy/nico-unbound-base/local.conf.d/patchme.conf` with the base Unbound forwarders; the base generator reads it before the root replaces `forwarders.conf` with `deploy/files/unbound/forwarders.conf`.
+
+After populating these inputs, `deploy/kustomization.yaml`, and all files under `deploy/files/`, deploy everything from the repository root with:
 
 ```bash
-kustomize build . --enable-helm --enable-alpha-plugins --enable-exec | kubectl apply -f -
+kustomize build deploy --enable-alpha-plugins --enable-exec | kubectl apply -f -
 ```
 
 ## NICo Core services (bare‑metal provisioning)
@@ -148,6 +150,8 @@ Path: `deploy/nico-base/api/`
 `nico-dhcp` is the **authoritative DHCP server** for NICo‑managed subnets. It runs Kea DHCPv4 and is the endpoint that **tenant ToR switches or DHCP relays point to**. When a tenant node PXE boots or requests an address, this service assigns IPs and options according to your Kea configuration.
 
 **What it deploys**
+
+For opt-in DHCPv6, see [Deploy DHCPv6](../docs/provisioning/dhcpv6-deployment.md). The top-level Kustomize root generates both DHCP ConfigMaps in `nico-system`; add `components/dhcp6` there only after supplying the stable server identifier, separate IPv6 VIP, and routable pod IPv6 address.
 
 Path: `deploy/nico-base/dhcp/`
 
@@ -371,7 +375,7 @@ Key settings live in `config-files/config.toml` (nico‑api URL, SPIFFE cert pat
 3. Deploy SSH console:
 
    ```bash
-   kubectl apply -k deploy/nico-base/ssh-console-rs -n <NICO_NAMESPACE>
+   kustomize build deploy/nico-base/ssh-console-rs --enable-alpha-plugins --enable-exec | kubectl apply -f - -n <NICO_NAMESPACE>
    ```
 
 ---
@@ -398,7 +402,7 @@ Key settings live in `config-files/config.toml` (nico‑api URL, SPIFFE cert pat
 - Apply the full base (optionally with your overlay):
 
    ```bash
-   kubectl apply -k deploy/nico-base -n <NICO_NAMESPACE>
+   kustomize build deploy/nico-base --enable-alpha-plugins --enable-exec | kubectl apply -f - -n <NICO_NAMESPACE>
    ```
 
 ---
@@ -413,7 +417,7 @@ Key settings live in `config-files/config.toml` (nico‑api URL, SPIFFE cert pat
 Path: `deploy/nico-unbound-base/`
 
 - Deployment `nico-unbound` with the Unbound server and `unbound_exporter` sidecar (config reload via Stakater reloader annotations).
-- Service `nico-unbound` – DNS on UDP/TCP **53**, metrics on TCP **9167**.
+- Service `nico-unbound` – DNS on UDP/TCP **53**, metrics on TCP **9167**. It defaults to IPv4; see [Unbound IPv6 transport](../docs/configuration/dns.md#unbound-ipv6-transport) for optional dual-stack exposure and the operator-supplied image/configuration requirements.
 - ConfigMaps
   - `unbound-envvars` from `unbound.env` (sets `LOCAL_CONFIG_DIR`, `BROKEN_DNSSEC`, `UNBOUND_CONTROL_DIR`).
   - `unbound-local-config` from `local.conf.d/*.conf`, including access controls, verbosity, extended statistics, and an `unknowndomain` blocklist plus a placeholder `forwarders.conf` you should replace with your upstream resolvers.
@@ -502,7 +506,7 @@ Path: `deploy/nico-system/`
 2. Apply the overlay:
 
    ```bash
-   kubectl apply -k deploy/nico-system
+   kustomize build deploy/nico-system --enable-alpha-plugins --enable-exec | kubectl apply -f -
    ```
 
 3. Confirm LoadBalancer IPs are assigned and cert-manager issues the NICo certificates.

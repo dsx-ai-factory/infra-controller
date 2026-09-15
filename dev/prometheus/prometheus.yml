@@ -10,8 +10,7 @@ global:
       monitor: 'docker-host-alpha'
 
 # Load and evaluate rules in this file every 'evaluation_interval' seconds.
-rule_files:
-  - "alert.rules"
+rule_files: []
 
 # A scrape configuration containing exactly one endpoint to scrape.
 scrape_configs:

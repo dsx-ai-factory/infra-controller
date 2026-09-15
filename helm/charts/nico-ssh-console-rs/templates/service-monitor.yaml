@@ -6,6 +6,7 @@ metadata:
   namespace: {{ include "nico-ssh-console-rs.namespace" . }}
   labels:
     {{- include "nico-ssh-console-rs.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: {{ include "nico-ssh-console-rs.name" . }}
     app: {{ include "nico-ssh-console-rs.name" . }}
     prometheus: nico-monitoring
 spec:

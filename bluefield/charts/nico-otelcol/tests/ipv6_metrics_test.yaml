@@ -1,0 +1,33 @@
+# The Service must reach the collector's exporter on either address family.
+suite: Collector metrics exposure
+templates: [configmap.yaml, service.yaml]
+tests:
+  # Loopback-only exporters cannot be reached through the node-address Service endpoints.
+  - it: exposes the default exporter beyond loopback through a dual-stack Service
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'prometheus:\s*endpoint: ":9999"'
+        template: configmap.yaml
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: PreferDualStack
+        template: service.yaml
+      - equal:
+          path: spec.ports
+          value: [{name: prometheus, protocol: TCP, port: 9999, targetPort: 9999}]
+        template: service.yaml
+
+  # Port overrides must move both the actual listener and its Service target together.
+  - it: keeps the exporter and Service aligned with an overridden metrics port
+    set:
+      prometheusPort: 19999
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'prometheus:\s*endpoint: ":19999"'
+        template: configmap.yaml
+      - equal:
+          path: spec.ports
+          value: [{name: prometheus, protocol: TCP, port: 19999, targetPort: 19999}]
+        template: service.yaml

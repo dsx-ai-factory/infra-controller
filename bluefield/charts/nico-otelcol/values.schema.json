@@ -161,7 +161,7 @@
     },
     "prometheusPort": {
       "type": "integer",
-      "description": "TCP port for the prometheus receiver Service (must match DPUServiceConfiguration configPorts)",
+      "description": "TCP port for the Prometheus exporter and Service (must match DPUServiceConfiguration configPorts)",
       "minimum": 1,
       "maximum": 65535
     }

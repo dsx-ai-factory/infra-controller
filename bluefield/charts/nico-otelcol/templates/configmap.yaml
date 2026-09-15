@@ -9,4 +9,6 @@ data:
     {{- /* Swap the embedded /opt/nico cert dir + nico_root.pem filename to match certsDir + rootCaFile. */ -}}
     {{- $certsDir := .Values.certsDir | default "/opt/nico" -}}
     {{- $rootCa := .Values.rootCaFile | default "nico_root.pem" -}}
-    {{- .Files.Get "files/otel_config.yaml" | replace "/opt/nico/nico_root.pem" (printf "%s/%s" $certsDir $rootCa) | replace "/opt/nico" $certsDir | nindent 4 }}
+    {{- /* The Service targets node IPs; Go's hostless TCP bind supports both dual-stack and IPv4-only nodes. */ -}}
+    {{- $prometheusEndpoint := printf ":%s" (include "nico-otelcol.prometheusPort" .) -}}
+    {{- .Files.Get "files/otel_config.yaml" | replace "/opt/nico/nico_root.pem" (printf "%s/%s" $certsDir $rootCa) | replace "/opt/nico" $certsDir | replace "127.0.0.1:9999" $prometheusEndpoint | nindent 4 }}

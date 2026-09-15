@@ -38,6 +38,12 @@ imagePullSecrets: []
 service:
   type: ClusterIP
 
+## Request dual-stack exposure on the combined nico-unbound DNS/metrics Service.
+## Configure and verify the supplied image's IPv6 DNS and exporter listeners first.
+## This flag does not change container startup, localConfig, or external DNS Services.
+ipv6:
+  enabled: false
+
 ## External LoadBalancer Service (bare-metal / MetalLB). When enabled, renders two
 ## Services (UDP+TCP on 53) sharing one VIP via metallb.universe.tf/allow-shared-ip, so
 ## DPUs/hosts can use unbound as their DHCP-advertised resolver for the .forge zone.

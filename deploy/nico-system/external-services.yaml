@@ -19,6 +19,8 @@ kind: Service
 metadata:
   name: nico-dhcp-external
 spec:
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv4]
   internalTrafficPolicy: Local
   type: LoadBalancer
   selector:

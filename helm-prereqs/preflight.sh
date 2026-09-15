@@ -25,6 +25,7 @@
 # Checks (in order — fails fast so the most actionable issues appear first):
 #   1. Environment variables    — presence and format
 #   2. Required tools           — helm, helmfile, kubectl, jq, ssh-keygen
+#                                  Core VIP validation also needs python3 + PyYAML
 #   3. values/metallb-config.yaml — YAML, pools, advertisement mode, ASNs
 #   4. Cluster reachability     — kubectl can reach the API server
 #   5. Node resources           — at least 3 schedulable (Ready + untainted) nodes
@@ -678,9 +679,17 @@ if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
     if _strip_comments "${_CORE_VALUES_CFG}" | grep -qE '^[[:space:]]*hostname:[[:space:]]*("")?[[:space:]]*$'; then
         ERRORS+=("${_CORE_VALUES_LABEL}: nico-api.hostname is empty — set your external nico-api hostname")
     fi
-    # Every enabled externalService needs a VIP from the MetalLB pool
-    if _strip_comments "${_CORE_VALUES_CFG}" | grep -qE 'loadBalancerIPs:[[:space:]]*("")?[[:space:]]*$'; then
-        ERRORS+=("${_CORE_VALUES_LABEL}: one or more loadBalancerIPs are empty — assign each enabled externalService a VIP from your MetalLB pool")
+    # Parse YAML so formatting cannot bypass active-Service checks; parser failures are errors.
+    if ! command -v python3 &>/dev/null; then
+        ERRORS+=("Core VIP preflight requires python3 with PyYAML — install them before running setup.sh")
+    elif _missing_vips="$(python3 "${SCRIPT_DIR}/check-external-service-vips.py" "${_CORE_VALUES_CFG}" 2>&1)"; then
+        # Disabled Services may keep blank site defaults; only active LoadBalancer Services require a VIP.
+        while IFS= read -r _service; do
+            [[ -z "${_service}" ]] && continue
+            ERRORS+=("${_CORE_VALUES_LABEL}: ${_service} needs loadBalancerIPs from your MetalLB pool")
+        done <<< "${_missing_vips}"
+    else
+        ERRORS+=("${_CORE_VALUES_LABEL}: ${_missing_vips}")
     fi
 fi
 
