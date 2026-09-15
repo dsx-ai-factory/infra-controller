@@ -195,9 +195,11 @@ impl SshBmcVendor {
         prompt_buf: &[u8],
         skip_data_read_len: usize,
     ) -> bool {
-        let lenovo_failure_pending = matches!(self, SshBmcVendor::Lenovo)
-            && bytes_contains(prompt_buf, LENOVO_SOL_PRIMARY_FAILURE);
-        !lenovo_failure_pending && prompt_buf.len() > skip_data_read_len
+        // Lenovo command failures can arrive in multiple SSH packets. Do not accept a Lenovo
+        // activation based on byte count because a partial failure response can look successful
+        // until the trailing BMC prompt arrives. The SSH connection implementation confirms
+        // Lenovo activation after a short response grace period instead.
+        !matches!(self, SshBmcVendor::Lenovo) && prompt_buf.len() > skip_data_read_len
     }
 
     pub fn filter_escape_sequences<'a>(
@@ -648,12 +650,12 @@ mod tests {
                 } => false,
             }
 
-            "Lenovo fallback start succeeds by byte count" {
+            "Lenovo fallback waits for delayed confirmation" {
                 AcceptActivationCase {
                     vendor: SshBmcVendor::Lenovo,
                     output: b"console start\r\nroot@host # ",
                     skip_data_read_len: lenovo_start_skip_len,
-                } => true,
+                } => false,
             }
 
             "non-Lenovo activation still succeeds by byte count" {
