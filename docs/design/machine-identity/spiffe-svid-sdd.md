@@ -230,7 +230,7 @@ ReencryptTenantIdentitySecrets (dry_run=false)
 
 ```text
 ┌────────┐       ┌───────────────┐       ┌─────────────┐       ┌──────────┐       
-│ Client │       │ NICo-rest  │       │  NICo API   │       │ Database │       
+│ Client │       │ NICo-rest     │       │  NICo API   │       │ Database │
 │        │       │   (REST)      │       │   (gRPC)    │       │(Postgres)│       
 └───┬────┘       └──────┬────────┘       └──────┬──────┘       └────┬─────┘       
     │                   │                       │                   │                    
