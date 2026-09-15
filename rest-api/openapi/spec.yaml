@@ -24916,16 +24916,12 @@ components:
             - string
             - 'null'
           description: |-
-            Firmware input serialized as a string. RMS-backed updates require a
-            complete SOT firmware-object JSON document suitable for the selected
-            trays. If the JSON object contains a case-sensitive top-level key
-            `compute`, `nvswitch`, or `powershelf`, each tray type receives its
-            corresponding value (JSON string values are unquoted). A missing
-            tray-type key in this form passes an empty input to that backend;
-            it does not guarantee a skipped update. Otherwise, the entire string
-            is passed unchanged to every selected tray type. Empty, null, or
-            omitted input leaves version handling to the backend and operation
-            rule; direct RMS firmware-object updates require a non-empty input.
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -26091,16 +26087,12 @@ components:
             - string
             - 'null'
           description: |-
-            Firmware input serialized as a string. RMS-backed updates require a
-            complete SOT firmware-object JSON document suitable for the selected
-            trays. If the JSON object contains a case-sensitive top-level key
-            `compute`, `nvswitch`, or `powershelf`, each tray type receives its
-            corresponding value (JSON string values are unquoted). A missing
-            tray-type key in this form passes an empty input to that backend;
-            it does not guarantee a skipped update. Otherwise, the entire string
-            is passed unchanged to every selected tray type. Empty, null, or
-            omitted input leaves version handling to the backend and operation
-            rule; direct RMS firmware-object updates require a non-empty input.
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         targets:
           type: array
           items:
@@ -26289,16 +26281,12 @@ components:
             - string
             - 'null'
           description: |-
-            Firmware input serialized as a string. RMS-backed updates require a
-            complete SOT firmware-object JSON document suitable for the selected
-            trays. If the JSON object contains a case-sensitive top-level key
-            `compute`, `nvswitch`, or `powershelf`, each tray type receives its
-            corresponding value (JSON string values are unquoted). A missing
-            tray-type key in this form passes an empty input to that backend;
-            it does not guarantee a skipped update. Otherwise, the entire string
-            is passed unchanged to every selected tray type. Empty, null, or
-            omitted input leaves version handling to the backend and operation
-            rule; direct RMS firmware-object updates require a non-empty input.
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         targets:
           type: array
           items:
