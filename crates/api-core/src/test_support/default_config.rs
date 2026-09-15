@@ -48,8 +48,8 @@ use crate::cfg::file::{
     SwitchStateControllerConfig, TracingConfig, VmaasConfig, VpcPeeringPolicy,
     VpcPrefixStateControllerConfig, default_bmc_session_lockout_threshold,
     default_database_pool_acquire_timeout, default_database_pool_idle_timeout,
-    default_database_pool_max_lifetime, default_max_find_by_ids,
-    default_max_site_prefixes_per_tenant, default_pxe_public_base_url,
+    default_database_pool_max_lifetime, default_database_startup_retry_timeout,
+    default_max_find_by_ids, default_max_site_prefixes_per_tenant, default_pxe_public_base_url,
 };
 #[cfg(test)]
 use crate::cfg::file::{
@@ -171,6 +171,7 @@ pub fn get() -> CarbideConfig {
         database_pool_acquire_timeout: default_database_pool_acquire_timeout(),
         database_pool_idle_timeout: default_database_pool_idle_timeout(),
         database_pool_max_lifetime: default_database_pool_max_lifetime(),
+        database_startup_retry_timeout: default_database_startup_retry_timeout(),
         api_admission_control: Default::default(),
         compute_allocation_enforcement: Default::default(),
         asn: 0,
