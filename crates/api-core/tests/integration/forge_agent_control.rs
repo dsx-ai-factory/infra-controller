@@ -33,7 +33,7 @@ trait DbMachineCleanupExt {
     async fn update_cleanup_time(&self, txn: &mut sqlx::PgTransaction<'_>);
 }
 
-impl DbMachineCleanupExt for model::machine::Machine {
+impl DbMachineCleanupExt for model::machine::AnyMachine {
     async fn clear_cleanup_time(&self, txn: &mut sqlx::PgTransaction<'_>) {
         db::machine::clear_cleanup_time(&self.id, txn.as_mut())
             .await

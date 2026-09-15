@@ -23,6 +23,7 @@ use std::{fmt, io};
 use carbide_instrument::Event;
 use carbide_utils::metrics::SharedMetricsHolder;
 use carbide_utils::periodic_timer::PeriodicTimer;
+use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use chrono::Utc;
@@ -845,7 +846,7 @@ impl SwitchCertificateMonitor {
             .filter_map(|target| target.rack_id.clone())
             .collect::<HashSet<_>>();
         let legacy_endpoints_result = async {
-            let machine_ids = db::machine::find_machine_ids(
+            let machine_ids = db::machine::find_machine_ids::<MachineId>(
                 &mut db_reader,
                 MachineSearchConfig {
                     mnnvl_only: true,

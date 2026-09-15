@@ -213,16 +213,14 @@ async fn handle_dpa_message(services: Arc<Api>, message: SetVni, topic: String) 
         }
     };
 
-    if machine.is_none() {
+    let Some(machine) = machine else {
         tracing::error!(
             machine_id = %dpa_if.machine_id,
             dpa_interface_id = %dpa_if.id,
             "Machine not found",
         );
         return;
-    }
-
-    let machine = machine.unwrap();
+    };
 
     let cur_spx_status_observations = machine.status.spx_status_observation.unwrap_or_default();
     let mut new_spx_status_observations = MachineSpxStatusObservation::default();

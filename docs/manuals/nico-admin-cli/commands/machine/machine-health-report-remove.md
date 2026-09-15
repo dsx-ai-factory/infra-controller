@@ -22,7 +22,7 @@ Remove a health report entry
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -40,7 +40,6 @@ Sort output by specified field\
 Print help (see a summary with -h)
 
 \<*MACHINE_ID*\>  
-
 \<*REPORT_SOURCE*\>
 
 ---

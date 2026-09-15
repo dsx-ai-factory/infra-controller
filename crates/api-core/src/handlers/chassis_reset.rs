@@ -21,7 +21,7 @@ use ::rpc::forge as rpc;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::HostMachineId;
 use model::machine::machine_search_config::MachineSearchConfig;
-use model::machine::{MachineMaintenanceOperation, ManagedHostState, ReadyBootConfigState};
+use model::machine::{MachineMaintenanceOperation, ManagedHostState};
 use tonic::{Request, Response, Status};
 
 use crate::api::{Api, log_request_data};
@@ -71,21 +71,12 @@ pub(crate) async fn admin_chassis_reset(
             },
         )
         .await?;
-    if !matches!(
-        host_machine.current_state(),
-        ManagedHostState::Ready
-            | ManagedHostState::Failed { .. }
-            | ManagedHostState::BootConfiguring {
-                boot_config_state: ReadyBootConfigState::Prepare
-                    | ReadyBootConfigState::Failed { .. },
-                ..
-            }
-    ) {
+    if !matches!(host_machine.current_state(), ManagedHostState::Ready) {
         return Err(Status::failed_precondition(
             "host state does not allow a chassis reset",
         ));
     }
-    if db::instance::find_live_by_machine_id_for_update(&mut txn, &host_machine.id)
+    if db::instance::find_id_by_machine_id(&mut txn, &host_machine.id)
         .await?
         .is_some()
     {
@@ -94,9 +85,15 @@ pub(crate) async fn admin_chassis_reset(
         ));
     }
 
+    if host_machine.health_reports.maintenance_override().is_none() {
+        return Err(Status::failed_precondition(
+            "host must be in maintenance mode before a chassis reset (enable it with SetMaintenance)",
+        ));
+    }
+
     db::machine::set_machine_maintenance_requested(
         &mut txn,
-        machine_id.into(),
+        machine_id,
         "admin-chassis-reset",
         MachineMaintenanceOperation::ChassisReset { chassis_id },
     )

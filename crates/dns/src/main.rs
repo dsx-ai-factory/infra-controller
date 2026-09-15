@@ -28,7 +28,6 @@ use opentelemetry_otlp::WithExportConfig;
 use tonic::codegen::http::uri::InvalidUri;
 use tracing::metadata::LevelFilter;
 use tracing_subscriber::filter::EnvFilter;
-use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
 #[tokio::main]
@@ -65,38 +64,60 @@ async fn main() -> Result<(), eyre::Report> {
         Command::Run(run_command) => {
             let config: Config = run_command.try_into()?;
 
-            let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
-                .with_tonic()
-                .with_endpoint(config.otlp_endpoint.to_string())
-                .build()?;
+            // Tracing is opt-in: an env var takes precedence over the config
+            // file so operators can override it without redeploying, and no
+            // endpoint (the default) disables trace export entirely.
+            let otlp_endpoint =
+                std::env::var(opentelemetry_otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
+                    .ok()
+                    .or_else(|| config.otlp_endpoint.as_ref().map(|uri| uri.to_string()));
 
-            let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-                .with_batch_exporter(otlp_exporter)
-                .with_resource(
-                    opentelemetry_sdk::Resource::builder()
-                        .with_attributes([opentelemetry::KeyValue::new(
-                            "service.name",
-                            "carbide-dns",
-                        )])
-                        .build(),
-                )
-                .build();
+            let otel_layer = match &otlp_endpoint {
+                None => None,
+                Some(endpoint) => {
+                    let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
+                        .with_tonic()
+                        .with_endpoint(endpoint)
+                        .build()?;
 
-            let otel_layer =
-                tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("carbide-dns"));
+                    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                        .with_batch_exporter(otlp_exporter)
+                        .with_resource(
+                            opentelemetry_sdk::Resource::builder()
+                                .with_attributes([opentelemetry::KeyValue::new(
+                                    "service.name",
+                                    "nico-dns",
+                                )])
+                                .build(),
+                        )
+                        .build();
+
+                    Some(
+                        tracing_opentelemetry::layer()
+                            .with_tracer(tracer_provider.tracer("nico-dns")),
+                    )
+                }
+            };
 
             let log_events = carbide_instrument::LogEventsMetric::new("nico-dns");
             tracing_subscriber::registry()
                 .with(log_events.layer())
-                .with(fmt::layer().json())
+                .with(
+                    logfmt::layer().with_event_fields([logfmt::EventField::with_default(
+                        "component",
+                        "nico-dns",
+                    )]),
+                )
                 .with(env_filter)
                 .with(otel_layer)
                 .try_init()?;
 
-            tracing::info!(
-                endpoint = %config.otlp_endpoint,
-                "OpenTelemetry tracing enabled",
-            );
+            match &otlp_endpoint {
+                Some(endpoint) => tracing::info!(%endpoint, "OpenTelemetry tracing enabled"),
+                None => {
+                    tracing::info!("OpenTelemetry tracing disabled: no OTLP endpoint configured")
+                }
+            }
 
             DnsServer::run(config)
                 .await
@@ -155,6 +176,15 @@ pub struct RunCommand {
 
     #[clap(short = 'k', long, help = "Path to the client key for the API server")]
     pub client_key_path: Option<PathBuf>,
+
+    /// OTLP gRPC endpoint that traces are exported to. Trace export is
+    /// disabled by default (this is unset). If the `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
+    /// environment variable is set, its value takes precedence over this flag.
+    #[clap(
+        long,
+        help = "OTLP gRPC endpoint that traces are exported to (e.g., http://otel-collector:4317). Defaults to unset, which disables trace export. Overridden by OTEL_EXPORTER_OTLP_TRACES_ENDPOINT."
+    )]
+    pub otlp_endpoint: Option<String>,
 
     // Backward compatibility alias
     #[clap(
@@ -234,6 +264,17 @@ impl TryInto<Config> for RunCommand {
         }
         if let Some(client_key_path) = self.client_key_path {
             config.client_key_path = client_key_path;
+        }
+        if let Some(otlp_endpoint) = self.otlp_endpoint {
+            config.otlp_endpoint =
+                Some(
+                    otlp_endpoint
+                        .parse()
+                        .map_err(|error| CommandError::InvalidUri {
+                            uri: otlp_endpoint,
+                            error,
+                        })?,
+                );
         }
 
         Ok(config)

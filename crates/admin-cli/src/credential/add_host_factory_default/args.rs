@@ -44,6 +44,7 @@ impl From<Args> for forgerpc::CredentialCreationRequest {
             password: args.password,
             mac_address: None,
             vendor: Some(args.vendor.to_string()),
+            credential_name: None,
         }
     }
 }

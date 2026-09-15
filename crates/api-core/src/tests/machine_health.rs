@@ -863,11 +863,7 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
     let (host_machine_id, _) = create_managed_host(&env).await.into();
 
     let mut txn = env.pool.begin().await?;
-    let machine_ids = db::machine::find_machine_ids(
-        txn.as_mut(),
-        model::machine::machine_search_config::MachineSearchConfig::default(),
-    )
-    .await?;
+    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await?;
     let options = model::machine::LoadSnapshotOptions {
         include_history: false,
         include_instance_data: false,
@@ -915,11 +911,7 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
     .await;
 
     let mut txn = env.pool.begin().await?;
-    let machine_ids = db::machine::find_machine_ids(
-        txn.as_mut(),
-        model::machine::machine_search_config::MachineSearchConfig::default(),
-    )
-    .await?;
+    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await?;
     let options = model::machine::LoadSnapshotOptions {
         include_history: false,
         include_instance_data: false,

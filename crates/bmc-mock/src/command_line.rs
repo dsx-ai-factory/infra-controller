@@ -17,8 +17,8 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use bmc_mock::HardwareType;
-use clap::{Parser, ValueEnum};
+use bmc_mock::{DpuFirmwareVersions, HardwareType};
+use clap::{Args as ClapArgs, Parser, ValueEnum};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(super) enum MachineRole {
@@ -66,7 +66,88 @@ impl From<String> for IpRouterPair {
     }
 }
 
+#[derive(Clone, ClapArgs, Debug, Default)]
+pub(super) struct DpuFirmwareArgs {
+    #[clap(
+        long = "dpu-bmc-firmware",
+        value_name = "VERSION",
+        requires = "hardware_profile",
+        help = "Override the DPU BMC version in generated firmware inventory"
+    )]
+    bmc: Option<String>,
+
+    #[clap(
+        long = "dpu-uefi-firmware",
+        value_name = "VERSION",
+        requires = "hardware_profile",
+        help = "Override the DPU UEFI version in generated firmware inventory"
+    )]
+    uefi: Option<String>,
+
+    #[clap(
+        long = "dpu-bsp-firmware",
+        value_name = "VERSION",
+        requires = "hardware_profile",
+        help = "Add the DPU BSP version to generated firmware inventory"
+    )]
+    bsp: Option<String>,
+
+    #[clap(
+        long = "dpu-cec-firmware",
+        value_name = "VERSION",
+        requires = "hardware_profile",
+        help = "Override the DPU CEC version in generated firmware inventory"
+    )]
+    cec: Option<String>,
+
+    #[clap(
+        long = "dpu-nic-firmware",
+        value_name = "VERSION",
+        requires = "hardware_profile",
+        help = "Override the DPU NIC version in generated firmware inventory"
+    )]
+    nic: Option<String>,
+}
+
+impl DpuFirmwareArgs {
+    pub(super) fn is_empty(&self) -> bool {
+        self.bmc.is_none()
+            && self.uefi.is_none()
+            && self.bsp.is_none()
+            && self.cec.is_none()
+            && self.nic.is_none()
+    }
+}
+
+impl From<DpuFirmwareArgs> for DpuFirmwareVersions {
+    fn from(value: DpuFirmwareArgs) -> Self {
+        Self {
+            bmc: value.bmc,
+            uefi: value.uefi,
+            bsp: value.bsp,
+            cec: value.cec,
+            nic: value.nic,
+        }
+    }
+}
+
 #[derive(Clone, Parser, Debug)]
+#[command(after_long_help = "\
+DPU FIRMWARE OVERRIDES:
+
+Firmware overrides are optional, opaque version strings for generated DPU endpoints.
+The hardware profile determines their Redfish inventory IDs. Omitted BMC, UEFI, CEC,
+and NIC values retain the profile inventory; omitting BSP leaves it absent. An exposed
+DPU reports the configured versions. A generated host also adds the primary DPU's
+explicitly configured versions without replacing colliding host inventory IDs.
+
+The inventory mapping supports generated BlueField-3 and BlueField-4 profiles using
+generation-specific Redfish IDs. The profile must resolve to at least one DPU; set
+--dpu-count to a positive value for variable-count profiles. Explicit internal mode
+also requires --machine-role and --state-backend=internal. The libvirt shorthand uses
+--hardware-profile with --libvirt-domain and implies the host role and libvirt state
+backend. Firmware overrides cannot be combined with --targz or --ip-router.
+")]
 pub(super) struct Args {
     #[clap(short, long)]
     pub(super) cert_path: Option<String>,
@@ -85,6 +166,21 @@ pub(super) struct Args {
         help = "An ip_address and .tar.gz file pair (comma separated).\nThe file is an archive of redfish data when the request is forwarded to a specific IP address.\nRepeat for different machines"
     )]
     pub(super) ip_router: Option<Vec<IpRouterPair>>,
+
+    #[clap(
+        long,
+        conflicts_with_all = ["targz", "ip_router"],
+        help = "Require Redfish authentication on generated routers (disabled by default); use the profile credentials to rotate its factory password through AccountService before ordinary reads"
+    )]
+    pub(super) redfish_auth: bool,
+
+    #[clap(
+        long,
+        value_name = "SECONDS",
+        conflicts_with_all = ["targz", "ip_router"],
+        help = "Keep the generated BMC offline, answering 503, for this many seconds after Manager.Reset or the /ipmi mock action bmc_cold_reset; omitted or 0 makes a reset instantaneous"
+    )]
+    pub(super) bmc_reset_duration: Option<u64>,
 
     #[clap(long, help = "Start an IPMI/SOL simulator for the generated BMC mock")]
     pub(super) enable_ipmi_simulation: bool,
@@ -135,6 +231,9 @@ pub(super) struct Args {
 
     #[clap(long, default_value = "virsh", requires = "libvirt_domain")]
     pub(super) virsh_path: PathBuf,
+
+    #[clap(flatten, next_help_heading = "DPU firmware overrides")]
+    pub(super) dpu_firmware: DpuFirmwareArgs,
 }
 
 pub(super) fn parse_args() -> Args {
@@ -146,6 +245,35 @@ mod tests {
     use clap::error::ErrorKind;
 
     use super::*;
+
+    #[test]
+    fn generated_router_auth_rejects_archives() {
+        carbide_test_support::value_scenarios!(run = |(feature, archive, value)|
+            Args::try_parse_from(["bmc-mock", feature, archive, value]).unwrap_err().kind();
+            "generated-router options conflict with archives" {
+                ("--redfish-auth", "--targz", "fixture.tar.gz") => ErrorKind::ArgumentConflict,
+                ("--redfish-auth", "--ip-router", "127.0.0.1,fixture.tar.gz") => ErrorKind::ArgumentConflict,
+            }
+        );
+    }
+
+    #[test]
+    fn the_reset_window_is_a_generated_router_option() {
+        let args = Args::try_parse_from(["bmc-mock", "--bmc-reset-duration", "15"]).unwrap();
+        assert_eq!(args.bmc_reset_duration, Some(15));
+        assert_eq!(
+            Args::try_parse_from([
+                "bmc-mock",
+                "--bmc-reset-duration",
+                "15",
+                "--targz",
+                "x.tar.gz"
+            ])
+            .unwrap_err()
+            .kind(),
+            ErrorKind::ArgumentConflict
+        );
+    }
 
     #[test]
     fn parses_supported_hardware_profiles() {
@@ -196,6 +324,51 @@ mod tests {
         assert_eq!(args.state_backend, Some(StateBackend::Internal));
         assert_eq!(args.dpu_index, Some(1));
         assert_eq!(args.instance_index, 3);
+    }
+
+    #[test]
+    fn parses_dpu_firmware_overrides() {
+        let args = Args::try_parse_from([
+            "bmc-mock",
+            "--machine-role",
+            "host",
+            "--state-backend",
+            "internal",
+            "--hardware-profile",
+            "dell_poweredge_r750",
+            "--dpu-count",
+            "1",
+            "--dpu-bmc-firmware",
+            "bmc-version",
+            "--dpu-uefi-firmware",
+            "uefi-version",
+            "--dpu-bsp-firmware",
+            "bsp-version",
+            "--dpu-cec-firmware",
+            "cec-version",
+            "--dpu-nic-firmware",
+            "nic-version",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            DpuFirmwareVersions::from(args.dpu_firmware),
+            DpuFirmwareVersions {
+                bmc: Some("bmc-version".to_string()),
+                uefi: Some("uefi-version".to_string()),
+                bsp: Some("bsp-version".to_string()),
+                cec: Some("cec-version".to_string()),
+                nic: Some("nic-version".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn dpu_firmware_overrides_require_a_hardware_profile() {
+        let error =
+            Args::try_parse_from(["bmc-mock", "--dpu-bmc-firmware", "bmc-version"]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

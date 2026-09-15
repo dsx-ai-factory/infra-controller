@@ -21,11 +21,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::{StreamExt, stream};
-use nv_redfish::ServiceRoot;
-use nv_redfish::core::Bmc;
+use nv_redfish::core::{Bmc, EntityTypeRef, ToSnakeCase};
+use nv_redfish::{Resource, ServiceRoot};
 
 use crate::HealthError;
-use crate::collectors::inventory::{DiscoveredEntity, EntityInventory, SharedInventory};
+use crate::collectors::inventory::{
+    DiscoveredEntity, EntityInventory, GpuIdentity, SharedInventory,
+};
 use crate::collectors::runtime::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
 
@@ -35,6 +37,12 @@ pub struct EntityDiscoveryCollectorConfig<B: Bmc> {
 
     /// Bounds local fan-out to the endpoint Redfish operation limit.
     pub request_concurrency: NonZeroUsize,
+
+    /// Label GPU telemetry with the identity of the device that produced it.
+    ///
+    /// Read from resources discovery already fetches, so this adds no Redfish
+    /// requests; it is opt-in only because it adds metric labels.
+    pub gpu_identity: bool,
 }
 
 pub struct EntityDiscoveryCollector<B: Bmc> {
@@ -42,6 +50,7 @@ pub struct EntityDiscoveryCollector<B: Bmc> {
     bmc: Arc<B>,
     shared: SharedInventory<B>,
     request_concurrency: usize,
+    gpu_identity: bool,
     generation: u64,
 }
 
@@ -58,6 +67,7 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for EntityDiscoveryCollector<B> {
             bmc,
             shared: config.shared,
             request_concurrency: config.request_concurrency.get(),
+            gpu_identity: config.gpu_identity,
             generation: 0,
         })
     }
@@ -144,6 +154,15 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
             }
         }
 
+        // Which processors are GPUs is the authoritative evidence that a chassis
+        // holds a GPU, and processors are all discovered by now. Collected once
+        // rather than per chassis, since every chassis consults the same set.
+        let gpu_processors = if self.gpu_identity {
+            gpu_processor_ids(&entities)
+        } else {
+            HashSet::new()
+        };
+
         if let Some(chassis_list) = service_root.chassis().await? {
             for chassis in chassis_list.members().await? {
                 let chassis = Arc::new(chassis);
@@ -155,8 +174,14 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                     &mut sensor_ids,
                 )
                 .await;
-                self.discover_chassis(&chassis, fetch_failures, &mut entities, &mut sensor_ids)
-                    .await;
+                self.discover_chassis(
+                    &chassis,
+                    &gpu_processors,
+                    fetch_failures,
+                    &mut entities,
+                    &mut sensor_ids,
+                )
+                .await;
             }
         }
 
@@ -197,10 +222,16 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
             for sensor in &sensors {
                 sensor_ids.insert(sensor.odata_id().to_string());
             }
+            let gpu = if self.gpu_identity {
+                gpu_identity_from_processor(&entity)
+            } else {
+                None
+            };
             entities.push(DiscoveredEntity::Processor {
                 entity,
                 system: system.clone(),
                 sensors,
+                gpu,
             });
         }
     }
@@ -339,6 +370,7 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
     async fn discover_chassis(
         &self,
         chassis: &Arc<nv_redfish::chassis::Chassis<B>>,
+        gpu_processors: &HashSet<String>,
         fetch_failures: &AtomicUsize,
         entities: &mut Vec<DiscoveredEntity<B>>,
         sensor_ids: &mut HashSet<String>,
@@ -363,13 +395,392 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
             .filter(|sensor| sensor_ids.insert(sensor.odata_id().to_string()))
             .collect();
 
-        if sensors.is_empty() {
+        let gpu = if self.gpu_identity {
+            gpu_identity_from_chassis(chassis, gpu_processors)
+        } else {
+            None
+        };
+
+        // A sensorless chassis is normally not worth tracking, but one holding a
+        // GPU is still needed to attribute SSE log records.
+        if sensors.is_empty() && gpu.is_none() {
             return;
         }
 
         entities.push(DiscoveredEntity::Chassis {
             entity: chassis.clone(),
             sensors,
+            gpu,
         });
+    }
+}
+
+/// Whether a processor is a GPU, per the Redfish `ProcessorType` enumeration.
+///
+/// Schema-defined rather than inferred from the id, which matters because ids
+/// containing `GPU` are not exclusive to GPUs: HGX baseboards expose an
+/// `HGX_ERoT_GPU_SXM_1` root-of-trust device per GPU, carrying its own
+/// unrelated UUID.
+pub(in crate::collectors) fn is_gpu_processor<B: Bmc>(
+    processor: &nv_redfish::computer_system::Processor<B>,
+) -> bool {
+    processor
+        .raw()
+        .processor_type
+        .flatten()
+        .is_some_and(|processor_type| processor_type.to_snake_case() == "gpu")
+}
+
+/// Read a GPU processor's identity from its own Redfish resource.
+///
+/// Yields nothing for non-GPU processors, which is the common case: a host CPU
+/// must not be labelled with `gpu_*` attributes.
+pub(in crate::collectors) fn gpu_identity_from_processor<B: Bmc>(
+    processor: &nv_redfish::computer_system::Processor<B>,
+) -> Option<GpuIdentity> {
+    if !is_gpu_processor(processor) {
+        return None;
+    }
+
+    let raw = processor.raw();
+    let identity = GpuIdentity {
+        uuid: raw.uuid.flatten().map(|uuid| uuid.to_string()),
+        serial: raw.serial_number.clone().flatten(),
+        model: raw.model.clone().flatten(),
+        // A processor does not report its enclosure's serial, and resolving the
+        // link would cost a fetch. On SXM hardware the GPU chassis reports the
+        // same serial as the GPU itself, so nothing is lost that `gpu_serial`
+        // does not already carry.
+        chassis_serial: None,
+    };
+
+    (!identity.is_empty()).then_some(identity)
+}
+
+/// Redfish ids of the GPUs among the discovered processors.
+///
+/// Keyed by `@odata.id` so a chassis can be matched against its
+/// `Links/Processors` entries without refetching them.
+pub(in crate::collectors) fn gpu_processor_ids<B: Bmc>(
+    entities: &[DiscoveredEntity<B>],
+) -> HashSet<String> {
+    entities
+        .iter()
+        .filter_map(|entity| match entity {
+            DiscoveredEntity::Processor { entity, .. } if is_gpu_processor(entity) => {
+                Some(entity.odata_id().to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a chassis holds a GPU.
+///
+/// Selection must be affirmative: a chassis reports a UUID whether or not it
+/// holds a GPU, so labelling by elimination would attribute `gpu_*` attributes
+/// to NVSwitch modules and root-of-trust components, corrupting the per-device
+/// history these attributes exist to preserve.
+///
+/// A `Links/Processors` entry naming a discovered GPU is the authoritative
+/// signal; [`id_names_gpu_module`] covers platforms that omit it.
+fn is_gpu_chassis<B: Bmc>(
+    chassis: &nv_redfish::chassis::Chassis<B>,
+    gpu_processors: &HashSet<String>,
+) -> bool {
+    let raw = chassis.raw();
+
+    let links_a_gpu_processor = raw
+        .links
+        .as_ref()
+        .and_then(|links| links.processors.as_ref())
+        .is_some_and(|processors| {
+            processors
+                .iter()
+                .any(|processor| gpu_processors.contains(&processor.odata_id().to_string()))
+        });
+
+    links_a_gpu_processor || id_names_gpu_module(&raw.base.id)
+}
+
+/// Whether a chassis id names a GPU module, for platforms that expose GPU
+/// modules without a corresponding GPU `Processor` to link to.
+///
+/// This is the same `HGX_GPU_` convention the SKU GPU-count check already
+/// relies on. A substring test would be wrong here: an HGX baseboard exposes an
+/// `HGX_ERoT_GPU_SXM_1` root-of-trust component per GPU, which reports its own
+/// unrelated UUID and would otherwise be labelled as the GPU itself.
+fn id_names_gpu_module(id: &str) -> bool {
+    id.starts_with("HGX_GPU_") && !id.contains("NVSwitch")
+}
+
+/// Read the identity of the GPU a chassis holds, from the chassis' own resource.
+///
+/// A GPU module chassis reports the GPU's UUID, serial and model directly, so
+/// no traversal to the processor or PCIe device is needed.
+pub(in crate::collectors) fn gpu_identity_from_chassis<B: Bmc>(
+    chassis: &nv_redfish::chassis::Chassis<B>,
+    gpu_processors: &HashSet<String>,
+) -> Option<GpuIdentity> {
+    if !is_gpu_chassis(chassis, gpu_processors) {
+        return None;
+    }
+
+    let raw = chassis.raw();
+    let serial = raw.serial_number.clone().flatten();
+    let identity = GpuIdentity {
+        uuid: raw.uuid.flatten().map(|uuid| uuid.to_string()),
+        serial: serial.clone(),
+        model: raw.model.clone().flatten(),
+        // On SXM baseboards the enclosing chassis *is* the GPU module, so its
+        // serial is the module serial rather than a host chassis serial.
+        chassis_serial: serial,
+    };
+
+    (!identity.is_empty()).then_some(identity)
+}
+
+#[cfg(test)]
+mod gpu_chassis_naming_tests {
+    use super::id_names_gpu_module;
+
+    #[test]
+    fn gpu_module_chassis_ids_are_recognised() {
+        for id in ["HGX_GPU_SXM_1", "HGX_GPU_SXM_8", "HGX_GPU_0"] {
+            assert!(id_names_gpu_module(id), "{id} names a GPU module");
+        }
+    }
+
+    /// The per-GPU root-of-trust component sits beside the GPU and reports its
+    /// own UUID, so claiming it as the GPU would attribute one device's identity
+    /// to another. Its id contains the GPU's name, which is why the test is
+    /// anchored at the start rather than a substring match.
+    #[test]
+    fn erot_and_nvswitch_chassis_ids_are_rejected() {
+        for id in [
+            "HGX_ERoT_GPU_SXM_1",
+            "HGX_NVSwitch_0",
+            "HGX_GPU_NVSwitch_0",
+            "HGX_Chassis_0",
+            "CPUBaseboard",
+            "",
+        ] {
+            assert!(!id_names_gpu_module(id), "{id} does not name a GPU module");
+        }
+    }
+}
+
+#[cfg(test)]
+mod bmc_mock_integration_tests {
+    use std::collections::{BTreeMap, HashSet};
+
+    use bmc_mock::test_support::{TestBmc, TestBmcHandle, nvidia_dgx_h100_bmc, wiwynn_gb200_bmc};
+    use nv_redfish::Resource as _;
+
+    use super::{gpu_identity_from_chassis, gpu_identity_from_processor, is_gpu_processor};
+    use crate::collectors::inventory::GpuIdentity;
+
+    /// Resolve a GPU identity for every processor the mock BMC exposes, keyed by
+    /// processor id, and return the `@odata.id`s of the GPUs among them. Mirrors
+    /// what the discovery collector does over the systems it enumerates.
+    async fn identities_by_processor(
+        h: &TestBmcHandle,
+    ) -> (BTreeMap<String, Option<GpuIdentity>>, HashSet<String>) {
+        let systems = h
+            .service_root
+            .systems()
+            .await
+            .expect("systems collection")
+            .expect("systems collection is present");
+
+        let mut identities = BTreeMap::new();
+        let mut gpu_processors = HashSet::new();
+        for system in systems.members().await.expect("system members") {
+            for processor in system
+                .processors()
+                .await
+                .expect("processors")
+                .unwrap_or_default()
+            {
+                if is_gpu_processor::<TestBmc>(&processor) {
+                    gpu_processors.insert(processor.odata_id().to_string());
+                }
+                identities.insert(
+                    processor.id().to_string(),
+                    gpu_identity_from_processor::<TestBmc>(&processor),
+                );
+            }
+        }
+        (identities, gpu_processors)
+    }
+
+    /// Resolve a GPU identity for every chassis the mock BMC exposes, keyed by
+    /// chassis id, against the GPU processors discovered first.
+    async fn identities_by_chassis(
+        h: &TestBmcHandle,
+        gpu_processors: &HashSet<String>,
+    ) -> BTreeMap<String, Option<GpuIdentity>> {
+        let chassis_list = h
+            .service_root
+            .chassis()
+            .await
+            .expect("chassis collection")
+            .expect("chassis collection is present");
+
+        let mut identities = BTreeMap::new();
+        for chassis in chassis_list.members().await.expect("chassis members") {
+            identities.insert(
+                chassis.id().to_string(),
+                gpu_identity_from_chassis::<TestBmc>(&chassis, gpu_processors),
+            );
+        }
+        identities
+    }
+
+    fn assert_distinct_uuids(identities: &[(&String, &GpuIdentity)], expected: usize) {
+        let uuids: std::collections::BTreeSet<_> = identities
+            .iter()
+            .filter_map(|(_, identity)| identity.uuid.clone())
+            .collect();
+        assert_eq!(
+            uuids.len(),
+            expected,
+            "each GPU must report a distinct UUID; a shared UUID would make the label useless"
+        );
+    }
+
+    /// The path that carries GPU sensor metrics on real HGX hardware, where GPU
+    /// sensors are attributed to `Processor` entities rather than to the chassis.
+    #[tokio::test]
+    async fn dgx_h100_resolves_identity_for_every_gpu_processor() {
+        let (identities, gpu_processors) =
+            identities_by_processor(&nvidia_dgx_h100_bmc().await).await;
+
+        let gpus: Vec<_> = identities
+            .iter()
+            .filter_map(|(id, identity)| identity.as_ref().map(|i| (id, i)))
+            .collect();
+        assert_eq!(gpus.len(), 8, "DGX H100 exposes 8 GPU processors");
+        assert_eq!(gpu_processors.len(), 8);
+
+        for (processor_id, identity) in &gpus {
+            assert!(identity.uuid.is_some(), "{processor_id} must carry a UUID");
+            assert!(
+                identity.serial.is_some(),
+                "{processor_id} must carry a serial"
+            );
+            assert_eq!(
+                identity.model.as_deref(),
+                Some("H100 80GB HBM3"),
+                "{processor_id} model"
+            );
+        }
+
+        assert_distinct_uuids(&gpus, 8);
+    }
+
+    #[tokio::test]
+    async fn dgx_h100_resolves_identity_for_every_gpu_chassis() {
+        let h = nvidia_dgx_h100_bmc().await;
+        let (_, gpu_processors) = identities_by_processor(&h).await;
+        let identities = identities_by_chassis(&h, &gpu_processors).await;
+
+        let gpus: Vec<_> = identities
+            .iter()
+            .filter_map(|(id, identity)| identity.as_ref().map(|i| (id, i)))
+            .collect();
+        assert_eq!(gpus.len(), 8, "DGX H100 exposes 8 GPU chassis");
+
+        for (chassis_id, identity) in &gpus {
+            assert!(identity.uuid.is_some(), "{chassis_id} must carry a UUID");
+            assert!(
+                identity.serial.is_some(),
+                "{chassis_id} must carry a serial"
+            );
+            assert_eq!(
+                identity.model.as_deref(),
+                Some("H100 80GB HBM3"),
+                "{chassis_id} model"
+            );
+            assert!(
+                identity.chassis_serial.is_some(),
+                "{chassis_id} must carry the GPU module chassis serial"
+            );
+        }
+
+        assert_distinct_uuids(&gpus, 8);
+    }
+
+    /// The chassis and the processor must agree, since a sensor attributed to one
+    /// and a log record attributed to the other describe the same physical GPU.
+    #[tokio::test]
+    async fn dgx_h100_chassis_and_processor_agree_on_identity() {
+        let h = nvidia_dgx_h100_bmc().await;
+        let (by_processor, gpu_processors) = identities_by_processor(&h).await;
+        let by_chassis = identities_by_chassis(&h, &gpu_processors).await;
+
+        for slot in 1..=8 {
+            let processor = by_processor
+                .get(&format!("GPU_SXM_{slot}"))
+                .and_then(Option::as_ref)
+                .expect("GPU processor identity");
+            let chassis = by_chassis
+                .get(&format!("HGX_GPU_SXM_{slot}"))
+                .and_then(Option::as_ref)
+                .expect("GPU chassis identity");
+
+            assert_eq!(processor.uuid, chassis.uuid, "slot {slot} UUID");
+            assert_eq!(processor.serial, chassis.serial, "slot {slot} serial");
+            assert_eq!(processor.model, chassis.model, "slot {slot} model");
+        }
+    }
+
+    #[tokio::test]
+    async fn non_gpu_resources_resolve_no_identity() {
+        let h = nvidia_dgx_h100_bmc().await;
+        let (by_processor, gpu_processors) = identities_by_processor(&h).await;
+        let by_chassis = identities_by_chassis(&h, &gpu_processors).await;
+
+        for (processor_id, identity) in &by_processor {
+            if processor_id.starts_with("GPU_") {
+                continue;
+            }
+            assert!(
+                identity.is_none(),
+                "{processor_id} is not a GPU but resolved {identity:?}"
+            );
+        }
+
+        for (chassis_id, identity) in &by_chassis {
+            if chassis_id.starts_with("HGX_GPU_SXM_") {
+                continue;
+            }
+            assert!(
+                identity.is_none(),
+                "{chassis_id} is not a GPU chassis but resolved {identity:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gb200_resolves_identity_for_every_gpu() {
+        let h = wiwynn_gb200_bmc().await;
+        let (by_processor, gpu_processors) = identities_by_processor(&h).await;
+        let by_chassis = identities_by_chassis(&h, &gpu_processors).await;
+
+        let processors: Vec<_> = by_processor
+            .iter()
+            .filter_map(|(id, identity)| identity.as_ref().map(|i| (id, i)))
+            .collect();
+        let chassis: Vec<_> = by_chassis
+            .iter()
+            .filter_map(|(id, identity)| identity.as_ref().map(|i| (id, i)))
+            .collect();
+
+        assert_eq!(processors.len(), 4, "Wiwynn GB200 exposes 4 GPU processors");
+        assert_eq!(chassis.len(), 4, "Wiwynn GB200 exposes 4 GPU chassis");
+
+        assert_distinct_uuids(&processors, 4);
+        assert_distinct_uuids(&chassis, 4);
     }
 }

@@ -26,7 +26,7 @@ use model::machine_boot_interface::{
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
-use crate::{DatabaseError, DatabaseResult};
+use crate::{ConditionalWrite, DatabaseError, DatabaseResult};
 
 #[derive(Debug, sqlx::FromRow)]
 struct DesiredBootInterfaceRow {
@@ -903,31 +903,55 @@ pub async fn enrich_interface_id(
     }))
 }
 
-/// Tries to reopen an inspected target as a new pending generation after
-/// Redfish drift.
+/// `BootInterfaceObservationNotApplicable` identifies why a Redfish observation
+/// cannot update the desired boot configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootInterfaceObservationNotApplicable {
+    /// No desired boot-interface target is set for the machine.
+    TargetUnset,
+    /// The desired generation or target differs from the one inspected.
+    TargetMismatch,
+    /// The matching desired generation is not verified and cannot be reopened.
+    AlreadyPending,
+}
+
+/// `try_reopen_after_observed_drift` opens a new pending generation when
+/// Redfish reports host BIOS settings or boot order that no longer match
+/// NICo's desired boot configuration.
 ///
 /// The parent machine lock and exact desired generation check make this an
 /// observation result, not a blind `force_set`: newer operator intent wins.
 /// The verified-version check also makes replay a no-op once a generation is
-/// already pending. `None` means either condition changed before this result
-/// could be persisted.
+/// already pending. `NotApplied` distinguishes an unset target (`TargetUnset`),
+/// a different target/version (`TargetMismatch`), and an unverified generation
+/// (`AlreadyPending`). `Applied` returns the same target with its new version.
+/// A missing parent machine is a `DatabaseError::NotFoundError`.
+/// A child CAS miss after both rows are locked is a `DatabaseError::Internal`.
 pub async fn try_reopen_after_observed_drift(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     inspected_boot_interface: &Versioned<MachineBootInterfaceTarget>,
-) -> Result<Option<Versioned<MachineBootInterfaceTarget>>, DatabaseError> {
+) -> Result<
+    ConditionalWrite<Versioned<MachineBootInterfaceTarget>, BootInterfaceObservationNotApplicable>,
+    DatabaseError,
+> {
     validate_target(&inspected_boot_interface.value)?;
 
     let desired_boot_interface_row = load_for_update(txn, machine_id).await?;
     let current_machine_version = desired_boot_interface_row.machine_version;
-    let Some(current_desired_boot_interface) = desired_boot_interface_row.decode(machine_id)?
-    else {
-        return Ok(None);
+    // The joined child columns can predate a wait for the parent lock. Read the
+    // target again under that lock so rejection describes the current target.
+    let Some(current_desired_boot_interface) = get(&mut *txn, machine_id).await? else {
+        return Ok(ConditionalWrite::NotApplied(
+            BootInterfaceObservationNotApplicable::TargetUnset,
+        ));
     };
-    if current_desired_boot_interface.desired.version != inspected_boot_interface.version
-        || current_desired_boot_interface.desired.value != inspected_boot_interface.value
+    if current_desired_boot_interface.version != inspected_boot_interface.version
+        || current_desired_boot_interface.value != inspected_boot_interface.value
     {
-        return Ok(None);
+        return Ok(ConditionalWrite::NotApplied(
+            BootInterfaceObservationNotApplicable::TargetMismatch,
+        ));
     }
 
     // Read and lock the child status only after `load_for_update` has acquired
@@ -944,42 +968,49 @@ pub async fn try_reopen_after_observed_drift(
         .fetch_one(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(verified_version_query, error))?;
-    if verified_version != Some(current_desired_boot_interface.desired.version) {
-        return Ok(None);
+    if verified_version != Some(current_desired_boot_interface.version) {
+        return Ok(ConditionalWrite::NotApplied(
+            BootInterfaceObservationNotApplicable::AlreadyPending,
+        ));
     }
 
     let Some(reopened_version) = write_desired_generation(
         txn,
         machine_id,
         current_machine_version,
-        Some(current_desired_boot_interface.desired.version),
-        &current_desired_boot_interface.desired.value,
+        Some(current_desired_boot_interface.version),
+        &current_desired_boot_interface.value,
         VerificationPolicy::Pending,
         SelectionSourceUpdate::Preserve,
     )
     .await?
     else {
-        return Ok(None);
+        return Err(DatabaseError::Internal {
+            message: format!(
+                "failed to reopen desired boot interface for locked machine {machine_id}"
+            ),
+        });
     };
 
-    Ok(Some(Versioned {
-        value: current_desired_boot_interface.desired.value,
+    Ok(ConditionalWrite::Applied(Versioned {
+        value: current_desired_boot_interface.value,
         version: reopened_version,
     }))
 }
 
-/// Records a Redfish observation only if the desired boot-interface version
-/// still matches the version the caller observed.
+/// `mark_verified` records a Redfish observation only if the desired
+/// boot-interface version still matches the version the caller observed.
 ///
-/// A `false` return means the desired target was removed or replaced before
-/// the observation could be committed. The caller must not treat that newer
-/// target as verified.
+/// `NotApplied` distinguishes an unset target (`TargetUnset`) from a different
+/// desired version (`TargetMismatch`); this operation never returns
+/// `AlreadyPending`. The caller must not treat a newer target as verified.
+/// A missing parent machine is a `DatabaseError::NotFoundError`.
 pub async fn mark_verified(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     expected_desired_version: ConfigVersion,
     observed_at: DateTime<Utc>,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), BootInterfaceObservationNotApplicable>, DatabaseError> {
     // Desired-target writers lock the parent machine row before touching this
     // child row. Preserve that order so a concurrent operator write cannot
     // deadlock verification against the state-controller transition, which
@@ -999,15 +1030,35 @@ pub async fn mark_verified(
         .bind(observed_at)
         .bind(machine_id)
         .bind(expected_desired_version)
-        .fetch_optional(txn)
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
 
-    Ok(updated.is_some())
+    if updated.is_some() {
+        return Ok(ConditionalWrite::Applied(()));
+    }
+
+    // The parent lock keeps desired-target writers out until commit. Check
+    // absence here rather than using the joined child snapshot from before a
+    // possible lock wait; a present row must have a different desired version.
+    let target_exists_query =
+        "SELECT EXISTS (SELECT 1 FROM machine_boot_interfaces WHERE machine_id = $1)";
+    let target_exists: bool = sqlx::query_scalar(target_exists_query)
+        .bind(machine_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(target_exists_query, error))?;
+    let reason = if target_exists {
+        BootInterfaceObservationNotApplicable::TargetMismatch
+    } else {
+        BootInterfaceObservationNotApplicable::TargetUnset
+    };
+    Ok(ConditionalWrite::NotApplied(reason))
 }
 
 #[cfg(test)]
 mod tests {
+    use BootInterfaceObservationNotApplicable::{AlreadyPending, TargetMismatch, TargetUnset};
     use BootInterfaceSelectionAuthority::Existing;
     use BootInterfaceSelectionSource::{Operator, RedfishUefiPci};
     use carbide_uuid::machine::{MachineIdSource, MachineType};
@@ -1273,6 +1324,17 @@ mod tests {
         let mut txn = pool.begin().await?;
         let machine_id = host_machine_id(34);
         seed_machine(txn.as_mut(), &machine_id).await?;
+        assert_eq!(
+            mark_verified(
+                txn.as_mut(),
+                &machine_id,
+                ConfigVersion::invalid(),
+                Utc::now(),
+            )
+            .await?,
+            ConditionalWrite::NotApplied(TargetUnset)
+        );
+        assert!(get(txn.as_mut(), &machine_id).await?.is_none());
         let target = MachineBootInterfaceTarget::MacOnly(MacAddress::new([2, 0, 0, 0, 3, 4]));
         let initialized =
             initialize_if_unset(txn.as_mut(), &machine_id, &target, RedfishUefiPci).await?;
@@ -1282,21 +1344,25 @@ mod tests {
         let observed_at =
             DateTime::from_timestamp(1_722_000_000, 123_000_000).expect("fixture timestamp");
 
-        assert!(
-            !mark_verified(
+        assert_eq!(
+            mark_verified(
                 txn.as_mut(),
                 &machine_id,
                 ConfigVersion::invalid(),
                 observed_at,
             )
-            .await?
+            .await?,
+            ConditionalWrite::NotApplied(TargetMismatch)
         );
         assert_eq!(
             status_observation(txn.as_mut(), &machine_id).await?,
             (None, None, false)
         );
 
-        assert!(mark_verified(txn.as_mut(), &machine_id, initialized.version, observed_at,).await?);
+        assert_eq!(
+            mark_verified(txn.as_mut(), &machine_id, initialized.version, observed_at).await?,
+            ConditionalWrite::Applied(())
+        );
         assert_eq!(
             status_observation(txn.as_mut(), &machine_id).await?,
             (Some(initialized.version), Some(observed_at), false)
@@ -1326,7 +1392,10 @@ mod tests {
             .await?
             .desired;
         assert_ne!(updated.version, initialized.version);
-        assert!(!mark_verified(txn.as_mut(), &machine_id, initialized.version, Utc::now(),).await?);
+        assert_eq!(
+            mark_verified(txn.as_mut(), &machine_id, initialized.version, Utc::now()).await?,
+            ConditionalWrite::NotApplied(TargetMismatch)
+        );
         assert_eq!(
             status_observation(txn.as_mut(), &machine_id).await?,
             (Some(initialized.version), Some(observed_at), false),
@@ -1348,19 +1417,29 @@ mod tests {
             mac_address: MacAddress::new([2, 0, 0, 0, 4, 4]),
             interface_id: "NIC.Slot.4-1-1".to_string(),
         });
+        let unset_desired = Versioned {
+            value: inspected_target.clone(),
+            version: ConfigVersion::invalid(),
+        };
+        assert!(matches!(
+            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &unset_desired).await?,
+            ConditionalWrite::NotApplied(TargetUnset)
+        ));
+        assert!(get(txn.as_mut(), &machine_id).await?.is_none());
         let inspected_desired = set(txn.as_mut(), &machine_id, &inspected_target, Operator)
             .await?
             .desired;
         let observed_at =
             DateTime::from_timestamp(1_722_000_300, 123_000_000).expect("fixture timestamp");
-        assert!(
+        assert_eq!(
             mark_verified(
                 txn.as_mut(),
                 &machine_id,
                 inspected_desired.version,
                 observed_at,
             )
-            .await?
+            .await?,
+            ConditionalWrite::Applied(())
         );
 
         let operator_target =
@@ -1368,11 +1447,10 @@ mod tests {
         let operator_desired = set(txn.as_mut(), &machine_id, &operator_target, Operator)
             .await?
             .desired;
-        assert!(
-            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &inspected_desired)
-                .await?
-                .is_none()
-        );
+        assert!(matches!(
+            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &inspected_desired).await?,
+            ConditionalWrite::NotApplied(TargetMismatch)
+        ));
         let persisted_desired = get(txn.as_mut(), &machine_id)
             .await?
             .expect("operator-selected target");
@@ -1406,20 +1484,22 @@ mod tests {
         overwrite_selection_updated_at(txn.as_mut(), &machine_id, selection_time).await?;
         let observed_at =
             DateTime::from_timestamp(1_722_000_400, 123_000_000).expect("fixture timestamp");
-        assert!(
+        assert_eq!(
             mark_verified(
                 txn.as_mut(),
                 &machine_id,
                 inspected_desired.version,
                 observed_at,
             )
-            .await?
+            .await?,
+            ConditionalWrite::Applied(())
         );
 
-        let pending_desired =
-            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &inspected_desired)
-                .await?
-                .expect("fresh pending generation");
+        let ConditionalWrite::Applied(pending_desired) =
+            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &inspected_desired).await?
+        else {
+            panic!("drift should reopen a pending generation");
+        };
         assert_target(&pending_desired, &inspected_target);
         assert_eq!(
             pending_desired.version.version_nr(),
@@ -1447,15 +1527,131 @@ mod tests {
         assert_eq!(desired_version_after_reopen, Some(pending_desired.version));
 
         assert!(
-            try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &pending_desired)
-                .await?
-                .is_none(),
+            matches!(
+                try_reopen_after_observed_drift(txn.as_mut(), &machine_id, &pending_desired)
+                    .await?,
+                ConditionalWrite::NotApplied(AlreadyPending)
+            ),
             "an already-pending generation must not be reopened",
         );
         assert_eq!(
             versions(txn.as_mut(), &machine_id).await?,
             (machine_version_after_reopen, desired_version_after_reopen),
         );
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn observation_rejection_uses_target_after_waiting_for_machine_lock(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Clone, Copy, Debug)]
+        enum Observation {
+            Verify,
+            Reopen,
+        }
+
+        for (marker, observation) in [(46, Observation::Verify), (47, Observation::Reopen)] {
+            let machine_id = host_machine_id(marker);
+            let mut setup = pool.begin().await?;
+            seed_machine(setup.as_mut(), &machine_id).await?;
+            setup.commit().await?;
+
+            let inspected_desired = Versioned {
+                value: MachineBootInterfaceTarget::MacOnly(MacAddress::new([
+                    2, 0, 0, 0, 4, marker,
+                ])),
+                version: ConfigVersion::invalid(),
+            };
+            let mut holder = pool.begin().await?;
+            let newer_desired = set(
+                holder.as_mut(),
+                &machine_id,
+                &inspected_desired.value,
+                Operator,
+            )
+            .await?
+            .desired;
+            let expected_versions = versions(holder.as_mut(), &machine_id).await?;
+            let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(holder.as_mut())
+                .await?;
+            let mut waiter = pool.begin().await?;
+            let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(waiter.as_mut())
+                .await?;
+
+            // The child's insert is still uncommitted when the observation
+            // waits for the parent lock. Its joined snapshot sees no target,
+            // but rejection must describe the target committed during the wait.
+            let record_observation = async {
+                let result = match observation {
+                    Observation::Verify => {
+                        mark_verified(
+                            waiter.as_mut(),
+                            &machine_id,
+                            inspected_desired.version,
+                            Utc::now(),
+                        )
+                        .await?
+                    }
+                    Observation::Reopen => {
+                        match try_reopen_after_observed_drift(
+                            waiter.as_mut(),
+                            &machine_id,
+                            &inspected_desired,
+                        )
+                        .await?
+                        {
+                            ConditionalWrite::Applied(_) => ConditionalWrite::Applied(()),
+                            ConditionalWrite::NotApplied(reason) => {
+                                ConditionalWrite::NotApplied(reason)
+                            }
+                        }
+                    }
+                };
+                waiter.commit().await?;
+                Ok::<_, Box<dyn std::error::Error>>(result)
+            };
+            let commit_target = async {
+                loop {
+                    let blocked_by_holder: bool =
+                        sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                            .bind(holder_pid)
+                            .bind(waiter_pid)
+                            .fetch_one(&pool)
+                            .await?;
+                    if blocked_by_holder {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                holder.commit().await
+            };
+            let (observation_result, target_commit) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    tokio::join!(record_observation, commit_target)
+                })
+                .await?;
+            target_commit?;
+            assert_eq!(
+                observation_result?,
+                ConditionalWrite::NotApplied(TargetMismatch),
+                "{observation:?} must classify the target after the lock wait"
+            );
+
+            let mut conn = pool.acquire().await?;
+            let persisted_desired = get(&mut *conn, &machine_id)
+                .await?
+                .expect("operator-selected target");
+            assert_target(&persisted_desired, &newer_desired.value);
+            assert_eq!(versions(&mut conn, &machine_id).await?, expected_versions);
+            assert_eq!(
+                status_observation(&mut conn, &machine_id).await?,
+                (None, None, false)
+            );
+        }
 
         Ok(())
     }
@@ -1727,7 +1923,10 @@ mod tests {
             .desired;
         let observed_at =
             DateTime::from_timestamp(1_722_000_200, 123_000_000).expect("fixture timestamp");
-        assert!(mark_verified(txn.as_mut(), &machine_id, paired.version, observed_at).await?);
+        assert_eq!(
+            mark_verified(txn.as_mut(), &machine_id, paired.version, observed_at).await?,
+            ConditionalWrite::Applied(())
+        );
         let versions_before = versions(txn.as_mut(), &machine_id).await?;
 
         let forced = force_reconcile(
@@ -1790,14 +1989,15 @@ mod tests {
             .await?;
         let observed_at =
             DateTime::from_timestamp(1_700_003_100, 123_000_000).expect("fixture timestamp");
-        assert!(
+        assert_eq!(
             mark_verified(
                 txn.as_mut(),
                 &attributed_machine_id,
                 initial.version,
                 observed_at,
             )
-            .await?
+            .await?,
+            ConditionalWrite::Applied(())
         );
 
         let reconciled = force_reconcile(
@@ -2016,7 +2216,10 @@ mod tests {
         .await?;
         let observed_at =
             DateTime::from_timestamp(1_722_000_100, 123_000_000).expect("fixture timestamp");
-        assert!(mark_verified(txn.as_mut(), &machine_id, initialized.version, observed_at,).await?);
+        assert_eq!(
+            mark_verified(txn.as_mut(), &machine_id, initialized.version, observed_at).await?,
+            ConditionalWrite::Applied(())
+        );
 
         let enriched =
             enrich_interface_id(txn.as_mut(), &machine_id, mac_address, "NIC.Slot.8-1-1")

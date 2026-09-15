@@ -16,104 +16,96 @@
  */
 
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
+use carbide_uuid::machine::MachineId;
 use config_version::ConfigVersion;
 use model::machine::{
-    DecommissioningState, MachineMaintenanceOperation, ManagedHostState, ReadyBootConfigState,
+    DecommissioningState, FailureCause, FailureDetails, FailureSource, MachineMaintenanceOperation,
+    ManagedHostState, ReadyBootConfigState, StateMachineArea,
 };
 use model::machine_boot_interface::MachineBootInterfaceTarget;
-use rpc::forge::AdminChassisResetRequest;
 use rpc::forge::admin_power_control_request::SystemPowerControl;
 use rpc::forge::forge_server::Forge;
+use rpc::forge::{AdminChassisResetRequest, MaintenanceOperation, MaintenanceRequest};
 use tonic::Request;
 
 use crate::tests::common::api_fixtures::{create_managed_host, create_test_env};
 
+fn reset_request(machine_id: MachineId) -> Request<AdminChassisResetRequest> {
+    Request::new(AdminChassisResetRequest {
+        machine_id: Some(machine_id),
+        chassis_id: "HGX_Chassis_0".into(),
+        action: SystemPowerControl::ForceRestart as i32,
+    })
+}
+
 #[crate::sqlx_test]
-async fn admin_chassis_reset_queues_maintenance_without_override(
+async fn admin_chassis_reset_requires_and_preserves_operator_maintenance(
     db_pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
     let env = create_test_env(db_pool).await;
-    let managed_host = create_managed_host(&env).await;
+    let host = create_managed_host(&env).await.host();
     let mut txn = env.db_txn().await;
-    db::machine::update_state(&mut txn, &managed_host.host().id, &ManagedHostState::Ready).await?;
+    db::machine::update_state(&mut txn, &host.id, &ManagedHostState::Ready).await?;
+    let bmc_access = host.bmc_access(&mut txn).await;
     txn.commit().await?;
-
-    let mut txn = env.db_txn().await;
-    let bmc_access = managed_host.host().bmc_access(&mut txn).await;
-    txn.rollback().await?;
     let redfish_timepoint = env.redfish_sim.timepoint();
+    let operation = MachineMaintenanceOperation::ChassisReset {
+        chassis_id: "HGX_Chassis_0".into(),
+    };
 
-    env.api
-        .admin_chassis_reset(Request::new(AdminChassisResetRequest {
-            machine_id: Some(managed_host.host().id.into()),
-            chassis_id: "HGX_Chassis_0".to_string(),
-            action: SystemPowerControl::ForceRestart as i32,
-        }))
-        .await?;
-
-    let duplicate_error = env
+    let error = env
         .api
-        .admin_chassis_reset(Request::new(AdminChassisResetRequest {
-            machine_id: Some(managed_host.host().id.into()),
-            chassis_id: "HGX_Chassis_1".to_string(),
-            action: SystemPowerControl::ForceRestart as i32,
-        }))
+        .admin_chassis_reset(reset_request(host.id.into()))
         .await
         .unwrap_err();
-    assert_eq!(duplicate_error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    env.api
+        .set_maintenance(Request::new(MaintenanceRequest {
+            operation: MaintenanceOperation::Enable.into(),
+            host_id: Some(host.id.into()),
+            reference: Some("chassis reset recovery".into()),
+        }))
+        .await?;
+    env.api
+        .admin_chassis_reset(reset_request(host.id.into()))
+        .await?;
 
     let mut txn = env.db_txn().await;
-    let machine = managed_host.host().db_machine(&mut txn).await;
+    let machine = host.db_machine(&mut txn).await;
     assert_eq!(machine.current_state(), &ManagedHostState::Ready);
     assert_eq!(
         machine
             .machine_maintenance_requested
             .as_ref()
             .map(|request| &request.operation),
-        Some(&MachineMaintenanceOperation::ChassisReset {
-            chassis_id: "HGX_Chassis_0".to_string(),
-        }),
+        Some(&operation)
     );
     txn.rollback().await?;
     assert!(
         env.redfish_sim
             .actions_since(&redfish_timepoint)
             .for_host(&bmc_access.host)
-            .is_empty(),
+            .is_empty()
     );
 
-    env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
+    let machine = host.next_iteration_machine(&env).await;
     assert_eq!(
-        managed_host
-            .host()
-            .db_machine(&mut txn)
-            .await
-            .current_state(),
-        &ManagedHostState::Maintenance {
-            operation: MachineMaintenanceOperation::ChassisReset {
-                chassis_id: "HGX_Chassis_0".to_string(),
-            },
-        },
+        machine.current_state(),
+        &ManagedHostState::Maintenance { operation }
     );
-    txn.rollback().await?;
-
-    env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
-    let machine = managed_host.host().db_machine(&mut txn).await;
+    let machine = host.next_iteration_machine(&env).await;
     assert_eq!(machine.current_state(), &ManagedHostState::Ready);
     assert!(machine.machine_maintenance_requested.is_none());
-    txn.rollback().await?;
+    assert!(machine.health_reports.maintenance_override().is_some());
     assert_eq!(
         env.redfish_sim
             .actions_since(&redfish_timepoint)
             .for_host(&bmc_access.host),
         vec![RedfishSimAction::ChassisReset {
-            chassis_id: "HGX_Chassis_0".to_string(),
+            chassis_id: "HGX_Chassis_0".into(),
             reset_type: libredfish::SystemPowerControl::ForceRestart,
-        }],
+        }]
     );
-
     Ok(())
 }
 
@@ -123,6 +115,7 @@ async fn admin_chassis_reset_rejects_live_instance_even_if_machine_state_is_read
 ) -> Result<(), eyre::Report> {
     let env = create_test_env(db_pool).await;
     let managed_host = create_managed_host(&env).await;
+    let host = managed_host.host();
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let _instance = managed_host
         .instance_builer(&env)
@@ -130,83 +123,88 @@ async fn admin_chassis_reset_rejects_live_instance_even_if_machine_state_is_read
         .build()
         .await;
 
-    // Model allocation having committed immediately before the reset request,
-    // while the machine controller has not yet observed the live instance.
+    // Allocation committed before the controller observed the live instance.
     let mut txn = env.db_txn().await;
-    db::machine::update_state(&mut txn, &managed_host.host().id, &ManagedHostState::Ready).await?;
+    db::machine::update_state(&mut txn, &host.id, &ManagedHostState::Ready).await?;
     txn.commit().await?;
-
     let error = env
         .api
-        .admin_chassis_reset(Request::new(AdminChassisResetRequest {
-            machine_id: Some(managed_host.host().id.into()),
-            chassis_id: "HGX_Chassis_0".to_string(),
-            action: SystemPowerControl::ForceRestart as i32,
-        }))
+        .admin_chassis_reset(reset_request(host.id.into()))
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-
+    assert_eq!(
+        error.message(),
+        "host is assigned to a tenant; a chassis reset is not allowed"
+    );
     let mut txn = env.db_txn().await;
     assert!(
-        managed_host
-            .host()
-            .db_machine(&mut txn)
+        host.db_machine(&mut txn)
             .await
             .machine_maintenance_requested
             .is_none()
     );
-
     Ok(())
 }
 
 #[crate::sqlx_test]
-async fn admin_chassis_reset_rejects_unsupported_states(
+async fn admin_chassis_reset_rejects_non_ready_hosts(
     db_pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
     let env = create_test_env(db_pool).await;
-    let managed_host = create_managed_host(&env).await;
+    let host = create_managed_host(&env).await.host();
+    env.api
+        .set_maintenance(Request::new(MaintenanceRequest {
+            operation: MaintenanceOperation::Enable.into(),
+            host_id: Some(host.id.into()),
+            reference: Some("chassis reset state preconditions".into()),
+        }))
+        .await?;
 
+    let boot_interface = "02:00:00:00:00:01".parse()?;
+    let boot_configuring = |boot_config_state| ManagedHostState::BootConfiguring {
+        desired_version: ConfigVersion::initial(),
+        desired_boot_interface: MachineBootInterfaceTarget::MacOnly(boot_interface),
+        post_lock_verification_retry_count: 0,
+        boot_config_state,
+    };
     for state in [
         ManagedHostState::Created,
         ManagedHostState::Decommissioning {
             decommissioning_state: DecommissioningState::Decommissioned,
         },
-        ManagedHostState::BootConfiguring {
-            desired_version: ConfigVersion::initial(),
-            desired_boot_interface: MachineBootInterfaceTarget::MacOnly(
-                "02:00:00:00:00:01".parse()?,
-            ),
-            post_lock_verification_retry_count: 0,
-            boot_config_state: ReadyBootConfigState::CheckHostConfig,
+        ManagedHostState::Failed {
+            details: FailureDetails {
+                cause: FailureCause::NVMECleanFailed {
+                    err: "initial storage cleanup failed".into(),
+                },
+                failed_at: chrono::Utc::now(),
+                source: FailureSource::StateMachineArea(StateMachineArea::HostInit),
+            },
+            machine_id: host.id.into(),
+            retry_count: 0,
         },
+        boot_configuring(ReadyBootConfigState::Prepare),
+        boot_configuring(ReadyBootConfigState::Failed {
+            failure: "boot configuration failed".into(),
+        }),
+        boot_configuring(ReadyBootConfigState::CheckHostConfig),
     ] {
         let mut txn = env.db_txn().await;
-        db::machine::update_state(&mut txn, &managed_host.host().id, &state).await?;
+        db::machine::update_state(&mut txn, &host.id, &state).await?;
         txn.commit().await?;
-
         let error = env
             .api
-            .admin_chassis_reset(Request::new(AdminChassisResetRequest {
-                machine_id: Some(managed_host.host().id.into()),
-                chassis_id: "HGX_Chassis_0".to_string(),
-                action: SystemPowerControl::ForceRestart as i32,
-            }))
+            .admin_chassis_reset(reset_request(host.id.into()))
             .await
             .unwrap_err();
-
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
         assert_eq!(error.message(), "host state does not allow a chassis reset");
-
         let mut txn = env.db_txn().await;
-        assert!(
-            managed_host
-                .host()
-                .db_machine(&mut txn)
-                .await
-                .machine_maintenance_requested
-                .is_none()
-        );
+        let machine = host.db_machine(&mut txn).await;
+        assert_eq!(machine.current_state(), &state);
+        assert!(machine.machine_maintenance_requested.is_none());
+        assert!(machine.health_reports.maintenance_override().is_some());
     }
     Ok(())
 }

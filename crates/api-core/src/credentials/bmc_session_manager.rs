@@ -506,7 +506,7 @@ impl BmcSessionManager {
             }
         };
 
-        let service_root = match self.redfish_pool.service_root(bmc_addr, creds).await {
+        let service_root = match self.redfish_pool.service_root(bmc_addr, Some(creds)).await {
             Ok(root) => root,
             Err(err) => return Err(self.classify_and_map(err, bmc_mac, bmc_addr).await),
         };

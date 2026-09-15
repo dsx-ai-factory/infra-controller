@@ -52,6 +52,9 @@ pub(crate) fn builder() -> SerialConsoleBuilder {
 pub(crate) fn simulated_ssh(port: u16) -> SerialConsole {
     builder()
         .ssh(&protocol_builder().service_enabled(true).port(port).build())
+        // Legacy libredfish requires both SSH and IPMI whenever SerialConsole is present,
+        // even though Redfish permits unsupported protocols to be omitted.
+        .ipmi(&protocol_builder().service_enabled(false).build())
         .build()
 }
 

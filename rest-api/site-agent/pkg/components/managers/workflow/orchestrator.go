@@ -8,14 +8,18 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
 	zlogadapter "logur.dev/adapter/zerolog"
 	"logur.dev/logur"
 
+	"go.opentelemetry.io/otel"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 
@@ -71,6 +75,15 @@ func workflowOrchestrator() error {
 	var clientInterceptors []interceptor.ClientInterceptor
 	var workerInterceptors []interceptor.WorkerInterceptor
 
+	// otelErr, not err: `var err error` is declared further down.
+	otelInterceptor, otelErr := opentelemetry.NewTracingInterceptor(
+		opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
+	if otelErr != nil {
+		return fmt.Errorf("creating Temporal tracing interceptor: %w", otelErr)
+	}
+	clientInterceptors = append(clientInterceptors, otelInterceptor)
+	workerInterceptors = append(workerInterceptors, otelInterceptor)
+
 	// Create logger for temporal using
 	// zero logger
 	// This is optional
@@ -100,6 +113,18 @@ func workflowOrchestrator() error {
 		if err != nil {
 			log.Error().Msg("Workflow: Unable to read client certificates")
 			return err
+		}
+
+		// Each pod loads its own certificate on startup and reload.
+		leaf := clientcert.Leaf
+		if leaf == nil {
+			// GODEBUG=x509keypairleaf=0 leaves Leaf unset after a successful load.
+			leaf, err = x509.ParseCertificate(clientcert.Certificate[0])
+		}
+		if err == nil && leaf != nil && CertExpirationMetric != nil {
+			CertExpirationMetric.Set(float64(leaf.NotAfter.Unix()))
+		} else {
+			log.Warn().Err(err).Msg("Workflow: Unable to update Temporal certificate expiration metric")
 		}
 
 		// Load server cert
@@ -137,9 +162,14 @@ func workflowOrchestrator() error {
 	// Initialize client for publish namespace
 	tLogger := logur.LoggerToKV(zlogadapter.New(zerolog.New(os.Stderr)))
 
-	log.Info().Msgf("Workflow: Connecting to Host %v, Port %v", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port)
+	host := ManagerAccess.Conf.EB.Temporal.Host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	target := net.JoinHostPort(host, ManagerAccess.Conf.EB.Temporal.Port)
+	log.Info().Msgf("Workflow: Connecting to %s", target)
 	clientOptions := client.Options{
-		HostPort:          fmt.Sprintf("%s:%s", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port),
+		HostPort:          target,
 		Namespace:         ManagerAccess.Conf.EB.Temporal.TemporalPublishNamespace,
 		ConnectionOptions: publishClientConnOptions,
 		DataConverter:     swu.NewTemporalDataConverter(),
@@ -160,7 +190,7 @@ func workflowOrchestrator() error {
 
 	// Initialize client for subscribe namespace
 	clientOptions = client.Options{
-		HostPort:          fmt.Sprintf("%s:%s", ManagerAccess.Conf.EB.Temporal.Host, ManagerAccess.Conf.EB.Temporal.Port),
+		HostPort:          target,
 		Namespace:         ManagerAccess.Conf.EB.Temporal.TemporalSubscribeNamespace,
 		ConnectionOptions: subscribeClientConnOptions,
 		DataConverter:     swu.NewTemporalDataConverter(),
@@ -209,6 +239,12 @@ func workflowOrchestrator() error {
 
 	ManagerAccess.API.VpcPeering.RegisterSubscriber()
 	ManagerAccess.API.VpcPeering.RegisterPublisher()
+
+	// Inventory only: SpectrumX Partition CRUD goes through the generic Core gRPC proxy.
+	err = ManagerAccess.API.SpectrumXPartition.RegisterPublisher()
+	if err != nil {
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("SpectrumXPartition: failed to register inventory publisher")
+	}
 
 	ManagerAccess.API.Subnet.RegisterSubscriber()
 	ManagerAccess.API.Subnet.RegisterPublisher()

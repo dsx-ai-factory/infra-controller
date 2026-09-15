@@ -25,7 +25,7 @@ func (api *API) RegisterPublisher() error {
 		TemporalPublishClient: ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher,
 		TemporalPublishQueue:  ManagerAccess.Conf.EB.Temporal.TemporalPublishQueue,
 		SitePageSize:          InventoryCarbidePageSize,
-		CloudPageSize:         InventoryCloudPageSize,
+		CloudPageSize:         ManagerAccess.Conf.EB.Temporal.InventoryCloudPageSize,
 	})
 
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(instanceInventoryManager.DiscoverInstanceInventory)

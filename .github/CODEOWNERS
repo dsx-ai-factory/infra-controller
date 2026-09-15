@@ -5,17 +5,17 @@
 # Rules are evaluated from top to bottom, with later rules taking precedence.
 
 # Default owners for everything in the repo
-* @NVIDIA/carbide-sw-approvers
+* @dsx-ai-factory/carbide-sw-approvers
 
 # CODEOWNERS file itself - requires admin approval
-/.github/CODEOWNERS @NVIDIA/carbide-sw-admins
+/.github/CODEOWNERS @dsx-ai-factory/carbide-sw-admins
 
 # CI/CD related files
-/.github/ @NVIDIA/dsx-sw-cicd
+/.github/ @dsx-ai-factory/dsx-sw-cicd
 
 # Helm charts
-/helm/ @NVIDIA/dsx-sw-helm
-/helm-prereqs/ @NVIDIA/dsx-sw-helm
+/helm/ @dsx-ai-factory/dsx-sw-helm
+/helm-prereqs/ @dsx-ai-factory/dsx-sw-helm
 
 # Documentation (To be re-enabled once as have a doc reviewer)
 /docs/ @polarweasel

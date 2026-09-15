@@ -18,7 +18,7 @@ Apply devenv config
 ## OPTIONS
 
 **-m**, **--mode** *\<MODE\>*  
-Vpc prefix or network segment?\
+Vpc prefix, tenant network segment, or HostInband segment?\
 
 \
 *Possible values:*
@@ -27,10 +27,13 @@ Vpc prefix or network segment?\
 
 - vpc-prefix
 
+- host-inband-segment: Flat VPC plus HostInband segment for hosts with
+  no DPU
+
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 

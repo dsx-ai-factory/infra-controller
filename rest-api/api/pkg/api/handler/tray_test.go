@@ -151,7 +151,8 @@ func createMockComponent(id, name, manufacturer, modelStr, componentID string, c
 		},
 	}
 	if rackID != "" {
-		comp.RackId = &flowv1.UUID{Id: rackID}
+		comp.RackId = &flowv1.UUID{Id: uuid.NewString()}
+		comp.RackExternalId = rackID
 	}
 	return comp
 }
@@ -189,13 +190,15 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 
 	handler := NewGetTrayHandler(dbSession, nil, scp, cfg)
 
-	trayID := uuid.New().String()
+	trayID := "nico-machine-001"
 
 	// Create mock component for success cases
 	mockComponent := createMockComponent(
-		trayID, "compute-tray-1", "NVIDIA", "GB200", "nico-machine-001",
+		uuid.NewString(), "compute-tray-1", "NVIDIA", "GB200", trayID,
 		flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, "rack-id-1",
 	)
+
+	mockComponent.Bmcs = []*flowv1.BMCInfo{{MacAddress: "d8:ab:cd:ef:00:01"}}
 
 	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
@@ -221,6 +224,15 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			mockComponent:  mockComponent,
 			expectedStatus: http.StatusOK,
 			wantErr:        false,
+		},
+		{
+			name:           "success - get tray by response MAC",
+			reqOrg:         org,
+			user:           providerUser,
+			trayID:         model.NewAPITray(mockComponent).BMCs[0].MacAddress,
+			queryParams:    map[string]string{"siteId": site.ID.String()},
+			mockComponent:  mockComponent,
+			expectedStatus: http.StatusOK,
 		},
 		{
 			name:   "failure - Flow not enabled on site",
@@ -287,7 +299,11 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			mockWorkflowRun := &tmocks.WorkflowRun{}
 			mockWorkflowRun.On("GetID").Return("test-workflow-id")
 			testFlowProxyReply(t, mockWorkflowRun, &flowv1.GetComponentInfoResponse{Component: tt.mockComponent})
-			testFlowProxyDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetComponentInfoByID_FullMethodName, nil)
+			testFlowProxyMethodDispatch(t, mockTemporalClient, mockWorkflowRun, flowv1.Flow_GetComponentInfoByID_FullMethodName, func(args mock.Arguments) {
+				var request flowv1.GetComponentInfoByIDRequest
+				testFlowProxyRequest(t, args, &request)
+				assert.Equal(t, tt.trayID, request.GetId().GetId())
+			})
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			// Build query string
@@ -326,6 +342,8 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			assert.Equal(t, trayID, apiTray.ID)
 			assert.Equal(t, "Compute", apiTray.Type)
 			assert.Equal(t, "NVIDIA", apiTray.Manufacturer)
+			require.Len(t, apiTray.BMCs, 1)
+			assert.Equal(t, "d8:ab:cd:ef:00:01", apiTray.BMCs[0].MacAddress)
 		})
 	}
 }
@@ -551,18 +569,6 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 			wantErr:        true,
 		},
 		{
-			name:   "failure - invalid rackId (not UUID)",
-			reqOrg: org,
-			user:   providerUser,
-			queryParams: map[string]string{
-				"siteId": site.ID.String(),
-				"rackId": "not-a-uuid",
-			},
-			mockResponse:   nil,
-			expectedStatus: http.StatusBadRequest,
-			wantErr:        true,
-		},
-		{
 			name:   "failure - invalid type",
 			reqOrg: org,
 			user:   providerUser,
@@ -575,7 +581,7 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 			wantErr:        true,
 		},
 		{
-			name:   "failure - componentId without type",
+			name:   "failure - componentId is not a supported query parameter",
 			reqOrg: org,
 			user:   providerUser,
 			queryParams: map[string]string{
@@ -814,16 +820,6 @@ func TestValidateTrayHandler_Handle(t *testing.T) {
 			},
 			expectedStatus: http.StatusBadRequest,
 		},
-		{
-			name:   "failure - invalid tray ID",
-			reqOrg: org,
-			user:   providerUser,
-			trayID: "not-a-uuid",
-			queryParams: map[string]string{
-				"siteId": site.ID.String(),
-			},
-			expectedStatus: http.StatusBadRequest,
-		},
 	}
 
 	for _, tt := range tests {
@@ -1020,13 +1016,13 @@ func TestValidateTraysHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusOK,
 		},
 		{
-			name:   "success - validate with componentId and type",
+			name:   "success - validate with id and type",
 			reqOrg: org,
 			user:   providerUser,
 			queryParams: map[string]string{
-				"siteId":      site.ID.String(),
-				"componentId": "ext-comp-1",
-				"type":        "Compute",
+				"siteId": site.ID.String(),
+				"id":     "ext-comp-1",
+				"type":   "Compute",
 			},
 			mockResponse: &flowv1.ValidateComponentsResponse{
 				Diffs:      []*flowv1.ComponentDiff{},
@@ -1047,36 +1043,31 @@ func TestValidateTraysHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
-			name:   "failure - rackId and componentId mutually exclusive",
-			reqOrg: org,
-			user:   providerUser,
-			queryParams: map[string]string{
-				"siteId":      site.ID.String(),
-				"rackId":      rackID,
-				"componentId": "ext-comp-1",
-				"type":        "Compute",
-			},
-			expectedStatus: http.StatusBadRequest,
-		},
-		{
-			name:   "failure - componentId without type",
-			reqOrg: org,
-			user:   providerUser,
-			queryParams: map[string]string{
-				"siteId":      site.ID.String(),
-				"componentId": "ext-comp-1",
-			},
-			expectedStatus: http.StatusBadRequest,
-		},
-		{
-			name:   "failure - invalid rackId",
+			name:   "failure - rackId and id mutually exclusive",
 			reqOrg: org,
 			user:   providerUser,
 			queryParams: map[string]string{
 				"siteId": site.ID.String(),
-				"rackId": "not-a-uuid",
+				"rackId": rackID,
+				"id":     "ext-comp-1",
+				"type":   "Compute",
 			},
 			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:   "success - validate with id without type",
+			reqOrg: org,
+			user:   providerUser,
+			queryParams: map[string]string{
+				"siteId": site.ID.String(),
+				"id":     "ext-comp-1",
+			},
+			mockResponse: &flowv1.ValidateComponentsResponse{
+				Diffs:      []*flowv1.ComponentDiff{},
+				TotalDiffs: 0,
+				MatchCount: 1,
+			},
+			expectedStatus: http.StatusOK,
 		},
 		{
 			name:   "failure - Flow not enabled on site",
@@ -1196,8 +1187,10 @@ func TestValidateTraysHandler_SlotFilter(t *testing.T) {
 	matchedID := uuid.NewString()
 	componentAt := func(slotID int32, id string) *flowv1.Component {
 		return &flowv1.Component{
-			Position: &flowv1.RackPosition{SlotId: slotID},
-			Info:     &flowv1.DeviceInfo{Id: &flowv1.UUID{Id: id}},
+			Type:        flowv1.ComponentType_COMPONENT_TYPE_COMPUTE,
+			ComponentId: id,
+			Position:    &flowv1.RackPosition{SlotId: slotID},
+			Info:        &flowv1.DeviceInfo{Id: &flowv1.UUID{Id: uuid.NewString()}},
 		}
 	}
 
@@ -1258,6 +1251,7 @@ func TestValidateTraysHandler_SlotFilter(t *testing.T) {
 			q.Set("siteId", site.ID.String())
 			q.Set("rackId", uuid.NewString())
 			q.Set("slotId", strconv.Itoa(wantedSlot))
+			q.Set("type", "Compute")
 			path := fmt.Sprintf("/v2/org/%s/nico/tray/validation?%s", org, q.Encode())
 
 			req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -1287,7 +1281,8 @@ func TestValidateTraysHandler_SlotFilter(t *testing.T) {
 
 			var gotIDs []string
 			for _, target := range validated.GetTargetSpec().GetComponents().GetTargets() {
-				gotIDs = append(gotIDs, target.GetId().GetId())
+				gotIDs = append(gotIDs, target.GetExternal().GetId())
+				assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, target.GetExternal().GetType())
 			}
 			assert.Equal(t, tt.expectedIDs, gotIDs)
 			assert.Equal(t, int32(1), apiResult.MatchCount)
@@ -1367,14 +1362,6 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			user:           providerUser,
 			trayID:         trayID,
 			body:           `{"state":"on"}`,
-			expectedStatus: http.StatusBadRequest,
-		},
-		{
-			name:           "failure - invalid tray ID (not UUID)",
-			reqOrg:         org,
-			user:           providerUser,
-			trayID:         "not-a-uuid",
-			body:           fmt.Sprintf(`{"siteId":"%s","state":"on"}`, site.ID.String()),
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
@@ -1597,14 +1584,6 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			user:           providerUser,
 			trayID:         trayID,
 			body:           `{}`,
-			expectedStatus: http.StatusBadRequest,
-		},
-		{
-			name:           "failure - invalid tray ID (not UUID)",
-			reqOrg:         org,
-			user:           providerUser,
-			trayID:         "not-a-uuid",
-			body:           fmt.Sprintf(`{"siteId":"%s"}`, site.ID.String()),
 			expectedStatus: http.StatusBadRequest,
 		},
 		{

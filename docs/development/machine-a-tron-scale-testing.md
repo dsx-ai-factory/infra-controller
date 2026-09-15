@@ -33,7 +33,7 @@ The `mat-k8s-controller` dynamically creates one ClusterIP Service per BMC:
 - Services route to correct pod via `nvidia-infra-controller/pod-name` selector
 
 **Requirements:**
-- `oobDhcpRelayAddress` must be within Kubernetes ServiceCIDR
+- `bmcDhcpRelayAddress` must be within Kubernetes ServiceCIDR
 - NICo siteConfig needs `allow_insecure_discovery = true` and a network
   covering the BMC IP range
 - Leave `site_explorer.bmc_proxy` unset — NICo dials each BMC's ClusterIP directly

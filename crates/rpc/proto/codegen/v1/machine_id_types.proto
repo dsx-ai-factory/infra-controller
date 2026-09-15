@@ -1,0 +1,57 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+syntax = "proto3";
+
+// These declarations exist only as Rust code-generation targets. Public proto
+// fields continue to use common.MachineId so non-Rust generated APIs and gRPC
+// reflection retain their established contract.
+package common;
+
+import "codegen/v1/extern_path.proto";
+
+message DpuMachineId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::machine::DpuMachineId";
+  string id = 1;
+}
+
+message HostMachineId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::machine::HostMachineId";
+  string id = 1;
+}
+
+message StableHostMachineId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::machine::StableHostMachineId";
+  string id = 1;
+}
+
+message PredictedHostMachineId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::machine::PredictedHostMachineId";
+  string id = 1;
+}
+
+message HostMachineIdList {
+  repeated HostMachineId machine_ids = 1;
+}
+
+message DpuMachineIdList {
+  repeated DpuMachineId machine_ids = 1;
+}
+
+message StableHostMachineIdList {
+  repeated StableHostMachineId machine_ids = 1;
+}

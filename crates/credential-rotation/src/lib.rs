@@ -88,6 +88,7 @@ use carbide_redfish::libredfish::BmcCredentialOps;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
+use carbide_uuid::machine::MachineIdSubtypeTrait;
 use chrono::{DateTime, Utc};
 use db::DatabaseError;
 use db::credential_rotation::{
@@ -422,7 +423,7 @@ impl BmcEndpoint {
 
     /// The BMC endpoint of a machine (a managed host or one of its DPUs), or
     /// `None` when that machine's BMC is unkeyable / unreachable.
-    pub fn from_machine(machine: &Machine) -> Option<Self> {
+    pub fn from_machine(machine: &Machine<impl MachineIdSubtypeTrait>) -> Option<Self> {
         Self::from_bmc_info(&machine.status.bmc_info)
     }
 
@@ -1495,10 +1496,15 @@ mod tests {
             .await
             .unwrap();
         for expected in 0..steps {
-            set_next_target_version(&mut conn, BMC, expected, serde_json::json!({}))
-                .await
-                .unwrap()
-                .expect("target must advance from the expected current version");
+            assert!(
+                matches!(
+                    set_next_target_version(&mut conn, BMC, expected, serde_json::json!({}))
+                        .await
+                        .unwrap(),
+                    db::ConditionalWrite::Applied(_)
+                ),
+                "target must advance from the expected current version"
+            );
         }
     }
 
@@ -2427,10 +2433,20 @@ mod tests {
             .await
             .unwrap();
         for expected in 0..steps {
-            set_next_target_version(&mut conn, DPU_BMC_SERVICE, expected, serde_json::json!({}))
-                .await
-                .unwrap()
-                .expect("target must advance from the expected current version");
+            assert!(
+                matches!(
+                    set_next_target_version(
+                        &mut conn,
+                        DPU_BMC_SERVICE,
+                        expected,
+                        serde_json::json!({})
+                    )
+                    .await
+                    .unwrap(),
+                    db::ConditionalWrite::Applied(_)
+                ),
+                "target must advance from the expected current version"
+            );
         }
     }
 

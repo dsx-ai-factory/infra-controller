@@ -509,7 +509,7 @@ func NewGetRackTasksHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.C
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param id path string true "UUID of the Rack"
+// @Param id path string true "Rack ID"
 // @Param siteId query string true "ID of the Site"
 // @Param activeOnly query boolean false "Restrict to non-terminal Tasks"
 // @Param includeReport query boolean false "Include the per-task execution report in each response (default false)"
@@ -525,9 +525,6 @@ func (h GetRackTasksHandler) Handle(c echo.Context) error {
 
 	rackID := c.Param("id")
 	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("rack_id", rackID), logger)
-	if _, err := uuid.Parse(rackID); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Rack ID specified in URL", nil)
-	}
 
 	var apiRequest model.APIGetTasksRequest
 	if err := common.ValidateKnownQueryParams(c.QueryParams(), apiRequest, pagination.PageRequest{}); err != nil {
@@ -672,13 +669,13 @@ func NewGetTrayTasksHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.C
 
 // Handle godoc
 // @Summary Retrieve all Tasks for a Tray
-// @Description List Tasks targeting the given Tray (matched as a component UUID on Flow), with optional active-only and pagination filters.
+// @Description List Tasks targeting the given Tray by component ID, with optional active-only and pagination filters.
 // @Tags tray
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param id path string true "UUID of the Tray"
+// @Param id path string true "Component ID"
 // @Param siteId query string true "ID of the Site"
 // @Param activeOnly query boolean false "Restrict to non-terminal Tasks"
 // @Param includeReport query boolean false "Include the per-task execution report in each response (default false)"
@@ -694,9 +691,6 @@ func (h GetTrayTasksHandler) Handle(c echo.Context) error {
 
 	trayID := c.Param("id")
 	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayID), logger)
-	if _, err := uuid.Parse(trayID); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Tray ID specified in URL", nil)
-	}
 
 	var apiRequest model.APIGetTasksRequest
 	if err := common.ValidateKnownQueryParams(c.QueryParams(), apiRequest, pagination.PageRequest{}); err != nil {

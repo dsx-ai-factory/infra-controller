@@ -28,7 +28,9 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::{Form, Json};
 use carbide_api_core::Api;
 use carbide_rpc_utils::managed_host_display::to_time;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId, MachineType};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, MachineId, MachineInterfaceId, MachineType, StableHostMachineId,
+};
 use hyper::http::StatusCode;
 use itertools::Itertools;
 use mac_address::MacAddress;
@@ -1118,11 +1120,7 @@ pub(super) async fn detail(
     let dpu_backed_machine_interface_ids = machine
         .interfaces
         .iter()
-        .filter(|interface| {
-            interface
-                .attached_dpu_machine_id
-                .is_some_and(|machine_id| machine_id.machine_type().is_dpu())
-        })
+        .filter(|interface| interface.attached_dpu_machine_id.is_some())
         .filter_map(|interface| interface.id)
         .collect::<HashSet<_>>();
     let mut display: MachineDetail = machine.into();
@@ -1237,9 +1235,9 @@ pub(super) async fn detail(
     display.validation_runs = validation_runs;
     display.action_status = ActionStatus::from_query(&params);
 
-    if !display.is_host {
+    if let Ok(dpu_machine_id) = DpuMachineId::try_from(machine_id) {
         let request = tonic::Request::new(forgerpc::ManagedHostNetworkConfigRequest {
-            dpu_machine_id: Some(machine_id),
+            dpu_machine_id: Some(dpu_machine_id),
         });
         if let Ok(netconf) = state
             .get_managed_host_network_config(request)
@@ -1326,7 +1324,7 @@ pub(super) async fn quarantine(
     Form(form): Form<QuarantineAction>,
 ) -> Response {
     let view_url = format!("/admin/machine/{machine_id}");
-    let machine_id = match machine_id.parse::<MachineId>() {
+    let machine_id = match machine_id.parse::<HostMachineId>() {
         Ok(machine_id) => machine_id,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
@@ -1462,14 +1460,10 @@ pub(super) async fn set_desired_boot_interface(
 ) -> Response {
     let view_url = format!("/admin/machine/{machine_id}#desired_boot_interface");
 
-    let machine_id = match machine_id.parse::<MachineId>() {
+    let machine_id = match machine_id.parse::<StableHostMachineId>() {
         Ok(machine_id) => machine_id,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
-    if !machine_id.machine_type().is_host() {
-        return (StatusCode::BAD_REQUEST, "machine must be a host").into_response();
-    }
-
     let redirect_url = match state
         .set_primary_interface(tonic::Request::new(forgerpc::SetPrimaryInterfaceRequest {
             host_machine_id: Some(machine_id),

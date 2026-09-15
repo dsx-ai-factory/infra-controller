@@ -27,7 +27,7 @@ Perform the following steps on the host that provides the NVIDIA Unified Fabric 
 
 Update the following parameters in `$UFM_HOME/ufm/files/conf/gv.cfg`.
 
-```
+```text
 …
 default_membership = limited
 …
@@ -39,7 +39,7 @@ m_key_per_port = true
 
 Update the following parameters in `$UFM_HOME/ufm/files/conf/opensm/opensm.conf`.
 
-```
+```text
 …
 m_key_protection_level 2
 …
@@ -63,7 +63,7 @@ sa_etm_max_num_event_subs 32
 
 As part of UFM configuration, set these initial parameters in `$UFM_HOME/ufm/files/conf/opensm/opensm.conf` to help reduce congestion:
 
-```
+```text
 max_op_vls 2
 ar_tree_asymmetric_flow 3
 ```
@@ -76,11 +76,14 @@ After editing OpenSM configuration, restart the UFM subnet manager (or UFM servi
 
 Static network configuration can be applied to enhance security of Infiniband cluster.
 It should be described in specific config file, named `topoconfig.conf`. The file is located at
-```
+
+```text
 $UFM_HOME/ufm/files/conf/opensm/topoconfig.conf
 ```
+
 The file format is
-```
+
+```text
 0x98039b0300867bba,1,0xb83fd2030080302e,1,Any,Active
 0x98039b0300867bba,3,0xb83fd2030080302e,3,Any,Active
 0xb83fd2030080302e,1,0x98039b0300867bba,1,Any,Active
@@ -89,12 +92,16 @@ The file format is
 0xb83fd2030080302e,29,0xf452140300280080,1,Any,Active
 0xb83fd2030080302e,30,0xf452140300280081,1,Any,Active
 ```
+
 with fields description as
-```
+
+```text
 Source GUID, Source Port, Destination GUID, Destination Port, Device type, Link State
 ```
+
 Starting UFM v6.19.0 to enable ability of UFM to work with static topology configuration `$UFM_HOME/ufm/files/conf/gv.cfg` file should include following parameter
-```
+
+```text
 …
 [SubnetManager]
 …
@@ -102,8 +109,10 @@ Starting UFM v6.19.0 to enable ability of UFM to work with static topology confi
 topoconfig_enabled = true
 …
 ```
+
 while on previous UFM versions this ability is enabled in file `$UFM_HOME/ufm/files/conf/opensm/opensm.conf` as
-```
+
+```text
 …
 # The file holding the topo configuration.
 topo_config_file $UFM_HOME/ufm/files/conf/opensm/topoconfig.conf
@@ -117,15 +126,18 @@ topo_config_enabled TRUE
 File `topoconfig.conf` can be created and modified manually or using UFM REST API starting v6.19.0.
 
 For example initial `topoconfig.conf` file can be created as
-```
+
+```bash
 curl -k -u admin:123456 -X POST https://<ufm host name>/ufmRest/static_topology/sm_topology_file | jq
 {
 "SM topoconfig action": "Create topoconfig file",
 "job_id": "1"
 }
 ```
+
 Request job by its ID to check job completion.
-```
+
+```bash
 curl -k -u admin:123456 -X GET https://<ufm host name>/ufmRest/jobs/1 | jq
 {
     "ID": "1",
@@ -142,6 +154,7 @@ curl -k -u admin:123456 -X GET https://<ufm host name>/ufmRest/jobs/1 | jq
     "SiteName": null
 }
 ```
+
 Once Job will be completed, path on UFM server to generated topoconfig file will be part of job completion message (Summary). Default generated topoconfig file location: `/tmp/ibdiagnet_out/generated_topoconfig.conf`
 
 #### Configurations per UFM
@@ -152,14 +165,14 @@ And the following configuration should be configured per UFM:
 
 A random 64bit integer is required for the sm_key, RANDOM environment value is a simple way to generate it as follows.
 
-```
+```text
 root:/# printf '0x%04x%04x%04x%04x\n' $RANDOM $RANDOM $RANDOM $RANDOM
 0x771d2fe77f553d47
 ```
 
 Update the sm_key in `$UFM_HOME/ufm/files/conf/opensm/opensm.conf` with the generated 64bit integer as follows.
 
-```
+```text
 …
 sm_key 0x771d2fe77f553d47
 …
@@ -169,7 +182,7 @@ sm_key 0x771d2fe77f553d47
 
 Get the GUID of openSM from `$UFM_HOME/ufm/files/conf/opensm/opensm.conf` of each UFM in the fabric.
 
-```
+```text
 …
 guid 0x1070fd03001763d4
 …
@@ -177,7 +190,7 @@ guid 0x1070fd03001763d4
 
 Update allowed_sm_guids in `$UFM_HOME/ufm/files/conf/opensm/opensm.conf` as follows.
 
-```
+```text
 …
 allowed_sm_guids 0x1070fd03001763d4,0x966daefffe2ac8d2
 …
@@ -190,7 +203,7 @@ Update the password of the admin as follows. The default password of the admin i
 * Minimum length is 4
 * Maximum length is 30, composed of alphanumeric and "_" characters
 
-```
+```text
 root:/# curl -s -k -XPUT -H "Content-Type: application/json" -u admin:123456 -d '{"password": "45364nnfgd"}' https://ufm.example.org:443/ufmRest/app/users/admin
 {
   "name": "admin"
@@ -199,7 +212,7 @@ root:/# curl -s -k -XPUT -H "Content-Type: application/json" -u admin:123456 -d 
 
 Generate a token for admin as follows:
 
-```
+```text
 root:/# curl -s -k -XPOST -u admin:x https://ufm.example.org:443/ufmRest/app/tokens | jq
 {
   "access_token": "x",
@@ -212,14 +225,14 @@ root:/# curl -s -k -XPOST -u admin:x https://ufm.example.org:443/ufmRest/app/tok
 
 After the configuration, restart the UFM HA cluster as follows:
 
-```
+```text
 root:/# ufm_ha_cluster stop
 root:/# ufm_ha_cluster start
 ```
 
 And then check UFM HA cluster status:
 
-```
+```text
 root:/# ufm_ha_cluster status
 ```
 
@@ -240,7 +253,7 @@ Follow the instructions in the section that applies to the selected option.
 
 Get the token of the admin user in UFM in above step, or get it again by following the rest api (the password of the admin user is required to get the token):
 
-```
+```text
 root:/# curl -s -k -XGET -u admin:password https://ufm:443/ufmRest/app/tokens | jq
 [
   {
@@ -255,7 +268,7 @@ root:/# curl -s -k -XGET -u admin:password https://ufm:443/ufmRest/app/tokens | 
 
 Create the credential for UFM client in NICo by nico-admin-cli as follows:
 
-```
+```text
 root:/# nico-admin-cli credential add-ufm --url=https://<address:port> --token=<access_token>
 ```
 
@@ -270,15 +283,18 @@ Zero Trust means that no user, device, or network traffic is trusted by default,
 UFM Server Certificates should include UFM Host Name `<ufm host name>` into The Subject Alternative Name (SAN) extension to the X.509 specification.
 
 Note:
-- `<ufm host name>` should be as `default.ufm.nico`, `default.ufm.<site domain name>`. Where `<site domain name>` is taken from `initial_domain_name` NICo configuration parameter.
 
-```
+* `<ufm host name>` should be as `default.ufm.nico`, `default.ufm.<site domain name>`. Where `<site domain name>` is taken from `initial_domain_name` NICo configuration parameter.
+
+```bash
 openssl x509 -in server.crt -text -noout | grep DNS
                 DNS:default.ufm.nico, DNS:default.ufm.nico.example.org
 ```
-- direct IP address is not supported.
-- for UFM version less than 6.18.0-5 following patch should be applied as
-```
+
+* Direct IP address is not supported
+* For UFM version less than 6.18.0-5, apply the following patch:
+
+```text
 --- /opt/ufm/scripts/ufm_conf_creator.py   2024-07-31 16:18:58.360497118 +0000
 +++ /opt/ufm/scripts/ufm_conf_creator.py   2024-07-31 16:20:01.480677706 +0000
 @@ -213,6 +213,7 @@
@@ -295,7 +311,7 @@ openssl x509 -in server.crt -text -noout | grep DNS
 
 Existing NICo certificates such as `/run/secrets/spiffe.io/{tls.crt,tls.key,ca.crt}` are used for client side.
 
-```
+```bash
 nico-admin-cli credential add-ufm --url=<ufm host name>
 ```
 
@@ -303,19 +319,23 @@ nico-admin-cli credential add-ufm --url=<ufm host name>
 
 Enter this command to create server UFM certificates using the vault:
 
-    nico-admin-cli credential generate-ufm-cert --fabric=default
+```bash
+nico-admin-cli credential generate-ufm-cert --fabric=default
+```
 
 UFM Server Certificates have predefined names as `default-ufm-ca-intermediate.crt, default-ufm-server.crt, default-ufm-server.key` and stored under `/var/run/secrets` location on `nico-api` pod.
 
 **Enter Docker UFM container.**
-```
+
+```bash
 docker exec -it ufm /bin/bash
 ```
 
 **Store server certificates at specific location.**
 
 Create UFM Server certificates using certificates generated on previous step in the UFM specific location and with predefined file names.
-```
+
+```text
 /opt/ufm/files/conf/webclient/ca-intermediate.crt
 /opt/ufm/files/conf/webclient/server.key
 /opt/ufm/files/conf/webclient/server.crt
@@ -323,7 +343,8 @@ Create UFM Server certificates using certificates generated on previous step in 
 
 **Assign UFM Client Host Name with UFM `admin` role.**
 It should be value from `client certificate SAN record` for example: nico-api.nico.
-```
+
+```bash
 /opt/ufm/scripts/manage_client_authentication.sh associate-user --san nico-api.nico --username admin
 curl -s -k -XGET -u admin:123456 https://<client host name>/ufmRest/app/client_authentication/settings | jq
 {
@@ -343,7 +364,8 @@ curl -s -k -XGET -u admin:123456 https://<client host name>/ufmRest/app/client_a
 
 **Set UFM Server Host Name for certificate verification.**
 It should be value from `server certificate SAN record` for example: default.ufm.nico.
-```
+
+```bash
 /opt/ufm/scripts/manage_client_authentication.sh set-ssl-cert-hostname --hostname default.ufm.nico
 curl -s -k -XGET -u admin:123456 https://<ufm host name>/ufmRest/app/client_authentication/settings | jq
 {
@@ -364,19 +386,22 @@ curl -s -k -XGET -u admin:123456 https://<ufm host name>/ufmRest/app/client_auth
 ```
 
 **Enable mTLS in UFM configuration file `/opt/ufm/files/conf/gv.cfg`.**
-```
+
+```text
 # Whether to authenticate web client by SSL client certificate or username/password.
 client_cert_authentication = true
 ```
 
 **Restart UFM.**
-```
+
+```bash
 /etc/init.d/ufmd restart
 ```
 
 **Check functionality.**
 Existing nico certificates such as `/run/secrets/spiffe.io/{tls.crt,tls.key,ca.crt}` are used for verification.
-```
+
+```bash
 curl -v -s --cert-type PEM --cacert ca.crt --key tls.key --cert tls.crt -XGET  https://<ufm host name>/ufmRest/app/ufm_version | jq
 *   Trying 192.168.121.78:443...
 * TCP_NODELAY set
@@ -523,7 +548,7 @@ The default home directory is `/opt/ufm`.
 
 There is a debug tools for QA/SRE to check the address/token of UFM:
 
-```
+```text
 root@host-client:/$ kubectl apply -f https://bit.ly/debug-console
 root@host-client:/$ kubectl exec -it debug-console -- /bin/bash
 root@host-worker:/# export UFM_ADDRESS=https://<ufm address>
@@ -538,7 +563,7 @@ management     0x7fff    true      2         2.5       0
 
 The default partition (`management/0x7fff`) will include all available ports in the fabric; use the `view` sub-command to list all available ports as follows.
 
-```
+```text
 root@host-worker:/# ufmctl view --pkey 0x7fff
 Name           : management
 Pkey           : 0x7fff
@@ -559,15 +584,18 @@ Ports          :
 
 ### How to check the auth token and UFM IP in NICo?
 
-After configuring UFM credentials in NICo, using the following commands to check whether the token was updated in Vault accordingly.
+After configuring UFM credentials in NICo, using the following commands to check whether the token was updated in the credential store. The commands below apply to the default Vault backend. With the Postgres store, confirm the journal row instead: in the `nico_system_nico` database, `SELECT path, seq, kek_id, created_at FROM secrets WHERE path LIKE 'ufm/%' ORDER BY seq DESC;` lists the entries without revealing the encrypted token.
 
-```
+If a local environment or file source supplies the fabric's credential, NICo reads that source first regardless of what the backend holds; refer to [Credential Sources](../configuration/credential-sources.md) for details.
+
+```bash
 kubectl exec -it vault-0 -n vault -- /bin/sh
 vault kv get -field=UsernamePassword --tls-skip-verify secrets/ufm/default/auth
 ```
 
 This returns something like
-```
+
+```text
 ======== Secret Path ========
 secrets/data/ufm/default/auth
 
@@ -599,7 +627,7 @@ SRE can also check the InfiniBand fabric monitor metrics emitted by NICo to dete
 
 Check the log of rest api:
 
-```
+```text
 root:/# tail $UFM_HOME/files/log/rest_api.log
 2024-03-28 07:42:02.954 rest_api INFO    user: ufmsystem, url: (http://127.0.0.1:8000/app/ufm_version/), method: (GET)
 2024-03-28 07:42:22.955 rest_api INFO    user: ufmsystem, url: (http://127.0.0.1:8000/app/ufm_version/), method: (GET)
@@ -615,7 +643,7 @@ root:/# tail $UFM_HOME/files/log/rest_api.log
 
 Check the log of UFM:
 
-```
+```text
 root:/# tail $UFM_HOME/files/log/ufm.log
 2024-03-28 07:46:17.742 ufm   INIT    Request Polling Delta Fabric
 2024-03-28 07:46:17.746 ufm   INIT    Get Polling Delta Fabric

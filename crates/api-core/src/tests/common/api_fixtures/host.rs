@@ -17,7 +17,9 @@
 
 //! Contains host related fixtures
 
-use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
+};
 use db::{ObjectColumnFilter, network_prefix};
 use model::hardware_info::HardwareInfo;
 use model::machine::MachineState::UefiSetup;
@@ -100,7 +102,7 @@ pub(in crate::tests) async fn host_discover_machine(
     env: &TestEnv,
     host_config: &ManagedHostConfig,
     machine_interface_id: MachineInterfaceId,
-) -> HostMachineId {
+) -> StableHostMachineId {
     let mut discovery_info = DiscoveryInfo::try_from(HardwareInfo::from(host_config)).unwrap();
 
     discovery_info.attest_key_info = Some(AttestKeyInfo {
@@ -194,7 +196,7 @@ pub(in crate::tests) async fn host_uefi_setup(env: &TestEnv, host_machine_id: Ho
             return;
         }
 
-        let response = forge_agent_control(env, host_machine_id.into()).await;
+        let response = forge_agent_control(env, host_machine_id).await;
         assert!(matches!(response.action, Some(Action::Noop(_))));
         assert_eq!(response.legacy_action, LegacyAction::Noop as i32);
     }

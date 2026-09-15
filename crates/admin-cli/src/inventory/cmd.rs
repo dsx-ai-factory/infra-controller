@@ -107,12 +107,12 @@ fn get_host_machine_info<'a>(
                 HostMachineInfo {
                     ansible_host: address,
                     machine_id: machine.id,
-                    dpu_machine_id: primary_dpu,
-                    primary_dpu_machine_id: primary_dpu,
+                    dpu_machine_id: primary_dpu.map(Into::into),
+                    primary_dpu_machine_id: primary_dpu.map(Into::into),
                     all_dpu_machine_ids: machine
                         .interfaces
                         .iter()
-                        .filter_map(|x| x.attached_dpu_machine_id)
+                        .filter_map(|x| x.attached_dpu_machine_id.map(Into::into))
                         .collect(),
                 },
             );
@@ -361,7 +361,7 @@ fn create_inventory_for_instances<'a>(
         let machine = machines
             .machines
             .iter()
-            .find(|x| x.id == instance.machine_id)
+            .find(|x| x.id == instance.machine_id.map(Into::into))
             .ok_or_else(|| {
                 CarbideCliError::GenericError(format!(
                     "No such machine {:?} found in db, instance {:?}",
@@ -379,7 +379,7 @@ fn create_inventory_for_instances<'a>(
 
         let details = InstanceDetails {
             instance_id: instance.id,
-            machine_id: instance.machine_id,
+            machine_id: instance.machine_id.map(Into::into),
             ansible_host: physical_ip.unwrap_or_default(),
             bmc_ip,
         };

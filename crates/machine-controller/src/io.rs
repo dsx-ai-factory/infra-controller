@@ -69,7 +69,7 @@ impl StateControllerIO for MachineStateControllerIO {
         txn: &mut PgConnection,
         machine_id: &Self::ObjectId,
     ) -> Result<Option<Self::State>, DatabaseError> {
-        let mut retstate = db::managed_host::load_host_snapshot(
+        let mut retstate = db::managed_host::load_snapshot(
             txn,
             machine_id,
             model::machine::LoadSnapshotOptions {

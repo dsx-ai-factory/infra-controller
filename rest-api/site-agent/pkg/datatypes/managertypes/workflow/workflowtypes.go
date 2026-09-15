@@ -96,6 +96,7 @@ type Workflow struct {
 	DpuExtensionServiceState    *MgrState
 	NVLinkLogicalPartitionState *MgrState
 	VpcPeeringState             *MgrState
+	SpectrumXPartitionState     *MgrState
 	TenantIdentityState         *MgrState
 }
 
@@ -131,6 +132,7 @@ func NewWorkflowInstance() *Workflow {
 		DpuExtensionServiceState:    &MgrState{},
 		NVLinkLogicalPartitionState: &MgrState{},
 		VpcPeeringState:             &MgrState{},
+		SpectrumXPartitionState:     &MgrState{},
 		TenantIdentityState:         &MgrState{},
 	}
 }

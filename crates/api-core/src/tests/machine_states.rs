@@ -21,14 +21,15 @@ use std::sync::atomic::AtomicBool;
 
 use ::rpc::measured_boot::FromGrpc;
 use base64::prelude::*;
-use carbide_machine_controller::context::MachineStateHandlerContextObjects;
-use carbide_machine_controller::handler::{MachineStateHandlerBuilder, handler_host_power_control};
+use carbide_machine_controller::handler::MachineStateHandlerBuilder;
 use carbide_machine_controller::metrics::MachineMetrics;
 use carbide_redfish::libredfish::test_support::{RedfishSimAction, RedfishSimPlatformAction};
 use carbide_site_explorer::MachineCreator;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_utils::arch::CpuArchitecture;
-use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId};
+use carbide_uuid::machine::{
+    AsMachineId, DpuMachineId, HostMachineId, MachineId, MachineIdSubtypeTrait,
+};
 use carbide_uuid::machine_validation::MachineValidationId;
 use chrono::{Duration, Utc};
 use common::api_fixtures::dpu::{
@@ -52,6 +53,7 @@ use measured_boot::pcr::PcrRegisterValue;
 use measured_boot::records::MeasurementBundleState;
 use measured_boot::report::MeasurementReport;
 use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::dpa_interface::{DpaInterfaceType, NewDpaInterface};
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::hardware_info::TpmEkCertificate;
 use model::machine::health_override::HARDWARE_HEALTH_OVERRIDE_PREFIX;
@@ -81,7 +83,7 @@ use rpc::forge_agent_control_response::{Action, LegacyAction};
 use rpc::machine_discovery::AttestKeyInfo;
 use rpc::{DiscoveryData, DiscoveryInfo};
 use state_controller::db_write_batch::DbWriteBatch;
-use state_controller::state_handler::StateHandlerContext;
+use state_controller::state_handler::{StateHandler, StateHandlerContext, StateHandlerError};
 use tonic::{Code, Request};
 
 use crate::cfg::file::DpuConfig as InitialDpuConfig;
@@ -98,7 +100,7 @@ use crate::tests::common::api_fixtures::instance::{
 };
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host_with_ek, discovery_completed, forge_agent_control,
-    on_demand_machine_validation, reboot_completed, update_time_params,
+    on_demand_machine_validation, update_time_params,
 };
 use crate::tests::common::attestation::spdm_attestation_run_to_failed_then_to_success;
 use crate::tests::instance_ipxe_behaviors::create_instance;
@@ -214,6 +216,128 @@ async fn test_managed_host_network_config_group_sync(pool: sqlx::PgPool) {
         !snapshot.managed_host_network_config_version_synced(),
         "sync should be false after a DPU-row write bumps the group"
     );
+}
+
+#[crate::sqlx_test]
+async fn rejected_dpa_network_config_rolls_back_before_transition(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    create_instance(&env, &mh, false, segment_id).await;
+    let host_id: HostMachineId = mh.id.into();
+
+    let mut txn = env.db_txn().await;
+    for (mac_address, pci_name) in [
+        ("00:11:22:33:44:55", "0000:cc:00.0"),
+        ("00:11:22:33:44:66", "0000:dd:00.0"),
+    ] {
+        db::dpa_interface::persist(
+            NewDpaInterface {
+                machine_id: host_id,
+                mac_address: mac_address.parse().unwrap(),
+                device_type: "SuperNIC".to_string(),
+                pci_name: pci_name.to_string(),
+                device_description: None,
+                interface_type: DpaInterfaceType::Svpc,
+            },
+            &mut txn,
+        )
+        .await
+        .unwrap();
+    }
+    txn.commit().await.unwrap();
+
+    for instance_state in [
+        InstanceState::SwitchToAdminNetwork,
+        InstanceState::DpaProvisioning,
+    ] {
+        let state = ManagedHostState::Assigned { instance_state };
+        let mut txn = env.db_txn().await;
+        db::machine::update_state(&mut txn, &host_id, &state)
+            .await
+            .unwrap();
+        let mut snapshot = mh.snapshot(&mut txn).await;
+        snapshot.dpa_interface_snapshots =
+            db::dpa_interface::find_by_machine_id(&mut *txn, host_id, Default::default())
+                .await
+                .unwrap();
+        let host_network = snapshot.host_snapshot.network_config.clone();
+        txn.commit().await.unwrap();
+
+        // The first card can apply. Advance the second after loading the snapshot
+        // so its rejection must discard the first card's write (and the host's
+        // admin-network write in `SwitchToAdminNetwork`).
+        let second = &snapshot.dpa_interface_snapshots[1];
+        let mut txn = env.db_txn().await;
+        assert_eq!(
+            db::dpa_interface::try_update_network_config(
+                &mut txn,
+                &second.id,
+                second.network_config.version,
+                &second.network_config.value,
+            )
+            .await
+            .unwrap(),
+            db::ConditionalWrite::Applied(second.id)
+        );
+        txn.commit().await.unwrap();
+
+        let mut services = env.machine_state_handler_services();
+        let mut site_config = env.config.machine_state_handler_site_config();
+        site_config.ewethers_enabled = true;
+        services.site_config = Arc::new(site_config);
+        let mut metrics = MachineMetrics::default();
+        let mut pending_db_writes = DbWriteBatch::new();
+        let mut ctx = StateHandlerContext {
+            services: &mut services,
+            metrics: &mut metrics,
+            pending_db_writes: &mut pending_db_writes,
+        };
+        let result = env
+            .machine_state_handler
+            .handle_object_state(&host_id, &mut snapshot, &state, &mut ctx)
+            .await;
+        assert!(
+            matches!(result, Err(StateHandlerError::IterationInvalidated { .. })),
+            "{state} must reject the stale DPA network configuration"
+        );
+
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        assert_eq!(host.current_state(), &state);
+        assert_eq!(host.network_config.value, host_network.value);
+        assert_eq!(host.network_config.version, host_network.version);
+        let expected_versions = [
+            snapshot.dpa_interface_snapshots[0]
+                .network_config
+                .version
+                .version_nr(),
+            snapshot.dpa_interface_snapshots[1]
+                .network_config
+                .version
+                .version_nr()
+                + 1,
+        ];
+        for (before, expected_version) in snapshot
+            .dpa_interface_snapshots
+            .iter()
+            .zip(expected_versions)
+        {
+            let card = db::dpa_interface::find_by_ids(&mut *txn, &[before.id], false)
+                .await
+                .unwrap()
+                .pop()
+                .expect("DPA interface exists");
+            assert_eq!(card.network_config.value, before.network_config.value);
+            assert_eq!(
+                card.network_config.version.version_nr(),
+                expected_version,
+                "{state}: card {}",
+                before.id
+            );
+        }
+        txn.commit().await.unwrap();
+    }
 }
 
 // Per-DPU network-config sync is rooted in the host-level
@@ -453,6 +577,7 @@ async fn test_machine_creator_created_host_advances_through_dpu_discovery(
         Arc::new(env.config.rack_profiles.clone()),
         None,
         env.test_credential_manager.clone(),
+        false,
     );
 
     // Use a known DPU serial so we can assert on the generated MachineId.
@@ -1474,7 +1599,7 @@ async fn test_failed_state_host_discovery_recovery(pool: sqlx::PgPool) {
 
     assert!(pxe.pxe_script.contains("scout.efi"));
 
-    let response = forge_agent_control(&env, mh.id.into()).await;
+    let response = forge_agent_control(&env, mh.id).await;
     assert!(matches!(response.action, Some(Action::Discovery(_))));
     assert_eq!(response.legacy_action, LegacyAction::Discovery as i32);
 
@@ -1567,7 +1692,7 @@ async fn test_failed_state_host_discovery_recovery(pool: sqlx::PgPool) {
     );
     txn.commit().await.unwrap();
 
-    let response = forge_agent_control(&env, mh.id.into()).await;
+    let response = forge_agent_control(&env, mh.id).await;
     assert!(matches!(response.action, Some(Action::Noop(_))));
     assert_eq!(response.legacy_action, LegacyAction::Noop as i32);
     env.run_machine_state_controller_iteration_until_state_matches(
@@ -2388,7 +2513,7 @@ async fn test_measurement_host_init_failed_to_waiting_for_measurements_to_pendin
 
     mh.host().discovery_completed().await;
 
-    host_uefi_setup(env, host_machine_id).await;
+    host_uefi_setup(env, host_machine_id.into()).await;
 
     env.run_machine_state_controller_iteration_until_state_matches(
         &host_machine_id,
@@ -2843,7 +2968,7 @@ async fn create_zero_dpu_test_env_with_overrides(
 
 /// Places a host directly in HostInit/SetBootOrder at the start of the
 /// boot-order flow, backdated so it reads as freshly entered.
-async fn set_host_stuck_in_set_boot_order(env: &TestEnv, host_id: HostMachineId) {
+async fn set_host_stuck_in_set_boot_order(env: &TestEnv, host_id: impl MachineIdSubtypeTrait) {
     set_host_controller_state_stuck_in(
         env,
         host_id,
@@ -2892,7 +3017,7 @@ async fn drive_until_past_set_boot_order(
 /// boot-order phase resolves and targets. Looked up by segment type (the same
 /// way the admin boot-interface resolution tests locate it), since a zero-DPU
 /// host boots from its HostInband NIC.
-async fn host_inband_nic_mac(env: &TestEnv, host_id: HostMachineId) -> MacAddress {
+async fn host_inband_nic_mac(env: &TestEnv, host_id: impl MachineIdSubtypeTrait) -> MacAddress {
     let mut txn = env.pool.begin().await.unwrap();
     db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
         .await
@@ -2932,7 +3057,7 @@ async fn set_pending_boot_interface(
 
     let pending = db::machine_desired_boot_interface::set(
         txn.as_mut(),
-        &host.id.try_into().unwrap(),
+        &host.id.into(),
         &replacement,
         BootInterfaceSelectionSource::Operator,
     )
@@ -2952,7 +3077,7 @@ async fn set_pending_boot_interface(
 async fn backdate_boot_interface_observation(
     env: &TestEnv,
     managed_host: &TestManagedHost,
-) -> model::machine::Machine {
+) -> model::machine::StableHostMachine {
     let mut txn = env.db_txn().await;
     let host_before = managed_host.host().db_machine(&mut txn).await;
     let desired_boot_interface = host_before
@@ -3359,7 +3484,7 @@ async fn test_ready_boot_config_waits_for_all_dpu_network_config_versions(pool: 
     let mut txn = env.db_txn().await;
     db::machine::set_machine_maintenance_requested(
         txn.as_mut(),
-        mh.host().id.into(),
+        mh.host().id,
         "test",
         MachineMaintenanceOperation::PowerOff,
     )
@@ -4129,7 +4254,10 @@ async fn test_assigned_periodic_boot_interface_drift_defers_convergence(pool: sq
     assert_read_only_boot_interface_observation(&redfish_actions);
 }
 
-async fn load_test_host(env: &TestEnv, managed_host: &TestManagedHost) -> model::machine::Machine {
+async fn load_test_host(
+    env: &TestEnv,
+    managed_host: &TestManagedHost,
+) -> model::machine::StableHostMachine {
     let mut txn = env.db_txn().await;
     managed_host.host().db_machine(&mut txn).await
 }
@@ -5987,7 +6115,7 @@ async fn test_hpc_polling_bios_setup_exhausted_enters_failed_and_recovers_when_b
 
 async fn set_host_controller_state_stuck_in(
     env: &TestEnv,
-    host_id: HostMachineId,
+    host_id: impl MachineIdSubtypeTrait,
     state: &ManagedHostState,
     minutes_in_state: i64,
 ) {
@@ -6005,7 +6133,7 @@ async fn set_host_controller_state_stuck_in(
     )
     .bind(sqlx::types::Json(&state_json))
     .bind(&version)
-    .bind(host_id)
+    .bind(host_id.to_machine_id())
     .execute(&mut *txn)
     .await
     .unwrap();
@@ -6084,7 +6212,7 @@ async fn test_scout_heartbeat_timeout_alert_cleared_on_instance_creation_transit
     env.api
         .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: Some(host_machine_id.into()),
+            machine_id: Some(host_machine_id),
             instance_type_id: None,
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
@@ -6167,7 +6295,7 @@ async fn test_scout_heartbeat_timeout_alert_not_cleared_when_unhealthy_allocatio
         .api
         .allocate_instance(Request::new(rpc::forge::InstanceAllocationRequest {
             instance_id: None,
-            machine_id: Some(host_machine_id.into()),
+            machine_id: Some(host_machine_id),
             instance_type_id: None,
             config: Some(rpc::InstanceConfig {
                 tenant: Some(default_tenant_config()),
@@ -6350,235 +6478,6 @@ async fn load_host_state(env: &TestEnv, host_id: &HostMachineId) -> ManagedHostS
 }
 
 #[crate::sqlx_test]
-async fn test_waiting_for_reboot_requires_completion_when_phone_home_disabled(pool: sqlx::PgPool) {
-    let (env, mh) = zero_dpu_host_with_instance(pool).await;
-    let host_id = mh.id;
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
-    assert!(!snapshot.instance.unwrap().config.os.phone_home_enabled);
-    txn.commit().await.unwrap();
-
-    set_assigned_state(&env, &host_id, InstanceState::WaitingForRebootToReady).await;
-    env.run_machine_state_controller_iteration().await;
-
-    assert_eq!(
-        load_host_state(&env, &host_id).await,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::WaitingForRebootToReady,
-        }
-    );
-
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let restart = host.status.last_reboot_requested.unwrap();
-    assert_eq!(restart.restart_verified, Some(false));
-    assert_eq!(restart.verification_attempts, Some(0));
-    txn.commit().await.unwrap();
-
-    reboot_completed(&env, host_id.into()).await;
-    env.run_machine_state_controller_iteration().await;
-    assert_eq!(
-        load_host_state(&env, &host_id).await,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::Ready,
-        }
-    );
-}
-
-#[crate::sqlx_test]
-async fn test_waiting_for_reboot_restarts_after_power_on_substitution(pool: sqlx::PgPool) {
-    let (env, mh) = zero_dpu_host_with_instance(pool).await;
-    let host_id = mh.id;
-
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
-    let mut write_batch = DbWriteBatch::new();
-    let mut services = env.machine_state_handler_services();
-    let mut metrics = MachineMetrics::default();
-    let mut ctx = StateHandlerContext::<MachineStateHandlerContextObjects> {
-        services: &mut services,
-        metrics: &mut metrics,
-        pending_db_writes: &mut write_batch,
-    };
-    handler_host_power_control(
-        &snapshot,
-        &mut ctx,
-        libredfish::SystemPowerControl::ForceOff,
-    )
-    .await
-    .unwrap();
-    write_batch.apply_all(&mut txn).await.unwrap();
-    txn.commit().await.unwrap();
-
-    set_assigned_state(&env, &host_id, InstanceState::WaitingForRebootToReady).await;
-    env.run_machine_state_controller_iteration().await;
-
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let power_on = host.status.last_reboot_requested.unwrap();
-    assert_eq!(power_on.mode, MachineLastRebootRequestedMode::PowerOn);
-    assert_eq!(power_on.restart_verified, None);
-    txn.commit().await.unwrap();
-
-    let checkpoint = env.redfish_sim.timepoint();
-    env.run_machine_state_controller_iteration().await;
-
-    assert_eq!(
-        load_host_state(&env, &host_id).await,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::WaitingForRebootToReady,
-        }
-    );
-    let actions = env.redfish_sim.actions_since(&checkpoint).all_hosts();
-    assert!(
-        actions.contains(&RedfishSimAction::Power(
-            libredfish::SystemPowerControl::ForceRestart,
-        )),
-        "the power-on substitution must be followed by the intended restart, got: {actions:?}"
-    );
-
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let restart = host.status.last_reboot_requested.unwrap();
-    assert_eq!(restart.mode, MachineLastRebootRequestedMode::Reboot);
-    assert_eq!(restart.restart_verified, Some(false));
-    assert_eq!(restart.verification_attempts, Some(0));
-    txn.commit().await.unwrap();
-}
-
-#[crate::sqlx_test]
-async fn test_waiting_for_reboot_keeps_transient_bmc_error_retryable(pool: sqlx::PgPool) {
-    let (env, mh) = zero_dpu_host_with_instance(pool).await;
-    let host_id = mh.id;
-    env.redfish_sim.set_bmc_event_log_supported(true);
-    set_assigned_state(&env, &host_id, InstanceState::WaitingForRebootToReady).await;
-    env.run_machine_state_controller_iteration().await;
-
-    let checkpoint = env.redfish_sim.timepoint();
-    env.redfish_sim.fail_next_bmc_event_log_read();
-    env.run_machine_state_controller_iteration().await;
-
-    assert_eq!(
-        load_host_state(&env, &host_id).await,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::WaitingForRebootToReady,
-        }
-    );
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let restart = host.status.last_reboot_requested.unwrap();
-    assert_eq!(restart.restart_verified, Some(false));
-    assert_eq!(restart.verification_attempts, Some(0));
-    txn.commit().await.unwrap();
-
-    env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let restart = host.status.last_reboot_requested.unwrap();
-    assert_eq!(restart.restart_verified, Some(false));
-    assert_eq!(restart.verification_attempts, Some(1));
-    txn.commit().await.unwrap();
-
-    assert_eq!(
-        load_host_state(&env, &host_id).await,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::WaitingForRebootToReady,
-        }
-    );
-
-    let actions = env.redfish_sim.actions_since(&checkpoint).all_hosts();
-    assert!(
-        actions
-            .iter()
-            .all(|action| !matches!(action, RedfishSimAction::Power(_))),
-        "transient BMC errors must not repeat a power action, got: {actions:?}"
-    );
-}
-
-#[crate::sqlx_test]
-async fn test_waiting_for_reboot_exhausted_verification_is_non_destructive(pool: sqlx::PgPool) {
-    let (env, mh) = zero_dpu_host_with_instance(pool).await;
-    let host_id = mh.id;
-    env.redfish_sim.set_bmc_event_log_supported(true);
-    set_assigned_state(&env, &host_id, InstanceState::WaitingForRebootToReady).await;
-    env.run_machine_state_controller_iteration().await;
-
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let restart_time = host.status.last_reboot_requested.unwrap().time;
-    txn.commit().await.unwrap();
-    update_time_params(
-        &env.pool,
-        &host,
-        5,
-        Some(restart_time - Duration::minutes(2)),
-    )
-    .await;
-
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let restart = host.status.last_reboot_requested.unwrap();
-    db::machine::update_restart_verification_status(
-        &host_id,
-        restart,
-        Some(false),
-        2,
-        txn.as_mut(),
-    )
-    .await
-    .unwrap();
-    txn.commit().await.unwrap();
-
-    let checkpoint = env.redfish_sim.timepoint();
-    env.run_machine_state_controller_iteration().await;
-
-    assert_eq!(
-        load_host_state(&env, &host_id).await,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::WaitingForRebootToReady,
-        }
-    );
-    let actions = env.redfish_sim.actions_since(&checkpoint).all_hosts();
-    assert!(
-        actions
-            .iter()
-            .all(|action| !matches!(action, RedfishSimAction::Power(_))),
-        "exhausted verification must not repeat a power action, got: {actions:?}"
-    );
-
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let restart = host.status.last_reboot_requested.unwrap();
-    assert_eq!(restart.restart_verified, None);
-    assert_eq!(restart.verification_attempts, Some(0));
-    txn.commit().await.unwrap();
-}
-
-#[crate::sqlx_test]
-async fn test_waiting_for_reboot_accepts_bmc_verification(pool: sqlx::PgPool) {
-    let (env, mh) = zero_dpu_host_with_instance(pool).await;
-    let host_id = mh.id;
-    set_assigned_state(&env, &host_id, InstanceState::WaitingForRebootToReady).await;
-    env.run_machine_state_controller_iteration().await;
-
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let restart = host.status.last_reboot_requested.unwrap();
-    db::machine::update_restart_verification_status(&host_id, restart, Some(true), 0, txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await.unwrap();
-
-    env.run_machine_state_controller_iteration().await;
-    assert_eq!(
-        load_host_state(&env, &host_id).await,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::Ready,
-        }
-    );
-}
-
-#[crate::sqlx_test]
 async fn test_waiting_for_reboot_checks_health_for_zero_dpu(pool: sqlx::PgPool) {
     let (env, mh) = zero_dpu_host_with_instance(pool).await;
     let host_id = mh.id;
@@ -6625,15 +6524,6 @@ async fn test_waiting_for_reboot_checks_health_for_zero_dpu(pool: sqlx::PgPool) 
         HealthReport::empty(health_source.to_string()),
     )
     .await;
-    env.run_machine_state_controller_iteration().await;
-    assert_eq!(
-        load_host_state(&env, &host_id).await,
-        ManagedHostState::Assigned {
-            instance_state: InstanceState::WaitingForRebootToReady,
-        }
-    );
-
-    reboot_completed(&env, host_id.into()).await;
     env.run_machine_state_controller_iteration().await;
     assert_eq!(
         load_host_state(&env, &host_id).await,

@@ -182,8 +182,8 @@ nico-machine-a-tron:
           hwType: wiwynn_gb200_nvl
           hostCount: 2
           dpuPerHostCount: 2
-          oobDhcpRelayAddress: "192.168.192.1"
-          adminDhcpRelayAddress: "192.168.176.1"
+          bmcDhcpRelayAddress: "192.168.192.1"
+          underlayDhcpRelayAddress: "192.168.176.1"
 nico-dhcp:
   enabled: false
 nico-dns:

@@ -880,12 +880,16 @@ fn validate_machine_validation_plugin(
             "plugin entrypoint must contain a non-empty executable and arguments".into(),
         ));
     }
-    let parameters: serde_json::Value =
-        serde_json::from_str(&plugin.parameters_json).map_err(|error| {
-            CarbideError::InvalidArgument(format!(
-                "plugin parameters_json must be valid JSON: {error}"
-            ))
-        })?;
+    let parameters_json = if plugin.parameters_json.is_empty() {
+        "{}"
+    } else {
+        &plugin.parameters_json
+    };
+    let parameters: serde_json::Value = serde_json::from_str(parameters_json).map_err(|error| {
+        CarbideError::InvalidArgument(format!(
+            "plugin parameters_json must be valid JSON: {error}"
+        ))
+    })?;
     if !parameters.is_object() {
         return Err(CarbideError::InvalidArgument(
             "plugin parameters_json must be a JSON object".into(),
@@ -1644,6 +1648,17 @@ mod img_name_validation_tests {
             approved_plugin_registries: vec!["registry.example.com".to_owned()],
             allow_privileged_plugins: true,
             allow_full_host_plugins: true,
+            ..MachineValidationConfig::default()
+        };
+        assert!(validate_machine_validation_plugin(&plugin.into(), &config).is_ok());
+    }
+
+    #[test]
+    fn plugin_admission_accepts_omitted_parameters() {
+        let mut plugin = plugin(false);
+        plugin.parameters_json.clear();
+        let config = MachineValidationConfig {
+            approved_plugin_registries: vec!["registry.example.com".to_owned()],
             ..MachineValidationConfig::default()
         };
         assert!(validate_machine_validation_plugin(&plugin.into(), &config).is_ok());

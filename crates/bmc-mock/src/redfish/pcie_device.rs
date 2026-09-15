@@ -111,6 +111,13 @@ impl PcieDeviceBuilder {
         self.add_str_field("SerialNumber", value)
     }
 
+    /// Device identity that survives a chassis-slot swap.
+    ///
+    /// On NVIDIA GPUs this matches the NVML GPU UUID without its `GPU-` prefix.
+    pub(crate) fn uuid(self, value: &str) -> Self {
+        self.add_str_field("UUID", value)
+    }
+
     fn firmware_version(self, value: &str) -> Self {
         self.add_str_field("FirmwareVersion", value)
     }

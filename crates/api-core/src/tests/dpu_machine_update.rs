@@ -21,7 +21,7 @@ use common::api_fixtures::{create_managed_host, create_managed_host_multi_dpu, c
 use db::DatabaseError;
 use model::dpu_machine_update::DpuMachineUpdate;
 use model::machine::network::MachineNetworkStatusObservation;
-use model::machine::{LoadSnapshotOptions, Machine, ManagedHostStateSnapshot};
+use model::machine::{DpuMachine, LoadSnapshotOptions, ManagedHostStateSnapshot};
 use sqlx::PgConnection;
 
 use super::common::api_fixtures::TestEnv;
@@ -80,6 +80,9 @@ async fn create_machines(
     )
     .await
     .expect("Failed to load snapshots")
+    .into_iter()
+    .map(|(id, snapshot)| (id.into(), snapshot))
+    .collect()
 }
 
 pub(in crate::tests) async fn get_all_snapshots(
@@ -260,7 +263,7 @@ async fn test_find_unavailable_outdated_dpus(
 
     assert_eq!(dpus.len(), 1);
     assert_eq!(dpus.first().unwrap().dpu_machine_id, mh.dpu_ids[0]);
-    assert_eq!(dpus.first().unwrap().host_machine_id, mh.id);
+    assert_eq!(dpus.first().unwrap().host_machine_id, mh.id.into());
 
     Ok(())
 }
@@ -289,7 +292,10 @@ async fn test_find_available_outdated_dpus_multidpu(
         },
     )
     .await
-    .expect("Failed to load snapshots");
+    .expect("Failed to load snapshots")
+    .into_iter()
+    .map(|(id, snapshot)| (id.into(), snapshot))
+    .collect();
 
     txn.commit().await?;
 
@@ -316,7 +322,7 @@ async fn test_find_available_outdated_dpus_multidpu_one_under_reprov(
     db::dpu_machine_update::trigger_reprovisioning_for_managed_host(
         &mut txn,
         &[DpuMachineUpdate {
-            host_machine_id: mh.id,
+            host_machine_id: mh.id.into(),
             dpu_machine_id: mh.dpu_ids[0],
             firmware_version: "test_version".to_string(),
             dpf_managed: false,
@@ -337,7 +343,10 @@ async fn test_find_available_outdated_dpus_multidpu_one_under_reprov(
         },
     )
     .await
-    .unwrap();
+    .unwrap()
+    .into_iter()
+    .map(|(id, snapshot)| (id.into(), snapshot))
+    .collect();
 
     let dpus = DpuMachineUpdate::find_available_outdated_dpus(
         None,
@@ -351,12 +360,12 @@ async fn test_find_available_outdated_dpus_multidpu_one_under_reprov(
     let mut txn = env.pool.begin().await?;
     let all_dpus = mh.dpu_db_machines(&mut txn).await;
 
-    let (dpu_under_reprov, dpu_not_under_reprov): (Vec<Machine>, Vec<Machine>) = all_dpus
+    let (dpu_under_reprov, dpu_not_under_reprov): (Vec<DpuMachine>, Vec<DpuMachine>) = all_dpus
         .into_iter()
         .partition(|x| x.reprovision_requested.is_some());
     assert_eq!(dpu_under_reprov.len(), 1);
     assert_eq!(dpu_not_under_reprov.len(), 1);
-    assert_eq!(dpu_under_reprov[0].id, *mh.dpu_n(0).id);
+    assert_eq!(dpu_under_reprov[0].id, mh.dpu_n(0).id);
 
     Ok(())
 }
@@ -375,14 +384,14 @@ async fn test_find_available_outdated_dpus_multidpu_both_under_reprov(
         &mut txn,
         &[
             DpuMachineUpdate {
-                host_machine_id: mh.id,
-                dpu_machine_id: all_dpus[1].id.try_into()?,
+                host_machine_id: mh.id.into(),
+                dpu_machine_id: all_dpus[1].id,
                 firmware_version: "test_version".to_string(),
                 dpf_managed: false,
             },
             DpuMachineUpdate {
-                host_machine_id: mh.id,
-                dpu_machine_id: all_dpus[0].id.try_into()?,
+                host_machine_id: mh.id.into(),
+                dpu_machine_id: all_dpus[0].id,
                 firmware_version: "test_version".to_string(),
                 dpf_managed: false,
             },
@@ -403,7 +412,10 @@ async fn test_find_available_outdated_dpus_multidpu_both_under_reprov(
         },
     )
     .await
-    .unwrap();
+    .unwrap()
+    .into_iter()
+    .map(|(id, snapshot)| (id.into(), snapshot))
+    .collect();
 
     let dpus = DpuMachineUpdate::find_available_outdated_dpus(
         None,
@@ -417,7 +429,7 @@ async fn test_find_available_outdated_dpus_multidpu_both_under_reprov(
     let mut txn = env.pool.begin().await?;
     let all_dpus = mh.dpu_db_machines(&mut txn).await;
 
-    let (dpu_under_reprov, dpu_not_under_reprov): (Vec<Machine>, Vec<Machine>) = all_dpus
+    let (dpu_under_reprov, dpu_not_under_reprov): (Vec<DpuMachine>, Vec<DpuMachine>) = all_dpus
         .into_iter()
         .partition(|x| x.reprovision_requested.is_some());
     assert_eq!(dpu_under_reprov.len(), 2);

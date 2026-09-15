@@ -7,7 +7,7 @@ curl -X POST "https://api.example.com/v2/org/{tenant-org-name}/nico/instance" \
    -d '{
       "name": "demo-compute-instance-0",
       "instanceTypeId": "9c4aaa6a-3934-4274-b0a9-5143b253039e",
-      "vpcId": "0b1c53a0-a27e-4714-98d7-0cd3bc579db2",
+      "vpcId": "f466a2d5-5820-4824-a845-3218fdff801b",
       "tenantId": "aaf3cb83-8785-4265-a3bd-61e828f87db8",
       "operatingSystemId": "0865029e-3979-432d-985e-2de396ecce32",
       "userData": null,

@@ -35,6 +35,10 @@ const MODEL: &str = "ProLiant DL380a Gen11";
 const SKU: &str = "P54903-B21";
 
 impl HpeProliantDl380aGen11<'_> {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         redfish::manager::Config {
             managers: vec![redfish::manager::SingleConfig {

@@ -30,9 +30,10 @@
 #   5. Node resources           — at least 3 schedulable (Ready + untainted) nodes
 #   6. MetalLB BGPPeer nodes    — hostnames in config exist in the cluster
 #   7. Per-node checks          — kernel params (sysctl) and DNS on every node
-#   8. Registry/image access    — registry host and rendered NICo image refs
+#   8. Temporal/Keycloak DB     — opt-in nico-pg-cluster migration wasn't skipped
+#   9. Registry/image access    — registry host and rendered NICo image refs
 #                                  are reachable with the supplied credentials
-#   9. NICo REST source/charts   — in-tree rest-api/ and helm/rest/ are present
+#   10. NICo REST source/charts  — in-tree rest-api/ and helm/rest/ are present
 #
 # Configurable:
 #   PREFLIGHT_CHECK_IMAGE — image used for per-node pod checks (default: busybox:1.36)
@@ -551,7 +552,7 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Required tools
 # ---------------------------------------------------------------------------
-for _tool in helm helmfile kubectl jq ssh-keygen; do
+for _tool in helm helmfile kubectl jq ssh-keygen envsubst; do
     command -v "${_tool}" &>/dev/null || \
         WARNINGS+=("'${_tool}' not found in PATH — install it before running setup.sh")
 done
@@ -643,6 +644,34 @@ done
 # data). Every active (uncommented) required value must be filled before install.
 # Comment lines + inline `# …` comments are stripped first.
 _strip_comments() { sed -E 's/[[:space:]]+#.*$//; /^[[:space:]]*#/d' "$1"; }
+
+# Reads a scalar field nested directly under a YAML key, at any indentation
+# depth (top-level or nested, e.g. the `enabled` under `nico-rest-api.config.
+# keycloak:`). Unlike `grep -A<n> key: | grep field:`, this isn't a
+# fixed-line-count window — it scans until the next line at the same or
+# shallower indentation as the matched key, so it doesn't silently break
+# (falling through to a caller's default) when a comment block above the
+# field grows. Shared with setup.sh, which sources this file, and
+# reimplemented standalone in scripts/migrate-temporal-keycloak-db.sh.
+_yaml_toplevel_value() {
+    local _file="$1" _key="$2" _field="$3"
+    awk -v key="${_key}" -v field="${_field}" '
+        {
+            indent = match($0, /[^ ]/) - 1
+            trimmed = $0
+            sub(/^[[:space:]]*/, "", trimmed)
+        }
+        !in_block && trimmed == key ":" { in_block = 1; key_indent = indent; next }
+        in_block && trimmed != "" && trimmed !~ /^#/ && indent <= key_indent { exit }
+        in_block && trimmed ~ "^" field ":[[:space:]]*" {
+            sub("^" field ":[[:space:]]*", "", trimmed)
+            sub(/[[:space:]]+#.*/, "", trimmed)
+            gsub(/"/, "", trimmed)
+            print trimmed
+            exit
+        }
+    ' "${_file}"
+}
 
 if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
     # nico-api.hostname must be a real external hostname
@@ -1022,10 +1051,113 @@ EOF
 
     _cleanup_preflight_pods
 
+    # -----------------------------------------------------------------------
+    # 8. Temporal/Keycloak DB consolidation — opt-in transition safety.
+    # See "Consolidating Temporal/Keycloak onto nico-pg-cluster" in README.md
+    # for the full story. Short version: temporal.useHaPostgres/keycloak.useHaPostgres
+    # point Temporal/Keycloak at nico-pg-cluster instead of postgres.postgres;
+    # this fails closed rather than let setup.sh silently redirect a site with
+    # un-migrated legacy data onto an empty/incomplete target database.
+    # -----------------------------------------------------------------------
+    _TEMPORAL_TOGGLE="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" temporal useHaPostgres)"
+    _KEYCLOAK_TOGGLE="$(_yaml_toplevel_value "${_SITE_VALUES_CFG}" keycloak useHaPostgres)"
+
+    if [[ "${_TEMPORAL_TOGGLE}" == "true" || "${_KEYCLOAK_TOGGLE}" == "true" ]]; then
+        _LEGACY_PG_POD="$(kubectl get pods -n postgres -l app=postgres \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+        _NICO_PG_POD="$(kubectl get pods -n postgres \
+            -l cluster-name=nico-pg-cluster,spilo-role=master \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+
+        # Fails closed: an unreadable legacy count, a missing target database,
+        # or an unreadable target count are all treated as "cannot rule out
+        # data loss" and raise an ERROR — not silently skipped as "nothing to
+        # migrate". In particular, flipping the toggle and running setup.sh
+        # directly (skipping the documented `helmfile sync -l name=nico-prereqs`
+        # step) means the target database genuinely doesn't exist yet at this
+        # point — that's exactly the case this check exists to catch, not a
+        # reason to wave it through.
+        _check_db_migration_needed() {
+            local _label="$1" _db="$2" _count_query="$3" _script_hint="$4"
+
+            # No legacy pod at all: genuinely nothing to protect (fresh
+            # cluster, postgres.postgres was never deployed). But a legacy
+            # pod WITH no nico-pg-cluster pod is exactly the direct
+            # opt-in-then-run-setup.sh-without-syncing-first case this check
+            # exists to catch — fail closed here too, not just skip.
+            [[ -n "${_LEGACY_PG_POD}" ]] || return 0
+            if [[ -z "${_NICO_PG_POD}" ]]; then
+                ERRORS+=("${_label}: nico-pg-cluster is not reachable, so this can't confirm postgres.postgres/${_db} has already been migrated — ensure postgresql.enabled=true and the nico-prereqs release has synced ('helmfile sync -l name=nico-prereqs') before proceeding")
+                return 0
+            fi
+
+            local _legacy_count
+            if ! _legacy_count="$(kubectl exec -n postgres "${_LEGACY_PG_POD}" -- \
+                psql -U postgres -d "${_db}" -tAc "${_count_query}" 2>/dev/null)" \
+                || [[ ! "${_legacy_count}" =~ ^[0-9]+$ ]]; then
+                ERRORS+=("${_label}: could not read a row count from postgres.postgres/${_db} — cannot verify whether ${_db} needs to be migrated before proceeding")
+                return 0
+            fi
+            # Legacy is genuinely empty — nothing to lose, safe to proceed.
+            [[ "${_legacy_count}" -gt 0 ]] || return 0
+
+            if ! kubectl exec -n postgres "${_NICO_PG_POD}" -- \
+                psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${_db}'" 2>/dev/null \
+                | grep -q 1; then
+                ERRORS+=("${_label}: postgres.postgres/${_db} has ${_legacy_count} row(s) but the nico-pg-cluster '${_db}' database doesn't exist yet — run 'helmfile sync -l name=nico-prereqs' to provision it, then '${_script_hint}', before re-running setup.sh")
+                return 0
+            fi
+
+            local _nico_count
+            if ! _nico_count="$(kubectl exec -n postgres "${_NICO_PG_POD}" -- \
+                psql -U postgres -d "${_db}" -tAc "${_count_query}" 2>/dev/null)" \
+                || [[ ! "${_nico_count}" =~ ^[0-9]+$ ]]; then
+                ERRORS+=("${_label}: could not read a row count from nico-pg-cluster/${_db} — cannot verify the migration completed")
+                return 0
+            fi
+
+            # A dump/restore of the same table should leave equal counts.
+            # Fewer means an incomplete/partial migration; more means the
+            # target has diverged from what was actually dumped (e.g. a
+            # stale prior migration attempt) — either way it's not the clean
+            # 1:1 restore this check exists to confirm. (Nothing else writes
+            # to nico-pg-cluster/${_db} before setup.sh cuts the workload
+            # over to it.)
+            if [[ "${_nico_count}" -ne "${_legacy_count}" ]]; then
+                ERRORS+=("${_label}: postgres.postgres/${_db} has ${_legacy_count} row(s) but nico-pg-cluster/${_db} has ${_nico_count} — migration looks incomplete or stale. Run '${_script_hint}' before proceeding, or this data will be orphaned")
+            fi
+            # This function communicates findings via ERRORS, not its own
+            # exit code — without this, a false `-eq 0` above (the "all
+            # good" case) would make the function return 1, and since
+            # preflight.sh is sourced into setup.sh's `set -e` shell, a bare
+            # call to this function would silently abort setup.sh entirely.
+            return 0
+        }
+
+        if [[ "${_TEMPORAL_TOGGLE}" == "true" ]]; then
+            _check_db_migration_needed \
+                "temporal.useHaPostgres" "temporal" "SELECT count(*) FROM namespaces" \
+                "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db temporal"
+            # temporal_visibility has its own tables (no namespaces table) —
+            # use schema presence (any tables at all) as the migrated-or-not
+            # signal, so a partial migration (temporal restored,
+            # temporal_visibility not) is caught too.
+            _check_db_migration_needed \
+                "temporal.useHaPostgres" "temporal_visibility" \
+                "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" \
+                "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db temporal"
+        fi
+        if [[ "${_KEYCLOAK_TOGGLE}" == "true" ]]; then
+            _check_db_migration_needed \
+                "keycloak.useHaPostgres" "keycloak" "SELECT count(*) FROM realm" \
+                "helm-prereqs/scripts/migrate-temporal-keycloak-db.sh --db keycloak"
+        fi
+    fi
+
 fi  # _CLUSTER_REACHABLE
 
 # ---------------------------------------------------------------------------
-# 8. Registry/image access - validate the exact image refs setup.sh will use.
+# 9. Registry/image access - validate the exact image refs setup.sh will use.
 #    The host check stays a warning for air-gapped/preloaded environments, but
 #    invalid provided credentials or missing rendered Core tags are hard errors.
 # ---------------------------------------------------------------------------
@@ -1051,7 +1183,7 @@ elif [[ "${SKIP_CORE:-false}" != "true" && -n "${NICO_IMAGE_REGISTRY:-}" && -n "
 fi
 
 # ---------------------------------------------------------------------------
-# 9. NICo REST source tree and Helm charts (in-tree)
+# 10. NICo REST source tree and Helm charts (in-tree)
 #
 # The REST stack lives in this repo under rest-api/. No separate clone is
 # supported any more; the legacy NICO_REST_REPO / NICO_REPO env vars and the

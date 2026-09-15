@@ -18,6 +18,7 @@
 use std::num::ParseIntError;
 
 use carbide_utils::cmd::CmdError;
+use carbide_uuid::machine::InvalidMachineType;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CarbideClientError {
@@ -55,3 +56,9 @@ pub enum CarbideClientError {
 }
 
 pub type CarbideClientResult<T> = Result<T, CarbideClientError>;
+
+impl From<InvalidMachineType> for CarbideClientError {
+    fn from(value: InvalidMachineType) -> Self {
+        Self::GenericError(format!("invalid machine type: {value}"))
+    }
+}

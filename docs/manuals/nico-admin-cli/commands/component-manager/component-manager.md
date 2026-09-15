@@ -20,7 +20,7 @@ Component manager actions
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -45,6 +45,7 @@ Print help (see a summary with -h)
 | [`get-firmware-update-status`](./component-manager-get-firmware-update-status.md) | Get component firmware update status |
 | [`get-firmware-versions`](./component-manager-get-firmware-versions.md) | List available component firmware versions |
 | [`component-power-control`](./component-manager-component-power-control.md) | Issue a power-control action against components (switches, power shelves, compute trays) |
+| [`configure-switch-certificate`](./component-manager-configure-switch-certificate.md) | Rotate or reinstall switch NVOS mTLS certificates via the switch Maintenance phase |
 
 ---
 

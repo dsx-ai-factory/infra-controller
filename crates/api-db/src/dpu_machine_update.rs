@@ -157,7 +157,7 @@ pub async fn get_updated_machines(
                 .map(|dpu| {
                     Ok(DpuMachineUpdate {
                         host_machine_id: machine_id,
-                        dpu_machine_id: dpu.dpu_machine_id()?,
+                        dpu_machine_id: dpu.id,
                         firmware_version: dpu
                             .status
                             .hardware_info

@@ -383,7 +383,7 @@ fn build_apply_firmware_command<'a>(
         carbide_instrument::emit(FirmwareUpdateProgress {
             target: FirmwareUpdateTarget::SuperNic,
             phase: FirmwareUpdatePhase::Started,
-            machine_id: machine_id.into(),
+            machine_id,
             detail: format!(
                 "pci_name={pci_name} part_number={part_number} psid={psid} \
                  observed_fw_version={:?} expected_fw_version={}",

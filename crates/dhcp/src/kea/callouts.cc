@@ -134,8 +134,7 @@ void add_ia_na_status6(Pkt6Ptr query6_ptr, Pkt6Ptr response6_ptr,
 }
 
 void record_dropped_v6_request(const char *reason) {
-  // Preserve the shared v4/v6 counter while emitting the required v6 series.
-  carbide_increment_dropped_requests(reason);
+  // DHCPv6 has its own metric family; the unsuffixed counter remains DHCPv4.
   carbide_increment_dropped_v6_requests(reason);
 }
 
@@ -451,7 +450,8 @@ void set_options(CalloutHandle &handle, Pkt4Ptr response4_ptr,
 }
 
 void set_options_v6(CalloutHandle &handle, Pkt6Ptr query6_ptr,
-                    Pkt6Ptr response6_ptr, Machine *machine) {
+                    Pkt6Ptr response6_ptr, Machine *machine,
+                    bool rapid_commit) {
   try {
     // DNS servers: DHCPv6 option 23 is a flat IPv6 address list.
     add_or_replace_option6(response6_ptr, D6O_NAME_SERVERS,
@@ -470,8 +470,10 @@ void set_options_v6(CalloutHandle &handle, Pkt6Ptr query6_ptr,
     // because the response payload depends on the client's requested flags.
     add_client_fqdn_option6(query6_ptr, response6_ptr, machine);
 
-    if (machine_get_rapid_commit_v6(machine)) {
-      response6_ptr->delOption(D6O_RAPID_COMMIT);
+    // The receive-side decision is authoritative; replace any Kea-provided
+    // copy so an eligible REPLY carries option 14 exactly once.
+    response6_ptr->delOption(D6O_RAPID_COMMIT);
+    if (rapid_commit) {
       response6_ptr->addOption(OptionPtr(new Option(Option::V6, D6O_RAPID_COMMIT)));
     }
   } catch (exception &e) {
@@ -1198,7 +1200,7 @@ int pkt6_receive(CalloutHandle &handle) {
   Pkt6Ptr query6_ptr;
   handle.getArgument("query6", query6_ptr);
 
-  carbide_increment_total_requests();
+  carbide_increment_v6_requests(query6_ptr ? query6_ptr->getType() : 0);
 
   if (!query6_ptr) {
     LOG_ERROR(logger, "LOG_CARBIDE_PKT6_RECEIVE: missing query6 argument");
@@ -1216,6 +1218,22 @@ int pkt6_receive(CalloutHandle &handle) {
     handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
     record_dropped_v6_request("NonRelayedPacket");
     return 0;
+  }
+
+  const bool rapid_commit =
+      hook_get_config_rapid_commit_v6() &&
+      query6_ptr->getType() == DHCPV6_SOLICIT &&
+      query6_ptr->getOption(D6O_IA_NA) &&
+      query6_ptr->getOption(D6O_RAPID_COMMIT);
+  handle.setContext("rapid_commit_v6", rapid_commit);
+
+  // Kea must not enter its native two-message flow unless both the server
+  // gate and the client's stateful opt-in are present. The original wire
+  // bytes remain available to Rust for the API message-kind decision.
+  if (!rapid_commit) {
+    // Kea stores DHCPv6 options in a multimap and removes one per call.
+    while (query6_ptr->delOption(D6O_RAPID_COMMIT)) {
+    }
   }
 
   uint8_t hop_count = 0;
@@ -1327,6 +1345,24 @@ int pkt6_send(CalloutHandle &handle) {
     return 1;
   }
 
+  bool rapid_commit = false;
+  try {
+    handle.getContext("rapid_commit_v6", rapid_commit);
+  } catch (...) {
+    rapid_commit = false;
+  }
+
+  // Core already used committed-request semantics for this exchange. Never
+  // send a response unless Kea completed the corresponding native transition.
+  if (rapid_commit && response6_ptr->getType() != DHCPV6_REPLY) {
+    LOG_ERROR(
+        logger,
+        "LOG_CARBIDE_PKT6_SEND: dropping Rapid Commit exchange because Kea produced DHCPv6 message type %1 instead of REPLY")
+        .arg(static_cast<unsigned int>(response6_ptr->getType()));
+    handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+    return 1;
+  }
+
   // CONFIRM cache validation can produce a status-only response without a
   // Machine context.
   bool confirm_not_on_link = false;
@@ -1397,7 +1433,8 @@ int pkt6_send(CalloutHandle &handle) {
     add_status6(response6_ptr, STATUS_Success, "success");
   }
 
-  set_options_v6(handle, query6_ptr, response6_ptr, machine.get());
+  set_options_v6(handle, query6_ptr, response6_ptr, machine.get(),
+                 rapid_commit);
 
   // Record the final outbound packet after hook-managed options/status have
   // been applied.

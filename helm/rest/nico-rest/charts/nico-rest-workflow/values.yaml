@@ -82,5 +82,8 @@ config:
     enabled: true
     port: 9360
   tracing:
-    enabled: false
+    enabled: true
     serviceName: nico-rest-workflow
+
+# -- Extra container environment, name->value. Mainly for OTEL_* variables.
+extraEnv: {}

@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"go.opentelemetry.io/otel/attribute"
 	tClient "go.temporal.io/sdk/client"
@@ -34,16 +33,16 @@ import (
 // ~~~~~ Slot resolution helpers ~~~~~ //
 
 // resolveTrayIDsBySlot enumerates trays for the given baseSpec through Flow's
-// GetComponents and returns the UUIDs of components at the requested slot.
+// GetComponents and returns the external IDs of components at the requested slot.
 //
 // baseSpec is the OperationTargetSpec the request would otherwise have
-// produced (rack scope, component-pinning ids/componentIds, or "all trays
+// produced (rack scope, component-pinning IDs, or "all trays
 // in site"); the resolver post-filters its result by slot. An empty result
 // is not an error — callers decide whether to treat it as a no-op or
 // surface 404.
 //
 // Flow has no by-slot component target shape; REST resolves slotId to
-// component UUIDs and drives downstream workflows with ComponentTargets.
+// external component IDs and drives downstream workflows with ComponentTargets.
 //
 // It returns the proxy's own APIError rather than a plain error so a slot
 // filter cannot downgrade the status the endpoint would otherwise report: a
@@ -76,24 +75,30 @@ func resolveTrayIDsBySlot(
 		if !slot.Matches(comp) {
 			continue
 		}
-		if id := comp.GetInfo().GetId(); id != nil && id.GetId() != "" {
-			ids = append(ids, id.GetId())
+		if id := comp.GetComponentId(); id != "" {
+			ids = append(ids, id)
 		}
 	}
 	return ids, nil
 }
 
 // componentTargetSpecFromIDs builds an OperationTargetSpec that targets
-// the given component UUIDs. Returns nil for an empty slice, which Flow
+// the given external component IDs. Returns nil for an empty slice, which Flow
 // rejects; callers should short-circuit before calling.
-func componentTargetSpecFromIDs(ids []string) *flowv1.OperationTargetSpec {
+func componentTargetSpecFromIDs(ids []string, componentType *string) *flowv1.OperationTargetSpec {
 	if len(ids) == 0 {
 		return nil
+	}
+	protoType := flowv1.ComponentType_COMPONENT_TYPE_UNKNOWN
+	if componentType != nil {
+		protoType = flowv1.ComponentType(flowv1.ComponentType_value[model.APIToProtoComponentTypeName[*componentType]])
 	}
 	targets := make([]*flowv1.ComponentTarget, 0, len(ids))
 	for _, id := range ids {
 		targets = append(targets, &flowv1.ComponentTarget{
-			Identifier: &flowv1.ComponentTarget_Id{Id: &flowv1.UUID{Id: id}},
+			Identifier: &flowv1.ComponentTarget_External{
+				External: &flowv1.ExternalRef{Type: protoType, Id: id},
+			},
 		})
 	}
 	return &flowv1.OperationTargetSpec{
@@ -207,9 +212,6 @@ func (gth GetTrayHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	if _, err := uuid.Parse(trayStrID); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Tray ID in URL", nil)
-	}
 	gth.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
 
 	// Get the temporal client for the site
@@ -285,8 +287,7 @@ func NewGetAllTrayHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cli
 // @Param rackId query string false "Filter by Rack ID"
 // @Param rackName query string false "Filter by Rack name"
 // @Param type query string false "Filter by tray type (Compute, NVSwitch, PowerShelf)"
-// @Param componentId query string false "Filter by component ID (use repeated params for multiple values)"
-// @Param id query string false "Filter by tray UUID (use repeated params for multiple values)"
+// @Param id query string false "Filter by component ID (use repeated params for multiple values)"
 // @Param slotId query int false "Filter by rack slot ID (position.slotId). Requires rackId or rackName. Composes with other filters via AND."
 // @Param orderBy query string false "Order by field (e.g. name_ASC, manufacturer_DESC)"
 // @Param pageNumber query int false "Page number (1-based)"
@@ -555,9 +556,6 @@ func (vth ValidateTrayHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	if _, err := uuid.Parse(trayStrID); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Tray ID in URL", nil)
-	}
 	vth.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
 
 	// Get site ID from query param (required)
@@ -605,9 +603,7 @@ func (vth ValidateTrayHandler) Handle(c echo.Context) error {
 				Components: &flowv1.ComponentTargets{
 					Targets: []*flowv1.ComponentTarget{
 						{
-							Identifier: &flowv1.ComponentTarget_Id{
-								Id: &flowv1.UUID{Id: trayStrID},
-							},
+							Identifier: &flowv1.ComponentTarget_External{External: &flowv1.ExternalRef{Id: trayStrID}},
 						},
 					},
 				},
@@ -672,7 +668,7 @@ func NewValidateTraysHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.
 // @Param name query string false "Filter trays by name"
 // @Param manufacturer query string false "Filter trays by manufacturer"
 // @Param type query string false "Filter trays by type (Compute, NVSwitch, PowerShelf)"
-// @Param componentId query string false "Filter by external component ID (requires type; mutually exclusive with rackId/rackName; use repeated params for multiple values)"
+// @Param id query string false "Filter by component ID (mutually exclusive with rackId/rackName; use repeated params for multiple values)"
 // @Param slotId query int false "Validate only trays at this rack slot (position.slotId). Requires rackId or rackName. Composes via AND."
 // @Success 200 {object} model.APIRackValidationResult
 // @Router /v2/org/{org}/nico/tray/validation [get]
@@ -757,7 +753,7 @@ func (vtsh ValidateTraysHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	// Resolve slotId (when set) to component UUIDs before building
+	// Resolve slotId (when set) to external component IDs before building
 	// the flow request: Flow has no by-slot component target shape.
 	targetSpec := apiRequest.ToTargetSpec()
 	if apiRequest.HasSlotFilter() {
@@ -771,7 +767,7 @@ func (vtsh ValidateTraysHandler) Handle(c echo.Context) error {
 			logger.Info().Msg("no trays match slot filter; returning empty validation result")
 			return c.JSON(http.StatusOK, model.NewAPIRackValidationResult(&flowv1.ValidateComponentsResponse{}))
 		}
-		targetSpec = componentTargetSpecFromIDs(ids)
+		targetSpec = componentTargetSpecFromIDs(ids, apiRequest.Type)
 	}
 
 	flowRequest := &flowv1.ValidateComponentsRequest{
@@ -824,7 +820,7 @@ func NewUpdateTrayPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 
 // Handle godoc
 // @Summary Power control a Tray
-// @Description Power control a Tray identified by Tray UUID (on, off, cycle, forceoff, forcecycle)
+// @Description Power control a Tray identified by component ID (on, off, cycle, forceoff, forcecycle)
 // @Tags tray
 // @Accept json
 // @Produce json
@@ -873,9 +869,6 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	if _, err := uuid.Parse(trayStrID); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Tray ID in URL", nil)
-	}
 	pcth.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
 
 	// Parse and validate request body
@@ -917,9 +910,7 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 			Components: &flowv1.ComponentTargets{
 				Targets: []*flowv1.ComponentTarget{
 					{
-						Identifier: &flowv1.ComponentTarget_Id{
-							Id: &flowv1.UUID{Id: trayStrID},
-						},
+						Identifier: &flowv1.ComponentTarget_External{External: &flowv1.ExternalRef{Id: trayStrID}},
 					},
 				},
 			},
@@ -1040,7 +1031,7 @@ func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 
 	// Build TargetSpec from filter (nil filter = all trays). When the
 	// filter pins a rack slot, Flow has no by-slot target shape, so we
-	// resolve to component UUIDs first.
+	// resolve to external component IDs first.
 	targetSpec := request.Filter.ToTargetSpec()
 	if request.Filter.HasSlotFilter() {
 		ids, resolveErr := resolveTrayIDsBySlot(ctx, stc, targetSpec,
@@ -1053,7 +1044,7 @@ func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 			logger.Info().Msg("no trays match slot filter; returning empty task list")
 			return c.JSON(http.StatusOK, model.NewAPIUpdatePowerStateResponse(nil))
 		}
-		targetSpec = componentTargetSpecFromIDs(ids)
+		targetSpec = componentTargetSpecFromIDs(ids, request.Filter.Type)
 	}
 
 	flowResp, err := common.ExecutePowerControlWorkflow(ctx, c, logger, stc, targetSpec, request.State,
@@ -1090,13 +1081,13 @@ func NewUpdateTrayFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp
 
 // Handle godoc
 // @Summary Firmware update a Tray
-// @Description Update firmware on a Tray identified by Tray UUID.
+// @Description Update firmware on a Tray identified by component ID.
 // @Tags tray
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param id path string true "UUID of the Tray"
+// @Param id path string true "Component ID"
 // @Param body body model.APIUpdateFirmwareRequest true "Firmware update request"
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/tray/{id}/firmware [patch]
@@ -1139,9 +1130,6 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
-	if _, err := uuid.Parse(trayStrID); err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Tray ID in URL", nil)
-	}
 	futh.tracerSpan.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID), logger)
 
 	// Parse and validate request body
@@ -1181,9 +1169,7 @@ func (futh UpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 			Components: &flowv1.ComponentTargets{
 				Targets: []*flowv1.ComponentTarget{
 					{
-						Identifier: &flowv1.ComponentTarget_Id{
-							Id: &flowv1.UUID{Id: trayStrID},
-						},
+						Identifier: &flowv1.ComponentTarget_External{External: &flowv1.ExternalRef{Id: trayStrID}},
 					},
 				},
 			},
@@ -1304,7 +1290,7 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 	}
 
 	// Build TargetSpec from filter (nil filter = all trays). When the
-	// filter pins a rack slot, resolve to component UUIDs first; Flow has
+	// filter pins a rack slot, resolve to external component IDs first; Flow has
 	// no by-slot target shape.
 	targetSpec := request.Filter.ToTargetSpec()
 	if request.Filter.HasSlotFilter() {
@@ -1318,7 +1304,7 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 			logger.Info().Msg("no trays match slot filter; returning empty task list")
 			return c.JSON(http.StatusOK, model.NewAPIUpdateFirmwareResponse(nil))
 		}
-		targetSpec = componentTargetSpecFromIDs(ids)
+		targetSpec = componentTargetSpecFromIDs(ids, request.Filter.Type)
 	}
 
 	flowResp, err := common.ExecuteFirmwareUpdateWorkflow(ctx, c, logger, stc, targetSpec, request.Version,

@@ -155,9 +155,13 @@ async fn switch_store_persist_failure_holds_in_rotating_bmc_until_reconciled(
     {
         let mut conn = pool.acquire().await?;
         record_device_converged(&mut conn, bmc_mac, BMC).await?;
-        set_next_target_version(&mut conn, BMC, 0, serde_json::json!({}))
-            .await?
-            .expect("target must advance from version 0");
+        assert!(
+            matches!(
+                set_next_target_version(&mut conn, BMC, 0, serde_json::json!({})).await?,
+                db::ConditionalWrite::Applied(_)
+            ),
+            "target must advance from version 0"
+        );
     }
     env.test_credential_manager
         .set_credentials(&rotate_to_key(1), &creds("root", "new"))

@@ -20,7 +20,7 @@ Machine related handling
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 
@@ -50,7 +50,7 @@ Print help (see a summary with -h)
 | [`metadata`](./machine-metadata.md) | Edit Metadata associated with a Machine |
 | [`hardware-info`](./machine-hardware-info.md) | Update/show machine hardware info |
 | [`positions`](./machine-positions.md) | Show physical location info for machines in rack-based systems |
-| [`nvlink-info`](./machine-nvlink-info.md) | Update/show NVLink info for an MNNVL machine |
+| [`nvlink-info`](./machine-nvlink-info.md) | Show NVLink info for an MNNVL machine |
 | [`health-history`](./machine-health-history.md) | Show machine health history |
 
 ---

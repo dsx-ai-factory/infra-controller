@@ -21,7 +21,7 @@ use std::sync::Arc;
 use mac_address::MacAddress;
 use serde_json::json;
 
-use crate::{BootOptionKind, Callbacks, LogService, LogServices, hw, redfish};
+use crate::{BootOptionKind, Callbacks, hw, redfish};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Mode {
@@ -386,11 +386,9 @@ impl Bluefield4<'_> {
                         .attributes(json!({}))
                         .build(),
                 ),
-                log_services: Some(Arc::new(Bf4LogServices {
-                    event_log: DpuEventLog {
-                        entries: vec!["DPU Warm Reset".to_string()],
-                    },
-                })),
+                log_services: Some(redfish::log_service::LogServices::event_log([
+                    "DPU Warm Reset",
+                ])),
                 storage: Some(vec![]),
                 processors: Some(vec![]),
                 memory: None,
@@ -398,6 +396,10 @@ impl Bluefield4<'_> {
                 secure_boot_available: true,
             }],
         }
+    }
+
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
     }
 
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
@@ -462,42 +464,5 @@ impl Bluefield4<'_> {
             Mode::B4240 => "900-9D4B4-CWAA-TSA",
             Mode::B4240V => "900-9D4A4-00CB-TS4",
         }
-    }
-}
-
-struct DpuEventLog {
-    entries: Vec<String>,
-}
-
-impl LogService for DpuEventLog {
-    fn id(&self) -> &str {
-        "EventLog"
-    }
-
-    fn entries(&self, collection: &redfish::Collection<'_>) -> Vec<serde_json::Value> {
-        self.entries
-            .iter()
-            .enumerate()
-            .map(|(idx, entry)| {
-                redfish::log_service::event_entry(collection, &idx.to_string())
-                    .message(entry)
-                    // These are not required by specification but
-                    // required by libredfish. Making it happy. However, in future
-                    // we may want to simulate these fields as well.
-                    .severity("OK")
-                    .created("2026-02-12T02:06:58+00:00")
-                    .build()
-            })
-            .collect()
-    }
-}
-
-struct Bf4LogServices {
-    event_log: DpuEventLog,
-}
-
-impl LogServices for Bf4LogServices {
-    fn services(&self) -> Vec<&(dyn LogService + '_)> {
-        vec![&self.event_log as &dyn LogService]
     }
 }

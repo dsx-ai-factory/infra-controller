@@ -62,9 +62,10 @@ use crate::tests::common::api_fixtures::network_segment::{
     FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY, FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY,
     FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY_2, FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY,
 };
+use crate::tests::common::api_fixtures::test_managed_host::TestPredictedManagedHost;
 use crate::tests::common::api_fixtures::{
-    TestEnv, TestManagedHost, forge_agent_control, get_machine_validation_runs,
-    machine_validation_completed, persist_machine_validation_result, update_machine_validation_run,
+    TestEnv, forge_agent_control, get_machine_validation_runs, machine_validation_completed,
+    persist_machine_validation_result, update_machine_validation_run,
 };
 use crate::tests::common::rpc_builder::DhcpDiscovery;
 
@@ -175,7 +176,7 @@ async fn complete_initial_discovery_cleanup_if_needed(
         .await;
     }
 
-    let response = forge_agent_control(env, host_machine_id.into()).await;
+    let response = forge_agent_control(env, host_machine_id).await;
     assert!(matches!(response.action, Some(Action::Reset(_))));
     assert_eq!(response.legacy_action, LegacyAction::Reset as i32);
 
@@ -509,17 +510,11 @@ impl<'a> MockExploredHost<'a> {
 
         let mut txn = self.test_env.pool.begin().await.unwrap();
 
+        let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::find_host_by_dpu_machine_id(&mut txn, &self.dpu_machine_ids[&0].clone())
+            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()
-                .unwrap()
-                .host_machine_id()
-                .unwrap();
-
-        for machine_id in self.dpu_machine_ids.values() {
-            create_machine_inventory(self.test_env, machine_id.into()).await;
-        }
+                .unwrap()[&dpu_machine_id];
 
         self.test_env
             .run_machine_state_controller_iteration_until_state_matches(
@@ -545,6 +540,10 @@ impl<'a> MockExploredHost<'a> {
             )
             .await;
 
+        for machine_id in self.dpu_machine_ids.values() {
+            create_machine_inventory(self.test_env, *machine_id).await;
+        }
+
         //run scout discovery for dpu(s)
         for dpu in self.managed_host.dpus.clone() {
             let machine_interfaces = find_by_mac_address(txn.as_mut(), dpu.oob_mac_address)
@@ -569,7 +568,7 @@ impl<'a> MockExploredHost<'a> {
         }
 
         for machine_id in self.dpu_machine_ids.values() {
-            let response = forge_agent_control(self.test_env, machine_id.into()).await;
+            let response = forge_agent_control(self.test_env, *machine_id).await;
             assert!(matches!(response.action, Some(Action::Discovery(_))));
             assert_eq!(
                 response.legacy_action,
@@ -608,16 +607,14 @@ impl<'a> MockExploredHost<'a> {
 
         let mut txn = self.test_env.pool.begin().await.unwrap();
 
+        let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::find_host_by_dpu_machine_id(&mut txn, &self.dpu_machine_ids[&0].clone())
+            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()
-                .unwrap()
-                .host_machine_id()
-                .unwrap();
+                .unwrap()[&dpu_machine_id];
 
         for machine_id in self.dpu_machine_ids.values() {
-            create_machine_inventory(self.test_env, machine_id.into()).await;
+            create_machine_inventory(self.test_env, *machine_id).await;
         }
 
         self.test_env
@@ -661,7 +658,7 @@ impl<'a> MockExploredHost<'a> {
         }
 
         for machine_id in self.dpu_machine_ids.values() {
-            let response = forge_agent_control(self.test_env, machine_id.into()).await;
+            let response = forge_agent_control(self.test_env, *machine_id).await;
             assert!(matches!(response.action, Some(Action::Discovery(_)),));
             assert_eq!(
                 response.legacy_action,
@@ -715,16 +712,14 @@ impl<'a> MockExploredHost<'a> {
 
         let mut txn = self.test_env.pool.begin().await.unwrap();
 
+        let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::find_host_by_dpu_machine_id(&mut txn, &self.dpu_machine_ids[&0].clone())
+            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()
-                .unwrap()
-                .host_machine_id()
-                .unwrap();
+                .unwrap()[&dpu_machine_id];
 
         for machine_id in self.dpu_machine_ids.values() {
-            create_machine_inventory(self.test_env, machine_id.into()).await;
+            create_machine_inventory(self.test_env, *machine_id).await;
         }
 
         self.test_env
@@ -1041,7 +1036,7 @@ impl<'a> MockExploredHost<'a> {
             return self;
         }
 
-        let response = forge_agent_control(self.test_env, host_machine_id.into()).await;
+        let response = forge_agent_control(self.test_env, host_machine_id).await;
         assert!(matches!(response.action, Some(Action::Noop(_))));
         assert_eq!(
             response.legacy_action,
@@ -1178,7 +1173,7 @@ impl<'a> MockExploredHost<'a> {
                 },
             }
         ) {
-            let response = forge_agent_control(self.test_env, host_machine_id.into()).await;
+            let response = forge_agent_control(self.test_env, host_machine_id).await;
             let uuid = &response.data.unwrap().pair[1].value;
             let validation_id: MachineValidationId = uuid.parse().unwrap();
             let success = update_machine_validation_run(
@@ -1248,7 +1243,7 @@ impl<'a> MockExploredHost<'a> {
 
                 txn.commit().await.unwrap();
             } else if machine_validation_result.exit_code == 0 {
-                let _ = forge_agent_control(self.test_env, host_machine_id.into()).await;
+                let _ = forge_agent_control(self.test_env, host_machine_id).await;
 
                 self.test_env
                     .run_machine_state_controller_iteration_until_state_matches(
@@ -1262,7 +1257,7 @@ impl<'a> MockExploredHost<'a> {
                     )
                     .await;
 
-                let response = forge_agent_control(self.test_env, host_machine_id.into()).await;
+                let response = forge_agent_control(self.test_env, host_machine_id).await;
                 assert!(matches!(response.action, Some(Action::Noop(_))));
                 assert_eq!(response.legacy_action, LegacyAction::Noop as i32);
                 self.test_env
@@ -1781,7 +1776,7 @@ pub(in crate::tests) async fn new_dpu(
 pub(in crate::tests) async fn new_dpu_in_network_install(
     env: &TestEnv,
     config: ManagedHostConfig,
-) -> eyre::Result<TestManagedHost> {
+) -> eyre::Result<TestPredictedManagedHost> {
     register_expected_machine(env, &config, None).await;
     let mut mock_explored_host = MockExploredHost::new(env, config);
 
@@ -1818,10 +1813,10 @@ pub(in crate::tests) async fn new_dpu_in_network_install(
         .unwrap()
         .id;
 
-    Ok(TestManagedHost {
+    Ok(TestPredictedManagedHost {
         id: host_machine_id
             .try_into()
-            .expect("discovered host ID should be a valid HostMachineId"),
+            .expect("discovered host ID should be a valid PredictedHostMachineId"),
         dpu_ids: vec![dpu_machine_id],
         api: env.api.clone(),
     })

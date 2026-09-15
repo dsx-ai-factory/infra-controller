@@ -20,3 +20,53 @@
 pub mod authority_router;
 pub mod injection;
 pub mod router;
+
+/// Whether a response declares JSON, including structured JSON suffixes and media parameters.
+pub fn is_json_response(response: &axum::response::Response) -> bool {
+    let Some(value) = response.headers().get(axum::http::header::CONTENT_TYPE) else {
+        return false;
+    };
+    let Ok(s) = value.to_str() else { return false };
+    let mime = s.split(';').next().unwrap_or(s).trim();
+    let Some((kind, subtype)) = mime.split_once('/') else {
+        return false;
+    };
+    if kind.is_empty() || subtype.is_empty() {
+        return false;
+    }
+    mime.eq_ignore_ascii_case("application/json") || subtype.to_ascii_lowercase().ends_with("+json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_json_media_types() {
+        carbide_test_support::value_scenarios!(run = |content_type: Option<&str>| {
+            let mut response = axum::response::Response::new(axum::body::Body::empty());
+            if let Some(value) = content_type {
+                response.headers_mut().insert(axum::http::header::CONTENT_TYPE, value.parse().unwrap());
+            }
+            is_json_response(&response)
+        };
+            "JSON media types and parameters" {
+                Some("application/json") => true,
+                Some("Application/JSON") => true,
+                Some("application/json; charset=utf-8") => true,
+                Some("application/problem+json") => true,
+                Some("Application/Vnd.Redfish+JSON; charset=utf-8") => true,
+            }
+            "non-JSON and missing media types" {
+                None => false,
+                Some("text/event-stream") => false,
+                Some("text/plain") => false,
+                Some("text/json") => false,
+                Some("application/octet-stream") => false,
+                Some("application/json-garbage") => false,
+                Some("bogus+json") => false,
+                Some("/+json") => false,
+            }
+        );
+    }
+}

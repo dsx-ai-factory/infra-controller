@@ -1640,6 +1640,13 @@ not returned as a conflict against the proposed replacement operation. </p></td>
                   <td><p>Active Tasks that explicitly target this component. </p></td>
                 </tr>
 
+                <tr>
+                  <td>rack_external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -1699,6 +1706,13 @@ not returned as a conflict against the proposed replacement operation. </p></td>
                   <td><p>Flow internal component UUID </p></td>
                 </tr>
 
+                <tr>
+                  <td>component_mac_address</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>BMC MAC address identifying a missing expected component </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -1738,7 +1752,7 @@ not returned as a conflict against the proposed replacement operation. </p></td>
 
 
         <h3 id="v1.ComponentOperationStatus">ComponentOperationStatus</h3>
-        <p>ComponentOperationStatus is Flow's view of a component's operability. The</p><p>inventory loop computes it on every sync from core's controller_state.</p>
+        <p>ComponentOperationStatus is Flow's view of a component's operability.</p>
 
 
           <table class="field-table">
@@ -1758,7 +1772,7 @@ not returned as a conflict against the proposed replacement operation. </p></td>
                   <td>reason</td>
                   <td><a href="#string">string</a></td>
                   <td></td>
-                  <td><p>Human-readable detail (typically the raw core state string). </p></td>
+                  <td><p>Human-readable source status detail. </p></td>
                 </tr>
 
                 <tr>
@@ -1797,7 +1811,7 @@ Empty when phase is READY. </p></td>
                   <td>external</td>
                   <td><a href="#v1.ExternalRef">ExternalRef</a></td>
                   <td></td>
-                  <td><p>External system reference </p></td>
+                  <td><p> </p></td>
                 </tr>
 
             </tbody>
@@ -3122,7 +3136,7 @@ this operation. </p></td>
 
 
         <h3 id="v1.ExternalRef">ExternalRef</h3>
-        <p>ExternalRef identifies a component by its external system ID.</p><p>All component types are routed through Core (NICo); the ID is the</p><p>identifier expected by NICo for that component type (e.g. machine_id</p><p>for compute, PMC MAC for power shelf).</p>
+        <p>ExternalRef identifies a component by its external identifier and optional type.</p>
 
 
           <table class="field-table">
@@ -3135,14 +3149,14 @@ this operation. </p></td>
                   <td>type</td>
                   <td><a href="#v1.ComponentType">ComponentType</a></td>
                   <td></td>
-                  <td><p>Component type determines the source system </p></td>
+                  <td><p>UNKNOWN requires an unambiguous ID. </p></td>
                 </tr>
 
                 <tr>
                   <td>id</td>
                   <td><a href="#string">string</a></td>
                   <td></td>
-                  <td><p>ID expected by NICo for this component type </p></td>
+                  <td><p> </p></td>
                 </tr>
 
             </tbody>
@@ -4613,7 +4627,7 @@ non-negative and limit must be greater than zero. </p></td>
                   <td>rack_id</td>
                   <td><a href="#v1.UUID">UUID</a></td>
                   <td>optional</td>
-                  <td><p>Restrict to Tasks created against this rack. </p></td>
+                  <td><p>Restrict by rack identifier. </p></td>
                 </tr>
 
                 <tr>
@@ -4634,10 +4648,10 @@ non-negative and limit must be greater than zero. </p></td>
                   <td>component_id</td>
                   <td><a href="#v1.UUID">UUID</a></td>
                   <td>optional</td>
-                  <td><p>Restrict to Tasks that target this component UUID, regardless of
-component type. A rack_id &#43; component_id combination that references
-a component not on the given rack is not an error; it yields an
-empty result. </p></td>
+                  <td><p>Restrict to Tasks that target this component identifier, regardless of
+component type. A rack_id plus
+component_id combination that references a component not on the given
+rack is not an error; it yields an empty result. </p></td>
                 </tr>
 
                 <tr>
@@ -5856,6 +5870,13 @@ crosses its configured threshold. </p></td>
                   <td><p> </p></td>
                 </tr>
 
+                <tr>
+                  <td>rack_external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -6682,6 +6703,20 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td><p>All active Tasks on this rack, including component-scoped Tasks. </p></td>
                 </tr>
 
+                <tr>
+                  <td>external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operation_status</td>
+                  <td><a href="#v1.Phase">Phase</a></td>
+                  <td></td>
+                  <td><p>Operability phase aggregated from component phases. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -6800,7 +6835,7 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td>id</td>
                   <td><a href="#v1.UUID">UUID</a></td>
                   <td></td>
-                  <td><p>Rack UUID </p></td>
+                  <td><p>Flow rack UUID </p></td>
                 </tr>
 
                 <tr>
@@ -6808,6 +6843,13 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td><a href="#string">string</a></td>
                   <td></td>
                   <td><p>Rack name </p></td>
+                </tr>
+
+                <tr>
+                  <td>external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
                 </tr>
 
                 <tr>
@@ -8714,7 +8756,7 @@ exists, this includes every materialized phase.</p></td>
         </table>
 
         <h3 id="v1.Phase">Phase</h3>
-        <p>Phase is the coarse lifecycle bucket a component is in, derived from</p><p>core's per-component state machine. Shared across compute, nvswitch,</p><p>and power shelf.</p>
+        <p>Phase is Flow's coarse operability bucket.</p>
         <table class="enum-table">
           <thead>
             <tr><td>Name</td><td>Number</td><td>Description</td></tr>

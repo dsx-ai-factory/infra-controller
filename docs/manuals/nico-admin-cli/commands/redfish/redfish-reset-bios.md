@@ -5,18 +5,19 @@ _[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **reset-
 ## NAME
 
 nico-admin-cli-redfish-reset-bios - Reset BIOS settings to factory
-defaults
+defaults. Returns once the BMC accepts the reset request. A system
+restart is required for the settings to take effect
 
 ## SYNOPSIS
 
 **nico-admin-cli redfish reset-bios** \[**-r**\|**--reboot**\]
-\[**--extended**\] \[**--sort-by** *\<SORT_BY\>*\] \[**-h**\|**--help**\]
+\[**--extended**\] \[**--sort-by**\] \[**-h**\|**--help**\]
 
 ## DESCRIPTION
 
 Reset BIOS settings to factory defaults. Returns once the BMC accepts
 the reset request. A system restart is required for the settings to take
-effect.
+effect
 
 ## OPTIONS
 

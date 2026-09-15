@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::HostMachineId;
 use clap::Parser;
 use rpc::forge::DpaInterfaceType;
 
@@ -34,7 +34,7 @@ Create/ensure a DPA interface with a device description:
 ")]
 pub(crate) struct Args {
     #[clap(help = "Machine ID")]
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     #[clap(help = "MAC address (e.g. 00:11:22:33:44:55)")]
     mac_addr: String,
     #[clap(help = "Device type (e.g. BlueField3)")]

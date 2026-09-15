@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_utils::periodic_timer::PeriodicTimer;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::nvlink::{NvLinkDomainId, NvLinkLogicalPartitionId, NvLinkPartitionId};
 use carbide_uuid::rack::RackId;
 use chrono::Utc;
@@ -107,7 +107,7 @@ type ManagedHostsByRackId<'a> = HashMap<RackId, Vec<&'a ManagedHostStateSnapshot
 /// Hosts with a `rack_id` are grouped into the rack's single current NMX-C
 /// domain. Hosts without a `rack_id` are grouped using chassis serial.
 fn group_managed_hosts_by_group_type(
-    snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+    snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
 ) -> (ManagedHostsByChassisSerial<'_>, ManagedHostsByRackId<'_>) {
     let by_chassis_serial: ManagedHostsByChassisSerial<'_> =
         snapshots
@@ -222,12 +222,12 @@ fn build_machine_nvlink_info_from_nmx_c_hello(
 
 /// Updates missing or stale machine NVLink domains using a validated NMX-C Hello.
 fn populate_machine_nvlink_info_if_needed(
-    machine_nvlink_info: &mut HashMap<MachineId, Option<MachineNvLinkInfo>>,
-    managed_host_snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
+    machine_nvlink_info: &mut HashMap<HostMachineId, Option<MachineNvLinkInfo>>,
+    managed_host_snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     snapshot_chassis_serial: Option<&str>,
-    machine_ids: &[MachineId],
+    machine_ids: &[HostMachineId],
     domain_uuid: NvLinkDomainId,
-) -> Vec<(MachineId, MachineNvLinkInfo)> {
+) -> Vec<(HostMachineId, MachineNvLinkInfo)> {
     let mut updates = Vec::new();
     for machine_id in machine_ids {
         let existing = machine_nvlink_info
@@ -420,7 +420,7 @@ pub struct PartitionProcessingContext {
     nmx_c_partitions: HashMap<libnmxc::nmxc_model::PartitionId, PartitionInfo>,
     db_nvl_logical_partitions: HashMap<NvLinkLogicalPartitionId, LogicalPartition>,
     db_nvl_partitions: HashMap<u32, NvlPartition>, // NMX-C partition ID to NvlPartition
-    machine_nvlink_info: HashMap<MachineId, Option<MachineNvLinkInfo>>,
+    machine_nvlink_info: HashMap<HostMachineId, Option<MachineNvLinkInfo>>,
     gpu_to_partition_map: HashMap<u64, PartitionInfo>, // GPU UID to NMX-C partition
     nmx_c_operations: HashMap<NvLinkLogicalPartitionId, Vec<NmxcPartitionOperation>>,
     unknown_partition_removal_operations: HashMap<u32, Vec<NmxcPartitionOperation>>,
@@ -457,7 +457,7 @@ impl PartitionProcessingContext {
         nmx_c_partitions: Vec<PartitionInfo>,
         db_nvl_logical_partitions: Vec<LogicalPartition>,
         db_nvl_partitions: Vec<NvlPartition>,
-        machine_nvlink_info: HashMap<MachineId, Option<MachineNvLinkInfo>>,
+        machine_nvlink_info: HashMap<HostMachineId, Option<MachineNvLinkInfo>>,
     ) -> Self {
         let gpu_map = Self::build_gpu_to_partition_map(&nmx_c_partitions);
         let nmx_c_partitions = nmx_c_partitions
@@ -537,7 +537,7 @@ impl PartitionProcessingContext {
     /// Queue NMX-C work so `gpu` is added to `tray_partition_{slot_id}` (existing partition or `Create`).
     fn ensure_gpu_enqueued_into_tray_partition(
         &mut self,
-        machine_id: &MachineId,
+        machine_id: &HostMachineId,
         domain_uuid: NvLinkDomainId,
         gpu: &NvLinkGpu,
     ) -> NvLinkManagerResult<()> {
@@ -653,7 +653,7 @@ impl PartitionProcessingContext {
         logical_partition_id: Option<NvLinkLogicalPartitionId>,
         partition_nmx_c_id: &libnmxc::nmxc_model::PartitionId,
         gpu_guid: u64,
-        machine_id: &MachineId,
+        machine_id: &HostMachineId,
         device_instance: u32,
     ) -> Option<Vec<u64>> {
         let Some(logical_partition_id) = logical_partition_id else {
@@ -719,7 +719,7 @@ impl PartitionProcessingContext {
         &self,
         partition_nmx_c_id: &libnmxc::nmxc_model::PartitionId,
         gpu_guid: u64,
-        machine_id: &MachineId,
+        machine_id: &HostMachineId,
         device_instance: u32,
     ) -> Option<Vec<u64>> {
         let gpus_to_keep = match self
@@ -1107,9 +1107,9 @@ impl NvLinkManager {
 struct CheckPartitionsInput {
     db_nvl_logical_partitions: Vec<LogicalPartition>,
     db_nvl_partitions: Vec<NvlPartition>,
-    machine_nvlink_info: HashMap<MachineId, Option<MachineNvLinkInfo>>,
-    managed_host_snapshots: HashMap<MachineId, ManagedHostStateSnapshot>,
-    nvlink_info_db_updates: Vec<(MachineId, MachineNvLinkInfo)>,
+    machine_nvlink_info: HashMap<HostMachineId, Option<MachineNvLinkInfo>>,
+    managed_host_snapshots: HashMap<HostMachineId, ManagedHostStateSnapshot>,
+    nvlink_info_db_updates: Vec<(HostMachineId, MachineNvLinkInfo)>,
 }
 
 /// Work queued when NMX-C cannot be used for a machine group and observations must be cleared.
@@ -1121,7 +1121,7 @@ struct PendingNullNvlinkObservation {
     /// Failure reason recorded in partition-monitor metrics.
     reason: ChassisNmxCUnreachableReason,
     /// Host machines in the group that will receive a null `nvlink_status_observation`.
-    machine_ids: Vec<MachineId>,
+    machine_ids: Vec<HostMachineId>,
 }
 
 /// Shared inputs for processing one chassis- or rack-scoped NMX-C monitor group.
@@ -1133,9 +1133,9 @@ struct ProcessMachineGroupInput<'a> {
 
     /// Rack associated with the selected switch endpoint; absent for chassis mappings.
     rack_id: Option<&'a RackId>,
-    all_managed_host_snapshots: &'a HashMap<MachineId, ManagedHostStateSnapshot>,
+    all_managed_host_snapshots: &'a HashMap<HostMachineId, ManagedHostStateSnapshot>,
     /// Pre-split shard of `machine_nvlink_info` containing only this group's machines.
-    machine_nvlink_info: HashMap<MachineId, Option<MachineNvLinkInfo>>,
+    machine_nvlink_info: HashMap<HostMachineId, Option<MachineNvLinkInfo>>,
     db_nvl_partitions: &'a [NvlPartition],
     db_nvl_logical_partitions: &'a [LogicalPartition],
 }
@@ -1565,12 +1565,12 @@ impl NvlPartitionMonitor {
             .join(", ");
 
         // Filter managed host snapshots, nvlink info, and DB partitions for this group.
-        let mut managed_host_snapshots_domain: HashMap<MachineId, ManagedHostStateSnapshot> =
+        let mut managed_host_snapshots_domain: HashMap<HostMachineId, ManagedHostStateSnapshot> =
             snapshots
                 .iter()
                 .map(|s| (s.host_snapshot.id, (*s).clone()))
                 .collect();
-        let machine_ids_in_domain: HashSet<MachineId> =
+        let machine_ids_in_domain: HashSet<HostMachineId> =
             managed_host_snapshots_domain.keys().copied().collect();
         let mut nvlink_info_db_updates = Vec::new();
         for snapshot in snapshots {
@@ -1611,7 +1611,7 @@ impl NvlPartitionMonitor {
                 }
             }
         }
-        let machine_nvlink_info_domain: HashMap<MachineId, Option<MachineNvLinkInfo>> =
+        let machine_nvlink_info_domain: HashMap<HostMachineId, Option<MachineNvLinkInfo>> =
             machine_nvlink_info
                 .iter()
                 .filter(|(id, _)| machine_ids_in_domain.contains(id))
@@ -1898,7 +1898,13 @@ impl NvlPartitionMonitor {
             metrics,
         )?;
 
-        self.record_nvlink_status_observation(observations).await?;
+        self.record_nvlink_status_observation(
+            observations
+                .into_iter()
+                .map(|(machine_id, observation)| (machine_id.into(), observation))
+                .collect(),
+        )
+        .await?;
 
         let nmx_c_operations = partition_processing_context.nmx_c_operations;
 
@@ -1972,9 +1978,9 @@ impl NvlPartitionMonitor {
     fn check_nv_link_partitions(
         &self,
         partition_ctx: &mut PartitionProcessingContext,
-        mh_snapshots: HashMap<MachineId, ManagedHostStateSnapshot>,
+        mh_snapshots: HashMap<HostMachineId, ManagedHostStateSnapshot>,
         metrics: &mut NvlPartitionMonitorMetrics,
-    ) -> NvLinkManagerResult<HashMap<MachineId, MachineNvLinkStatusObservation>> {
+    ) -> NvLinkManagerResult<HashMap<HostMachineId, MachineNvLinkStatusObservation>> {
         let mut machine_gpu_statuses = HashMap::new();
 
         // If the default partition is present, enqueue a removal operation and return early.
@@ -2317,8 +2323,8 @@ impl NvlPartitionMonitor {
     /// Records time from nvlink_config_version for instances currently in Pending (time spent in Pending).
     fn record_nvlink_config_pending_durations(
         &self,
-        mh_snapshots: &HashMap<MachineId, ManagedHostStateSnapshot>,
-        machine_gpu_statuses: &HashMap<MachineId, MachineNvLinkStatusObservation>,
+        mh_snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
+        machine_gpu_statuses: &HashMap<HostMachineId, MachineNvLinkStatusObservation>,
         metrics: &mut NvlPartitionMonitorMetrics,
     ) {
         for (machine_id, observation) in machine_gpu_statuses {
@@ -2469,7 +2475,7 @@ impl NvlPartitionMonitor {
         snapshots: &[&ManagedHostStateSnapshot],
         reason: ChassisNmxCUnreachableReason,
     ) {
-        let machine_ids: Vec<MachineId> = snapshots
+        let machine_ids: Vec<HostMachineId> = snapshots
             .iter()
             .map(|snapshot| snapshot.host_snapshot.id)
             .collect();
@@ -2501,7 +2507,7 @@ impl NvlPartitionMonitor {
                 .or_insert(0) += 1;
         }
 
-        let machine_ids: Vec<MachineId> = pending
+        let machine_ids: Vec<HostMachineId> = pending
             .iter()
             .flat_map(|entry| entry.machine_ids.iter().copied())
             .collect::<HashSet<_>>()
@@ -2864,8 +2870,8 @@ impl NvlPartitionMonitor {
     async fn load_mnnvl_managed_host_snapshots(
         &self,
         txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    ) -> NvLinkManagerResult<HashMap<MachineId, ManagedHostStateSnapshot>> {
-        let mnvvl_machine_ids = find_machine_ids(
+    ) -> NvLinkManagerResult<HashMap<HostMachineId, ManagedHostStateSnapshot>> {
+        let mnvvl_machine_ids = find_machine_ids::<HostMachineId>(
             txn.as_mut(),
             MachineSearchConfig {
                 mnnvl_only: true,
@@ -2874,7 +2880,8 @@ impl NvlPartitionMonitor {
             },
         )
         .await?;
-        load_by_machine_ids(
+
+        Ok(load_by_machine_ids(
             txn.as_mut(),
             mnvvl_machine_ids.as_slice(),
             LoadSnapshotOptions {
@@ -2883,8 +2890,7 @@ impl NvlPartitionMonitor {
                 host_health_config: self.host_health,
             },
         )
-        .await
-        .map_err(NvLinkManagerError::from)
+        .await?)
     }
 }
 
@@ -3020,7 +3026,11 @@ mod domain_uuid_observation_tests {
     #[test]
     fn valid_domain_observations_update_only_changed_machine_domains()
     -> Result<(), Box<dyn std::error::Error>> {
-        let machine_id = MachineId::new(MachineIdSource::Tpm, [1; 32], MachineType::Host);
+        let machine_id = HostMachineId::try_from(MachineId::new(
+            MachineIdSource::Tpm,
+            [1; 32],
+            MachineType::Host,
+        ))?;
         let old_domain: NvLinkDomainId = "11111111-1111-1111-1111-111111111111".parse()?;
         let observed_domain: NvLinkDomainId = "22222222-2222-2222-2222-222222222222".parse()?;
 
@@ -3374,7 +3384,7 @@ mod machine_group_tests {
     use carbide_macros::sqlx_test;
     use carbide_test_support::{Check, check_values};
     use carbide_utils::test_support::test_meter::TestMeter;
-    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+    use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
     use carbide_uuid::nvlink::NvLinkDomainId;
     use carbide_uuid::rack::{RackId, RackProfileId};
     use db::test_support::switch::create_seeded_discovered;
@@ -3404,8 +3414,10 @@ mod machine_group_tests {
         racks: BTreeMap<String, BTreeSet<u8>>,
     }
 
-    fn machine_id(byte: u8) -> MachineId {
+    fn machine_id(byte: u8) -> HostMachineId {
         MachineId::new(MachineIdSource::Tpm, [byte; 32], MachineType::Host)
+            .try_into()
+            .unwrap()
     }
 
     fn snapshot(spec: &HostSpec) -> ManagedHostStateSnapshot {
@@ -3423,14 +3435,14 @@ mod machine_group_tests {
     }
 
     fn summarize(hosts: &[HostSpec]) -> GroupingSummary {
-        let snapshots: HashMap<MachineId, ManagedHostStateSnapshot> = hosts
+        let snapshots: HashMap<HostMachineId, ManagedHostStateSnapshot> = hosts
             .iter()
             .map(|spec| {
                 let snapshot = snapshot(spec);
                 (snapshot.host_snapshot.id, snapshot)
             })
             .collect();
-        let id_bytes: HashMap<MachineId, u8> = hosts
+        let id_bytes: HashMap<HostMachineId, u8> = hosts
             .iter()
             .map(|spec| (machine_id(spec.id_byte), spec.id_byte))
             .collect();

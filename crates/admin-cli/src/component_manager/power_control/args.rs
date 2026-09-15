@@ -18,7 +18,7 @@
 use clap::Parser;
 
 use crate::component_manager::common::{
-    ComputeTraySelection, PowerActionArg, PowerControlTargetArgs,
+    ComputeTraySelection, PowerActionArg, PowerControlTargetArgs, SwitchSelection,
 };
 
 #[derive(Parser, Debug)]
@@ -28,6 +28,10 @@ EXAMPLES:
 Power on a switch:
     $ nico-admin-cli component-manager component-power-control switch \
     --switch-id 12345678-1234-5678-90ab-cdef01234567 --action on
+
+Power on a switch by BMC MAC (targets the switch before ingestion):
+    $ nico-admin-cli component-manager component-power-control switch \
+    --mac-address 00:11:22:33:44:55 --action on
 
 Force off a compute tray:
     $ nico-admin-cli component-manager component-power-control compute-tray \
@@ -65,13 +69,21 @@ impl From<Args> for rpc::forge::ComponentPowerControlRequest {
         let action = ::rpc::common::SystemPowerControl::from(args.action) as i32;
         let bypass_state_controller = args.bypass_state_controller;
         match args.target {
-            PowerControlTargetArgs::Switch(target) => Self {
-                target: Some(
-                    rpc::forge::component_power_control_request::Target::SwitchIds(target.into()),
-                ),
-                action,
-                bypass_state_controller,
-            },
+            PowerControlTargetArgs::Switch(target) => {
+                let target = match target.into_selection() {
+                    SwitchSelection::SwitchIds(list) => {
+                        rpc::forge::component_power_control_request::Target::SwitchIds(list)
+                    }
+                    SwitchSelection::Macs(macs) => {
+                        rpc::forge::component_power_control_request::Target::SwitchBmcMacs(macs)
+                    }
+                };
+                Self {
+                    target: Some(target),
+                    action,
+                    bypass_state_controller,
+                }
+            }
             PowerControlTargetArgs::PowerShelf(target) => Self {
                 target: Some(
                     rpc::forge::component_power_control_request::Target::PowerShelfIds(

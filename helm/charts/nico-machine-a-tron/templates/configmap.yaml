@@ -193,11 +193,11 @@ data:
     acceleration_factor = {{ $section.acceleration_factor | default $defaults.accelerationFactor | default 1.0 }}
     discovery_retry_interval = {{ $section.discovery_retry_interval | default $defaults.discoveryRetryInterval | default "60s" | quote }}
     {{- if $dhcpRelayEnabled }}
-    oob_dhcp_relay_address = {{ $relayIP | quote }}
+    bmc_dhcp_relay_address = {{ $relayIP | quote }}
     {{- else }}
-    oob_dhcp_relay_address = {{ $section.oob_dhcp_relay_address | quote }}
+    bmc_dhcp_relay_address = {{ coalesce $section.bmc_dhcp_relay_address $section.oob_dhcp_relay_address | quote }}
     {{- end }}
-    admin_dhcp_relay_address = {{ $section.admin_dhcp_relay_address | quote }}
+    underlay_dhcp_relay_address = {{ coalesce $section.underlay_dhcp_relay_address $section.admin_dhcp_relay_address | quote }}
     {{- end }}
 
     {{- range $sectionName, $section := $machines }}
@@ -218,11 +218,11 @@ data:
     run_interval_idle = {{ $section.runIntervalIdle | default $defaults.runIntervalIdle | default "10s" | quote }}
     network_status_run_interval = {{ $section.networkStatusRunInterval | default $defaults.networkStatusRunInterval | default "20s" | quote }}
     {{- if $dhcpRelayEnabled }}
-    oob_dhcp_relay_address = {{ $relayIP | quote }}
+    bmc_dhcp_relay_address = {{ $relayIP | quote }}
     {{- else }}
-    oob_dhcp_relay_address = {{ $section.oobDhcpRelayAddress | default "192.168.192.1" | quote }}
+    bmc_dhcp_relay_address = {{ coalesce $section.bmcDhcpRelayAddress $section.oobDhcpRelayAddress "192.168.192.1" | quote }}
     {{- end }}
-    admin_dhcp_relay_address = {{ $section.adminDhcpRelayAddress | default "192.168.176.1" | quote }}
+    underlay_dhcp_relay_address = {{ coalesce $section.underlayDhcpRelayAddress $section.adminDhcpRelayAddress "192.168.176.1" | quote }}
     dpus_in_nic_mode = {{ $section.dpusInNicMode | default $defaults.dpusInNicMode | default false }}
     {{- $hostFw := ternary $section.hostFirmwareVersions (default $defaults.hostFirmwareVersions $section.hostFirmwareVersions) (hasKey $section "hostFirmwareVersions") }}
     {{- with $hostFw }}

@@ -75,6 +75,33 @@ pub fn nmx_c_endpoint_url_from_nvos_ip(
     )
 }
 
+/// Outcome of resolving an NMX-C gRPC endpoint for a chassis- or rack-scoped machine group.
+///
+/// The `Rack` path can fail in two distinct ways that callers should not conflate: no
+/// qualifying switch exists at all, versus a qualifying switch exists but its NVOS IP has not
+/// been resolved yet. Collapsing both into a bare `None` misdiagnoses the latter as "switch not
+/// found" when a switch was in fact found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NmxCEndpointResolution {
+    /// The endpoint URL was resolved.
+    Resolved(String),
+    /// No config row (`Chassis`) or no ready, control-plane-configured switch (`Rack`) exists.
+    NotFound,
+    /// `Rack` only: a ready, control-plane-configured switch exists in the rack, but its NVOS
+    /// IP has not been resolved (`find_switch_endpoints_by_ids` returned a null `nvos_ip`).
+    SwitchMissingNvosIp,
+}
+
+impl NmxCEndpointResolution {
+    /// Discards the distinction between failure modes, for callers that only need the URL.
+    pub fn into_url(self) -> Option<String> {
+        match self {
+            Self::Resolved(url) => Some(url),
+            Self::NotFound | Self::SwitchMissingNvosIp => None,
+        }
+    }
+}
+
 /// Resolves the NMX-C gRPC endpoint URL for a chassis- or rack-scoped machine group.
 ///
 /// - [`ManagedHostGroupType::Chassis`]: looks up `nvlink_nmxc_endpoints` by `chassis_serial`.
@@ -86,24 +113,30 @@ pub async fn resolve_nmx_c_endpoint_url<DB>(
     rack_id: Option<&RackId>,
     chassis_serial: Option<&str>,
     nvlink_config: &NvLinkConfig,
-) -> DatabaseResult<Option<String>>
+) -> DatabaseResult<NmxCEndpointResolution>
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
     match group_type {
         ManagedHostGroupType::Chassis => {
             let Some(chassis_serial) = chassis_serial else {
-                return Ok(None);
+                return Ok(NmxCEndpointResolution::NotFound);
             };
             Ok(
-                db::nvlink_nmxc_endpoints::find_by_chassis_serial(&mut *db, chassis_serial.trim())
-                    .await?
-                    .map(|row| row.endpoint),
+                match db::nvlink_nmxc_endpoints::find_by_chassis_serial(
+                    &mut *db,
+                    chassis_serial.trim(),
+                )
+                .await?
+                {
+                    Some(row) => NmxCEndpointResolution::Resolved(row.endpoint),
+                    None => NmxCEndpointResolution::NotFound,
+                },
             )
         }
         ManagedHostGroupType::Rack => {
             let Some(rack_id) = rack_id else {
-                return Ok(None);
+                return Ok(NmxCEndpointResolution::NotFound);
             };
 
             let switch_ids = db::switch::find_ready_control_plane_configured_switch_ids_in_rack(
@@ -112,16 +145,20 @@ where
             .await?;
 
             let Some(switch_id) = switch_ids.first() else {
-                return Ok(None);
+                return Ok(NmxCEndpointResolution::NotFound);
             };
 
             let endpoint_rows =
                 db::switch::find_switch_endpoints_by_ids(&mut *db, &[*switch_id]).await?;
 
-            Ok(endpoint_rows
-                .first()
-                .and_then(|row| row.nvos_ip.as_ref())
-                .map(|nvos_ip| nmx_c_endpoint_url_from_nvos_ip(nvos_ip, None, nvlink_config)))
+            Ok(
+                match endpoint_rows.first().and_then(|row| row.nvos_ip.as_ref()) {
+                    Some(nvos_ip) => NmxCEndpointResolution::Resolved(
+                        nmx_c_endpoint_url_from_nvos_ip(nvos_ip, None, nvlink_config),
+                    ),
+                    None => NmxCEndpointResolution::SwitchMissingNvosIp,
+                },
+            )
         }
     }
 }
@@ -192,7 +229,10 @@ mod tests {
             &config,
         )
         .await?;
-        assert_eq!(resolved.as_deref(), Some(mapped_endpoint));
+        assert_eq!(
+            resolved,
+            NmxCEndpointResolution::Resolved(mapped_endpoint.to_string())
+        );
         txn.rollback().await?;
         Ok(())
     }
@@ -268,7 +308,97 @@ mod tests {
             &config,
         )
         .await?;
-        assert_eq!(resolved.as_deref(), Some(expected_url.as_str()));
+        assert_eq!(resolved, NmxCEndpointResolution::Resolved(expected_url));
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    #[sqlx_test]
+    async fn resolve_rack_reports_switch_missing_nvos_ip_distinctly_from_not_found(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let rack_id: RackId = "rack-nmxc-no-nvos-ip".parse()?;
+        let config = NvLinkConfig::default();
+
+        let mut txn = pool.begin().await?;
+        db::rack::create(
+            txn.as_mut(),
+            &rack_id,
+            Some(&RackProfileId::new("NVL72")),
+            &RackConfig::default(),
+            None,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let mut txn = pool.begin().await?;
+        let switch =
+            db::test_support::switch::create_seeded_discovered(txn.as_mut(), 2, "Switch2").await?;
+        txn.commit().await?;
+
+        let mut txn = pool.begin().await?;
+        sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
+            .bind(&rack_id)
+            .bind(switch.id)
+            .execute(txn.as_mut())
+            .await?;
+
+        // Simulate a switch whose NVOS management interface has never been discovered:
+        // ready and control-plane-configured, but with no NVOS MAC/IP to resolve.
+        sqlx::query(
+            "UPDATE expected_switches SET nvos_mac_addresses = NULL WHERE bmc_mac_address = $1",
+        )
+        .bind(
+            switch
+                .bmc_mac_address
+                .expect("seeded switch should have a BMC MAC"),
+        )
+        .execute(txn.as_mut())
+        .await?;
+
+        let switch = db::switch::find_by_id(txn.as_mut(), &switch.id)
+            .await?
+            .expect("switch should exist");
+        assert!(
+            db::switch::try_update_controller_state(
+                txn.as_mut(),
+                switch.id,
+                switch.controller_state.version,
+                switch.controller_state.version.increment(),
+                &SwitchControllerState::Ready,
+            )
+            .await?
+        );
+        db::switch::update_fabric_manager_status(
+            txn.as_mut(),
+            switch.id,
+            Some(&FabricManagerStatus {
+                fabric_manager_state: FabricManagerState::Ok,
+                addition_info: Some(CONTROL_PLANE_STATE_CONFIGURED.to_string()),
+                reason: None,
+                error_message: None,
+            }),
+        )
+        .await?;
+
+        let endpoint_row = db::switch::find_switch_endpoints_by_ids(txn.as_mut(), &[switch.id])
+            .await?
+            .pop()
+            .expect("switch endpoint row should still be returned");
+        assert!(
+            endpoint_row.nvos_ip.is_none(),
+            "test setup should leave nvos_ip unresolved"
+        );
+
+        let resolved = resolve_nmx_c_endpoint_url(
+            txn.as_mut(),
+            ManagedHostGroupType::Rack,
+            Some(&rack_id),
+            None,
+            &config,
+        )
+        .await?;
+        assert_eq!(resolved, NmxCEndpointResolution::SwitchMissingNvosIp);
         txn.rollback().await?;
         Ok(())
     }
@@ -302,7 +432,7 @@ mod tests {
             &config,
         )
         .await?;
-        assert_eq!(rack_resolved, None);
+        assert_eq!(rack_resolved, NmxCEndpointResolution::NotFound);
 
         let chassis_resolved = resolve_nmx_c_endpoint_url(
             txn.as_mut(),
@@ -312,7 +442,10 @@ mod tests {
             &config,
         )
         .await?;
-        assert_eq!(chassis_resolved.as_deref(), Some(mapped_endpoint));
+        assert_eq!(
+            chassis_resolved,
+            NmxCEndpointResolution::Resolved(mapped_endpoint.to_string())
+        );
         txn.rollback().await?;
         Ok(())
     }

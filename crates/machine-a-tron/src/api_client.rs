@@ -18,7 +18,7 @@
 use base64::prelude::*;
 use bmc_mock::{DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, MachineInfo};
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineInterfaceId};
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::{RackId, RackProfileId};
@@ -67,7 +67,7 @@ impl From<ForgeApiClient> for ApiClient {
 }
 
 pub struct DpuNetworkStatusArgs<'a> {
-    pub dpu_machine_id: MachineId,
+    pub dpu_machine_id: DpuMachineId,
     pub network_config_version: String,
     pub instance_network_config_version: Option<String>,
     pub instance_config_version: Option<String>,

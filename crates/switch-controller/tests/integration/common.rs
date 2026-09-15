@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_health_metrics::PerObjectMetricsRegistry;
-use carbide_rack::rms_client::test_support::RmsSim;
+use carbide_rack::test_support::RmsSim;
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_switch_controller::context::SwitchStateHandlerServices;

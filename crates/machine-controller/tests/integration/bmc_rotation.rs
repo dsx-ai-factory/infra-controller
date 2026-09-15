@@ -101,9 +101,13 @@ async fn stage_lagging_bmc(
     {
         let mut conn = pool.acquire().await?;
         record_device_converged(&mut conn, host_mac, BMC).await?;
-        set_next_target_version(&mut conn, BMC, 0, serde_json::json!({}))
-            .await?
-            .expect("target must advance from version 0");
+        assert!(
+            matches!(
+                set_next_target_version(&mut conn, BMC, 0, serde_json::json!({})).await?,
+                db::ConditionalWrite::Applied(_)
+            ),
+            "target must advance from version 0"
+        );
     }
     cm.set_credentials(&rotate_to_key(1), &creds("root", "new"))
         .await
@@ -372,7 +376,7 @@ async fn force_request_converges_quarantined_bmc_when_disabled(
             Utc::now() + Duration::seconds(3600),
         )
         .await?;
-        db::machine::set_bmc_credential_rotation_requested(&mut conn, machine_id).await?;
+        db::machine::set_bmc_credential_rotation_requested(&mut conn, &machine_id).await?;
     }
 
     // Iteration 1: the force request drives entry into RotatingBmc despite the

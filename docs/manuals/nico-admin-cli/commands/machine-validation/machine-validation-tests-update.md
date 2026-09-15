@@ -34,7 +34,7 @@ Version to be verify
 List of contexts
 
 **--img-name** *\<IMG_NAME\>*  
-Container image name
+Container image name (must include @sha256:\<digest\>)
 
 **--execute-in-host** *\<EXECUTE_IN_HOST\>*  
 Run command using chroot in case of container\
@@ -73,7 +73,7 @@ Pre condition
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 

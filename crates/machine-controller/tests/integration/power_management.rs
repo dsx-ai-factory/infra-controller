@@ -348,7 +348,7 @@ async fn desired_on_limits_power_on_attempts(
         .test_harness
         .api()
         .get_power_options(Request::new(PowerOptionRequest {
-            machine_id: vec![mh.host.id.into()],
+            machine_id: vec![mh.host.id],
         }))
         .await?
         .into_inner();
@@ -384,7 +384,7 @@ async fn desired_off_persists_observed_off_state(
     env.test_harness
         .api()
         .update_power_option(Request::new(PowerOptionUpdateRequest {
-            machine_id: Some(mh.host.id.into()),
+            machine_id: Some(mh.host.id),
             power_state: rpc::forge::PowerState::Off as i32,
         }))
         .await?;
@@ -447,7 +447,7 @@ async fn queued_power_off_runs_when_power_manager_gates_desired_off(
     env.test_harness
         .api()
         .update_power_option(Request::new(PowerOptionUpdateRequest {
-            machine_id: Some(mh.host.id.into()),
+            machine_id: Some(mh.host.id),
             power_state: rpc::forge::PowerState::Off as i32,
         }))
         .await?;
@@ -472,7 +472,7 @@ async fn queued_power_off_runs_when_power_manager_gates_desired_off(
     let mut txn = env.test_harness.db_txn().await;
     db::machine::set_machine_maintenance_requested(
         &mut txn,
-        mh.host.id.into(),
+        mh.host.id,
         "component-manager",
         MachineMaintenanceOperation::PowerOff,
     )

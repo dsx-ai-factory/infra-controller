@@ -26,7 +26,7 @@ resources:
     cpu: "100m"
   limits:
     memory: "512Mi"
-    cpu: "500m"
+    cpu: "1000m"
 
 secrets:
   temporalEncryptionKey: temporal-encryption-key
@@ -81,7 +81,8 @@ config:
     enabled: true
     port: 9360
   tracing:
-    enabled: false
+    # Gates the otelecho middleware and the Temporal client interceptor.
+    enabled: true
     serviceName: nico-rest-api
   powerProvisioning:
     dps:
@@ -119,3 +120,6 @@ config:
     rate: 10.0
     burst: 30
     expiresIn: 180
+
+# -- Extra container environment, name->value. Mainly for OTEL_* variables.
+extraEnv: {}

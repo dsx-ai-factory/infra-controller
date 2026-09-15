@@ -241,6 +241,9 @@ spec:
               path "{{ .Values.vault.kvMount }}/data/*" {
                 capabilities = ["read", "list"]
               }
+              path "{{ .Values.vault.kvMount }}/metadata/*" {
+                capabilities = ["list"]
+              }
               path "{{ .Values.vault.kvMount }}/data/machines*" {
                 capabilities = ["create", "read", "patch", "list", "update", "delete"]
               }
@@ -248,7 +251,7 @@ spec:
                 capabilities = ["create", "read", "patch", "list", "update", "delete"]
               }
               path "{{ .Values.vault.kvMount }}/metadata/machines/*" {
-                capabilities = ["delete"]
+                capabilities = ["list", "delete"]
               }
               path "{{ .Values.vault.kvMount }}/destroy/machines/*" {
                 capabilities = ["delete"]
@@ -261,6 +264,12 @@ spec:
               }
               path "{{ .Values.vault.kvMount }}/data/bgp/*" {
                 capabilities = ["create", "read", "patch", "list", "update", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/firmware_artifacts/+/access-token" {
+                capabilities = ["create", "read", "update"]
+              }
+              path "{{ .Values.vault.kvMount }}/metadata/firmware_artifacts/+/access-token" {
+                capabilities = ["delete"]
               }
               path "{{ .Values.vault.kvMount }}/data/switch_nvos/*" {
                 capabilities = ["create", "read", "patch", "list", "update", "delete"]

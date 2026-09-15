@@ -70,6 +70,11 @@ async fn get_service_root(State(state): State<BmcState>) -> Response {
     } else {
         builder
     };
+    let builder = if state.event_service.is_some() {
+        builder.event_service(&redfish::event_service::resource())
+    } else {
+        builder
+    };
     builder
         .manager_collection(&redfish::manager::collection())
         .update_service(&redfish::update_service::resource())
@@ -129,6 +134,10 @@ impl ServiceRootBuilder {
 
     fn update_service(self, v: &redfish::Resource<'_>) -> Self {
         self.apply_patch(v.nav_property("UpdateService"))
+    }
+
+    fn event_service(self, v: &redfish::Resource<'_>) -> Self {
+        self.apply_patch(v.nav_property("EventService"))
     }
 
     fn telemetry_service(self, v: &redfish::Resource<'_>) -> Self {

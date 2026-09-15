@@ -26,14 +26,19 @@ This section provides example REST API workflows for common NICo tasks. All exam
 ## Managing Virtual Private Clouds
 
 <Note>
-`networkVirtualizationType` supports two VPC networking mechanisms: **FNN** is recommended for all deployments that include DPUs (instances in FNN VPCs reference a `vpcPrefixId` in their interface configuration.); **Legacy** VPCs use subnets instead of VPC prefixes. New deployments with DPUs should use FNN exclusively.
+`networkVirtualizationType` selects the VPC's tenant network resource. `FNN`
+VPCs use VPC Prefixes, and their Instance interfaces reference a
+`vpcPrefixId`. `ETHERNET_VIRTUALIZER` VPCs use IPv4 Subnets, and their Instance
+interfaces reference a `subnetId`. `FLAT` VPCs attach the network automatically
+and use neither resource. `FNN` is the supported target for production
+deployments with DPUs.
 
 `tenantId` is the ID of the Tenant organization generated during setup. This value is distinct from the organization name used in the API URL path.
 </Note>
 
 <AccordionGroup>
   <Accordion title="Create a VPC">
-    Create the VPC and specify a name.
+    Create an `FNN` VPC and specify a name.
     <Code src="snippets/input/create_vpc.sh" title="Example Call" />
     <Code src="snippets/output/create_vpc.json" title="Example Response" />
   </Accordion>
@@ -43,7 +48,7 @@ This section provides example REST API workflows for common NICo tasks. All exam
     <Code src="snippets/output/poll_vpc_status.json" title="Example Response" />
   </Accordion>
   <Accordion title="Add an Instance with a Single Interface">
-    Add one or more compute instances. The `interfaces` array configures how each DPU port is assigned a network address. For FNN VPCs, specify a `vpcPrefixId`; for Legacy VPCs, specify a `subnetId`.
+    Add one or more compute instances. The `interfaces` array configures how each DPU port is assigned a network address. This example requires the pre-existing `ETHERNET_VIRTUALIZER` VPC and IPv4 Subnet from the Subnet examples below, so the interface specifies a `subnetId`. The VPC ID is distinct from the `FNN` VPC created above.
 
     The `isPhysical` flag determines whether a physical function (PF) or a virtual function (VF) is configured on the DPU port. Set `isPhysical: true` for standard bare-metal configurations. VFs (`isPhysical: false`) are used when running VMs on the host that require direct hardware passthrough of a DPU port.
     <Code src="snippets/input/create_instance_single_interface.sh" title="Example Call" />
@@ -111,11 +116,13 @@ Before adding an operating system image, ensure you have:
 
 ## Managing Subnets and VPC Prefixes
 
-Before managing Subnets, ensure you have at least one IP Block allocated so that you can add a Subnet of the IP Block address space.
+Before managing these resources, ensure you have a tenant IP Block at the VPC's
+Site. An IPv4 Subnet requires that block to be `Ready`. VPC Prefixes configure
+`FNN` VPCs. IPv4 Subnets configure `ETHERNET_VIRTUALIZER` VPCs.
 
 <AccordionGroup>
   <Accordion title="Add a Subnet">
-    Add one or more subnets. The following command sample shows how to add one subnet.
+    Add an IPv4 Subnet to a Ready `ETHERNET_VIRTUALIZER` VPC. Before running this example, use the [Create VPC endpoint](/infra-controller/rest-api-reference/api-reference/vpc/create-vpc) to create that VPC and set `networkVirtualizationType` to `ETHERNET_VIRTUALIZER`. Replace the pre-existing sample VPC ID `f466a2d5-5820-4824-a845-3218fdff801b` with the new VPC's ID. This VPC is distinct from the `FNN` VPC used by the VPC Prefix examples. The Subnet's `ipv4BlockId` identifies a Ready tenant IPv4 IP Block at the same Site, and `prefixLength` accepts values from 8 through 30.
     <Code src="snippets/input/create_subnet.sh" title="Example Call" />
     <Code src="snippets/output/create_subnet.json" title="Example Response" />
   </Accordion>
@@ -125,7 +132,7 @@ Before managing Subnets, ensure you have at least one IP Block allocated so that
     <Code src="snippets/output/poll_subnet_status.json" title="Example Response" />
   </Accordion>
   <Accordion title="Add a VPC Prefix">
-    The following command sample shows how to add one VPC prefix. You can also add multiple VPC prefixes at once.
+    Add a VPC Prefix to the Ready `FNN` VPC created above. The source IP Block determines the VPC Prefix's address family. REST support for creating IPv6 FNN VPC Prefixes is tracked by [#5407](https://github.com/NVIDIA/infra-controller/issues/5407).
     <Code src="snippets/input/create_vpc_prefix.sh" title="Example Call" />
     <Code src="snippets/output/create_vpc_prefix.json" title="Example Response" />
   </Accordion>

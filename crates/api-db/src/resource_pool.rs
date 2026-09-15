@@ -37,6 +37,7 @@ use tokio::sync::oneshot;
 
 use super::BIND_LIMIT;
 use crate::DatabaseError;
+use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
 use crate::db_read::DbReader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
@@ -266,7 +267,10 @@ where
     Ok(())
 }
 
-/// Get a resource from the pool
+/// `allocate` reserves a value from the automatic or explicit assignment partition.
+/// An omitted `requested_value` requires `auto_assign=true`; an exact request
+/// requires `auto_assign=false`. Use [`allocate_exact`] when an exact request
+/// may claim a free value from either partition.
 pub async fn allocate<T>(
     value: &ResourcePool<T>,
     txn: &mut PgConnection,
@@ -375,6 +379,50 @@ RETURNING allocate.value
     Ok(out)
 }
 
+/// `allocate_exact` reserves a specific free value from either assignment partition.
+///
+/// Unlike [`allocate`], this accepts and preserves either `auto_assign` setting.
+/// It records the owner and allocation time, then returns the requested value.
+/// Missing or allocated values return [`DatabaseError::FailedPrecondition`],
+/// including values already reserved by the same owner. Callers must handle
+/// retained allocations separately. The claim participates in the supplied
+/// transaction and waits for conflicting row locks.
+pub async fn allocate_exact<T>(
+    pool: &ResourcePool<T>,
+    txn: &mut PgConnection,
+    owner_type: OwnerType,
+    owner_id: &str,
+    requested_value: T,
+) -> Result<T, DatabaseError>
+where
+    T: ToString + FromStr + Send + Sync + 'static,
+    <T as FromStr>::Err: std::error::Error,
+{
+    let requested_value_text = requested_value.to_string();
+    let allocated_state = ResourcePoolEntryState::Allocated {
+        owner: owner_id.to_string(),
+        owner_type: owner_type.to_string(),
+    };
+    let query = "UPDATE resource_pool SET state = $1, allocated = NOW()
+        WHERE name = $2 AND value = $3 AND state = $4";
+    let result = sqlx::query(query)
+        .bind(sqlx::types::Json(&allocated_state))
+        .bind(pool.name())
+        .bind(&requested_value_text)
+        .bind(sqlx::types::Json(ResourcePoolEntryState::Free))
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if result.rows_affected() == 0 {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "`{requested_value_text}` not an available value for resource-pool `{}`",
+            pool.name()
+        )));
+    }
+
+    Ok(requested_value)
+}
+
 /// Returns the value already reserved by one owner in this pool.
 ///
 /// A duplicate reservation is treated as corrupted pool state. Callers cannot
@@ -430,6 +478,28 @@ where
         })
         .transpose()
         .map_err(Into::into)
+}
+
+/// Returns a value shared by two integer pools, if any.
+///
+/// This compares materialized entries, including allocated and manually
+/// assigned values, rather than the configured range definitions. It does not
+/// lock the pools or prevent their definitions from changing afterward.
+pub async fn find_pool_overlap(
+    txn: &mut PgConnection,
+    first: &ResourcePool<i32>,
+    second: &ResourcePool<i32>,
+) -> Result<Option<i32>, DatabaseError> {
+    let query = "SELECT first_pool.value::integer FROM resource_pool first_pool
+        JOIN resource_pool second_pool ON first_pool.value = second_pool.value
+        WHERE first_pool.name = $1 AND second_pool.name = $2
+        LIMIT 1";
+    sqlx::query_scalar(query)
+        .bind(first.name())
+        .bind(second.name())
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// Return a resource to the pool
@@ -893,12 +963,13 @@ pub async fn reconcile_pool_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed. Warn, don't reapply.
             (Some(stored_def), true) => {
-                tracing::warn!(
-                    pool_name = name,
-                    stored = ?stored_def,
-                    declared = ?def,
-                    "Resource Pool definition has changed since it was seeded; not re-applying"
-                );
+                emit(ConfigDefinitionDrifted {
+                    resource_kind: ConfigResourceKind::ResourcePool,
+                    drift_kind: ConfigDriftKind::Changed,
+                    name: name.clone(),
+                    stored: Some(format!("{stored_def:?}")),
+                    declared: Some(format!("{def:?}")),
+                });
             }
             // Pool exists in resource_pool but has no snapshot yet.
             // Pre-migration deployment, or a pool re-added after a snapshot
@@ -924,10 +995,13 @@ pub async fn reconcile_pool_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            tracing::warn!(
-                pool_name = name,
-                "Resource Pool exists in database but is no longer declared in any config file"
-            );
+            emit(ConfigDefinitionDrifted {
+                resource_kind: ConfigResourceKind::ResourcePool,
+                drift_kind: ConfigDriftKind::Dropped,
+                name: name.clone(),
+                stored: None,
+                declared: None,
+            });
         }
     }
 
@@ -2018,6 +2092,57 @@ mod tests {
         );
 
         txn.rollback().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn allocate_exact_preserves_assignment_partitions(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let pool_handle =
+            ResourcePool::<i32>::new("test-exact-pool".to_string(), ValueType::Integer);
+        for auto_assign in [true, false] {
+            let mut txn = pool.begin().await?;
+            populate(&pool_handle, &mut txn, vec![41, 42], auto_assign).await?;
+            let allocated =
+                allocate_exact(&pool_handle, &mut txn, OwnerType::Vpc, "owner", 42).await?;
+            assert_eq!(allocated, 42);
+
+            let rows: Vec<(
+                i32,
+                sqlx::types::Json<ResourcePoolEntryState>,
+                Option<bool>,
+                bool,
+            )> = sqlx::query_as(
+                "SELECT value::integer, state, allocated = NOW(), auto_assign
+                     FROM resource_pool WHERE name = $1 ORDER BY value::integer",
+            )
+            .bind(pool_handle.name())
+            .fetch_all(&mut *txn)
+            .await?;
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        41,
+                        sqlx::types::Json(ResourcePoolEntryState::Free),
+                        None,
+                        auto_assign,
+                    ),
+                    (
+                        42,
+                        sqlx::types::Json(ResourcePoolEntryState::Allocated {
+                            owner: "owner".to_string(),
+                            owner_type: OwnerType::Vpc.to_string(),
+                        }),
+                        Some(true),
+                        auto_assign,
+                    ),
+                ],
+                "auto_assign={auto_assign}",
+            );
+            txn.rollback().await?;
+        }
         Ok(())
     }
 

@@ -473,8 +473,8 @@ are slow to respond, increase scrape timeout - but keep it at or below the scrap
 
 ## 7. References
 
-- [NICo Helm charts](https://github.com/NVIDIA/infra-controller/tree/main/helm/charts) - ServiceMonitor configs, metrics ports
-- [NICo Grafana dashboards](https://github.com/NVIDIA/infra-controller/tree/main/helm/observability/dashboards) - JSON dashboard files
+- [NICo Helm charts](https://github.com/dsx-ai-factory/infra-controller/tree/main/helm/charts) - ServiceMonitor configs, metrics ports
+- [NICo Grafana dashboards](https://github.com/dsx-ai-factory/infra-controller/tree/main/helm/observability/dashboards) - JSON dashboard files
 - [Full metrics reference](core_metrics.md) - Auto-generated list
 - [OpenTelemetry Collector Helm chart](https://opentelemetry.io/docs/platforms/kubernetes/helm/collector/)
 - [Prometheus receiver](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/prometheusreceiver)

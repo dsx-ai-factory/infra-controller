@@ -300,6 +300,21 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 	flag.StringVar(&conf.Temporal.TemporalServer, "temporalServer", os.Getenv("TEMPORAL_SERVER"), "Temporal server")
 	flag.StringVar(&conf.Temporal.TemporalInventorySchedule, "temporalInventorySchedule", os.Getenv("TEMPORAL_INVENTORY_SCHEDULE"), "Temporal Inventory schedule")
 
+	inventoryCloudPageSize := conftypes.DefaultInventoryCloudPageSize
+	if v := os.Getenv("INVENTORY_CLOUD_PAGE_SIZE"); v != "" {
+		parsed, perr := strconv.Atoi(v)
+		if perr != nil {
+			log.Fatal().Msgf("error loading config, INVENTORY_CLOUD_PAGE_SIZE %q is not a valid integer", v)
+		}
+		inventoryCloudPageSize = parsed
+	}
+	flag.IntVar(&conf.Temporal.InventoryCloudPageSize, "inventoryCloudPageSize", inventoryCloudPageSize, "Number of inventory items published to Cloud per Temporal workflow page")
+
+	// Must run before validation: flag.XxxVar sets the destination immediately, but a real
+	// CLI flag only overwrites it here, so validating first would let a bad CLI value slip
+	// through unchecked.
+	flag.Parse()
+
 	if conf.Temporal.TemporalPublishQueue == "" {
 		log.Fatal().Msg("error loading config, Temporal publish queue must be specified")
 	}
@@ -313,8 +328,12 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 		log.Fatal().Msgf("error loading config, %v", serr)
 	}
 
+	serr = validateInventoryCloudPageSize(conf.Temporal.InventoryCloudPageSize)
+	if serr != nil {
+		log.Fatal().Msgf("error loading config, %v", serr)
+	}
+
 	log.Info().Interface("config", conf).Msg("Config Manager: Config loaded")
-	flag.Parse()
 
 	// Set default metrics namespace if not specified
 	if conf.MetricsNamespace == "" {
@@ -341,6 +360,22 @@ func validateInventorySchedule(schedule string) error {
 	if interval > cutil.MaxInventoryReceiptInterval {
 		return fmt.Errorf("Temporal inventory schedule %q collects every %v, which is slower than the %v maximum",
 			schedule, interval, cutil.MaxInventoryReceiptInterval)
+	}
+
+	return nil
+}
+
+// validateInventoryCloudPageSize rejects a page size Temporal cannot carry. Must be >=1 and
+// <=MaxInventoryCloudPageSize (2MB Temporal blob ceiling, see conftypes.go). The page size no
+// longer has to divide the Core fetch page evenly: every inventory now publishes through the
+// shared collector, which buffers items across Core pages instead of chunking each one on its
+// own, so a page size like 30 no longer desyncs the paging totals.
+func validateInventoryCloudPageSize(pageSize int) error {
+	if pageSize < 1 {
+		return fmt.Errorf("INVENTORY_CLOUD_PAGE_SIZE %d must be at least 1", pageSize)
+	}
+	if pageSize > conftypes.MaxInventoryCloudPageSize {
+		return fmt.Errorf("INVENTORY_CLOUD_PAGE_SIZE %d exceeds the %d maximum", pageSize, conftypes.MaxInventoryCloudPageSize)
 	}
 
 	return nil

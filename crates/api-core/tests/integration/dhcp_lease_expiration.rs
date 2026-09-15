@@ -176,6 +176,18 @@ async fn test_discover_reallocates_after_expiration(
         !original_ip.is_empty(),
         "should get an IP on first discover"
     );
+    env.api()
+        .add_expected_machine(Request::new(rpc::forge::ExpectedMachine {
+            bmc_mac_address: "aa:bb:cc:dd:ef:07".into(),
+            chassis_serial_number: "EXPIRED-DHCP-STAYS-DYNAMIC".into(),
+            host_nics: vec![rpc::forge::ExpectedInterface {
+                mac_address: mac_address.into(),
+                ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .await?;
     let expire_response = env
         .api()
         .expire_dhcp_lease(Request::new(ExpireDhcpLeaseRequest {
@@ -186,16 +198,23 @@ async fn test_discover_reallocates_after_expiration(
         .into_inner();
     assert_eq!(expire_response.status(), ExpireDhcpLeaseStatus::Released);
 
-    // And finally, DHCP discover again! This should see the interface
-    // exists, but doesn't have an IP, so it will [re]allocate an IP to
-    // that pre-existing interface
-    let response2 = env
-        .api()
-        .discover_dhcp(
+    // The unassociated interface survives expiry. Reallocation must still
+    // allow another shared IPv4 allocator on the same segment.
+    let mut shared_allocation = env.db_txn().await;
+    db::machine_interface::lock_network_segments_shared(
+        &mut shared_allocation,
+        std::slice::from_ref(&admin_segment.id),
+    )
+    .await?;
+    let response2 = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        env.api().discover_dhcp(
             DhcpDiscovery::builder(mac_address, admin_segment.relay_address).tonic_request(),
-        )
-        .await?
-        .into_inner();
+        ),
+    )
+    .await??
+    .into_inner();
+    shared_allocation.rollback().await?;
     assert!(
         !response2.address.is_empty(),
         "should get an IP after re-allocation"
@@ -206,6 +225,17 @@ async fn test_discover_reallocates_after_expiration(
         response1.machine_interface_id, response2.machine_interface_id,
         "should reuse the same interface"
     );
+    let mut txn = env.db_txn().await;
+    let addresses = db::machine_interface_address::find_for_interface(
+        &mut txn,
+        response2
+            .machine_interface_id
+            .expect("DHCP should identify the interface"),
+    )
+    .await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
+    txn.rollback().await?;
 
     Ok(())
 }

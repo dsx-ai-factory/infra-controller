@@ -499,9 +499,7 @@ func (vrh ValidateRackHandler) Handle(c echo.Context) error {
 				Racks: &flowv1.RackTargets{
 					Targets: []*flowv1.RackTarget{
 						{
-							Identifier: &flowv1.RackTarget_Id{
-								Id: &flowv1.UUID{Id: rackStrID},
-							},
+							Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 						},
 					},
 				},
@@ -698,7 +696,7 @@ func NewUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Client, s
 
 // Handle godoc
 // @Summary Power control a Rack
-// @Description Power control a Rack identified by Rack UUID (on, off, cycle, forceoff, forcecycle)
+// @Description Power control a Rack identified by Rack ID (on, off, cycle, forceoff, forcecycle)
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -791,9 +789,7 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 			Racks: &flowv1.RackTargets{
 				Targets: []*flowv1.RackTarget{
 					{
-						Identifier: &flowv1.RackTarget_Id{
-							Id: &flowv1.UUID{Id: rackStrID},
-						},
+						Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 					},
 				},
 			},
@@ -952,13 +948,13 @@ func NewUpdateRackFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp
 
 // Handle godoc
 // @Summary Firmware update a Rack
-// @Description Update firmware on a Rack identified by Rack UUID.
+// @Description Update firmware on a Rack identified by Rack ID.
 // @Tags rack
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param id path string true "UUID of the Rack"
+// @Param id path string true "Rack ID"
 // @Param body body model.APIUpdateFirmwareRequest true "Firmware update request"
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/rack/{id}/firmware [patch]
@@ -1043,9 +1039,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 			Racks: &flowv1.RackTargets{
 				Targets: []*flowv1.RackTarget{
 					{
-						Identifier: &flowv1.RackTarget_Id{
-							Id: &flowv1.UUID{Id: rackStrID},
-						},
+						Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 					},
 				},
 			},
@@ -1206,13 +1200,13 @@ func NewBringUpRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cl
 
 // Handle godoc
 // @Summary Bring up a Rack
-// @Description Bring up a Rack identified by Rack UUID
+// @Description Bring up a Rack identified by Rack ID
 // @Tags rack
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param id path string true "UUID of the Rack"
+// @Param id path string true "Rack ID"
 // @Param body body model.APIBringUpRackRequest true "Bring up request"
 // @Success 200 {object} model.APIBringUpRackResponse
 // @Router /v2/org/{org}/nico/rack/{id}/bringup [post]
@@ -1298,9 +1292,7 @@ func (burh BringUpRackHandler) Handle(c echo.Context) error {
 			Racks: &flowv1.RackTargets{
 				Targets: []*flowv1.RackTarget{
 					{
-						Identifier: &flowv1.RackTarget_Id{
-							Id: &flowv1.UUID{Id: rackStrID},
-						},
+						Identifier: &flowv1.RackTarget_ExternalId{ExternalId: rackStrID},
 					},
 				},
 			},

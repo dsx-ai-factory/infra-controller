@@ -48,7 +48,7 @@ use carbide_nvlink_manager::nvlink::test_support::NmxcSimClient;
 use carbide_nvlink_manager::{
     NvlPartitionMonitor, SwitchCertificateMonitor, SwitchCertificateMonitorIterationResult,
 };
-use carbide_rack::rms_client::test_support::RmsSim;
+use carbide_rack::test_support::RmsSim;
 use carbide_rack_controller::config::RackConfig;
 use carbide_rack_controller::context::RackStateHandlerServices;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
@@ -70,7 +70,9 @@ use carbide_spdm_controller::io::SpdmStateControllerIO;
 use carbide_utils::test_support::test_meter::TestMeter;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::instance_type::InstanceTypeId;
-use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId};
+use carbide_uuid::machine::{
+    AsMachineId, DpuMachineId, HostMachineId, MachineId, MachineIdSubtypeTrait,
+};
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
@@ -92,8 +94,8 @@ use model::hardware_info::{HardwareInfo, TpmEkCertificate};
 use model::instance_type::InstanceTypeMachineCapabilityFilter;
 use model::machine::capabilities::MachineCapabilityType;
 use model::machine::{
-    FailureDetails, Machine, MachineLastRebootRequested, MachineValidatingState, ManagedHostState,
-    ValidationState,
+    FailureDetails, HostMachine, Machine, MachineLastRebootRequested, MachineValidatingState,
+    ManagedHostState, ValidationState,
 };
 use model::metadata::Metadata;
 use model::network_security_group;
@@ -146,6 +148,25 @@ use crate::test_support::network_segment::{
     create_underlay_network_segment,
 };
 use crate::tests::common::rpc_builder::VpcCreationRequest;
+
+fn test_nvos_update_manager(
+    rms_sim: &RmsSim,
+) -> Option<Arc<dyn component_manager::NvosUpdateManager>> {
+    rms_sim.as_rms_client().map(|client| {
+        Arc::new(component_manager::rms::rms_nvos_update_manager(client))
+            as Arc<dyn component_manager::NvosUpdateManager>
+    })
+}
+
+fn test_rack_firmware_update_manager(
+    rms_sim: &RmsSim,
+) -> Option<Arc<dyn component_manager::RackFirmwareUpdateManager>> {
+    rms_sim.as_rms_client().map(|client| {
+        Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
+            client,
+        )) as Arc<dyn component_manager::RackFirmwareUpdateManager>
+    })
+}
 
 pub(in crate::tests) mod dpu;
 pub(in crate::tests) mod host;
@@ -366,14 +387,14 @@ impl TestEnv {
     pub(in crate::tests) fn rack_state_handler_services(&self) -> RackStateHandlerServices {
         RackStateHandlerServices {
             db_pool: self.pool.clone(),
-            rms_client: self.rms_sim.as_rms_client(),
             site_config: RackConfig {
                 rms: self.config.rms.clone(),
                 rack_validation_config: self.config.rack_validation_config.clone(),
                 rack_profiles: self.config.rack_profiles.clone(),
             }
             .into(),
-            switch_system_image_rms_client: self.rms_sim.as_switch_system_image_rms_client(),
+            nvos_update_manager: test_nvos_update_manager(&self.rms_sim),
+            rack_firmware_update_manager: test_rack_firmware_update_manager(&self.rms_sim),
             credential_manager: self.test_credential_manager.clone(),
             component_manager: self.test_component_manager.clone(),
             nmx_cluster_switch_mtls_services:
@@ -401,7 +422,7 @@ impl TestEnv {
     fn fill_machine_information(
         &self,
         state: &ManagedHostState,
-        machine: &Machine,
+        machine: &HostMachine,
     ) -> ManagedHostState {
         //This block is to fill data that is populated within statemachine
         match state.clone() {
@@ -524,12 +545,16 @@ impl TestEnv {
     /// Runs iterations of the machine state controller handler with the services
     /// in this test environment until the condition is met.  using a callback function
     /// allows the caller to use "matches!" to compare patterns instead of concrete values.
-    pub(in crate::tests) async fn run_machine_state_controller_iteration_until_state_condition(
+    pub(in crate::tests) async fn run_machine_state_controller_iteration_until_state_condition<ID>(
         &self,
-        host_machine_id: &HostMachineId,
+        host_machine_id: &ID,
         max_iterations: u32,
-        state_check: impl Fn(&Machine) -> bool,
-    ) -> ManagedHostState {
+        state_check: impl Fn(&Machine<ID>) -> bool,
+    ) -> ManagedHostState
+    where
+        ID: MachineIdSubtypeTrait,
+        db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+    {
         for _ in 0..max_iterations {
             self.machine_state_controller
                 .lock()
@@ -1642,14 +1667,14 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
         .services(
             RackStateHandlerServices {
                 db_pool: db_pool.clone(),
-                rms_client: rms_sim.as_rms_client(),
                 site_config: RackConfig {
                     rms: config.rms.clone(),
                     rack_validation_config: config.rack_validation_config.clone(),
                     rack_profiles: config.rack_profiles.clone(),
                 }
                 .into(),
-                switch_system_image_rms_client: rms_sim.as_switch_system_image_rms_client(),
+                nvos_update_manager: test_nvos_update_manager(&rms_sim),
+                rack_firmware_update_manager: test_rack_firmware_update_manager(&rms_sim),
                 credential_manager: credential_manager.clone(),
                 component_manager: test_component_manager.clone(),
                 nmx_cluster_switch_mtls_services:
@@ -1704,6 +1729,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
         site_explorer_rack_profiles,
         rms_sim.as_rms_client(),
         credential_manager.clone(),
+        api.runtime_config.dpf.enabled && api.dpf_sdk.is_some(),
     );
 
     // Create some instance types
@@ -2112,7 +2138,7 @@ pub(in crate::tests) async fn discovery_completed(env: &TestEnv, machine_id: &Ma
     let _response = env
         .api
         .discovery_completed(Request::new(rpc::forge::MachineDiscoveryCompletedRequest {
-            machine_id: Some(*machine_id),
+            machine_id: Some(machine_id.to_machine_id()),
         }))
         .await
         .unwrap()
@@ -2153,7 +2179,7 @@ pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
         .api
         .get_managed_host_network_config(Request::new(
             rpc::forge::ManagedHostNetworkConfigRequest {
-                dpu_machine_id: Some((*dpu_machine_id).into()),
+                dpu_machine_id: Some(*dpu_machine_id),
             },
         ))
         .await
@@ -2166,14 +2192,11 @@ pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
         } else {
             Some(network_config.instance_network_config_version.clone())
         };
-    let instance: Option<rpc::Instance> = env
-        .api
-        .find_instance_by_machine_id(Request::new(dpu_machine_id.into()))
-        .await
-        .unwrap()
-        .into_inner()
-        .instances
-        .pop();
+    let instance: Option<rpc::Instance> = if let Some(instance_id) = network_config.instance_id {
+        env.find_instances(vec![instance_id]).await.instances.pop()
+    } else {
+        None
+    };
     let instance_config_version = if let Some(instance) = instance {
         // If an instance is reported via this API, the version should match what we
         // get via the GetManagedHostNetworkConfig API
@@ -2268,7 +2291,7 @@ pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
             .collect();
 
     let status = rpc::forge::DpuNetworkStatus {
-        dpu_machine_id: Some((*dpu_machine_id).into()),
+        dpu_machine_id: Some(*dpu_machine_id),
         dpu_agent_version: Some(dpu::TEST_DPU_AGENT_VERSION.to_string()),
         observed_at: None,
         dpu_health: Some(dpu_health),
@@ -2313,7 +2336,7 @@ pub(in crate::tests) async fn simulate_hardware_health_report(
     let _ = env
         .api
         .insert_machine_health_report(Request::new(InsertMachineHealthReportRequest {
-            machine_id: Some(*host_machine_id),
+            machine_id: Some(host_machine_id.to_machine_id()),
             health_report_entry: Some(HealthReportEntry {
                 report: Some(health_report.into()),
                 ..Default::default()
@@ -2334,7 +2357,7 @@ pub(in crate::tests) async fn send_health_report_entry(
     let _ = env
         .api
         .insert_machine_health_report(Request::new(InsertMachineHealthReportRequest {
-            machine_id: Some(*machine_id),
+            machine_id: Some(machine_id.to_machine_id()),
             health_report_entry: Some(HealthReportEntry {
                 report: Some(entry.0.into()),
                 mode: entry.1 as i32,
@@ -2355,7 +2378,7 @@ pub(in crate::tests) async fn remove_health_report_entry(
     let _ = env
         .api
         .remove_machine_health_report(Request::new(RemoveMachineHealthReportRequest {
-            machine_id: Some(*machine_id),
+            machine_id: Some(machine_id.to_machine_id()),
             source,
         }))
         .await
@@ -2364,13 +2387,13 @@ pub(in crate::tests) async fn remove_health_report_entry(
 
 pub(in crate::tests) async fn forge_agent_control(
     env: &TestEnv,
-    machine_id: carbide_uuid::machine::MachineId,
+    machine_id: impl MachineIdSubtypeTrait,
 ) -> rpc::forge::ForgeAgentControlResponse {
     let _ = reboot_completed(env, machine_id).await;
 
     env.api
         .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
-            machine_id: Some(machine_id),
+            machine_id: Some(machine_id.into()),
         }))
         .await
         .unwrap()
@@ -2425,14 +2448,7 @@ pub(in crate::tests) async fn create_managed_host_with_dpf_multi_hw(
             .id
             .try_into()
             .expect("managed host snapshot ID should be a valid HostMachineId"),
-        dpu_ids: mh
-            .dpu_snapshots
-            .iter()
-            .map(|dpu| {
-                DpuMachineId::try_from(dpu.id)
-                    .expect("DPU snapshot ID should be a valid DpuMachineId")
-            })
-            .collect(),
+        dpu_ids: mh.dpu_snapshots.iter().map(|dpu| dpu.id).collect(),
         api: env.api.clone(),
     }
 }
@@ -2471,10 +2487,7 @@ pub(in crate::tests) async fn create_managed_host_with_config(
     let dpu_ids = mh
         .dpu_snapshots
         .iter()
-        .map(|snapshot| {
-            DpuMachineId::try_from(snapshot.id)
-                .expect("dpu_snapshot ID should be valid DpuMachineId")
-        })
+        .map(|snapshot| snapshot.id)
         .collect();
 
     TestManagedHost {
@@ -2505,10 +2518,7 @@ pub(in crate::tests) async fn create_host_with_machine_validation(
         dpu_ids: mh
             .dpu_snapshots
             .into_iter()
-            .map(|snapshot| {
-                DpuMachineId::try_from(snapshot.id)
-                    .expect("DPU snapshot ID should be a valid DpuMachineId")
-            })
+            .map(|snapshot| snapshot.id)
             .collect(),
         api: env.api.clone(),
     }
@@ -2527,14 +2537,7 @@ pub(in crate::tests) async fn create_managed_host_with_hardware_info_template(
             .id
             .try_into()
             .expect("managed host snapshot ID should be a valid HostMachineId"),
-        dpu_ids: mh
-            .dpu_snapshots
-            .into_iter()
-            .map(|s| {
-                DpuMachineId::try_from(s.id)
-                    .expect("DPU snapshot ID should be a valid DpuMachineId")
-            })
-            .collect(),
+        dpu_ids: mh.dpu_snapshots.into_iter().map(|s| s.id).collect(),
         api: env.api.clone(),
     }
 }
@@ -2646,7 +2649,7 @@ pub(in crate::tests) async fn set_nvlink_nmxc_endpoint(
 
 pub(in crate::tests) async fn update_time_params(
     pool: &sqlx::PgPool,
-    machine: &Machine,
+    machine: &Machine<impl MachineIdSubtypeTrait>,
     retry_count: i64,
     last_reboot_requested: Option<DateTime<Utc>>,
 ) {
@@ -2689,7 +2692,7 @@ pub(in crate::tests) async fn update_time_params(
 
 pub(in crate::tests) async fn reboot_completed(
     env: &TestEnv,
-    machine_id: carbide_uuid::machine::MachineId,
+    machine_id: impl MachineIdSubtypeTrait,
 ) -> rpc::forge::MachineRebootCompletedResponse {
     tracing::info!(
         machine_id = %machine_id,
@@ -2697,7 +2700,7 @@ pub(in crate::tests) async fn reboot_completed(
     );
     env.api
         .reboot_completed(Request::new(rpc::forge::MachineRebootCompletedRequest {
-            machine_id: Some(machine_id),
+            machine_id: Some(machine_id.into()),
         }))
         .await
         .unwrap()
@@ -2718,7 +2721,7 @@ pub(in crate::tests) async fn machine_validation_completed(
         .api
         .machine_validation_completed(Request::new(
             rpc::forge::MachineValidationCompletedRequest {
-                machine_id: Some(*machine_id),
+                machine_id: Some(machine_id.to_machine_id()),
                 machine_validation_error,
                 validation_id: Some(validation_id),
             },
@@ -2733,7 +2736,7 @@ pub(in crate::tests) async fn machine_validation_completed(
 /// if needed, as part of the auto-approval process.
 pub(in crate::tests) async fn inject_machine_measurements(
     env: &TestEnv,
-    machine_id: HostMachineId,
+    machine_id: impl MachineIdSubtypeTrait,
 ) {
     let _response = env
         .api

@@ -21,7 +21,8 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::machine::{
-    DpuMachineId, HostMachineId, InvalidMachineType, MachineId, MachineInterfaceId,
+    AsMachineId, DpuMachineId, HostMachineId, InvalidMachineType, MachineId, MachineIdSubtypeTrait,
+    MachineInterfaceId, PredictedHostMachineId, StableHostMachineId,
 };
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::network::NetworkSegmentId;
@@ -112,7 +113,7 @@ type DpuDeviceMappings = (
     HashMap<String, Vec<DpuMachineId>>,
 );
 
-pub fn get_display_ids(machines: &[Machine]) -> String {
+pub fn get_display_ids(machines: &[Machine<impl MachineIdSubtypeTrait>]) -> String {
     machines
         .iter()
         .map(|x| x.id.to_string())
@@ -137,8 +138,8 @@ fn pending_boot_interface_config_version(
 /// Represents the current state of `Machine`
 #[derive(Debug, Clone)]
 pub struct ManagedHostStateSnapshot {
-    pub host_snapshot: Machine,
-    pub dpu_snapshots: Vec<Machine>,
+    pub host_snapshot: HostMachine,
+    pub dpu_snapshots: Vec<DpuMachine>,
     pub dpa_interface_snapshots: Vec<DpaInterface>,
     /// If there is an instance provisioned on top of the machine, this holds
     /// its state
@@ -177,9 +178,9 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
                 None
             };
 
-        let host_snapshot: Machine = host_snapshot.0.try_into()?;
+        let host_snapshot: HostMachine = host_snapshot.0.try_into()?;
 
-        let dpu_snapshots: Vec<Machine> = dpu_snapshots
+        let dpu_snapshots: Vec<DpuMachine> = dpu_snapshots
             .0
             .into_iter()
             .flatten()
@@ -492,7 +493,7 @@ impl ManagedHostStateSnapshot {
     /// - the Machine to be in `Ready` state
     /// - the Machine has not yet been target of an instance creation request
     /// - no health alerts which classification `PreventAllocations` to be set
-    /// - the machine not to be in Maintenance Mode
+    /// - no pending or operator maintenance, even when `allow_unhealthy` is true
     /// - the desired boot-interface generation to have a matching observation
     pub fn is_usable_as_instance(&self, allow_unhealthy: bool) -> Result<(), NotAllocatableReason> {
         // TODO: allow other states than Ready when allow_unhealthy=true. Will require changes to state machine (see Matthias).
@@ -509,7 +510,10 @@ impl ManagedHostStateSnapshot {
             return Err(NotAllocatableReason::PendingInstanceCreation);
         }
 
-        if self.host_snapshot.machine_maintenance_requested.is_some() {
+        let host = &self.host_snapshot;
+        if host.machine_maintenance_requested.is_some()
+            || host.health_reports.maintenance_override().is_some()
+        {
             return Err(NotAllocatableReason::MaintenanceMode);
         }
 
@@ -677,7 +681,7 @@ impl ManagedHostStateSnapshot {
             .all(|dpu_machine_id| {
                 self.dpu_snapshots
                     .iter()
-                    .find(|dpu_snapshot| dpu_snapshot.id == dpu_machine_id.into())
+                    .find(|dpu_snapshot| dpu_snapshot.id == dpu_machine_id)
                     .is_some_and(|dpu_snapshot| {
                         dpu_snapshot.managed_host_network_config_version_synced(host_version)
                     })
@@ -748,10 +752,10 @@ impl ManagedHostStateSnapshot {
             let index = self
                 .dpu_snapshots
                 .iter()
-                .position(|x| x.id == primary_dpu_id.into())
+                .position(|x| x.id == primary_dpu_id)
                 .ok_or({
                     ManagedHostStateSnapshotError::MissingPrimaryDpu(
-                        self.host_snapshot.host_machine_id()?,
+                        self.host_snapshot.id,
                         primary_dpu_id,
                     )
                 })?;
@@ -766,7 +770,7 @@ impl ManagedHostStateSnapshot {
             // ExpectedMachine can declare a non-DPU host admin NIC as primary, and in that case no
             // DPU should be promoted ahead of PCI order.
             return Err(ManagedHostStateSnapshotError::PrimaryInterfaceMissing(
-                self.host_snapshot.host_machine_id()?,
+                self.host_snapshot.id,
             ));
         };
 
@@ -808,13 +812,23 @@ impl Default for MachineLastRebootRequested {
     }
 }
 
-///
+/// A machine whose ID may identify any machine kind.
+pub type AnyMachine = Machine<MachineId>;
+/// A machine with an ID known to be a DPU (fm100d).
+pub type DpuMachine = Machine<DpuMachineId>;
+/// A machine with an ID known to be a predicted host (fm100p).
+pub type PredictedHostMachine = Machine<PredictedHostMachineId>;
+/// A machine with an ID known to be either a stable (fm100h) or predicted (fm100p) host.
+pub type HostMachine = Machine<HostMachineId>;
+/// A machine with an ID known to be a stable host (fm100h ID).
+pub type StableHostMachine = Machine<StableHostMachineId>;
+
 /// A machine is a standalone system that performs network booting via normal DHCP processes.
 #[derive(Debug, Clone)]
-pub struct Machine {
+pub struct Machine<ID: MachineIdSubtypeTrait> {
     /// The ID of the machine, this is an internal identifier in the database that's unique for
     /// all machines managed by this instance of carbide.
-    pub id: MachineId,
+    pub id: ID,
 
     /// The current state of the machine.
     pub state: Versioned<ManagedHostState>,
@@ -929,6 +943,96 @@ pub struct Machine {
     pub manual_firmware_upgrade_completed: Option<DateTime<Utc>>,
 }
 
+impl<ID: MachineIdSubtypeTrait> Machine<ID> {
+    /// Reconstruct this machine into type with a different ID. Should be an efficient memcpy
+    fn with_id<NewID>(self, new_id: NewID) -> Machine<NewID>
+    where
+        NewID: MachineIdSubtypeTrait,
+    {
+        Machine {
+            id: new_id,
+            state: self.state,
+            network_config: self.network_config,
+            network_status_observation: self.network_status_observation,
+            history: self.history,
+            metadata: self.metadata,
+            version: self.version,
+            rack_id: self.rack_id,
+            config: self.config,
+            status: self.status,
+            health_reports: self.health_reports,
+            reprovision_requested: self.reprovision_requested,
+            host_reprovision_requested: self.host_reprovision_requested,
+            machine_maintenance_requested: self.machine_maintenance_requested,
+            decommission_requested: self.decommission_requested,
+            bmc_credential_rotation_requested: self.bmc_credential_rotation_requested,
+            uefi_credential_rotation_requested: self.uefi_credential_rotation_requested,
+            lockdown_ikm_credential_rotation_requested: self
+                .lockdown_ikm_credential_rotation_requested,
+            dpu_agent_upgrade_requested: self.dpu_agent_upgrade_requested,
+            controller_state_outcome: self.controller_state_outcome,
+            bios_password_set_time: self.bios_password_set_time,
+            last_machine_validation_time: self.last_machine_validation_time,
+            discovery_machine_validation_id: self.discovery_machine_validation_id,
+            cleanup_machine_validation_id: self.cleanup_machine_validation_id,
+            on_demand_machine_validation_id: self.on_demand_machine_validation_id,
+            on_demand_machine_validation_request: self.on_demand_machine_validation_request,
+            asn: self.asn,
+            host_profile: self.host_profile,
+            rack_fw_details: self.rack_fw_details,
+            manual_firmware_upgrade_completed: self.manual_firmware_upgrade_completed,
+        }
+    }
+
+    /// Converts this machine to a narrower ID when its ID has the required kind. (so AnyMachine to
+    /// DpuMachine, etc)
+    pub fn try_into_subtype<NewID>(self) -> Result<Machine<NewID>, InvalidMachineType>
+    where
+        NewID: MachineIdSubtypeTrait,
+    {
+        let new_id = self.id.to_machine_id().try_into().map_err(Into::into)?;
+        Ok(self.with_id(new_id))
+    }
+
+    /// Converts this machine to a compatible, broader ID subtype (so DpuMachine to AnyMachine, etc)
+    pub fn into_subtype<NewID>(self) -> Machine<NewID>
+    where
+        NewID: MachineIdSubtypeTrait + From<ID>,
+    {
+        let new_id = NewID::from(self.id);
+        self.with_id(new_id)
+    }
+}
+
+macro_rules! impl_try_from_any_machine {
+    ($type:ty) => {
+        impl TryFrom<AnyMachine> for $type {
+            type Error = InvalidMachineType;
+            fn try_from(value: AnyMachine) -> Result<Self, Self::Error> {
+                value.try_into_subtype()
+            }
+        }
+    };
+}
+
+macro_rules! impl_from_host_machine_subtype {
+    ($type:ty) => {
+        impl From<$type> for HostMachine {
+            fn from(value: $type) -> Self {
+                value.into_subtype()
+            }
+        }
+    };
+}
+
+impl_try_from_any_machine!(HostMachine);
+impl_try_from_any_machine!(DpuMachine);
+impl_try_from_any_machine!(PredictedHostMachine);
+impl_try_from_any_machine!(StableHostMachine);
+
+impl_from_host_machine_subtype!(PredictedHostMachine);
+impl_from_host_machine_subtype!(StableHostMachine);
+
 // Dpf status field.
 #[derive(Debug, Default, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Dpf {
@@ -970,7 +1074,10 @@ impl HostProfile {
 
 // We need to implement FromRow because we can't associate dependent tables with the default derive
 // (i.e. it can't default unknown fields)
-impl<'r> FromRow<'r, PgRow> for Machine {
+impl<'r, ID: MachineIdSubtypeTrait> FromRow<'r, PgRow> for Machine<ID>
+where
+    Machine<ID>: TryFrom<MachineSnapshotPgJson, Error = sqlx::Error>,
+{
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         // Json<T> deserializes the row bytes straight into the snapshot
         // struct, skipping the intermediate serde_json::Value DOM.
@@ -979,19 +1086,11 @@ impl<'r> FromRow<'r, PgRow> for Machine {
     }
 }
 
-impl Machine {
+impl<ID: MachineIdSubtypeTrait> Machine<ID> {
     /// Returns whether the Machine is a DPU, based on the HardwareInfo that
     /// was available when the Machine was discovered
     pub fn is_dpu(&self) -> bool {
         self.id.machine_type().is_dpu()
-    }
-
-    pub fn dpu_machine_id(&self) -> Result<DpuMachineId, InvalidMachineType> {
-        self.id.try_into()
-    }
-
-    pub fn host_machine_id(&self) -> Result<HostMachineId, InvalidMachineType> {
-        self.id.try_into()
     }
 
     pub fn bmc_vendor(&self) -> bmc_vendor::BMCVendor {
@@ -1435,7 +1534,7 @@ pub enum DecommissioningState {
         deconfiguring_state: DeconfiguringHostState,
     },
     DeconfiguringDpus {
-        dpu_states: HashMap<MachineId, DeconfiguringDpuState>,
+        dpu_states: HashMap<DpuMachineId, DeconfiguringDpuState>,
     },
     /// OOB DHCP is suppressed before the host power cycle so post-cycle discovers are ignored.
     SuppressingOobDhcp,
@@ -1775,17 +1874,13 @@ impl NextStateBFBSupport<DpuDiscoveringState> for DpuDiscoveringState {
     fn next_substate_based_on_bfb_support(
         enable_secure_boot: bool,
         state: &ManagedHostStateSnapshot,
-        dpf_enabled_at_site: bool,
+        _dpf_enabled_at_site: bool,
     ) -> DpuDiscoveringState {
-        // DPF should be given priority over secure boot.
-        // DPF does not support Secure boot.
-        let is_dpf_based_provisioning_possible =
-            dpf_based_dpu_provisioning_possible(state, dpf_enabled_at_site, false);
+        if state.host_snapshot.config.dpf.used_for_ingestion {
+            return DpuDiscoveringState::RebootAllDPUS;
+        }
 
-        if !is_dpf_based_provisioning_possible
-            && enable_secure_boot
-            && bfb_install_support(&state.dpu_snapshots)
-        {
+        if enable_secure_boot && bfb_install_support(&state.dpu_snapshots) {
             // Move with a redfish install path
             DpuDiscoveringState::EnableSecureBoot {
                 count: 0,
@@ -1825,7 +1920,7 @@ impl NextStateBFBSupport<ReprovisionState> for ReprovisionState {
     }
 }
 
-fn bfb_install_support(dpu_snapshots: &[Machine]) -> bool {
+fn bfb_install_support(dpu_snapshots: &[DpuMachine]) -> bool {
     !dpu_snapshots.is_empty()
         && dpu_snapshots
             .iter()
@@ -3934,6 +4029,30 @@ mod tests {
     }
 
     #[test]
+    fn operator_maintenance_blocks_allocation_until_cleared() {
+        let mut snapshot = managed_host_state_snapshot();
+        let mut alert = alert_with_classifications(vec![
+            health_report::HealthAlertClassification::prevent_allocations(),
+        ]);
+        alert.id = "Maintenance".parse().unwrap();
+        snapshot.host_snapshot.health_reports.merges.insert(
+            "maintenance".to_string(),
+            health_report_with_alerts(vec![alert]),
+        );
+
+        assert_eq!(
+            snapshot.is_usable_as_instance(true),
+            Err(NotAllocatableReason::MaintenanceMode),
+        );
+        snapshot
+            .host_snapshot
+            .health_reports
+            .merges
+            .remove("maintenance");
+        assert_eq!(snapshot.is_usable_as_instance(true), Ok(()));
+    }
+
+    #[test]
     fn boot_configuring_state_has_stable_state_strings() {
         let state = ManagedHostState::BootConfiguring {
             desired_version: ConfigVersion::new(7),
@@ -4151,14 +4270,25 @@ mod tests {
                         enable_secure_boot: true,
                     },
                     expect: (
-                        DpuDiscoveringState::DisableSecureBoot {
-                            count: 0,
-                            disable_secure_boot_state: Some(
-                                SetSecureBootState::CheckSecureBootStatus,
-                            ),
-                        },
+                        DpuDiscoveringState::RebootAllDPUS,
                         ReprovisionState::DpfStates {
                             substate: DpfState::Reprovisioning,
+                        },
+                    ),
+                },
+                Check {
+                    scenario: "DPF-enabled site uses secure boot fallback when the host was not selected",
+                    input: DpuProvisioningRouteInput {
+                        dpf: dpf_input(&[BF3_SUPPORTED]),
+                        enable_secure_boot: true,
+                    },
+                    expect: (
+                        DpuDiscoveringState::EnableSecureBoot {
+                            count: 0,
+                            enable_secure_boot_state: SetSecureBootState::CheckSecureBootStatus,
+                        },
+                        ReprovisionState::InstallDpuOs {
+                            substate: InstallDpuOsState::InstallingBFB,
                         },
                     ),
                 },
@@ -4221,7 +4351,7 @@ mod tests {
                     ),
                 },
                 Check {
-                    scenario: "legacy subset only blocks the reprovision DPF route",
+                    scenario: "unselected host only uses the legacy initial-ingestion route",
                     input: DpuProvisioningRouteInput {
                         dpf: DpfProvisioningInput {
                             dpus: &[BF3_REQUESTED, BF3_SUPPORTED],
@@ -4230,11 +4360,9 @@ mod tests {
                         enable_secure_boot: true,
                     },
                     expect: (
-                        DpuDiscoveringState::DisableSecureBoot {
+                        DpuDiscoveringState::EnableSecureBoot {
                             count: 0,
-                            disable_secure_boot_state: Some(
-                                SetSecureBootState::CheckSecureBootStatus,
-                            ),
+                            enable_secure_boot_state: SetSecureBootState::CheckSecureBootStatus,
                         },
                         ReprovisionState::InstallDpuOs {
                             substate: InstallDpuOsState::InstallingBFB,

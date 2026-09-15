@@ -1185,6 +1185,7 @@ mod tests {
                     vec![DiscoveredEntity::Chassis {
                         entity: chassis,
                         sensors: vec![sensor],
+                        gpu: None,
                     }],
                 );
             }

@@ -21,9 +21,9 @@ NICo uses HKDF-SHA256 ([RFC 5869](https://datatracker.ietf.org/doc/html/rfc5869)
 - **Independent keys**: Different SuperNICs produce cryptographically independent keys; compromising one device does not weaken any other.
 - **Non-reversible keys**: The lockdown key cannot be used to recover the site-wide root.
 
-Because the per-device key can be re-derived from the site-wide root and information that is permanently readable from the card itself, *NICo can recover from total database loss* without bricking any cards. As long as the site-wide root is preserved, any card can be unlocked.
+Because the per-device key can be re-derived from the site-wide root and information that is permanently readable from the card itself, *NICo can recover from total database loss* without bricking any cards, provided the site-wide root itself survives: it does with the default Vault store, and with the Postgres store only if the database backup and its KEK do. As long as the site-wide root is preserved, any card can be unlocked.
 
-The site-wide root is the single piece of data that must survive at all costs. It is held in Vault and should be backed up according to standard Vault disaster-recovery procedures for the site.
+The site-wide root is the single piece of data that must survive at all costs. It is held in the NICo credential store, Vault by default, and should be backed up according to that store's disaster-recovery procedures; with the Postgres store, that means the database and its KEK (refer to [Secrets Storage](../configuration/secrets-storage.md) for details).
 
 ### SuperNIC Key Derivation
 
@@ -42,7 +42,7 @@ This option introduces a trade-off: the tenant context lives in the database, so
 
 | Input | Source | Survives Database Loss? |
 |-------|--------|-------------------------|
-| Site-wide root | Vault | Yes |
+| Site-wide root | Credential store: Vault by default, or Postgres | Yes with Vault; with Postgres, only if the database or its backup and the KEK survive |
 | NIC MAC address | Hardware | Yes |
 | MachineId | Hardware | Yes |
 | VPC VNI / Tenant ID | Database | No |
@@ -64,7 +64,7 @@ Site managers do not interact with keys directly; the workflow is fully automate
 
 The HKDF for each SuperNIC is generated as follows:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                        HKDF-SHA256                              │
 ├─────────────────────────────────────────────────────────────────┤
@@ -88,7 +88,7 @@ The HKDF for each SuperNIC is generated as follows:
 
 The `info` parameter uses a versioned string format for domain separation and future extensibility:
 
-```
+```text
 Version 1:  "supernic-lock:v1:{mac_address}:{machine_id}"
 
 Example:
@@ -123,7 +123,6 @@ This allows the derivation to evolve over time without coordinated re-locking of
 
 ### Storage of the Site-Wide Root
 
-- The site-wide root is stored encrypted at rest in Vault and is provisioned during site bring-up.
+- The site-wide root is stored encrypted at rest in the credential store and is provisioned during site bring-up.
 - Derived keys exist only in memory during lock/unlock operations; they are never written to disk or to the database.
 - The 64-bit key size is a hardware constraint of the SuperNIC. While shorter than typical cryptographic keys, the derivation ensures the 64 bits are device-unique and indistinguishable from random.
-

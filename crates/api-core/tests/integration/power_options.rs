@@ -74,7 +74,7 @@ async fn creates_and_updates_power_options(pool: PgPool) -> Result<(), Box<dyn s
 
     env.api()
         .update_power_option(Request::new(PowerOptionUpdateRequest {
-            machine_id: Some(mh.host.id.into()),
+            machine_id: Some(mh.host.id),
             power_state: rpc::forge::PowerState::Off as i32,
         }))
         .await?;
@@ -104,7 +104,7 @@ async fn rejects_update_without_maintenance(
     let error = env
         .api()
         .update_power_option(Request::new(PowerOptionUpdateRequest {
-            machine_id: Some(mh.host.id.into()),
+            machine_id: Some(mh.host.id),
             power_state: rpc::forge::PowerState::Off as i32,
         }))
         .await

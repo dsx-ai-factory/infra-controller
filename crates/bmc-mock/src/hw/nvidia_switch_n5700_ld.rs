@@ -36,6 +36,10 @@ pub(crate) struct NvidiaSwitchN5700Ld<'a> {
 }
 
 impl NvidiaSwitchN5700Ld<'_> {
+    pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
+        Some(crate::EventServiceConfig::default())
+    }
+
     pub(crate) fn manager_config(&self) -> redfish::manager::Config {
         let manager_id = "BMC_0";
         let eth_builder = |eth| {

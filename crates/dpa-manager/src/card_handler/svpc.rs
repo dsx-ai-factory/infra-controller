@@ -27,7 +27,7 @@ use mac_address::MacAddress;
 use model::dpa_interface::DpaLockMode::{Locked, Unlocked};
 use model::dpa_interface::{DpaInterface, DpaInterfaceControllerState};
 use model::instance::snapshot::InstanceSnapshot;
-use model::machine::{Machine, ManagedHostStateSnapshot};
+use model::machine::{HostMachine, ManagedHostStateSnapshot};
 use mqttea::client::MqtteaClient;
 use sqlx::{PgConnection, PgTransaction};
 
@@ -89,7 +89,7 @@ impl SvpcInterfaceHandler {
     async fn reconcile_assigned_state<'a>(
         monitor: &mut DpaMonitor,
         dpa_interface: &DpaInterface,
-        machine: &Machine,
+        machine: &HostMachine,
         instance: &InstanceSnapshot,
         client: Arc<MqtteaClient>,
         dpa_info: &Arc<DpaInfo>,
@@ -194,7 +194,7 @@ impl SvpcInterfaceHandler {
 
     async fn reconcile_ready_state<'a>(
         monitor: &mut DpaMonitor,
-        machine: &Machine,
+        machine: &HostMachine,
         dpa_interface: &DpaInterface,
         client: Arc<MqtteaClient>,
         dpa_info: &Arc<DpaInfo>,

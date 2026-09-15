@@ -1,16 +1,12 @@
-# Contributing to NCX Infra Controller
+# Contributing to NVIDIA Infra Controller
 
-Thank you for your interest in contributing to NCX Infra Controller! 
+Thank you for your interest in contributing to NVIDIA Infra Controller!
 
-We welcome contributions of all sizes — from fixing a typo in the docs to adding a new API endpoint. Whether you're a first-time contributor or a seasoned open source developer, there's a place for you here.
+We welcome contributions of all sizes — from fixing a typo in the docs to adding a new API endpoint. Whether you're a first-time contributor or a seasoned open-source developer, there's a place for you here.
 
-> **Project Status:** NCX Infra Controller is currently in **experimental**. This means:
->
-> - APIs, configurations, and features may change without notice between releases.
-> - Review timelines may vary as the team focuses on stabilizing the core platform.
-> - Not all contributions will be accepted — we prioritize changes that align with the current roadmap.
->
-> We appreciate your patience and contributions as we work toward a stable release.
+> The software is provided "as is" without warranties of any kind. Features,
+> APIs, and configurations may change in future releases. For production
+> deployments, please test thoroughly in non-critical environments first.
 
 ## Table of Contents
 
@@ -23,11 +19,11 @@ We welcome contributions of all sizes — from fixing a typo in the docs to addi
 
 ## Developer Certificate of Origin (DCO)
 
-NCX Infra Controller requires the Developer Certificate of Origin (DCO) process to be followed for all contributions.
+NVIDIA Infra Controller requires the Developer Certificate of Origin (DCO) process to be followed for all contributions.
 
 The DCO is a lightweight way for contributors to certify that they wrote or otherwise have the right to submit the code they are contributing. The full text of the DCO can be found at [developercertificate.org](https://developercertificate.org/):
 
-```
+```text
 Developer Certificate of Origin
 Version 1.1
 
@@ -83,7 +79,7 @@ git config --global alias.ci 'commit -s -S'
 
 This will automatically add a line like this to your commit message:
 
-```
+```text
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
@@ -137,11 +133,11 @@ git commit --amend -s -S --no-edit
 
 ## Fork and Setup
 
-Developers must first fork the upstream [Infra Controller repository](https://github.com/NVIDIA/infra-controller).
+Developers must first fork the upstream [Infra Controller repository](https://github.com/dsx-ai-factory/infra-controller).
 
 ### 1. Fork the Repository
 
-1. Navigate to the [Infra Controller repository](https://github.com/NVIDIA/infra-controller) on GitHub.
+1. Navigate to the [Infra Controller repository](https://github.com/dsx-ai-factory/infra-controller) on GitHub.
 2. Click the **Fork** button in the upper right corner.
 3. Select your GitHub account as the destination.
 
@@ -157,7 +153,7 @@ cd infra-controller
 Add the original repository as an upstream remote to keep your fork in sync:
 
 ```bash
-git remote add upstream https://github.com/NVIDIA/infra-controller.git
+git remote add upstream https://github.com/dsx-ai-factory/infra-controller.git
 git remote -v  # Verify remotes
 ```
 
@@ -188,6 +184,7 @@ git checkout -b feature/your-feature-name
 ```
 
 Use descriptive branch names like:
+
 - `feature/add-new-api`
 - `fix/resolve-dhcp-issue`
 - `docs/update-readme`

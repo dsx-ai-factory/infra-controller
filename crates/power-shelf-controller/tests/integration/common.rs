@@ -25,7 +25,7 @@ use carbide_power_shelf_controller::context::{
 use carbide_power_shelf_controller::handler::PowerShelfStateHandler;
 use carbide_power_shelf_controller::io::PowerShelfStateControllerIO;
 use carbide_power_shelf_controller::metrics::PowerShelfMetrics;
-use carbide_rack::rms_client::test_support::RmsSim;
+use carbide_rack::test_support::RmsSim;
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::TestHarness;

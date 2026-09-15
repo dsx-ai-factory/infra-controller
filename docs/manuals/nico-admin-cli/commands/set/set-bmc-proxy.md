@@ -18,7 +18,9 @@ Set bmc_proxy
 ## OPTIONS
 
 **--enabled** *\<ENABLED\>*  
-Enable site-explorer bmc_proxy\
+Enable the dynamic site_explorer.bmc_proxy redirect for development and
+integration environments. This setting is independent of static
+\[bmc_proxy\] routing through nico-bmc-proxy.\
 
 \
 *Possible values:*
@@ -33,7 +35,7 @@ host:port string use as a proxy for talking to BMCs
 **--extended**  
 Extended result output.
 
-This used by measured boot, where basic output contains just what you
+This is used by measured boot, where basic output contains just what you
 probably care about, and "extended" output also dumps out all the
 internal UUIDs that are used to associate instances.
 

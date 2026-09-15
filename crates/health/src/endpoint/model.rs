@@ -95,13 +95,25 @@ impl BmcEndpoint {
         )
     }
 
+    /// Returns the endpoint identity used for collector log state.
+    ///
+    /// Machines prefer their NICo ID, switches use their serial number, and PowerShelves prefer
+    /// their serial number followed by their NICo ID. Other cases use the BMC MAC address.
     pub fn log_identity(&self) -> Cow<'_, str> {
         match &self.metadata {
             Some(EndpointMetadata::Machine(MachineData {
                 machine_id: Some(id),
                 ..
             })) => Cow::Owned(id.to_string()),
-            Some(EndpointMetadata::PowerShelf(power_shelf)) => Cow::Borrowed(&power_shelf.serial),
+            Some(EndpointMetadata::PowerShelf(power_shelf)) => {
+                if let Some(serial) = power_shelf.serial.as_deref() {
+                    Cow::Borrowed(serial)
+                } else if let Some(id) = power_shelf.id {
+                    Cow::Owned(id.to_string())
+                } else {
+                    Cow::Owned(self.addr.mac.to_string())
+                }
+            }
             Some(EndpointMetadata::Switch(switch)) => Cow::Borrowed(&switch.serial),
             _ => Cow::Owned(self.addr.mac.to_string()),
         }
@@ -159,10 +171,14 @@ impl EndpointMetadata {
         }
     }
 
+    /// Returns the hardware serial number when the endpoint metadata provides one.
+    ///
+    /// Machine and PowerShelf serial numbers may be absent; switch serial numbers are always
+    /// present.
     pub fn serial_number(&self) -> Option<&str> {
         match self {
             EndpointMetadata::Machine(machine) => machine.machine_serial.as_deref(),
-            EndpointMetadata::PowerShelf(power_shelf) => Some(power_shelf.serial.as_str()),
+            EndpointMetadata::PowerShelf(power_shelf) => power_shelf.serial.as_deref(),
             EndpointMetadata::Switch(switch) => Some(switch.serial.as_str()),
         }
     }
@@ -214,7 +230,8 @@ pub struct MachineData {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PowerShelfData {
     pub id: Option<PowerShelfId>,
-    pub serial: String,
+    /// Hardware serial number, when explicitly known.
+    pub serial: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -306,6 +323,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use carbide_test_support::{Check, check_values};
+    use carbide_uuid::power_shelf::PowerShelfId;
     use mac_address::MacAddress;
 
     use super::{
@@ -409,7 +427,7 @@ mod tests {
                     scenario: "power shelf is not eligible",
                     input: Some(EndpointMetadata::PowerShelf(PowerShelfData {
                         id: None,
-                        serial: "power-shelf".to_string(),
+                        serial: None,
                     })),
                     expect: false,
                 },
@@ -424,6 +442,37 @@ mod tests {
                 endpoint.metadata = metadata;
 
                 endpoint.supports_periodic_logs()
+            },
+        );
+    }
+
+    #[test]
+    fn power_shelf_log_identity_falls_back_to_id_then_mac() {
+        let power_shelf_id =
+            PowerShelfId::from_str("ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg")
+                .expect("valid power shelf id");
+
+        check_values(
+            [
+                Check {
+                    scenario: "PowerShelf ID is available",
+                    input: Some(power_shelf_id),
+                    expect: power_shelf_id.to_string(),
+                },
+                Check {
+                    scenario: "PowerShelf ID is unavailable",
+                    input: None,
+                    expect: "00:11:22:33:44:55".to_string(),
+                },
+            ],
+            |id| {
+                let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+                endpoint.metadata = Some(EndpointMetadata::PowerShelf(PowerShelfData {
+                    id,
+                    serial: None,
+                }));
+
+                endpoint.log_identity().into_owned()
             },
         );
     }

@@ -27,7 +27,7 @@ use bmc_mock::{
     SetSystemPowerError, SetSystemPowerResult, SystemPowerControl,
 };
 use carbide_network::virtualization::build_dual_stack_list;
-use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+use carbide_uuid::machine::{DpuMachineId, InvalidMachineType, MachineId, MachineInterfaceId};
 use rpc::forge::{MachineArchitecture, MachineDiscoveryResult, ManagedHostNetworkConfigResponse};
 use rpc::forge_agent_control_response::Action;
 use serde::{Deserialize, Serialize};
@@ -936,11 +936,10 @@ impl MachineStateMachine {
             .as_ref()
             .and_then(|result| result.machine_id)
             .ok_or(MissingMachineId)?;
-
         let network_config = match self
             .app_context
             .forge_api_client
-            .get_managed_host_network_config(machine_id)
+            .get_managed_host_network_config(DpuMachineId::try_from(machine_id)?)
             .await
         {
             Ok(config) => config,
@@ -1180,7 +1179,7 @@ impl MachineStateMachine {
         self.app_context
             .api_client()
             .record_dpu_network_status(DpuNetworkStatusArgs {
-                dpu_machine_id: machine_id,
+                dpu_machine_id: DpuMachineId::try_from(machine_id)?,
                 network_config_version: network_config.managed_host_config_version.clone(),
                 instance_network_config_version,
                 instance_config_version,
@@ -1350,6 +1349,8 @@ pub(super) enum MachineStateError {
         "invalid machine state: missing machine_id for this machine in machine discovery results"
     )]
     MissingMachineId,
+    #[error("invalid machine ID subtype: {0}")]
+    InvalidMachineIdSubtype(#[from] InvalidMachineType),
     #[error("no mac addresses specified for machine")]
     NoMachineMacAddress,
     #[error("no DHCP info for BMC. this is bug")]

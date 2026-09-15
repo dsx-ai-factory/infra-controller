@@ -122,11 +122,7 @@ impl StaticEndpointSource {
                         None
                     }
                 });
-                let serial = power_shelf
-                    .serial
-                    .clone()
-                    .or_else(|| power_shelf.id.clone())
-                    .unwrap_or_else(|| cfg.mac.clone());
+                let serial = power_shelf.serial.clone();
 
                 Some(EndpointMetadata::PowerShelf(PowerShelfData { id, serial }))
             } else if let Some(switch) = &cfg.switch {
@@ -501,7 +497,39 @@ mod tests {
         match &endpoints[0].metadata {
             Some(EndpointMetadata::PowerShelf(power_shelf)) => {
                 assert_eq!(power_shelf.id, Some(power_shelf_id));
-                assert_eq!(power_shelf.serial, "PS-001");
+                assert_eq!(power_shelf.serial.as_deref(), Some("PS-001"));
+            }
+            other => panic!("expected PowerShelf metadata, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_static_endpoint_without_power_shelf_serial_preserves_absence() {
+        let power_shelf_id = test_power_shelf_id("power-shelf-without-serial");
+        let configs = vec![StaticBmcEndpoint {
+            ip: ip("10.0.2.2"),
+            port: Some(443),
+            mac: "22:33:44:55:66:88".to_string(),
+            username: "admin".to_string(),
+            password: Some("pass".to_string()),
+            machine: None,
+            power_shelf: Some(StaticPowerShelfEndpoint {
+                id: Some(power_shelf_id.to_string()),
+                serial: None,
+            }),
+            switch: None,
+            rack_id: None,
+            labels: Default::default(),
+        }];
+
+        let source = StaticEndpointSource::from_config(&configs, &reqwest(), None, 10, None);
+        let endpoints = source.fetch_bmc_hosts().await.unwrap();
+
+        assert_eq!(endpoints.len(), 1);
+        match &endpoints[0].metadata {
+            Some(EndpointMetadata::PowerShelf(power_shelf)) => {
+                assert_eq!(power_shelf.id, Some(power_shelf_id));
+                assert_eq!(power_shelf.serial, None);
             }
             other => panic!("expected PowerShelf metadata, got {other:?}"),
         }

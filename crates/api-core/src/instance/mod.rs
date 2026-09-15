@@ -27,7 +27,7 @@ use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::instance_type::InstanceTypeId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{HostMachineId, MachineIdSubtypeTrait};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::spx::SpxPartitionId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
@@ -58,7 +58,7 @@ use model::instance::config::network::{
 use model::instance::config::spx::{InstanceSpxConfig, SpxAttachmentType};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
-    HostHealthConfig, LoadSnapshotOptions, Machine, ManagedHostStateSnapshot, NotAllocatableReason,
+    HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnapshot, NotAllocatableReason,
 };
 use model::metadata::Metadata;
 use model::network_segment::NetworkSegmentType;
@@ -241,7 +241,7 @@ pub(crate) async fn validate_os_definition_usable(
 #[derive(Debug)]
 pub(crate) struct InstanceAllocationRequest {
     /// The Machine on top of which we create an Instance
-    pub(crate) machine_id: MachineId,
+    pub(crate) machine_id: HostMachineId,
 
     /// The expected InstanceTypeId of the source
     /// machine for the instance.
@@ -304,7 +304,7 @@ impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
         Ok(InstanceAllocationRequest {
             instance_id,
             instance_type_id,
-            machine_id,
+            machine_id: machine_id.into(),
             config,
             metadata,
             allow_unhealthy_machine,
@@ -1367,7 +1367,7 @@ pub(crate) async fn allocate_network(
 
 pub(crate) fn allocate_ib_port_guid(
     ib_config: &InstanceInfinibandConfig,
-    machine: &Machine,
+    machine: &model::machine::Machine<impl MachineIdSubtypeTrait>,
 ) -> CarbideResult<InstanceInfinibandConfig> {
     let mut updated_ib_config = ib_config.clone();
 
@@ -1581,7 +1581,7 @@ pub(crate) async fn load_extension_services(
 /// attachment still occupies the DPU-agent or the DPF delivery path until its
 /// cleanup finishes, so an instance may never straddle both.
 pub(crate) fn validate_instance_extension_services(
-    machine_id: MachineId,
+    machine_id: HostMachineId,
     is_dpf_managed_host: bool,
     extension_services: &InstanceExtensionServicesConfig,
     services: &HashMap<ExtensionServiceId, ExtensionService>,
@@ -1677,7 +1677,10 @@ pub(crate) fn validate_instance_extension_services(
     Ok(())
 }
 
-fn not_allocatable_error(machine_id: MachineId, reason: NotAllocatableReason) -> CarbideError {
+fn not_allocatable_error(
+    machine_id: impl MachineIdSubtypeTrait,
+    reason: NotAllocatableReason,
+) -> CarbideError {
     match reason {
         NotAllocatableReason::InvalidState(state) => CarbideError::InvalidArgument(format!(
             "could not create instance on machine {machine_id} given machine state {state:?}"
@@ -1742,6 +1745,14 @@ pub(crate) async fn batch_allocate_instances(
 
     // Start a single transaction for all allocations
     let mut txn = api.txn_begin().await?;
+    if requests
+        .iter()
+        .any(|request| request.config.network.auto_config.is_none())
+    {
+        // Take the overlap lock before Machine, NSG, or prefix locks so a
+        // waiting allocation reads the policy committed by the prior writer.
+        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    }
 
     // ==== Phase 2: Check against allocations for tenants in requests ====
 
@@ -1829,7 +1840,7 @@ pub(crate) async fn batch_allocate_instances(
     }
 
     // ==== Phase 3: Batch query machines (FOR UPDATE) ====
-    let machine_ids: Vec<_> = requests.iter().map(|r| r.machine_id).collect();
+    let machine_ids: Vec<HostMachineId> = requests.iter().map(|r| r.machine_id).collect();
 
     // Grab a row-level locks on the requested machines
     let machines = db::machine::find(
@@ -1873,20 +1884,12 @@ pub(crate) async fn batch_allocate_instances(
     let dpa_search_config = DpaSearchConfig::default();
     let snapshot_ids: Vec<carbide_uuid::machine::HostMachineId> = snapshot_map
         .values()
-        .map(|snapshot| {
-            snapshot
-                .host_snapshot
-                .host_machine_id()
-                .map_err(|error| CarbideError::internal(error.to_string()))
-        })
-        .collect::<Result<_, _>>()?;
+        .map(|snapshot| snapshot.host_snapshot.id)
+        .collect();
     let mut dpa_interfaces_by_machine =
         db::dpa_interface::find_by_machine_ids(&mut txn, &snapshot_ids, dpa_search_config).await?;
     for snapshot in snapshot_map.values_mut() {
-        let host_machine_id = snapshot
-            .host_snapshot
-            .host_machine_id()
-            .map_err(|error| CarbideError::internal(error.to_string()))?;
+        let host_machine_id = snapshot.host_snapshot.id;
         snapshot.dpa_interface_snapshots = dpa_interfaces_by_machine
             .remove(&host_machine_id)
             .unwrap_or_default();
@@ -2240,6 +2243,16 @@ pub(crate) async fn batch_allocate_instances(
             }
         }
 
+        if mh_snapshot.has_managed_dpus() {
+            crate::handlers::tenant_prefix_overlap::validate_instance_network(
+                api,
+                txn.as_mut(),
+                &request.config,
+                None,
+                true,
+            )
+            .await?;
+        }
         processed_requests.push((request, mh_snapshot));
     }
 
@@ -2384,7 +2397,7 @@ pub(crate) async fn batch_allocate_instances(
     db::instance::batch_update_spx_config(&mut txn, &spx_refs, false).await?;
 
     // ==== Phase 9: Load final instances ====
-    let machine_id_refs: Vec<&MachineId> = processed_requests
+    let machine_id_refs: Vec<&HostMachineId> = processed_requests
         .iter()
         .map(|(r, _)| &r.machine_id)
         .collect();
@@ -2902,9 +2915,10 @@ mod tests {
 
     #[test]
     fn pending_boot_configuration_has_a_safe_allocation_error() {
-        let machine_id = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
-            .parse()
-            .unwrap();
+        let machine_id: carbide_uuid::machine::StableHostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+                .parse()
+                .unwrap();
 
         assert!(matches!(
             not_allocatable_error(

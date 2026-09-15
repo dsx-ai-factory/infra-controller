@@ -77,7 +77,7 @@ fn status_request(
     upgrade_task_id: &str,
 ) -> rpc::forge::ScoutFirmwareUpgradeStatusRequest {
     rpc::forge::ScoutFirmwareUpgradeStatusRequest {
-        machine_id: Some(mh.host.id.into()),
+        machine_id: Some(mh.host.id),
         success: true,
         exit_code: 0,
         stdout: String::new(),

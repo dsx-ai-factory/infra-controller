@@ -276,9 +276,7 @@ async fn connect_postgres(config: &CarbideConfig) -> eyre::Result<PgPool> {
     // We need logs to be enabled at least at `INFO` level. Otherwise
     // our global logging filter would reject the logs before they get injected
     // into the `SqlxQueryTracing` layer.
-    let mut options = config
-        .database_url
-        .parse::<sqlx::postgres::PgConnectOptions>()?
+    let mut options = crate::postgres_connect_options(&config.database_url)?
         .log_statements(SQLX_STATEMENTS_LOG_LEVEL.as_log().to_level_filter());
     // The integration test opts out of TLS enforcement.
     if let Some(tls_config) = &config.tls

@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM arm64v8/rust:1.97.1-slim-bookworm
+FROM arm64v8/rust:1.97.1-slim-bookworm@sha256:b28e5606d830400fabf789f910f9ed2ea22cdd6d51d463c5d0baa30bb2bedb2d
+
+ARG KEA_VERSION
 
 # Set in gitlab-templates/scripts/build-push-container-image.sh
 ARG CI_COMMIT_SHORT_SHA
@@ -42,9 +44,9 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		iproute2 \
 		iputils-ping \
 		jq \
-		kea-dev \
-		kea-dhcp4-server \
-		kea-dhcp6-server \
+		kea-dev=${KEA_VERSION} \
+		kea-dhcp4-server=${KEA_VERSION} \
+		kea-dhcp6-server=${KEA_VERSION} \
 		libboost-dev \
 		libgrpc-dev \
 		libopenipmi-dev \
@@ -66,6 +68,9 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		wget \
 		git \
 	&& rm -rf /var/lib/apt/lists/*
+
+RUN test "$(dpkg-query -W -f='${Version}' kea-dev)" = "${KEA_VERSION}" && \
+	kea-dhcp6 -V
 
 # Keep the system linker for non-Rust builds such as iPXE, whose linker script
 # is not accepted by mold. Cargo uses this wrapper even outside the repository.

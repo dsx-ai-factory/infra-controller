@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::DpuMachineId;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
@@ -31,5 +31,5 @@ pub(crate) struct MachineQuery {
 #[derive(Parser, Debug, Clone)]
 pub(crate) struct NetworkConfigQuery {
     #[clap(long, required(true), help = "DPU machine id")]
-    pub(crate) machine_id: MachineId,
+    pub(crate) machine_id: DpuMachineId,
 }

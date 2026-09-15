@@ -52,7 +52,7 @@ func NewKeycloakConfig(baseURL, externalBaseURL, clientID, clientSecret, realm s
 func (kc *KeycloakConfig) initializeJWKS() bool {
 	jwksURL := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/certs", kc.BaseURL, kc.Realm)
 
-	tempJwksConfig := &JwksConfig{
+	jwksConfig := &JwksConfig{
 		Name:           fmt.Sprintf("keycloak-%s", kc.Realm),
 		URL:            jwksURL,
 		Issuer:         kc.Issuer,
@@ -60,25 +60,31 @@ func (kc *KeycloakConfig) initializeJWKS() bool {
 		ServiceAccount: kc.ServiceAccountEnabled,
 	}
 
+	// Retain the configuration even when the initial fetch fails so token
+	// validation can refresh the key set after Keycloak becomes available.
+	kc.jwksConfig = jwksConfig
+
 	// Attempt to fetch JWKS during initialization
-	err := tempJwksConfig.UpdateJWKS()
+	err := jwksConfig.UpdateJWKS()
 	if err != nil {
 		log.Warn().Err(err).Msgf("Failed to fetch JWKS during initialization from URL %s for realm %s", jwksURL, kc.Realm)
 		return false
-	} else {
-		log.Info().Msgf("Successfully initialized JWKS for realm %s from URL %s", kc.Realm, jwksURL)
-		// Only set jwksConfig if fetch succeeds
-		kc.jwksConfig = tempJwksConfig
-		return true
 	}
+
+	log.Info().Msgf("Successfully initialized JWKS for realm %s from URL %s", kc.Realm, jwksURL)
+	return true
 }
 
-// GetJwksConfig gets the JWKS configuration, retrying fetch if needed
+// GetJwksConfig returns the stable JWKS configuration, initializing it if needed.
 func (kc *KeycloakConfig) GetJwksConfig() (*JwksConfig, error) {
 	kc.mu.RLock()
 	if kc.jwksConfig != nil {
+		jwksConfig := kc.jwksConfig
 		kc.mu.RUnlock()
-		return kc.jwksConfig, nil
+		if jwksConfig.GetJWKS() == nil {
+			return jwksConfig, fmt.Errorf("failed to fetch JWKS for realm %s", kc.Realm)
+		}
+		return jwksConfig, nil
 	}
 	kc.mu.RUnlock()
 
@@ -87,12 +93,15 @@ func (kc *KeycloakConfig) GetJwksConfig() (*JwksConfig, error) {
 
 	// Double-check in case another goroutine initialized it
 	if kc.jwksConfig != nil {
+		if kc.jwksConfig.GetJWKS() == nil {
+			return kc.jwksConfig, fmt.Errorf("failed to fetch JWKS for realm %s", kc.Realm)
+		}
 		return kc.jwksConfig, nil
 	}
 
 	success := kc.initializeJWKS()
 	if !success || kc.jwksConfig == nil {
-		return nil, fmt.Errorf("failed to fetch JWKS for realm %s", kc.Realm)
+		return kc.jwksConfig, fmt.Errorf("failed to fetch JWKS for realm %s", kc.Realm)
 	}
 
 	return kc.jwksConfig, nil
