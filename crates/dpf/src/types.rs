@@ -684,6 +684,28 @@ pub struct DetachedDpuServiceDefinition {
     /// Exact-match node labels for the detached service's DaemonSet. The SDK
     /// renders these as one NodeSelector term with `In` expressions.
     pub node_selector_labels: BTreeMap<String, String>,
+    pub service_daemon_set: DetachedServiceDaemonSet,
+}
+
+/// Tenant-configurable fields on a detached DPUService's generated DaemonSet.
+#[derive(Debug, Clone, Default)]
+pub struct DetachedServiceDaemonSet {
+    pub annotations: Option<BTreeMap<String, String>>,
+    pub labels: Option<BTreeMap<String, String>>,
+    pub resources: Option<BTreeMap<String, IntOrString>>,
+    pub update_strategy: Option<DetachedServiceDaemonSetUpdateStrategy>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DetachedServiceDaemonSetUpdateStrategy {
+    pub strategy_type: Option<String>,
+    pub rolling_update: Option<DetachedServiceDaemonSetRollingUpdate>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DetachedServiceDaemonSetRollingUpdate {
+    pub max_surge: Option<IntOrString>,
+    pub max_unavailable: Option<IntOrString>,
 }
 
 /// Helm-chart fields required by a [`DetachedDpuServiceDefinition`].
@@ -715,6 +737,10 @@ pub struct DpuServiceObservation {
     /// Serialized Kubernetes NodeSelector, retained for immutable ownership
     /// validation.
     pub service_daemon_set_node_selector: Option<serde_json::Value>,
+    pub service_daemon_set_annotations: Option<BTreeMap<String, String>>,
+    pub service_daemon_set_labels: Option<BTreeMap<String, String>>,
+    pub service_daemon_set_resources: Option<BTreeMap<String, IntOrString>>,
+    pub service_daemon_set_update_strategy: Option<serde_json::Value>,
     pub service_id: Option<String>,
     pub config_ports_present: bool,
     /// Whether Kubernetes has accepted deletion and the CR is retained only

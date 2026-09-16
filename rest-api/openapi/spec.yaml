@@ -30374,6 +30374,11 @@ components:
                 prometheus:
                   scrapeIntervalSeconds: 30
                   endpoint: busybox:9090
+        - name: storage-client
+          description: DPF-managed storage client
+          serviceType: DpfHelmChart
+          siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security.privileged":true,"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
       properties:
         name:
           type: string
@@ -30399,7 +30404,8 @@ components:
         data:
           type: string
           maxLength: 131072
-          description: Deployment spec, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. KubernetesPod requires a parseable Pod manifest declaring at least one container, whose kind, when present, is Pod. DpfHelmChart requires a strict JSON object with repoURL, chartName, chartVersion, security.privileged, and optional values; repoURL must use https:// or oci://, and serviceDaemonSet.nodeSelector is unsupported.
+          description: >-
+            Deployment spec, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. KubernetesPod requires a parseable Pod manifest declaring at least one container, whose kind, when present, is Pod. DpfHelmChart requires a strict JSON object with repoURL, chartName, chartVersion, security.privileged, and optional values and serviceDaemonSet; repoURL must use https:// or oci://. The typed serviceDaemonSet supports only labels, annotations, ResourceList-style resources, and updateStrategy. Metadata uses Kubernetes key/value syntax. updateStrategy supports RollingUpdate and OnDelete. Rolling-update limits are non-negative integers or percentage strings from 0% through 100%; after Kubernetes defaults are applied, exactly one of maxSurge and maxUnavailable must be non-zero. Explicit serviceDaemonSet.nodeSelector, the incorrect upgradeStrategy spelling, values.serviceDaemonSet.nodeSelector, and all other unsupported fields are rejected because NICo owns placement and the typed contract is strict.
         credentials:
           $ref: '#/components/schemas/DpuExtensionServiceCredentials'
           description: Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
@@ -30443,7 +30449,7 @@ components:
             - string
             - 'null'
           maxLength: 131072
-          description: Deployment spec for the DPU Extension Service, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. For KubernetesPod this is the same Pod manifest accepted on create. For DpfHelmChart this is the same strict JSON definition accepted on create and updates stable V1 in place.
+          description: Deployment spec for the DPU Extension Service, limited to 131072 bytes once UTF-8 encoded; characters outside ASCII count as more than one byte. For KubernetesPod this is the same Pod manifest accepted on create. For DpfHelmChart this is the same strict JSON definition and serviceDaemonSet validation accepted on create, and updates stable V1 in place.
         credentials:
           $ref: '#/components/schemas/DpuExtensionServiceCredentials'
           description: Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart

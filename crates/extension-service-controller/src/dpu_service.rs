@@ -19,10 +19,15 @@
 
 use std::collections::BTreeMap;
 
-use carbide_dpf::{DetachedDpuServiceDefinition, DetachedHelmChart, DpuServiceObservation};
+use carbide_dpf::{
+    DetachedDpuServiceDefinition, DetachedHelmChart, DetachedServiceDaemonSet,
+    DetachedServiceDaemonSetRollingUpdate, DetachedServiceDaemonSetUpdateStrategy,
+    DpuServiceObservation, IntOrString,
+};
 use carbide_uuid::extension_service::ExtensionServiceId;
 use model::extension_service::{
-    DPF_HELM_CHART_OWNER_LABEL, DPF_HELM_CHART_PLACEMENT_LABEL_VALUE, DpfHelmChartIdentity,
+    DPF_HELM_CHART_OWNER_LABEL, DPF_HELM_CHART_PLACEMENT_LABEL_VALUE,
+    DpfHelmChartDaemonSetUpdateStrategyType, DpfHelmChartIdentity, DpfHelmChartIntOrPercent,
     DpfHelmChartServiceData,
 };
 use serde_json::{Map, Value, json};
@@ -50,6 +55,7 @@ pub fn project_dpu_service(
         deploy_in_cluster: false,
         security_privileged: data.security_privileged,
         node_selector_labels: detached_node_selector_labels(&identity),
+        service_daemon_set: projected_service_daemon_set(data),
     }
 }
 
@@ -68,7 +74,7 @@ pub fn project_dpu_service(
 /// absent values by omitting that field.
 pub fn dpu_service_mutable_patch(
     projected: &DetachedDpuServiceDefinition,
-    existing_values: Option<&BTreeMap<String, Value>>,
+    existing: Option<&DpuServiceObservation>,
 ) -> Value {
     let helm_chart = &projected.helm_chart;
     let mut helm_chart_patch = Map::from_iter([(
@@ -84,17 +90,79 @@ pub fn dpu_service_mutable_patch(
         helm_chart.values.as_ref().map_or(Value::Null, |values| {
             Value::Object(values_replacement_merge_patch(
                 &json_object(values),
-                &existing_values.map(json_object).unwrap_or_default(),
+                &existing
+                    .and_then(|existing| existing.helm_chart.values.as_ref())
+                    .map(json_object)
+                    .unwrap_or_default(),
             ))
         }),
     );
+
+    let service_daemon_set = &projected.service_daemon_set;
+    let service_daemon_set_patch = Map::from_iter([
+        (
+            "annotations".to_owned(),
+            optional_object_replacement_patch(
+                service_daemon_set.annotations.as_ref(),
+                existing.and_then(|existing| existing.service_daemon_set_annotations.as_ref()),
+            ),
+        ),
+        (
+            "labels".to_owned(),
+            optional_object_replacement_patch(
+                service_daemon_set.labels.as_ref(),
+                existing.and_then(|existing| existing.service_daemon_set_labels.as_ref()),
+            ),
+        ),
+        (
+            "resources".to_owned(),
+            optional_object_replacement_patch(
+                service_daemon_set.resources.as_ref(),
+                existing.and_then(|existing| existing.service_daemon_set_resources.as_ref()),
+            ),
+        ),
+        (
+            "updateStrategy".to_owned(),
+            optional_value_replacement_patch(
+                service_daemon_set
+                    .update_strategy
+                    .as_ref()
+                    .map(update_strategy_json),
+                existing.and_then(|existing| existing.service_daemon_set_update_strategy.clone()),
+            ),
+        ),
+    ]);
 
     json!({
         "spec": {
             "helmChart": helm_chart_patch,
             "security": {"privileged": projected.security_privileged},
+            "serviceDaemonSet": service_daemon_set_patch,
         },
     })
+}
+
+fn optional_object_replacement_patch<T: serde::Serialize>(
+    desired: Option<&BTreeMap<String, T>>,
+    existing: Option<&BTreeMap<String, T>>,
+) -> Value {
+    optional_value_replacement_patch(
+        desired.map(|value| serde_json::to_value(value).expect("map serialization is infallible")),
+        existing.map(|value| serde_json::to_value(value).expect("map serialization is infallible")),
+    )
+}
+
+fn optional_value_replacement_patch(desired: Option<Value>, existing: Option<Value>) -> Value {
+    match desired {
+        Some(Value::Object(desired)) => Value::Object(values_replacement_merge_patch(
+            &desired,
+            &existing
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default(),
+        )),
+        Some(value) => value,
+        None => Value::Null,
+    }
 }
 
 fn values_replacement_merge_patch(
@@ -216,6 +284,68 @@ fn projected_helm_chart(
     }
 }
 
+fn projected_service_daemon_set(data: &DpfHelmChartServiceData) -> DetachedServiceDaemonSet {
+    let Some(service_daemon_set) = &data.service_daemon_set else {
+        return DetachedServiceDaemonSet::default();
+    };
+    DetachedServiceDaemonSet {
+        annotations: service_daemon_set.annotations.clone(),
+        labels: service_daemon_set.labels.clone(),
+        resources: service_daemon_set.resources.as_ref().map(|resources| {
+            resources
+                .iter()
+                .map(|(name, quantity)| (name.clone(), IntOrString::String(quantity.clone())))
+                .collect()
+        }),
+        update_strategy: service_daemon_set.update_strategy.as_ref().map(|strategy| {
+            DetachedServiceDaemonSetUpdateStrategy {
+                strategy_type: strategy
+                    .strategy_type
+                    .map(|strategy_type| match strategy_type {
+                        DpfHelmChartDaemonSetUpdateStrategyType::RollingUpdate => {
+                            "RollingUpdate".to_owned()
+                        }
+                        DpfHelmChartDaemonSetUpdateStrategyType::OnDelete => "OnDelete".to_owned(),
+                    }),
+                rolling_update: strategy.rolling_update.as_ref().map(|rolling| {
+                    DetachedServiceDaemonSetRollingUpdate {
+                        max_surge: rolling.max_surge.as_ref().map(projected_int_or_percent),
+                        max_unavailable: rolling
+                            .max_unavailable
+                            .as_ref()
+                            .map(projected_int_or_percent),
+                    }
+                }),
+            }
+        }),
+    }
+}
+
+fn projected_int_or_percent(value: &DpfHelmChartIntOrPercent) -> IntOrString {
+    match value {
+        DpfHelmChartIntOrPercent::Int(value) => IntOrString::Int(*value),
+        DpfHelmChartIntOrPercent::Percent(value) => IntOrString::String(value.clone()),
+    }
+}
+
+fn update_strategy_json(strategy: &DetachedServiceDaemonSetUpdateStrategy) -> Value {
+    let mut value = Map::new();
+    if let Some(strategy_type) = &strategy.strategy_type {
+        value.insert("type".to_owned(), json!(strategy_type));
+    }
+    if let Some(rolling_update) = &strategy.rolling_update {
+        let mut rolling = Map::new();
+        if let Some(max_surge) = &rolling_update.max_surge {
+            rolling.insert("maxSurge".to_owned(), json!(max_surge));
+        }
+        if let Some(max_unavailable) = &rolling_update.max_unavailable {
+            rolling.insert("maxUnavailable".to_owned(), json!(max_unavailable));
+        }
+        value.insert("rollingUpdate".to_owned(), Value::Object(rolling));
+    }
+    Value::Object(value)
+}
+
 fn detached_node_selector_labels(identity: &DpfHelmChartIdentity) -> BTreeMap<String, String> {
     BTreeMap::from([(
         identity.placement_label_key.clone(),
@@ -274,6 +404,7 @@ mod tests {
             chart_version: "1.2.3".to_owned(),
             security_privileged: true,
             values,
+            service_daemon_set: None,
         }
     }
 
@@ -298,6 +429,14 @@ mod tests {
             service_daemon_set_node_selector: Some(node_selector_json(
                 &projected.node_selector_labels,
             )),
+            service_daemon_set_annotations: projected.service_daemon_set.annotations.clone(),
+            service_daemon_set_labels: projected.service_daemon_set.labels.clone(),
+            service_daemon_set_resources: projected.service_daemon_set.resources.clone(),
+            service_daemon_set_update_strategy: projected
+                .service_daemon_set
+                .update_strategy
+                .as_ref()
+                .map(update_strategy_json),
             service_id: None,
             config_ports_present: false,
         }
@@ -350,6 +489,83 @@ mod tests {
     }
 
     #[test]
+    fn projection_and_patch_include_typed_daemon_set_fields_but_not_placement() {
+        let initial = DpfHelmChartServiceData::parse(
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "security.privileged":true,
+                "serviceDaemonSet":{
+                    "labels":{"app":"old","remove-me":"value"},
+                    "annotations":{"example.com/owner":"old"},
+                    "resources":{"nvidia.com/bf_sf":"1"},
+                    "updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}
+                }
+            }"#,
+        )
+        .unwrap();
+        let initial_projection = project_dpu_service(service_id(), NAMESPACE, &initial);
+        assert_eq!(
+            initial_projection
+                .service_daemon_set
+                .resources
+                .as_ref()
+                .unwrap()["nvidia.com/bf_sf"],
+            IntOrString::String("1".to_owned())
+        );
+        assert_eq!(
+            initial_projection
+                .service_daemon_set
+                .update_strategy
+                .as_ref()
+                .unwrap()
+                .rolling_update
+                .as_ref()
+                .unwrap()
+                .max_unavailable,
+            Some(IntOrString::Int(0))
+        );
+
+        let desired = DpfHelmChartServiceData::parse(
+            r#"{
+                "repoURL":"oci://registry.example.com/charts",
+                "chartName":"tenant-service",
+                "chartVersion":"1.2.3",
+                "security.privileged":true,
+                "serviceDaemonSet":{
+                    "labels":{"app":"new"},
+                    "annotations":{},
+                    "resources":{"nvidia.com/bf_sf":"2"},
+                    "updateStrategy":{"type":"OnDelete"}
+                }
+            }"#,
+        )
+        .unwrap();
+        let desired_projection = project_dpu_service(service_id(), NAMESPACE, &desired);
+        let existing = observation(&initial_projection);
+        let patch = dpu_service_mutable_patch(&desired_projection, Some(&existing));
+
+        assert_eq!(
+            patch["spec"]["serviceDaemonSet"],
+            json!({
+                "annotations": {"example.com/owner": null},
+                "labels": {"app": "new", "remove-me": null},
+                "resources": {"nvidia.com/bf_sf": "2"},
+                "updateStrategy": {
+                    "type": "OnDelete",
+                    "rollingUpdate": null,
+                },
+            })
+        );
+        assert!(
+            patch["spec"]["serviceDaemonSet"]
+                .get("nodeSelector")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn mutable_patch_has_no_identity_or_attachment_fields() {
         let projected = project_dpu_service(service_id(), NAMESPACE, &data(None));
         let patch = dpu_service_mutable_patch(&projected, None);
@@ -361,7 +577,11 @@ mod tests {
         assert!(patch["spec"].get("interfaces").is_none());
         assert!(patch["spec"].get("configPorts").is_none());
         assert!(patch["spec"].get("dpuClusterSelector").is_none());
-        assert!(patch["spec"].get("serviceDaemonSet").is_none());
+        assert!(
+            patch["spec"]["serviceDaemonSet"]
+                .get("nodeSelector")
+                .is_none()
+        );
         assert!(
             patch["spec"]["helmChart"]["source"]
                 .get("releaseName")
@@ -388,7 +608,9 @@ mod tests {
             ]))),
         );
 
-        let patch = dpu_service_mutable_patch(&projected, Some(&existing_values));
+        let mut existing = observation(&projected);
+        existing.helm_chart.values = Some(existing_values);
+        let patch = dpu_service_mutable_patch(&projected, Some(&existing));
 
         assert_eq!(
             patch["spec"]["helmChart"]["values"],
@@ -408,7 +630,9 @@ mod tests {
         let projected = project_dpu_service(service_id(), NAMESPACE, &data(Some(Map::new())));
         let existing_values = BTreeMap::from_iter([("debug".to_owned(), json!(true))]);
 
-        let patch = dpu_service_mutable_patch(&projected, Some(&existing_values));
+        let mut existing = observation(&projected);
+        existing.helm_chart.values = Some(existing_values);
+        let patch = dpu_service_mutable_patch(&projected, Some(&existing));
 
         assert_eq!(patch["spec"]["helmChart"]["values"], json!({"debug": null}));
     }

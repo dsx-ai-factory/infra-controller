@@ -15,9 +15,13 @@
  * limitations under the License.
  */
 
+use std::collections::BTreeMap;
+
 use carbide_uuid::extension_service::ExtensionServiceId;
 use chrono::prelude::*;
 use config_version::{ConfigVersion, Versioned};
+use lazy_static::lazy_static;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
@@ -416,6 +420,69 @@ pub struct DpfHelmChartServiceData {
     /// field is sent to DPF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub values: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "serviceDaemonSet"
+    )]
+    pub service_daemon_set: Option<DpfHelmChartServiceDaemonSet>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DpfHelmChartServiceDaemonSet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<BTreeMap<String, String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "updateStrategy"
+    )]
+    pub update_strategy: Option<DpfHelmChartDaemonSetUpdateStrategy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DpfHelmChartDaemonSetUpdateStrategy {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "type")]
+    pub strategy_type: Option<DpfHelmChartDaemonSetUpdateStrategyType>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "rollingUpdate"
+    )]
+    pub rolling_update: Option<DpfHelmChartDaemonSetRollingUpdate>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DpfHelmChartDaemonSetUpdateStrategyType {
+    RollingUpdate,
+    OnDelete,
+}
+
+// maxSurge and maxUnavailable can be either absolute number or a percentage
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DpfHelmChartDaemonSetRollingUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxSurge")]
+    pub max_surge: Option<DpfHelmChartIntOrPercent>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "maxUnavailable"
+    )]
+    pub max_unavailable: Option<DpfHelmChartIntOrPercent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum DpfHelmChartIntOrPercent {
+    Int(i32),
+    Percent(String),
 }
 
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
@@ -428,6 +495,8 @@ pub enum DpfHelmChartServiceDataError {
     InvalidRepositoryUrl,
     #[error("tenant values may not set NICo-owned field serviceDaemonSet.nodeSelector")]
     ReservedNodeSelector,
+    #[error("invalid serviceDaemonSet: {0}")]
+    InvalidServiceDaemonSet(String),
 }
 
 impl DpfHelmChartServiceData {
@@ -473,8 +542,184 @@ impl DpfHelmChartServiceData {
         }) {
             return Err(DpfHelmChartServiceDataError::ReservedNodeSelector);
         }
+        if let Some(service_daemon_set) = &self.service_daemon_set {
+            service_daemon_set.validate()?;
+        }
         Ok(())
     }
+}
+
+const MAX_KUBERNETES_ANNOTATION_BYTES: usize = 256 * 1024;
+
+lazy_static! {
+    static ref KUBERNETES_QUALIFIED_NAME: Regex =
+        Regex::new(r"^[A-Za-z0-9](?:[-A-Za-z0-9_.]*[A-Za-z0-9])?$").unwrap();
+    static ref KUBERNETES_DNS_SUBDOMAIN: Regex =
+        Regex::new(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$").unwrap();
+    static ref KUBERNETES_QUANTITY: Regex = Regex::new(
+        r"^(?:\+|-)?(?:(?:[0-9]+(?:\.[0-9]*)?)|(?:\.[0-9]+))(?:(?:[KMGTPE]i)|[numkMGTPE]|(?:[eE](?:\+|-)?(?:(?:[0-9]+(?:\.[0-9]*)?)|(?:\.[0-9]+))))?$"
+    )
+    .unwrap();
+}
+
+impl DpfHelmChartServiceDaemonSet {
+    fn validate(&self) -> Result<(), DpfHelmChartServiceDataError> {
+        // TODO: Add DPF reserved metadata key checks if the direct DPUService
+        // contract adopts the policy currently enforced by DPUServiceConfiguration.
+        if let Some(labels) = &self.labels {
+            for (key, value) in labels {
+                validate_metadata_key("label", key)?;
+                if value.len() > 63
+                    || (!value.is_empty() && !KUBERNETES_QUALIFIED_NAME.is_match(value))
+                {
+                    return Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(
+                        format!("label {key:?} has an invalid Kubernetes label value"),
+                    ));
+                }
+            }
+        }
+
+        if let Some(annotations) = &self.annotations {
+            let annotation_bytes = annotations
+                .iter()
+                .map(|(key, value)| key.len() + value.len())
+                .sum::<usize>();
+            if annotation_bytes > MAX_KUBERNETES_ANNOTATION_BYTES {
+                return Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(
+                    format!(
+                        "annotations exceed Kubernetes' {MAX_KUBERNETES_ANNOTATION_BYTES}-byte limit"
+                    ),
+                ));
+            }
+            for key in annotations.keys() {
+                validate_metadata_key("annotation", key)?;
+            }
+        }
+
+        if let Some(resources) = &self.resources {
+            for (name, quantity) in resources {
+                validate_metadata_key("resource", name)?;
+                if !KUBERNETES_QUANTITY.is_match(quantity) {
+                    return Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(
+                        format!("resource {name:?} has invalid Kubernetes quantity {quantity:?}"),
+                    ));
+                }
+            }
+        }
+
+        if let Some(strategy) = &self.update_strategy {
+            strategy.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl DpfHelmChartDaemonSetUpdateStrategy {
+    // Follow Kubernetes DaemonSet rolling-update semantics:
+    // - maxSurge defaults to 0
+    // - maxUnavailable defaults to 1
+    // - maxSurge and maxUnavailable cannot both be non-zero
+    // - maxSurge and maxUnavailable cannot both be zero
+    // See:
+    // https://kubernetes.io/docs/reference/kubernetes-api/apps/daemon-set-v1/#DaemonSetUpdateStrategy
+    fn validate(&self) -> Result<(), DpfHelmChartServiceDataError> {
+        if self.strategy_type == Some(DpfHelmChartDaemonSetUpdateStrategyType::OnDelete)
+            && self.rolling_update.is_some()
+        {
+            return Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(
+                "updateStrategy.rollingUpdate is supported only for RollingUpdate".to_owned(),
+            ));
+        }
+
+        let Some(rolling_update) = &self.rolling_update else {
+            return Ok(());
+        };
+
+        let max_surge = rolling_update
+            .max_surge
+            .as_ref()
+            .map(DpfHelmChartIntOrPercent::validate)
+            .transpose()?
+            .unwrap_or(0);
+        let max_unavailable = rolling_update
+            .max_unavailable
+            .as_ref()
+            .map(DpfHelmChartIntOrPercent::validate)
+            .transpose()?
+            .unwrap_or(1);
+        if max_surge != 0 && max_unavailable != 0 {
+            return Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(
+                "updateStrategy.rollingUpdate maxSurge must be zero when maxUnavailable is non-zero"
+                    .to_owned(),
+            ));
+        }
+        if max_surge == 0 && max_unavailable == 0 {
+            return Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(
+                "updateStrategy.rollingUpdate maxSurge and maxUnavailable cannot both be zero"
+                    .to_owned(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl DpfHelmChartIntOrPercent {
+    fn validate(&self) -> Result<i32, DpfHelmChartServiceDataError> {
+        match self {
+            Self::Int(value) if *value >= 0 => Ok(*value),
+            Self::Percent(value) => {
+                let Some(percent) = value.strip_suffix('%') else {
+                    return Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(
+                        format!(
+                            "rolling-update string {value:?} must be a percentage ending in '%'"
+                        ),
+                    ));
+                };
+                percent
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|value| (0..=100).contains(value))
+                    .ok_or_else(|| {
+                        DpfHelmChartServiceDataError::InvalidServiceDaemonSet(format!(
+                            "rolling-update percentage {value:?} must be between 0% and 100%"
+                        ))
+                    })
+            }
+            Self::Int(value) => Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(
+                format!("rolling-update integer {value} must not be negative"),
+            )),
+        }
+    }
+}
+
+fn validate_metadata_key(field: &str, key: &str) -> Result<(), DpfHelmChartServiceDataError> {
+    let mut components = key.split('/');
+    let first = components.next().unwrap_or_default();
+    let second = components.next();
+    if components.next().is_some() {
+        return Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(
+            format!("{field} name {key:?} is not a Kubernetes qualified name"),
+        ));
+    }
+    let (prefix, name) = second.map_or((None, first), |name| (Some(first), name));
+    let prefix_is_valid = prefix.is_none_or(|prefix| {
+        !prefix.is_empty()
+            && prefix.len() <= 253
+            && prefix.split('.').all(|component| {
+                component.len() <= 63 && KUBERNETES_DNS_SUBDOMAIN.is_match(component)
+            })
+    });
+    if !prefix_is_valid
+        || name.is_empty()
+        || name.len() > 63
+        || !KUBERNETES_QUALIFIED_NAME.is_match(name)
+    {
+        return Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(
+            format!("{field} name {key:?} is not a Kubernetes qualified name"),
+        ));
+    }
+    Ok(())
 }
 
 /// Durable lifecycle state for an extension service managed by a state controller.
@@ -581,6 +826,125 @@ mod tests {
             ),
             Err(DpfHelmChartServiceDataError::ReservedNodeSelector)
         );
+
+        for (field, expected) in [
+            (
+                r#""serviceDaemonSet":{"nodeSelector":{}}"#,
+                "unknown field `nodeSelector`",
+            ),
+            (
+                r#""serviceDaemonSet":{"upgradeStrategy":{}}"#,
+                "unknown field `upgradeStrategy`",
+            ),
+        ] {
+            let input = format!(
+                r#"{{"repoURL":"https://charts.example.com","chartName":"tenant-service","chartVersion":"1.2.3","security.privileged":true,{field}}}"#
+            );
+            assert!(matches!(
+                DpfHelmChartServiceData::parse(&input),
+                Err(DpfHelmChartServiceDataError::Json(message)) if message.contains(expected)
+            ));
+        }
+    }
+
+    #[test]
+    fn dpf_helm_chart_data_validates_and_round_trips_service_daemon_set() {
+        let input = r#"{
+            "repoURL":"https://charts.example.com",
+            "chartName":"tenant-service",
+            "chartVersion":"1.2.3",
+            "security.privileged":true,
+            "values":{"serviceDaemonSet":{"labels":{"chart-path":"preserved"}}},
+            "serviceDaemonSet":{
+                "labels":{"app.kubernetes.io/name":"storage-client","svc.dpu.nvidia.com/custom-flows":"enabled"},
+                "annotations":{"example.com/owner":"storage"},
+                "resources":{"nvidia.com/bf_sf":"1","memory":"500Mi"},
+                "updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":"25%","maxUnavailable":0}}
+            }
+        }"#;
+
+        let parsed = DpfHelmChartServiceData::parse(input).unwrap();
+        let daemon_set = parsed.service_daemon_set.as_ref().unwrap();
+        assert_eq!(
+            daemon_set.resources.as_ref().unwrap()["nvidia.com/bf_sf"],
+            "1"
+        );
+        assert_eq!(
+            daemon_set.update_strategy.as_ref().unwrap().strategy_type,
+            Some(DpfHelmChartDaemonSetUpdateStrategyType::RollingUpdate)
+        );
+        assert_eq!(
+            DpfHelmChartServiceData::parse(&parsed.normalized_json().unwrap()).unwrap(),
+            parsed
+        );
+    }
+
+    #[test]
+    fn dpf_helm_chart_data_rejects_invalid_service_daemon_set_values() {
+        let cases = [
+            (r#"{"labels":{"bad key":"value"}}"#, "qualified name"),
+            (r#"{"labels":{"app":"bad value"}}"#, "label value"),
+            (
+                r#"{"resources":{"nvidia.com/bf_sf":"not-a-quantity"}}"#,
+                "invalid Kubernetes quantity",
+            ),
+            (
+                r#"{"updateStrategy":{"type":"OnDelete","rollingUpdate":{}}}"#,
+                "supported only for RollingUpdate",
+            ),
+            (
+                r#"{"updateStrategy":{"rollingUpdate":{"maxSurge":0,"maxUnavailable":"0%"}}}"#,
+                "cannot both be zero",
+            ),
+            (
+                r#"{"updateStrategy":{"rollingUpdate":{"maxUnavailable":"-1%"}}}"#,
+                "between 0% and 100%",
+            ),
+            (
+                r#"{"updateStrategy":{"rollingUpdate":{"maxUnavailable":"1"}}}"#,
+                "ending in '%'",
+            ),
+            (
+                r#"{"updateStrategy":{"rollingUpdate":{"maxUnavailable":"101%"}}}"#,
+                "between 0% and 100%",
+            ),
+            (
+                r#"{"updateStrategy":{"rollingUpdate":{"maxSurge":1,"maxUnavailable":1}}}"#,
+                "maxSurge must be zero",
+            ),
+        ];
+
+        for (service_daemon_set, expected) in cases {
+            let input = format!(
+                r#"{{"repoURL":"https://charts.example.com","chartName":"tenant-service","chartVersion":"1.2.3","security.privileged":true,"serviceDaemonSet":{service_daemon_set}}}"#
+            );
+            assert!(matches!(
+                DpfHelmChartServiceData::parse(&input),
+                Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(message))
+                    if message.contains(expected)
+            ));
+        }
+    }
+
+    #[test]
+    fn dpf_helm_chart_data_rejects_oversized_annotations() {
+        let input = serde_json::json!({
+            "repoURL": "https://charts.example.com",
+            "chartName": "tenant-service",
+            "chartVersion": "1.2.3",
+            "security.privileged": true,
+            "serviceDaemonSet": {
+                "annotations": {
+                    "example.com/data": "x".repeat(MAX_KUBERNETES_ANNOTATION_BYTES),
+                },
+            },
+        });
+
+        assert!(matches!(
+            DpfHelmChartServiceData::parse(&input.to_string()),
+            Err(DpfHelmChartServiceDataError::InvalidServiceDaemonSet(message))
+                if message.contains("262144-byte limit")
+        ));
     }
 
     #[test]

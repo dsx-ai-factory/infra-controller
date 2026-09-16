@@ -84,7 +84,9 @@ use crate::crds::dpuservices_generated::{
     DPUService, DpuServiceHelmChart, DpuServiceHelmChartSource, DpuServiceSecurity,
     DpuServiceServiceDaemonSet, DpuServiceServiceDaemonSetNodeSelector,
     DpuServiceServiceDaemonSetNodeSelectorNodeSelectorTerms,
-    DpuServiceServiceDaemonSetNodeSelectorNodeSelectorTermsMatchExpressions, DpuServiceSpec,
+    DpuServiceServiceDaemonSetNodeSelectorNodeSelectorTermsMatchExpressions,
+    DpuServiceServiceDaemonSetUpdateStrategy,
+    DpuServiceServiceDaemonSetUpdateStrategyRollingUpdate, DpuServiceSpec,
 };
 use crate::crds::dpuservicetemplates_generated::{
     DPUServiceTemplate, DpuServiceTemplateHelmChart, DpuServiceTemplateHelmChartSource,
@@ -2400,11 +2402,21 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
                 spiffe: None,
             }),
             service_daemon_set: Some(DpuServiceServiceDaemonSet {
-                annotations: None,
-                labels: None,
+                annotations: service.service_daemon_set.annotations.clone(),
+                labels: service.service_daemon_set.labels.clone(),
                 node_selector: Some(detached_node_selector(&service.node_selector_labels)),
-                resources: None,
-                update_strategy: None,
+                resources: service.service_daemon_set.resources.clone(),
+                update_strategy: service.service_daemon_set.update_strategy.as_ref().map(
+                    |strategy| DpuServiceServiceDaemonSetUpdateStrategy {
+                        r#type: strategy.strategy_type.clone(),
+                        rolling_update: strategy.rolling_update.as_ref().map(|rolling| {
+                            DpuServiceServiceDaemonSetUpdateStrategyRollingUpdate {
+                                max_surge: rolling.max_surge.clone(),
+                                max_unavailable: rolling.max_unavailable.clone(),
+                            }
+                        }),
+                    },
+                ),
             }),
             service_id: None,
         },
@@ -2440,6 +2452,28 @@ fn dpu_service_from_resource(service: DPUService) -> Result<DpuServiceObservatio
             .service_daemon_set
             .as_ref()
             .and_then(|daemon_set| daemon_set.node_selector.as_ref())
+            .map(serde_json::to_value)
+            .transpose()?,
+        service_daemon_set_annotations: service
+            .spec
+            .service_daemon_set
+            .as_ref()
+            .and_then(|daemon_set| daemon_set.annotations.clone()),
+        service_daemon_set_labels: service
+            .spec
+            .service_daemon_set
+            .as_ref()
+            .and_then(|daemon_set| daemon_set.labels.clone()),
+        service_daemon_set_resources: service
+            .spec
+            .service_daemon_set
+            .as_ref()
+            .and_then(|daemon_set| daemon_set.resources.clone()),
+        service_daemon_set_update_strategy: service
+            .spec
+            .service_daemon_set
+            .as_ref()
+            .and_then(|daemon_set| daemon_set.update_strategy.as_ref())
             .map(serde_json::to_value)
             .transpose()?,
         service_id: service.spec.service_id,
@@ -6593,7 +6627,54 @@ mod tests {
                 "nico/extension-service".to_owned(),
                 "enabled".to_owned(),
             )]),
+            service_daemon_set: Default::default(),
         }
+    }
+
+    #[test]
+    fn detached_dpu_service_daemon_set_fields_round_trip_through_checked_cr_type() {
+        let mut service = test_dpu_service("extension-service");
+        service.service_daemon_set = crate::types::DetachedServiceDaemonSet {
+            annotations: Some(BTreeMap::from([(
+                "example.com/owner".to_owned(),
+                "tenant".to_owned(),
+            )])),
+            labels: Some(BTreeMap::from([("app".to_owned(), "storage".to_owned())])),
+            resources: Some(BTreeMap::from([(
+                "nvidia.com/bf_sf".to_owned(),
+                IntOrString::String("1".to_owned()),
+            )])),
+            update_strategy: Some(crate::types::DetachedServiceDaemonSetUpdateStrategy {
+                strategy_type: Some("RollingUpdate".to_owned()),
+                rolling_update: Some(crate::types::DetachedServiceDaemonSetRollingUpdate {
+                    max_surge: None,
+                    max_unavailable: Some(IntOrString::Int(1)),
+                }),
+            }),
+        };
+
+        let observed = dpu_service_from_resource(dpu_service_to_resource(&service)).unwrap();
+
+        assert_eq!(
+            observed.service_daemon_set_annotations,
+            service.service_daemon_set.annotations
+        );
+        assert_eq!(
+            observed.service_daemon_set_labels,
+            service.service_daemon_set.labels
+        );
+        assert_eq!(
+            observed.service_daemon_set_resources,
+            service.service_daemon_set.resources
+        );
+        assert_eq!(
+            observed.service_daemon_set_update_strategy,
+            Some(json!({
+                "type": "RollingUpdate",
+                "rollingUpdate": {"maxUnavailable": 1},
+            }))
+        );
+        assert!(observed.service_daemon_set_node_selector.is_some());
     }
 
     #[tokio::test]
