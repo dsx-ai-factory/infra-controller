@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -5239,6 +5240,14 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	// Get IP addresses from query param and filter by interface IPs
 	if ipAddresses := qParams["ipAddress"]; len(ipAddresses) != 0 {
 		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("ipAddress", ipAddresses), logger)
+		// Core stores these addresses in compressed form, and the database
+		// compares them as text. Leave invalid filters unchanged to match nothing.
+		for i, value := range ipAddresses {
+			address, err := netip.ParseAddr(value)
+			if err == nil {
+				ipAddresses[i] = address.String()
+			}
+		}
 
 		// GetAll interfaces matching specified IP addresses
 		ifcDAO := cdbm.NewInterfaceDAO(gaih.dbSession)
