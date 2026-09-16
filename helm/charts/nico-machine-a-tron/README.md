@@ -25,6 +25,38 @@ helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
 When `mat-k8s-controller` is enabled, it always deploys into the same namespace
 as nico-machine-a-tron. The controller does not support a separate namespace.
 
+## Helm-only Deployment
+
+The chart creates the Kubernetes resources that
+`helm-prereqs/setup-machine-a-tron.sh` otherwise creates: the namespace, its
+`nico.nvidia.com/managed` label and the image pull Secret. Those resources need
+no setup script once helm-prereqs (cert-manager ClusterIssuer, ESO) is
+installed:
+
+- `global.namespaceOverride` with `createNamespace: true` creates the namespace
+  and labels it `nico.nvidia.com/managed: "true"`, so the `nico-roots`
+  ClusterExternalSecret from helm-prereqs syncs the site CA into it.
+- `imagePullSecret.create: true` creates the `image-pull-secret` Secret from the
+  base64-encoded docker config JSON in `imagePullSecret.dockerconfigjson`.
+  Reference it from `global.imagePullSecrets`.
+- A pod that defines only `racks` (clearing the default group with
+  `machines.rack-machines: null`) still gets the bare `[machines]` table that
+  machine-a-tron requires at startup.
+
+The chart does not seed the site-default Vault credentials or write the
+nico-core site configuration; follow the
+[deployment guide](../../../docs/development/machine-a-tron-deployment.md) for
+those steps.
+
+```bash
+helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
+  --set global.namespaceOverride=nico-mat \
+  --set imagePullSecret.create=true \
+  --set imagePullSecret.dockerconfigjson="$(base64 < ~/.docker/config.json | tr -d '\n')" \
+  --set 'global.imagePullSecrets[0].name=image-pull-secret' \
+  -f my-values.yaml
+```
+
 ## Deployment Modes
 
 | Mode | Use Case | Real HW Compatible | Network Setup |
