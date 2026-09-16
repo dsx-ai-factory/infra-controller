@@ -47,6 +47,19 @@ func TestObfuscateRequestBody(t *testing.T) {
 			},
 		},
 		{
+			name: "obfuscates credential fields case-insensitively",
+			body: map[string]interface{}{
+				"DefaultBmcPassword": "synthetic-default",
+				"CLIENTSECRET":       "synthetic-secret",
+				"clientSecret":       "synthetic-second-secret",
+			},
+			want: map[string]interface{}{
+				"DefaultBmcPassword": auditObfuscatedValue,
+				"CLIENTSECRET":       auditObfuscatedValue,
+				"clientSecret":       auditObfuscatedValue,
+			},
+		},
+		{
 			// Regression: the expected-switch NVOS password field must never be
 			// persisted in plaintext in the audit body.
 			name: "obfuscates expected switch nvOsPassword",
@@ -146,13 +159,13 @@ func TestPrepareAuditRequestBody(t *testing.T) {
 			},
 		},
 		{
-			name:    "wraps an array and obfuscates nested sensitive fields",
-			reqBody: `[{"name":"first","password":"synthetic-secret"}]`,
+			name:    "wraps an array and obfuscates differently cased sensitive fields",
+			reqBody: `[{"name":"first","DefaultBmcPassword":"synthetic-secret"}]`,
 			want: map[string]interface{}{
 				auditBodyValueField: []interface{}{
 					map[string]interface{}{
-						"name":     "first",
-						"password": auditObfuscatedValue,
+						"name":               "first",
+						"DefaultBmcPassword": auditObfuscatedValue,
 					},
 				},
 			},
