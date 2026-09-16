@@ -96,6 +96,20 @@ impl From<db::expected_switch::PreIngestionSwitchRmsIdentity> for RmsIdentity {
     }
 }
 
+/// A pre-ingestion power shelf has no `power_shelves` row, so its PMC MAC is the
+/// opaque RMS `node_id` (RMS treats `node_id` as a string, and the request also
+/// carries the full node descriptor and endpoints). Every power shelf is
+/// rack-scale, so the rack identity comes straight from the expected inventory.
+impl From<db::expected_power_shelf::PreIngestionPowerShelfRmsIdentity> for RmsIdentity {
+    fn from(row: db::expected_power_shelf::PreIngestionPowerShelfRmsIdentity) -> Self {
+        Self {
+            node_id: row.bmc_mac_address.to_string(),
+            rack_id: row.rack_id.to_string(),
+            rack_profile_id: row.rack_profile_id,
+        }
+    }
+}
+
 struct ResolvedRmsNode<'a> {
     identity: &'a RmsIdentity,
     node_identity: RmsNodeIdentity,
@@ -1208,6 +1222,38 @@ async fn resolve_power_shelf_identities(
     Ok(map)
 }
 
+/// Resolve RMS identities for pre-ingestion (row-less) power shelves from the
+/// expected inventory, keyed by PMC MAC.
+///
+/// Every power shelf is rack-scale (RMS-managed), so its expected record is
+/// expected to declare a `rack_id`; that rack is required to build the RMS node
+/// descriptor. A record missing a `rack_id` is a misconfiguration and is omitted
+/// here, surfacing as an identity-lookup error at dispatch. The PMC MAC doubles
+/// as the RMS node id because no power shelf id exists yet — RMS treats `node_id`
+/// as an opaque string and the request also carries the full node descriptor and
+/// endpoints. Mirrors `resolve_pre_ingestion_switch_identities`.
+async fn resolve_pre_ingestion_power_shelf_identities(
+    db: &PgPool,
+    macs: &[MacAddress],
+) -> Result<HashMap<MacAddress, RmsIdentity>, ComponentManagerError> {
+    if macs.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = db::expected_power_shelf::find_rms_identities_by_bmc_macs(db, macs)
+        .await
+        .map_err(|e| {
+            ComponentManagerError::Internal(format!(
+                "failed to resolve pre-ingestion power shelf RMS identities: {e}"
+            ))
+        })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.bmc_mac_address, row.into()))
+        .collect())
+}
+
 /// Resolved RMS identity for a compute tray, keyed by BMC IP.
 struct ComputeTrayRmsIdentity {
     identity: RmsIdentity,
@@ -1441,7 +1487,19 @@ impl PowerShelfManager for RmsBackend {
         action: PowerAction,
     ) -> Result<Vec<PowerShelfComponentResult>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.pmc_mac).collect();
-        let ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        let mut ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        // Power shelves with no `power_shelves` row yet (pre-ingestion) fall back
+        // to the expected inventory keyed by PMC MAC. Every power shelf is
+        // rack-scale, so a declared rack_id is expected; the PMC MAC doubles as
+        // the RMS node id since no power shelf id exists.
+        let pre_ingestion_macs: Vec<MacAddress> = macs
+            .iter()
+            .copied()
+            .filter(|m| !ids.contains_key(m))
+            .collect();
+        ids.extend(
+            resolve_pre_ingestion_power_shelf_identities(&self.db, &pre_ingestion_macs).await?,
+        );
         let operation = to_rms_power_operation(action);
         let mut results = Vec::with_capacity(endpoints.len());
 
@@ -1514,7 +1572,19 @@ impl PowerShelfManager for RmsBackend {
         options: &FirmwareUpdateOptions,
     ) -> Result<Vec<PowerShelfComponentResult>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.pmc_mac).collect();
-        let ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        let mut ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        // Power shelves with no `power_shelves` row yet (pre-ingestion) fall back
+        // to the expected inventory keyed by PMC MAC. Every power shelf is
+        // rack-scale, so a declared rack_id is expected; the PMC MAC doubles as
+        // the RMS node id since no power shelf id exists.
+        let pre_ingestion_macs: Vec<MacAddress> = macs
+            .iter()
+            .copied()
+            .filter(|m| !ids.contains_key(m))
+            .collect();
+        ids.extend(
+            resolve_pre_ingestion_power_shelf_identities(&self.db, &pre_ingestion_macs).await?,
+        );
         let component_filters = power_shelf_firmware_object_component_filters(components);
 
         let mut results = Vec::with_capacity(endpoints.len());
@@ -1569,17 +1639,53 @@ impl PowerShelfManager for RmsBackend {
                         &resolved.identity.node_id,
                     );
 
-                    if success {
-                        if let Some(job_id) = job_id {
-                            self.firmware_jobs.lock().unwrap().insert(
-                                ep.pmc_mac,
-                                vec![RmsTrackedFirmwareJob::FirmwareObject(job_id)],
+                    if let (true, Some(job_id)) = (success, job_id) {
+                        // Track both in memory and in the DB keyed by PMC MAC
+                        // so status queries survive a nico-api restart, for
+                        // both ingested and pre-ingestion power shelves. A
+                        // row-less pre-ingestion shelf has no state-controller
+                        // status to fall back to, so without this it returns
+                        // Unknown forever after a restart.
+                        self.firmware_jobs.lock().unwrap().insert(
+                            ep.pmc_mac,
+                            vec![RmsTrackedFirmwareJob::FirmwareObject(job_id.clone())],
+                        );
+                        if let Err(e) = db::direct_dispatch_firmware_job::save(
+                            &self.db,
+                            ep.pmc_mac,
+                            FirmwareJobKind::FirmwareObject,
+                            &job_id,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                pmc_mac_address = %ep.pmc_mac,
+                                job_id = %job_id,
+                                error = %e,
+                                "failed to persist power shelf firmware job ID to database"
                             );
-                        } else {
-                            self.firmware_jobs.lock().unwrap().remove(&ep.pmc_mac);
                         }
                     } else {
+                        // This submission produced no durable job (a failed
+                        // apply, or a success the backend assigned no job to).
+                        // Clear both the in-memory tracking and any job a prior
+                        // update persisted, otherwise a later status query
+                        // (which, after a restart, reads the DB) would recover
+                        // the stale job and report its state for this request.
                         self.firmware_jobs.lock().unwrap().remove(&ep.pmc_mac);
+                        if let Err(e) = db::direct_dispatch_firmware_job::delete(
+                            &self.db,
+                            ep.pmc_mac,
+                            FirmwareJobKind::FirmwareObject,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                pmc_mac_address = %ep.pmc_mac,
+                                error = %e,
+                                "failed to clear persisted power shelf firmware job ID from database"
+                            );
+                        }
                     }
 
                     results.push(PowerShelfComponentResult {
@@ -1631,8 +1737,33 @@ impl PowerShelfManager for RmsBackend {
 
         let mut statuses = Vec::with_capacity(endpoints.len());
 
-        for (pmc_mac, job_id) in &endpoint_jobs {
-            let Some(job_id) = job_id else {
+        for (pmc_mac, in_memory_job) in &endpoint_jobs {
+            // When the in-memory map has no job (e.g. after a pod restart), fall
+            // back to the DB-persisted job id written by update_firmware, keyed
+            // by PMC MAC for both ingested and pre-ingestion power shelves.
+            let resolved_job_id: Option<String> = if in_memory_job.is_some() {
+                in_memory_job.clone()
+            } else {
+                match db::direct_dispatch_firmware_job::get(
+                    &self.db,
+                    *pmc_mac,
+                    FirmwareJobKind::FirmwareObject,
+                )
+                .await
+                {
+                    Ok(db_job_id) => db_job_id,
+                    Err(e) => {
+                        tracing::warn!(
+                            pmc_mac_address = %pmc_mac,
+                            error = %e,
+                            "failed to fetch persisted power shelf firmware job ID from database"
+                        );
+                        None
+                    }
+                }
+            };
+
+            let Some(job_id) = resolved_job_id else {
                 statuses.push(PowerShelfFirmwareUpdateStatus {
                     pmc_mac: *pmc_mac,
                     state: FirmwareState::Unknown,
@@ -1700,7 +1831,19 @@ impl PowerShelfManager for RmsBackend {
         endpoints: &[PowerShelfEndpoint],
     ) -> Result<Vec<PowerShelfFirmwareVersions>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.pmc_mac).collect();
-        let ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        let mut ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        // Power shelves with no `power_shelves` row yet (pre-ingestion) fall back
+        // to the expected inventory keyed by PMC MAC. Every power shelf is
+        // rack-scale, so a declared rack_id is expected; the PMC MAC doubles as
+        // the RMS node id since no power shelf id exists.
+        let pre_ingestion_macs: Vec<MacAddress> = macs
+            .iter()
+            .copied()
+            .filter(|m| !ids.contains_key(m))
+            .collect();
+        ids.extend(
+            resolve_pre_ingestion_power_shelf_identities(&self.db, &pre_ingestion_macs).await?,
+        );
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
@@ -1771,7 +1914,19 @@ impl PowerShelfManager for RmsBackend {
         endpoints: &[PowerShelfEndpoint],
     ) -> Result<Vec<PowerShelfPowerStateResult>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.pmc_mac).collect();
-        let ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        let mut ids = resolve_power_shelf_identities(&self.db, &macs).await?;
+        // Power shelves with no `power_shelves` row yet (pre-ingestion) fall back
+        // to the expected inventory keyed by PMC MAC. Every power shelf is
+        // rack-scale, so a declared rack_id is expected; the PMC MAC doubles as
+        // the RMS node id since no power shelf id exists.
+        let pre_ingestion_macs: Vec<MacAddress> = macs
+            .iter()
+            .copied()
+            .filter(|m| !ids.contains_key(m))
+            .collect();
+        ids.extend(
+            resolve_pre_ingestion_power_shelf_identities(&self.db, &pre_ingestion_macs).await?,
+        );
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
@@ -6015,6 +6170,58 @@ mod tests {
         .expect("failed to create expected machine");
     }
 
+    /// Seed a rack-scale power shelf that has an expected record and rack but no
+    /// `power_shelves` row, mirroring a device present before ingestion
+    /// completes. When `create_rack_row` is false the rack profile is only
+    /// discoverable through `expected_racks`, exercising that fallback.
+    async fn seed_pre_ingestion_power_shelf(
+        txn: &mut sqlx::PgConnection,
+        mac: &str,
+        rack_id: &RackId,
+        create_rack_row: bool,
+    ) {
+        let rack_profile_id = RackProfileId::new(TEST_RACK_PROFILE_ID);
+        db::expected_rack::create(
+            &mut *txn,
+            &model::expected_rack::ExpectedRack {
+                rack_id: rack_id.clone(),
+                rack_profile_id: rack_profile_id.clone(),
+                metadata: model::metadata::Metadata::default(),
+            },
+        )
+        .await
+        .expect("failed to create expected rack");
+
+        if create_rack_row {
+            db::rack::create(
+                &mut *txn,
+                rack_id,
+                Some(&rack_profile_id),
+                &model::rack::RackConfig::default(),
+                None,
+            )
+            .await
+            .expect("failed to create rack");
+        }
+
+        db::expected_power_shelf::create(
+            &mut *txn,
+            model::expected_power_shelf::ExpectedPowerShelf {
+                expected_power_shelf_id: None,
+                bmc_mac_address: mac.parse().unwrap(),
+                serial_number: "PRE-PS-001".to_owned(),
+                bmc_username: "admin".to_owned(),
+                bmc_password: "pass".to_owned(),
+                bmc_ip_address: None,
+                metadata: model::metadata::Metadata::default(),
+                rack_id: Some(rack_id.clone()),
+                bmc_retain_credentials: None,
+            },
+        )
+        .await
+        .expect("failed to create expected power shelf");
+    }
+
     fn make_ct_endpoint(bmc_ip: &str, bmc_mac: &str) -> ComputeTrayEndpoint {
         use carbide_secrets::credentials::Credentials;
         ComputeTrayEndpoint {
@@ -6305,6 +6512,50 @@ mod tests {
     }
 
     #[carbide_macros::sqlx_test]
+    async fn ps_power_control_pre_ingestion_dispatches_via_expected_rack(pool: sqlx::PgPool) {
+        // No power_shelves row and no live racks row: the RMS identity must
+        // resolve entirely from the expected inventory, with the node id
+        // synthesized from the PMC MAC. This is the default RMS backend path for
+        // a pre-ingestion power shelf, which previously failed with an
+        // identity-lookup error.
+        let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+        let mut txn = pool.begin().await.unwrap();
+        seed_pre_ingestion_power_shelf(&mut txn, PS_MAC_1, &rack_id, false).await;
+        txn.commit().await.unwrap();
+
+        let mock = Arc::new(MockRmsApi::new());
+        let backend = RmsBackend::new(
+            mock.clone(),
+            Some(mock.clone()),
+            pool.clone(),
+            Arc::new(rack_profile_config()),
+            true,
+        );
+
+        let pmc_mac: MacAddress = PS_MAC_1.parse().unwrap();
+        // Row-less shelves use the PMC MAC directly as the RMS node id.
+        let node_id = pmc_mac.to_string();
+        mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(&node_id)))
+            .await;
+
+        let eps = vec![make_ps_endpoint(PS_MAC_1)];
+        let results = PowerShelfManager::power_control(&backend, &eps, PowerAction::On)
+            .await
+            .unwrap();
+
+        assert!(results[0].success);
+
+        let calls = mock.batch_set_power_state_calls().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].operation, rms::PowerOperation::On as i32);
+        let dev0 = &calls[0].nodes.as_ref().unwrap().nodes[0];
+        assert_eq!(dev0.node_id, node_id);
+        assert_eq!(dev0.rack_id, rack_id.to_string());
+        assert_descriptor_node(dev0, ROLE_POWER_SHELF);
+        assert!(dev0.bmc_endpoint.is_some());
+    }
+
+    #[carbide_macros::sqlx_test]
     async fn ps_power_control_partial_failure(pool: sqlx::PgPool) {
         let (mock, backend, _, ps1, ps2, _, _) = make_backend(&pool).await;
         mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
@@ -6526,6 +6777,79 @@ mod tests {
     }
 
     #[carbide_macros::sqlx_test]
+    async fn ps_firmware_status_after_failed_resubmit_and_restart_reports_no_job(
+        pool: sqlx::PgPool,
+    ) {
+        let (mock, backend, _, ps1, _, _, _) = make_backend(&pool).await;
+        let eps = vec![make_ps_endpoint(PS_MAC_1)];
+
+        // A successful update persists job-a to the DB.
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+            &ps1.to_string(),
+            "job-a",
+        )))
+        .await;
+        PowerShelfManager::update_firmware(
+            &backend,
+            &eps,
+            r#"{"Id":"fw-json"}"#,
+            &[PowerShelfComponent::Pmc],
+            &firmware_update_options(),
+        )
+        .await
+        .unwrap();
+
+        // A later submission fails and produces no durable job.
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_fail(
+            &ps1.to_string(),
+            "bad firmware file",
+        )))
+        .await;
+        PowerShelfManager::update_firmware(
+            &backend,
+            &eps,
+            r#"{"Id":"fw-json"}"#,
+            &[PowerShelfComponent::Pmc],
+            &firmware_update_options(),
+        )
+        .await
+        .unwrap();
+
+        // The failed submission must clear the persisted job, not just the
+        // in-memory entry, so a restart cannot resurrect it.
+        assert_eq!(
+            db::direct_dispatch_firmware_job::get(
+                &pool,
+                PS_MAC_1.parse::<MacAddress>().unwrap(),
+                FirmwareJobKind::FirmwareObject,
+            )
+            .await
+            .unwrap(),
+            None
+        );
+
+        // Simulate a nico-api restart: the in-memory map is empty, so status
+        // falls back to the DB. With the persisted job cleared, the shelf
+        // reports no tracked job rather than stale job-a's state, and no status
+        // query is issued for it.
+        backend.firmware_jobs.lock().unwrap().clear();
+
+        let statuses = PowerShelfManager::get_firmware_status(&backend, &eps)
+            .await
+            .unwrap();
+
+        assert_eq!(statuses[0].state, FirmwareState::Unknown);
+        assert!(
+            statuses[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("no firmware job")
+        );
+        assert!(mock.get_firmware_job_status_calls().await.is_empty());
+    }
+
+    #[carbide_macros::sqlx_test]
     async fn ps_firmware_status_running(pool: sqlx::PgPool) {
         let (mock, backend, _, ps1, _, _, _) = make_backend(&pool).await;
 
@@ -6578,6 +6902,80 @@ mod tests {
                 .unwrap()
                 .contains("no firmware job")
         );
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn ps_update_firmware_persists_job_id_to_db(pool: sqlx::PgPool) {
+        let (mock, backend, _, ps1, _, _, _) = make_backend(&pool).await;
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+            &ps1.to_string(),
+            "job-persist",
+        )))
+        .await;
+
+        let eps = vec![make_ps_endpoint(PS_MAC_1)];
+        PowerShelfManager::update_firmware(
+            &backend,
+            &eps,
+            r#"{"Id":"fw-json"}"#,
+            &[PowerShelfComponent::Pmc],
+            &firmware_update_options(),
+        )
+        .await
+        .unwrap();
+
+        // The job id is persisted under the PMC MAC so a restart can recover it.
+        assert_eq!(
+            db::direct_dispatch_firmware_job::get(
+                &pool,
+                PS_MAC_1.parse::<MacAddress>().unwrap(),
+                FirmwareJobKind::FirmwareObject,
+            )
+            .await
+            .unwrap(),
+            Some("job-persist".to_string())
+        );
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn ps_firmware_status_falls_back_to_db_after_restart(pool: sqlx::PgPool) {
+        let (mock, backend, _, ps1, _, _, _) = make_backend(&pool).await;
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+            &ps1.to_string(),
+            "job-reload",
+        )))
+        .await;
+
+        let eps = vec![make_ps_endpoint(PS_MAC_1)];
+        PowerShelfManager::update_firmware(
+            &backend,
+            &eps,
+            r#"{"Id":"fw-json"}"#,
+            &[PowerShelfComponent::Pmc],
+            &firmware_update_options(),
+        )
+        .await
+        .unwrap();
+
+        // Simulate a nico-api restart: the in-memory job map is empty, but the
+        // DB row written by update_firmware survives.
+        backend.firmware_jobs.lock().unwrap().clear();
+
+        mock.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
+            rms::FirmwareJobState::Running,
+        )))
+        .await;
+
+        let statuses = PowerShelfManager::get_firmware_status(&backend, &eps)
+            .await
+            .unwrap();
+
+        // Status recovers the persisted job id from the DB and reports the real
+        // backend state instead of a permanent Unknown.
+        assert_eq!(statuses[0].state, FirmwareState::InProgress);
+        assert!(statuses[0].error.is_none());
+        let calls = mock.get_firmware_job_status_calls().await;
+        assert_eq!(calls[0].job_id, "job-reload");
     }
 
     #[carbide_macros::sqlx_test]

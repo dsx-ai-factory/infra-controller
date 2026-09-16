@@ -221,11 +221,11 @@ stateDiagram-v2
 ```
 
 `Start` submits one `ConfigureSwitchCertificate` request containing every rack
-switch and fixed `nvue_api` and `scale_up_fabric_manager` bindings. The parent
-RMS job ID is persisted while the rack polls the complete batch. After
-completion, the rack submits the RMS ScaleUpFabricManager job. RMS selects the
-primary and reconciles the existing V2 fabric workflow. NICo persists the
-observed primary after the job completes.
+switch and a fixed `nvue_api` binding. The parent RMS job ID is persisted while
+the rack polls the complete batch. After completion, the rack submits the RMS
+ScaleUpFabricManager job. RMS selects the primary, binds NMX-C to the refreshed
+NVUE material, and reconciles the existing V2 fabric workflow. NICo persists
+the observed primary after the job completes.
 
 | Current sub-state | Condition | Result |
 |-------------------|-----------|--------|

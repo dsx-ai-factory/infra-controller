@@ -2581,6 +2581,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-mat-protocol-gateway"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "carbide-test-support",
+ "carbide-ufm-mock",
+ "carbide-utils",
+ "clap",
+ "duration-str",
+ "eyre",
+ "figment",
+ "metrics-endpoint",
+ "rcgen",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "carbide-measured-boot"
 version = "0.0.0"
 dependencies = [
@@ -3464,6 +3491,7 @@ dependencies = [
  "metrics-endpoint",
  "opentelemetry 0.32.0",
  "reqwest 0.13.4",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -6801,7 +6829,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.5#569bc602d2aa03b3f2ea4c9e006d593a05c7b1dc"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.6#f2ebed4d9ba048da3a8a959d8be5104e205abc03"
 dependencies = [
  "chrono",
  "clap",

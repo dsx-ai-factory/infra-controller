@@ -920,7 +920,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     let env = api_fixtures::create_test_env_with_overrides(pool, overrides).await;
 
     // Attach the FNN admin VPC because test env setup does not run production setup hooks.
-    crate::db_init::create_admin_vpc(&env.pool, Some(10000))
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
         .await
         .unwrap();
     crate::db_init::update_network_segments_svi_ip(&env.pool)
@@ -1037,7 +1037,7 @@ async fn test_managed_host_network_config_multi_dpu_fnn_ipv6_loopbacks(pool: sql
         routing_profile: FnnRoutingProfileConfig::default(),
     });
     let env = api_fixtures::create_test_env_with_overrides(pool, overrides).await;
-    crate::db_init::create_admin_vpc(&env.pool, Some(10000))
+    crate::db_init::create_admin_vpc(&env.api, Some(10000))
         .await
         .unwrap();
     crate::db_init::update_network_segments_svi_ip(&env.pool)

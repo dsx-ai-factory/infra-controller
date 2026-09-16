@@ -10941,6 +10941,67 @@ paths:
         For Infrastructure Providers: Org must have an Infrastructure Provider entity and own the Site that the Machine belongs to. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
         For Tenants: Org must have a Tenant with `TargetedInstanceCreation` capability enabled and Tenant Account with Machine's Provider. User must have authorization role with `TENANT_ADMIN` suffix.
+  '/v2/org/{org}/nico/machine/{machineId}/chassis/{chassisId}/reset':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+        name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+    patch:
+      summary: Reset Machine Chassis
+      tags:
+        - Machine
+      parameters:
+        - name: chassisId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            pattern: '^[A-Za-z0-9_-][A-Za-z0-9._-]*$'
+          description: Case-sensitive Redfish chassis identifier for the single chassis to reset
+      responses:
+        '202':
+          description: Machine chassis reset request was accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                example-1:
+                  value:
+                    message: Machine chassis reset request was accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Machine is missing on Site, is assigned to a tenant, is not in the Ready lifecycle state, does not have operator maintenance enabled, already has a pending maintenance operation, or its Site is not Registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: reset-machine-chassis
+      description: |-
+        Queue a case-sensitive Redfish chassis reset on an unassigned Machine owned by the Provider Admin's Org.
+        The Machine must be present on a Registered Site and be a managed host in the `Ready` lifecycle state with operator maintenance enabled and no pending maintenance operation. The chassis ID is required; each request targets one chassis.
+        A `202` response means queued, not completed; `metadata.lifecycleState.value` transitions through `Maintenance(...)` to `Ready` when the BMC accepts the reset, or `Failed/...` if dispatch fails. `Ready` does not confirm hardware recovery; verify recovery before clearing operator maintenance.
+        Read the Machine with `includeMetadata=true` to inspect its lifecycle state.
+        The reset sends the Redfish `ForceRestart` action to the selected chassis.
+        The selected chassis must support the Redfish reset action. Pending reset work and operator maintenance block new allocations.
+        Org must have an Infrastructure Provider entity and own the Site that the Machine belongs to. User must have authorization role with `PROVIDER_ADMIN` suffix.
   '/v2/org/{org}/nico/machine/{machineId}/dpu/reprovision':
     parameters:
       - schema:
@@ -29227,7 +29288,9 @@ components:
           type: integer
           format: uint64
           minimum: 0
-          description: Total number of IP addresses in the block (acquired and unused)
+          description: |
+            Total number of IP addresses in the block (acquired and unused), capped at 2,147,483,647.
+            An IP Block allocated to one child prefix of the same size reports zero.
           readOnly: true
         acquiredIPs:
           type: integer
@@ -29246,7 +29309,9 @@ components:
         availableSmallestPrefixes:
           type: integer
           description: |
-            Total number of /30 prefixes that can still be acquired from this block (only reduced if prefixes are acquired, not reduced by acquired IPs)
+            Number of complete `/30` IPv4 prefixes or `/126` IPv6 prefixes remaining after acquired child prefixes are excluded.
+            Both prefix sizes contain four addresses. The count is capped at 2,147,483,647.
+            The `acquiredIPs` count is not subtracted.
           format: uint64
           minimum: 0
           readOnly: true

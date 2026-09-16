@@ -40,6 +40,8 @@ jobs:
             valueOverrides: '[]'
           - chart: helm/charts/nico-flow
             valueOverrides: '[]'
+          - chart: rest-api/temporal-helm/temporal
+            valueOverrides: '[]'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -53,6 +55,14 @@ jobs:
           lint: 'true'
           template: 'true'
           valueOverrides: ${{ matrix.valueOverrides }}
+
+      - name: Test Temporal SQL addresses
+        if: matrix.chart == 'rest-api/temporal-helm/temporal'
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
+        with:
+          plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
+          registry-password: ${{ secrets.NVCR_STG_TOKEN }}
+          charts: rest-api/temporal-helm/temporal
 
   push-charts:
     name: Push Helm Charts

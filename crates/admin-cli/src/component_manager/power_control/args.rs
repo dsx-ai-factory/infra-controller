@@ -18,7 +18,8 @@
 use clap::Parser;
 
 use crate::component_manager::common::{
-    ComputeTraySelection, PowerActionArg, PowerControlTargetArgs, SwitchSelection,
+    ComputeTraySelection, PowerActionArg, PowerControlTargetArgs, PowerShelfSelection,
+    SwitchSelection,
 };
 
 #[derive(Parser, Debug)]
@@ -44,6 +45,10 @@ Force off a compute tray by BMC MAC (targets the tray before ingestion):
 AC power-cycle a power shelf:
     $ nico-admin-cli component-manager component-power-control power-shelf \
     --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --action ac-powercycle
+
+AC power-cycle a power shelf by PMC MAC (targets the power shelf before ingestion):
+    $ nico-admin-cli component-manager component-power-control power-shelf \
+    --mac-address 00:11:22:33:44:55 --action ac-powercycle
 
 ")]
 pub(crate) struct Args {
@@ -84,15 +89,21 @@ impl From<Args> for rpc::forge::ComponentPowerControlRequest {
                     bypass_state_controller,
                 }
             }
-            PowerControlTargetArgs::PowerShelf(target) => Self {
-                target: Some(
-                    rpc::forge::component_power_control_request::Target::PowerShelfIds(
-                        target.into(),
-                    ),
-                ),
-                action,
-                bypass_state_controller,
-            },
+            PowerControlTargetArgs::PowerShelf(target) => {
+                let target = match target.into_selection() {
+                    PowerShelfSelection::PowerShelfIds(list) => {
+                        rpc::forge::component_power_control_request::Target::PowerShelfIds(list)
+                    }
+                    PowerShelfSelection::Macs(macs) => {
+                        rpc::forge::component_power_control_request::Target::PowerShelfPmcMacs(macs)
+                    }
+                };
+                Self {
+                    target: Some(target),
+                    action,
+                    bypass_state_controller,
+                }
+            }
             PowerControlTargetArgs::ComputeTray(target) => {
                 let target = match target.into_selection() {
                     ComputeTraySelection::MachineIds(list) => {

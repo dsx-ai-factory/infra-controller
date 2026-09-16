@@ -42,6 +42,7 @@ futures = { workspace = true }
 metrics-endpoint = { path = "../metrics-endpoint" }
 opentelemetry = { workspace = true }
 reqwest = { default-features = false, features = ["json", "rustls"], workspace = true }
+rustls = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

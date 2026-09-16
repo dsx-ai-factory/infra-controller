@@ -61,17 +61,18 @@ var errUsage = errors.New("invalid command line")
 
 // options are the parsed command line flags.
 type options struct {
-	namespace          string
-	discoverySelector  string
-	syncInterval       time.Duration
-	kubeconfig         string
-	targetSelector     string
-	insecureSkipVerify bool
-	logLevel           string
-	sourceListAddr     string
-	sourceListDebounce time.Duration
-	healthAddr         string
-	healthStaleAfter   time.Duration
+	namespace              string
+	discoverySelector      string
+	syncInterval           time.Duration
+	kubeconfig             string
+	targetSelector         string
+	insecureSkipVerify     bool
+	logLevel               string
+	sourceListAddr         string
+	sourceListDebounce     time.Duration
+	healthAddr             string
+	healthStaleAfter       time.Duration
+	enableStateAnnotations bool
 }
 
 // parseOptions parses args (without the program name) with environment
@@ -130,6 +131,8 @@ func parseOptions(args []string, lookupEnv func(string) (string, bool)) (*option
 		"Listen address for the liveness endpoint GET /healthz on the pod network (empty disables it)")
 	fs.DurationVar(&opts.healthStaleAfter, "health-stale-after", durationOrDefault("HEALTH_STALE_AFTER", defaultHealthStaleAfter),
 		"How long the reconcile loop may go without completing a pass before /healthz reports a stall (0 disables the check)")
+	fs.BoolVar(&opts.enableStateAnnotations, "enable-state-annotations", envBoolOrDefault("ENABLE_STATE_ANNOTATIONS", false),
+		"Include machine state annotations (api-state, power-state) on Services; causes frequent updates")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil, err
@@ -197,6 +200,7 @@ func main() {
 		Dur("source_list_debounce", opts.sourceListDebounce).
 		Str("health_addr", opts.healthAddr).
 		Dur("health_stale_after", opts.healthStaleAfter).
+		Bool("enable_state_annotations", opts.enableStateAnnotations).
 		Msg("starting controller")
 
 	// Create Kubernetes client
@@ -227,8 +231,9 @@ func main() {
 
 	// Create service builder
 	builder := &controller.ServiceBuilder{
-		Namespace:    opts.namespace,
-		BaseSelector: parseSelector(opts.targetSelector),
+		Namespace:              opts.namespace,
+		BaseSelector:           parseSelector(opts.targetSelector),
+		EnableStateAnnotations: opts.enableStateAnnotations,
 	}
 
 	// Create deployment client for owner reference lookups

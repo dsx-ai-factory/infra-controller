@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::extract::{Json, Path, RawQuery, State};
+use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -1122,40 +1122,10 @@ async fn post_clear_log(
         .unwrap_or_else(http::not_found)
 }
 
-/// `$skip` and `$top` of an entries collection request. Other query options
-/// are ignored, as the Redfish specification allows for non-`$` parameters
-/// and as this mock does for the `$` ones it does not implement.
-fn entry_paging(query: Option<&str>) -> Result<(usize, Option<usize>), String> {
-    let mut skip = 0;
-    let mut top = None;
-    for (key, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
-        let parsed = match key.as_ref() {
-            "$skip" | "$top" => value
-                .parse::<usize>()
-                .map_err(|_| format!("{key} must be a non-negative integer"))?,
-            _ => continue,
-        };
-        if key == "$skip" {
-            skip = parsed;
-        } else if parsed == 0 {
-            // A zero-member page makes no progress, so its continuation would point at itself.
-            return Err("$top must be a positive integer".to_owned());
-        } else {
-            top = Some(parsed);
-        }
-    }
-    Ok((skip, top))
-}
-
 async fn get_log_service_entries(
     State(state): State<BmcState>,
     Path((system_id, log_service_id)): Path<(String, String)>,
-    RawQuery(query): RawQuery,
 ) -> Response {
-    let (skip, top) = match entry_paging(query.as_deref()) {
-        Ok(paging) => paging,
-        Err(message) => return http::bad_request(&message),
-    };
     state
         .system_state
         .find(&system_id)
@@ -1164,17 +1134,18 @@ async fn get_log_service_entries(
         .map(|log_service| {
             let collection =
                 redfish::log_service::system_entries_collection(&system_id, &log_service_id);
-            let page = log_service.page(&collection, skip, top);
-            let mut document = collection.with_members(&page.members).patch(json!({
-                "Members@odata.count": page.total,
-                "Description": "Log services collection", // Required by libredfish
-            }));
-            if let Some(next_skip) = page.next_skip {
-                document = document.patch(json!({
-                    "Members@odata.nextLink": format!("{}?$skip={next_skip}", collection.odata_id),
-                }));
+            let mut response = collection
+                .with_members(&log_service.entries(&collection))
+                .patch(json!({
+                    "Description": "Log services collection", // Required by libredfish
+                }))
+                .into_ok_response();
+            if let Some(page_size) = log_service.page_size() {
+                response
+                    .extensions_mut()
+                    .insert(redfish::query_router::PageSize(page_size));
             }
-            document.into_ok_response()
+            response
         })
         .unwrap_or_else(http::not_found)
 }
@@ -1644,52 +1615,6 @@ mod tests {
             .await,
             StatusCode::NOT_FOUND
         );
-    }
-
-    #[tokio::test]
-    async fn the_entries_collection_pages_with_a_next_link() {
-        let (router, state) = dell_router();
-        let entries_path = "/redfish/v1/Systems/System.Embedded.1/LogServices/EventLog/Entries";
-        let system = "/redfish/v1/Systems/System.Embedded.1";
-        // One seed entry plus 59 lifecycle entries: 60 in a log paged by 50.
-        for _ in 0..59 {
-            state.record_log(redfish::log_service::LogEntryDraft::powered_on(system));
-        }
-        let first = get_json(&router, entries_path).await;
-        assert_eq!(first["Members"].as_array().unwrap().len(), 50);
-        assert_eq!(first["Members@odata.count"], 60);
-        assert_eq!(
-            first["Members@odata.nextLink"],
-            format!("{entries_path}?$skip=50")
-        );
-        assert_eq!(first["Members"][0]["Id"], "0");
-
-        let last = get_json(&router, first["Members@odata.nextLink"].as_str().unwrap()).await;
-        assert_eq!(last["Members"].as_array().unwrap().len(), 10);
-        assert_eq!(last["Members"][9]["Id"], "59");
-        assert!(last.get("Members@odata.nextLink").is_none());
-
-        let capped = get_json(&router, &format!("{entries_path}?$top=5&$skip=2")).await;
-        assert_eq!(capped["Members"].as_array().unwrap().len(), 5);
-        assert_eq!(capped["Members"][0]["Id"], "2");
-        assert_eq!(
-            capped["Members@odata.nextLink"],
-            format!("{entries_path}?$skip=7")
-        );
-
-        for query in ["$skip=many", "$top=0"] {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(format!("{entries_path}?{query}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
-        }
     }
 
     #[tokio::test]
