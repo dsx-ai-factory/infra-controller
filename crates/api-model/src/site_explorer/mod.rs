@@ -126,6 +126,18 @@ pub struct ExploredEndpointSearchFilter {
 #[derive(Clone, Debug, Default)]
 pub struct ExploredManagedHostSearchFilter {}
 
+/// One member of a BMC's `ComponentIntegrity` collection: what the BMC says it
+/// can attest, before any eligibility filter. `ComponentIntegrityEnabled` is
+/// read-write, so a device switched off has to stay distinguishable from one
+/// that is absent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ComponentIntegrityEntry {
+    pub id: String,
+    pub component_integrity_type: String,
+    pub component_integrity_enabled: bool,
+}
+
 /// Data that we gathered about a particular endpoint during site exploration
 /// This data is stored as JSON in the Database. Therefore the format can
 /// only be adjusted in a backward compatible fashion.
@@ -158,6 +170,11 @@ pub struct EndpointExplorationReport {
     /// `Service` reported by Redfish
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service: Vec<Service>,
+    /// The `ComponentIntegrity` collection reported by Redfish, recorded
+    /// unfiltered. `None` means the BMC reported no collection, which is
+    /// distinct from `Some([])` for one it reported empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_integrities: Option<Vec<ComponentIntegrityEntry>>,
     /// If the endpoint is a BMC that belongs to a Machine and enough data is
     /// available to calculate the `MachineId`, this field contains the `MachineId`
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -936,6 +953,7 @@ impl EndpointExplorationReport {
             systems: Vec::new(),
             chassis: Vec::new(),
             service: Vec::new(),
+            component_integrities: None,
             vendor: None,
             hardware_class: None,
             machine_id: None,
@@ -2931,6 +2949,54 @@ mod tests {
         );
     }
 
+    /// The stored report has to keep three answers apart: a BMC that reported
+    /// no `ComponentIntegrity` collection, one that reported an empty
+    /// collection, and one that listed members. Absent and empty are the pair a
+    /// bare `Vec` would merge, and attestation coverage reads them differently.
+    #[test]
+    fn component_integrities_keep_unreported_apart_from_empty() {
+        value_scenarios!(run = |component_integrities| {
+            let report = EndpointExplorationReport {
+                component_integrities,
+                ..Default::default()
+            };
+            let json = serde_json::to_value(&report).expect("report serializes");
+            let round_trip: EndpointExplorationReport =
+                serde_json::from_value(json.clone()).expect("serialized report deserializes");
+            (
+                json.get("ComponentIntegrities").cloned(),
+                round_trip.component_integrities,
+            )
+        };
+            "a BMC that reported no collection stores no field" {
+                None => (None, None),
+            }
+
+            "a collection reported empty stores an empty list" {
+                Some(Vec::new()) => (Some(serde_json::json!([])), Some(Vec::new())),
+            }
+
+            "a listed member keeps its type and enabled flag" {
+                Some(vec![ComponentIntegrityEntry {
+                    id: "ERoT_BMC_0".to_string(),
+                    component_integrity_type: "SPDM".to_string(),
+                    component_integrity_enabled: false,
+                }]) => (
+                    Some(serde_json::json!([{
+                        "Id": "ERoT_BMC_0",
+                        "ComponentIntegrityType": "SPDM",
+                        "ComponentIntegrityEnabled": false,
+                    }])),
+                    Some(vec![ComponentIntegrityEntry {
+                        id: "ERoT_BMC_0".to_string(),
+                        component_integrity_type: "SPDM".to_string(),
+                        component_integrity_enabled: false,
+                    }]),
+                ),
+            }
+        );
+    }
+
     #[test]
     fn machine_setup_status_json_correlates_the_evaluated_target() {
         let mac = MacAddress::new([0x02, 0, 0, 0, 0, 1]);
@@ -3694,6 +3760,7 @@ mod tests {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
+            component_integrities: None,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
             hardware_class: None,
             managers: vec![Manager {
@@ -3859,6 +3926,7 @@ mod tests {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
+            component_integrities: None,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
             hardware_class: None,
             managers: vec![Manager {

@@ -179,9 +179,10 @@ async fn generic_ami_hosts_do_not_use_the_lenovo_port_fallback() {
     }))
     .await;
 
-    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
-        .await
-        .unwrap();
+    let report =
+        nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &common::explorer_config())
+            .await
+            .unwrap();
 
     assert!(
         report.chassis[0].network_adapters[0]

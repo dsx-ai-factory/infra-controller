@@ -29,7 +29,7 @@ async fn explore_nvidia_dgx_vr_and_generate_machine_id() {
     let h = test_support::nvidia_dgx_vr_host_bmc().await;
     let config = common::explorer_config();
 
-    let mut report = nv_generate_exploration_report(h.service_root, &config)
+    let mut report = nv_generate_exploration_report(h.bmc.as_ref(), h.service_root, &config)
         .await
         .expect("NvidiaDgxVr host exploration should succeed");
 
