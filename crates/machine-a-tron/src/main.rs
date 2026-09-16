@@ -149,11 +149,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         bmc_mock_certs_dir,
         bmc_registry,
         api_throttler,
-        desired_firmware_versions,
+        desired_firmware_versions: std::sync::RwLock::new(desired_firmware_versions),
         forge_api_client,
         dhcp_client,
         mac_address_pool: Mutex::new(mac_address_pool).into(),
     });
+
+    machine_a_tron::spawn_desired_firmware_refresher(app_context.clone());
 
     let info = app_context.forge_api_client.version(false).await?;
     tracing::info!(

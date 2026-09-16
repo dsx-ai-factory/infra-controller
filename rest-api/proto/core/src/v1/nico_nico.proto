@@ -2370,6 +2370,10 @@ message PowerShelf {
   optional common.RackId rack_id = 10;
 
   reserved 11, 12;
+
+  // NVLink domain UUID of the shelf's rack, as last reported by the rack's
+  // NMX-C endpoint. Unset until a valid domain has been observed.
+  common.NVLinkDomainId nvlink_domain_uuid = 13;
 }
 
 message PowerShelfList {

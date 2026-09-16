@@ -110,6 +110,16 @@ fn resolve_pxe_boot(
     }
 }
 
+/// Installed OS a machine starts with. A DPF-managed DPU without a recorded OS gets the
+/// DPU agent image: DPF writes the BFB before NICo first answers its PXE request with
+/// EXIT, so the simulated disk must already be bootable.
+fn initial_installed_os(is_dpu: bool, dpf_enabled: bool, recorded: OsImage) -> OsImage {
+    match recorded {
+        OsImage::None if is_dpu && dpf_enabled => OsImage::DpuAgent,
+        recorded => recorded,
+    }
+}
+
 /// MachineStateMachine (yo dawg) models the state machine of a machine endpoint
 ///
 /// This code is in common between DPUs and Hosts.(ie. anything that has a BMC, boots via DHCP, can
@@ -360,6 +370,11 @@ impl MachineStateMachine {
         };
         let (fsm, actions) = MachineFsm::init(true, Self::is_bmc_only(&machine_info, &config));
         let resolved_timings = Self::resolve_timings(&machine_info, &config);
+        let installed_os = initial_installed_os(
+            matches!(machine_info, MachineInfo::Dpu(_)),
+            config.dpf_enabled,
+            initial_os_image,
+        );
         let mut live_state =
             LiveState::for_machine(&machine_info, MockPowerState::On, tpm_ek_certificate);
         live_state.bmc_credentials = bmc_credentials;
@@ -377,7 +392,7 @@ impl MachineStateMachine {
             machine_interface_id: None,
             dhcp_retry_deadline: None,
             machine_discovery_result: None,
-            installed_os: initial_os_image,
+            installed_os,
             live_state: Arc::new(RwLock::new(live_state)),
             machine_info,
             bmc_command_channel,
@@ -401,6 +416,11 @@ impl MachineStateMachine {
     ) -> MachineStateMachine {
         let (fsm, actions) = MachineFsm::init(false, Self::is_bmc_only(&machine_info, &config));
         let resolved_timings = Self::resolve_timings(&machine_info, &config);
+        let installed_os = initial_installed_os(
+            matches!(machine_info, MachineInfo::Dpu(_)),
+            config.dpf_enabled,
+            OsImage::default(),
+        );
         MachineStateMachine {
             live_state: Arc::new(RwLock::new(LiveState::for_machine(
                 &machine_info,
@@ -420,7 +440,7 @@ impl MachineStateMachine {
             machine_on_deadline: None,
             agent_polling_deadline: None,
             power_cycle_deadline: None,
-            installed_os: OsImage::default(),
+            installed_os,
             machine_info,
             bmc_command_channel,
             config,
@@ -1060,6 +1080,31 @@ impl MachineStateMachine {
         }
     }
 
+    /// Apply refreshed desired host firmware targets: update the retained
+    /// `machine_info` and re-stage a running BMC mock's pending upgrades.
+    pub(super) fn set_desired_host_firmware(
+        &mut self,
+        desired: Option<bmc_mock::HostFirmwareVersions>,
+    ) {
+        if let MachineInfo::Host(host) = &mut self.machine_info {
+            host.desired_host_firmware = desired.clone();
+        }
+        let Some(bmc_state) = self.bmc_state.as_ref() else {
+            return;
+        };
+        let update_service = &bmc_state.update_service_state;
+        let (bmc_target, uefi_target) = match &desired {
+            Some(fw) => (fw.bmc.as_deref(), fw.uefi.as_deref()),
+            None => (None, None),
+        };
+        if let Some(id) = update_service.host_bmc_inventory_id.as_deref() {
+            update_service.retarget_pending_upgrade(id, bmc_target);
+        }
+        if let Some(id) = update_service.host_uefi_inventory_id.as_deref() {
+            update_service.retarget_pending_upgrade(id, uefi_target);
+        }
+    }
+
     /// Stop relaying data-plane DHCP through the DPU. Once a DPU flips to NIC
     /// mode it is a plain NIC, so the host DHCPs directly on its own (former-DPU
     /// host) MAC -- the same MAC, so a retained boot interface still matches on
@@ -1534,6 +1579,40 @@ mod tests {
                 },
             ],
             |(is_host, host_inband)| direct_dhcp_relay_address(is_host, underlay, host_inband),
+        );
+    }
+
+    #[test]
+    fn dpf_managed_dpus_start_with_installed_dpu_agent() {
+        check_values(
+            [
+                Check {
+                    scenario: "new DPU of a DPF-enabled host",
+                    input: (true, true, OsImage::None),
+                    expect: OsImage::DpuAgent,
+                },
+                Check {
+                    scenario: "new DPU of a host without DPF",
+                    input: (true, false, OsImage::None),
+                    expect: OsImage::None,
+                },
+                Check {
+                    scenario: "new host under DPF",
+                    input: (false, true, OsImage::None),
+                    expect: OsImage::None,
+                },
+                Check {
+                    scenario: "restored DPF DPU keeps a recorded Scout",
+                    input: (true, true, OsImage::Scout),
+                    expect: OsImage::Scout,
+                },
+                Check {
+                    scenario: "restored host keeps a recorded Scout",
+                    input: (false, true, OsImage::Scout),
+                    expect: OsImage::Scout,
+                },
+            ],
+            |(is_dpu, dpf_enabled, recorded)| initial_installed_os(is_dpu, dpf_enabled, recorded),
         );
     }
 
