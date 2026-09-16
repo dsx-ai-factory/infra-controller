@@ -11,3 +11,22 @@ No Job required — avoids network dependency for apk.
   {{- genPrivateKey "ed25519" -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Vault KV payload for one vault.siteCredentials entry:
+{"UsernamePassword":{"username":"...","password":"..."}}.
+Takes a dict with `key` (the values path used in error messages), `cred`
+(the username/password map) and `requireUsername`. Both fields are coerced
+to strings so an unquoted numeric or boolean YAML scalar still deserializes
+into the String fields NICo reads the entry into.
+*/}}
+{{- define "prereqs.siteCredentialJson" -}}
+{{- $password := required (printf "vault.siteCredentials.%s.password must be set when vault.siteCredentials.enabled is true" .key) .cred.password -}}
+{{- $username := .cred.username -}}
+{{- if .requireUsername -}}
+{{- $username = required (printf "vault.siteCredentials.%s.username must be set when vault.siteCredentials.enabled is true" .key) $username -}}
+{{- else if kindIs "invalid" $username -}}
+{{- $username = "" -}}
+{{- end -}}
+{{- dict "UsernamePassword" (dict "username" (toString $username) "password" (toString $password)) | toJson -}}
+{{- end -}}
