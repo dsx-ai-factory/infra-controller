@@ -30,16 +30,14 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      # 1000 is the `nvs` user the migrations image declares. `pg_isready` in
-      # the init container is a client binary that writes nothing, so it runs
-      # under the same UID without needing anything from its own image.
+      {{- with .Values.podSecurityContext }}
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         - name: wait-for-postgres
           image: {{ if and .Values.waitForPostgres.repository .Values.waitForPostgres.tag }}{{ .Values.waitForPostgres.repository }}:{{ .Values.waitForPostgres.tag }}{{ else }}{{ .Values.waitForPostgres.image }}{{ end }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -78,6 +76,10 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secrets.dbCreds }}
                   key: password
+            {{- with .Values.db.sslMode }}
+            - name: PGSSLMODE
+              value: {{ . | quote }}
+            {{- end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp

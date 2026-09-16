@@ -99,9 +99,10 @@ spec:
           {{- end }}
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
           securityContext:
-            capabilities:
-              add:
-                - SYS_PTRACE
+            allowPrivilegeEscalation: false
+            {{- with .Values.containerSecurityContext }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           ports:

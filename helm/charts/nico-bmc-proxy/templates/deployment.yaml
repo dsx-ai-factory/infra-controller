@@ -80,7 +80,7 @@ spec:
             - name: DATASTORE_USER
               valueFrom:
                 secretKeyRef:
-                  key: username
+                  key: {{ .Values.envFrom.databaseCredentials.usernameKey | default "username" }}
                   name: {{ .Values.envFrom.databaseCredentials.secretName }}
             - name: DATASTORE_PASSWORD
               valueFrom:
