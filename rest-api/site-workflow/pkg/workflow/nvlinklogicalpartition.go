@@ -11,6 +11,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 func DiscoverNVLinkLogicalPartitionInventory(ctx workflow.Context) error {
@@ -69,7 +71,7 @@ func CreateNVLinkLogicalPartition(ctx workflow.Context, request *corev1.NVLinkLo
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -110,7 +112,7 @@ func UpdateNVLinkLogicalPartition(ctx workflow.Context, request *corev1.NVLinkLo
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -150,7 +152,7 @@ func DeleteNVLinkLogicalPartition(ctx workflow.Context, request *corev1.NVLinkLo
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

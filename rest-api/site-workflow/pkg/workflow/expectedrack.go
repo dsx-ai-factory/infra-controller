@@ -12,6 +12,8 @@ import (
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 const (
@@ -29,7 +31,7 @@ func expectedRackActivityOptions() workflow.ActivityOptions {
 		MaximumAttempts:    2,
 	}
 	return workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		RetryPolicy:         retrypolicy,
 	}
 }

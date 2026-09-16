@@ -11,6 +11,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 const (
@@ -70,7 +72,7 @@ func CreateExpectedSwitch(ctx workflow.Context, request *corev1.ExpectedSwitch) 
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -115,7 +117,7 @@ func UpdateExpectedSwitch(ctx workflow.Context, request *corev1.ExpectedSwitch) 
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -150,7 +152,7 @@ func DeleteExpectedSwitch(ctx workflow.Context, request *corev1.ExpectedSwitchRe
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

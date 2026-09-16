@@ -26611,7 +26611,9 @@ components:
           readOnly: true
         isUsableByTenant:
           type: boolean
-          description: Indicates whether the machine is usable by or currently in use by a tenant.
+          description: >-
+            Indicates whether the machine is usable by or currently in use by a tenant. It does not indicate that a
+            Machine is available for Instance creation.
           readOnly: true
         statusHistory:
           type: array

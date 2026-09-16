@@ -14,6 +14,8 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/activity"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 // SetMachineMaintenance is a workflow to set Machine maintenance mode using SetMaintenanceOnSite activity
@@ -31,7 +33,7 @@ func SetMachineMaintenance(ctx workflow.Context, request *corev1.MaintenanceRequ
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -66,7 +68,7 @@ func UpdateMachineMetadata(ctx workflow.Context, request *corev1.MachineMetadata
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -99,7 +101,7 @@ func CreateMachineHealthReport(ctx workflow.Context, request *corev1.InsertMachi
 		MaximumAttempts:    2,
 	}
 	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		RetryPolicy:         retrypolicy,
 	}
 	ctx = workflow.WithActivityOptions(ctx, options)
@@ -126,7 +128,7 @@ func DeleteMachineHealthReport(ctx workflow.Context, request *corev1.RemoveMachi
 		MaximumAttempts:    2,
 	}
 	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		RetryPolicy:         retrypolicy,
 	}
 	ctx = workflow.WithActivityOptions(ctx, options)
@@ -192,7 +194,7 @@ func GetDpuMachines(ctx workflow.Context, dpuMachineIDs []string) (*corev1.DpuMa
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}

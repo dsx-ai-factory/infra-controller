@@ -11,6 +11,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
+
+	cloudutils "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
 
 func DiscoverInfiniBandPartitionInventory(ctx workflow.Context) error {
@@ -66,7 +68,7 @@ func CreateInfiniBandPartitionV2(ctx workflow.Context, request *corev1.IBPartiti
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
@@ -99,7 +101,7 @@ func UpdateInfiniBandPartition(ctx workflow.Context, request *corev1.IBPartition
 		MaximumAttempts:    2,
 	}
 	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		RetryPolicy:         retrypolicy,
 	}
 
@@ -135,7 +137,7 @@ func DeleteInfiniBandPartitionV2(ctx workflow.Context, request *corev1.IBPartiti
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
 		// Optionally provide a customized RetryPolicy.
 		RetryPolicy: retrypolicy,
 	}
