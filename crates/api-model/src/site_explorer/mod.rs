@@ -48,6 +48,73 @@ use crate::pci::{UefiPciOrderingKey, UefiPciOrderingKeyParseError, normalize_uef
 use crate::power_shelf::power_shelf_id;
 use crate::switch::switch_id;
 
+/// Stands in for a field the BMC left empty, so every explored endpoint gets a
+/// class an operator can key a profile to rather than no class at all.
+const ABSENT_MANUFACTURER: &str = "unknown";
+const ABSENT_MODEL: &str = "nomodel";
+const ABSENT_SKU: &str = "nosku";
+
+/// Derives an endpoint's hardware class from what its BMC reports about the
+/// host system: manufacturer, model, and SKU, joined by `_`.
+///
+/// The service root's vendor and product stand in for the two fields it also
+/// reports, so one empty Redfish property does not sink the key. `_` cannot
+/// survive normalisation, so a class name parses back into exactly three
+/// fields, and since there are always three it can never collide with the
+/// reserved `any`.
+pub fn derive_hardware_class(
+    system: Option<&ComputerSystem>,
+    root_vendor: Option<&str>,
+    root_product: Option<&str>,
+) -> String {
+    let manufacturer = class_field(
+        system.and_then(|system| system.manufacturer.as_deref()),
+        root_vendor,
+        ABSENT_MANUFACTURER,
+    );
+    let model = class_field(
+        system.and_then(|system| system.model.as_deref()),
+        root_product,
+        ABSENT_MODEL,
+    );
+    let sku = class_field(
+        system.and_then(|system| system.sku.as_deref()),
+        None,
+        ABSENT_SKU,
+    );
+    format!("{manufacturer}_{model}_{sku}")
+}
+
+/// The first source that normalises to something, or the absent marker. A field
+/// of only punctuation normalises to nothing, so it falls through rather than
+/// keying on an empty string.
+fn class_field(preferred: Option<&str>, fallback: Option<&str>, absent: &str) -> String {
+    [preferred, fallback]
+        .into_iter()
+        .flatten()
+        .map(normalize_class_field)
+        .find(|field| !field.is_empty())
+        .unwrap_or_else(|| absent.to_string())
+}
+
+/// Lowercases and joins the alphanumeric runs with `-`, which collapses every
+/// other character and drops leading and trailing separators.
+fn normalize_class_field(value: &str) -> String {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|run| !run.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// How many explored endpoints carry one hardware class, or carry none.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct HardwareClassCount {
+    pub hardware_class: Option<String>,
+    pub endpoints: i64,
+}
+
 /// Filters explored endpoints by values in their exploration reports.
 #[derive(Clone, Debug, Default)]
 pub struct ExploredEndpointSearchFilter {
@@ -74,6 +141,10 @@ pub struct EndpointExplorationReport {
     /// Vendor as reported by Redfish
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<bmc_vendor::BMCVendor>,
+    /// The class [`derive_hardware_class`] derived from what the BMC reported.
+    /// `None` if no exploration has recorded one for this endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware_class: Option<String>,
     /// `Managers` reported by Redfish
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managers: Vec<Manager>,
@@ -865,6 +936,7 @@ impl EndpointExplorationReport {
             chassis: Vec::new(),
             service: Vec::new(),
             vendor: None,
+            hardware_class: None,
             machine_id: None,
             versions: HashMap::default(),
             model: None,
@@ -2628,6 +2700,47 @@ mod tests {
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
 
+    /// A class is the key an operator writes profiles against, so whatever the
+    /// BMC reports has to reduce to a name the API will accept, including when
+    /// it reports nothing usable.
+    #[test]
+    fn hardware_class_derivation() {
+        let system =
+            |manufacturer: Option<&str>, model: Option<&str>, sku: Option<&str>| ComputerSystem {
+                manufacturer: manufacturer.map(str::to_string),
+                model: model.map(str::to_string),
+                sku: sku.map(str::to_string),
+                ..ComputerSystem::default()
+            };
+
+        value_scenarios!(
+            run = |(system, root_vendor, root_product): (
+                ComputerSystem,
+                Option<&str>,
+                Option<&str>,
+            )| derive_hardware_class(Some(&system), root_vendor, root_product);
+
+            "reported fields lowercase and hyphenate into three" {
+                (system(Some("Dell Inc."), Some("PowerEdge R750"), Some("0A6B")), None, None)
+                    => "dell-inc_poweredge-r750_0a6b".to_string(),
+            }
+
+            // The service root reports a vendor and product of its own, which
+            // is a truer answer than the marker for an absent field.
+            "the service root stands in for what the system omits" {
+                (system(None, None, Some("692-24190")), Some("NVIDIA"), Some("GB200 NVL"))
+                    => "nvidia_gb200-nvl_692-24190".to_string(),
+            }
+
+            // A field that normalises to nothing is no more usable than an
+            // absent one, so it falls through rather than keying on empty.
+            "a field with nothing to normalise falls through" {
+                (system(Some("---"), None, None), None, None)
+                    => "unknown_nomodel_nosku".to_string(),
+            }
+        );
+    }
+
     #[test]
     fn identify_dpu_recognizes_bluefield_model_variants() {
         value_scenarios!(
@@ -3574,6 +3687,7 @@ mod tests {
             last_exploration_error: None,
             last_exploration_latency: None,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
+            hardware_class: None,
             managers: vec![Manager {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),
@@ -3738,6 +3852,7 @@ mod tests {
             last_exploration_error: None,
             last_exploration_latency: None,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
+            hardware_class: None,
             managers: vec![Manager {
                 ethernet_interfaces: vec![],
                 id: "bmc".to_string(),
