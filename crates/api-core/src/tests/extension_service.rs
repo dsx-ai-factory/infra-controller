@@ -24,7 +24,8 @@ use ::rpc::forge::{
     DpuExtensionServiceObservabilityConfigLogging,
 };
 use carbide_dpf::{
-    DetachedDpuServiceDefinition, DpfError, DpuServiceHelmChartObservation, DpuServiceObservation,
+    DetachedDpuServiceDefinition, DpfError, DpuServiceDaemonSetObservation,
+    DpuServiceHelmChartObservation, DpuServiceObservation,
 };
 use carbide_extension_service_controller::dpu_service::{
     dpu_service_mutable_patch, project_dpu_service,
@@ -191,45 +192,47 @@ fn dpu_service_observation(service: &DetachedDpuServiceDefinition) -> DpuService
         interfaces_present: false,
         paused: None,
         security_privileged: Some(service.security_privileged),
-        service_daemon_set_node_selector: Some(serde_json::json!({
-            "nodeSelectorTerms": [{
-                "matchExpressions": service.node_selector_labels.iter().map(|(key, value)| serde_json::json!({
-                    "key": key,
-                    "operator": "In",
-                    "values": [value],
-                })).collect::<Vec<_>>(),
-            }],
-        })),
-        service_daemon_set_annotations: service.service_daemon_set.annotations.clone(),
-        service_daemon_set_labels: service.service_daemon_set.labels.clone(),
-        service_daemon_set_resources: service.service_daemon_set.resources.clone(),
-        service_daemon_set_update_strategy: service
-            .service_daemon_set
-            .update_strategy
-            .as_ref()
-            .map(|strategy| {
-                let mut value = serde_json::Map::new();
-                if let Some(strategy_type) = &strategy.strategy_type {
-                    value.insert("type".to_string(), serde_json::json!(strategy_type));
-                }
-                if let Some(rolling_update) = &strategy.rolling_update {
-                    let mut rolling = serde_json::Map::new();
-                    if let Some(max_surge) = &rolling_update.max_surge {
-                        rolling.insert("maxSurge".to_string(), serde_json::json!(max_surge));
+        service_daemon_set: Some(DpuServiceDaemonSetObservation {
+            node_selector: Some(serde_json::json!({
+                "nodeSelectorTerms": [{
+                    "matchExpressions": service.node_selector_labels.iter().map(|(key, value)| serde_json::json!({
+                        "key": key,
+                        "operator": "In",
+                        "values": [value],
+                    })).collect::<Vec<_>>(),
+                }],
+            })),
+            annotations: service.service_daemon_set.annotations.clone(),
+            labels: service.service_daemon_set.labels.clone(),
+            resources: service.service_daemon_set.resources.clone(),
+            update_strategy: service
+                .service_daemon_set
+                .update_strategy
+                .as_ref()
+                .map(|strategy| {
+                    let mut value = serde_json::Map::new();
+                    if let Some(strategy_type) = &strategy.strategy_type {
+                        value.insert("type".to_string(), serde_json::json!(strategy_type));
                     }
-                    if let Some(max_unavailable) = &rolling_update.max_unavailable {
-                        rolling.insert(
-                            "maxUnavailable".to_string(),
-                            serde_json::json!(max_unavailable),
+                    if let Some(rolling_update) = &strategy.rolling_update {
+                        let mut rolling = serde_json::Map::new();
+                        if let Some(max_surge) = &rolling_update.max_surge {
+                            rolling.insert("maxSurge".to_string(), serde_json::json!(max_surge));
+                        }
+                        if let Some(max_unavailable) = &rolling_update.max_unavailable {
+                            rolling.insert(
+                                "maxUnavailable".to_string(),
+                                serde_json::json!(max_unavailable),
+                            );
+                        }
+                        value.insert(
+                            "rollingUpdate".to_string(),
+                            serde_json::Value::Object(rolling),
                         );
                     }
-                    value.insert(
-                        "rollingUpdate".to_string(),
-                        serde_json::Value::Object(rolling),
-                    );
-                }
-                serde_json::Value::Object(value)
-            }),
+                    serde_json::Value::Object(value)
+                }),
+        }),
         service_id: None,
         config_ports_present: false,
         is_deleting: false,

@@ -99,26 +99,28 @@ pub fn dpu_service_mutable_patch(
     );
 
     let service_daemon_set = &projected.service_daemon_set;
+    let existing_service_daemon_set =
+        existing.and_then(|existing| existing.service_daemon_set.as_ref());
     let service_daemon_set_patch = Map::from_iter([
         (
             "annotations".to_owned(),
             optional_object_replacement_patch(
                 service_daemon_set.annotations.as_ref(),
-                existing.and_then(|existing| existing.service_daemon_set_annotations.as_ref()),
+                existing_service_daemon_set.and_then(|daemon_set| daemon_set.annotations.as_ref()),
             ),
         ),
         (
             "labels".to_owned(),
             optional_object_replacement_patch(
                 service_daemon_set.labels.as_ref(),
-                existing.and_then(|existing| existing.service_daemon_set_labels.as_ref()),
+                existing_service_daemon_set.and_then(|daemon_set| daemon_set.labels.as_ref()),
             ),
         ),
         (
             "resources".to_owned(),
             optional_object_replacement_patch(
                 service_daemon_set.resources.as_ref(),
-                existing.and_then(|existing| existing.service_daemon_set_resources.as_ref()),
+                existing_service_daemon_set.and_then(|daemon_set| daemon_set.resources.as_ref()),
             ),
         ),
         (
@@ -128,7 +130,8 @@ pub fn dpu_service_mutable_patch(
                     .update_strategy
                     .as_ref()
                     .map(update_strategy_json),
-                existing.and_then(|existing| existing.service_daemon_set_update_strategy.clone()),
+                existing_service_daemon_set
+                    .and_then(|daemon_set| daemon_set.update_strategy.clone()),
             ),
         ),
     ]);
@@ -239,7 +242,10 @@ pub fn verify_dpu_service_ownership(
     )?;
     let expected_node_selector = node_selector_json(&detached_node_selector_labels(&identity));
     immutable_field_matches(
-        existing.service_daemon_set_node_selector.as_ref(),
+        existing
+            .service_daemon_set
+            .as_ref()
+            .and_then(|daemon_set| daemon_set.node_selector.as_ref()),
         Some(&expected_node_selector),
         "spec.serviceDaemonSet.nodeSelector",
     )
@@ -388,6 +394,8 @@ fn immutable_absent(
 mod tests {
     use std::str::FromStr;
 
+    use carbide_dpf::DpuServiceDaemonSetObservation;
+
     use super::*;
 
     const SERVICE_ID: &str = "00000000-0000-0000-0000-000000000001";
@@ -426,17 +434,17 @@ mod tests {
             interfaces_present: false,
             paused: None,
             security_privileged: Some(projected.security_privileged),
-            service_daemon_set_node_selector: Some(node_selector_json(
-                &projected.node_selector_labels,
-            )),
-            service_daemon_set_annotations: projected.service_daemon_set.annotations.clone(),
-            service_daemon_set_labels: projected.service_daemon_set.labels.clone(),
-            service_daemon_set_resources: projected.service_daemon_set.resources.clone(),
-            service_daemon_set_update_strategy: projected
-                .service_daemon_set
-                .update_strategy
-                .as_ref()
-                .map(update_strategy_json),
+            service_daemon_set: Some(DpuServiceDaemonSetObservation {
+                node_selector: Some(node_selector_json(&projected.node_selector_labels)),
+                annotations: projected.service_daemon_set.annotations.clone(),
+                labels: projected.service_daemon_set.labels.clone(),
+                resources: projected.service_daemon_set.resources.clone(),
+                update_strategy: projected
+                    .service_daemon_set
+                    .update_strategy
+                    .as_ref()
+                    .map(update_strategy_json),
+            }),
             service_id: None,
             config_ports_present: false,
         }
@@ -689,7 +697,11 @@ mod tests {
         );
 
         let mut wrong_placement = observation(&projected);
-        wrong_placement.service_daemon_set_node_selector = Some(json!({
+        wrong_placement
+            .service_daemon_set
+            .as_mut()
+            .unwrap()
+            .node_selector = Some(json!({
             "nodeSelectorTerms": [{"matchExpressions": []}],
         }));
         assert_eq!(

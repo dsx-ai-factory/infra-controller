@@ -106,11 +106,12 @@ use crate::types::{
     DOCA_HBN_SERVICE_NAME, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF, DPU_AGENT_SERVICE_NAME,
     DPU_ENABLED_NODE_LABEL, DTS_SERVICE_NAME, DetachedDpuServiceDefinition, DpfInterceptBridging,
     DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuMismatch, DpuNodeInfo, DpuNodeSummary,
-    DpuPhase, DpuServiceHelmChartObservation, DpuServiceInterfacePatch,
-    DpuServiceInterfaceTemplateDefinition, DpuServiceInterfaceTemplateType, DpuServiceObservation,
-    DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig,
-    MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE,
-    ServiceConfigPortProtocol, ServiceDefinition, ServiceNADResourceType, ServiceTemplateVersion,
+    DpuPhase, DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation,
+    DpuServiceInterfacePatch, DpuServiceInterfaceTemplateDefinition,
+    DpuServiceInterfaceTemplateType, DpuServiceObservation, DpuServiceVersion, DpuSummary,
+    FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig, MAX_BLUEFIELD_VFS_PER_PF,
+    OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE, ServiceConfigPortProtocol,
+    ServiceDefinition, ServiceNADResourceType, ServiceTemplateVersion,
 };
 #[cfg(test)]
 use crate::types::{DEFAULT_PF_TOTAL_SF_RESERVED, InitDpfResourcesConfigBuilder};
@@ -2428,6 +2429,28 @@ fn dpu_service_to_resource(service: &DetachedDpuServiceDefinition) -> DPUService
 /// controller.  The repository remains the only layer that deals in checked
 /// DPF CR types.
 fn dpu_service_from_resource(service: DPUService) -> Result<DpuServiceObservation, DpfError> {
+    let service_daemon_set = service
+        .spec
+        .service_daemon_set
+        .map(|daemon_set| {
+            Ok::<_, serde_json::Error>(DpuServiceDaemonSetObservation {
+                node_selector: daemon_set
+                    .node_selector
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?,
+                annotations: daemon_set.annotations,
+                labels: daemon_set.labels,
+                resources: daemon_set.resources,
+                update_strategy: daemon_set
+                    .update_strategy
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
+
     Ok(DpuServiceObservation {
         name: service.metadata.name,
         namespace: service.metadata.namespace,
@@ -2447,35 +2470,7 @@ fn dpu_service_from_resource(service: DPUService) -> Result<DpuServiceObservatio
             .spec
             .security
             .and_then(|security| security.privileged),
-        service_daemon_set_node_selector: service
-            .spec
-            .service_daemon_set
-            .as_ref()
-            .and_then(|daemon_set| daemon_set.node_selector.as_ref())
-            .map(serde_json::to_value)
-            .transpose()?,
-        service_daemon_set_annotations: service
-            .spec
-            .service_daemon_set
-            .as_ref()
-            .and_then(|daemon_set| daemon_set.annotations.clone()),
-        service_daemon_set_labels: service
-            .spec
-            .service_daemon_set
-            .as_ref()
-            .and_then(|daemon_set| daemon_set.labels.clone()),
-        service_daemon_set_resources: service
-            .spec
-            .service_daemon_set
-            .as_ref()
-            .and_then(|daemon_set| daemon_set.resources.clone()),
-        service_daemon_set_update_strategy: service
-            .spec
-            .service_daemon_set
-            .as_ref()
-            .and_then(|daemon_set| daemon_set.update_strategy.as_ref())
-            .map(serde_json::to_value)
-            .transpose()?,
+        service_daemon_set,
         service_id: service.spec.service_id,
         config_ports_present: service.spec.config_ports.is_some(),
         is_deleting: service.metadata.deletion_timestamp.is_some(),
@@ -6654,27 +6649,39 @@ mod tests {
         };
 
         let observed = dpu_service_from_resource(dpu_service_to_resource(&service)).unwrap();
+        let observed_daemon_set = observed.service_daemon_set.unwrap();
 
         assert_eq!(
-            observed.service_daemon_set_annotations,
+            observed_daemon_set.annotations,
             service.service_daemon_set.annotations
         );
         assert_eq!(
-            observed.service_daemon_set_labels,
+            observed_daemon_set.labels,
             service.service_daemon_set.labels
         );
         assert_eq!(
-            observed.service_daemon_set_resources,
+            observed_daemon_set.resources,
             service.service_daemon_set.resources
         );
         assert_eq!(
-            observed.service_daemon_set_update_strategy,
+            observed_daemon_set.update_strategy,
             Some(json!({
                 "type": "RollingUpdate",
                 "rollingUpdate": {"maxUnavailable": 1},
             }))
         );
-        assert!(observed.service_daemon_set_node_selector.is_some());
+        assert!(observed_daemon_set.node_selector.is_some());
+    }
+
+    #[test]
+    fn dpu_service_observation_preserves_absent_service_daemon_set() {
+        let service = test_dpu_service("extension-service");
+        let mut resource = dpu_service_to_resource(&service);
+        resource.spec.service_daemon_set = None;
+
+        let observed = dpu_service_from_resource(resource).unwrap();
+
+        assert!(observed.service_daemon_set.is_none());
     }
 
     #[tokio::test]

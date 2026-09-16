@@ -734,18 +734,24 @@ pub struct DpuServiceObservation {
     pub interfaces_present: bool,
     pub paused: Option<bool>,
     pub security_privileged: Option<bool>,
-    /// Serialized Kubernetes NodeSelector, retained for immutable ownership
-    /// validation.
-    pub service_daemon_set_node_selector: Option<serde_json::Value>,
-    pub service_daemon_set_annotations: Option<BTreeMap<String, String>>,
-    pub service_daemon_set_labels: Option<BTreeMap<String, String>>,
-    pub service_daemon_set_resources: Option<BTreeMap<String, IntOrString>>,
-    pub service_daemon_set_update_strategy: Option<serde_json::Value>,
+    pub service_daemon_set: Option<DpuServiceDaemonSetObservation>,
     pub service_id: Option<String>,
     pub config_ports_present: bool,
     /// Whether Kubernetes has accepted deletion and the CR is retained only
     /// while finalizers remove its dependent resources.
     pub is_deleting: bool,
+}
+
+/// SDK-owned view of the DaemonSet settings observed on a DPUService.
+#[derive(Debug, Clone)]
+pub struct DpuServiceDaemonSetObservation {
+    /// Serialized Kubernetes NodeSelector, retained for immutable ownership
+    /// validation.
+    pub node_selector: Option<serde_json::Value>,
+    pub annotations: Option<BTreeMap<String, String>>,
+    pub labels: Option<BTreeMap<String, String>>,
+    pub resources: Option<BTreeMap<String, IntOrString>>,
+    pub update_strategy: Option<serde_json::Value>,
 }
 
 /// Helm-chart fields as observed on a live DPUService.
