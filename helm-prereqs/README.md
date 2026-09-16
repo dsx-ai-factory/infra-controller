@@ -276,7 +276,7 @@ It supports these common deployment modes:
 | `--core-values <file>` | Use site-specific Core values instead of `helm-prereqs/values/nico-core.yaml`. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--skip-dpf` | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Use for sites with no DPUs or that still use the deprecated iPXE DPU path. See [DPF](#dpf). |
-| `--install-contour` | Install the optional Contour/Envoy ingress controller. The Envoy Service is `LoadBalancer` and is pinned to the `vip-pool-external` MetalLB pool, so that pool must have addresses before the install. |
+| `--install-contour` | Install the optional Contour/Envoy ingress controller. The Envoy Service is `LoadBalancer` and is pinned to the `vip-pool-external` MetalLB pool, so that pool must have addresses before the install. Setup aborts if `projectcontour` already runs a Contour that NICo does not manage, rather than upgrading it with these values. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Core deploys. |
 | `--with-observability` | Also install the local monitoring stack (metrics + logs + traces) after Core. Runs in every mode, including `--skip-rest`. Can also be run standalone at any time: `observability/install-observability.sh`. See [observability/README.md](observability/README.md). |
 | `--debug` | Enable bash tracing. This can print secrets, so avoid it in shared logs. |
