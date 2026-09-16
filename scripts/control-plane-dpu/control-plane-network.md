@@ -192,8 +192,10 @@ one management reach by importing the shared tags into its own VRFs. Sites that 
 to different operators, or that must be kept apart, must use per-site tag numbers
 (1.8.2).
 
-Control-plane prefixes, the loopbacks, host links and service VIPs, are addresses in one
-underlay. They must be disjoint per site in every case.
+Of the control-plane prefixes, only the DPU loopbacks are underlay addresses: they are the
+VXLAN endpoints, in the default VRF. The host links and the service VIPs live in the
+control-plane VRF (`vpc_<controlPlaneVni>`, section 2) and reach the datacenter as EVPN
+routes under `:50100`. All of these prefixes must be disjoint per site in every case.
 
 #### 1.1.3. The ASN range
 
@@ -358,7 +360,9 @@ tags the ASN half is the datacenter ASN allocated in 1.1.1. The control-plane ta
 datacenter ASN, and it differs only when several sites share one datacenter (1.1.2.2).
 The second half is a number from NICo's conventions, listed below. The network team must
 know both halves, because the datacenter imports these targets by their full value. A
-tag is advertised only while a VPC of the corresponding routing profile exists. Routing
+tenant routing profile's tag is advertised only while a VPC of that profile exists;
+`:50100` is exported by the site controller DPUs regardless of any tenant VPC (section 2),
+so the datacenter's import of it must never be made conditional on tenant creation. Routing
 profiles are defined in the `[fnn.routing_profiles]` section of the site config TOML;
 see [VPC Routing Profiles](../../docs/manuals/vpc/vpc_routing_profiles.md).
 
