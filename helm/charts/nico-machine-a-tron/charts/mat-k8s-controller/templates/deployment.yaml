@@ -8,6 +8,15 @@ metadata:
     {{- include "mat-k8s-controller.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  {{- if .Values.gateway.enabled }}
+  # Gateway partition and QoS state is process-local, so an old and a new pod
+  # must not serve the gateway Service at the same time during a rollout.
+  # Kubernetes rejects rollingUpdate together with Recreate, so an existing
+  # Deployment's defaulted field is cleared on upgrade.
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  {{- end }}
   selector:
     matchLabels:
       {{- include "mat-k8s-controller.selectorLabels" . | nindent 6 }}
@@ -21,6 +30,11 @@ spec:
       # with E2BIG ("argument list too long").
       enableServiceLinks: false
       serviceAccountName: {{ include "mat-k8s-controller.serviceAccountName" . }}
+      {{- if .Values.gateway.enabled }}
+      # The gateway must not receive Kubernetes API credentials, so the
+      # ServiceAccount token is projected into the controller container only.
+      automountServiceAccountToken: false
+      {{- end }}
       {{- $global := .Values.global | default dict }}
       {{- with (.Values.imagePullSecrets | default $global.imagePullSecrets) }}
       imagePullSecrets:
@@ -48,6 +62,89 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             runAsUser: 65534
+          {{- if .Values.gateway.enabled }}
+          volumeMounts:
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+          {{- end }}
+        {{- if .Values.gateway.enabled }}
+        {{- $gatewayName := include "mat-k8s-controller.gateway.fullname" . }}
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /mat-protocol-gateway
+          args:
+            - /etc/mat-protocol-gateway/gateway.toml
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.config.logLevel | quote }}
+            - name: UFM_MOCK_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.existingAuthSecret | default "nico-machine-a-tron-ufm-mock-auth" | quote }}
+                  key: token
+          ports:
+            - name: ufm
+              containerPort: {{ .Values.gateway.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: ufm
+              scheme: HTTPS
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: ufm
+              scheme: HTTPS
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/mat-protocol-gateway
+              readOnly: true
+            - name: gateway-tls
+              mountPath: /var/run/secrets/spiffe.io
+              readOnly: true
+      volumes:
+        - name: kube-api-access
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+        - name: gateway-config
+          configMap:
+            name: {{ $gatewayName }}-config
+        - name: gateway-tls
+          secret:
+            secretName: {{ $gatewayName }}-tls
+        {{- end }}
       securityContext:
         fsGroup: 65534
         runAsNonRoot: true
