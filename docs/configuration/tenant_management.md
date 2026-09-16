@@ -719,7 +719,20 @@ The injected `url` is the site-configured phone-home endpoint in `site.phoneHome
 
 When you disable phone-home, the removal behavior depends on whether the request supplies `userData`. If it does, NICo removes only a `phone_home` block that reports to the site endpoint and leaves blocks that report elsewhere unchanged. If the request omits `userData`, NICo edits the stored blob. If NICo stored that blob with phone-home enabled, it removes every `phone_home` block. A stored block can contain a URL from before a change to `site.phoneHomeUrl`.
 
-**Which user-data NICo can edit.** Because NICo rewrites your user-data as YAML, **`userData` you provide must be a `#cloud-config` mapping or a `#cloud-config-archive` sequence when phone-home is enabled**. The API rejects anything else: a `#!` script, a `## template: jinja` document (NICo cannot render a template back), another cloud-init format such as `#cloud-boothook` or `#cloud-config-jsonp`, more than one YAML document, or text that is not YAML. User-data that declares no format at all -- no marker line, or only a comment above your keys -- is taken as `#cloud-config`, and enabling writes that marker at the top, which is what makes cloud-init read the document. Disabling phone-home over user-data NICo cannot edit leaves it untouched rather than failing the request, so any `phone_home` block in there stays.
+**Which user data NICo can edit.** When phone-home is enabled, the `userData` you provide must be one of these formats:
+
+- A `#cloud-config` mapping.
+- A `#cloud-config-archive` sequence.
+
+The API rejects these inputs:
+
+- A `#!` script.
+- A `## template: jinja` document, because NICo cannot render the template back to text.
+- Another cloud-init format, including `#cloud-boothook` or `#cloud-config-jsonp`.
+- More than one YAML document.
+- Text that is not YAML.
+
+NICo treats user data without a format marker as `#cloud-config`, including user data with only a comment above the keys. Enabling phone-home writes the marker at the top so that cloud-init reads the document. When you disable phone-home for user data that NICo cannot edit, NICo leaves the document unchanged instead of rejecting the request. Any `phone_home` block in that document remains.
 
 **Where the block lands.** In a `#cloud-config` document, NICo adds the block at the top level. If the document contains an `autoinstall` section, NICo adds the block under `autoinstall.user-data`. This placement makes the callback come from the installed system instead of the installer.
 
