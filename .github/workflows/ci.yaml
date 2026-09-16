@@ -1746,6 +1746,7 @@ jobs:
             helm/charts/unbound
             helm/rest/nico-mcp
             helm/rest/nico-rest-site-agent
+            helm/rest/nico-rest/charts/nico-rest-api
             helm/rest/nico-rest/charts/nico-rest-common
             helm/rest/nico-rest/charts/nico-rest-site-manager
 

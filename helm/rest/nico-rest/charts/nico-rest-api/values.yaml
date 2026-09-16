@@ -30,7 +30,9 @@ ingress:
   className: contour
   annotations: {}
   # -- Hosts to serve. Every entry is added to spec.tls[].hosts and to the
-  # certificate dnsNames, so this is the only place a DNS name needs to change.
+  # certificate dnsNames, so with both of those derived this is the only place a
+  # DNS name needs to change. Overriding either list means naming the host there
+  # as well, and the chart rejects an override that leaves a host uncovered.
   hosts:
     - host: nico-rest-api.local
       paths:
