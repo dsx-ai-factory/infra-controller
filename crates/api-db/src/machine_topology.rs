@@ -460,6 +460,7 @@ mod tests {
 
     use carbide_uuid::machine::{MachineIdSource, MachineInterfaceId, MachineType};
     use carbide_uuid::network::NetworkSegmentId;
+    use model::machine::ManagedHostState;
 
     use super::*;
 
@@ -499,9 +500,9 @@ mod tests {
                     hash,
                     MachineType::Host,
                 );
-                sqlx::query("INSERT INTO machines (id) VALUES ($1)")
-                    .bind(id)
-                    .execute(txn.as_mut())
+                // Use the production helper: `machines` has NOT NULL columns
+                // without defaults, so a hand-rolled INSERT drifts from the schema.
+                crate::machine::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 1)
                     .await?;
                 Some(id)
             } else {
