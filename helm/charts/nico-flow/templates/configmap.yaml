@@ -1,4 +1,4 @@
-{{- if .Values.flowConfig }}
+{{- include "nico-flow.flowConfigMap" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,6 +7,9 @@ metadata:
   labels:
     {{- include "nico-flow.labels" . | nindent 4 }}
 data:
+  ## Keys mirror the yaml tags in rest-api/flow/internal/config/config.go.
   flowconfig.yaml: |
-{{ .Values.flowConfig | indent 4 }}
-{{- end }}
+    inventory_run_frequency: {{ include "nico-flow.flowConfigInterval" (dict "key" "inventoryRunFrequency" "value" .Values.flowConfig.inventoryRunFrequency) }}
+    disable_inventory: {{ include "nico-flow.flowConfigBool" (dict "key" "disableInventory" "value" .Values.flowConfig.disableInventory) }}
+    leak_detection_interval: {{ include "nico-flow.flowConfigInterval" (dict "key" "leakDetectionInterval" "value" .Values.flowConfig.leakDetectionInterval) }}
+    disable_leak_detection: {{ include "nico-flow.flowConfigBool" (dict "key" "disableLeakDetection" "value" .Values.flowConfig.disableLeakDetection) }}

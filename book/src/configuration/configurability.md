@@ -1146,6 +1146,15 @@ override:
 | `CLUSTER_ID` | — (set by `setup.sh`) | Site UUID (`NICO_SITE_UUID`). |
 | `TEMPORAL_SUBSCRIBE_NAMESPACE` | — (set by `setup.sh`) | Temporal namespace; must match `CLUSTER_ID`. |
 
+### Flow runtime settings - `flowConfig`
+
+Flow reads `/etc/flow/flowconfig.yaml`, which the `nico-flow` chart renders
+from its `flowConfig` values (inventory sync interval, leak detection
+interval, and the two job toggles). Defaults equal Flow's built-in
+defaults, and changing a value rolls the Flow pod. See the
+[chart README](https://github.com/dsx-ai-factory/infra-controller/tree/main/helm/charts/nico-flow)
+for the value table and an override example.
+
 ### REST-side PostgreSQL
 
 NICo REST runs its own simple StatefulSet Postgres in the `nico-rest`
