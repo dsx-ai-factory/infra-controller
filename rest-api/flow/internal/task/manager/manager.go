@@ -310,7 +310,7 @@ func (m *ManagerImpl) validateSubmissionRackTargets(
 	op operation.Wrapper,
 	rackMap map[uuid.UUID]*rack.Rack,
 ) error {
-	if !usesRuleDefinition(op.Type) {
+	if !requiresRuleTargetApplicability(op.Type) {
 		if err := validateResolvedRackTargets(op, nil, rackMap); err != nil {
 			return fmt.Errorf("operation cannot be submitted: %w", err)
 		}
@@ -399,17 +399,15 @@ func validateRuleTargetApplicability(
 	))
 }
 
-// usesRuleDefinition reports whether the task's workflow executes operation
-// rule steps. Direct workflows such as InjectExpectation do not.
-func usesRuleDefinition(taskType taskcommon.TaskType) bool {
+// requiresRuleTargetApplicability reports whether the resolved operation rule
+// must contain a step for at least one targeted component type. The
+// InjectExpectation workflow executes directly without consuming rule steps.
+func requiresRuleTargetApplicability(taskType taskcommon.TaskType) bool {
 	switch taskType {
-	case taskcommon.TaskTypePowerControl,
-		taskcommon.TaskTypeFirmwareControl,
-		taskcommon.TaskTypeBringUp,
-		taskcommon.TaskTypeDecommission:
-		return true
-	default:
+	case taskcommon.TaskTypeInjectExpectation:
 		return false
+	default:
+		return true
 	}
 }
 
@@ -1018,7 +1016,7 @@ func (m *ManagerImpl) executeTask(
 	if err != nil {
 		return nil, fmt.Errorf("operation cannot be executed: %w", err)
 	}
-	if usesRuleDefinition(task.Operation.Type) {
+	if requiresRuleTargetApplicability(task.Operation.Type) {
 		if err := validateRuleTargetApplicability(rule, targetRack); err != nil {
 			return nil, err
 		}
