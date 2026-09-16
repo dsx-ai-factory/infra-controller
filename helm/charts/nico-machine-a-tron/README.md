@@ -473,6 +473,39 @@ To use API mode (default), don't set `dhcpRelay.baseIP` (or set it to empty stri
 
 ---
 
+## Site Health Probe (synthetic monitoring)
+
+The chart ships a `nico-site-health-probe` subchart (enabled by default): a
+single-replica Rust service that continuously runs read-only probes against
+the site's APIs and exposes latency/outcome metrics on `:9009/metrics`
+(`carbide_site_health_probe_*`). Source: `crates/site-health-probe`; the
+metric set is documented in the
+[subchart README](charts/nico-site-health-probe/README.md).
+
+- **gRPC probe** (on by default): `FindMachineIds` + a first-page
+  `FindMachinesByIds` against nico-api — the `machine show` read path,
+  including the PostgreSQL round-trip. Authenticates with a SPIFFE mTLS cert
+  issued by the site's ClusterIssuer under the identity
+  `spiffe://<trustDomain>/nico-system/sa/nico-site-health-probe`, which
+  nico-api's internal RBAC grants read-only access.
+- **REST probes** (off by default): `GET /v2/org/<org>/nico/machine` and
+  `/instance` against nico-rest-api via a Keycloak service-account client.
+  Enabling them requires site inputs — the org, the token URL, a client
+  secret in an existing Secret, and the REST CA bundle (`restCa`) since
+  nico-rest serves TLS from its own issuer. See the subchart values.
+
+Disable with `nico-site-health-probe.enabled=false`. Override the image
+(`nico-site-health-probe.image.repository/tag`) — the default has no registry
+prefix and will not resolve in real clusters.
+
+> **Certificate note:** like the machine-a-tron pod certs, the probe's TLS
+> secret (`nico-site-health-probe-tls`) survives chart uninstalls. After a
+> reinstall that rotated the site CA, delete the stale secret so cert-manager
+> reissues it: `kubectl delete secret nico-site-health-probe-tls -n <ns>`.
+
+<!-- TODO(#5360-followup): active lifecycle probes (machine_count: 1=canary,
+     all=scale test) and progress p50/p95/p99 reporting. -->
+
 ## Troubleshooting
 
 ### ClusterIP already allocated
