@@ -26,8 +26,8 @@ use crate::cfg::cli_options::{CliCommand, CliOptions};
 
 /// Two classes in the shape exploration derives, ordered as the grouped query
 /// returns them, so the fixture is a response the server could actually send.
-const UNPROFILED_CLASS: &str = "dell-inc_poweredge-r750_nosku";
-const PROFILED_CLASS: &str = "nvidia_dgx-gb200_692-24190-0000-1a";
+const UNPROFILED_CLASS: &str = "dell-inc_poweredge-r750";
+const PROFILED_CLASS: &str = "nvidia_dgx-gb200";
 
 struct FakeClient(GetAttestationCoverageResponse);
 

@@ -216,7 +216,7 @@ mod test {
 
         let created = create(
             &mut txn,
-            "dell-inc_poweredge-r750_0a6b",
+            "dell-inc_poweredge-r750",
             &gpu_allowlist(),
             OPERATOR,
         )
@@ -231,17 +231,14 @@ mod test {
         );
         assert_eq!(created.updated_by, OPERATOR);
 
-        let found = find(&mut *txn, "dell-inc_poweredge-r750_0a6b")
+        let found = find(&mut *txn, "dell-inc_poweredge-r750")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(found.policy_document, gpu_allowlist());
         assert_eq!(found.version, created.version);
         assert!(
-            find(&mut *txn, "nvidia_dgx-gb200_692-24190")
-                .await
-                .unwrap()
-                .is_none(),
+            find(&mut *txn, "nvidia_dgx-gb200").await.unwrap().is_none(),
             "a class with no profile reads as absent, not as a default"
         );
     }
@@ -251,7 +248,7 @@ mod test {
         let mut txn = pool.begin().await.unwrap();
         create(
             &mut txn,
-            "dell-inc_poweredge-r750_0a6b",
+            "dell-inc_poweredge-r750",
             &gpu_allowlist(),
             OPERATOR,
         )
@@ -260,7 +257,7 @@ mod test {
 
         let error = create(
             &mut txn,
-            "dell-inc_poweredge-r750_0a6b",
+            "dell-inc_poweredge-r750",
             &gpu_allowlist(),
             OPERATOR,
         )
@@ -278,7 +275,7 @@ mod test {
         let mut txn = pool.begin().await.unwrap();
         let created = create(
             &mut txn,
-            "dell-inc_poweredge-r750_0a6b",
+            "dell-inc_poweredge-r750",
             &gpu_allowlist(),
             OPERATOR,
         )
@@ -288,7 +285,7 @@ mod test {
         let replacement = policy(AttesterSelectionMode::All, vec![]);
         let updated = update(
             &mut txn,
-            "dell-inc_poweredge-r750_0a6b",
+            "dell-inc_poweredge-r750",
             &replacement,
             OPERATOR,
             created.version,
@@ -307,7 +304,7 @@ mod test {
         // it must not silently overwrite the first.
         let error = update(
             &mut txn,
-            "dell-inc_poweredge-r750_0a6b",
+            "dell-inc_poweredge-r750",
             &gpu_allowlist(),
             OPERATOR,
             created.version,
@@ -319,7 +316,7 @@ mod test {
             matches!(error, DatabaseError::ConcurrentModificationError(..)),
             "expected a concurrent-modification error, got {error:?}"
         );
-        let stored = find(&mut *txn, "dell-inc_poweredge-r750_0a6b")
+        let stored = find(&mut *txn, "dell-inc_poweredge-r750")
             .await
             .unwrap()
             .unwrap();
@@ -336,7 +333,7 @@ mod test {
         let mut txn = pool.begin().await.unwrap();
         let created = create(
             &mut txn,
-            "dell-inc_poweredge-r750_0a6b",
+            "dell-inc_poweredge-r750",
             &gpu_allowlist(),
             OPERATOR,
         )
@@ -344,7 +341,7 @@ mod test {
         .unwrap();
         let updated = update(
             &mut txn,
-            "dell-inc_poweredge-r750_0a6b",
+            "dell-inc_poweredge-r750",
             &policy(AttesterSelectionMode::All, vec![]),
             OPERATOR,
             created.version,
@@ -352,7 +349,7 @@ mod test {
         .await
         .unwrap();
 
-        let error = delete(&mut txn, "dell-inc_poweredge-r750_0a6b", created.version)
+        let error = delete(&mut txn, "dell-inc_poweredge-r750", created.version)
             .await
             .expect_err("a stale version must be refused");
         assert!(
@@ -360,18 +357,18 @@ mod test {
             "expected a concurrent-modification error, got {error:?}"
         );
         assert!(
-            find(&mut *txn, "dell-inc_poweredge-r750_0a6b")
+            find(&mut *txn, "dell-inc_poweredge-r750")
                 .await
                 .unwrap()
                 .is_some(),
             "the refused delete must leave the row in place"
         );
 
-        delete(&mut txn, "dell-inc_poweredge-r750_0a6b", updated.version)
+        delete(&mut txn, "dell-inc_poweredge-r750", updated.version)
             .await
             .unwrap();
         assert!(
-            find(&mut *txn, "dell-inc_poweredge-r750_0a6b")
+            find(&mut *txn, "dell-inc_poweredge-r750")
                 .await
                 .unwrap()
                 .is_none()
@@ -381,7 +378,7 @@ mod test {
         // version a caller read before the delete cannot match the new row.
         let recreated = create(
             &mut txn,
-            "dell-inc_poweredge-r750_0a6b",
+            "dell-inc_poweredge-r750",
             &gpu_allowlist(),
             OPERATOR,
         )
@@ -424,20 +421,20 @@ mod test {
         let cases = [
             Case {
                 scenario: "the class has its own profile",
-                stored: &["dell-inc_poweredge-r750_0a6b", ANY_HARDWARE_CLASS],
-                recorded: Some("dell-inc_poweredge-r750_0a6b"),
-                expect: "the dell-inc_poweredge-r750_0a6b profile",
+                stored: &["dell-inc_poweredge-r750", ANY_HARDWARE_CLASS],
+                recorded: Some("dell-inc_poweredge-r750"),
+                expect: "the dell-inc_poweredge-r750 profile",
             },
             Case {
                 scenario: "a class with no profile of its own falls back",
                 stored: &[ANY_HARDWARE_CLASS],
-                recorded: Some("dell-inc_poweredge-r750_0a6b"),
+                recorded: Some("dell-inc_poweredge-r750"),
                 expect: "the any profile, as a fallback",
             },
             Case {
                 scenario: "a class with neither its own profile nor a fallback finds nothing",
                 stored: &[],
-                recorded: Some("dell-inc_poweredge-r750_0a6b"),
+                recorded: Some("dell-inc_poweredge-r750"),
                 expect: "no profile",
             },
             Case {
@@ -448,7 +445,7 @@ mod test {
             },
             Case {
                 scenario: "no class and no fallback is its own answer",
-                stored: &["dell-inc_poweredge-r750_0a6b"],
+                stored: &["dell-inc_poweredge-r750"],
                 recorded: None,
                 expect: "no class recorded",
             },
@@ -473,11 +470,7 @@ mod test {
     async fn list_orders_by_class(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
         let all = policy(AttesterSelectionMode::All, vec![]);
-        for class in [
-            "dell-inc_poweredge-r750_0a6b",
-            "any",
-            "nvidia_dgx-gb200_692-24190",
-        ] {
+        for class in ["dell-inc_poweredge-r750", "any", "nvidia_dgx-gb200"] {
             create(&mut txn, class, &all, OPERATOR).await.unwrap();
         }
 
@@ -492,8 +485,8 @@ mod test {
             classes,
             [
                 ANY_HARDWARE_CLASS,
-                "dell-inc_poweredge-r750_0a6b",
-                "nvidia_dgx-gb200_692-24190"
+                "dell-inc_poweredge-r750",
+                "nvidia_dgx-gb200"
             ]
         );
     }

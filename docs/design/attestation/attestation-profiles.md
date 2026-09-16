@@ -10,7 +10,7 @@
 | Version | Date | Modified By | Description |
 | :---: | :---: | :---- | :---- |
 | 0.1 | 09/04/2026 | Binu Ramakrishnan | Initial version |
-| 0.2 | 09/15/2026 | Binu Ramakrishnan | Hardware class derived from BMC-reported manufacturer, model, and SKU instead of `HwType`; `ComponentIntegrity` captured at exploration; attester inventory added |
+| 0.2 | 09/15/2026 | Binu Ramakrishnan | Hardware class derived from BMC-reported manufacturer and model instead of `HwType`; `ComponentIntegrity` captured at exploration; attester inventory added |
 
 ## 1 What this changes
 
@@ -66,7 +66,7 @@ separate work (§12).
 | Term               | Meaning                                                                                                                            |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
 | **Attester**       | One chip inside a machine that can produce evidence. A GPU root of trust, for example.                                             |
-| **Hardware class** | A group of hardware sharing one profile, for example `nvidia_dgx-gb200_692-24190-0000-1a`. Derived from what the BMC reports; see §4.1. |
+| **Hardware class** | A group of hardware sharing one profile, for example `nvidia_dgx-gb200`. Derived from what the BMC reports; see §4.1.                  |
 | `any`              | The one reserved class an operator can write. A profile keyed `any` covers hardware with no profile of its own; see §4.2 and §5.3. |
 | **Profile**        | The stored policy for one hardware class.                                                                                          |
 | **Selection**      | The part of a profile naming which attesters are in or out.                                                                        |
@@ -77,11 +77,11 @@ separate work (§12).
 
 ### 4.1 The hardware class is the key
 
-A profile is keyed by a hardware class: three fields the BMC reports, joined by
-underscores.
+A profile is keyed by a hardware class: two fields the BMC reports, joined by an
+underscore.
 
 ```text
-<manufacturer>_<model>_<sku>
+<manufacturer>_<model>
 ```
 
 Each field comes from a fallback chain, so one empty Redfish property does not
@@ -91,23 +91,34 @@ sink the key.
 | ------------ | ------------------------------------------------------------------- |
 | manufacturer | `ComputerSystem.Manufacturer` → `ServiceRoot.Vendor` → `unknown`    |
 | model        | `ComputerSystem.Model` → `ServiceRoot.Product` → `nomodel`          |
-| sku          | `ComputerSystem.SKU` → `nosku`                                      |
 
 Each field is normalised on its own: lowercased, every run of characters outside
 `a-z0-9` becomes a single `-`, and leading and trailing `-` are dropped. The
 fields are then joined with `_`, which cannot appear inside a normalised field,
-so a class name parses back into exactly three parts.
+so a class name parses back into exactly two parts.
 
 ```text
-nvidia_dgx-gb200_692-24190-0000-1a
-dell-inc_poweredge-r750_0a6b
-dell-inc_poweredge-r750_nosku
+nvidia_dgx-gb200
+dell-inc_poweredge-r750
 ```
 
-`any` is the one reserved name (§4.2). Because the chain always yields three
+`any` is the one reserved name (§4.2). Because the chain always yields two
 fields, every explored endpoint gets a keyable class — worst case
-`unknown_nomodel_nosku`, which an operator can write a profile for. There is no
+`unknown_nomodel`, which an operator can write a profile for. There is no
 `unrecognized` marker.
+
+**Why not the SKU.** A third field from `ComputerSystem.SKU` would give
+sub-model granularity, and an earlier revision of this design used one. Redfish
+defines that property as "the manufacturer SKU for this system" and leaves the
+meaning to the vendor, and the vendors disagree: Dell reports the service tag,
+which iDRAC also returns as `SerialNumber`; HPE reports the product part number;
+Lenovo reports the machine type model; and NVIDIA's DGX BMCs leave it empty.
+Keying on it would mint one class per machine on Dell, where a profile could
+then only ever describe a single node, and would add nothing on the NVIDIA
+hardware this feature targets. Hardware of one model carrying different
+components is told apart by its attester set instead (§7.5), which is measured
+from the `ComponentIntegrity` collection rather than asserted by a vendor
+string.
 
 **Why not `HwType`.** `HwType` is a closed enum of sixteen variants resolved from
 `ServiceRoot` and chassis signatures by `bmc-explorer`. Two properties
@@ -162,7 +173,7 @@ and one prefix covers them however many a tray has.
 ### 4.4 The policy is a JSON document
 
 The profile row stores its policy as one JSON document. Here is
-`nvidia_dgx-gb200_692-24190-0000-1a`, attesting every GPU root of trust plus one
+`nvidia_dgx-gb200`, attesting every GPU root of trust plus one
 named CPU root of trust, and a denylist excluding a single component:
 
 ```json
@@ -274,11 +285,13 @@ disagree (§7.1). Two states:
 
 ### 5.2 A derived class moves when reporting changes
 
-A BMC firmware update that begins populating a field the previous version left
-empty changes the class — `dell-inc_poweredge-r750_nosku` becomes
-`dell-inc_poweredge-r750_0a6b` on the same hardware. This is inherent to deriving
-a key from reported data; no available field avoids it, since the instability is
-in how the BMC reports, not in what the field means.
+A BMC firmware update that changes how a field reads changes the class — a
+manufacturer reported as `Dell Inc.` and later as `Dell` moves the same hardware
+from `dell-inc_poweredge-r750` to `dell_poweredge-r750`, and a model that was
+empty and fell through to `ServiceRoot.Product` moves when the system starts
+reporting one of its own. This is inherent to deriving a key from reported data;
+no available field avoids it, since the instability is in how the BMC reports,
+not in what the field means.
 
 Two things make it survivable rather than breaking.
 
@@ -535,7 +548,7 @@ Patterns are two repeatable flags, `--exact <id>` and `--prefix <string>`, so a
 selection can mix them:
 
 ```text
-nico-admin-cli attestation spdm profile create nvidia_dgx-gb200_692-24190-0000-1a \
+nico-admin-cli attestation spdm profile create nvidia_dgx-gb200 \
   --mode allowlist --prefix HGX_IRoT_GPU_ --exact VERA_CPU_0
 ```
 
@@ -573,28 +586,30 @@ and resolves each group against the profile table:
 
 ```text
 $ nico-admin-cli attestation spdm coverage
-+-------------------------------------+--------------------+---------------+-------------+-----------------------------+
-| HARDWARE CLASS                      | EXPLORED ENDPOINTS | ATTESTER SETS | OWN PROFILE | WOULD USE                   |
-+=====================================+====================+===============+=============+=============================+
-| dell-inc_poweredge-r750_0a6b        | 4                  | 1             | yes         | its own profile (none)      |
-+-------------------------------------+--------------------+---------------+-------------+-----------------------------+
-| dell-inc_poweredge-r750_nosku       | 2                  | 1             | no          | any (all)                   |
-+-------------------------------------+--------------------+---------------+-------------+-----------------------------+
-| nvidia_dgx-gb200_692-24190-0000-1a  | 72                 | 2             | yes         | its own profile (allowlist) |
-+-------------------------------------+--------------------+---------------+-------------+-----------------------------+
-| (no class recorded)                 | 1                  | 0             | n/a         | any (all)                   |
-+-------------------------------------+--------------------+---------------+-------------+-----------------------------+
-| any                                 | —                  | —             | yes         | its own profile (all)       |
-+-------------------------------------+--------------------+---------------+-------------+-----------------------------+
++------------------------------+--------------------+---------------+-------------+-----------------------------+
+| HARDWARE CLASS               | EXPLORED ENDPOINTS | ATTESTER SETS | OWN PROFILE | WOULD USE                   |
++==============================+====================+===============+=============+=============================+
+| dell-inc_poweredge-r750      | 6                  | 1             | no          | any (all)                   |
++------------------------------+--------------------+---------------+-------------+-----------------------------+
+| lenovo_thinksystem-sr680a-v3 | 4                  | 1             | yes         | its own profile (none)      |
++------------------------------+--------------------+---------------+-------------+-----------------------------+
+| nvidia_dgx-gb200             | 72                 | 2             | yes         | its own profile (allowlist) |
++------------------------------+--------------------+---------------+-------------+-----------------------------+
+| (no class recorded)          | 1                  | 0             | n/a         | any (all)                   |
++------------------------------+--------------------+---------------+-------------+-----------------------------+
+| any                          | —                  | —             | yes         | its own profile (all)       |
++------------------------------+--------------------+---------------+-------------+-----------------------------+
 ```
 
-That table holds three findings. Two R750s report no SKU, so they form a class
-separate from the four siblings that do report one, and they fall to `any`
-because nobody has written a profile under that second name. The 72 GB200 trays
-share a profile: two attester sets under one class means at
-least one tray reports different components from the rest (§7.5). And one
-endpoint has no class recorded yet, either because it is new or because its
-explorations are failing, so there is nothing to key on and `any` covers it too.
+That table holds four findings. Nobody has written a profile for the six R750s,
+so `any` attests them with whatever their BMCs report. The four SR680a V3s have
+a profile of their own that attests nothing, which is a deliberate exclusion
+rather than an oversight — the two rows read differently and only this view
+tells them apart. The 72 GB200 trays share a profile, and two attester sets
+under one class means at least one tray reports different components from the
+rest (§7.5). And one endpoint has no class recorded yet, either because it is
+new or because its explorations are failing, so there is nothing to key on and
+`any` covers it too.
 
 `EXPLORED ENDPOINTS` counts rows of `explored_endpoints` rather than machines,
 because `hardware_class` is recorded per endpoint and a machine can present more
@@ -662,12 +677,11 @@ Recorded unfiltered, so a device present but switched off is distinguishable fro
 one that is absent. `None` means the BMC reported no collection — some platforms
 answer `NotSupported` — while `Some([])` means it reported an empty one.
 
-
 ### 7.2 The profile table
 
 ```sql
 -- Attestation profiles: one row per hardware class, naming which attesters
--- machines of that class require. The key is a derived manufacturer_model_sku
+-- machines of that class require. The key is a derived manufacturer_model
 -- class name, or the reserved 'any'.
 CREATE TABLE attestation_profiles (
     hardware_class  text         PRIMARY KEY,
@@ -847,7 +861,6 @@ hardware drift. Disabled members therefore count — Redfish keeps the type
 readable, suppressing only the nested `SPDM` object — and §7.1's projection holds
 the flag itself.
 
-
 `explored_endpoints.attester_digest` (§7.3) records which of the class's sets that
 one endpoint last reported, which is what makes an odd set traceable to hardware:
 grouping endpoints by `(hardware_class, attester_digest)` gives the per-set
@@ -1022,7 +1035,7 @@ class also emits, which is how a site sees hardware arrive.
 | 1 The profile (§4)                        | A policy document is stored and read back unchanged, and every §6.2 validation rule is refused                                                                                                                                                                                                                                                                                                                                             | Unit, then the API boundary                      |
 | 2 CRUD (§6)                               | Create, update, delete, get and list reflect each step; `version` increments; a stale `if_version_match` is refused on update and on delete while an omitted one proceeds; a second create for one class fails; an unknown `schema_version` is refused                                                                                                                                                                                                                                                                                 | API and database                                 |
 | 3 Enabling and disabling attesters (§4.2) | Against `HGX_IRoT_GPU_0/1/2` and `HGX_BMC_0`: an allowlist of `prefix: HGX_IRoT_GPU_` selects the three GPUs and not the BMC, a denylist of `exact: HGX_BMC_0` selects the same three, `ALL` selects four, `NONE` selects none. Mixed patterns take the union, overlapping ones select once, and `hgx_irot_gpu_` selects nothing. Per §4.5, an allowlist pattern matching nothing fails while a denylist pattern matching nothing does not | Pure function over a policy and a component list |
-| 4 The hardware class (§4.1)               | Derivation normalises each field, falls back through §4.1's chain, and yields `_nosku` and `unknown_nomodel_nosku` where fields are absent; the §6.2 format rule accepts `any` and a three-field name and refuses the rest; a mock BMC records the class its reported fields imply, together with the `ComponentIntegrity` projection and the attester set that class then carries (§7.5); an unexplored endpoint stays `NULL`                                                                                                              | Unit, then the explorer against mock BMCs        |
+| 4 The hardware class (§4.1)               | Derivation normalises each field, falls back through §4.1's chain, yields `unknown_nomodel` where both are absent, and keeps a reported SKU out of the key; the §6.2 format rule accepts `any` and a two-field name and refuses the rest; a mock BMC records the class its reported fields imply, together with the `ComponentIntegrity` projection and the attester set that class then carries (§7.5); an unexplored endpoint stays `NULL`                                                                                          | Unit, then the explorer against mock BMCs        |
 | 5 The scheduler consults the profile (§5) | With `spdm_enabled` on, a mock GB200 tray resolves its class, finds its profile, and gets one work row per selected attester; every §5.3 outcome is reached, and a failing one writes nothing                                                                                                                                                                                                                                              | Attestation integration                          |
 | 6 Room to refine (§4.4)                   | A document written today reads back with its `schema_version`, so a later shape can be told apart from this one                                                                                                                                                                                                                                                                                                                            | Unit                                             |
 

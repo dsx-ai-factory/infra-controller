@@ -84,7 +84,7 @@ impl DpuConfigExt for DpuConfig {
 /// The two mock halves have always disagreed about the platform; this follows
 /// the half attestation acts on. The fixture writes it into the report, so it
 /// is not derived from what the mock reports.
-pub const MOCK_HOST_HARDWARE_CLASS: &str = "nvidia_gb200-nvl_nosku";
+pub const MOCK_HOST_HARDWARE_CLASS: &str = "nvidia_gb200-nvl";
 
 pub trait ManagedHostConfigExt {
     fn zero_dpu() -> Self;

@@ -1286,8 +1286,8 @@ mod tests {
 
     /// Two classes in the shape exploration derives, so the tests key on what
     /// the column actually holds.
-    const HARDWARE_CLASS: &str = "dell-inc_poweredge-r750_0a6b";
-    const OTHER_HARDWARE_CLASS: &str = "nvidia_dgx-gb200_692-24190";
+    const HARDWARE_CLASS: &str = "dell-inc_poweredge-r750";
+    const OTHER_HARDWARE_CLASS: &str = "nvidia_dgx-gb200";
 
     fn report_with_class(hardware_class: Option<&str>) -> EndpointExplorationReport {
         EndpointExplorationReport {

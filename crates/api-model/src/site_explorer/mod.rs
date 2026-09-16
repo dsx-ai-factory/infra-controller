@@ -52,16 +52,22 @@ use crate::switch::switch_id;
 /// class an operator can key a profile to rather than no class at all.
 const ABSENT_MANUFACTURER: &str = "unknown";
 const ABSENT_MODEL: &str = "nomodel";
-const ABSENT_SKU: &str = "nosku";
 
 /// Derives an endpoint's hardware class from what its BMC reports about the
-/// host system: manufacturer, model, and SKU, joined by `_`.
+/// host system: manufacturer and model, joined by `_`.
 ///
 /// The service root's vendor and product stand in for the two fields it also
 /// reports, so one empty Redfish property does not sink the key. `_` cannot
-/// survive normalisation, so a class name parses back into exactly three
-/// fields, and since there are always three it can never collide with the
-/// reserved `any`.
+/// survive normalisation, so a class name parses back into exactly two fields,
+/// and since there are always two it can never collide with the reserved
+/// `any`.
+///
+/// `ComputerSystem.SKU` is deliberately not part of the key. Redfish leaves its
+/// meaning to the vendor, and vendors disagree: it is a service tag on Dell,
+/// a product part number on HPE, a machine type model on Lenovo, and empty on
+/// NVIDIA. Keying on it would mint a class per machine wherever it identifies
+/// a unit. Hardware of one model carrying different components is told apart by
+/// its attester set instead, which is measured rather than asserted.
 pub fn derive_hardware_class(
     system: Option<&ComputerSystem>,
     root_vendor: Option<&str>,
@@ -77,12 +83,7 @@ pub fn derive_hardware_class(
         root_product,
         ABSENT_MODEL,
     );
-    let sku = class_field(
-        system.and_then(|system| system.sku.as_deref()),
-        None,
-        ABSENT_SKU,
-    );
-    format!("{manufacturer}_{model}_{sku}")
+    format!("{manufacturer}_{model}")
 }
 
 /// The first source that normalises to something, or the absent marker. A field
@@ -2720,23 +2721,30 @@ mod tests {
                 Option<&str>,
             )| derive_hardware_class(Some(&system), root_vendor, root_product);
 
-            "reported fields lowercase and hyphenate into three" {
-                (system(Some("Dell Inc."), Some("PowerEdge R750"), Some("0A6B")), None, None)
-                    => "dell-inc_poweredge-r750_0a6b".to_string(),
+            "reported fields lowercase and hyphenate into two" {
+                (system(Some("Dell Inc."), Some("PowerEdge R750"), None), None, None)
+                    => "dell-inc_poweredge-r750".to_string(),
             }
 
             // The service root reports a vendor and product of its own, which
             // is a truer answer than the marker for an absent field.
             "the service root stands in for what the system omits" {
-                (system(None, None, Some("692-24190")), Some("NVIDIA"), Some("GB200 NVL"))
-                    => "nvidia_gb200-nvl_692-24190".to_string(),
+                (system(None, None, None), Some("NVIDIA"), Some("GB200 NVL"))
+                    => "nvidia_gb200-nvl".to_string(),
             }
 
             // A field that normalises to nothing is no more usable than an
             // absent one, so it falls through rather than keying on empty.
             "a field with nothing to normalise falls through" {
                 (system(Some("---"), None, None), None, None)
-                    => "unknown_nomodel_nosku".to_string(),
+                    => "unknown_nomodel".to_string(),
+            }
+
+            // Dell reports the service tag here, so a class carrying the SKU
+            // would name one machine rather than one kind of hardware.
+            "a reported SKU stays out of the key" {
+                (system(Some("Dell Inc."), Some("PowerEdge R750"), Some("CKNTC2J")), None, None)
+                    => "dell-inc_poweredge-r750".to_string(),
             }
         );
     }

@@ -22,10 +22,10 @@ use tonic::{Code, Request};
 
 /// Classes in the shape exploration derives. Creating a profile requires one an
 /// endpoint reports, so every test that creates one records an endpoint first.
-const HARDWARE_CLASS: &str = "dell-inc_poweredge-r750_0a6b";
-const OTHER_HARDWARE_CLASS: &str = "nvidia_dgx-gb200_692-24190";
+const HARDWARE_CLASS: &str = "dell-inc_poweredge-r750";
+const OTHER_HARDWARE_CLASS: &str = "nvidia_dgx-gb200";
 /// Well formed, and no endpoint reports it.
-const UNRECORDED_CLASS: &str = "lenovo_thinksystem-sr680a-v3_7dhk";
+const UNRECORDED_CLASS: &str = "lenovo_thinksystem-sr680a-v3";
 
 fn exact(id: &str) -> rpc::ComponentIdMatch {
     rpc::ComponentIdMatch {
@@ -205,7 +205,7 @@ async fn the_api_refuses_what_section_6_2_forbids(pool: PgPool) {
 
     // Nothing outside the derived shape can be a key, and an omitted class
     // arrives as the empty string rather than as an absence.
-    let malformed_class = create(&env, "dell-inc_poweredge-r750", gpu_allowlist())
+    let malformed_class = create(&env, "dell-inc_poweredge-r750_0a6b", gpu_allowlist())
         .await
         .expect_err("a class outside the derived shape is not a profile key");
     assert_eq!(malformed_class.code(), Code::InvalidArgument);
