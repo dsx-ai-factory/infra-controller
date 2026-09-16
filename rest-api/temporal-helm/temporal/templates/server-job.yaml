@@ -92,7 +92,7 @@ spec:
             - name: SQL_PLUGIN
               value: {{ include "temporal.persistence.sql.driver" (list $ $store) }}
             - name: SQL_HOST
-              value: {{ include "temporal.persistence.sql.host" (list $ $store) }}
+              value: {{ include "temporal.persistence.sql.host" (list $ $store) | quote }}
             - name: SQL_PORT
               value: {{ include "temporal.persistence.sql.port" (list $ $store) | quote }}
             {{- if $storeConfig.sql.user }}
@@ -165,7 +165,7 @@ spec:
             - name: SQL_PLUGIN
               value: {{ include "temporal.persistence.sql.driver" (list $ $store) }}
             - name: SQL_HOST
-              value: {{ include "temporal.persistence.sql.host" (list $ $store) }}
+              value: {{ include "temporal.persistence.sql.host" (list $ $store) | quote }}
             - name: SQL_PORT
               value: {{ include "temporal.persistence.sql.port" (list $ $store) | quote }}
             - name: SQL_DATABASE
@@ -327,7 +327,7 @@ spec:
             - name: SQL_PLUGIN
               value: {{ include "temporal.persistence.sql.driver" (list $ $store) }}
             - name: SQL_HOST
-              value: {{ include "temporal.persistence.sql.host" (list $ $store) }}
+              value: {{ include "temporal.persistence.sql.host" (list $ $store) | quote }}
             - name: SQL_PORT
               value: {{ include "temporal.persistence.sql.port" (list $ $store) | quote }}
             - name: SQL_DATABASE
