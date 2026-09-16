@@ -58,7 +58,8 @@ pub enum SchedulingOutcome {
     /// An operator-authored requirement went unsatisfied, and nothing was left
     /// to attest.
     PolicyMatchedNothing,
-    /// No exploration has recorded a hardware class for this machine's BMC.
+    /// No exploration has recorded a hardware class for this machine's BMC,
+    /// and no `any` profile covers it either.
     ClassNotRecorded,
     /// Neither the machine's class nor `any` has a profile.
     NoProfile,

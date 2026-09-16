@@ -87,7 +87,7 @@ fn would_use(coverage: i32, mode: Option<i32>) -> String {
             "nothing: no profile for this class and no any fallback".to_string()
         }
         Ok(AttestationCoverage::ClassNotRecorded) => {
-            "nothing: no class recorded; explore these endpoints again".to_string()
+            "nothing: no class recorded and no any profile".to_string()
         }
         Ok(AttestationCoverage::Unspecified) | Err(_) => {
             "unknown to this client; the server is newer".to_string()
@@ -95,9 +95,9 @@ fn would_use(coverage: i32, mode: Option<i32>) -> String {
     }
 }
 
-/// Whether a profile keyed to this class supplies the policy. `n/a` where no
-/// profile may be keyed to it at all, which is the `unrecognized` marker and
-/// the endpoints carrying no class.
+/// Whether a profile keyed to this class supplies the policy. The endpoints
+/// carrying no class are `n/a`, since there is no class to key one to; the
+/// fallback can still cover them, which `WOULD USE` reports.
 fn own_profile(coverage: i32) -> &'static str {
     match AttestationCoverage::try_from(coverage) {
         Ok(AttestationCoverage::OwnProfile) => "yes",
@@ -126,12 +126,17 @@ fn coverage_views(coverage: &GetAttestationCoverageResponse) -> Vec<CoverageView
     let mut views: Vec<_> = coverage
         .entries
         .iter()
-        .map(|entry| CoverageView {
-            hardware_class: (!entry.hardware_class.is_empty())
-                .then(|| entry.hardware_class.clone()),
-            explored_endpoints: Some(entry.endpoints),
-            own_profile: own_profile(entry.coverage),
-            would_use: would_use(entry.coverage, entry.mode),
+        .map(|entry| {
+            let hardware_class =
+                (!entry.hardware_class.is_empty()).then(|| entry.hardware_class.clone());
+            CoverageView {
+                own_profile: hardware_class
+                    .as_ref()
+                    .map_or("n/a", |_| own_profile(entry.coverage)),
+                would_use: would_use(entry.coverage, entry.mode),
+                explored_endpoints: Some(entry.endpoints),
+                hardware_class,
+            }
         })
         .collect();
 

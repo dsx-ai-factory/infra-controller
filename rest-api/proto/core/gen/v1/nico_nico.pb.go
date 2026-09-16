@@ -99,7 +99,8 @@ const (
 	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND SpdmSchedulingOutcome = 3
 	// An operator-authored requirement went unsatisfied.
 	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING SpdmSchedulingOutcome = 4
-	// No exploration has recorded a hardware class for this machine's BMC.
+	// No exploration has recorded a hardware class for this machine's BMC, and
+	// no "any" profile covers it either.
 	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED SpdmSchedulingOutcome = 5
 	// Neither the machine's class nor `any` has a profile.
 	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_NO_PROFILE SpdmSchedulingOutcome = 6
@@ -283,8 +284,8 @@ const (
 	AttestationCoverage_ATTESTATION_COVERAGE_ANY_FALLBACK AttestationCoverage = 2
 	// Neither this class nor "any" has a profile.
 	AttestationCoverage_ATTESTATION_COVERAGE_NO_PROFILE AttestationCoverage = 3
-	// No exploration has recorded a class. "any" is not consulted, so nothing
-	// covers these endpoints until they are explored again.
+	// No exploration has recorded a class, and no "any" profile is stored, so
+	// nothing covers these endpoints.
 	AttestationCoverage_ATTESTATION_COVERAGE_CLASS_NOT_RECORDED AttestationCoverage = 4
 )
 

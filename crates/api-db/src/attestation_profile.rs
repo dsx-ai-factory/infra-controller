@@ -86,7 +86,9 @@ pub async fn find_for_update(
 ///
 /// `recorded_class` is what `explored_endpoints.hardware_class` holds: a
 /// derived class name, or nothing at all when no exploration has recorded one.
-/// An exact class match wins over `any`.
+/// An exact class match wins over `any`, and an endpoint with no class reaches
+/// `any` too, since a profile written for everything is one an operator meant
+/// to apply to hardware they had not classified either.
 pub async fn resolve<DB>(
     db: &mut DB,
     recorded_class: Option<&str>,
@@ -94,11 +96,9 @@ pub async fn resolve<DB>(
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    let Some(recorded_class) = recorded_class else {
-        return Ok(ProfileResolution::ClassNotRecorded);
-    };
-
-    if let Some(profile) = find(&mut *db, recorded_class).await? {
+    if let Some(recorded_class) = recorded_class
+        && let Some(profile) = find(&mut *db, recorded_class).await?
+    {
         return Ok(ProfileResolution::Resolved {
             profile,
             used_any_fallback: false,
@@ -110,6 +110,7 @@ where
             profile,
             used_any_fallback: true,
         }),
+        None if recorded_class.is_none() => Ok(ProfileResolution::ClassNotRecorded),
         None => Ok(ProfileResolution::NoProfile),
     }
 }
@@ -408,9 +409,9 @@ mod test {
     }
 
     /// The fallback order in one place: a class's own profile outranks `any`,
-    /// and finding no profile is a distinct answer from having no class to look
-    /// one up by, because an operator fixes a missing profile and an unexplored
-    /// endpoint differently.
+    /// an endpoint with no class recorded still reaches `any`, and the two ways
+    /// of finding nothing stay distinct, because an operator fixes a missing
+    /// profile and an unexplored endpoint differently.
     #[crate::sqlx_test]
     async fn resolution_prefers_the_class_over_any(pool: sqlx::PgPool) {
         struct Case {
@@ -440,8 +441,14 @@ mod test {
                 expect: "no profile",
             },
             Case {
-                scenario: "an unexplored endpoint does not reach any",
+                scenario: "an endpoint with no class recorded falls back",
                 stored: &[ANY_HARDWARE_CLASS],
+                recorded: None,
+                expect: "the any profile, as a fallback",
+            },
+            Case {
+                scenario: "no class and no fallback is its own answer",
+                stored: &["dell-inc_poweredge-r750_0a6b"],
                 recorded: None,
                 expect: "no class recorded",
             },
