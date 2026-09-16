@@ -289,12 +289,9 @@ async fn schedule(
         }
     };
 
-    // The validation that list is not changed is done by SKU validation. SKU
-    // validation checks that the device profile is not changed over time. If any
-    // device list is changed and SKU validation is passed, means SRE has approved the
-    // change request.
-    // Validating again is not needed.
-    // Remove existing device list and over-write with this list.
+    // The rows this writes replace the machine's existing ones: the profile
+    // decides what to attest, so this selection supersedes whatever an earlier
+    // trigger left behind.
     // Truncated to what `timestamptz` stores, so the value reported back is
     // the one a caller finds on the rows rather than a sub-microsecond miss.
     let time_now = Utc::now().trunc_subsecs(6);
