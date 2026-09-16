@@ -132,7 +132,7 @@ jobs:
           echo "Comparing OpenAPI changes against merge-base ${MERGE_BASE}"
 
       - name: Check OpenAPI breaking changes
-        uses: oasdiff/oasdiff-action/breaking@a8c7f0e5649d20d623edb5b38446d3ab3d82d43c
+        uses: oasdiff/oasdiff-action/breaking@3e9d440d37f468355457604348009f50e0cddbf3
         with:
           base: '${{ steps.openapi-base.outputs.merge_base }}:rest-api/openapi/spec.yaml'
           revision: ':rest-api/openapi/spec.yaml'
