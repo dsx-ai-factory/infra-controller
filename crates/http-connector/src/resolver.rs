@@ -57,9 +57,12 @@ impl ForgeRuntimeProvider {
         self
     }
 
-    pub fn create_ipv4_tcp_socket(use_mgmt: bool) -> std::io::Result<socket2::Socket> {
+    fn create_tcp_socket(
+        server_addr: SocketAddr,
+        use_mgmt: bool,
+    ) -> std::io::Result<socket2::Socket> {
         let socket = socket2::Socket::new(
-            socket2::Domain::IPV4,
+            socket2::Domain::for_address(server_addr),
             socket2::Type::STREAM,
             Some(socket2::Protocol::TCP),
         )?;
@@ -71,9 +74,12 @@ impl ForgeRuntimeProvider {
         }
         Ok(socket)
     }
-    pub fn create_ipv4_udp_socket(use_mgmt: bool) -> std::io::Result<socket2::Socket> {
+    fn create_udp_socket(
+        local_addr: SocketAddr,
+        use_mgmt: bool,
+    ) -> std::io::Result<socket2::Socket> {
         let socket = socket2::Socket::new(
-            socket2::Domain::IPV4,
+            socket2::Domain::for_address(local_addr),
             socket2::Type::DGRAM,
             Some(socket2::Protocol::UDP),
         )?;
@@ -103,7 +109,7 @@ impl RuntimeProvider for ForgeRuntimeProvider {
         _timeout: Option<Duration>,
     ) -> Pin<Box<dyn Send + Future<Output = std::io::Result<Self::Tcp>>>> {
         if self.use_mgmt_vrf {
-            let socket = match ForgeRuntimeProvider::create_ipv4_tcp_socket(true) {
+            let socket = match ForgeRuntimeProvider::create_tcp_socket(server_addr, true) {
                 Ok(socket) => socket,
                 Err(io_err) => {
                     return Box::pin(async move { Err(io_err) });
@@ -136,7 +142,7 @@ impl RuntimeProvider for ForgeRuntimeProvider {
         _server_addr: SocketAddr,
     ) -> Pin<Box<dyn Send + Future<Output = std::io::Result<Self::Udp>>>> {
         if self.use_mgmt_vrf {
-            let socket = match ForgeRuntimeProvider::create_ipv4_udp_socket(true) {
+            let socket = match ForgeRuntimeProvider::create_udp_socket(local_addr, true) {
                 Ok(socket) => socket,
                 Err(io_err) => {
                     return Box::pin(async move { Err(io_err) });
@@ -371,5 +377,74 @@ impl SocketAddrs {
 
     pub(super) fn len(&self) -> usize {
         self.iter.as_slice().len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn tcp_socket_connects_with_the_server_address_family() {
+        for listen_addr in [
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+        ] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let listener = TcpListener::bind(listen_addr).await?;
+                let server_addr = listener.local_addr()?;
+                let socket = ForgeRuntimeProvider::create_tcp_socket(server_addr, false)?;
+                let mut client = TcpSocket::from_std_stream(socket.into())
+                    .connect(server_addr)
+                    .await?;
+                let (mut server, _) = listener.accept().await?;
+
+                client.write_all(b"query").await?;
+                let mut received = [0; 5];
+                server.read_exact(&mut received).await?;
+                assert_eq!(&received, b"query");
+
+                server.write_all(b"reply").await?;
+                client.read_exact(&mut received).await?;
+                assert_eq!(&received, b"reply");
+                Ok::<(), std::io::Error>(())
+            })
+            .await
+            .unwrap_or_else(|_| panic!("TCP exchange timed out for {listen_addr}"))
+            .unwrap_or_else(|error| panic!("TCP exchange failed for {listen_addr}: {error}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_socket_binds_with_the_local_address_family() {
+        for local_addr in [
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+        ] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let server = TokioUdpSocket::bind(local_addr).await?;
+                let server_addr = server.local_addr()?;
+                let socket = ForgeRuntimeProvider::create_udp_socket(local_addr, false)?;
+                socket.bind(&SockAddr::from(local_addr))?;
+                let client = TokioUdpSocket::from_std(socket.into())?;
+
+                client.send_to(b"query", server_addr).await?;
+                let mut received = [0; 5];
+                let (length, client_addr) = server.recv_from(&mut received).await?;
+                assert_eq!(&received[..length], b"query");
+
+                server.send_to(b"reply", client_addr).await?;
+                let (length, peer_addr) = client.recv_from(&mut received).await?;
+                assert_eq!(&received[..length], b"reply");
+                assert_eq!(peer_addr, server_addr);
+                Ok::<(), std::io::Error>(())
+            })
+            .await
+            .unwrap_or_else(|_| panic!("UDP exchange timed out for {local_addr}"))
+            .unwrap_or_else(|error| panic!("UDP exchange failed for {local_addr}: {error}"));
+        }
     }
 }
