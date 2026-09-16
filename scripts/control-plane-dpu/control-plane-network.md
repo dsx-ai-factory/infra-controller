@@ -52,6 +52,11 @@ only from a VRF that imports the target. The management network itself, its devi
 addresses and switches, does not change. What changes is how the fabric carries it: in
 VRFs with route targets instead of the global routing table.
 
+The SMN belongs to the datacenter, not to NICo: FNN is NICo's overlay model for the
+networks it owns, and the SMN is how the datacenter carries the management prefixes NICo
+must reach. A site that runs both is what the [README](README.md) calls FNN/SMN
+networking mode.
+
 For NICo the SMN primarily carries the *Management Network for Managed Hosts* of
 [Network
 Prerequisites](../../docs/getting-started/prerequisites/network.md#ip-address-pools).
@@ -75,8 +80,8 @@ with `:901`, or on a plain management VLAN.
 
 ## Terms
 
-Site controller, route target, FNN, VNI, VRF, VTEP, EVPN, BGP, OOB, BMC, HBN
-and DPU are used as defined in the [Glossary](../../docs/glossary.md). The site controller
+FNN, VNI, VRF, VTEP, EVPN, BGP, OOB, BMC, HBN and DPU are used as defined in the
+[Glossary](../../docs/glossary.md). Route targets are introduced in 1.4. The site controller
 DPU configuration described here is the FNN-mode render (`startupSMN.template`), in
 which the control-plane host link sits in a VRF with an L3VNI and route-target-driven
 import and export, like any VPC. The Secure Management Network (SMN) is defined
@@ -204,29 +209,20 @@ controllers, for example, uses four consecutive ASNs. The managed-host pool
 #### 1.1.4. IP prefixes
 
 The datacenter must allocate the following IP prefixes, typically carved from one
-aggregate per site.
+aggregate per site. [Network Prerequisites → IP Address
+Pools](../../docs/getting-started/prerequisites/network.md#ip-address-pools) sizes the
+first four; the table below adds only what is specific to a site controller.
 
-##### 1.1.4.1. DPU loopbacks
+| Prefix | Size | Note |
+|---|---|---|
+| DPU loopbacks | one per DPU | The VXLAN tunnel endpoints of the site controllers' and the managed hosts' DPUs. They live in the underlay. |
+| site controller host links | one `/31` per site controller | Between the host and its DPU. |
+| control-plane service VIPs | usually a `/27` | The addresses MetalLB announces. |
+| admin network | one per managed host | One per *host*, however many DPUs it has, unlike the out-of-band prefixes of 1.1.4.2. |
 
-The loopbacks of the site controllers' and managed hosts' DPUs are the VXLAN tunnel
-endpoints. They live in the underlay and must be routable between every DPU and ToR.
+The two below need more than a size, and are the ones sites most often get wrong.
 
-##### 1.1.4.2. Site controller host links
-
-Each site controller needs one `/31` between its host and its DPU.
-
-##### 1.1.4.3. Control-plane service VIPs
-
-A prefix, usually a `/27`, holds the addresses MetalLB announces.
-
-##### 1.1.4.4. Admin network
-
-The admin network holds the addresses managed hosts use while no tenant is assigned to
-them. NICo needs one address per managed host regardless of how many DPUs it has
-([Network Prerequisites → Admin
-Network](../../docs/getting-started/prerequisites/network.md#admin-network)).
-
-##### 1.1.4.5. Tenant address space
+##### 1.1.4.1. Tenant address space
 
 The tenant address space is the set of aggregates from which tenants carve their VPC
 prefixes (subnets), listed in the site config TOML's `site_fabric_prefixes`. Every
@@ -248,7 +244,7 @@ counts. A host with several interfaces therefore consumes several `/31`s. Size e
 aggregate for the number of instance interfaces it will carry, not for the number of
 hosts.
 
-##### 1.1.4.6. Managed hosts' out-of-band prefixes
+##### 1.1.4.2. Managed hosts' out-of-band prefixes
 
 These prefixes hold the addresses of each managed host's BMC and of every DPU's BMC and
 out-of-band port. The count per host depends on the number of DPUs: one for the host BMC
@@ -294,37 +290,37 @@ the following:
 - The **MTU** is large enough for the host MTU (`siteControllerMtuSize`) plus the
   VXLAN overhead of about fifty bytes, end to end across the fabric ([Network
   Prerequisites → General Guidance](../../docs/getting-started/prerequisites/network.md#general-guidance)).
-- The filters of 1.2.3 apply.
+- The filters of 1.2.2 apply.
 - **No BGP session password is configured.** The site controller DPU is configured from the
   install ISO, before any NICo service exists, and the configuration built into the ISO
   has no password field; a ToR that demands one leaves those sessions down and the
   provisioning procedure in `scripts/control-plane-dpu/README.md` fails.
 
-Both uplinks must be cabled and configured. The site controller DPU peers on both. It
-should be noted that, as of now, the site controller DPU runs no agent and has no health
-check, so nothing reports a down uplink; the failure becomes visible only when the
-remaining uplink fails as well.
+Both uplinks must be cabled and configured. The site controller DPU peers on both. The
+site controller DPU runs no agent and has no health check, so nothing reports a down
+uplink; the failure becomes visible only when the remaining uplink fails as well.
 
-#### 1.2.2. Loopback reachability
+#### 1.2.2. Filters
 
-Every DPU `/32` loopback must be reachable from every other DPU and ToR, whether through
-full routes, an aggregate, or a default route. This is what the VXLAN tunnels ride on.
-
-#### 1.2.3. Filters
-
-The ToR must accept from a site controller DPU only what it should announce: its `/32`
-loopback, its host `/31`, and `/32` host routes from the service VIP prefix. Each
-DPU-facing port must carry a max-prefix limit, so that a misconfigured DPU cannot flood
-the fabric. The fabric may summarize these routes at the leaf or pod boundary; it is not
-required to carry them as individual `/31`s and `/32`s beyond it.
+[Network
+Prerequisites](../../docs/getting-started/prerequisites/network.md#underlay-and-bgp-configuration)
+says to filter DPU announcements down to loopbacks. The site controller DPUs are the
+exception: the ToR must also accept the host `/31` and the `/32` host routes from the
+service VIP prefix, because that is how MetalLB puts the service VIPs on the fabric. A
+loopback-only filter on those ports leaves every NICo service unreachable. The fabric
+may summarize these routes at the leaf or pod boundary; it is not required to carry them
+as individual `/31`s and `/32`s beyond it.
 
 ### 1.3. Overlay
 
 #### 1.3.1. EVPN to the site controller DPUs
 
-The ToRs must peer EVPN with the site controller DPUs, dual-stacked with IPv4 on the
-same session. The site controller DPU configuration has no route-server peer group, so
-its ToR sessions must carry **both** IPv4 unicast and L2VPN EVPN. The fabric must
+Of the two overlay options in [Network Prerequisites → Overlay and EVPN
+Configuration](../../docs/getting-started/prerequisites/network.md#overlay-and-evpn-configuration),
+only the first is available here. The ISO-built site controller DPU configuration has no
+route-server peer group, so route servers cannot carry its overlay: the ToRs must peer
+EVPN with the site controller DPUs directly, and those sessions must carry **both** IPv4
+unicast and L2VPN EVPN on the one session. The fabric must
 propagate EVPN between the ToRs and the rest of the fabric (spines or route reflectors)
 so that routes tagged with the targets in 1.4 reach every VRF that imports them.
 
@@ -347,7 +343,7 @@ it marks. A common target stands for a whole class of routes: importing `:50200`
 for example, brings in every internal tenant's prefixes, present and future, without the
 network team tracking each VPC's own native target (`<datacenterAsn>:<vni>`) as VPCs
 come and go. That is why NICo tags every route twice, with its native target and with
-the common target of its class: the two teams never have to coordinate per prefix. The
+the common target of its class. The
 mechanism is described in [VNI Resource Pools → Simplifying network team
 coordination](../../docs/manuals/vpc/vni_resource_pools.md#simplifying-network-team-coordination)
 and [VPC Network Virtualization → Export Route-Targets and Return-Path
@@ -382,7 +378,7 @@ see [VPC Routing Profiles](../../docs/manuals/vpc/vpc_routing_profiles.md).
 | `:901` (conventional) | The datacenter exports this target on the VRF that holds the site controllers' own out-of-band segment: the controllers' host BMCs, DPU BMCs and DPU out-of-band ports (1.5.2). It exists only when the datacenter carries that segment in an SMN VRF rather than a plain VLAN. It is kept apart from `:900` so that the out-of-band path to the site controllers never depends on the site controllers' own DPUs. | The site controller DPUs must never import it. |
 | targets of other SMN segments | The datacenter exports one target per SMN segment the site controllers must reach. Typical segments are the jump hosts or utility cluster from which the site operator's staff administer NICo, the power-shelf controllers and NVLink switch controllers of the racks NICo manages, and the management endpoints of the storage NICo provisions. Each site needs only the targets of the segments its services actually talk to. | The site controller DPUs import them through the per-site list `fnn.routeTargetsToImport` (1.4.3). |
 | a summary target for all SMN segments | Some datacenters attach one additional target to every SMN prefix, so that a single import brings in the whole SMN. Such a summary also carries the segments the site controllers must not see, including the `:901` segment above. | An optional shortcut. The site controller DPUs must import the individual targets instead, unless the datacenter scopes the summary to the segments NICo needs (1.5.2). |
-| default-route targets | The datacenter's gateway VRFs export a default route into the overlay under an agreed target, one per egress path: the internet-facing gateway for external tenants and the shared internal egress for internal tenants. The alternatives, injecting the default route under each VPC's native target or leaking it from the underlay, are described in [VPC Network Virtualization → Internet Connectivity](../../docs/manuals/vpc/vpc_network_virtualization.md#internet-connectivity). | The tenant routing profiles import them. The site controller DPUs do not. Whether the admin VPC needs one is an open question. |
+| default-route targets | The datacenter's gateway VRFs export a default route into the overlay under an agreed target, one per egress path: the internet-facing gateway for external tenants and the shared internal egress for internal tenants. The alternatives, injecting the default route under each VPC's native target or leaking it from the underlay, are described in [VPC Network Virtualization → Internet Connectivity](../../docs/manuals/vpc/vpc_network_virtualization.md#internet-connectivity). | The tenant routing profiles import them. The site controller DPUs do not. |
 
 #### 1.4.3. The import list of the site controller DPUs
 
@@ -411,8 +407,6 @@ through `:50500`", meaning the tags in use, not all four.
 
 ### 1.5. SMN requirements
 
-The SMN is defined in the introduction of this page. This section states what the datacenter must provide for it.
-
 #### 1.5.1. One SMN VRF for the site's managed hosts
 
 The datacenter must provide one SMN VRF for the managed hosts of this NICo site. That
@@ -420,7 +414,9 @@ VRF must contain the out-of-band prefixes of every rack whose hosts NICo manages
 host BMC, DPU BMC and DPU out-of-band addresses. Racks that NICo does not manage stay
 outside it. The VRF must export those prefixes into EVPN as type-5 routes tagged `:900`.
 It must import `:50100`. It must import **nothing tenant-related** (1.8.1). The `:50100`
-import is what lets the hosts answer NICo. It also carries the DHCP relays' traffic.
+import is what lets the hosts answer NICo, and is the other half of the export that
+`startupSMN.template` annotates as tagging routes "for SMN return traffic". It also
+carries the DHCP relays' traffic.
 [BMC and Out-of-Band Setup](../../docs/getting-started/prerequisites/bmc-oob-setup.md)
 requires a relay on every BMC-facing segment. Those relays sit on this VRF's gateway
 interfaces, so their requests to the NICo DHCP VIP and the replies to their `giaddr`
@@ -432,9 +428,9 @@ The datacenter owns the site controllers' out-of-band segment and NICo never imp
 The datacenter must allocate the addresses of the site controllers' host BMCs, DPU BMCs
 and DPU out-of-band ports (a handful of nodes with static configuration, and no DHCP
 relay to NICo needed) and must decide how to carry the segment. A plain management VLAN
-is sufficient. On the other hand, datacenters with an SMN usually give each NICo site a
+is sufficient. Datacenters with an SMN usually give each NICo site a
 companion VRF (`<name>` and `<name>-SC`) and export the `-SC` one with `:901` for their
-own operators' access. Whichever it is, **no NICo component reaches the site
+own operators' access. Either way, **no NICo component reaches the site
 controllers' own BMCs**, and the site controller DPU must **not** import that route
 target. Importing it would expose the controllers' BMCs to the site controller VRF and,
 through the VRF leak, to the control plane hosts and everything that reaches them.
@@ -457,7 +453,7 @@ page assumes the latter.
 
 #### 1.6.1. Every datacenter VRF that must reach NICo services imports `:50100`
 
-Typically these are:
+These usually include:
 
 - every SMN VRF holding devices NICo manages or provisions: the managed hosts' VRF (1.5.1),
   power-shelf management, compute-fabric switch management;
@@ -467,8 +463,8 @@ Typically these are:
   service VIPs (a jump host that only needs the SMN does not need this import);
 - the user-storage VRF.
 
-Rule of thumb: if a device gets an address from NICo, is inventoried by site explorer, or
-is reached by an operator through NICo's services, its VRF must import `:50100`.
+If a device gets an address from NICo, is inventoried by site explorer, or is reached by
+an operator through NICo's services, its VRF must import `:50100`.
 
 #### 1.6.2. Every datacenter VRF that must reach managed hosts' admin addresses imports `:50400`
 
@@ -521,7 +517,7 @@ with the network team, assume Mechanism 2 for every VPC.
 
 #### 1.7.2. Control-plane reachability of tenant VPCs
 
-As discussed in previous sections, tenant routing profiles import `:50100` to reach the
+Tenant routing profiles import `:50100` to reach the
 service VIPs (1.6.1), and the site controllers import the common tag of every routing
 profile in use so that replies find the tenant prefix (1.4.3). Neither import requires a
 datacenter action.
@@ -537,7 +533,9 @@ ports, its own included. The only profile that imports `:900` is the operator-re
 `PRIVILEGED_INTERNAL` profile for NICo's own services, and it must never be assigned to
 a customer tenant. With the out-of-band prefixes in an SMN VRF exporting `:900`, this
 rule holds by construction, because no tenant VRF imports that target; nothing depends
-on a filter that somebody has to keep correct.
+on a filter that somebody has to keep correct. [Network Isolation → What a Tenant Can
+and Cannot Access](../../docs/configuration/network-isolation.md#what-a-tenant-can-and-cannot-access)
+states the resulting boundary across all fabrics.
 
 #### 1.8.2. Several NICo sites in one datacenter
 
@@ -560,7 +558,8 @@ build script does with each DPU site file field is described in the [README, Ste
 1](README.md#step-1--prepare-the-site-config). The meaning of the site config TOML
 fields is described in [VPC Routing
 Profiles](../../docs/manuals/vpc/vpc_routing_profiles.md), [VNI Resource
-Pools](../../docs/manuals/vpc/vni_resource_pools.md) and [IP and Network
+Pools](../../docs/manuals/vpc/vni_resource_pools.md), [IP Resource
+Pools](../../docs/manuals/networking/ip_resource_pools.md) and [IP and Network
 Configuration](../../docs/provisioning/ip-and-network-configuration.md).
 
 Fictional example values. The datacenter provides the left column; the site operator
@@ -570,20 +569,20 @@ copies each row into both files.
 |---|---|---|---|---|
 | 1.1.1 | datacenter ASN | `4200000100` | `datacenterAsn` | `datacenter_asn` |
 | 1.1.3 | ASN range | `4200100000–4200100999` | `bgpAsnStart: 4200100000` (site controllers use `…000`–`…003`), `siteControllerRoutesAsn: 4200100000` | `[pools.fnn-asn]` `4200100100–4200100999` |
-| 1.2.1 | BGP session password on DPU-facing ToR ports | **none on site controller ports** (required); optional site-wide secret on managed-host ports | — (no field; the ISO-built configuration cannot carry one today) | `bgp_leaf_session_password = "site_wide"` + `nico-admin-cli credential bgp set-sitewide` (managed hosts only) |
+| 1.2.1 | BGP session password on DPU-facing ToR ports | **none on site controller ports** (required); optional site-wide secret on managed-host ports | — (no field; the ISO-built configuration cannot carry one) | `bgp_leaf_session_password = "site_wide"` + [`nico-admin-cli credential bgp set-sitewide`](../../docs/manuals/nico-admin-cli/commands/credential/credential-bgp-set-sitewide.md) (managed hosts only) |
 | 1.1.2 | NICo VNI block (example layout); no other VNI in it, and no datacenter route target `<datacenterAsn>:<n>` with `n` in it other than the common tags | `50000–65000` | `fnn.controlPlaneVni: 60000` | `[fnn.admin_vpc].vpc_vni = 60100`; `[pools.vpc-vni]` `60101–60199`; `[pools.vni]` `56000–56009` (L2VNIs, admin segments); `[pools.vlan-id]` any ten values, DPU-internal |
 | 1.1.4 | DPU loopbacks | `10.10.0.0/26` | `forgeDpuLoopbackPrefix: 10.10.0.0/28` | `[pools.lo-ip]` `10.10.0.16–10.10.0.62`; `[pools.vpc-dpu-lo]` disjoint from the optional `fnn.vpcVrfLoopbackPrefix` |
 | 1.1.4 | site controller host `/31`s (DPU design) | `10.10.1.0/29` | `forgeControlPlanePrefix` | MetalLB peers `10.10.1.0`, `.2`, `.4` (without DPUs: the ToR addresses, 1.3) |
 | 1.1.4 | service VIPs | `10.10.2.0/27` | `forgeServiceVipPrefix` | MetalLB pools inside `10.10.2.0/28` (internal) and `10.10.2.16/28` (external) |
 | 1.1.4 | admin network | `10.10.64.0/22` | — | `[networks.admin]` |
-| 1.1.4.5 | tenant address space (external, internal, break-fix aggregates) | `10.30.0.0/16`, `10.31.0.0/16` | — | `site_fabric_prefixes` = the aggregates; `deny_prefixes` = admin network, out-of-band prefixes, and the control-plane prefixes the site decides to withhold |
+| 1.1.4.1 | tenant address space (external, internal, break-fix aggregates) | `10.30.0.0/16`, `10.31.0.0/16` | — | `site_fabric_prefixes` = the aggregates; `deny_prefixes` = admin network, out-of-band prefixes, and the control-plane prefixes the site decides to withhold |
 | 1.1.4 | per-rack out-of-band prefixes (in the SMN) | `10.20.<rack>.0/24` | — | DHCP scopes are selected by the relay addresses ([IP and Network Configuration](../../docs/provisioning/ip-and-network-configuration.md#22-dhcp-configuration-for-physical-machine-interfaces)) |
 | 1.5.1 | SMN RT, managed hosts | `:900` | `fnn.commonManagedNodeBmcRouteTarget: 900` | `PRIVILEGED_INTERNAL` import |
 | 1.5.2 | site controllers' own OOB segment (datacenter's; SMN companion RT if it has one) | `:901`, or a plain VLAN | not imported | — |
 | 1.6.1 | NICo control-plane RT | `:50100` | `fnn.commonSiteControllerRouteTarget: 50100` | `[fnn].additional_route_target_imports` (site-wide), or every profile's `route_target_imports` |
 | 1.6.2 | NICo admin RT | `:50400` | `fnn.commonAdminNetworkTarget: 50400` | admin VPC export |
 | 1.7.1 | external tenant VNI range | `51000–51255` for up to 256 concurrent tenant VPCs, inside the block; no per-VNI registration under Mechanism 1 | — | `[pools.external-vpc-vni]` = that range; tenants default to `EXTERNAL` |
-| 1.7.1 | default-route target for external VPCs (Mechanism 1) | agreed value, `<datacenterAsn>:<n>`; exported by the internet gateway VRF, which also imports `:50500` | — | `[fnn.routing_profiles.EXTERNAL].route_target_imports` = that target (the shipped sample uses `:50500`, under clarification) |
+| 1.7.1 | default-route target for external VPCs (Mechanism 1) | agreed value, `<datacenterAsn>:<n>`; exported by the internet gateway VRF, which also imports `:50500` | — | `[fnn.routing_profiles.EXTERNAL].route_target_imports` = that target |
 | 1.4 | other SMN segments the site controllers must reach | jump hosts `:101`, power shelves `:1003` | `fnn.routeTargetsToImport` | `PRIVILEGED_INTERNAL` imports |
 | 1.4.3 | routing profiles in use (common tags the site controllers must import) | `EXTERNAL` only → `:50500` | `fnn.routeTargetsToImport` | `[fnn.routing_profiles.<name>]` definitions ([VPC Routing Profiles](../../docs/manuals/vpc/vpc_routing_profiles.md)) |
 
@@ -594,8 +593,8 @@ route-target number, not a VNI, and no VXLAN tunnel with that number exists (1.1
 the ISO are re-entered by hand as MetalLB BGP peers during prerequisite deployment and
 must match (with DPU-less site controllers the peers are the ToRs instead, 1.3.2).
 MetalLB's address pools must fall inside the two halves of the service VIP prefix. The
-loopback prefixes must not overlap. The VNI ranges of 1.1.2 must be disjoint. A lint for
-these is planned.
+loopback prefixes must not overlap. The VNI ranges of 1.1.2 must be disjoint. Nothing in
+the tooling cross-checks any of these.
 
 What each site controller DPU then does, so the network team knows what to expect:
 default VRF with the `/32` loopback as VTEP source and eBGP
@@ -607,27 +606,3 @@ VRF. The build renders this FNN-mode template (`startupSMN.template`) when the
 site file has an `fnn:` block, which is the configuration this page describes. A site
 file without that block renders the non-FNN `startup.template` instead; that mode is
 supported but beyond the scope of this page.
-
----
-
-## 3. The questions from issue #5358, by reference
-
-1. *What is SMN?* Secure Management Network: the datacenter's out-of-band management
-   overlay, segmented into VRFs per system that uses it (defined in the introduction;
-   requirements in section 1.5).
-2. *SMN vs FNN?* FNN is NICo's overlay model; the SMN is the datacenter's. The FNN-mode
-   site controller configuration is what consumes the SMN, hence "FNN/SMN mode".
-3. *Which prefix does the SMN advertise, who originates it, what must the DPU import?*
-   The managed hosts' out-of-band prefixes, originated by the datacenter's SMN VRF,
-   tagged `:900`; the DPU imports `:900` (1.5.1).
-4. *What is SMN return traffic?* Managed hosts answering NICo through the SMN VRF's
-   `:50100` import (1.5.1, 1.6.1).
-5. *Who exports which route targets?* Section 1.4, both tables.
-6. *Which are mandatory?* `:900` (datacenter), `:50100` and `:50400` (NICo). Everything
-   else is per-site import or profile-specific; `:901` is never imported (1.5.2).
-7. *ToR requirements?* 1.2.1–1.3.1; dual-stacked sessions are mandatory for site controllers.
-8. *BMC reachability design?* An SMN VRF exporting `:900`, the design this page assumes
-   and the shipped samples expect (introduction, 1.5.1). A site without an SMN is
-   supported but outside the scope of this page.
-9. *When is the non-FNN template valid?* When the site file has no `fnn:` block. It is
-   supported; this page covers the FNN-mode configuration only (section 2).
