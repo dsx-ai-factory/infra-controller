@@ -69,6 +69,7 @@ impl From<DpuConfig> for EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: value.last_exploration_error,
             last_exploration_latency: None,
+            component_integrities: None,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
             hardware_class: None,
             machine_id: None,
