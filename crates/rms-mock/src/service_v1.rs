@@ -134,9 +134,7 @@ rack_manager_impl! {
             request: tonic::Request<rms::GetJobStatusRequest>,
         ) -> std::result::Result<tonic::Response<rms::GetJobStatusResponse>, tonic::Status> {
             let job_id = &request.get_ref().job_id;
-            let Some(status) = self.jobs.observe(job_id) else {
-                return Err(tonic::Status::not_found(format!("unknown job {job_id}")));
-            };
+            let status = self.jobs.observe(job_id);
 
             Ok(tonic::Response::new(rms::GetJobStatusResponse {
                 job_states: vec![rms::JobStatus {
@@ -155,29 +153,6 @@ rack_manager_impl! {
                     created_at: None,
                     updated_at: None,
                 }],
-            }))
-        }
-
-        /// Add or remove switches from the scale-up fabric.
-        ///
-        /// Nothing is reconfigured; the setting is recorded so that reading
-        /// the fabric back reflects what was written to it. A node the mock
-        /// has no device for is a per-node failure and records nothing.
-        async fn batch_set_scale_up_fabric_state(
-            &self,
-            request: tonic::Request<rms::BatchSetScaleUpFabricStateRequest>,
-        ) -> std::result::Result<tonic::Response<rms::BatchSetScaleUpFabricStateResponse>, tonic::Status>
-        {
-            let enabled = request.get_ref().enabled;
-            let inventory = self.inventory.nodes();
-            let refs = crate::resolve::resolve_nodes(&inventory, request.get_ref().nodes.as_ref());
-
-            for node in refs.iter().filter(|r| r.matched()) {
-                self.fabric.set_enabled(node.node_id, enabled);
-            }
-
-            Ok(tonic::Response::new(rms::BatchSetScaleUpFabricStateResponse {
-                response: Some(crate::envelope::node_batch(&refs, "")),
             }))
         }
 
@@ -205,8 +180,8 @@ rack_manager_impl! {
                     if r.matched() {
                         rms::ScaleUpFabricSwitchStatus {
                             node_id: r.node_id.to_owned(),
-                            enabled: self.fabric.is_enabled(r.rack_id, r.node_id),
-                            fabric_manager_status: crate::fabric::healthy_status(),
+                            enabled: self.fabric.is_primary(r.rack_id, r.node_id),
+                            fabric_manager_status: crate::fabric::FABRIC_MANAGER_OK.to_owned(),
                             error_message: String::new(),
                         }
                     } else {
@@ -224,7 +199,8 @@ rack_manager_impl! {
             Ok(tonic::Response::new(rms::GetScaleUpFabricStatusResponse {
                 status: rms::ReturnCode::Success as i32,
                 fabric_status: Some(rms::ScaleUpFabricStatus {
-                    topology_type: self.config.fabric_topology_type.clone(),
+                    // Not read by NICo, which takes the topology from the rack profile.
+                    topology_type: String::new(),
                     extra_static_configs: Vec::new(),
                     switches,
                 }),
@@ -311,10 +287,7 @@ rack_manager_impl! {
 
         /// Report progress of a certificate configuration job.
         ///
-        /// `state` is a free-form string here rather than an enum, and the
-        /// caller maps only a fixed vocabulary; anything it does not
-        /// recognise it reads as still running and polls forever. So the
-        /// spelling comes from `JobState` rather than being written inline.
+        /// A job id the mock has no record of is reported completed.
         async fn get_configure_switch_certificate_job_status(
             &self,
             request: tonic::Request<rms::GetConfigureSwitchCertificateJobStatusRequest>,
@@ -323,9 +296,7 @@ rack_manager_impl! {
             tonic::Status,
         > {
             let job_id = &request.get_ref().job_id;
-            let Some(status) = self.jobs.observe(job_id) else {
-                return Err(tonic::Status::not_found(format!("unknown job {job_id}")));
-            };
+            let status = self.jobs.observe(job_id);
 
             Ok(tonic::Response::new(
                 rms::GetConfigureSwitchCertificateJobStatusResponse {
@@ -382,6 +353,7 @@ rack_manager_impl! {
         configure_scale_up_fabric_manager(ConfigureScaleUpFabricManagerRequest) -> ConfigureScaleUpFabricManagerResponse,
         batch_reset_switch_sdn_factory_default(BatchResetSwitchSdnFactoryDefaultRequest) -> BatchResetSwitchSdnFactoryDefaultResponse,
         get_scale_up_fabric_state(GetScaleUpFabricStateRequest) -> GetScaleUpFabricStateResponse,
+        batch_set_scale_up_fabric_state(BatchSetScaleUpFabricStateRequest) -> BatchSetScaleUpFabricStateResponse,
         set_scale_up_fabric_telemetry_interface_state(SetScaleUpFabricTelemetryInterfaceStateRequest) -> SetScaleUpFabricTelemetryInterfaceStateResponse,
         batch_disable_switch_mtls(BatchDisableSwitchMtlsRequest) -> BatchDisableSwitchMtlsResponse,
         list_switch_system_images(ListSwitchSystemImagesRequest) -> ListSwitchSystemImagesResponse,

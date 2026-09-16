@@ -39,7 +39,7 @@ mod router;
 mod service_v1;
 mod service_v2;
 
-pub use config::{JobPacing, RmsMockConfig, UnknownJobPolicy};
+pub use config::RmsMockConfig;
 pub use inventory::{RmsInventory, SimNode, SimNodeKind};
 /// The V1 protobuf module. Aliased because both service impls refer to it
 /// constantly, and because `rack_manager_v2` defines same-named messages that
@@ -67,14 +67,9 @@ pub struct RmsMock {
 
 impl RmsMock {
     pub fn new(inventory: std::sync::Arc<dyn RmsInventory>, config: RmsMockConfig) -> Self {
-        let jobs = jobs::JobStore::new(
-            config.job_id_prefix.clone(),
-            config.job_pacing,
-            config.unknown_job_policy,
-        );
         Self {
             inventory,
-            jobs,
+            jobs: jobs::JobStore::new(),
             fabric: fabric::FabricState::new(),
             config,
         }

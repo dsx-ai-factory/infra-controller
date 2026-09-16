@@ -23,13 +23,18 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::config::{JobPacing, UnknownJobPolicy};
 use crate::rms;
+
+/// Prefix of generated job ids.
+const JOB_ID_PREFIX: &str = "rms-mock";
+
+/// The poll on which a job reports its terminal state; earlier polls see it
+/// running.
+const TERMINAL_AFTER_OBSERVATIONS: u32 = 2;
 
 /// Where a job has got to; rendered per RPC as an enum or a string.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum JobState {
-    Queued,
     Running,
     Completed,
     Failed,
@@ -39,7 +44,6 @@ impl JobState {
     /// The `JobExecutionState` value; never `Unspecified`.
     pub(crate) fn as_execution_state(self) -> i32 {
         let state = match self {
-            Self::Queued => rms::JobExecutionState::Queued,
             Self::Running => rms::JobExecutionState::Running,
             Self::Completed => rms::JobExecutionState::Completed,
             Self::Failed => rms::JobExecutionState::Failed,
@@ -50,7 +54,6 @@ impl JobState {
     /// The lowercase spelling for the RPCs that report state as a string.
     pub(crate) fn as_wire_str(self) -> &'static str {
         match self {
-            Self::Queued => "queued",
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -66,13 +69,13 @@ struct Job {
     observations: u32,
 }
 
-/// Every job the mock has handed out.
+/// Every job handed out and not yet seen complete.
+///
+/// Starting a job for a node drops any earlier job for it, and a completed
+/// job is forgotten.
 pub(crate) struct JobStore {
     jobs: Mutex<HashMap<String, Job>>,
     next_id: AtomicU64,
-    prefix: String,
-    pacing: JobPacing,
-    unknown: UnknownJobPolicy,
 }
 
 /// What a poll of a job returned.
@@ -85,13 +88,10 @@ pub(crate) struct JobStatus {
 }
 
 impl JobStore {
-    pub(crate) fn new(prefix: String, pacing: JobPacing, unknown: UnknownJobPolicy) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             jobs: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
-            prefix,
-            pacing,
-            unknown,
         }
     }
 
@@ -101,21 +101,18 @@ impl JobStore {
     }
 
     /// Start a job that will fail with `error`, and return its id.
-    ///
-    /// It is paced like any other job, so the caller's polling loop sees it
-    /// queued and running before it reports [`JobState::Failed`] where a
-    /// completing job reports [`JobState::Completed`].
     pub(crate) fn start_failing(&self, node_id: &str, rack_id: &str, error: String) -> String {
         self.insert(node_id, rack_id, Some(error))
     }
 
     fn insert(&self, node_id: &str, rack_id: &str, failure: Option<String>) -> String {
         let id = format!(
-            "{}-{}",
-            self.prefix,
+            "{JOB_ID_PREFIX}-{}",
             self.next_id.fetch_add(1, Ordering::Relaxed)
         );
-        crate::lock(&self.jobs).insert(
+        let mut jobs = crate::lock(&self.jobs);
+        jobs.retain(|_, job| job.node_id != node_id || job.rack_id != rack_id);
+        jobs.insert(
             id.clone(),
             Job {
                 node_id: node_id.to_owned(),
@@ -127,63 +124,39 @@ impl JobStore {
         id
     }
 
-    /// Poll a job, advancing it.
-    ///
-    /// Returns `None` only when the job is unknown and the configured policy
-    /// says to report that as an error.
-    pub(crate) fn observe(&self, job_id: &str) -> Option<JobStatus> {
+    /// Poll a job, advancing it. A job this process never issued is reported
+    /// complete.
+    pub(crate) fn observe(&self, job_id: &str) -> JobStatus {
         let mut jobs = crate::lock(&self.jobs);
         let Some(job) = jobs.get_mut(job_id) else {
-            return self.unknown_job(job_id);
+            tracing::warn!(job_id, "Reporting an unknown job as complete");
+            return JobStatus {
+                state: JobState::Completed,
+                node_id: String::new(),
+                rack_id: String::new(),
+                error_message: String::new(),
+            };
         };
 
         job.observations += 1;
-        let (state, error_message) = if job.observations >= self.pacing.terminal_after_observations
-        {
+        let (state, error_message) = if job.observations >= TERMINAL_AFTER_OBSERVATIONS {
             match &job.failure {
                 Some(error) => (JobState::Failed, error.clone()),
                 None => (JobState::Completed, String::new()),
             }
-        } else if job.observations >= self.pacing.running_after_observations {
-            (JobState::Running, String::new())
         } else {
-            (JobState::Queued, String::new())
+            (JobState::Running, String::new())
         };
 
-        Some(JobStatus {
+        let status = JobStatus {
             state,
             node_id: job.node_id.clone(),
             rack_id: job.rack_id.clone(),
             error_message,
-        })
-    }
-
-    /// How to answer for a job this process never issued.
-    ///
-    /// NICo persists job ids in its database, so after its host restarts the
-    /// mock is polled for jobs that no longer exist. Reporting those as
-    /// failures would strand every switch that had a configuration in flight,
-    /// which is why the default is to call them complete. The proto says such
-    /// a poll should fail; this is a deliberate divergence in favour of a mock
-    /// that survives its host's restart.
-    fn unknown_job(&self, job_id: &str) -> Option<JobStatus> {
-        match self.unknown {
-            UnknownJobPolicy::Complete => {
-                tracing::debug!(job_id, "Reporting an unknown job as complete");
-                Some(JobStatus {
-                    state: JobState::Completed,
-                    node_id: String::new(),
-                    rack_id: String::new(),
-                    error_message: String::new(),
-                })
-            }
-            UnknownJobPolicy::Fail => Some(JobStatus {
-                state: JobState::Failed,
-                node_id: String::new(),
-                rack_id: String::new(),
-                error_message: String::new(),
-            }),
-            UnknownJobPolicy::NotFound => None,
+        };
+        if state == JobState::Completed {
+            jobs.remove(job_id);
         }
+        status
     }
 }

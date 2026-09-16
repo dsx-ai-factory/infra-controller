@@ -12,19 +12,18 @@ cannot disagree. RPCs outside its scope return `UNIMPLEMENTED`.
 Besides `GetVersion` and `BatchGetNodeDeviceInfo`, the mock serves the RPCs a
 rack passes on its way to ready: `ConfigureSwitchCertificate` with
 `GetConfigureSwitchCertificateJobStatus`, the V2
-`ConfigureScaleUpFabricManager` with `GetJobStatus`,
-`BatchSetScaleUpFabricState`, `GetScaleUpFabricStatus` and
-`BatchGetScaleUpFabricServiceStatus`. Nothing is installed on a simulated
-switch. The mock records what was written so that reading the fabric back
-agrees with it, and elects one fabric-manager primary per rack: the requested
-primary when it is one of the rack's simulated switches, otherwise the one
-lowest in the rack, with node id breaking ties. A node the request names but
-no simulated device answers for is a per-node failure: the batch fails, the
-node's result says why, and no job is issued for it.
+`ConfigureScaleUpFabricManager` with `GetJobStatus`, `GetScaleUpFabricStatus`
+and `BatchGetScaleUpFabricServiceStatus`. Nothing is installed on a simulated
+switch. The mock elects one fabric-manager primary per rack, which is the one
+switch that reads back enabled: the requested primary when it is one of the
+rack's simulated switches, otherwise the one lowest in the rack, with node id
+breaking ties. A node the request names but no simulated device answers for is
+a per-node failure: the batch fails, the node's result says why, and no job is
+issued for it.
 `ConfigureScaleUpFabricManager` has no per-node results, so when none of its
 switches match, the job it returns fails and names them. Jobs advance each
 time they are polled rather than with time, and a poll for a job id this
-process never issued follows `unknown_job_policy`.
+process never issued reports it completed.
 
 ## Pointing NICo at the mock
 
@@ -35,21 +34,6 @@ NICo reaches RMS through the `nico-api` chart's `rms` values. Set
 and keep `nico-api.rms.enabled` on. `nico-api.rms.enforceTls` and the
 certificate values apply exactly as they do for a real RMS, since the mock is
 served with the listener's own TLS material. Nothing has to be enabled on the
-machine-a-tron side: the services are always mounted.
-
-## Configuration
-
-The optional `[rms_mock]` table in the machine-a-tron configuration holds
-these keys; every one has a default.
-
-- `version_string`: what `GetVersion` reports. Defaults to
-  `machine-a-tron-rms-mock/<crate version>`.
-- `job_pacing.running_after_observations` (default `1`) and
-  `job_pacing.terminal_after_observations` (default `2`): how many polls a job
-  takes to report running and then completed.
-- `unknown_job_policy` (default `complete`): what a poll for a job id this
-  process never issued reports. `complete` reports it completed, `fail`
-  reports it failed, and `not_found` returns gRPC `NOT_FOUND`.
-- `job_id_prefix` (default `rms-mock`): prefix of generated job ids.
-- `fabric_topology_type` (default `nvl72`): topology reported by
-  `GetScaleUpFabricStatus`.
+machine-a-tron side: the services are always mounted. The optional
+`[rms_mock]` table in the machine-a-tron configuration sets `version_string`,
+which `GetVersion` reports.

@@ -17,16 +17,8 @@
 
 //! Scale-up fabric state.
 //!
-//! The fabric has no simulated behaviour of its own: switches are either
-//! enabled in it or not, and their fabric manager is reported healthy. What
-//! this module exists for is to remember what a caller set, so that reading
-//! the fabric back agrees with what was written to it.
-//!
-//! `enabled` doubles as the primary marker: the fabric manager runs on the
-//! one enabled switch of a rack, and a reader that finds several enabled
-//! switches treats the rack as having multiple primaries and waits. So once a
-//! rack's fabric manager has been configured, only its elected primary reads
-//! back as enabled unless a caller has set a switch explicitly.
+//! Remembers which switch of each rack was elected to run the fabric manager;
+//! only that switch reads back as enabled.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -34,7 +26,7 @@ use std::sync::Mutex;
 use crate::resolve::NodeRef;
 
 /// The `status` value a caller maps to a healthy fabric manager.
-const FABRIC_MANAGER_OK: &str = "ok";
+pub(crate) const FABRIC_MANAGER_OK: &str = "ok";
 
 /// The `addition-info` value that marks the primary's control plane as
 /// configured.
@@ -49,11 +41,6 @@ pub(crate) fn status_json(primary: bool) -> String {
     } else {
         format!(r#"{{"status":"{FABRIC_MANAGER_OK}"}}"#)
     }
-}
-
-/// The bare health string, for the fields that carry it unwrapped.
-pub(crate) fn healthy_status() -> String {
-    FABRIC_MANAGER_OK.to_owned()
 }
 
 /// A switch the inventory has, and so one that can run a rack's fabric
@@ -86,9 +73,6 @@ fn lowest<'a>(candidates: impl IntoIterator<Item = Candidate<'a>>) -> Option<&'a
 
 /// Per-rack scale-up fabric state.
 pub(crate) struct FabricState {
-    /// Explicit per-switch settings written through the fabric-state RPC,
-    /// keyed by node id.
-    enabled: Mutex<HashMap<String, bool>>,
     /// Elected primary switch per rack, keyed by rack id.
     primaries: Mutex<HashMap<String, String>>,
 }
@@ -96,13 +80,8 @@ pub(crate) struct FabricState {
 impl FabricState {
     pub(crate) fn new() -> Self {
         Self {
-            enabled: Mutex::new(HashMap::new()),
             primaries: Mutex::new(HashMap::new()),
         }
-    }
-
-    pub(crate) fn set_enabled(&self, node_id: &str, enabled: bool) {
-        crate::lock(&self.enabled).insert(node_id.to_owned(), enabled);
     }
 
     /// Elect and record a rack's primary: the requested switch when it is a
@@ -127,40 +106,27 @@ impl FabricState {
         &self,
         nodes: impl IntoIterator<Item = (&'a str, Candidate<'a>)>,
     ) {
+        let mut primaries = crate::lock(&self.primaries);
         let mut by_rack: HashMap<&str, Vec<Candidate<'a>>> = HashMap::new();
         for (rack_id, candidate) in nodes {
-            by_rack.entry(rack_id).or_default().push(candidate);
-        }
-        let mut primaries = crate::lock(&self.primaries);
-        for (rack_id, candidates) in by_rack {
-            if primaries.contains_key(rack_id) {
-                continue;
+            if !primaries.contains_key(rack_id) {
+                by_rack.entry(rack_id).or_default().push(candidate);
             }
+        }
+        for (rack_id, candidates) in by_rack {
             if let Some(primary) = lowest(candidates) {
                 primaries.insert(rack_id.to_owned(), primary.to_owned());
             }
         }
     }
 
-    /// Whether a switch is its rack's elected primary.
+    /// Whether a switch is its rack's elected primary, which is when it reads
+    /// back as enabled.
     pub(crate) fn is_primary(&self, rack_id: &str, node_id: &str) -> bool {
         crate::lock(&self.primaries)
             .get(rack_id)
             .map(String::as_str)
             == Some(node_id)
-    }
-
-    /// Whether a switch reads back as enabled in the fabric.
-    ///
-    /// An explicit setting always wins. Otherwise a switch is enabled exactly
-    /// when it is its rack's elected primary. The status RPCs elect a primary
-    /// before reading, so a rack that has never been configured still reads
-    /// back one enabled switch, provided the mock has a device for one.
-    pub(crate) fn is_enabled(&self, rack_id: &str, node_id: &str) -> bool {
-        if let Some(explicit) = crate::lock(&self.enabled).get(node_id) {
-            return *explicit;
-        }
-        self.is_primary(rack_id, node_id)
     }
 }
 
@@ -213,25 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn only_the_elected_primary_reads_back_enabled() {
-        let fabric = FabricState::new();
-        let switches = [c("sw-1", None), c("sw-2", None)];
-
-        // A rack without a primary has no enabled switch.
-        assert!(!fabric.is_enabled("rack-a", "sw-1"));
-
-        fabric.elect_primary("rack-a", &switches, None);
-        assert!(fabric.is_enabled("rack-a", "sw-1"));
-        assert!(!fabric.is_enabled("rack-a", "sw-2"));
-
-        // An explicit setting overrides the election either way.
-        fabric.set_enabled("sw-1", false);
-        assert!(!fabric.is_enabled("rack-a", "sw-1"));
-        fabric.set_enabled("sw-2", true);
-        assert!(fabric.is_enabled("rack-a", "sw-2"));
-    }
-
-    #[test]
     fn reading_a_rack_without_a_primary_elects_one_and_keeps_existing_ones() {
         let fabric = FabricState::new();
         fabric.elect_primary("rack-a", &[c("sw-1", None), c("sw-2", None)], Some("sw-2"));
@@ -246,16 +193,9 @@ mod tests {
         // rack-a keeps its requested primary; rack-b gets the lowest position,
         // which is not its lowest node id.
         assert!(fabric.is_primary("rack-a", "sw-2"));
-        assert!(!fabric.is_enabled("rack-a", "sw-1"));
+        assert!(!fabric.is_primary("rack-a", "sw-1"));
         assert!(fabric.is_primary("rack-b", "sw-9"));
-        assert!(!fabric.is_enabled("rack-b", "sw-3"));
+        assert!(!fabric.is_primary("rack-b", "sw-3"));
         assert!(!fabric.is_primary("rack-c", "sw-1"));
-    }
-
-    #[test]
-    fn only_the_primary_reports_a_configured_control_plane() {
-        assert!(super::status_json(true).contains("CONTROL_PLANE_STATE_CONFIGURED"));
-        assert!(!super::status_json(false).contains("addition-info"));
-        assert!(super::status_json(false).contains(r#""status":"ok""#));
     }
 }
