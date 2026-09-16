@@ -16,6 +16,7 @@
  */
 
 use carbide_machine_controller::metrics::MachineMetrics;
+use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::HostMachineId;
 use db::ConditionalWrite;
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, NewDpaInterface};
@@ -29,42 +30,75 @@ use tonic::{Code, Request};
 use crate::tests::common::api_fixtures::{create_managed_host, create_test_env};
 
 #[crate::sqlx_test]
-async fn uefi_password_job_advances_without_a_scheduled_phase(pool: sqlx::PgPool) {
+async fn uefi_password_job_advances_to_completion_wait(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let managed_host = create_managed_host(&env).await;
     let host_id: HostMachineId = managed_host.id.into();
+    let job_id = "JID_893866234996";
 
-    let mut txn = env.db_txn().await;
-    db::machine::update_state(
-        &mut txn,
-        &host_id,
-        &ManagedHostState::Decommissioning {
-            decommissioning_state: DecommissioningState::DeconfiguringHost {
-                deconfiguring_state: DeconfiguringHostState::WaitForUefiPasswordJobScheduled {
-                    job_id: "JID_893866234996".to_string(),
+    for (name, job_state, iterations, expected_actions) in [
+        (
+            "scheduled job",
+            libredfish::JobState::Scheduled,
+            2,
+            vec![RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart,
+            )],
+        ),
+        (
+            "already-completed job",
+            libredfish::JobState::Completed,
+            1,
+            vec![],
+        ),
+    ] {
+        let mut txn = env.db_txn().await;
+        db::machine::update_state(
+            &mut txn,
+            &host_id,
+            &ManagedHostState::Decommissioning {
+                decommissioning_state: DecommissioningState::DeconfiguringHost {
+                    deconfiguring_state: DeconfiguringHostState::WaitForUefiPasswordJobScheduled {
+                        job_id: job_id.to_string(),
+                    },
                 },
             },
-        },
-    )
-    .await
-    .unwrap();
-    txn.commit().await.unwrap();
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
 
-    env.redfish_sim
-        .set_job_state_sequence(vec![libredfish::JobState::Completed]);
-    env.run_machine_state_controller_iteration().await;
-
-    let mut txn = env.db_txn().await;
-    let host = managed_host.host().db_machine(&mut txn).await;
-    assert!(matches!(
-        host.current_state(),
-        ManagedHostState::Decommissioning {
-            decommissioning_state: DecommissioningState::DeconfiguringHost {
-                deconfiguring_state: DeconfiguringHostState::WaitForUefiPasswordJobCompletion { .. },
-            },
+        env.redfish_sim.set_job_state_sequence(vec![job_state]);
+        let redfish_timepoint = env.redfish_sim.timepoint();
+        for _ in 0..iterations {
+            env.run_machine_state_controller_iteration().await;
         }
-    ));
-    txn.commit().await.unwrap();
+
+        assert_eq!(
+            env.redfish_sim
+                .actions_since(&redfish_timepoint)
+                .all_hosts(),
+            expected_actions,
+            "{name}",
+        );
+        let mut txn = env.db_txn().await;
+        assert_eq!(
+            managed_host
+                .host()
+                .db_machine(&mut txn)
+                .await
+                .current_state(),
+            &ManagedHostState::Decommissioning {
+                decommissioning_state: DecommissioningState::DeconfiguringHost {
+                    deconfiguring_state: DeconfiguringHostState::WaitForUefiPasswordJobCompletion {
+                        job_id: job_id.to_string(),
+                    },
+                },
+            },
+            "{name}",
+        );
+        txn.commit().await.unwrap();
+    }
 }
 
 #[crate::sqlx_test]
