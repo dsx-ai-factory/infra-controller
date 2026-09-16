@@ -63,11 +63,11 @@ func handleMachineStatusRequest(w http.ResponseWriter, r *http.Request) {
 
 // StartHTTPServer - start a web server on the specified port.
 func StartHTTPServer() {
-	port := os.Getenv("ESA_PORT")
+	port := ":" + os.Getenv("ESA_PORT")
 	http.HandleFunc(computils.SiteStatus, handleSiteStatusRequest)
 	http.HandleFunc(computils.VPCStatus, handleVpcStatusRequest)
 	http.HandleFunc(computils.SubnetStatus, handleSubnetStatusRequest)
 	http.HandleFunc(computils.InstanceStatus, handleInstanceStatusRequest)
 	http.HandleFunc(computils.MachineStatus, handleMachineStatusRequest)
-	go http.ListenAndServe(fmt.Sprintf("localhost:%v", port), nil)
+	go http.ListenAndServe(port, nil)
 }
