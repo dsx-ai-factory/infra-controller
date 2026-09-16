@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+mod attestation_profile;
 mod batch_instance_allocation_validation;
 mod batch_instance_release;
 mod compute_allocation;
