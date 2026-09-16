@@ -33,6 +33,7 @@ use rpc::forge::{
 use rpc::protos::forge_api_client::ForgeApiClient;
 
 use crate::MachineConfig;
+use crate::status::DeviceKind;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientApiError {
@@ -63,6 +64,59 @@ pub struct ApiClient(pub ForgeApiClient);
 impl From<ForgeApiClient> for ApiClient {
     fn from(value: ForgeApiClient) -> Self {
         ApiClient(value)
+    }
+}
+
+/// One expected inventory record that machine-a-tron registers at startup.
+#[derive(Clone, Debug)]
+pub(crate) enum ExpectedRecord {
+    Rack {
+        rack_id: RackId,
+        rack_profile_id: RackProfileId,
+    },
+    Machine {
+        bmc_mac_address: String,
+        chassis_serial_number: String,
+        rack_id: Option<RackId>,
+        dpu_policy: Option<HostDpuPolicy>,
+        dpf_enabled: bool,
+        interfaces: Vec<ExpectedInterface>,
+    },
+    Switch {
+        bmc_mac_address: String,
+        switch_serial_number: String,
+        nvos_mac_addresses: Vec<String>,
+        rack_id: Option<RackId>,
+    },
+    PowerShelf {
+        bmc_mac_address: String,
+        shelf_serial_number: String,
+        rack_id: Option<RackId>,
+    },
+}
+
+impl ExpectedRecord {
+    /// Human-readable identity used in logs and the registration summary.
+    pub(crate) fn identifier(&self) -> String {
+        let (kind, serial, bmc_mac_address) = match self {
+            Self::Rack { rack_id, .. } => return format!("rack {rack_id}"),
+            Self::Machine {
+                chassis_serial_number,
+                bmc_mac_address,
+                ..
+            } => (DeviceKind::Machine, chassis_serial_number, bmc_mac_address),
+            Self::Switch {
+                switch_serial_number,
+                bmc_mac_address,
+                ..
+            } => (DeviceKind::Switch, switch_serial_number, bmc_mac_address),
+            Self::PowerShelf {
+                shelf_serial_number,
+                bmc_mac_address,
+                ..
+            } => (DeviceKind::PowerShelf, shelf_serial_number, bmc_mac_address),
+        };
+        format!("{kind} {serial} ({bmc_mac_address})")
     }
 }
 
@@ -360,6 +414,56 @@ impl ApiClient {
             })
             .await
             .map_err(ClientApiError::InvocationError)
+    }
+
+    /// Registers one expected inventory record of any supported kind.
+    pub(crate) async fn add_expected_record(&self, record: ExpectedRecord) -> ClientApiResult<()> {
+        match record {
+            ExpectedRecord::Rack {
+                rack_id,
+                rack_profile_id,
+            } => self.ensure_expected_rack(rack_id, rack_profile_id).await,
+            ExpectedRecord::Machine {
+                bmc_mac_address,
+                chassis_serial_number,
+                rack_id,
+                dpu_policy,
+                dpf_enabled,
+                interfaces,
+            } => {
+                self.add_expected_machine(
+                    bmc_mac_address,
+                    chassis_serial_number,
+                    rack_id,
+                    dpu_policy,
+                    dpf_enabled,
+                    interfaces,
+                )
+                .await
+            }
+            ExpectedRecord::Switch {
+                bmc_mac_address,
+                switch_serial_number,
+                nvos_mac_addresses,
+                rack_id,
+            } => {
+                self.add_expected_switch(
+                    bmc_mac_address,
+                    switch_serial_number,
+                    nvos_mac_addresses,
+                    rack_id,
+                )
+                .await
+            }
+            ExpectedRecord::PowerShelf {
+                bmc_mac_address,
+                shelf_serial_number,
+                rack_id,
+            } => {
+                self.add_expected_power_shelf(bmc_mac_address, shelf_serial_number, rack_id)
+                    .await
+            }
+        }
     }
 
     /// Registers a mock expected machine. Static BMC (`bmc_ip_address`) is left unset here;
