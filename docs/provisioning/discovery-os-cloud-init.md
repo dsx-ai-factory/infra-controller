@@ -147,9 +147,14 @@ journalctl -u cloud-final.service
 
 ### Paths and Endpoints
 
-PXE exposes Scout's NoCloud datasource URL through the internal iPXE variable
-`${scout-cloudinit-url}`. The Scout boot instruction passes it on the kernel
-command line as `ds=nocloud;s=${scout-cloudinit-url}`.
+PXE exposes the NoCloud datasource URL used by Scout through the internal iPXE
+variable `${scout-cloudinit-url}`. The Scout boot instruction passes it on the
+kernel command line as `ds=nocloud;s=${scout-cloudinit-url}`.
+
+PXE selects responses for these datasource endpoints using the request's source
+IP. It does not authenticate the Scout process or verify that Scout originated
+the request. Access therefore depends on network reachability and source-IP
+resolution rather than caller identity.
 
 | Purpose | Path or endpoint |
 | --- | --- |
