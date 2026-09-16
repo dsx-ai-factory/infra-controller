@@ -248,9 +248,6 @@ tags:
     x-displayName: DPU Reprovision
     description: |-
       DPU Reprovision allows re-provisioning Machine's DPUs
-  - name: Health Report
-    description: |-
-      Machine Health Report contains information about the health of a Machine including user enforced overrides
   - name: Machine Capability
     description: |-
       Machine Capability defines the hardware capabilities of a Machine. Machine Capabilities can be used to group Machines into Instance Types.
@@ -11073,7 +11070,7 @@ paths:
     get:
       summary: Retrieve all Machine health reports
       tags:
-        - Health Report
+        - Machine
       responses:
         '200':
           description: OK
@@ -11099,7 +11096,7 @@ paths:
     put:
       summary: Create or update Machine health report
       tags:
-        - Health Report
+        - Machine
       requestBody:
         required: true
         content:
@@ -11151,7 +11148,7 @@ paths:
     delete:
       summary: Delete Machine health report
       tags:
-        - Health Report
+        - Machine
       responses:
         '204':
           description: Machine health report was successfully removed
