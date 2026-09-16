@@ -455,9 +455,13 @@ impl RedfishClient {
             })
             .ok();
 
+        // `Vendor` rather than `vendor_string()`, which falls back to an
+        // arbitrary key of an unordered `Oem` map. A class has to derive the
+        // same way on every exploration, or the profile keyed to it stops
+        // applying.
         let hardware_class = derive_hardware_class(
             Some(&system),
-            service_root.vendor_string().as_deref(),
+            service_root.vendor.as_deref(),
             service_root.product.as_deref(),
         );
 
