@@ -243,7 +243,9 @@ nico-rest-api:
       secretName: rest-api-mysite-example-com-tls
 ```
 
-With this managed-certificate setup, `ingress.hosts` is the only place the DNS name appears. The chart adds every host to the ingress `spec.tls` block and to the certificate `dnsNames`, and uses the first host as the certificate common name, so a host that is renamed here stays covered by TLS. Supplying your own `ingress.tls` or `certificate.dnsNames` replaces the corresponding derived list, and the name then has to appear there too; the chart rejects an override that leaves any `ingress.hosts` entry uncovered rather than serving it over plaintext HTTP or with a certificate that has no matching SAN. The chart also rejects `ingress.enabled` and `nodePort.enabled` together.
+With this managed-certificate setup, `ingress.hosts` is the only place the DNS name appears. The chart adds every host to the ingress `spec.tls` block and to the certificate `dnsNames`, and uses the first host as the certificate common name, so a host that is renamed here stays covered by TLS. Supplying your own `ingress.tls` or `certificate.dnsNames` replaces the corresponding derived list, and the name then has to appear there too. The chart rejects an override that leaves an `ingress.hosts` entry out, under the rule that applies to each list: `ingress.tls[].hosts` has to name the host exactly, because that is how an ingress controller keys the virtual host it terminates TLS on, while `certificate.dnsNames` accepts a wildcard covering one label, as X.509 SAN matching does.
+
+Two settings are defaults rather than something to configure. `ingress.annotations` carries `ingress.kubernetes.io/force-ssl-redirect: "true"`, because a `spec.tls` block alone leaves port 80 serving the API in cleartext. And the chart rejects `ingress.enabled` together with `nodePort.enabled`.
 
 The chart creates a cert-manager `Certificate` for the ingress TLS Secret when `ingress.certificate.enabled: true`. The certificate is issued by the REST stack's `nico-rest-ca-issuer`, so this is a quick self-signed/private-CA setup suitable for lab and site-local deployments. If your cluster already has a TLS Secret for the domain, set `ingress.certificate.enabled: false` and set `ingress.tls` to point at that existing Secret.
 
@@ -279,14 +281,14 @@ nico-rest-api:
     tls:
       - secretName: mysite-wildcard-tls
         hosts:
-          - "*.mysite.example.com"
+          - rest-api.mysite.example.com
 ```
 
-A wildcard `ingress.tls` host covers a single label, so `*.mysite.example.com` satisfies `rest-api.mysite.example.com`. The chart rejects any `ingress.hosts` entry that no `ingress.tls` host covers, because an uncovered host is served over plaintext HTTP.
+Note that `ingress.tls[].hosts` names the concrete host even though the Secret holds a wildcard certificate. Contour keys its secure virtual host by the literal string there and attaches a route only on an exact match, so a `*.mysite.example.com` entry would leave this route with no HTTPS virtual host at all. The chart rejects any `ingress.hosts` entry that `ingress.tls[].hosts` does not name exactly. The wildcard certificate itself still works, and `certificate.dnsNames` does accept wildcards, since X.509 SAN matching covers one label.
 
 Three things differ from the Contour path:
 
-- **Redirects depend on the controller.** Contour and ingress-nginx redirect HTTP to HTTPS on their own once a host has TLS; others, Traefik among them, serve both unless told otherwise. Add your controller's redirect annotation, as the example does, rather than assuming the `spec.tls` block is enough.
+- **The redirect annotation is controller-specific.** A `spec.tls` block does not redirect plaintext HTTP on its own. The chart defaults `ingress.annotations` to `ingress.kubernetes.io/force-ssl-redirect: "true"`, which Contour honours, and ingress-nginx wants `nginx.ingress.kubernetes.io/force-ssl-redirect` instead, as the example above sets. Overriding the map merges with the default, so add your controller's annotation rather than assuming the inherited one applies.
 - **Annotation values must be quoted strings.** Kubernetes annotations are `map[string]string`, so an unquoted `true` or a bare number is rejected at apply time with `cannot unmarshal bool into Go struct field ObjectMeta.metadata.annotations of type string`.
 - **The Secret must live in the `nico-rest` namespace.** `spec.tls[].secretName` resolves in the Ingress's own namespace, so copy or mirror a site-wide wildcard Secret into `nico-rest`. Contour additionally needs a `TLSCertificateDelegation` to read one from elsewhere.
 

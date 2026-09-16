@@ -66,6 +66,33 @@ tests:
       - failedTemplate:
           errorMessage: "nico-rest-api: every ingress.hosts entry requires a non-empty host; an entry without one renders an empty ingress host and an empty certificate commonName"
 
+  # Contour's Ingress path leaves port 80 serving cleartext unless this is set,
+  # so it ships as a default rather than something an operator has to know about.
+  - it: requires HTTPS by default
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+    asserts:
+      - equal:
+          path: metadata.annotations["ingress.kubernetes.io/force-ssl-redirect"]
+          value: "true"
+
+  - it: keeps the HTTPS redirect when annotations are extended
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        annotations:
+          projectcontour.io/response-timeout: 30s
+    asserts:
+      - equal:
+          path: metadata.annotations["ingress.kubernetes.io/force-ssl-redirect"]
+          value: "true"
+      - equal:
+          path: metadata.annotations["projectcontour.io/response-timeout"]
+          value: 30s
+
   - it: renders ingress rules, class, and annotations when enabled
     template: ingress.yaml
     set:
@@ -226,9 +253,13 @@ tests:
               - api.nico.example.com
     asserts:
       - failedTemplate:
-          errorMessage: 'nico-rest-api: ingress.hosts entry "admin.nico.example.com" is not covered by any ingress.tls host, so it would be served over plaintext HTTP; add it to ingress.tls[].hosts, or clear ingress.tls to derive the block from ingress.hosts'
+          errorMessage: 'nico-rest-api: ingress.hosts entry "admin.nico.example.com" is not listed exactly in ingress.tls[].hosts, so Contour would attach no HTTPS route for it and serve it over plaintext HTTP; a wildcard entry does not match, list the host itself (a wildcard certificate Secret still works), or clear ingress.tls to derive the block from ingress.hosts'
 
-  - it: accepts a wildcard ingress.tls host covering one label
+  # Contour keys a secure virtual host by the literal spec.tls[].hosts string and
+  # attaches a rule only on an exact lookup, so a wildcard TLS entry leaves the
+  # route with no HTTPS virtual host. The wildcard Secret is still usable, but the
+  # concrete host has to be listed.
+  - it: rejects a wildcard ingress.tls host that does not name the rule host
     template: ingress.yaml
     set:
       ingress:
@@ -245,13 +276,10 @@ tests:
             hosts:
               - "*.nico.example.com"
     asserts:
-      - equal:
-          path: spec.tls[0].secretName
-          value: wildcard-nico-example-com-tls
+      - failedTemplate:
+          errorMessage: 'nico-rest-api: ingress.hosts entry "api.nico.example.com" is not listed exactly in ingress.tls[].hosts, so Contour would attach no HTTPS route for it and serve it over plaintext HTTP; a wildcard entry does not match, list the host itself (a wildcard certificate Secret still works), or clear ingress.tls to derive the block from ingress.hosts'
 
-  # An Ingress wildcard matches exactly one label, so *.nico.example.com must not
-  # be treated as covering a deeper name.
-  - it: rejects a wildcard ingress.tls host against a two-label host
+  - it: accepts a wildcard certificate Secret when the host is listed exactly
     template: ingress.yaml
     set:
       ingress:
@@ -259,17 +287,21 @@ tests:
         certificate:
           enabled: false
         hosts:
-          - host: a.b.nico.example.com
+          - host: api.nico.example.com
             paths:
               - path: /
                 pathType: Prefix
         tls:
           - secretName: wildcard-nico-example-com-tls
             hosts:
-              - "*.nico.example.com"
+              - api.nico.example.com
     asserts:
-      - failedTemplate:
-          errorMessage: 'nico-rest-api: ingress.hosts entry "a.b.nico.example.com" is not covered by any ingress.tls host, so it would be served over plaintext HTTP; add it to ingress.tls[].hosts, or clear ingress.tls to derive the block from ingress.hosts'
+      - equal:
+          path: spec.tls[0].secretName
+          value: wildcard-nico-example-com-tls
+      - equal:
+          path: spec.tls[0].hosts[0]
+          value: api.nico.example.com
 
   # An overridden dnsNames list replaces the host-derived SANs, so a host left
   # out of it gets a certificate with no matching SAN and clients reject the

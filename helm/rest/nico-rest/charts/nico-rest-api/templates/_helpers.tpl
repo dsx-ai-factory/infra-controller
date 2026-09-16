@@ -71,26 +71,31 @@ app.kubernetes.io/component: api
 {{/*
 Both ingress.tls and certificate.dnsNames replace a list the chart otherwise
 derives from ingress.hosts, and neither replacement has to mention every host.
-An ingress.hosts entry missing from ingress.tls is served over plaintext HTTP;
-one missing from certificate.dnsNames gets a certificate with no matching SAN,
-which clients reject. Require coverage for both rather than let either override
-silently break the route it is configured for.
+The two are checked under different rules on purpose.
+
+ingress.tls needs an exact match. Contour keys a secure virtual host by the
+literal string in spec.tls[].hosts and attaches a rule only on an exact lookup
+of the rule host, so tls.hosts: ["*.example.com"] gives api.example.com no HTTPS
+route at all. A wildcard certificate still works; list the concrete host.
+
+certificate.dnsNames follows X.509 SAN matching, where a wildcard does cover one
+label, so *.example.com is a valid SAN for api.example.com.
 */}}
 {{- if and .Values.ingress.enabled .Values.ingress.tls -}}
-{{- $covered := list -}}
+{{- $tlsHosts := list -}}
 {{- range .Values.ingress.tls -}}
-{{- $covered = concat $covered (.hosts | default list) -}}
+{{- $tlsHosts = concat $tlsHosts (.hosts | default list) -}}
 {{- end -}}
 {{- range .Values.ingress.hosts -}}
-{{- if not (include "nico-rest-api.hostCovered" (dict "host" .host "patterns" $covered)) -}}
-{{- fail (printf "nico-rest-api: ingress.hosts entry %q is not covered by any ingress.tls host, so it would be served over plaintext HTTP; add it to ingress.tls[].hosts, or clear ingress.tls to derive the block from ingress.hosts" .host) -}}
+{{- if not (has .host $tlsHosts) -}}
+{{- fail (printf "nico-rest-api: ingress.hosts entry %q is not listed exactly in ingress.tls[].hosts, so Contour would attach no HTTPS route for it and serve it over plaintext HTTP; a wildcard entry does not match, list the host itself (a wildcard certificate Secret still works), or clear ingress.tls to derive the block from ingress.hosts" .host) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if and .Values.ingress.enabled .Values.ingress.certificate.enabled .Values.ingress.certificate.dnsNames -}}
 {{- $sans := .Values.ingress.certificate.dnsNames -}}
 {{- range .Values.ingress.hosts -}}
-{{- if not (include "nico-rest-api.hostCovered" (dict "host" .host "patterns" $sans)) -}}
+{{- if not (include "nico-rest-api.sanCoversHost" (dict "host" .host "sans" $sans)) -}}
 {{- fail (printf "nico-rest-api: ingress.hosts entry %q is not covered by any ingress.certificate.dnsNames entry, so the issued certificate would have no SAN for it and clients would reject the connection; add it to dnsNames, or clear dnsNames to derive them from ingress.hosts" .host) -}}
 {{- end -}}
 {{- end -}}
@@ -98,15 +103,18 @@ silently break the route it is configured for.
 {{- end -}}
 
 {{/*
-Reports whether one host is covered by a list of host patterns, emitting a
-non-empty string when it is. A wildcard matches exactly one label, per both the
-Ingress spec and X.509 SAN matching, so *.example.com covers api.example.com but
-neither a.b.example.com nor example.com itself.
-Call as: include "nico-rest-api.hostCovered" (dict "host" $h "patterns" $list)
+Reports whether a host is covered by a list of X.509 SANs, emitting a non-empty
+string when it is. A wildcard SAN covers exactly one label, so *.example.com
+covers api.example.com but neither a.b.example.com nor example.com itself.
+
+Deliberately not reusable for ingress.tls[].hosts, which Contour matches
+exactly. Conflating the two is what lets a wildcard TLS entry look valid while
+leaving the route on plaintext HTTP.
+Call as: include "nico-rest-api.sanCoversHost" (dict "host" $h "sans" $list)
 */}}
-{{- define "nico-rest-api.hostCovered" -}}
+{{- define "nico-rest-api.sanCoversHost" -}}
 {{- $host := .host -}}
-{{- range .patterns -}}
+{{- range .sans -}}
 {{- if eq . $host -}}
 covered
 {{- else if hasPrefix "*." . -}}

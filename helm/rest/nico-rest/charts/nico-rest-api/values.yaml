@@ -28,7 +28,13 @@ ingress:
   # HTTP inside the cluster.
   enabled: false
   className: contour
-  annotations: {}
+  # -- Annotations for the Ingress. The default is what requires HTTPS: on
+  # Contour's Ingress path a spec.tls block alone does not redirect, because the
+  # route's HTTPSUpgrade follows force-ssl-redirect while allow-http defaults to
+  # true, so port 80 would serve the API in cleartext. Overriding this map merges
+  # with the default, so keep a redirect annotation your controller understands.
+  annotations:
+    ingress.kubernetes.io/force-ssl-redirect: "true"
   # -- Hosts to serve. Every entry is added to spec.tls[].hosts and to the
   # certificate dnsNames, so with both of those derived this is the only place a
   # DNS name needs to change. Overriding either list means naming the host there
@@ -41,7 +47,10 @@ ingress:
   # -- Fully override spec.tls. When empty, a single entry is generated from
   # certificate.secretName and ingress.hosts. Set this with certificate.enabled
   # false to serve a Secret this chart does not manage, such as one issued for a
-  # fully qualified domain by an external CA.
+  # fully qualified domain by an external CA. Entries must name each host in
+  # ingress.hosts exactly; a wildcard does not match, because the controller keys
+  # the virtual host it terminates TLS on by this literal string. A wildcard
+  # certificate in the Secret is fine.
   # Example:
   #   tls:
   #     - secretName: api-example-com-tls
