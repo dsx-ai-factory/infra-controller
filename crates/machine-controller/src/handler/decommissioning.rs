@@ -281,7 +281,7 @@ pub(super) async fn handle_deconfiguring_host(
                 },
                 _ => {
                     return Ok(StateHandlerOutcome::wait(format!(
-                        "waiting for UEFI password job {job_id} to be scheduled; current state: {job_state:?}"
+                        "waiting for UEFI password job {job_id} to be scheduled or completed; current state: {job_state:?}"
                     )));
                 }
             };
