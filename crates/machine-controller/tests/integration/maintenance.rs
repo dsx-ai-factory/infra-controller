@@ -93,6 +93,7 @@ impl ComputeTrayManager for ReconciliationComputeTrayManager {
                 bmc_mac: endpoints[0].bmc_mac,
                 success: true,
                 error: None,
+                backend_job_id: None,
             }]),
             BackendOutcome::Empty => Ok(Vec::new()),
             BackendOutcome::NonSuccess => Ok(vec![ComputeTrayResult {
@@ -100,6 +101,7 @@ impl ComputeTrayManager for ReconciliationComputeTrayManager {
                 bmc_mac: endpoints[0].bmc_mac,
                 success: false,
                 error: Some("test backend rejection".into()),
+                backend_job_id: None,
             }]),
             BackendOutcome::TransportFailure => Err(ComponentManagerError::Status(
                 tonic::Status::unavailable("test transport failure"),
