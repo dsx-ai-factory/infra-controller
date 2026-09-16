@@ -705,7 +705,7 @@ The instance detail response is rich -- it includes `interfaces[]` with assigned
 
 **What it does.** When phone-home is enabled, NICo does not consider the instance fully provisioned until the booted OS contacts NICo's metadata service from inside the guest. The instance is held in a provisioning state -- the transition to `Ready` is gated -- until that callback arrives. When it is disabled, NICo reports the instance ready as soon as provisioning and config sync finish, without waiting for any signal from the OS.
 
-**What NICo injects.** When phone-home is enabled, NICo edits your `userData` for you -- you do *not* add the callback yourself. NICo parses your cloud-init YAML, strips the existing [`phone_home`](https://cloudinit.readthedocs.io/en/latest/reference/modules.html#phone-home) blocks it can edit, and inserts one that POSTs to the site's metadata endpoint:
+**What NICo injects.** When phone-home is enabled, NICo edits your `userData`. You do not add the callback yourself. NICo parses your cloud-init YAML, removes the existing [`phone_home`](https://cloudinit.readthedocs.io/en/latest/reference/modules.html#phone-home) blocks that it can edit, and inserts one that sends a POST request to the site's metadata endpoint:
 
 ```yaml
 #cloud-config
