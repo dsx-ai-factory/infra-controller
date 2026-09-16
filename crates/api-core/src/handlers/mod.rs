@@ -36,6 +36,7 @@ pub(super) mod dpf;
 pub(super) mod dpu;
 pub(super) mod dpu_remediation;
 pub(super) mod dpu_service_sync;
+mod expected_component_patch;
 pub(super) mod expected_machine;
 pub(super) mod expected_power_shelf;
 pub(super) mod expected_rack;
