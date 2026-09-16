@@ -139,13 +139,18 @@ impl InstanceExtensionServicesStatus {
             };
 
             if required_dpus.is_empty() {
-                if removed_at.is_none() || !targets_resolved {
+                let can_terminate_without_dpu_observation = *service_type
+                    == ExtensionServiceType::DpfHelmChart
+                    && removed_at.is_some()
+                    && targets_resolved;
+
+                if !can_terminate_without_dpu_observation {
                     is_configs_synced = false;
                 }
                 extension_services.push(InstanceExtensionServiceStatus {
                     service_id: service.service_id,
                     version: service.version,
-                    overall_status: if removed_at.is_some() && targets_resolved {
+                    overall_status: if can_terminate_without_dpu_observation {
                         ExtensionServiceDeploymentStatus::Terminated
                     } else {
                         ExtensionServiceDeploymentStatus::Unknown
@@ -807,9 +812,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_required_dpus_are_terminated_only_after_removal_begins() {
+    fn kubernetes_pod_without_required_dpus_requires_termination_evidence() {
         let config_version = ConfigVersion::initial();
-        let config = create_service_config(config_version);
+        let mut config = create_service_config(config_version);
         let service_types =
             HashMap::from([(get_test_service_id(), ExtensionServiceType::KubernetesPod)]);
         let observations = HashMap::new();
@@ -829,25 +834,28 @@ mod tests {
             ExtensionServiceDeploymentStatus::Unknown
         );
 
-        let deleted_at = Utc::now();
+        let removed_at = Utc::now();
+        config.service_configs[0].removed = Some(removed_at);
         let removed = InstanceExtensionServicesStatus::from_config_and_service_type_observations(
             Versioned::new(&config, config_version),
             &service_types,
             &[],
             &[],
             None,
-            Some(&deleted_at),
+            None,
             &observations,
         );
-        assert_eq!(removed.configs_synced, SyncState::Synced);
+        assert_eq!(removed.configs_synced, SyncState::Pending);
         assert_eq!(
             removed.extension_services[0].overall_status,
-            ExtensionServiceDeploymentStatus::Terminated
+            ExtensionServiceDeploymentStatus::Unknown
         );
-        let deleted_at_text = deleted_at.to_string();
+        assert!(removed.extension_services[0].dpu_statuses.is_empty());
+        assert!(removed.get_terminated_service_keys().is_empty());
+        let removed_at_text = removed_at.to_string();
         assert_eq!(
             removed.extension_services[0].removed.as_deref(),
-            Some(deleted_at_text.as_str())
+            Some(removed_at_text.as_str())
         );
     }
 
@@ -865,7 +873,7 @@ mod tests {
         )]));
 
         let status = InstanceExtensionServicesStatus::from_config_and_type_observations(
-            &[],
+            &[dpu_id],
             &[],
             None,
             Versioned::new(&create_service_config(config_version), config_version),

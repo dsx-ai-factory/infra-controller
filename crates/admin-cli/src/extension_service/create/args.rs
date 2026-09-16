@@ -29,6 +29,11 @@ Create a Kubernetes-pod extension service:
     $ nico-admin-cli extension-service create --name my-service --type kubernetes-pod \
     --data '{\"image\":\"my-registry/my-service:1.0\"}'
 
+Create a DPF Helm chart on all DPUs used by instance networking:
+    $ nico-admin-cli extension-service create --name my-helm-service --type dpf-helm-chart \
+    --dpu-target all-active --data \
+    '{\"repoURL\":\"oci://registry.example.com/charts\",\"chartName\":\"my-service\",\"chartVersion\":\"1.2.3\",\"security.privileged\":false}'
+
 Create with an explicit service ID and a description:
     $ nico-admin-cli extension-service create --id 12345678-1234-5678-90ab-cdef01234567 \
     --name my-service --type kubernetes-pod --data '{\"image\":\"my-registry/my-service:1.0\"}' \

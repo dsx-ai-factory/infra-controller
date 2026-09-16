@@ -2078,6 +2078,15 @@ async fn update_instance_extension_services_config(
     validate_instance_extension_services(
         mh_snapshot.host_snapshot.id,
         mh_snapshot.host_snapshot.config.dpf.used_for_ingestion,
+        mh_snapshot
+            .host_snapshot
+            .primary_attached_dpu_machine_id()
+            .is_some_and(|primary_dpu| {
+                mh_snapshot
+                    .dpu_snapshots
+                    .iter()
+                    .any(|dpu| dpu.id == primary_dpu)
+            }),
         &new_extension_services_config,
         &services,
         &versions,
