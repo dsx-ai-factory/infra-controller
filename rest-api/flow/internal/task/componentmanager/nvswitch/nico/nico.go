@@ -324,15 +324,8 @@ func (m *Manager) GetPowerStatus(
 
 // FirmwareControl schedules a firmware update via NICo's UpdateComponentFirmware API.
 //
-// When TargetVersion is provided it is forwarded directly to Core.
-// When TargetVersion is empty (e.g. BringUp context), the method queries
-// Core's desired firmware entries and the actual firmware from explored
-// endpoints to perform an idempotency check. If all switches already run the
-// desired firmware the call returns early without triggering an update.
-//
-// Before issuing the update the method also verifies that all target switches
-// report the same firmware version set. A heterogeneous fleet is rejected
-// because a single UpdateComponentFirmware call cannot target mixed versions.
+// TargetVersion is forwarded directly to Core. For an empty TargetVersion,
+// Core resolves the rack profile's desired firmware object.
 func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, info operations.FirmwareControlTaskInfo) error {
 	log.Debug().
 		Str("components", target.String()).
@@ -353,24 +346,13 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 		return err
 	}
 
-	if info.TargetVersion == "" {
-		upToDate, err := m.checkFirmwareUpToDate(ctx, target)
-		if err != nil {
-			log.Warn().Err(err).Msg("NVSwitch idempotency check failed, proceeding with update")
-		} else if upToDate {
-			log.Info().
-				Str("components", target.String()).
-				Msg("All NVSwitch firmware already at desired version, skipping update")
-			return nil
-		}
-	}
-
 	switchTarget := &corev1.UpdateSwitchFirmwareTarget{Components: subComponents}
 	if target.UsesMACAddresses() {
 		switchTarget.BmcMacs = &corev1.MacAddressList{MacAddresses: target.Identifiers}
 	} else {
 		switchTarget.SwitchIds = switchIDsProto(target.Identifiers)
 	}
+
 	req := &corev1.UpdateComponentFirmwareRequest{
 		Target:                &corev1.UpdateComponentFirmwareRequest_Switches{Switches: switchTarget},
 		TargetVersion:         info.TargetVersion,
@@ -397,36 +379,6 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 		Str("target_version", info.TargetVersion).
 		Msg("Firmware update started for NVSwitch via NICo")
 	return nil
-}
-
-// checkFirmwareUpToDate queries actual firmware from GetComponentInventory and
-// desired firmware from Core, returning true when all target switches are
-// already running a desired version.
-func (m *Manager) checkFirmwareUpToDate(ctx context.Context, target common.Target) (bool, error) {
-	desiredEntries, err := m.nicoClient.GetDesiredFirmwareVersions(ctx)
-	if err != nil {
-		return false, fmt.Errorf("failed to query desired firmware versions: %w", err)
-	}
-
-	actualFirmware, err := m.getActualFirmwareVersions(ctx, target)
-	if err != nil {
-		return false, err
-	}
-
-	if len(actualFirmware) == 0 {
-		return false, nil
-	}
-
-	for _, id := range target.Identifiers {
-		actual, ok := actualFirmware[id]
-		if !ok || len(actual) == 0 {
-			return false, nil
-		}
-		if !matchesAnyDesired(actual, desiredEntries) {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 // getActualFirmwareVersions queries GetComponentInventory for the target
@@ -512,24 +464,6 @@ func (m *Manager) VerifyFirmwareConsistency(ctx context.Context, target common.T
 		Str("firmware_versions", referenceJSON).
 		Msg("All NVSwitch firmware versions are consistent")
 	return nil
-}
-
-func matchesAnyDesired(actual map[string]string, entries []*corev1.DesiredFirmwareVersionEntry) bool {
-	for _, entry := range entries {
-		if firmwareVersionsMatch(entry.GetComponentVersions(), actual) {
-			return true
-		}
-	}
-	return false
-}
-
-func firmwareVersionsMatch(desired, actual map[string]string) bool {
-	for k, v := range desired {
-		if actual[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 // GetFirmwareStatus returns the current status of firmware updates for the target components.
