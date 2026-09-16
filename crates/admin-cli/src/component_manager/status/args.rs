@@ -17,7 +17,9 @@
 
 use clap::Parser;
 
-use crate::component_manager::common::{ComputeTraySelection, DeviceTargetArgs, SwitchSelection};
+use crate::component_manager::common::{
+    ComputeTraySelection, DeviceTargetArgs, PowerShelfSelection, SwitchSelection,
+};
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
@@ -37,6 +39,10 @@ Get status for several compute trays at once:
 
 Get status for a compute tray by BMC MAC (targets the tray before ingestion):
     $ nico-admin-cli component-manager get-firmware-update-status compute-tray \
+    --mac-address 00:11:22:33:44:55
+
+Get status for a power shelf by PMC MAC (targets the power shelf before ingestion):
+    $ nico-admin-cli component-manager get-firmware-update-status power-shelf \
     --mac-address 00:11:22:33:44:55
 
 Get status for an entire rack:
@@ -65,11 +71,18 @@ impl From<Args> for rpc::forge::GetComponentFirmwareStatusRequest {
                 }),
             },
             DeviceTargetArgs::PowerShelf(target) => Self {
-                target: Some(
-                    rpc::forge::get_component_firmware_status_request::Target::PowerShelfIds(
-                        target.into(),
-                    ),
-                ),
+                target: Some(match target.into_selection() {
+                    PowerShelfSelection::PowerShelfIds(list) => {
+                        rpc::forge::get_component_firmware_status_request::Target::PowerShelfIds(
+                            list,
+                        )
+                    }
+                    PowerShelfSelection::Macs(macs) => {
+                        rpc::forge::get_component_firmware_status_request::Target::PowerShelfPmcMacs(
+                            macs,
+                        )
+                    }
+                }),
             },
             DeviceTargetArgs::ComputeTray(target) => Self {
                 target: Some(match target.into_selection() {

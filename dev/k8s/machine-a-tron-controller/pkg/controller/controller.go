@@ -75,6 +75,10 @@ const (
 type ServiceBuilder struct {
 	Namespace    string
 	BaseSelector map[string]string
+	// EnableStateAnnotations controls whether machine state annotations
+	// (api-state, power-state) are included on Services. When false (default),
+	// these annotations are omitted to reduce K8s API update churn.
+	EnableStateAnnotations bool
 	// OwnerRefs maps pod names to their Deployment's OwnerReference.
 	// Services are owned by the machine-a-tron Deployment they route to.
 	OwnerRefs map[string]metav1.OwnerReference
@@ -113,9 +117,11 @@ func (b *ServiceBuilder) BuildService(machine *matclient.MachineStatus, machineT
 	}
 
 	annotations := map[string]string{
-		AnnotationAPIState:          machine.APIState,
-		AnnotationPowerState:        machine.PowerState,
 		AnnotationRedfishListenPort: strconv.Itoa(int(machine.BMC.Redfish.ListenPort)),
+	}
+	if b.EnableStateAnnotations {
+		annotations[AnnotationAPIState] = machine.APIState
+		annotations[AnnotationPowerState] = machine.PowerState
 	}
 	if machine.BMC.IP != nil {
 		annotations[AnnotationBMCIP] = *machine.BMC.IP
@@ -200,14 +206,18 @@ func (b *ServiceBuilder) BuildServicesFromStatus(status *matclient.MachinesStatu
 	var services []*corev1.Service
 
 	for _, machine := range status.Machines {
-		// Build service for the host
-		svc := b.BuildService(&machine, MachineTypeHost, "", podName)
-		services = append(services, svc)
+		// Build service for the host only after DHCP has assigned its BMC IP.
+		// BuildService sets spec.clusterIP from the BMC IP, so a Service built
+		// without one would be given an arbitrary ClusterIP by the API server.
+		if machine.BMC.IP != nil && *machine.BMC.IP != "" {
+			services = append(services, b.BuildService(&machine, MachineTypeHost, "", podName))
+		}
 
-		// Build services for DPUs
+		// Build services for DPUs under the same BMC IP gate.
 		for _, dpu := range machine.DPUs {
-			dpuSvc := b.BuildService(&dpu, MachineTypeDPU, machine.MatID, podName)
-			services = append(services, dpuSvc)
+			if dpu.BMC.IP != nil && *dpu.BMC.IP != "" {
+				services = append(services, b.BuildService(&dpu, MachineTypeDPU, machine.MatID, podName))
+			}
 		}
 	}
 

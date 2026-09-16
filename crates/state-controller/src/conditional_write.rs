@@ -17,15 +17,18 @@
 
 use std::panic::Location;
 
+use db::dpa_interface::DpaNetworkConfigNotCurrent;
+use db::machine::MachineNetworkConfigNotCurrent;
 use db::{ConditionalWrite, ControllerStateNotCurrent};
 
 use crate::state_handler::StateHandlerError;
 
 /// `CheckApplied` requires a conditional write to apply before a handler continues.
 ///
-/// For [`ControllerStateNotCurrent`], a rejected write returns
-/// [`StateHandlerError::IterationInvalidated`]. Propagate this error unchanged
-/// with `?`. The processor discards the iteration's uncommitted database writes
+/// For [`ControllerStateNotCurrent`], [`DpaNetworkConfigNotCurrent`], and
+/// [`MachineNetworkConfigNotCurrent`], a rejected write returns
+/// [`StateHandlerError::IterationInvalidated`]. Propagate this error
+/// unchanged with `?`. The processor discards the iteration's uncommitted database writes
 /// and queues another pass to read fresh state.
 ///
 /// This does not retry the write or undo external effects; those must remain
@@ -57,9 +60,47 @@ impl<T> CheckApplied for ConditionalWrite<T, ControllerStateNotCurrent> {
     }
 }
 
+impl<T> CheckApplied for ConditionalWrite<T, DpaNetworkConfigNotCurrent> {
+    type Value = T;
+
+    #[track_caller]
+    fn check_applied(self) -> Result<T, StateHandlerError> {
+        match self {
+            Self::Applied(value) => Ok(value),
+            Self::NotApplied(DpaNetworkConfigNotCurrent) => {
+                Err(StateHandlerError::IterationInvalidated {
+                    source_ref: Location::caller(),
+                })
+            }
+        }
+    }
+}
+
+impl<T> CheckApplied for ConditionalWrite<T, MachineNetworkConfigNotCurrent> {
+    type Value = T;
+
+    #[track_caller]
+    fn check_applied(self) -> Result<T, StateHandlerError> {
+        match self {
+            Self::Applied(value) => Ok(value),
+            Self::NotApplied(MachineNetworkConfigNotCurrent) => {
+                Err(StateHandlerError::IterationInvalidated {
+                    source_ref: Location::caller(),
+                })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn applied_dpa_network_config_returns_its_value() {
+        let write = ConditionalWrite::<_, DpaNetworkConfigNotCurrent>::Applied(7);
+        assert_eq!(write.check_applied().unwrap(), 7);
+    }
 
     #[test]
     fn check_applied_reports_the_call_site() {

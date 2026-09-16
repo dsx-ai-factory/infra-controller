@@ -71,7 +71,12 @@ extraVolumes:
       secretName: otel-receiver-tls        # site-issuer: tls.crt/tls.key (server) + ca.crt (= site-root, the DPU's trust anchor AND its client-cert CA)
 extraVolumeMounts:
   - {name: otlp-server-cert, mountPath: /etc/otel/tls, readOnly: true}
+# Bracket the pod IP in listener and scrape addresses. Unbracketed IPv6
+# endpoints prevent collector startup; brackets also work for IPv4.
 config:
+  extensions:
+    health_check:
+      endpoint: "[${env:MY_POD_IP}]:13133"
   receivers:
     # Null out the chart's default receivers (helm merge keeps them otherwise; a null key
     # removes it) — only the mTLS OTLP/gRPC listener below may exist on this pod.
@@ -82,7 +87,7 @@ config:
       protocols:
         http: null
         grpc:
-          endpoint: ${env:MY_POD_IP}:4317
+          endpoint: "[${env:MY_POD_IP}]:4317"
           tls:
             cert_file: /etc/otel/tls/tls.crt
             key_file: /etc/otel/tls/tls.key
@@ -93,7 +98,7 @@ config:
           - job_name: opentelemetry-collector
             scrape_interval: 10s
             static_configs:
-              - targets: ["${env:MY_POD_IP}:8888"]
+              - targets: ["[${env:MY_POD_IP}]:8888"]
             metric_relabel_configs:
               - {action: labeldrop, regex: "service_instance_id|service_name"}
   processors:
@@ -134,7 +139,7 @@ config:
       default_labels_enabled:
         exporter: false
     prometheus/site:
-      endpoint: ${env:MY_POD_IP}:9999
+      endpoint: "[${env:MY_POD_IP}]:9999"
       resource_to_telemetry_conversion:
         enabled: false
   service:
@@ -156,5 +161,5 @@ config:
         exporters: [prometheus/site]
     telemetry:
       metrics:
-        address: ${env:MY_POD_IP}:8888
+        address: "[${env:MY_POD_IP}]:8888"
 # Prometheus scrapes :9999 via the additionalScrapeConfig in values-kube-prometheus-stack.yaml.

@@ -158,6 +158,16 @@ fn test_nvos_update_manager(
     })
 }
 
+fn test_rack_firmware_update_manager(
+    rms_sim: &RmsSim,
+) -> Option<Arc<dyn component_manager::RackFirmwareUpdateManager>> {
+    rms_sim.as_rms_client().map(|client| {
+        Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
+            client,
+        )) as Arc<dyn component_manager::RackFirmwareUpdateManager>
+    })
+}
+
 pub(in crate::tests) mod dpu;
 pub(in crate::tests) mod host;
 pub(in crate::tests) mod ib_partition;
@@ -191,10 +201,15 @@ pub(in crate::tests) struct TestEnvOverrides {
     pub(in crate::tests) nmxc_fail_after_n_creates: Option<usize>,
     pub(in crate::tests) compute_allocation_enforcement: Option<ComputeAllocationEnforcement>,
     pub(in crate::tests) nmxc_simulator: Option<bool>,
+    pub(in crate::tests) rack_component_manager_enabled: Option<bool>,
 
     /// Optional compute-tray backend injected into the component manager.
     pub(in crate::tests) compute_tray_manager:
         Option<Arc<dyn component_manager::compute_tray_manager::ComputeTrayManager>>,
+
+    /// Optional NV-Switch backend injected into the component manager.
+    pub(in crate::tests) nv_switch_manager:
+        Option<Arc<dyn component_manager::nv_switch_manager::NvSwitchManager>>,
 
     /// Optional firmware-object fetcher injected into the rack state handler.
     pub(in crate::tests) firmware_object_fetcher: Option<Arc<dyn FirmwareObjectFetcher>>,
@@ -377,7 +392,6 @@ impl TestEnv {
     pub(in crate::tests) fn rack_state_handler_services(&self) -> RackStateHandlerServices {
         RackStateHandlerServices {
             db_pool: self.pool.clone(),
-            rms_client: self.rms_sim.as_rms_client(),
             site_config: RackConfig {
                 rms: self.config.rms.clone(),
                 rack_validation_config: self.config.rack_validation_config.clone(),
@@ -385,6 +399,7 @@ impl TestEnv {
             }
             .into(),
             nvos_update_manager: test_nvos_update_manager(&self.rms_sim),
+            rack_firmware_update_manager: test_rack_firmware_update_manager(&self.rms_sim),
             credential_manager: self.test_credential_manager.clone(),
             component_manager: self.test_component_manager.clone(),
             nmx_cluster_switch_mtls_services:
@@ -1374,6 +1389,11 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
     if let Some(compute_tray_manager) = overrides.compute_tray_manager.clone() {
         test_component_manager.compute_tray = compute_tray_manager;
     }
+
+    if let Some(nv_switch_manager) = overrides.nv_switch_manager.clone() {
+        test_component_manager.nv_switch = nv_switch_manager;
+    }
+
     let test_component_manager = Some(Arc::new(test_component_manager));
     let fake_endpoint_explorer = MockEndpointExplorer::default();
 
@@ -1657,7 +1677,6 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
         .services(
             RackStateHandlerServices {
                 db_pool: db_pool.clone(),
-                rms_client: rms_sim.as_rms_client(),
                 site_config: RackConfig {
                     rms: config.rms.clone(),
                     rack_validation_config: config.rack_validation_config.clone(),
@@ -1665,8 +1684,13 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
                 }
                 .into(),
                 nvos_update_manager: test_nvos_update_manager(&rms_sim),
+                rack_firmware_update_manager: test_rack_firmware_update_manager(&rms_sim),
                 credential_manager: credential_manager.clone(),
-                component_manager: test_component_manager.clone(),
+                component_manager: if overrides.rack_component_manager_enabled.unwrap_or(true) {
+                    test_component_manager.clone()
+                } else {
+                    None
+                },
                 nmx_cluster_switch_mtls_services:
                     component_manager::config::switch_mtls_services_as_i32(
                         &component_manager::config::effective_nmx_cluster_switch_mtls_services(&[]),

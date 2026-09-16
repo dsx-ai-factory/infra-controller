@@ -25,6 +25,82 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// How a lookup was classified against the zones the site holds. The DNS
+// server maps this to an RCODE and the AA bit; the values are not RCODE
+// numbers.
+type DnsLookupOutcome int32
+
+const (
+	// Sent by servers that predate this field. Clients must fall back to the
+	// record list: non-empty is NOERROR, empty is NXDOMAIN.
+	DnsLookupOutcome_DNS_LOOKUP_OUTCOME_UNSPECIFIED DnsLookupOutcome = 0
+	// A successful lookup. NOERROR with `records` as the answer section. Clients
+	// answer NOERROR even if `records` is empty; a negative answer is always
+	// NO_DATA or NO_SUCH_NAME, never an empty RECORDS.
+	DnsLookupOutcome_DNS_LOOKUP_OUTCOME_RECORDS DnsLookupOutcome = 1
+	// The name exists in a held zone but has no records of the requested type.
+	// NOERROR with an empty answer; `authority_soa` is set.
+	DnsLookupOutcome_DNS_LOOKUP_OUTCOME_NO_DATA DnsLookupOutcome = 2
+	// The name is inside a held zone and nothing exists at or below it.
+	// NXDOMAIN; `authority_soa` is set.
+	DnsLookupOutcome_DNS_LOOKUP_OUTCOME_NO_SUCH_NAME DnsLookupOutcome = 3
+	// No held zone contains the name. The server must not answer NXDOMAIN.
+	DnsLookupOutcome_DNS_LOOKUP_OUTCOME_NOT_AUTHORITATIVE DnsLookupOutcome = 4
+	// The zone is held but policy declines to answer. REFUSED.
+	DnsLookupOutcome_DNS_LOOKUP_OUTCOME_REFUSED DnsLookupOutcome = 5
+	// The requested operation is not implemented. NOTIMP.
+	DnsLookupOutcome_DNS_LOOKUP_OUTCOME_NOT_IMPLEMENTED DnsLookupOutcome = 6
+)
+
+// Enum value maps for DnsLookupOutcome.
+var (
+	DnsLookupOutcome_name = map[int32]string{
+		0: "DNS_LOOKUP_OUTCOME_UNSPECIFIED",
+		1: "DNS_LOOKUP_OUTCOME_RECORDS",
+		2: "DNS_LOOKUP_OUTCOME_NO_DATA",
+		3: "DNS_LOOKUP_OUTCOME_NO_SUCH_NAME",
+		4: "DNS_LOOKUP_OUTCOME_NOT_AUTHORITATIVE",
+		5: "DNS_LOOKUP_OUTCOME_REFUSED",
+		6: "DNS_LOOKUP_OUTCOME_NOT_IMPLEMENTED",
+	}
+	DnsLookupOutcome_value = map[string]int32{
+		"DNS_LOOKUP_OUTCOME_UNSPECIFIED":       0,
+		"DNS_LOOKUP_OUTCOME_RECORDS":           1,
+		"DNS_LOOKUP_OUTCOME_NO_DATA":           2,
+		"DNS_LOOKUP_OUTCOME_NO_SUCH_NAME":      3,
+		"DNS_LOOKUP_OUTCOME_NOT_AUTHORITATIVE": 4,
+		"DNS_LOOKUP_OUTCOME_REFUSED":           5,
+		"DNS_LOOKUP_OUTCOME_NOT_IMPLEMENTED":   6,
+	}
+)
+
+func (x DnsLookupOutcome) Enum() *DnsLookupOutcome {
+	p := new(DnsLookupOutcome)
+	*p = x
+	return p
+}
+
+func (x DnsLookupOutcome) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DnsLookupOutcome) Descriptor() protoreflect.EnumDescriptor {
+	return file_dns_nico_proto_enumTypes[0].Descriptor()
+}
+
+func (DnsLookupOutcome) Type() protoreflect.EnumType {
+	return &file_dns_nico_proto_enumTypes[0]
+}
+
+func (x DnsLookupOutcome) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DnsLookupOutcome.Descriptor instead.
+func (DnsLookupOutcome) EnumDescriptor() ([]byte, []int) {
+	return file_dns_nico_proto_rawDescGZIP(), []int{0}
+}
+
 type DnsResourceRecordLookupRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Qtype         string                 `protobuf:"bytes,1,opt,name=qtype,proto3" json:"qtype,omitempty"`
@@ -110,8 +186,20 @@ func (x *DnsResourceRecordLookupRequest) GetRealRemote() string {
 }
 
 type DnsResourceRecordLookupResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Records       []*DnsResourceRecord   `protobuf:"bytes,1,rep,name=records,proto3" json:"records,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Records of the requested type at the queried name, or the zone SOA for an
+	// apex SOA query. Empty unless `outcome` is RECORDS.
+	Records []*DnsResourceRecord `protobuf:"bytes,1,rep,name=records,proto3" json:"records,omitempty"`
+	// How the lookup was classified.
+	Outcome DnsLookupOutcome `protobuf:"varint,2,opt,name=outcome,proto3,enum=dns.DnsLookupOutcome" json:"outcome,omitempty"`
+	// The SOA of the zone the name falls in, for the authority section of a
+	// negative answer. Always set for NO_DATA and NO_SUCH_NAME, never for the
+	// other outcomes. A client treats a negative without it as a broken reply.
+	AuthoritySoa *DnsResourceRecord `protobuf:"bytes,3,opt,name=authority_soa,json=authoritySoa,proto3,oneof" json:"authority_soa,omitempty"`
+	// The AA bit. True exactly when `outcome` is RECORDS, NO_DATA, or
+	// NO_SUCH_NAME. A client that receives an `outcome` value it does not
+	// recognise answers SERVFAIL rather than guessing an RCODE.
+	Authoritative bool `protobuf:"varint,4,opt,name=authoritative,proto3" json:"authoritative,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -151,6 +239,27 @@ func (x *DnsResourceRecordLookupResponse) GetRecords() []*DnsResourceRecord {
 		return x.Records
 	}
 	return nil
+}
+
+func (x *DnsResourceRecordLookupResponse) GetOutcome() DnsLookupOutcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return DnsLookupOutcome_DNS_LOOKUP_OUTCOME_UNSPECIFIED
+}
+
+func (x *DnsResourceRecordLookupResponse) GetAuthoritySoa() *DnsResourceRecord {
+	if x != nil {
+		return x.AuthoritySoa
+	}
+	return nil
+}
+
+func (x *DnsResourceRecordLookupResponse) GetAuthoritative() bool {
+	if x != nil {
+		return x.Authoritative
+	}
+	return false
 }
 
 type DnsResourceRecord struct {
@@ -1001,9 +1110,13 @@ const file_dns_nico_proto_rawDesc = "" +
 	"realRemote\x88\x01\x01B\b\n" +
 	"\x06_localB\t\n" +
 	"\a_remoteB\x0e\n" +
-	"\f_real_remote\"S\n" +
+	"\f_real_remote\"\xfe\x01\n" +
 	"\x1fDnsResourceRecordLookupResponse\x120\n" +
-	"\arecords\x18\x01 \x03(\v2\x16.dns.DnsResourceRecordR\arecords\"\xf0\x01\n" +
+	"\arecords\x18\x01 \x03(\v2\x16.dns.DnsResourceRecordR\arecords\x12/\n" +
+	"\aoutcome\x18\x02 \x01(\x0e2\x15.dns.DnsLookupOutcomeR\aoutcome\x12@\n" +
+	"\rauthority_soa\x18\x03 \x01(\v2\x16.dns.DnsResourceRecordH\x00R\fauthoritySoa\x88\x01\x01\x12$\n" +
+	"\rauthoritative\x18\x04 \x01(\bR\rauthoritativeB\x10\n" +
+	"\x0e_authority_soa\"\xf0\x01\n" +
 	"\x11DnsResourceRecord\x12\x14\n" +
 	"\x05qname\x18\x01 \x01(\tR\x05qname\x12\x14\n" +
 	"\x05qtype\x18\x02 \x01(\tR\x05qtype\x12\x10\n" +
@@ -1063,7 +1176,15 @@ const file_dns_nico_proto_rawDesc = "" +
 	"\x05_name\"9\n" +
 	"\x15DomainDeletionRequest\x12 \n" +
 	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdR\x02id\"\x16\n" +
-	"\x14DomainDeletionResultB8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
+	"\x14DomainDeletionResult*\x8d\x02\n" +
+	"\x10DnsLookupOutcome\x12\"\n" +
+	"\x1eDNS_LOOKUP_OUTCOME_UNSPECIFIED\x10\x00\x12\x1e\n" +
+	"\x1aDNS_LOOKUP_OUTCOME_RECORDS\x10\x01\x12\x1e\n" +
+	"\x1aDNS_LOOKUP_OUTCOME_NO_DATA\x10\x02\x12#\n" +
+	"\x1fDNS_LOOKUP_OUTCOME_NO_SUCH_NAME\x10\x03\x12(\n" +
+	"$DNS_LOOKUP_OUTCOME_NOT_AUTHORITATIVE\x10\x04\x12\x1e\n" +
+	"\x1aDNS_LOOKUP_OUTCOME_REFUSED\x10\x05\x12&\n" +
+	"\"DNS_LOOKUP_OUTCOME_NOT_IMPLEMENTED\x10\x06B8Z6github.com/NVIDIA/infra-controller/rest-api/proto/coreb\x06proto3"
 
 var (
 	file_dns_nico_proto_rawDescOnce sync.Once
@@ -1077,49 +1198,53 @@ func file_dns_nico_proto_rawDescGZIP() []byte {
 	return file_dns_nico_proto_rawDescData
 }
 
+var file_dns_nico_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_dns_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_dns_nico_proto_goTypes = []any{
-	(*DnsResourceRecordLookupRequest)(nil),  // 0: dns.DnsResourceRecordLookupRequest
-	(*DnsResourceRecordLookupResponse)(nil), // 1: dns.DnsResourceRecordLookupResponse
-	(*DnsResourceRecord)(nil),               // 2: dns.DnsResourceRecord
-	(*DomainMetadata)(nil),                  // 3: dns.DomainMetadata
-	(*DomainMetadataRequest)(nil),           // 4: dns.DomainMetadataRequest
-	(*DomainMetadataResponse)(nil),          // 5: dns.DomainMetadataResponse
-	(*DomainList)(nil),                      // 6: dns.DomainList
-	(*GetAllDomainsRequest)(nil),            // 7: dns.GetAllDomainsRequest
-	(*GetAllDomainsResponse)(nil),           // 8: dns.GetAllDomainsResponse
-	(*GetAllRecordsForDomainRequest)(nil),   // 9: dns.GetAllRecordsForDomainRequest
-	(*GetAllRecordsForDomainResponse)(nil),  // 10: dns.GetAllRecordsForDomainResponse
-	(*DomainInfo)(nil),                      // 11: dns.DomainInfo
-	(*Domain)(nil),                          // 12: dns.Domain
-	(*CreateDomainRequest)(nil),             // 13: dns.CreateDomainRequest
-	(*UpdateDomainRequest)(nil),             // 14: dns.UpdateDomainRequest
-	(*DomainSearchQuery)(nil),               // 15: dns.DomainSearchQuery
-	(*DomainDeletionRequest)(nil),           // 16: dns.DomainDeletionRequest
-	(*DomainDeletionResult)(nil),            // 17: dns.DomainDeletionResult
-	(*DomainId)(nil),                        // 18: common.DomainId
-	(*timestamppb.Timestamp)(nil),           // 19: google.protobuf.Timestamp
+	(DnsLookupOutcome)(0),                   // 0: dns.DnsLookupOutcome
+	(*DnsResourceRecordLookupRequest)(nil),  // 1: dns.DnsResourceRecordLookupRequest
+	(*DnsResourceRecordLookupResponse)(nil), // 2: dns.DnsResourceRecordLookupResponse
+	(*DnsResourceRecord)(nil),               // 3: dns.DnsResourceRecord
+	(*DomainMetadata)(nil),                  // 4: dns.DomainMetadata
+	(*DomainMetadataRequest)(nil),           // 5: dns.DomainMetadataRequest
+	(*DomainMetadataResponse)(nil),          // 6: dns.DomainMetadataResponse
+	(*DomainList)(nil),                      // 7: dns.DomainList
+	(*GetAllDomainsRequest)(nil),            // 8: dns.GetAllDomainsRequest
+	(*GetAllDomainsResponse)(nil),           // 9: dns.GetAllDomainsResponse
+	(*GetAllRecordsForDomainRequest)(nil),   // 10: dns.GetAllRecordsForDomainRequest
+	(*GetAllRecordsForDomainResponse)(nil),  // 11: dns.GetAllRecordsForDomainResponse
+	(*DomainInfo)(nil),                      // 12: dns.DomainInfo
+	(*Domain)(nil),                          // 13: dns.Domain
+	(*CreateDomainRequest)(nil),             // 14: dns.CreateDomainRequest
+	(*UpdateDomainRequest)(nil),             // 15: dns.UpdateDomainRequest
+	(*DomainSearchQuery)(nil),               // 16: dns.DomainSearchQuery
+	(*DomainDeletionRequest)(nil),           // 17: dns.DomainDeletionRequest
+	(*DomainDeletionResult)(nil),            // 18: dns.DomainDeletionResult
+	(*DomainId)(nil),                        // 19: common.DomainId
+	(*timestamppb.Timestamp)(nil),           // 20: google.protobuf.Timestamp
 }
 var file_dns_nico_proto_depIdxs = []int32{
-	2,  // 0: dns.DnsResourceRecordLookupResponse.records:type_name -> dns.DnsResourceRecord
-	3,  // 1: dns.DomainMetadataResponse.result:type_name -> dns.DomainMetadata
-	12, // 2: dns.DomainList.domains:type_name -> dns.Domain
-	11, // 3: dns.GetAllDomainsResponse.result:type_name -> dns.DomainInfo
-	2,  // 4: dns.GetAllRecordsForDomainResponse.result:type_name -> dns.DnsResourceRecord
-	18, // 5: dns.DomainInfo.id:type_name -> common.DomainId
-	18, // 6: dns.Domain.id:type_name -> common.DomainId
-	19, // 7: dns.Domain.created:type_name -> google.protobuf.Timestamp
-	19, // 8: dns.Domain.updated:type_name -> google.protobuf.Timestamp
-	19, // 9: dns.Domain.deleted:type_name -> google.protobuf.Timestamp
-	3,  // 10: dns.Domain.metadata:type_name -> dns.DomainMetadata
-	12, // 11: dns.UpdateDomainRequest.domain:type_name -> dns.Domain
-	18, // 12: dns.DomainSearchQuery.id:type_name -> common.DomainId
-	18, // 13: dns.DomainDeletionRequest.id:type_name -> common.DomainId
-	14, // [14:14] is the sub-list for method output_type
-	14, // [14:14] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	3,  // 0: dns.DnsResourceRecordLookupResponse.records:type_name -> dns.DnsResourceRecord
+	0,  // 1: dns.DnsResourceRecordLookupResponse.outcome:type_name -> dns.DnsLookupOutcome
+	3,  // 2: dns.DnsResourceRecordLookupResponse.authority_soa:type_name -> dns.DnsResourceRecord
+	4,  // 3: dns.DomainMetadataResponse.result:type_name -> dns.DomainMetadata
+	13, // 4: dns.DomainList.domains:type_name -> dns.Domain
+	12, // 5: dns.GetAllDomainsResponse.result:type_name -> dns.DomainInfo
+	3,  // 6: dns.GetAllRecordsForDomainResponse.result:type_name -> dns.DnsResourceRecord
+	19, // 7: dns.DomainInfo.id:type_name -> common.DomainId
+	19, // 8: dns.Domain.id:type_name -> common.DomainId
+	20, // 9: dns.Domain.created:type_name -> google.protobuf.Timestamp
+	20, // 10: dns.Domain.updated:type_name -> google.protobuf.Timestamp
+	20, // 11: dns.Domain.deleted:type_name -> google.protobuf.Timestamp
+	4,  // 12: dns.Domain.metadata:type_name -> dns.DomainMetadata
+	13, // 13: dns.UpdateDomainRequest.domain:type_name -> dns.Domain
+	19, // 14: dns.DomainSearchQuery.id:type_name -> common.DomainId
+	19, // 15: dns.DomainDeletionRequest.id:type_name -> common.DomainId
+	16, // [16:16] is the sub-list for method output_type
+	16, // [16:16] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_dns_nico_proto_init() }
@@ -1129,6 +1254,7 @@ func file_dns_nico_proto_init() {
 	}
 	file_common_nico_proto_init()
 	file_dns_nico_proto_msgTypes[0].OneofWrappers = []any{}
+	file_dns_nico_proto_msgTypes[1].OneofWrappers = []any{}
 	file_dns_nico_proto_msgTypes[2].OneofWrappers = []any{}
 	file_dns_nico_proto_msgTypes[11].OneofWrappers = []any{}
 	file_dns_nico_proto_msgTypes[12].OneofWrappers = []any{}
@@ -1138,13 +1264,14 @@ func file_dns_nico_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dns_nico_proto_rawDesc), len(file_dns_nico_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_dns_nico_proto_goTypes,
 		DependencyIndexes: file_dns_nico_proto_depIdxs,
+		EnumInfos:         file_dns_nico_proto_enumTypes,
 		MessageInfos:      file_dns_nico_proto_msgTypes,
 	}.Build()
 	File_dns_nico_proto = out.File

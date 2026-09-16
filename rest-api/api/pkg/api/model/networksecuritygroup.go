@@ -270,7 +270,7 @@ type APINetworkSecurityGroup struct {
 	// Rules is the list of NetworkSecurityGroupRuleAttributes for the NetworkSecurityGroup
 	Rules []*APINetworkSecurityGroupRule `json:"rules"`
 	// Labels is the set of labels/tags for the NetworkSecurityGroup
-	Labels map[string]string `json:"labels"`
+	Labels APILabels `json:"labels"`
 	// Created indicates the ISO datetime string for when the NetworkSecurityGroup was created
 	Created time.Time `json:"created"`
 	// Updated indicates the ISO datetime string for when the NetworkSecurityGroup was last updated
@@ -500,7 +500,7 @@ func NewAPINetworkSecurityGroup(dsg *cdbm.NetworkSecurityGroup, dbsds []cdbm.Sta
 		Description:    dsg.Description,
 		SiteID:         dsg.SiteID.String(),
 		TenantID:       dsg.TenantID.String(),
-		Labels:         dsg.Labels,
+		Labels:         APILabels(dsg.Labels),
 		Status:         dsg.Status,
 		Created:        dsg.Created,
 		Updated:        dsg.Updated,

@@ -232,6 +232,8 @@ fn machine_router_inner(
         .with_state(state.clone())
         .merge(crate::injection::management_router(injection.clone()));
     let router = ([
+        // Innermost, so `$expand` sees an already filtered and paged collection.
+        Box::new(redfish::query_router::append),
         Box::new(redfish::expander_router::append),
         Box::new(move |router| {
             if redfish_auth {

@@ -10,7 +10,7 @@ configure the API server's resource pools correctly.
 
 - `docs/manuals/vpc/vpc_routing_profiles.md` — how the `internal` flag on a routing profile
   determines which VNI pool is used
-- `docs/manuals/networking_requirements.md` — site-wide networking prerequisites, including
+- `docs/getting-started/prerequisites/network.md` — site-wide networking prerequisites, including
   general VNI and ASN allocation guidance
 - `docs/manuals/networking/ip_resource_pools.md` — IP resource pool configuration
 - `docs/manuals/vpc/vpc_network_virtualization.md` — end-to-end VPC network virtualization
@@ -151,7 +151,7 @@ Use the following approach to determine the required pool size for each pool.
    route-targets, so the network team must configure import and export policies that reference the
    same ranges you define in the pool.
 
-The `docs/manuals/networking_requirements.md` document states the general rule: one VNI is
+The `docs/getting-started/prerequisites/network.md` page states the general rule: one VNI is
 required per expected VPC. The pools defined here are the mechanism that enforces and tracks that
 allocation.
 

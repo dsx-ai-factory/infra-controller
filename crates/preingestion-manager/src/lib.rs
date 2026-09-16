@@ -41,6 +41,8 @@ use carbide_secrets::credentials::{
 use carbide_utils::periodic_timer::PeriodicTimer;
 use chrono::{DateTime, Utc};
 pub use config::PreingestionManagerConfig;
+use db::ConditionalWrite::{Applied, NotApplied};
+use db::explored_endpoints::EndpointReportNotCurrent;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{DatabaseError, WithTransaction};
 use futures_util::FutureExt;
@@ -895,14 +897,18 @@ impl PreingestionManagerStatic {
                                     txn,
                                 )
                                 .await?;
-                                db::explored_endpoints::re_explore_if_version_matches(
+                                match db::explored_endpoints::re_explore_if_version_matches(
                                     endpoint.address,
                                     endpoint.report_version,
                                     txn,
                                 )
-                                .await?;
+                                .await?
+                                {
+                                    Applied(()) | NotApplied(EndpointReportNotCurrent) => {}
+                                }
 
-                                // We need site explorer to requery the version
+                                // Wait for fresh inventory even if the endpoint
+                                // no longer matched our re-exploration request.
                                 db::explored_endpoints::set_waiting_for_explorer_refresh(
                                     endpoint.address,
                                     txn,

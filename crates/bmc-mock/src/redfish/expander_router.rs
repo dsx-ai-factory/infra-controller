@@ -142,29 +142,7 @@ async fn process(State(mut state): State<Expander>, request: Request<Body>) -> R
                         .unwrap();
                     state.call_inner_router(req).await
                 };
-                let (parts, response_bytes) = match json_bytes(response).await {
-                    Ok(buffered) => buffered,
-                    Err(BufferError::NotJson(response)) => {
-                        return Err(MemberRequestError::NotJson(uri, response.status()));
-                    }
-                    Err(BufferError::Read(e)) => return Err(MemberRequestError::Axum(uri, e)),
-                };
-
-                // Don't bother deserializing if it's unsuccessful
-                if !parts.status.is_success() {
-                    return Err(MemberRequestError::UnsuccessfulResponse(
-                        uri,
-                        parts,
-                        String::from_utf8_lossy(response_bytes.to_vec().as_slice()).to_string(),
-                    ));
-                }
-
-                serde_json::from_slice(response_bytes.as_ref()).map_err(|_| {
-                    MemberRequestError::MalformedResponse(
-                        uri,
-                        String::from_utf8_lossy(response_bytes.to_vec().as_slice()).to_string(),
-                    )
-                })
+                member_json(response, uri).await
             }
         }))
         .await
@@ -215,7 +193,7 @@ struct Expander {
     inner: Router,
 }
 
-enum BufferError {
+pub(super) enum BufferError {
     /// The response does not declare JSON; it is returned untouched.
     NotJson(Response),
     Read(axum::Error),
@@ -223,7 +201,7 @@ enum BufferError {
 
 /// Buffer a JSON response body. Streaming and other non-JSON bodies are never
 /// read to their end, which for an open event stream would be never.
-async fn json_bytes(
+pub(super) async fn json_bytes(
     response: Response,
 ) -> Result<(axum::http::response::Parts, bytes::Bytes), BufferError> {
     if !carbide_axum_utils::is_json_response(&response) {
@@ -236,8 +214,35 @@ async fn json_bytes(
         .map_err(BufferError::Read)
 }
 
+/// The JSON document a member request answered with, once it is known to
+/// have succeeded.
+pub(super) async fn member_json(
+    response: Response,
+    uri: String,
+) -> Result<Value, MemberRequestError> {
+    let (parts, bytes) = match json_bytes(response).await {
+        Ok(buffered) => buffered,
+        Err(BufferError::NotJson(response)) => {
+            return Err(MemberRequestError::NotJson(uri, response.status()));
+        }
+        Err(BufferError::Read(e)) => return Err(MemberRequestError::Axum(uri, e)),
+    };
+    if !parts.status.is_success() {
+        return Err(MemberRequestError::UnsuccessfulResponse(
+            uri,
+            parts,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| {
+        MemberRequestError::MalformedResponse(uri, String::from_utf8_lossy(&bytes).into_owned())
+    })
+}
+
 #[derive(thiserror::Error, Debug)]
-enum MemberRequestError {
+pub(super) enum MemberRequestError {
+    #[error("member @odata.id {0} is not a request URI: {1}")]
+    InvalidUri(String, axum::http::Error),
     #[error("inner request to URI {0} returned failure: {1:?}, body: {2}")]
     UnsuccessfulResponse(String, axum::http::response::Parts, String),
     #[error("inner request to URI {0} returned a non-JSON {1} response")]

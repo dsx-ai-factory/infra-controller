@@ -17,7 +17,9 @@
 
 use clap::Parser;
 
-use crate::component_manager::common::{ComputeTraySelection, DeviceTargetArgs, SwitchSelection};
+use crate::component_manager::common::{
+    ComputeTraySelection, DeviceTargetArgs, PowerShelfSelection, SwitchSelection,
+};
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
@@ -38,6 +40,10 @@ List versions for a compute tray by BMC MAC (targets the tray before ingestion):
 List versions for power shelves:
     $ nico-admin-cli component-manager get-firmware-versions power-shelf \
     --power-shelf-id 12345678-1234-5678-90ab-cdef01234567
+
+List versions for a power shelf by PMC MAC (targets the power shelf before ingestion):
+    $ nico-admin-cli component-manager get-firmware-versions power-shelf \
+    --mac-address 00:11:22:33:44:55
 
 List versions for an entire rack:
     $ nico-admin-cli component-manager get-firmware-versions rack \
@@ -67,11 +73,18 @@ impl From<Args> for rpc::forge::ListComponentFirmwareVersionsRequest {
                 }),
             },
             DeviceTargetArgs::PowerShelf(target) => Self {
-                target: Some(
-                    rpc::forge::list_component_firmware_versions_request::Target::PowerShelfIds(
-                        target.into(),
-                    ),
-                ),
+                target: Some(match target.into_selection() {
+                    PowerShelfSelection::PowerShelfIds(list) => {
+                        rpc::forge::list_component_firmware_versions_request::Target::PowerShelfIds(
+                            list,
+                        )
+                    }
+                    PowerShelfSelection::Macs(macs) => {
+                        rpc::forge::list_component_firmware_versions_request::Target::PowerShelfPmcMacs(
+                            macs,
+                        )
+                    }
+                }),
             },
             DeviceTargetArgs::ComputeTray(target) => Self {
                 target: Some(match target.into_selection() {

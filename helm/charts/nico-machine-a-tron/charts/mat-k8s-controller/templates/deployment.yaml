@@ -37,6 +37,7 @@ spec:
             - --insecure-skip-verify={{ .Values.config.insecureSkipVerify }}
             - --log-level={{ .Values.config.logLevel }}
             - --target-selector={{ include "mat-k8s-controller.targetSelector" . }}
+            - --enable-state-annotations={{ .Values.config.enableStateAnnotations }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:

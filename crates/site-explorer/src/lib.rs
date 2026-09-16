@@ -35,7 +35,10 @@ use carbide_uuid::machine::MachineType;
 use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
 use chrono::Utc;
 use config::SiteExplorerConfig;
-use db::{self, DatabaseError, Transaction, machine, power_shelf as db_power_shelf};
+use db::explored_endpoints::EndpointReportNotCurrent;
+use db::{
+    self, ConditionalWrite, DatabaseError, Transaction, machine, power_shelf as db_power_shelf,
+};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
@@ -109,8 +112,7 @@ use errors::{SiteExplorerError, SiteExplorerResult};
 use self::metrics::{
     BmcResetFinished, BmcResetMethod, BmcResetStatus, BmcResetTimestampPersistenceFailed,
     BootInterfaceSelected, DpuMigrationSignal, PairingBlockerReason, SiteExplorerIterationFinished,
-    SiteExplorerMachineSlotTrayFetchFailed, SiteExplorerMachineSlotTrayResponseMissing,
-    SiteExplorerMachineSlotTrayValueInvalid, exploration_error_to_metric_label,
+    exploration_error_to_metric_label,
 };
 use crate::config::SiteExplorerExploreMode;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
@@ -251,43 +253,6 @@ fn rms_location_value(value: Option<u32>) -> Result<Option<i32>, u32> {
     value
         .map(|value| i32::try_from(value).map_err(|_| value))
         .transpose()
-}
-
-/// Fetches `slot_number` and `tray_index` from RMS for one rack/node pair.
-/// Each value remains usable when the other is absent or outside `i32`.
-pub async fn fetch_slot_and_tray(
-    rms_client: &dyn librms::RmsApi,
-    request: librms::protos::rack_manager::BatchGetNodeDeviceInfoRequest,
-) -> (Option<i32>, Option<i32>) {
-    match rms_client.batch_get_node_device_info(request).await {
-        Ok(info) => {
-            let Some(node_device_details) = info.node_device_details.first() else {
-                carbide_instrument::emit(SiteExplorerMachineSlotTrayResponseMissing::new());
-                return (None, None);
-            };
-
-            let slot_number =
-                rms_location_value(node_device_details.slot_number).unwrap_or_else(|value| {
-                    carbide_instrument::emit(SiteExplorerMachineSlotTrayValueInvalid::SlotNumber {
-                        value,
-                    });
-                    None
-                });
-            let tray_index =
-                rms_location_value(node_device_details.tray_index).unwrap_or_else(|value| {
-                    carbide_instrument::emit(SiteExplorerMachineSlotTrayValueInvalid::TrayIndex {
-                        value,
-                    });
-                    None
-                });
-
-            (slot_number, tray_index)
-        }
-        Err(e) => {
-            carbide_instrument::emit(SiteExplorerMachineSlotTrayFetchFailed::new(e.to_string()));
-            (None, None)
-        }
-    }
 }
 
 pub struct Endpoint<'a> {
@@ -1205,6 +1170,26 @@ impl SiteExplorer {
                 );
             }
         }
+
+        let reconcile_machine_locations_start = Instant::now();
+        let host_bmc_ips = identified_hosts
+            .iter()
+            .map(|identified| identified.explored_host.host_bmc_ip)
+            .collect::<Vec<_>>();
+        if let Err(error) = self
+            .machine_creator
+            .reconcile_machine_locations(&host_bmc_ips)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                "Machine RMS location reconciliation failed; a later Site Explorer run will retry"
+            );
+        }
+        metrics.record_phase_latency(
+            "reconcile_machine_locations",
+            reconcile_machine_locations_start.elapsed(),
+        );
 
         Ok(identified_hosts
             .into_iter()
@@ -2938,6 +2923,9 @@ impl SiteExplorer {
         metrics.record_update_explored_endpoints_count("endpoint_error_update_attempts", 0);
         metrics.record_update_explored_endpoints_count("firmware_version_update_attempts", 0);
         metrics.record_update_explored_endpoints_count("redfish_remediation_candidates", 0);
+        // Commit the whole batch before dispatching remediation. A later write
+        // failure must roll back earlier reports and request clearing, since it
+        // also discards the remediation collected for them.
         let mut txn = self.txn_begin().await?;
 
         let mut redfish_errors = Vec::new();
@@ -2979,6 +2967,10 @@ impl SiteExplorer {
                 }
             }
 
+            // Keep topology writes ahead of endpoint writes to match machine deletion's
+            // lock order. A savepoint lets a rejected report undo only its own topology.
+            let mut txn = db::Transaction::begin_inner(txn.as_pgconn()).await?;
+
             // Update possible stale machine versions
             // Configured firmware versions remain the preferred source. Hosts
             // without firmware-management configuration, such as Lenovo GB300
@@ -3017,7 +3009,7 @@ impl SiteExplorer {
                                     "Initial exploration of endpoint"
                                 );
                             }
-                            db::explored_endpoints::try_update(
+                            let report_write = db::explored_endpoints::try_update(
                                 address,
                                 old_version,
                                 &report,
@@ -3026,18 +3018,37 @@ impl SiteExplorer {
                             )
                             .await?;
                             endpoint_report_update_attempts += 1;
+                            match report_write {
+                                ConditionalWrite::Applied(()) => {}
+                                ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+                                    // Skip transient remediation: it would use
+                                    // the rejected report's stale endpoint snapshot.
+                                    txn.rollback().await?;
+                                    continue;
+                                }
+                            }
                         }
                         Err(e) => {
                             // If an endpoint can not be explored we don't delete the known information, since it's
                             // still helpful. The failure might just be intermittent.
-                            db::explored_endpoints::try_update_last_exploration_error(
-                                address,
-                                old_version,
-                                &e,
-                                exploration_duration,
-                                &mut txn,
-                            )
-                            .await?;
+                            let error_write =
+                                db::explored_endpoints::try_update_last_exploration_error(
+                                    address,
+                                    old_version,
+                                    &e,
+                                    exploration_duration,
+                                    &mut txn,
+                                )
+                                .await?;
+                            match error_write {
+                                ConditionalWrite::Applied(()) => {}
+                                ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+                                    // The endpoint disappeared or its report changed
+                                    // while we were probing. Don't remediate an error
+                                    // the database didn't accept.
+                                    redfish_error = None;
+                                }
+                            }
                             endpoint_error_update_attempts += 1;
                         }
                     }
@@ -3090,6 +3101,8 @@ impl SiteExplorer {
                     }
                 }
             }
+
+            txn.commit().await?;
 
             // We wait until the end to add it to redfish_errors so we can move endpoint safely
             if let Some(e) = redfish_error {

@@ -29,21 +29,26 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::{
     DpuConfigExt as _, FixtureDefault as _, ManagedHostConfigExt as _,
 };
-use carbide_uuid::machine::MachineId;
-use db::ObjectFilter;
+use carbide_uuid::machine::{MachineId, MachineType};
+use db::explored_endpoints::EndpointReportNotCurrent;
 use db::sku::CURRENT_SKU_VERSION;
+use db::{ConditionalWrite, ObjectFilter};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
+use model::hardware_info::{DmiData, HardwareInfo};
+use model::machine::machine_id::from_hardware_info_with_type;
 use model::machine::machine_search_config::MachineSearchConfig;
-use model::machine::{AnyMachine, LoadSnapshotOptions};
+use model::machine::{
+    AnyMachine, CURRENT_STATE_MODEL_VERSION, LoadSnapshotOptions, ManagedHostState,
+};
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::metadata::Metadata;
 use model::site_explorer::{
     BlueFieldOperatingMode, Chassis, ComputerSystem, EndpointExplorationError,
-    EndpointExplorationReport, EndpointType, ExploredDpu, ExploredManagedHost, NetworkAdapter,
-    PreingestionState, UefiDevicePath,
+    EndpointExplorationReport, EndpointType, ExploredDpu, ExploredManagedHost, Inventory,
+    NetworkAdapter, PreingestionState, Service, UefiDevicePath,
 };
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::GetSiteExplorationRequest;
@@ -687,6 +692,380 @@ async fn test_handle_redfish_error_powers_on_machine(
     let endpoints = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn).await?;
     txn.commit().await?;
     assert_eq!(endpoints.len(), 1, "expected one explored endpoint");
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_rejected_exploration_error_skips_only_its_remediation(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let mut machines = vec![
+        env.new_machine("02:00:00:00:13:01", "Vendor1"),
+        env.new_machine("02:00:00:00:13:02", "Vendor2"),
+    ];
+    machines.discover_dhcp(env.api()).await?;
+    let report = EndpointExplorationReport {
+        endpoint_type: EndpointType::Bmc,
+        model: Some("cached hardware model".to_string()),
+        last_exploration_error: Some(EndpointExplorationError::AvoidLockout),
+        last_exploration_latency: Some(Duration::from_secs(12)),
+        ..Default::default()
+    };
+    let mut txn = env.pool.begin().await?;
+    for machine in &machines {
+        db::expected_machine::create(
+            &mut txn,
+            ExpectedMachine {
+                id: None,
+                bmc_mac_address: machine.mac,
+                data: ExpectedMachineData {
+                    serial_number: format!("host-{}", machine.mac),
+                    ..Default::default()
+                },
+            },
+        )
+        .await?;
+        db::explored_endpoints::insert(machine.ip.parse()?, &report, false, &mut txn).await?;
+    }
+    txn.commit().await?;
+
+    let mut endpoints = db::explored_endpoints::find_all(&env.pool).await?;
+    endpoints.sort_by_key(|endpoint| endpoint.address);
+    assert_eq!(endpoints.len(), 2);
+    let stale_endpoint = &endpoints[0];
+    let sibling_endpoint = &endpoints[1];
+
+    // Set `exploration_requested` to probe this endpoint first. The persistence
+    // loop sorts by IP, so rejecting the first write must still allow the
+    // sibling's update.
+    let mut txn = env.pool.begin().await?;
+    assert_eq!(
+        db::explored_endpoints::re_explore_if_version_matches(
+            stale_endpoint.address,
+            stale_endpoint.report_version,
+            &mut txn,
+        )
+        .await?,
+        ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 2,
+        concurrent_explorations: 1,
+        create_machines: Arc::new(false.into()),
+        ..Default::default()
+    });
+    let error = EndpointExplorationError::RedfishError {
+        details: "transient redfish failure".to_string(),
+        response_body: None,
+        response_code: Some(500),
+    };
+    for endpoint in &endpoints {
+        explorer.insert_endpoint_result(endpoint.address, Err(error.clone()));
+        explorer
+            .endpoint_explorer()
+            .power_states
+            .lock()
+            .unwrap()
+            .insert(endpoint.address, libredfish::PowerState::Off);
+    }
+
+    let blocker = explorer.endpoint_explorer().block_next_exploration();
+    let clear_during_probe = async {
+        blocker.wait_until_started().await;
+        assert_eq!(
+            explorer
+                .endpoint_explorer()
+                .explore_endpoint_calls
+                .lock()
+                .unwrap()[0]
+                .ip_address,
+            stale_endpoint.address,
+        );
+        env.api()
+            .clear_site_exploration_error(Request::new(
+                rpc::forge::ClearSiteExplorationErrorRequest {
+                    ip_address: stale_endpoint.address.to_string(),
+                },
+            ))
+            .await?;
+        let cleared_endpoint =
+            db::explored_endpoints::find_by_ips(&env.pool, vec![stale_endpoint.address])
+                .await?
+                .pop()
+                .unwrap();
+        blocker.release();
+        Ok::<_, Box<dyn std::error::Error>>(cleared_endpoint)
+    };
+    let iteration = async {
+        explorer.run_single_iteration().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (_, cleared_endpoint) = tokio::try_join!(iteration, clear_during_probe)?;
+
+    let mut persisted = db::explored_endpoints::find_all(&env.pool).await?;
+    persisted.sort_by_key(|endpoint| endpoint.address);
+    assert_eq!(persisted.len(), 2);
+    assert_eq!(cleared_endpoint.report.last_exploration_error, None);
+    assert_eq!(
+        cleared_endpoint.report_version.version_nr(),
+        stale_endpoint.report_version.version_nr() + 1,
+    );
+    assert_eq!(persisted[0].report, cleared_endpoint.report);
+    assert_eq!(persisted[0].report_version, cleared_endpoint.report_version);
+    assert_eq!(persisted[1].report.last_exploration_error, Some(error));
+    assert_eq!(persisted[1].report.model, report.model);
+    assert_eq!(
+        persisted[1].report_version.version_nr(),
+        sibling_endpoint.report_version.version_nr() + 1,
+    );
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .redfish_power_control_calls
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &[(
+            std::net::SocketAddr::new(sibling_endpoint.address, 443),
+            libredfish::SystemPowerControl::On,
+        )],
+    );
+
+    let counts: HashMap<_, _> = env
+        .test_harness
+        .test_meter
+        .parsed_metrics("carbide_site_explorer_update_explored_endpoints_count")
+        .into_iter()
+        .collect();
+    assert_eq!(counts["{kind=\"endpoint_error_update_attempts\"}"], "2");
+    assert_eq!(counts["{kind=\"redfish_remediation_candidates\"}"], "1");
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_rejected_successful_report_preserves_topology_and_skips_only_its_remediation(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let mut machines = vec![
+        env.new_machine("02:00:00:00:14:01", "Vendor1"),
+        env.new_machine("02:00:00:00:14:02", "Vendor2"),
+    ];
+    machines.discover_dhcp(env.api()).await?;
+    let mut txn = env.pool.begin().await?;
+    for machine in &machines {
+        let serial = format!("host-{}", machine.mac);
+        let hardware_info = HardwareInfo {
+            dmi_data: Some(DmiData {
+                product_serial: serial.clone(),
+                bios_version: "old-bios".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let machine_id = from_hardware_info_with_type(&hardware_info, MachineType::Host)?;
+        db::machine::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        // Leave the BMC interface unattached for preingestion remediation.
+        // The report's machine_id identifies this topology for firmware writes.
+        db::machine_topology::create_or_update(&mut txn, &machine_id, &hardware_info).await?;
+        db::machine_topology::update_firmware_version_by_machine_id(
+            &mut txn,
+            &machine_id,
+            "old-bmc",
+            "old-bios",
+        )
+        .await?;
+        db::expected_machine::create(
+            &mut txn,
+            ExpectedMachine {
+                id: None,
+                bmc_mac_address: machine.mac,
+                data: ExpectedMachineData {
+                    serial_number: serial.clone(),
+                    ..Default::default()
+                },
+            },
+        )
+        .await?;
+        let report = EndpointExplorationReport {
+            endpoint_type: EndpointType::Bmc,
+            machine_id: Some(machine_id),
+            model: Some("cached hardware model".to_string()),
+            last_exploration_error: Some(EndpointExplorationError::AvoidLockout),
+            systems: vec![ComputerSystem {
+                id: "System_0".to_string(),
+                serial_number: Some(serial),
+                model: Some("cached hardware model".to_string()),
+                bios_version: Some("old-bios".to_string()),
+                ..Default::default()
+            }],
+            service: vec![Service {
+                id: "FirmwareInventory".to_string(),
+                inventories: vec![Inventory {
+                    id: "BMC".to_string(),
+                    version: Some("old-bmc".to_string()),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+        db::explored_endpoints::insert(machine.ip.parse()?, &report, false, &mut txn).await?;
+    }
+    txn.commit().await?;
+
+    let mut endpoints = db::explored_endpoints::find_all(&env.pool).await?;
+    endpoints.sort_by_key(|endpoint| endpoint.address);
+    assert_eq!(endpoints.len(), 2);
+    let sibling_endpoint = &endpoints[0];
+    let stale_endpoint = &endpoints[1];
+    let machine_ids = endpoints
+        .iter()
+        .map(|endpoint| endpoint.report.machine_id.unwrap())
+        .collect::<Vec<_>>();
+    let mut txn = env.pool.begin().await?;
+    let original_topologies =
+        db::machine_topology::find_latest_by_machine_ids(&mut txn, &machine_ids).await?;
+    // Probe the stale endpoint first, but persist the sibling first (IP order).
+    // Rejecting the stale report must not undo the sibling's accepted writes.
+    db::explored_endpoints::request_exploration_for_addresses(
+        &[stale_endpoint.address],
+        txn.as_mut(),
+    )
+    .await?;
+    txn.commit().await?;
+
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 2,
+        concurrent_explorations: 1,
+        create_machines: Arc::new(false.into()),
+        ..Default::default()
+    });
+    for endpoint in &endpoints {
+        let mut report = endpoint.report.clone();
+        report.last_exploration_error = None;
+        report.systems[0].model = Some("updated hardware model".to_string());
+        report.systems[0].bios_version = Some("new-bios".to_string());
+        report.service[0].inventories[0].version = Some("new-bmc".to_string());
+        report.remediation_error = Some(EndpointExplorationError::RedfishError {
+            details: "transient redfish failure".to_string(),
+            response_body: None,
+            response_code: Some(500),
+        });
+        explorer.insert_endpoint_result(endpoint.address, Ok(report));
+        explorer
+            .endpoint_explorer()
+            .power_states
+            .lock()
+            .unwrap()
+            .insert(endpoint.address, libredfish::PowerState::Off);
+    }
+
+    let blocker = explorer.endpoint_explorer().block_next_exploration();
+    let clear_during_probe = async {
+        blocker.wait_until_started().await;
+        assert_eq!(
+            explorer
+                .endpoint_explorer()
+                .explore_endpoint_calls
+                .lock()
+                .unwrap()[0]
+                .ip_address,
+            stale_endpoint.address,
+        );
+        env.api()
+            .clear_site_exploration_error(Request::new(
+                rpc::forge::ClearSiteExplorationErrorRequest {
+                    ip_address: stale_endpoint.address.to_string(),
+                },
+            ))
+            .await?;
+        let cleared_endpoint =
+            db::explored_endpoints::find_by_ips(&env.pool, vec![stale_endpoint.address])
+                .await?
+                .pop()
+                .unwrap();
+        blocker.release();
+        Ok::<_, Box<dyn std::error::Error>>(cleared_endpoint)
+    };
+    let iteration = async {
+        explorer.run_single_iteration().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (_, cleared_endpoint) = tokio::try_join!(iteration, clear_during_probe)?;
+
+    let mut persisted = db::explored_endpoints::find_all(&env.pool).await?;
+    persisted.sort_by_key(|endpoint| endpoint.address);
+    assert_eq!(persisted.len(), 2);
+    assert_eq!(cleared_endpoint.report.last_exploration_error, None);
+    assert_eq!(
+        cleared_endpoint.report_version.version_nr(),
+        stale_endpoint.report_version.version_nr() + 1,
+    );
+    assert_eq!(persisted[1].report, cleared_endpoint.report);
+    assert_eq!(persisted[1].report_version, cleared_endpoint.report_version);
+    assert_eq!(
+        persisted[0].report.model.as_deref(),
+        Some("updated hardware model")
+    );
+    assert_eq!(
+        persisted[0].report.observed_host_bmc_version(),
+        Some("new-bmc")
+    );
+    assert_eq!(persisted[0].report.system_bios_version(), Some("new-bios"));
+    assert_eq!(
+        persisted[0].report_version.version_nr(),
+        sibling_endpoint.report_version.version_nr() + 1,
+    );
+    let mut txn = env.pool.begin().await?;
+    let topologies =
+        db::machine_topology::find_latest_by_machine_ids(&mut txn, &machine_ids).await?;
+    txn.commit().await?;
+    assert_eq!(
+        topologies[&machine_ids[1]].topology,
+        original_topologies[&machine_ids[1]].topology
+    );
+    let sibling_topology = &topologies[&machine_ids[0]].topology;
+    assert_eq!(
+        sibling_topology.bmc_info.firmware_version.as_deref(),
+        Some("new-bmc")
+    );
+    assert_eq!(
+        sibling_topology
+            .discovery_data
+            .info
+            .dmi_data
+            .as_ref()
+            .unwrap()
+            .bios_version,
+        "new-bios"
+    );
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .redfish_power_control_calls
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &[(
+            std::net::SocketAddr::new(sibling_endpoint.address, 443),
+            libredfish::SystemPowerControl::On,
+        )],
+    );
     Ok(())
 }
 
@@ -2425,7 +2804,7 @@ async fn test_site_explorer_clear_last_known_error(
     );
 
     let mut txn = db::Transaction::begin(&env.pool).await?;
-    let stale_write_applied = db::explored_endpoints::try_update_last_exploration_error(
+    let stale_write = db::explored_endpoints::try_update_last_exploration_error(
         bmc_ip,
         old_version,
         &EndpointExplorationError::AvoidLockout,
@@ -2434,8 +2813,9 @@ async fn test_site_explorer_clear_last_known_error(
     )
     .await?;
     txn.commit().await?;
-    assert!(
-        !stale_write_applied,
+    assert_eq!(
+        stale_write,
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent),
         "a stale exploration result must not overwrite a cleared error"
     );
 
@@ -2450,7 +2830,7 @@ async fn test_site_explorer_clear_last_known_error(
     // from the freshly persisted report.
     let version_before_race = nodes.first().unwrap().report_version;
     let mut exploration_txn = db::Transaction::begin(&env.pool).await?;
-    let exploration_write_applied = db::explored_endpoints::try_update_last_exploration_error(
+    let exploration_write = db::explored_endpoints::try_update_last_exploration_error(
         bmc_ip,
         version_before_race,
         &EndpointExplorationError::AvoidLockout,
@@ -2458,7 +2838,7 @@ async fn test_site_explorer_clear_last_known_error(
         &mut exploration_txn,
     )
     .await?;
-    assert!(exploration_write_applied);
+    assert_eq!(exploration_write, ConditionalWrite::Applied(()));
 
     let mut clear_txn = db::Transaction::begin(&env.pool).await?;
     {

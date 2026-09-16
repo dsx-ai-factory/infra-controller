@@ -1503,7 +1503,7 @@ async fn test_dpf_helm_chart_controller_queue_scan_and_persistence(
         .pop()
         .expect("controller record exists");
     let deleted_version = creating.status.controller_state.version.increment();
-    assert!(
+    assert_eq!(
         io.persist_controller_state(
             &mut txn,
             &service_id,
@@ -1511,7 +1511,8 @@ async fn test_dpf_helm_chart_controller_queue_scan_and_persistence(
             deleted_version,
             &ExtensionServiceLifecycleState::Deleted,
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
     io.persist_state_history(
         &mut txn,
@@ -1523,15 +1524,16 @@ async fn test_dpf_helm_chart_controller_queue_scan_and_persistence(
     // Models a create request that completed in DPF after a delete won the
     // database race. Its stale Creating version cannot overwrite Deleted with
     // Ready; the framework re-enqueues the object after this lost CAS.
-    assert!(
-        !io.persist_controller_state(
+    assert_eq!(
+        io.persist_controller_state(
             &mut txn,
             &service_id,
             creating.status.controller_state.version,
             creating.status.controller_state.version.increment(),
             &ExtensionServiceLifecycleState::Ready,
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent)
     );
     txn.commit().await?;
 

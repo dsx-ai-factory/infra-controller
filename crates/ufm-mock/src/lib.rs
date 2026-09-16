@@ -23,7 +23,9 @@ mod metrics;
 mod reconcile;
 mod state;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use auth::{UFM_MOCK_AUTH_TOKEN_ENV, UfmAuthToken};
 use axum::Router;
@@ -107,4 +109,44 @@ impl UfmMock {
         self.metrics.record_reconciliation(outcome.metric_label());
         Ok(())
     }
+}
+
+/// Serves `router` on `address`, over TLS when `tls` is set, until `cancellation` fires.
+///
+/// Shared by the standalone binary and the machine-a-tron protocol gateway so both listeners
+/// load PEM material and drain connections the same way.
+pub async fn serve(
+    address: SocketAddr,
+    tls: Option<TlsConfig>,
+    router: Router,
+    cancellation: CancellationToken,
+) -> eyre::Result<()> {
+    match tls {
+        Some(tls) => {
+            // Other workspace crates link the `ring` provider next to `aws-lc-rs`, so rustls
+            // cannot pick a process default on its own. Installing is a no-op when a provider is
+            // already installed.
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            let tls =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(tls.cert_path, tls.key_path)
+                    .await?;
+            let handle = axum_server::Handle::new();
+            let shutdown_handle = handle.clone();
+            tokio::spawn(async move {
+                cancellation.cancelled().await;
+                shutdown_handle.graceful_shutdown(Some(Duration::from_secs(10)));
+            });
+            axum_server::bind_rustls(address, tls)
+                .handle(handle)
+                .serve(router.into_make_service())
+                .await?;
+        }
+        None => {
+            let listener = tokio::net::TcpListener::bind(address).await?;
+            axum::serve(listener, router)
+                .with_graceful_shutdown(cancellation.cancelled_owned())
+                .await?;
+        }
+    }
+    Ok(())
 }
