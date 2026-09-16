@@ -26,6 +26,7 @@ use bmc_mock::{
     DpuMachineInfo, DpuSettings, HardwareType, HostFirmwareVersions, RackInfo, RackPlacement,
     RackType,
 };
+use carbide_utils::HostPortPair;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use clap::Parser;
@@ -592,6 +593,12 @@ pub struct MachineATronConfig {
 }
 
 impl MachineATronConfig {
+    pub(crate) fn bmc_proxy_address(&self) -> Option<String> {
+        self.configure_carbide_bmc_proxy_host
+            .as_ref()
+            .map(|host| HostPortPair::HostAndPort(host.clone(), self.bmc_mock_port).to_string())
+    }
+
     pub fn validate(&self) -> eyre::Result<()> {
         if let Some(ufm_mock) = self.ufm_mock.as_ref() {
             ufm_mock.validate()?;
@@ -1385,6 +1392,44 @@ scout_run_interval = "5s"
     #[test]
     fn dhcp_uses_api_by_default() {
         assert_eq!(rack_config().dhcp, DhcpType::Api {});
+    }
+
+    #[test]
+    fn bmc_proxy_address_uses_configured_host_and_port() {
+        check_values(
+            [
+                Check {
+                    scenario: "bare IPv6 with default port",
+                    input: r#"configure_carbide_bmc_proxy_host = "2001:db8::1""#,
+                    expect: Some("[2001:db8::1]:2000".to_string()),
+                },
+                Check {
+                    scenario: "bracketed IPv6 with configured port",
+                    input: r#"configure_carbide_bmc_proxy_host = "[2001:db8::1]"
+bmc_mock_port = 8443"#,
+                    expect: Some("[2001:db8::1]:8443".to_string()),
+                },
+                Check {
+                    scenario: "IPv4",
+                    input: r#"configure_carbide_bmc_proxy_host = "192.0.2.1""#,
+                    expect: Some("192.0.2.1:2000".to_string()),
+                },
+                Check {
+                    scenario: "proxy host omitted",
+                    input: "",
+                    expect: None,
+                },
+            ],
+            |serialized| {
+                let config: MachineATronConfig = toml::from_str(&format!(
+                    r#"carbide_api_url = "https://carbide-api.forge:443"
+machines = {{}}
+{serialized}"#
+                ))
+                .expect("could not parse config");
+                config.bmc_proxy_address()
+            },
+        );
     }
 
     #[test]

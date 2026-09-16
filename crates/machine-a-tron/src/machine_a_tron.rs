@@ -354,22 +354,15 @@ impl MachineATron {
         simulators: SimulatorRegistry,
         mut stop_rx: mpsc::Receiver<()>,
     ) -> eyre::Result<()> {
-        if let Some(host_str) = self
-            .app_context
-            .app_config
-            .configure_carbide_bmc_proxy_host
-            .as_ref()
-        {
-            let host_port_str =
-                format!("{}:{}", host_str, self.app_context.app_config.bmc_mock_port);
+        if let Some(bmc_proxy_address) = self.app_context.app_config.bmc_proxy_address() {
             tracing::info!(
-                bmc_proxy_address = %host_port_str,
+                %bmc_proxy_address,
                 "Configuring carbide API to use as bmc_proxy",
             );
             _ = self
                 .app_context
                 .api_client()
-                .configure_bmc_proxy_host(host_port_str)
+                .configure_bmc_proxy_host(bmc_proxy_address)
                 .await
                 .inspect_err(
                     |e| tracing::warn!(error = ?e, "Could not configure carbide bmc_proxy"),
