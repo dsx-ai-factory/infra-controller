@@ -18,6 +18,7 @@
 mod api_client;
 
 pub mod api_server;
+pub mod dns;
 pub mod domain;
 pub mod instance;
 pub mod machine;

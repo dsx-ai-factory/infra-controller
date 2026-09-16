@@ -1296,6 +1296,7 @@ dependencies = [
  "data-encoding",
  "eyre",
  "http",
+ "ipnetwork",
  "itertools 0.14.0",
  "mac_address",
  "serde_json",
