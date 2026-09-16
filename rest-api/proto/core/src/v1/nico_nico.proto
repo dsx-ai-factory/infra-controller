@@ -1173,7 +1173,8 @@ enum SpdmSchedulingOutcome {
   SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND = 3;
   // An operator-authored requirement went unsatisfied.
   SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING = 4;
-  // No exploration has recorded a hardware class for this machine's BMC.
+  // No exploration has recorded a hardware class for this machine's BMC, and
+  // no "any" profile covers it either.
   SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED = 5;
   // Neither the machine's class nor `any` has a profile.
   SPDM_SCHEDULING_OUTCOME_NO_PROFILE = 6;
@@ -1330,8 +1331,8 @@ enum AttestationCoverage {
   ATTESTATION_COVERAGE_ANY_FALLBACK = 2;
   // Neither this class nor "any" has a profile.
   ATTESTATION_COVERAGE_NO_PROFILE = 3;
-  // No exploration has recorded a class. "any" is not consulted, so nothing
-  // covers these endpoints until they are explored again.
+  // No exploration has recorded a class, and no "any" profile is stored, so
+  // nothing covers these endpoints.
   ATTESTATION_COVERAGE_CLASS_NOT_RECORDED = 4;
 }
 
