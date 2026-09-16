@@ -42,6 +42,7 @@ use model::site_explorer::{
     EndpointExplorationError, EndpointExplorationReport, EndpointType, EthernetInterface,
     InternalLockdownStatus, Inventory, LockdownStatus, MachineSetupDiff, MachineSetupStatus,
     Manager, NetworkAdapter, PCIeDevice, SecureBootStatus, Service, UefiDevicePath,
+    derive_hardware_class,
 };
 use regex::Regex;
 
@@ -454,6 +455,12 @@ impl RedfishClient {
             })
             .ok();
 
+        let hardware_class = derive_hardware_class(
+            Some(&system),
+            service_root.vendor_string().as_deref(),
+            service_root.product.as_deref(),
+        );
+
         Ok(EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
@@ -464,6 +471,7 @@ impl RedfishClient {
             chassis,
             service,
             vendor,
+            hardware_class: Some(hardware_class),
             versions: HashMap::default(),
             model: None,
             power_shelf_id: None,
