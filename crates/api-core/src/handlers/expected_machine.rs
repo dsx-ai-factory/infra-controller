@@ -389,12 +389,16 @@ fn preserve_omitted_dpu_loopback_reservations(
 }
 
 /// Create missing expected_machines that aren't already in the database,
-/// calling `validate_expected_machine_for_insert` for each new entry. This is currently
-/// purely used by the expected_machines.json import path only, but lives
-/// here so it can re-leverage `validate_expected_machine_for_insert` and share the
-/// same validation codepath as the API handler.
+/// running the full `validate_expected_machine` (shape checks plus
+/// transaction-backed reservation pool membership) for each new entry. This is
+/// currently purely used by the expected_machines.json import path only, but
+/// lives here so it shares the same validation codepath as the API handler --
+/// including rejecting a DPU loopback reservation whose address is outside its
+/// pool, auto-assignable, or already allocated, rather than deferring that
+/// failure to DPU discovery.
 pub(crate) async fn create_missing_from(
     txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
     expected_machines: &[ExpectedMachine],
 ) -> Result<(), CarbideError> {
     let existing_macs: HashSet<String> = db::expected_machine::find_all(&mut *txn)
@@ -429,7 +433,9 @@ pub(crate) async fn create_missing_from(
             LegacyHostBmcOverrides::default()
         };
         normalize_host_bmc_configuration(&mut expected_machine, None, overrides)?;
-        validate_expected_machine_for_insert(&expected_machine)?;
+        // These are fresh inserts (existing == None), so every reserved address
+        // is treated as new and checked against its pool.
+        validate_expected_machine(&mut *txn, common_pools, &expected_machine, None).await?;
         db::expected_machine::create(&mut *txn, expected_machine).await?;
     }
 
