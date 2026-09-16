@@ -188,6 +188,10 @@ func parseUserData(userData *string, contentFormat string) (string, *yaml.Node, 
 
 	documentRoot := document.Content[0]
 
+	// yaml hangs a comment written below the last key on the document node, which
+	// is not what renders, so it comes across with the root that does.
+	documentRoot.FootComment = document.FootComment
+
 	format := userDataFormat(header)
 
 	switch {

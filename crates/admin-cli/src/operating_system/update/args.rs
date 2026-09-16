@@ -52,7 +52,10 @@ pub(crate) struct Args {
     #[clap(long, help = "Set whether users can override OS parameters.")]
     pub(super) allow_override: Option<bool>,
 
-    #[clap(long, help = "Set whether phone-home on first boot is enabled.")]
+    #[clap(
+        long,
+        help = "Set whether phone-home on first boot is enabled (user-data must be #cloud-config or #cloud-config-archive)."
+    )]
     pub(super) phone_home_enabled: Option<bool>,
 
     #[clap(long, help = "Update the cloud-init / user-data script.")]

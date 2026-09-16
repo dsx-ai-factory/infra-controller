@@ -738,15 +738,15 @@ func (osur *APIOperatingSystemUpdateRequest) ValidateAndSetUserData(phonehomeUrl
 	nicoAuthoredPhoneHome := existingOS.PhoneHomeEnabled && osur.UserData == nil
 
 	if mergedPhoneHomeEnabled == nil {
-		mergedPhoneHomeEnabled = &existingOS.PhoneHomeEnabled
-
-		// If phone-home has never been enabled, then
-		// any user-data content was always acceptable,
-		// so there is nothing to rewrite. The stored blob still reaches the
-		// Site, so its size is checked before returning.
-		if !*mergedPhoneHomeEnabled {
+		// An update naming neither user-data nor phone-home is not asking for the
+		// block to be rewritten, and the stored blob can be user-data we no longer
+		// edit, so it is left as it is. It still reaches the Site, so its size is
+		// checked before returning.
+		if osur.UserData == nil {
 			return util.ValidateEffectiveUserData(mergedUserData)
 		}
+
+		mergedPhoneHomeEnabled = &existingOS.PhoneHomeEnabled
 	}
 
 	var userData *string

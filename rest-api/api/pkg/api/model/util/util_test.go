@@ -669,6 +669,22 @@ reuse: *phone
 			"the script entry is not cloud-config, so its text is kept as authored")
 	})
 
+	t.Run("a comment sits below the last key", func(t *testing.T) {
+		// yaml hangs that one on the document rather than on any key in it.
+		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config
+packages:
+- curl
+phone_home:
+  url: `+phoneHomeURL+`
+
+# keep me too
+`), phoneHomeURL)
+		require.NoError(t, err)
+
+		assert.NotContains(t, *userData, SitePhoneHomeName)
+		assert.Contains(t, *userData, "# keep me too", "a comment below the document stays with it")
+	})
+
 	t.Run("a comment sits on the alias", func(t *testing.T) {
 		userData, err := DisablePhoneHomeInUserData(new(`#cloud-config
 phone_home:

@@ -65,7 +65,7 @@ pub(crate) struct Args {
     #[clap(
         long,
         default_value = "false",
-        help = "Enable phone-home on first boot."
+        help = "Enable phone-home on first boot (user-data must be #cloud-config or #cloud-config-archive)."
     )]
     pub(super) phone_home_enabled: bool,
 
