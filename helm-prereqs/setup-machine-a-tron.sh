@@ -209,9 +209,10 @@ NICO_DB="nico_system_nico"
 
 # --- deployment mode ---------------------------------------------------------
 # override (default): all Redfish through site_explorer.bmc_proxy → one mock.
-# scale: Controller Mode — mat-k8s-controller creates one ClusterIP Service per
-#   BMC with ClusterIP = BMC IP. Uses values/machine-a-tron-scale.yaml plus a
-#   NICo network covering the BMC IP range. See the chart README "Controller Mode".
+# scale: Controller Mode - mat-k8s-controller creates one Service per BMC with
+#   the BMC IP published as externalIP. Uses values/machine-a-tron-scale.yaml
+#   plus a NICo network covering the BMC IP range. See the chart README
+#   "Controller Mode".
 MAT_MODE="${MAT_MODE:-override}"
 # Networks for scale mode. The OOB gateway must match the scale values file
 # (bmcDhcpRelayAddress). Both are sized from MEASURED demand, not from the host
@@ -229,9 +230,12 @@ MAT_MODE="${MAT_MODE:-override}"
 # 9.8ms at /18 against 28.6ms at /16, and it does that holding the fleet-wide
 # admin-segment lock. Sizing these generously is NOT free.
 #
-# Controller Mode has the opposite constraint: its BMC addresses are ClusterIPs
-# and must come from the Kubernetes ServiceCIDR, so it must override these.
-SCALE_OOB_PREFIX="${SCALE_OOB_PREFIX:-10.96.64.0/18}";  SCALE_OOB_GW="${SCALE_OOB_GW:-10.96.64.1}"
+# Controller Mode publishes the BMC addresses as Service externalIPs, for which
+# kube-proxy programs forwarding rules on every node, so the OOB range must lie
+# outside the cluster ServiceCIDR, pod CIDR, node network, and any network the
+# nodes or pods must otherwise reach. The default clears the kubeadm
+# (10.96.0.0/12), kubespray (10.233.0.0/18) and Kind defaults.
+SCALE_OOB_PREFIX="${SCALE_OOB_PREFIX:-10.200.0.0/18}";  SCALE_OOB_GW="${SCALE_OOB_GW:-10.200.0.1}"
 SCALE_ADMIN_PREFIX="${SCALE_ADMIN_PREFIX:-10.102.0.0/18}"; SCALE_ADMIN_GW="${SCALE_ADMIN_GW:-10.102.0.1}"
 # DPU OOB and switch NVOS DHCP relay target. NICo predicts DPU oob interfaces
 # on an underlay-typed segment and rejects DHCP relayed from any other type,
@@ -1331,7 +1335,8 @@ def prefix_for(relay):
     if relay == "<default>":
         return default_prefix
     # Most specific containing prefix wins: a relay sits inside both its own
-    # segment and the wide ServiceCIDR, and only the narrow one is its pool.
+    # segment and any wider range the file documents (such as the parent
+    # block the segments are carved from), and only the narrow one is its pool.
     best = None
     for cand in re.findall(r'([0-9]+(?:\.[0-9]+){3}/[0-9]+)', text):
         try:
