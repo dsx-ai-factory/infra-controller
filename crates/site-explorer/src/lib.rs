@@ -1738,11 +1738,9 @@ impl SiteExplorer {
                         if expected_managed_dpus_total > 0 {
                             tracing::warn!(
                                 bmc_ip_address = %ep.address,
-                                exploration_report = ?ep,
                                 discovered_dpu_count = dpus_explored_for_host.len(),
                                 expected_managed_dpu_count = expected_managed_dpus_total,
                                 all_dpus_configured_properly_in_host,
-                                discovered_dpu_details = ?dpus_explored_for_host,
                                 "cannot identify managed host because the site explorer has not discovered all attached DPUs"
                             );
                         }
