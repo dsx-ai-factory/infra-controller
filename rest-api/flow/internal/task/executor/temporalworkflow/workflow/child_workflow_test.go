@@ -471,6 +471,51 @@ func TestGenericComponentStepWorkflow_FirmwareControlAction(t *testing.T) {
 	assert.NoError(t, env.GetWorkflowError())
 }
 
+func TestGenericComponentStepWorkflow_FirmwareControlSkipsOmittedLayer(t *testing.T) {
+	testSuite := &testsuite.WorkflowTestSuite{}
+	env := testSuite.NewTestWorkflowEnvironment()
+
+	started := false
+	mockStart := func(
+		ctx context.Context,
+		target common.Target,
+		info operations.FirmwareControlTaskInfo,
+	) error {
+		started = true
+		return nil
+	}
+
+	env.RegisterActivityWithOptions(
+		mockStart,
+		activity.RegisterOptions{Name: activitypkg.NameFirmwareControl},
+	)
+
+	step := operationrules.SequenceStep{
+		ComponentType: devicetypes.ComponentTypePowerShelf,
+		Stage:         1,
+		MainOperation: operationrules.ActionConfig{
+			Name: operationrules.ActionFirmwareControl,
+		},
+	}
+	target := common.Target{
+		Type:        devicetypes.ComponentTypePowerShelf,
+		Identifiers: []string{"power-shelf-1"},
+	}
+	allTargets := map[devicetypes.ComponentType]common.Target{
+		devicetypes.ComponentTypePowerShelf: target,
+	}
+	info := &operations.FirmwareControlTaskInfo{
+		Operation:     operations.FirmwareOperationUpgrade,
+		TargetVersion: `{"compute":{"bmc":"1.0"}}`,
+	}
+
+	env.ExecuteWorkflow(genericComponentStepWorkflow, step, target, info, allTargets)
+
+	assert.True(t, env.IsWorkflowCompleted())
+	assert.NoError(t, env.GetWorkflowError())
+	assert.False(t, started)
+}
+
 // TestGenericComponentStepWorkflow_PowerControlWithParamOperation tests that
 // PowerControl action constructs PowerControlTaskInfo from ParamOperation
 // when the workflow's operationInfo is a different type (cross-workflow use).

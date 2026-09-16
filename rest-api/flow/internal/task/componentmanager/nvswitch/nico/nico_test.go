@@ -6,6 +6,7 @@ package nico
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -160,26 +161,70 @@ func TestMACTargetRequests(t *testing.T) {
 }
 
 func TestFirmwareControl(t *testing.T) {
-	client := nicoapi.NewMockClient()
-	m := New(client, nil)
-
 	target := common.Target{
 		Type:        devicetypes.ComponentTypeNVSwitch,
 		Identifiers: []string{"switch-1"},
 	}
 
-	err := m.FirmwareControl(context.Background(), target, operations.FirmwareControlTaskInfo{
-		TargetVersion:        "2.0.0",
-		AccessToken:          "switch-token",
-		OverrideVersionCheck: true,
-	})
-	assert.NoError(t, err)
-	assert.True(t, client.LastUpdateComponentFirmwareRequest().GetForceUpdate())
-	assert.Equal(
-		t,
-		"switch-token",
-		client.LastUpdateComponentFirmwareRequest().GetAccessToken(),
-	)
+	testCases := map[string]struct {
+		info        operations.FirmwareControlTaskInfo
+		response    *corev1.UpdateComponentFirmwareResponse
+		err         error
+		expectError string
+	}{
+		"explicit version is forwarded": {
+			info: operations.FirmwareControlTaskInfo{
+				TargetVersion:        "2.0.0",
+				AccessToken:          "switch-token",
+				OverrideVersionCheck: true,
+			},
+			response: &corev1.UpdateComponentFirmwareResponse{},
+		},
+		"empty version is forwarded": {
+			response: &corev1.UpdateComponentFirmwareResponse{},
+		},
+		"Core RPC failure fails the operation": {
+			err:         errors.New("desired firmware object unavailable"),
+			expectError: "desired firmware object unavailable",
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			client := &firmwareUpdateClient{
+				Client:   nicoapi.NewMockClient(),
+				response: tc.response,
+				err:      tc.err,
+			}
+			m := New(client, nil)
+
+			err := m.FirmwareControl(context.Background(), target, tc.info)
+			if tc.expectError != "" {
+				require.ErrorContains(t, err, tc.expectError)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NotNil(t, client.request)
+			assert.Equal(t, tc.info.TargetVersion, client.request.GetTargetVersion())
+			assert.Equal(t, tc.info.AccessToken, client.request.GetAccessToken())
+			assert.Equal(t, tc.info.OverrideVersionCheck, client.request.GetForceUpdate())
+		})
+	}
+}
+
+type firmwareUpdateClient struct {
+	nicoapi.Client
+	response *corev1.UpdateComponentFirmwareResponse
+	request  *corev1.UpdateComponentFirmwareRequest
+	err      error
+}
+
+func (c *firmwareUpdateClient) UpdateComponentFirmware(
+	_ context.Context,
+	req *corev1.UpdateComponentFirmwareRequest,
+) (*corev1.UpdateComponentFirmwareResponse, error) {
+	c.request = req
+	return c.response, c.err
 }
 
 func TestGetFirmwareStatus(t *testing.T) {

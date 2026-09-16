@@ -41,21 +41,21 @@ func TestAPIUpdateFirmwareRequest_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "invalid - targets without version",
+			name: "valid - targets without version",
 			request: APIUpdateFirmwareRequest{
 				SiteID:  "site-1",
 				Targets: []string{"bmc"},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
-			name: "invalid - targets with empty version string",
+			name: "valid - targets with empty version string",
 			request: APIUpdateFirmwareRequest{
 				SiteID:  "site-1",
 				Version: strPtr(""),
 				Targets: []string{"bmc"},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "invalid - targets contains empty string",
@@ -161,12 +161,12 @@ func TestAPIBatchTrayFirmwareUpdateRequest_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "invalid - targets without version",
+			name: "valid - targets without version",
 			request: APIBatchTrayFirmwareUpdateRequest{
 				SiteID:  "site-1",
 				Targets: []string{"bmc"},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name:    "invalid - missing siteId",

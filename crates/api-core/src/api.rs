@@ -34,6 +34,7 @@ use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
+use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
 use carbide_secrets::SecretsError;
 use carbide_secrets::certificates::CertificateProvider;
@@ -104,6 +105,7 @@ pub struct Api {
     pub(crate) machine_state_handler_enqueuer: Enqueuer<MachineStateControllerIO>,
     pub(crate) metric_emitter: ApiMetricsEmitter,
     pub(crate) component_manager: Option<component_manager::component_manager::ComponentManager>,
+    pub(crate) firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
     pub(crate) bms_client: OnceLock<Arc<BmsDsxExchangeHandle>>,
     pub(crate) secrets_context: Option<crate::secrets::SecretsContext>,
     /// Validator for node-auth bearer JWTs (issue #355). `Some` only when

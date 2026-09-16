@@ -28,7 +28,7 @@ type APIUpdateFirmwareRequest struct {
 	// flow/pkg/common/firmwarecomponents for the resolution logic and
 	// helpers like SupportedNICoNVSwitchNames.
 	// Empty/nil means "update the default targets" for the
-	// compute-tray-internal targets. When non-empty, requires Version.
+	// compute-tray-internal targets.
 	//
 	// On compute trays, the special target "dpu" requests DPU
 	// reprovisioning on each matched host. Unlike every other target,
@@ -65,7 +65,7 @@ func (r *APIUpdateFirmwareRequest) Validate() error {
 	if err != nil {
 		return err
 	}
-	return validateFirmwareTargets(r.Targets, r.Version)
+	return validateFirmwareTargets(r.Targets)
 }
 
 // APIFirmwareAuthenticationData selects one shared firmware download
@@ -185,7 +185,7 @@ type APIBatchTrayFirmwareUpdateRequest struct {
 	AuthenticationData *APIFirmwareAuthenticationData `json:"authenticationData"`
 	// Targets, when non-empty, restricts the update to a subset of
 	// firmware sub-parts within each matched tray. Same semantics as the
-	// single-tray variant. When non-empty, requires Version.
+	// single-tray variant.
 	Targets []string `json:"targets"`
 	// RuleID, when set, pins every task spawned by this batch to the named
 	// Operation Rule.
@@ -213,14 +213,13 @@ func (r *APIBatchTrayFirmwareUpdateRequest) Validate() error {
 			return err
 		}
 	}
-	return validateFirmwareTargets(r.Targets, r.Version)
+	return validateFirmwareTargets(r.Targets)
 }
 
-// validateFirmwareTargets enforces the cross-field constraint that a
-// firmware-target subset selection is only meaningful when a target version
-// is also supplied. Per-tray-type name validation is delegated to Flow,
-// where the mapping from string to component-manager enum lives.
-func validateFirmwareTargets(targets []string, version *string) error {
+// validateFirmwareTargets rejects empty target names. Per-tray-type name
+// validation is delegated to Flow, where the mapping from string to
+// component-manager enum lives.
+func validateFirmwareTargets(targets []string) error {
 	if len(targets) == 0 {
 		return nil
 	}
@@ -228,9 +227,6 @@ func validateFirmwareTargets(targets []string, version *string) error {
 		if t == "" {
 			return fmt.Errorf("targets must not contain empty strings")
 		}
-	}
-	if version == nil || *version == "" {
-		return fmt.Errorf("targets requires version to be set")
 	}
 	return nil
 }
