@@ -75,8 +75,11 @@ Required fields: `datacenterAsn`, `siteControllerRoutesAsn`, `bgpAsnStart`, `sit
 
 Optional: the entire `fnn` block (only needed for FNN/SMN networking mode). When present,
 `fnn.controlPlaneVni`, `fnn.commonManagedNodeBmcRouteTarget`, `fnn.commonSiteControllerRouteTarget`,
-and `fnn.commonAdminNetworkTarget` are required; `fnn.vpcVrfLoopbackPrefix` and
-`fnn.routeTargetsToImport` are optional.
+and `fnn.commonAdminNetworkTarget` are required; `fnn.vpcVrfLoopbackPrefix` is optional.
+`fnn.routeTargetsToImport` is optional only for a site with no tenant routing profile in
+use and `siteControllerRoutesAsn` equal to `datacenterAsn`; otherwise it must list every
+active profile's common tag and, when the ASNs differ, `<siteControllerRoutesAsn>:50100`
+(see the field notes below). No other field supplies these imports.
 
 ```yaml
 # yaml-language-server: $schema=

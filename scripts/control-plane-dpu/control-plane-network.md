@@ -218,7 +218,7 @@ first four; the table below adds only what is specific to a site controller.
 | DPU loopbacks | one per DPU | The VXLAN tunnel endpoints of the site controllers' and the managed hosts' DPUs. They live in the underlay. |
 | site controller host links | one `/31` per site controller | Between the host and its DPU. |
 | control-plane service VIPs | usually a `/27` | The addresses MetalLB announces. |
-| admin network | one per managed host | One per *host*, however many DPUs it has, unlike the out-of-band prefixes of 1.1.4.2. |
+| admin network | one site-wide prefix, one address per managed host | One address per *host*, however many DPUs it has, unlike the out-of-band prefixes of 1.1.4.2. |
 
 The two below need more than a size, and are the ones sites most often get wrong.
 
@@ -526,7 +526,7 @@ datacenter action.
 
 #### 1.8.1. The SMN and the tenants never meet
 
-No SMN VRF may import a tenant tag (`:50200`, `:50500`, or any VPC's native target), and
+No SMN VRF may import a tenant tag (`:50200`, `:50300`, `:50500`, or any VPC's native target), and
 no tenant routing profile may import an SMN route target (`:900`, `:901`, or any other
 SMN segment). Either import would let a tenant instance reach BMCs and DPU management
 ports, its own included. The only profile that imports `:900` is the operator-reserved
@@ -569,7 +569,7 @@ copies each row into both files.
 |---|---|---|---|---|
 | 1.1.1 | datacenter ASN | `4200000100` | `datacenterAsn` | `datacenter_asn` |
 | 1.1.3 | ASN range | `4200100000–4200100999` | `bgpAsnStart: 4200100000` (site controllers use `…000`–`…003`), `siteControllerRoutesAsn: 4200100000` | `[pools.fnn-asn]` `4200100100–4200100999` |
-| 1.2.1 | BGP session password on DPU-facing ToR ports | **none on site controller ports** (required); optional site-wide secret on managed-host ports | — (no field; the ISO-built configuration cannot carry one) | `bgp_leaf_session_password = "site_wide"` + [`nico-admin-cli credential bgp set-sitewide`](../../docs/manuals/nico-admin-cli/commands/credential/credential-bgp-set-sitewide.md) (managed hosts only) |
+| 1.2.1 | BGP session password on DPU-facing ToR ports | **none on site controller ports** (required); optional site-wide secret on managed-host ports | — (no field; the ISO-built configuration cannot carry one) | `bgp_leaf_session_password = "site_wide"` + [`nico-admin-cli credential bgp set-sitewide --password <secret>`](../../docs/manuals/nico-admin-cli/commands/credential/credential-bgp-set-sitewide.md) (managed hosts only) |
 | 1.1.2 | NICo VNI block (example layout); no other VNI in it, and no datacenter route target `<datacenterAsn>:<n>` with `n` in it other than the common tags | `50000–65000` | `fnn.controlPlaneVni: 60000` | `[fnn.admin_vpc].vpc_vni = 60100`; `[pools.vpc-vni]` `60101–60199`; `[pools.vni]` `56000–56009` (L2VNIs, admin segments); `[pools.vlan-id]` any ten values, DPU-internal |
 | 1.1.4 | DPU loopbacks | `10.10.0.0/26` | `forgeDpuLoopbackPrefix: 10.10.0.0/28` | `[pools.lo-ip]` `10.10.0.16–10.10.0.62`; `[pools.vpc-dpu-lo]` disjoint from the optional `fnn.vpcVrfLoopbackPrefix` |
 | 1.1.4 | site controller host `/31`s (DPU design) | `10.10.1.0/29` | `forgeControlPlanePrefix` | MetalLB peers `10.10.1.0`, `.2`, `.4` (without DPUs: the ToR addresses, 1.3) |
