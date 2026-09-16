@@ -12823,7 +12823,7 @@ async fn restart_dpu(
         tracing::warn!(
             machine_id = %machine.id,
             %power_state,
-            "DPU is not running; powering it on instead of restarting it"
+            "DPU is powered off; powering it on instead of restarting it"
         );
     }
 
@@ -12839,10 +12839,11 @@ fn dpu_restart_power_action(
     power_state: libredfish::PowerState,
 ) -> Result<SystemPowerControl, StateHandlerError> {
     match power_state {
-        // BlueField-3 reports its stable StandbyOffline state as Paused after
-        // the Arm OS shuts down, so it needs the same recovery as Off.
-        libredfish::PowerState::Off | libredfish::PowerState::Paused => Ok(SystemPowerControl::On),
-        libredfish::PowerState::On => Ok(SystemPowerControl::ForceRestart),
+        libredfish::PowerState::Off => Ok(SystemPowerControl::On),
+        // A Paused system requires an explicit restart to begin a new boot sequence.
+        libredfish::PowerState::On | libredfish::PowerState::Paused => {
+            Ok(SystemPowerControl::ForceRestart)
+        }
         libredfish::PowerState::PoweringOff
         | libredfish::PowerState::PoweringOn
         | libredfish::PowerState::Reset
@@ -14388,9 +14389,9 @@ mod tests {
                     expect: Err(()),
                 },
                 Check {
-                    scenario: "paused DPU is powered on",
+                    scenario: "paused DPU is restarted",
                     input: libredfish::PowerState::Paused,
-                    expect: Ok(SystemPowerControl::On),
+                    expect: Ok(SystemPowerControl::ForceRestart),
                 },
                 Check {
                     scenario: "resetting DPU is retried",
