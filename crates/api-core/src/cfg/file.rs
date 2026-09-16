@@ -3486,10 +3486,10 @@ pub struct RackStateControllerConfig {
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
 
-    /// Switch mTLS services for NMX cluster setup. Accepted and ignored: rack
-    /// `ConfigureNmxCluster` uses the fixed `nvue_api` and
-    /// `scale_up_fabric_manager` bindings. Per-switch certificate configuration
-    /// uses `[switch_state_controller].switch_mtls_services`.
+    /// Deprecated. Accepted and ignored. Rack `ConfigureNmxCluster` uses a fixed
+    /// `nvue_api` binding before RMS V2 selects and configures the primary switch.
+    /// Per-switch certificate configuration uses
+    /// `[switch_state_controller].switch_mtls_services`.
     #[serde(default)]
     pub nmx_cluster_switch_mtls_services: Vec<component_manager::config::SwitchMtlsService>,
 }
