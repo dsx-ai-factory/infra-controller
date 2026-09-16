@@ -484,7 +484,8 @@ cert-manager               (jetstack/cert-manager v1.17.1)
 vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS)
 external-secrets           (external-secrets/external-secrets 0.14.3)
 DPF stack                  (default; --skip-dpf to opt out: argo-cd, kamaji, NFD,
-                            maintenance-operator, dpf-operator — see docs/manuals/dpf.md)
+                            maintenance-operator, dpf-operator from the pinned
+                            doca-platform submodule - see docs/manuals/dpf.md)
 rack-manager (RMS)         (default; --skip-rms to opt out - pinned nv-rms submodule, mTLS
                             via vault-nico-issuer, rms database on nico-pg-cluster)
 nico-prereqs               (this Helm chart - nico-system namespace)

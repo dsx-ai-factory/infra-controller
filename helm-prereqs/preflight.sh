@@ -502,8 +502,11 @@ fi
 # DPF requirements. DPF installs by default; these apply unless --skip-dpf
 # (NICO_SKIP_DPF=true / NICO_INSTALL_DPF=false), which clears INSTALL_DPF.
 if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
-    command -v git &>/dev/null || \
-        ERRORS+=("DPF requires 'git' to clone doca-platform — install it, or pass --skip-dpf")
+    [[ -n "${NICO_DPF_SRC:-}" ]] || command -v git &>/dev/null || \
+        ERRORS+=("DPF requires 'git' to initialize the doca-platform submodule - install it, set NICO_DPF_SRC to a local checkout, or pass --skip-dpf")
+    if [[ -n "${NICO_DPF_SRC:-}" && ! -d "${NICO_DPF_SRC}/deploy/charts/dpf-operator" ]]; then
+        ERRORS+=("NICO_DPF_SRC='${NICO_DPF_SRC}' has no deploy/charts/dpf-operator - point it at a NVIDIA/doca-platform checkout")
+    fi
     command -v envsubst &>/dev/null || \
         ERRORS+=("DPF requires 'envsubst' (gettext) to render DPF manifests — install it, or pass --skip-dpf")
     [[ -z "${NICO_DPF_DPU_INTERFACE:-}" ]] && \
