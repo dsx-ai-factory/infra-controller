@@ -324,6 +324,63 @@ mod tests {
         Ok(())
     }
 
+    /// When `expected_machine::update` selects a row by `id`, reservation
+    /// replacement must key on that row's own BMC MAC, not the caller-supplied
+    /// MAC. A direct caller passing host A's `id` with host B's MAC must update
+    /// host A's reservations and leave host B's untouched, since the FK only
+    /// requires the supplied MAC to identify *some* host.
+    #[crate::sqlx_test]
+    async fn update_by_id_keys_reservations_on_the_matched_rows_mac(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mac_a = "aa:bb:cc:dd:ee:01";
+        let mac_b = "aa:bb:cc:dd:ee:02";
+
+        let mut txn = pool.begin().await?;
+        let host_a = crate::expected_machine::create(
+            &mut txn,
+            expected_machine(mac_a, vec![reservation("SER-A", Some("192.0.2.11"), None)]),
+        )
+        .await?;
+        crate::expected_machine::create(
+            &mut txn,
+            expected_machine(mac_b, vec![reservation("SER-B", Some("192.0.2.22"), None)]),
+        )
+        .await?;
+
+        // Select host A by id, but supply host B's MAC and a new reservation
+        // set. The replacement must land on host A. (Use a distinct serial so
+        // the parent UPDATE does not collide with host B's serial.)
+        let mut update =
+            expected_machine(mac_b, vec![reservation("SER-A2", Some("192.0.2.33"), None)]);
+        update.id = host_a.id;
+        update.data.serial_number = "serial-a-updated".to_string();
+        crate::expected_machine::update(&mut txn, &update).await?;
+
+        // Host B's reservation is untouched: its MAC was never the write target.
+        assert_eq!(
+            find_for_machine(txn.as_mut(), mac_b.parse::<MacAddress>()?)
+                .await?
+                .iter()
+                .map(|r| r.dpu_serial_number.as_str())
+                .collect::<Vec<_>>(),
+            ["SER-B"],
+        );
+
+        // Host A received the new set, keyed on its own MAC.
+        assert_eq!(
+            find_for_machine(txn.as_mut(), mac_a.parse::<MacAddress>()?)
+                .await?
+                .iter()
+                .map(|r| r.dpu_serial_number.as_str())
+                .collect::<Vec<_>>(),
+            ["SER-A2"],
+        );
+
+        txn.rollback().await?;
+        Ok(())
+    }
+
     /// The site-wide serial uniqueness constraint rejects the same DPU serial
     /// declared on a second host, surfaced as a precondition failure.
     #[crate::sqlx_test]
