@@ -153,13 +153,13 @@ pub(super) struct MachineStateMachine {
 }
 
 #[derive(Debug, Clone)]
-struct LiveStateCallbacks {
+pub(super) struct LiveStateCallbacks {
     state: Arc<RwLock<LiveState>>,
     command_channel: mpsc::UnboundedSender<BmcCommand>,
 }
 
 impl LiveStateCallbacks {
-    fn new(
+    pub(super) fn new(
         state: Arc<RwLock<LiveState>>,
         command_channel: mpsc::UnboundedSender<BmcCommand>,
     ) -> Self {

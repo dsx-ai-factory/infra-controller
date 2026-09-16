@@ -875,6 +875,111 @@ async fn an_unmatched_node_fails_per_node_on_every_batch_rpc() {
             .error_message
             .is_empty()
     );
+
+    let power = client
+        .batch_get_power_state(librms::protos::rack_manager::BatchGetPowerStateRequest {
+            nodes: Some(node_set()),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let batch = power.response.unwrap();
+    assert_eq!(batch.status, failure);
+    assert!(batch.message.contains("stranger"), "{:?}", batch.message);
+    assert_eq!(
+        per_node(&batch),
+        [("switch-7", success, true), ("stranger", failure, false)]
+    );
+    assert_eq!(batch.stats.unwrap().failed_nodes, 1);
+    let read: Vec<&str> = power
+        .node_power_states
+        .iter()
+        .map(|n| n.node_id.as_str())
+        .collect();
+    assert_eq!(read, ["switch-7"], "only a node that was read is listed");
+
+    let batch = client
+        .batch_set_power_state(librms::protos::rack_manager::BatchSetPowerStateRequest {
+            nodes: Some(node_set()),
+            operation: librms::protos::rack_manager::PowerOperation::Off as i32,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .response
+        .unwrap();
+    assert_eq!(batch.status, failure);
+    assert_eq!(
+        per_node(&batch),
+        [("switch-7", success, true), ("stranger", failure, false)]
+    );
+    assert_eq!(batch.stats.unwrap().failed_nodes, 1);
+}
+
+/// Power set over RMS is visible when read back over RMS, keyed by the
+/// caller's own node id and spelt as the proto documents `pstate`; an
+/// operation that would change nothing is a per-node failure.
+#[tokio::test]
+async fn power_set_over_rms_reads_back_over_rms() {
+    let url = serve_with(vec![a_switch()]).await;
+    let mut client = RackManagerClient::connect(url).await.unwrap();
+    let node_set = || librms::protos::rack_manager::NodeSet {
+        nodes: vec![node_info("switch-7", "02:00:11:11:22:22")],
+    };
+    async fn read(
+        client: &mut RackManagerClient<tonic::transport::Channel>,
+        nodes: librms::protos::rack_manager::NodeSet,
+    ) -> String {
+        let response = client
+            .batch_get_power_state(librms::protos::rack_manager::BatchGetPowerStateRequest {
+                nodes: Some(nodes),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let batch = response.response.unwrap();
+        assert_eq!(
+            batch.status,
+            librms::protos::rack_manager::ReturnCode::Success as i32
+        );
+        assert_eq!(batch.stats.unwrap().failed_nodes, 0);
+        assert_eq!(response.node_power_states[0].node_id, "switch-7");
+        response.node_power_states[0].pstate.clone()
+    }
+
+    assert_eq!(read(&mut client, node_set()).await, "ON");
+
+    let success = librms::protos::rack_manager::ReturnCode::Success as i32;
+    let failure = librms::protos::rack_manager::ReturnCode::Failure as i32;
+    type Op = librms::protos::rack_manager::PowerOperation;
+    // Each row runs against the state the row before it left.
+    for (operation, status, failed_nodes, reason, pstate) in [
+        (Op::On, failure, 1, "already on", "ON"),
+        (Op::Off, success, 0, "", "OFF"),
+    ] {
+        let batch = client
+            .batch_set_power_state(librms::protos::rack_manager::BatchSetPowerStateRequest {
+                nodes: Some(node_set()),
+                operation: operation as i32,
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .response
+            .unwrap();
+        assert_eq!(batch.status, status, "{operation:?}");
+        assert_eq!(
+            batch.stats.unwrap().failed_nodes,
+            failed_nodes,
+            "{operation:?}"
+        );
+        assert!(
+            batch.node_results[0].error_message.contains(reason),
+            "{operation:?}: {:?}",
+            batch.node_results[0].error_message
+        );
+        assert_eq!(read(&mut client, node_set()).await, pstate, "{operation:?}");
+    }
 }
 
 /// Reading a rack never configured here elects a primary, and only the

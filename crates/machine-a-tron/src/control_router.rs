@@ -24,10 +24,11 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
 use bmc_mock::injection::{InjectionStore, Rule, RuleId};
-use bmc_mock::{HardwareType, RackPlacement, TrayPlacement};
+use bmc_mock::{HardwareType, MockPowerState, RackPlacement, SystemPowerControl, TrayPlacement};
 use carbide_uuid::rack::RackId;
 use chrono::{SecondsFormat, Utc};
-use rms_mock::{RmsInventory, SimNode, SimNodeKind};
+use mac_address::MacAddress;
+use rms_mock::{PowerOperation, RmsInventory, SimNode, SimNodeKind, SimPowerState};
 use tower::Service;
 use ufm_mock::{
     EpochId, Generation, InventoryId, InventoryMachine as UfmInventoryMachine, InventoryPort,
@@ -108,6 +109,13 @@ struct InventoryMachine {
 }
 
 impl ControlState {
+    fn device_by_bmc_mac(&self, bmc_mac: MacAddress) -> eyre::Result<&DeviceHandle> {
+        self.simulators
+            .find_by_bmc_mac(bmc_mac)
+            .map(SimulatorLifecycle::handle)
+            .ok_or_else(|| eyre::eyre!("no simulated device has BMC MAC {bmc_mac}"))
+    }
+
     pub fn new(
         simulators: SimulatorRegistry,
         status_config: DeviceStatusConfig,
@@ -252,6 +260,37 @@ impl RmsInventory for ControlState {
         }
         Arc::clone(&cached.nodes)
     }
+
+    fn power_state(&self, bmc_mac: MacAddress) -> eyre::Result<SimPowerState> {
+        Ok(match self.device_by_bmc_mac(bmc_mac)?.power_state() {
+            MockPowerState::On => SimPowerState::On,
+            // The Redfish mock reports a cycling device as off until the
+            // cycle's delay has run, and RMS has no state in between.
+            MockPowerState::Off | MockPowerState::PowerCycling { .. } => SimPowerState::Off,
+        })
+    }
+
+    fn set_power(&self, bmc_mac: MacAddress, op: PowerOperation) -> eyre::Result<()> {
+        let control = power_control_for(op)?;
+        self.device_by_bmc_mac(bmc_mac)?.set_system_power(control)?;
+        Ok(())
+    }
+}
+
+/// The Redfish reset an RMS power operation stands for; RMS documents `RESET`
+/// as a power cycle and `OFF` as a graceful shutdown.
+fn power_control_for(op: PowerOperation) -> eyre::Result<SystemPowerControl> {
+    Ok(match op {
+        PowerOperation::Unspecified => eyre::bail!("power operation is unspecified"),
+        PowerOperation::On | PowerOperation::ForceOn => SystemPowerControl::On,
+        PowerOperation::Off | PowerOperation::GracefulShutdown => {
+            SystemPowerControl::GracefulShutdown
+        }
+        PowerOperation::ForceOff => SystemPowerControl::ForceOff,
+        PowerOperation::Reset => SystemPowerControl::PowerCycle,
+        PowerOperation::GracefulRestart => SystemPowerControl::GracefulRestart,
+        PowerOperation::ForceRestart => SystemPowerControl::ForceRestart,
+    })
 }
 
 impl ControlState {
@@ -456,7 +495,7 @@ mod tests {
     use bmc_mock::{HardwareType, RackInfo, RackType};
     use carbide_uuid::rack::{RackId, RackProfileId};
     use mac_address::MacAddress;
-    use rms_mock::RmsInventory;
+    use rms_mock::{PowerOperation, RmsInventory, SimPowerState};
     use tower::ServiceExt;
     use uuid::Uuid;
 
@@ -565,6 +604,26 @@ mod tests {
         assert!(!Arc::ptr_eq(&second, &third));
         assert_eq!(third[0].bmc_ip, Some(IpAddr::from([10, 0, 0, 7])));
         assert!(Arc::ptr_eq(&third, &state.nodes()));
+    }
+
+    /// RMS power reads the BMC's own state and is refused by the BMC's own
+    /// guard.
+    #[test]
+    fn rms_power_is_the_bmc_power() {
+        let handle = DeviceHandle::for_control_test(Vec::new(), None);
+        let state = control_state(vec![handle]);
+        let mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
+
+        assert_eq!(state.power_state(mac).unwrap(), SimPowerState::On);
+        let refused = state
+            .set_power(mac, PowerOperation::On)
+            .expect_err("the BMC refuses to power on a machine that is on")
+            .to_string();
+        assert!(refused.contains("already on"), "{refused}");
+        assert_eq!(state.power_state(mac).unwrap(), SimPowerState::On);
+
+        let unknown = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x99]);
+        assert!(state.power_state(unknown).is_err());
     }
 
     #[tokio::test]

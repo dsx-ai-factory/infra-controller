@@ -13,7 +13,11 @@ Besides `GetVersion` and `BatchGetNodeDeviceInfo`, the mock serves the RPCs a
 rack passes on its way to ready: `ConfigureSwitchCertificate` with
 `GetConfigureSwitchCertificateJobStatus`, the V2
 `ConfigureScaleUpFabricManager` with `GetJobStatus`, `GetScaleUpFabricStatus`
-and `BatchGetScaleUpFabricServiceStatus`. Nothing is installed on a simulated
+and `BatchGetScaleUpFabricServiceStatus`, and power control with
+`BatchGetPowerState` and `BatchSetPowerState`. Power is read from and applied
+to the simulated BMC under the same rules as a Redfish request, so a device
+the BMC refuses is a per-node failure; `RESET` is a power cycle, and a device
+mid-cycle reads `OFF`. Nothing is installed on a simulated
 switch. The mock elects one fabric-manager primary per rack, which is the one
 switch that reads back enabled: the requested primary when it is one of the
 rack's simulated switches, otherwise the one lowest in the rack, with node id
