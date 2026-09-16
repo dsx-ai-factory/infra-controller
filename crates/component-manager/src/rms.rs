@@ -1639,38 +1639,53 @@ impl PowerShelfManager for RmsBackend {
                         &resolved.identity.node_id,
                     );
 
-                    if success {
-                        if let Some(job_id) = job_id {
-                            // Track both in memory and in the DB keyed by PMC MAC
-                            // so status queries survive a nico-api restart, for
-                            // both ingested and pre-ingestion power shelves. A
-                            // row-less pre-ingestion shelf has no state-controller
-                            // status to fall back to, so without this it returns
-                            // Unknown forever after a restart.
-                            self.firmware_jobs.lock().unwrap().insert(
-                                ep.pmc_mac,
-                                vec![RmsTrackedFirmwareJob::FirmwareObject(job_id.clone())],
+                    if let (true, Some(job_id)) = (success, job_id) {
+                        // Track both in memory and in the DB keyed by PMC MAC
+                        // so status queries survive a nico-api restart, for
+                        // both ingested and pre-ingestion power shelves. A
+                        // row-less pre-ingestion shelf has no state-controller
+                        // status to fall back to, so without this it returns
+                        // Unknown forever after a restart.
+                        self.firmware_jobs.lock().unwrap().insert(
+                            ep.pmc_mac,
+                            vec![RmsTrackedFirmwareJob::FirmwareObject(job_id.clone())],
+                        );
+                        if let Err(e) = db::direct_dispatch_firmware_job::save(
+                            &self.db,
+                            ep.pmc_mac,
+                            FirmwareJobKind::FirmwareObject,
+                            &job_id,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                pmc_mac_address = %ep.pmc_mac,
+                                job_id = %job_id,
+                                error = %e,
+                                "failed to persist power shelf firmware job ID to database"
                             );
-                            if let Err(e) = db::direct_dispatch_firmware_job::save(
-                                &self.db,
-                                ep.pmc_mac,
-                                FirmwareJobKind::FirmwareObject,
-                                &job_id,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    pmc_mac_address = %ep.pmc_mac,
-                                    job_id = %job_id,
-                                    error = %e,
-                                    "failed to persist power shelf firmware job ID to database"
-                                );
-                            }
-                        } else {
-                            self.firmware_jobs.lock().unwrap().remove(&ep.pmc_mac);
                         }
                     } else {
+                        // This submission produced no durable job (a failed
+                        // apply, or a success the backend assigned no job to).
+                        // Clear both the in-memory tracking and any job a prior
+                        // update persisted, otherwise a later status query
+                        // (which, after a restart, reads the DB) would recover
+                        // the stale job and report its state for this request.
                         self.firmware_jobs.lock().unwrap().remove(&ep.pmc_mac);
+                        if let Err(e) = db::direct_dispatch_firmware_job::delete(
+                            &self.db,
+                            ep.pmc_mac,
+                            FirmwareJobKind::FirmwareObject,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                pmc_mac_address = %ep.pmc_mac,
+                                error = %e,
+                                "failed to clear persisted power shelf firmware job ID from database"
+                            );
+                        }
                     }
 
                     results.push(PowerShelfComponentResult {
@@ -6759,6 +6774,79 @@ mod tests {
 
         let jobs = backend.firmware_jobs.lock().unwrap();
         assert!(!jobs.contains_key(&PS_MAC_1.parse::<MacAddress>().unwrap()));
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn ps_firmware_status_after_failed_resubmit_and_restart_reports_no_job(
+        pool: sqlx::PgPool,
+    ) {
+        let (mock, backend, _, ps1, _, _, _) = make_backend(&pool).await;
+        let eps = vec![make_ps_endpoint(PS_MAC_1)];
+
+        // A successful update persists job-a to the DB.
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+            &ps1.to_string(),
+            "job-a",
+        )))
+        .await;
+        PowerShelfManager::update_firmware(
+            &backend,
+            &eps,
+            r#"{"Id":"fw-json"}"#,
+            &[PowerShelfComponent::Pmc],
+            &firmware_update_options(),
+        )
+        .await
+        .unwrap();
+
+        // A later submission fails and produces no durable job.
+        mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_fail(
+            &ps1.to_string(),
+            "bad firmware file",
+        )))
+        .await;
+        PowerShelfManager::update_firmware(
+            &backend,
+            &eps,
+            r#"{"Id":"fw-json"}"#,
+            &[PowerShelfComponent::Pmc],
+            &firmware_update_options(),
+        )
+        .await
+        .unwrap();
+
+        // The failed submission must clear the persisted job, not just the
+        // in-memory entry, so a restart cannot resurrect it.
+        assert_eq!(
+            db::direct_dispatch_firmware_job::get(
+                &pool,
+                PS_MAC_1.parse::<MacAddress>().unwrap(),
+                FirmwareJobKind::FirmwareObject,
+            )
+            .await
+            .unwrap(),
+            None
+        );
+
+        // Simulate a nico-api restart: the in-memory map is empty, so status
+        // falls back to the DB. With the persisted job cleared, the shelf
+        // reports no tracked job rather than stale job-a's state, and no status
+        // query is issued for it.
+        backend.firmware_jobs.lock().unwrap().clear();
+
+        let statuses = PowerShelfManager::get_firmware_status(&backend, &eps)
+            .await
+            .unwrap();
+
+        assert_eq!(statuses[0].state, FirmwareState::Unknown);
+        assert!(
+            statuses[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("no firmware job")
+        );
+        assert!(mock.get_firmware_job_status_calls().await.is_empty());
     }
 
     #[carbide_macros::sqlx_test]
