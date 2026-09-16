@@ -243,7 +243,7 @@ nico-rest-api:
       secretName: rest-api-mysite-example-com-tls
 ```
 
-`ingress.hosts` is the only place the DNS name appears. The chart adds every host to the ingress `spec.tls` block and to the certificate `dnsNames`, and uses the first host as the certificate common name, so a host that is renamed here stays covered by TLS. The chart rejects `ingress.enabled` and `nodePort.enabled` together rather than serving the API over plaintext HTTP alongside TLS.
+With this managed-certificate setup, `ingress.hosts` is the only place the DNS name appears. The chart adds every host to the ingress `spec.tls` block and to the certificate `dnsNames`, and uses the first host as the certificate common name, so a host that is renamed here stays covered by TLS. Supplying your own `ingress.tls` or `certificate.dnsNames` replaces the corresponding derived list, and the name then has to appear there too; the chart rejects an override that leaves any `ingress.hosts` entry uncovered rather than serving it over plaintext HTTP or with a certificate that has no matching SAN. The chart also rejects `ingress.enabled` and `nodePort.enabled` together.
 
 The chart creates a cert-manager `Certificate` for the ingress TLS Secret when `ingress.certificate.enabled: true`. The certificate is issued by the REST stack's `nico-rest-ca-issuer`, so this is a quick self-signed/private-CA setup suitable for lab and site-local deployments. If your cluster already has a TLS Secret for the domain, set `ingress.certificate.enabled: false` and set `ingress.tls` to point at that existing Secret.
 
@@ -255,6 +255,42 @@ The ingress routes to the chart-managed `nico-rest-api` Service on `service.port
 export NICO_INSTALL_CONTOUR=true
 ./setup.sh -y
 ```
+
+##### Use an ingress controller the cluster already has
+
+Nothing in the rendered Ingress is Contour-specific, so skip `--install-contour` and point `ingress.className` at your own controller's class. The `contour` default only reflects the controller `setup.sh` can install for you. To serve a TLS Secret your own issuer populates, set `ingress.certificate.enabled: false` and list the Secret in `ingress.tls`:
+
+```yaml filename="helm-prereqs/values/nico-rest.yaml"
+nico-rest-api:
+  nodePort:
+    enabled: false
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    hosts:
+      - host: rest-api.mysite.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    certificate:
+      enabled: false
+    tls:
+      - secretName: mysite-wildcard-tls
+        hosts:
+          - "*.mysite.example.com"
+```
+
+A wildcard `ingress.tls` host covers a single label, so `*.mysite.example.com` satisfies `rest-api.mysite.example.com`. The chart rejects any `ingress.hosts` entry that no `ingress.tls` host covers, because an uncovered host is served over plaintext HTTP.
+
+Three things differ from the Contour path:
+
+- **Redirects depend on the controller.** Contour and ingress-nginx redirect HTTP to HTTPS on their own once a host has TLS; others, Traefik among them, serve both unless told otherwise. Add your controller's redirect annotation, as the example does, rather than assuming the `spec.tls` block is enough.
+- **Annotation values must be quoted strings.** Kubernetes annotations are `map[string]string`, so an unquoted `true` or a bare number is rejected at apply time with `cannot unmarshal bool into Go struct field ObjectMeta.metadata.annotations of type string`.
+- **The Secret must live in the `nico-rest` namespace.** `spec.tls[].secretName` resolves in the Ingress's own namespace, so copy or mirror a site-wide wildcard Secret into `nico-rest`. Contour additionally needs a `TLSCertificateDelegation` to read one from elsewhere.
+
+Keeping `ingress.certificate.enabled: true` also works with a foreign controller; the chart issues the Secret through cert-manager and your controller serves it. The DNS step below still applies, but read the external address from your controller's own Service instead of `contour-envoy`.
 
 ##### Point DNS at the ingress and trust the CA
 

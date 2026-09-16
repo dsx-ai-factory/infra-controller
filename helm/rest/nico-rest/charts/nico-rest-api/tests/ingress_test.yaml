@@ -271,6 +271,48 @@ tests:
       - failedTemplate:
           errorMessage: 'nico-rest-api: ingress.hosts entry "a.b.nico.example.com" is not covered by any ingress.tls host, so it would be served over plaintext HTTP; add it to ingress.tls[].hosts, or clear ingress.tls to derive the block from ingress.hosts'
 
+  # An overridden dnsNames list replaces the host-derived SANs, so a host left
+  # out of it gets a certificate with no matching SAN and clients reject the
+  # connection even though the ingress route itself is correct. Rendered through
+  # ingress.yaml because that is the one template that includes validateExposure.
+  - it: rejects certificate dnsNames that leave an ingress host without a SAN
+    template: ingress.yaml
+    set:
+      ingress:
+        enabled: true
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+        certificate:
+          dnsNames:
+            - unrelated.nico.example.com
+    asserts:
+      - failedTemplate:
+          errorMessage: 'nico-rest-api: ingress.hosts entry "api.nico.example.com" is not covered by any ingress.certificate.dnsNames entry, so the issued certificate would have no SAN for it and clients would reject the connection; add it to dnsNames, or clear dnsNames to derive them from ingress.hosts'
+
+  - it: accepts certificate dnsNames that cover every host, including extras
+    template: ingress-certificate.yaml
+    set:
+      ingress:
+        enabled: true
+        hosts:
+          - host: api.nico.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+        certificate:
+          dnsNames:
+            - "*.nico.example.com"
+            - extra.other.example.com
+    asserts:
+      - equal:
+          path: spec.dnsNames
+          value:
+            - "*.nico.example.com"
+            - extra.other.example.com
+
   - it: renders ingress certificate from ingress host defaults
     template: ingress-certificate.yaml
     set:

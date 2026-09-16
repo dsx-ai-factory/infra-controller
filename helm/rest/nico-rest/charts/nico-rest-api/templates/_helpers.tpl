@@ -69,11 +69,12 @@ app.kubernetes.io/component: api
 {{- end -}}
 {{- end -}}
 {{/*
-An explicit ingress.tls replaces the block derived from ingress.hosts, but every
-ingress.hosts entry still gets a rule. A rule host with no TLS entry is served
-over plaintext HTTP, so require coverage rather than let the override silently
-reintroduce that. A wildcard TLS host matches exactly one label, per the Ingress
-spec, so *.example.com covers api.example.com but not a.b.example.com.
+Both ingress.tls and certificate.dnsNames replace a list the chart otherwise
+derives from ingress.hosts, and neither replacement has to mention every host.
+An ingress.hosts entry missing from ingress.tls is served over plaintext HTTP;
+one missing from certificate.dnsNames gets a certificate with no matching SAN,
+which clients reject. Require coverage for both rather than let either override
+silently break the route it is configured for.
 */}}
 {{- if and .Values.ingress.enabled .Values.ingress.tls -}}
 {{- $covered := list -}}
@@ -81,23 +82,40 @@ spec, so *.example.com covers api.example.com but not a.b.example.com.
 {{- $covered = concat $covered (.hosts | default list) -}}
 {{- end -}}
 {{- range .Values.ingress.hosts -}}
+{{- if not (include "nico-rest-api.hostCovered" (dict "host" .host "patterns" $covered)) -}}
+{{- fail (printf "nico-rest-api: ingress.hosts entry %q is not covered by any ingress.tls host, so it would be served over plaintext HTTP; add it to ingress.tls[].hosts, or clear ingress.tls to derive the block from ingress.hosts" .host) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.ingress.enabled .Values.ingress.certificate.enabled .Values.ingress.certificate.dnsNames -}}
+{{- $sans := .Values.ingress.certificate.dnsNames -}}
+{{- range .Values.ingress.hosts -}}
+{{- if not (include "nico-rest-api.hostCovered" (dict "host" .host "patterns" $sans)) -}}
+{{- fail (printf "nico-rest-api: ingress.hosts entry %q is not covered by any ingress.certificate.dnsNames entry, so the issued certificate would have no SAN for it and clients would reject the connection; add it to dnsNames, or clear dnsNames to derive them from ingress.hosts" .host) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Reports whether one host is covered by a list of host patterns, emitting a
+non-empty string when it is. A wildcard matches exactly one label, per both the
+Ingress spec and X.509 SAN matching, so *.example.com covers api.example.com but
+neither a.b.example.com nor example.com itself.
+Call as: include "nico-rest-api.hostCovered" (dict "host" $h "patterns" $list)
+*/}}
+{{- define "nico-rest-api.hostCovered" -}}
 {{- $host := .host -}}
-{{- $ok := false -}}
-{{- range $covered -}}
+{{- range .patterns -}}
 {{- if eq . $host -}}
-{{- $ok = true -}}
+covered
 {{- else if hasPrefix "*." . -}}
 {{- $suffix := trimPrefix "*" . -}}
 {{- if hasSuffix $suffix $host -}}
 {{- $label := trimSuffix $suffix $host -}}
 {{- if and $label (not (contains "." $label)) -}}
-{{- $ok = true -}}
+covered
 {{- end -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- if not $ok -}}
-{{- fail (printf "nico-rest-api: ingress.hosts entry %q is not covered by any ingress.tls host, so it would be served over plaintext HTTP; add it to ingress.tls[].hosts, or clear ingress.tls to derive the block from ingress.hosts" $host) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
