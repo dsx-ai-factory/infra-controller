@@ -769,6 +769,7 @@ func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
 			Str("rack_id", task.RackID.String()).
 			Msg("Resolved operation rule for task")
 	} else {
+		task.AppliedRuleID = nil
 		log.Info().
 			Str("rule_name", rule.Name).
 			Str("operation_type", string(task.Operation.Type)).
@@ -797,8 +798,19 @@ func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
 	task.ExecutionID = resp.ExecutionID
 	task.ExecutorType = m.executor.Type()
 	if err := m.taskStore.UpdateScheduledTask(ctx, task); err != nil {
-		log.Error().Err(err).
-			Msgf("failed to update scheduled task %s", task.ID)
+		persistErr := fmt.Errorf("failed to persist scheduled task %s: %w", task.ID, err)
+		terminateErr := m.executor.TerminateTask(
+			ctx,
+			resp.ExecutionID,
+			"Task scheduling metadata could not be persisted",
+		)
+		if terminateErr != nil {
+			log.Error().Err(terminateErr).
+				Str("task_id", task.ID.String()).
+				Str("execution_id", resp.ExecutionID).
+				Msg("failed to terminate execution after scheduling metadata persistence failed")
+		}
+		return persistErr
 	}
 	return nil
 }
