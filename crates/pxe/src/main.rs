@@ -17,8 +17,8 @@
 use std::fmt::Debug;
 use std::net::SocketAddr;
 
+use axum::Router;
 use axum::middleware::{map_request, map_response};
-use axum::{Router, ServiceExt};
 use axum_client_ip::ClientIpSource;
 use axum_template::engine::Engine;
 use carbide_utils::SCOUT_FIRMWARE_SCRIPTS_DIR;
@@ -35,6 +35,7 @@ mod metrics;
 mod middleware;
 mod routes;
 mod rpc_error;
+mod server;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -120,11 +121,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             err
         })?;
 
-    axum::serve(
-        listener,
-        final_app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    println!(
+        "serving http listen_address={socket_addr} header_read_timeout_seconds={}",
+        server::HEADER_READ_TIMEOUT.as_secs()
+    );
+    server::serve(listener, final_app, server::HEADER_READ_TIMEOUT).await?;
 
     Ok(())
 }
