@@ -3250,6 +3250,17 @@ message InstanceInfinibandConfig {
 message InstanceDpuExtensionServiceConfig {
   string service_id = 1;
   string version = 2;
+  // VPCs selected positionally for the service's registered interface requirements.
+  // A new attachment supplies one VPC per requirement; empty is valid only when the
+  // service has no requirements. Networking cannot be detached separately: remove
+  // this entry from service_configs to terminate the attachment. Service, version,
+  // and VPC selections do not mutate in place; a change deletes the old attachment
+  // and adds a distinct one under the applicable lifecycle guards. For compatibility
+  // with clients that predate this field, empty on an existing networked attachment
+  // preserves its current selection. The current API accepts at most one VPC. Until
+  // endpoint reconciliation is available, a new nonempty selection is rejected with
+  // FAILED_PRECONDITION; an existing selection may only be repeated unchanged.
+  repeated common.VpcId service_vpc_ids = 3;
 }
 
 // Extension services configuration for an instance
@@ -3457,6 +3468,11 @@ message InstanceDpuExtensionServiceStatus {
   DpuExtensionServiceDeploymentStatus deployment_status = 3;
   repeated DpuExtensionServiceStatus dpu_statuses = 4;
   optional string removed = 5;
+  // Server-owned attachment identity. When present, it matches the hidden
+  // service-interface endpoints, allowing callers to correlate them with
+  // deployment status. Attachments written before identity support may omit it;
+  // every attachment created by a current server receives one.
+  common.UUID attachment_id = 6;
 }
 
 // Status of extension services subsystem of an instance
@@ -4929,6 +4945,64 @@ message ManagedHostNetworkConfigResponse {
   // restart openvswitch-switch if this is set. Other actions could also
   // be added based on this tracking variable.
   optional bool use_admin_network_changed = 120;
+
+  // Resolved service-facing endpoints on the receiving DPU. They are separate
+  // from tenant interfaces because they must not be exposed to the tenant OS.
+  repeated ManagedHostServiceInterfaceConfig service_interfaces = 121;
+
+  // Complete fixed-slot inventory for the receiving DPU. Omitted means a legacy
+  // response; present and empty means the deployment has zero service slots.
+  optional ServiceVpcSlotInventory service_vpc_slot_inventory = 122;
+}
+
+// Resolved network state for one service attachment endpoint on the receiving DPU.
+message ManagedHostServiceInterfaceConfig {
+  // Registered service whose workload receives this endpoint.
+  string service_id = 1;
+  // Server-owned attachment that owns this endpoint.
+  common.UUID attachment_id = 2;
+  // Zero-based position in the service's registered interface requirements.
+  uint32 interface_ordinal = 3;
+  // Fixed local service slot, indexed by service_vpc_slot_inventory.
+  uint32 slot_index = 4;
+  // VPC selected when the service was attached to the instance.
+  common.VpcId vpc_id = 5;
+  // VNI allocated to the selected VPC.
+  uint32 vpc_vni = 6;
+  // Prefixes belonging to the selected VPC, in CIDR notation.
+  repeated string vpc_prefixes = 7;
+  // Prefixes imported from VPC peers, in CIDR notation.
+  repeated string vpc_peer_prefixes = 8;
+  // VNIs imported from VPC peers.
+  repeated uint32 vpc_peer_vnis = 9;
+  // Effective routing profile for the selected VPC.
+  optional RoutingProfile vpc_routing_profile = 10;
+  // Effective routing profile for this service interface.
+  optional FlatInterfaceRoutingProfile interface_routing_profile = 11;
+  // Resolved network security group for the selected VPC.
+  optional FlatInterfaceNetworkSecurityGroupConfig network_security_group = 12;
+  // Effective interface MTU in bytes.
+  optional uint32 mtu = 13;
+  // Canonical IPv4 /31 or IPv6 /127 shared by HBN and the service.
+  string link_prefix = 14;
+  // Stable service-interface MAC assigned by NICo and reused on every DPU.
+  string mac_address = 15;
+  // Stable identity used to correlate this endpoint across reconciliation.
+  common.UUID internal_uuid = 16;
+}
+
+// Complete fixed service-slot inventory for one DPU deployment.
+message ServiceVpcSlotInventory {
+  // Every fixed slot, in ascending contiguous order starting at zero.
+  repeated ServiceVpcSlot slots = 1;
+}
+
+// One fixed service slot provisioned on a DPU.
+message ServiceVpcSlot {
+  // Zero-based slot index referenced by service endpoints.
+  uint32 slot_index = 1;
+  // Unique, nonempty HBN interface name before DHCP interface translation.
+  string hbn_interface_name = 2;
 }
 
 message ManagedHostDpuExtensionServiceConfig {
@@ -9011,6 +9085,27 @@ message DpuExtensionService {
   // The lifecycle of the extension service registration itself. This is
   // independent from deployment status on individual instances.
   LifecycleStatus lifecycle_status = 11;
+
+  // Service-facing interface requirements in ordinal order. Empty means the
+  // service has no service network. The current API supports at most one
+  // requirement.
+  repeated ServiceVpcInterfaceRequirement service_vpc_interfaces = 12;
+}
+
+// Address family required by a service-facing interface.
+enum ServiceVpcAddressFamily {
+  // Missing family. Requests using this value are rejected.
+  SERVICE_VPC_ADDRESS_FAMILY_UNSPECIFIED = 0;
+  // IPv4 service interface.
+  SERVICE_VPC_ADDRESS_FAMILY_IPV4 = 1;
+  // IPv6 service interface.
+  SERVICE_VPC_ADDRESS_FAMILY_IPV6 = 2;
+}
+
+// Network requirement for one service-facing interface.
+message ServiceVpcInterfaceRequirement {
+  // Required address family. Unspecified and unknown values are rejected.
+  ServiceVpcAddressFamily address_family = 1;
 }
 
 message CreateDpuExtensionServiceRequest {
@@ -9029,8 +9124,22 @@ message CreateDpuExtensionServiceRequest {
   // Metrics configuration to be added to the existing
   // metrics collection service that runs on the DPU.
   optional DpuExtensionServiceObservability observability = 8;
+
+  // Service-facing interface requirements. Omitted or empty means no
+  // service network. The current API accepts at most one requirement and only
+  // for a DPF Helm chart service. A nonempty declaration is accepted but remains
+  // in retryable Creating state until service VPC reconciliation is available.
+  repeated ServiceVpcInterfaceRequirement service_vpc_interfaces = 9;
 }
 
+// Complete service-facing interface requirements supplied during an update.
+// The order defines the stable interface ordinal used by every attachment.
+message ServiceVpcInterfaceRequirements {
+  repeated ServiceVpcInterfaceRequirement interfaces = 1;
+}
+
+// Updates submit the complete desired versioned definition. Name and description
+// remain optional metadata edits and change only when present.
 message UpdateDpuExtensionServiceRequest {
   string service_id = 1;
 
@@ -9038,7 +9147,8 @@ message UpdateDpuExtensionServiceRequest {
   optional string service_name = 2;
   optional string description = 3;
 
-  // create a new extension service version
+  // Complete service data. Kubernetes Pod updates create a new version; DPF Helm
+  // chart updates replace the stable V1 definition in place.
   string data = 4;
   optional DpuExtensionServiceCredential credential = 5;
   // If the field here is set, the update will only be applied if the version
@@ -9050,6 +9160,16 @@ message UpdateDpuExtensionServiceRequest {
   // Metrics configuration to be added to the existing
   // metrics collection service that runs on the DPU.
   optional DpuExtensionServiceObservability observability = 7;
+
+  // Complete desired service-facing interface requirements in ordinal order.
+  // A present wrapper with no interfaces explicitly removes the service
+  // network. Omission is accepted for older clients only when the stored list
+  // is already empty; it does not preserve a nonempty stored definition. The
+  // API rejects a change while any active or terminating instance attachment
+  // references the service. Without attachments, a change is eligible under
+  // the existing service-type and lifecycle update rules. The current API
+  // accepts at most one requirement and only for a DPF Helm chart service.
+  optional ServiceVpcInterfaceRequirements service_vpc_interfaces = 8;
 }
 
 // If versions is empty, request to delete the whole service;

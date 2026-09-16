@@ -1708,6 +1708,94 @@ mod tests {
         assert_eq!(snapshots.len(), 2);
     }
 
+    /// Verifies an attachment written without an ID remains readable and
+    /// writable across independent loads, which keeps rolling upgrades safe.
+    #[crate::sqlx_test]
+    async fn legacy_attachment_without_id_remains_writable(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.expect("begin legacy attachment setup");
+        let instance_id = seed_instance(txn.as_mut(), 0x4a, None).await;
+        let legacy = serde_json::json!({
+            "service_configs": [{
+                "service_id": ExtensionServiceId::new(),
+                "version": ConfigVersion::initial(),
+                "removed": null
+            }]
+        });
+
+        // Model a live outgoing writer that still serializes the older JSON shape.
+        sqlx::query("UPDATE instances SET extension_services_config = $1 WHERE id = $2")
+            .bind(Json(&legacy))
+            .bind(instance_id)
+            .execute(txn.as_mut())
+            .await
+            .expect("persist predecessor attachment JSON");
+        txn.commit().await.expect("commit predecessor attachment");
+
+        // Load the committed row again and preserve the missing identity.
+        let initial = find_by_id(&pool, instance_id)
+            .await
+            .expect("read older attachment")
+            .expect("seeded instance exists");
+        assert!(
+            initial.config.extension_services.service_configs[0]
+                .id
+                .is_none()
+        );
+        let previous_version = initial.extension_services_config_version;
+
+        // Lock and reload the row before a current writer begins termination.
+        let mut txn = pool.begin().await.expect("begin current attachment update");
+        find_by_id_for_update(txn.as_mut(), instance_id)
+            .await
+            .expect("lock older attachment")
+            .expect("seeded instance exists");
+        let locked = find_by_id(txn.as_mut(), instance_id)
+            .await
+            .expect("reload locked older attachment")
+            .expect("seeded instance exists");
+        let mut updated = locked.config.extension_services;
+        updated.service_configs[0].removed = Some(Utc::now());
+        update_extension_services_config(
+            txn.as_mut(),
+            instance_id,
+            previous_version,
+            &updated,
+            true,
+        )
+        .await
+        .expect("update older attachment");
+        txn.commit()
+            .await
+            .expect("commit current attachment update");
+
+        // A current writer keeps the ID absent in storage and on a fresh read.
+        let stored: serde_json::Value =
+            sqlx::query_scalar("SELECT extension_services_config FROM instances WHERE id = $1")
+                .bind(instance_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read rewritten attachment JSON");
+        assert!(stored["service_configs"][0].get("id").is_none());
+        let persisted = find_by_id(&pool, instance_id)
+            .await
+            .expect("reread updated older attachment")
+            .expect("seeded instance exists");
+        assert!(
+            persisted.config.extension_services.service_configs[0]
+                .id
+                .is_none()
+        );
+        assert!(
+            persisted.config.extension_services.service_configs[0]
+                .removed
+                .is_some()
+        );
+        assert_eq!(
+            persisted.extension_services_config_version.version_nr(),
+            previous_version.version_nr() + 1
+        );
+    }
+
     /// General and OS updates distinguish missing and deleted `Instance`s from
     /// live records whose version has changed.
     #[crate::sqlx_test]

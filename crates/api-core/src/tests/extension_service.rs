@@ -36,7 +36,9 @@ use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_uuid::extension_service::ExtensionServiceId;
 use config_version::ConfigVersion;
 use model::controller_outcome::PersistentStateHandlerOutcome;
-use model::extension_service::{ExtensionServiceLifecycleState, ExtensionServiceType};
+use model::extension_service::{
+    ExtensionServiceLifecycleState, ExtensionServiceType, ServiceVpcAddressFamily,
+};
 use model::tenant::TenantOrganizationId;
 use state_controller::controller::Enqueuer;
 use state_controller::io::StateControllerIO;
@@ -161,6 +163,45 @@ async fn create_dpf_controller_test_env(
     .await
 }
 
+/// Advances a DPF registration to Ready so update tests can stand in for the
+/// service VPC reconciler that is intentionally outside this milestone.
+async fn mark_dpf_service_ready_for_update(
+    env: &TestEnv,
+    service_id: ExtensionServiceId,
+) -> Result<(), eyre::Report> {
+    let mut txn = env.pool.begin().await?;
+    let service = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("created DPF registration exists");
+    let state_change = service.status.controller_state.version.incremental_change();
+
+    // This transition is normally owned by reconciliation. Recording both the
+    // state and its history keeps the fixture equivalent to that completed work.
+    assert_eq!(
+        db::extension_service::try_update_controller_state(
+            &mut txn,
+            service_id,
+            state_change.current,
+            state_change.new,
+            &ExtensionServiceLifecycleState::Ready,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    db::state_history::persist(
+        &mut txn,
+        db::state_history::StateHistoryTableId::ExtensionService,
+        &service_id,
+        &ExtensionServiceLifecycleState::Ready,
+        state_change.new,
+    )
+    .await?;
+    txn.commit().await?;
+
+    Ok(())
+}
+
 fn dpu_service_observation(service: &DetachedDpuServiceDefinition) -> DpuServiceObservation {
     DpuServiceObservation {
         name: Some(service.name.clone()),
@@ -206,6 +247,7 @@ async fn create_test_extension_service(
     credential: Option<rpc::DpuExtensionServiceCredential>,
 ) -> Result<rpc::DpuExtensionService, eyre::Report> {
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: name.to_string(),
         description: Some("Test service".to_string()),
@@ -228,6 +270,7 @@ async fn create_test_extension_service_with_three_versions(
 ) -> Result<rpc::DpuExtensionService, eyre::Report> {
     create_test_tenants(env).await?;
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -249,6 +292,7 @@ async fn create_test_extension_service_with_three_versions(
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: None,
             description: None,
@@ -264,6 +308,7 @@ async fn create_test_extension_service_with_three_versions(
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: None,
             description: None,
@@ -284,6 +329,7 @@ async fn create_test_extension_service_with_ten_versions(
 ) -> Result<String, eyre::Report> {
     create_test_tenants(env).await?;
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -307,6 +353,7 @@ async fn create_test_extension_service_with_ten_versions(
         let update_resp = env
             .api
             .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+                service_vpc_interfaces: None,
                 service_id: service_id.clone(),
                 service_name: None,
                 description: None,
@@ -322,6 +369,7 @@ async fn create_test_extension_service_with_ten_versions(
         let update_resp = env
             .api
             .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+                service_vpc_interfaces: None,
                 service_id: service_id.clone(),
                 service_name: None,
                 description: None,
@@ -372,6 +420,7 @@ async fn test_extension_service_creation(db_pool: sqlx::PgPool) -> Result<(), ey
     create_test_tenants(&env).await?;
 
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -406,6 +455,7 @@ async fn test_dpf_helm_chart_extension_service_is_rejected_when_dpf_is_disabled(
     let response = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: None,
             service_name: "dpf-service".to_string(),
             description: None,
@@ -446,6 +496,7 @@ async fn test_dpf_helm_chart_create_persists_normalized_creating_state_without_d
     let response = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: None,
             service_name: "accepted-dpf-service".to_string(),
             description: Some("durable acceptance only".to_string()),
@@ -511,6 +562,537 @@ async fn test_dpf_helm_chart_create_persists_normalized_creating_state_without_d
     Ok(())
 }
 
+/// Verifies an IPv6 service declaration remains durable and retryable across a
+/// controller restart without creating an ordinary nonnetworked DPUService.
+#[crate::sqlx_test]
+async fn test_networked_dpf_registration_waits_across_controller_restart(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let service_id = ExtensionServiceId::new();
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service().times(0);
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+
+    // Registration accepts the family declaration and persists it with Creating state.
+    let created = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Ipv6 as i32,
+            }],
+            service_id: Some(service_id.to_string()),
+            service_name: "ipv6-networked-service".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(lifecycle_state(&created), "creating");
+    assert_eq!(created.service_vpc_interfaces.len(), 1);
+
+    // The controller records a retryable wait and makes no DPF call.
+    env.run_extension_service_controller_iteration().await;
+    let mut txn = env.pool.begin().await?;
+    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("networked registration remains durable");
+    assert_eq!(
+        record.service_vpc_interfaces[0].address_family,
+        ServiceVpcAddressFamily::Ipv6
+    );
+    assert_eq!(
+        record.status.controller_state.value,
+        ExtensionServiceLifecycleState::Creating
+    );
+    assert!(matches!(
+        record.status.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+            if reason == "service VPC registration is unavailable until network resource reconciliation is implemented"
+    ));
+    // Remove the first outcome so only fresh processing after restart can satisfy the test.
+    sqlx::query("UPDATE extension_services SET controller_state_outcome = NULL WHERE id = $1")
+        .bind(service_id)
+        .execute(txn.as_mut())
+        .await?;
+    txn.commit().await?;
+
+    // After restart, the controller reads the stored declaration and waits again.
+    let restart_pool = env.pool.clone();
+    drop(env);
+    let mut restarted_mock = MockDpfOperations::new();
+    restarted_mock.expect_create_dpu_service().times(0);
+    let mut config = get_config();
+    config.dpf.enabled = true;
+    let mut restart_overrides =
+        TestEnvOverrides::with_config(config).with_dpf_sdk(Arc::new(restarted_mock));
+    restart_overrides.create_network_segments = Some(false);
+    let restarted = create_test_env_with_overrides(restart_pool, restart_overrides).await;
+    restarted.run_extension_service_controller_iteration().await;
+
+    let mut txn = restarted.pool.begin().await?;
+    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("restarted controller reloads registration");
+    assert_eq!(
+        record.status.controller_state.value,
+        ExtensionServiceLifecycleState::Creating
+    );
+    assert!(matches!(
+        record.status.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+            if reason == "service VPC registration is unavailable until network resource reconciliation is implemented"
+    ));
+
+    Ok(())
+}
+
+/// Verifies registration rejects a missing family, multiple interfaces, and a
+/// non-DPF service without persisting any invalid registration.
+#[crate::sqlx_test]
+async fn test_service_vpc_registration_rejects_invalid_shapes(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_dpf_enabled_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+    let unspecified_id = ExtensionServiceId::new();
+    let too_many_id = ExtensionServiceId::new();
+    let wrong_type_id = ExtensionServiceId::new();
+
+    // The zero enum value means "not provided" and must not become IPv4.
+    let unspecified = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Unspecified as i32,
+            }],
+            service_id: Some(unspecified_id.to_string()),
+            service_name: "unspecified-family".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await
+        .expect_err("unspecified family is not a service requirement");
+    assert_eq!(unspecified.code(), tonic::Code::InvalidArgument);
+
+    // Multiple requirements exceed the single-interface MVP contract.
+    let too_many = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![
+                rpc::ServiceVpcInterfaceRequirement {
+                    address_family: rpc::ServiceVpcAddressFamily::Ipv4 as i32,
+                },
+                rpc::ServiceVpcInterfaceRequirement {
+                    address_family: rpc::ServiceVpcAddressFamily::Ipv6 as i32,
+                },
+            ],
+            service_id: Some(too_many_id.to_string()),
+            service_name: "too-many-interfaces".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await
+        .expect_err("MVP supports at most one service interface");
+    assert_eq!(too_many.code(), tonic::Code::InvalidArgument);
+
+    // Kubernetes Pod delivery has no DPF-owned VRF in which to place this interface.
+    let wrong_type = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![rpc::ServiceVpcInterfaceRequirement {
+                address_family: rpc::ServiceVpcAddressFamily::Ipv4 as i32,
+            }],
+            service_id: Some(wrong_type_id.to_string()),
+            service_name: "pod-network-requirement".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::KubernetesPod.into(),
+            data: TEST_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await
+        .expect_err("service VPC interfaces require DPF Helm delivery");
+    assert_eq!(wrong_type.code(), tonic::Code::InvalidArgument);
+
+    // Rejected requests must not leave registrations that later become visible.
+    let persisted = env
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![
+                unspecified_id.to_string(),
+                too_many_id.to_string(),
+                wrong_type_id.to_string(),
+            ],
+        }))
+        .await?
+        .into_inner();
+    assert!(persisted.services.is_empty());
+
+    Ok(())
+}
+
+/// Verifies a networked update requires an explicit complete interface
+/// definition, preserves that definition, and waits for reconciliation.
+#[crate::sqlx_test]
+async fn test_networked_dpf_data_update_preserves_requirements_and_waits(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let service_id = ExtensionServiceId::new();
+    let requirements = vec![rpc::ServiceVpcInterfaceRequirement {
+        address_family: rpc::ServiceVpcAddressFamily::Ipv4 as i32,
+    }];
+    let mut mock = MockDpfOperations::new();
+    mock.expect_create_dpu_service().times(0);
+    mock.expect_patch_dpu_service().times(0);
+    let env = create_dpf_controller_test_env(db_pool, mock).await;
+    create_test_tenants(&env).await?;
+
+    // Register a networked service, then stand in for the later reconciler so
+    // the existing DPF update lifecycle accepts its complete replacement.
+    let created = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: requirements.clone(),
+            service_id: Some(service_id.to_string()),
+            service_name: "networked-data-update".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+    mark_dpf_service_ready_for_update(&env, service_id).await?;
+
+    // Omitting a nonempty definition is incomplete and must not silently reuse
+    // the stored requirements.
+    let omitted = env
+        .api
+        .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
+            service_id: created.service_id.clone(),
+            service_name: None,
+            description: None,
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2.to_string(),
+            credential: None,
+            observability: None,
+            if_version_ctr_match: Some(created.version_ctr),
+        }))
+        .await
+        .expect_err("networked updates require the complete interface definition");
+    assert_eq!(omitted.code(), tonic::Code::InvalidArgument);
+    assert!(omitted.message().contains("must be provided"));
+
+    // A fresh read proves the incomplete request changed no stored definition.
+    let unchanged = env
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![created.service_id.clone()],
+        }))
+        .await?
+        .into_inner()
+        .services
+        .pop()
+        .expect("service remains visible after rejected update");
+    assert_eq!(unchanged.version_ctr, created.version_ctr);
+    assert_eq!(unchanged.service_vpc_interfaces, requirements);
+
+    // Repeating the complete interface definition is not a requirement change,
+    // so an ordinary deployment-data revision remains valid.
+    let updated = env
+        .api
+        .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: Some(rpc::ServiceVpcInterfaceRequirements {
+                interfaces: requirements.clone(),
+            }),
+            service_id: created.service_id.clone(),
+            service_name: None,
+            description: None,
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2.to_string(),
+            credential: None,
+            observability: None,
+            if_version_ctr_match: Some(created.version_ctr),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(updated.version_ctr, 2);
+    assert_eq!(lifecycle_state(&updated), "updating");
+    assert_eq!(updated.service_vpc_interfaces, requirements);
+
+    // A fresh API read proves the data and unchanged requirements committed.
+    let persisted = env
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![created.service_id.clone()],
+        }))
+        .await?
+        .into_inner()
+        .services
+        .pop()
+        .expect("updated service remains visible");
+    assert_eq!(
+        persisted
+            .latest_version_info
+            .expect("stable DPF version is returned")
+            .data,
+        model::extension_service::DpfHelmChartServiceData::parse(
+            TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2
+        )?
+        .normalized_json()?
+    );
+    assert_eq!(persisted.service_vpc_interfaces, requirements);
+
+    // Updating a networked service must wait for the service VPC reconciler and
+    // must not patch the ordinary DPUService without its network resources.
+    env.run_extension_service_controller_iteration().await;
+    let mut txn = env.pool.begin().await?;
+    let persisted = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+        .await?
+        .pop()
+        .expect("updated registration remains controller-visible");
+    assert_eq!(
+        persisted.status.controller_state.value,
+        ExtensionServiceLifecycleState::Updating
+    );
+    assert!(matches!(
+        persisted.status.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+            if reason == "service VPC registration is unavailable until network resource reconciliation is implemented"
+    ));
+
+    Ok(())
+}
+
+/// Verifies a registration may add or explicitly remove its complete interface
+/// requirements when no durable attachment can depend on the old definition.
+#[crate::sqlx_test]
+async fn test_dpf_interface_requirements_change_without_attachments(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_dpf_enabled_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+    let service_id = ExtensionServiceId::new();
+
+    // Begin with an unnetworked Ready registration and submit its complete
+    // replacement definition with one IPv6 interface requirement.
+    let created = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
+            service_id: Some(service_id.to_string()),
+            service_name: "add-interface-requirement".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+    mark_dpf_service_ready_for_update(&env, service_id).await?;
+    let requirements = vec![rpc::ServiceVpcInterfaceRequirement {
+        address_family: rpc::ServiceVpcAddressFamily::Ipv6 as i32,
+    }];
+    let updated = env
+        .api
+        .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: Some(rpc::ServiceVpcInterfaceRequirements {
+                interfaces: requirements.clone(),
+            }),
+            service_id: created.service_id.clone(),
+            service_name: None,
+            description: None,
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+            if_version_ctr_match: Some(created.version_ctr),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(updated.service_vpc_interfaces, requirements);
+    assert_eq!(lifecycle_state(&updated), "updating");
+
+    // A fresh API read proves the new interface contract replaced the empty one.
+    let persisted = env
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![created.service_id.clone()],
+        }))
+        .await?
+        .into_inner()
+        .services
+        .pop()
+        .expect("updated service remains visible");
+    assert_eq!(persisted.service_vpc_interfaces, requirements);
+    assert_eq!(lifecycle_state(&persisted), "updating");
+
+    // An explicitly present empty wrapper is the complete replacement that
+    // removes the service network (it is distinct from omission).
+    mark_dpf_service_ready_for_update(&env, service_id).await?;
+    let removed = env
+        .api
+        .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: Some(rpc::ServiceVpcInterfaceRequirements {
+                interfaces: vec![],
+            }),
+            service_id: created.service_id.clone(),
+            service_name: None,
+            description: None,
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+            if_version_ctr_match: Some(updated.version_ctr),
+        }))
+        .await?
+        .into_inner();
+    assert!(removed.service_vpc_interfaces.is_empty());
+    assert_eq!(lifecycle_state(&removed), "updating");
+
+    // A fresh API read proves the explicit removal committed.
+    let persisted = env
+        .api
+        .find_dpu_extension_services_by_ids(Request::new(rpc::DpuExtensionServicesByIdsRequest {
+            service_ids: vec![created.service_id],
+        }))
+        .await?
+        .into_inner()
+        .services
+        .pop()
+        .expect("updated service remains visible");
+    assert!(persisted.service_vpc_interfaces.is_empty());
+
+    Ok(())
+}
+
+/// Verifies both active and terminating durable attachments freeze a service's
+/// interface requirements, because either may still own network resources.
+#[crate::sqlx_test]
+async fn test_dpf_interface_requirements_change_rejects_existing_attachments(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_dpf_enabled_test_env(db_pool).await;
+    create_test_tenants(&env).await?;
+    let service_id = ExtensionServiceId::new();
+    let created = env
+        .api
+        .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
+            service_id: Some(service_id.to_string()),
+            service_name: "attached-interface-requirement".to_string(),
+            description: None,
+            tenant_organization_id: "best_org".to_string(),
+            service_type: rpc::DpuExtensionServiceType::DpfHelmChart.into(),
+            data: TEST_DPF_HELM_CHART_SERVICE_DATA.to_string(),
+            credential: None,
+            observability: None,
+        }))
+        .await?
+        .into_inner();
+    mark_dpf_service_ready_for_update(&env, service_id).await?;
+
+    // Milestone 01 cannot publicly activate service networking, so seed only
+    // the durable attachment state consumed by the update exclusion check.
+    let managed_host = create_managed_host(&env).await;
+    let instance_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO instances (machine_id, os_ipxe_script, network_config, nvlink_config) \
+         VALUES ($1, '#!ipxe', '{\"interfaces\": []}'::jsonb, '{\"gpu_configs\": []}'::jsonb) \
+         RETURNING id",
+    )
+    .bind(managed_host.id)
+    .fetch_one(&env.pool)
+    .await?;
+    let cases = [
+        // An active attachment is already using the current service definition.
+        ("active attachment", serde_json::Value::Null),
+        // A terminating attachment may still own endpoints until cleanup completes.
+        (
+            "terminating attachment",
+            serde_json::json!(chrono::Utc::now()),
+        ),
+    ];
+    for (scenario, removed) in cases {
+        let attachment = serde_json::json!({
+            "service_configs": [{
+                "id": uuid::Uuid::new_v4(),
+                "service_id": service_id,
+                "version": ConfigVersion::initial(),
+                "removed": removed
+            }]
+        });
+        sqlx::query("UPDATE instances SET extension_services_config = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(attachment))
+            .bind(instance_id)
+            .execute(&env.pool)
+            .await?;
+
+        // A full replacement that changes requirements must be rejected before
+        // it changes either the stable DPF data or the registration record.
+        let error = env
+            .api
+            .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+                service_vpc_interfaces: Some(rpc::ServiceVpcInterfaceRequirements {
+                    interfaces: vec![rpc::ServiceVpcInterfaceRequirement {
+                        address_family: rpc::ServiceVpcAddressFamily::Ipv4 as i32,
+                    }],
+                }),
+                service_id: created.service_id.clone(),
+                service_name: None,
+                description: None,
+                data: TEST_DPF_HELM_CHART_SERVICE_DATA_VERSION_2.to_string(),
+                credential: None,
+                observability: None,
+                if_version_ctr_match: Some(created.version_ctr),
+            }))
+            .await
+            .expect_err(scenario);
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+        assert!(
+            error
+                .message()
+                .contains("active or terminating attachments"),
+            "{scenario}: {error}"
+        );
+
+        // A fresh API read proves the rejected replacement left the definition intact.
+        let persisted = env
+            .api
+            .find_dpu_extension_services_by_ids(Request::new(
+                rpc::DpuExtensionServicesByIdsRequest {
+                    service_ids: vec![created.service_id.clone()],
+                },
+            ))
+            .await?
+            .into_inner()
+            .services
+            .pop()
+            .expect("service remains visible after rejected update");
+        assert!(persisted.service_vpc_interfaces.is_empty(), "{scenario}");
+        assert_eq!(persisted.version_ctr, created.version_ctr, "{scenario}");
+        assert_eq!(lifecycle_state(&persisted), "ready", "{scenario}");
+    }
+
+    Ok(())
+}
+
 #[crate::sqlx_test]
 async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     db_pool: sqlx::PgPool,
@@ -551,6 +1133,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     let created = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: Some(service_id.to_string()),
             service_name: "update-dpf-service".to_string(),
             description: Some("before update".to_string()),
@@ -571,6 +1154,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     let stale_update = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.to_string(),
             service_name: None,
             description: None,
@@ -586,6 +1170,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     let updated = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.to_string(),
             service_name: Some("updated-dpf-service".to_string()),
             description: Some("after update".to_string()),
@@ -655,6 +1240,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     let error = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.to_string(),
             service_name: None,
             description: None,
@@ -735,6 +1321,7 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
 
     env.api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: Some(service_id.to_string()),
             service_name: "delete-dpf-service".to_string(),
             description: Some("delete controller test".to_string()),
@@ -794,6 +1381,7 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
     let recreate_while_deleting = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: None,
             service_name: "delete-dpf-service".to_string(),
             description: None,
@@ -850,6 +1438,7 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
     let recreated = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: None,
             service_name: "delete-dpf-service".to_string(),
             description: None,
@@ -891,6 +1480,7 @@ async fn test_dpf_helm_chart_delete_refuses_unowned_dpu_service(
 
     env.api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: Some(service_id.to_string()),
             service_name: "unowned-delete-dpf-service".to_string(),
             description: None,
@@ -940,6 +1530,7 @@ async fn test_dpf_helm_chart_delete_recovers_after_controller_restart(
 
     env.api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: Some(service_id.to_string()),
             service_name: "restart-delete-dpf-service".to_string(),
             description: None,
@@ -1008,6 +1599,7 @@ async fn test_dpf_helm_chart_metadata_update_keeps_active_lifecycle_and_v1(
     let created = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: None,
             service_name: "metadata-dpf-service".to_string(),
             description: None,
@@ -1025,6 +1617,7 @@ async fn test_dpf_helm_chart_metadata_update_keeps_active_lifecycle_and_v1(
     let updated = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.to_string(),
             service_name: Some("metadata-dpf-service-renamed".to_string()),
             description: Some("metadata only".to_string()),
@@ -1087,6 +1680,7 @@ async fn test_dpf_helm_chart_create_rejects_unsupported_credentials_and_observab
         let response = env
             .api
             .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+                service_vpc_interfaces: vec![],
                 service_id: Some(service_id.to_string()),
                 service_name: name.to_string(),
                 description: None,
@@ -1158,6 +1752,7 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
         let error = env
             .api
             .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+                service_vpc_interfaces: vec![],
                 service_id: Some(service_id.to_string()),
                 service_name: name.to_string(),
                 description: None,
@@ -1194,6 +1789,7 @@ async fn test_dpf_helm_chart_create_rejects_duplicate_name_for_tenant(
 
     env.api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: None,
             service_name: "duplicate-dpf-service".to_string(),
             description: None,
@@ -1208,6 +1804,7 @@ async fn test_dpf_helm_chart_create_rejects_duplicate_name_for_tenant(
     let error = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: None,
             service_name: "Duplicate-Dpf-Service".to_string(),
             description: None,
@@ -1250,6 +1847,7 @@ async fn seed_dpf_helm_chart_service_with_id(
         name,
         &tenant,
         Some("controller fixture"),
+        &[],
         TEST_DPF_HELM_CHART_SERVICE_DATA,
         None,
         false,
@@ -1483,6 +2081,7 @@ async fn test_dpf_helm_chart_controller_queue_scan_and_persistence(
         "controller-non-dpf",
         &tenant,
         None,
+        &[],
         TEST_SERVICE_DATA,
         None,
         false,
@@ -1574,6 +2173,7 @@ async fn test_extension_service_create_with_credential(
     create_test_tenants(&env).await?;
 
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -1620,6 +2220,7 @@ async fn test_extension_service_create_failure(db_pool: sqlx::PgPool) -> Result<
     create_test_tenants(&env).await?;
 
     let requested_extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -1742,6 +2343,7 @@ async fn test_extension_service_update_race_condition(
         let join_handle_1 = tokio::spawn({
             let api = env.api.clone();
             let request = Request::new(rpc::UpdateDpuExtensionServiceRequest {
+                service_vpc_interfaces: None,
                 service_id: service.service_id.clone(),
                 service_name: Some("test-service-updated".to_string()), // should cause collision
                 description: Some(service.description.clone()),
@@ -1755,6 +2357,7 @@ async fn test_extension_service_update_race_condition(
         let join_handle_2 = tokio::spawn({
             let api = env.api.clone();
             let request = Request::new(rpc::UpdateDpuExtensionServiceRequest {
+                service_vpc_interfaces: None,
                 service_id: service.service_id.clone(),
                 service_name: Some("test-service-updated".to_string()), // should cause collision
                 description: Some(service.description.clone()),
@@ -1865,6 +2468,7 @@ async fn test_extension_service_update_failure(db_pool: sqlx::PgPool) -> Result<
     let update_response = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_2.service_id.clone(),
             service_name: Some("test-service-1".to_string()), // should cause collision
             description: Some(service_1.description.clone()),
@@ -1992,6 +2596,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Test empty service name
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "".to_string(),
         description: Some("Test service".to_string()),
@@ -2010,6 +2615,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Test empty data
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -2028,6 +2634,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Test invalid data format (not YAML or JSON)
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -2046,6 +2653,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Test invalid credential registry URL
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -2074,6 +2682,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Test invalid observability config
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -2097,6 +2706,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Test invalid observability config name
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -2126,6 +2736,7 @@ async fn test_extension_service_creation_invalid_arg(
 
     // Fail to create an an extension with too many observability configs
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -2159,6 +2770,7 @@ async fn test_extension_service_creation_invalid_arg(
     // Fail to create an an extension with just a basic bad observability config
     // that's missing the actual config.
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -2193,6 +2805,7 @@ async fn test_extension_service_creation_with_same_name(
     create_test_tenants(&env).await?;
 
     let extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -2218,6 +2831,7 @@ async fn test_extension_service_creation_with_same_name(
 
     // Creating a new extension service with the same name and tenant organization ID should fail
     let duplicate_extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "Test-Service".to_string(),
         description: Some("Test service".to_string()),
@@ -2240,6 +2854,7 @@ async fn test_extension_service_creation_with_same_name(
 
     // However, creating a new extension service with the same name but different tenant organization ID should be allowed
     let new_extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "test-service".to_string(),
         description: Some("Test service".to_string()),
@@ -2320,6 +2935,7 @@ async fn test_extension_service_update(db_pool: sqlx::PgPool) -> Result<(), eyre
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: Some("updated-service".to_string()),
             description: Some("Updated service".to_string()),
@@ -2365,6 +2981,7 @@ async fn test_extension_service_update(db_pool: sqlx::PgPool) -> Result<(), eyre
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: None,
             description: None,
@@ -2433,6 +3050,7 @@ async fn test_extension_service_update_invalid_arg(
 
     // Create another extension service with a different name
     let other_extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "other-test-service".to_string(),
         description: Some("Other test service".to_string()),
@@ -2452,6 +3070,7 @@ async fn test_extension_service_update_invalid_arg(
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: Some("".to_string()),
             description: None,
@@ -2474,6 +3093,7 @@ async fn test_extension_service_update_invalid_arg(
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: None,
             description: None,
@@ -2490,6 +3110,7 @@ async fn test_extension_service_update_invalid_arg(
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: None,
             description: None,
@@ -2512,6 +3133,7 @@ async fn test_extension_service_update_invalid_arg(
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: None,
             description: None,
@@ -2534,6 +3156,7 @@ async fn test_extension_service_update_invalid_arg(
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: None,
             description: None,
@@ -2556,6 +3179,7 @@ async fn test_extension_service_update_invalid_arg(
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: Uuid::new_v4().to_string(),
             service_name: None,
             description: None,
@@ -2578,6 +3202,7 @@ async fn test_extension_service_update_invalid_arg(
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: Some("other-test-service".to_string()),
             description: None,
@@ -2596,6 +3221,7 @@ async fn test_extension_service_update_invalid_arg(
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: Some("other-test-service".to_string()),
             description: None,
@@ -2633,6 +3259,7 @@ async fn test_extension_service_update_metadata(db_pool: sqlx::PgPool) -> Result
 
     // Create another extension service with a different name
     let other_extension_service = rpc::CreateDpuExtensionServiceRequest {
+        service_vpc_interfaces: vec![],
         service_id: None,
         service_name: "other-test-service".to_string(),
         description: Some("Other test service".to_string()),
@@ -2652,6 +3279,7 @@ async fn test_extension_service_update_metadata(db_pool: sqlx::PgPool) -> Result
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: Some("updated-service".to_string()),
             description: None,
@@ -2682,6 +3310,7 @@ async fn test_extension_service_update_metadata(db_pool: sqlx::PgPool) -> Result
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: None,
             description: None,
@@ -2710,6 +3339,7 @@ async fn test_extension_service_update_metadata(db_pool: sqlx::PgPool) -> Result
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: Some("updated-service-2".to_string()),
             description: Some("Updated description".to_string()),
@@ -2996,6 +3626,7 @@ async fn test_extension_service_delete_in_use(db_pool: sqlx::PgPool) -> Result<(
             service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
                 service_id: service_id.clone(),
                 version: version3.clone(),
+                service_vpc_ids: vec![],
             }],
         })
         .build_and_return()
@@ -3108,6 +3739,7 @@ async fn test_extension_service_create_update_delete_credential(
     let update_resp = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             credential: Some(create_credential()),
             observability: Some(create_observability()),
@@ -3248,6 +3880,7 @@ async fn test_extension_service_delete_credential_cleanup_failure(
     let second_service_version = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: None,
             description: None,
@@ -3504,6 +4137,7 @@ async fn test_find_instances_by_extension_service(
     let service = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
+            service_vpc_interfaces: None,
             service_id: service_id.clone(),
             service_name: None,
             description: None,
@@ -3530,6 +4164,7 @@ async fn test_find_instances_by_extension_service(
             service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
                 service_id: service_id.clone(),
                 version: version1.clone(),
+                service_vpc_ids: vec![],
             }],
         })
         .build_and_return()
@@ -3543,6 +4178,7 @@ async fn test_find_instances_by_extension_service(
             service_configs: vec![rpc::InstanceDpuExtensionServiceConfig {
                 service_id: service_id.clone(),
                 version: version2.clone(),
+                service_vpc_ids: vec![],
             }],
         })
         .build_and_return()
@@ -3669,6 +4305,7 @@ async fn test_find_instances_by_extension_service_multiple_services_per_instance
     let service2 = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
+            service_vpc_interfaces: vec![],
             service_id: None,
             service_name: "test-service-2".to_string(),
             description: Some("Second test service".to_string()),
@@ -3697,10 +4334,12 @@ async fn test_find_instances_by_extension_service_multiple_services_per_instance
                 rpc::InstanceDpuExtensionServiceConfig {
                     service_id: service1_id.clone(),
                     version: service1_version.clone(),
+                    service_vpc_ids: vec![],
                 },
                 rpc::InstanceDpuExtensionServiceConfig {
                     service_id: service2_id.clone(),
                     version: service2_version.clone(),
+                    service_vpc_ids: vec![],
                 },
             ],
         })

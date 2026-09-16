@@ -18,6 +18,7 @@
 use carbide_uuid::extension_service::ExtensionServiceId;
 use chrono::prelude::*;
 use config_version::{ConfigVersion, Versioned};
+use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
@@ -39,6 +40,34 @@ pub const DPF_HELM_CHART_PLACEMENT_LABEL_VALUE: &str = "enabled";
 pub enum ExtensionServiceType {
     KubernetesPod,
     DpfHelmChart,
+}
+
+/// Address family required by one service-facing VPC interface.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceVpcAddressFamily {
+    /// The service interface uses IPv4.
+    Ipv4,
+    /// The service interface uses IPv6.
+    Ipv6,
+}
+
+/// Network requirement declared by an extension service.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceVpcInterfaceRequirement {
+    /// Address family used by this interface.
+    pub address_family: ServiceVpcAddressFamily,
+}
+
+/// Stable MAC assignment shared by every attachment of one service interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtensionServiceInterfaceMac {
+    /// Service that owns this MAC assignment.
+    pub service_id: ExtensionServiceId,
+    /// Zero-based position in the service's interface requirements.
+    pub interface_ordinal: u32,
+    /// MAC reused for this service interface on every attached DPU.
+    pub mac_address: MacAddress,
 }
 
 impl std::fmt::Display for ExtensionServiceType {
@@ -73,6 +102,9 @@ pub struct ExtensionService {
     pub name: String,
     pub tenant_organization_id: TenantOrganizationId,
     pub description: String,
+    /// Service-facing interface requirements in ordinal order.
+    #[serde(default)]
+    pub service_vpc_interfaces: Vec<ServiceVpcInterfaceRequirement>,
     pub version_ctr: i32, // Version counter for the extension service, always incremented
     /// Controller-owned registration status. Kubernetes Pod services are
     /// synchronously ready, while DPF Helm services reconcile this lifecycle
@@ -129,6 +161,11 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionService {
                 .parse::<TenantOrganizationId>()
                 .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
             description: row.try_get("description")?,
+            service_vpc_interfaces: row
+                .try_get::<sqlx::types::Json<Vec<ServiceVpcInterfaceRequirement>>, _>(
+                    "service_vpc_interfaces",
+                )?
+                .0,
             version_ctr: row.try_get::<i32, _>("version_ctr")?,
             status: ExtensionServiceStatus {
                 controller_state: Versioned::new(
@@ -183,6 +220,8 @@ pub struct ExtensionServiceSnapshot {
     pub latest_version: Option<ExtensionServiceVersionInfo>,
     pub active_versions: Vec<ConfigVersion>,
     pub description: String,
+    /// Service-facing interface requirements in ordinal order.
+    pub service_vpc_interfaces: Vec<ServiceVpcInterfaceRequirement>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub deleted: Option<DateTime<Utc>>,
@@ -209,6 +248,11 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
             .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
         let version_ctr: i32 = row.try_get("version_ctr")?;
         let description: String = row.try_get("description")?;
+        let service_vpc_interfaces = row
+            .try_get::<sqlx::types::Json<Vec<ServiceVpcInterfaceRequirement>>, _>(
+                "service_vpc_interfaces",
+            )?
+            .0;
         let created: DateTime<Utc> = row.try_get("created")?;
         let updated: DateTime<Utc> = row.try_get("updated")?;
         let deleted: Option<DateTime<Utc>> = row.try_get("deleted")?;
@@ -264,6 +308,7 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
             latest_version: latest_service_version,
             active_versions,
             description,
+            service_vpc_interfaces,
             created,
             updated,
             deleted,

@@ -126,6 +126,7 @@ impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
             observability: Some(::rpc::forge::DpuExtensionServiceObservability {
                 configs: observability,
             }),
+            service_vpc_interfaces: vec![],
         })
     }
 }
