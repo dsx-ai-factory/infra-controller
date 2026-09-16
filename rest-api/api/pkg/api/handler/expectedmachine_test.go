@@ -422,9 +422,13 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				var response model.APIExpectedMachine
 				err := json.Unmarshal(rec.Body.Bytes(), &response)
 				assert.Nil(t, err)
+				var fields map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &fields))
+				assert.Equal(t, "true", string(fields["isDpfEnabled"]))
+				stored, err := emDAO.Get(ctx, nil, response.ID, nil, false)
+				require.NoError(t, err)
+				assert.Nil(t, stored.IsDpfEnabled, "response default must not change the stored optional value")
 				if tt.requestBodyJSON != "" {
-					var fields map[string]json.RawMessage
-					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &fields))
 					assert.JSONEq(t, `{}`, string(fields["labels"]))
 					assert.JSONEq(t, `[]`, string(fields["fallbackDPUSerialNumbers"]))
 				}
@@ -2647,9 +2651,7 @@ func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T
 	var apiResponse model.APIExpectedMachine
 	err = json.Unmarshal(rec.Body.Bytes(), &apiResponse)
 	assert.Nil(t, err)
-	if assert.NotNil(t, apiResponse.IsDpfEnabled) {
-		assert.False(t, *apiResponse.IsDpfEnabled)
-	}
+	assert.False(t, apiResponse.IsDpfEnabled)
 }
 
 // TestUpdateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow is a regression test for the

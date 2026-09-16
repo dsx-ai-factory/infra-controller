@@ -294,8 +294,8 @@ type APIExpectedMachine struct {
 	TrayIdx *int32 `json:"trayIdx"`
 	// HostID is the optional host identifier
 	HostID *int32 `json:"hostId"`
-	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning
-	IsDpfEnabled *bool `json:"isDpfEnabled"`
+	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning, defaulting to true when unset.
+	IsDpfEnabled bool `json:"isDpfEnabled"`
 	// Labels is the labels of the expected machine
 	Labels APILabels `json:"labels"`
 	// HostLifecycleProfile is the optional per-host lifecycle profile
@@ -325,7 +325,7 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 		SlotID:                   dibp.SlotID,
 		TrayIdx:                  dibp.TrayIdx,
 		HostID:                   dibp.HostID,
-		IsDpfEnabled:             dibp.IsDpfEnabled,
+		IsDpfEnabled:             dibp.IsDpfEnabled == nil || *dibp.IsDpfEnabled,
 		Labels:                   APILabels(dibp.Labels),
 		HostLifecycleProfile:     NewAPIHostLifecycleProfile(dibp.HostLifecycleProfile),
 		Created:                  dibp.Created,

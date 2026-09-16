@@ -27575,6 +27575,8 @@ components:
           type: boolean
           description: |-
             When true, this host is eligible for DPF-based provisioning.
+            Returns the effective setting: true when no value is configured.
+            An explicitly configured false value is returned as false.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines
@@ -27707,6 +27709,8 @@ components:
             - 'null'
           description: |-
             When true, this host is eligible for DPF-based provisioning.
+            Optional. Omission or null uses an effective default of true.
+            Set false explicitly to disable DPF-based provisioning.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines
@@ -27845,6 +27849,8 @@ components:
             - 'null'
           description: |-
             When true, this host is eligible for DPF-based provisioning.
+            Optional. Omission or null leaves the existing setting unchanged.
+            An explicit true or false value updates the setting.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines
