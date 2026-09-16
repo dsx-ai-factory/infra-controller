@@ -75,6 +75,11 @@ PROMETHEUS_OPERATOR="${PROMETHEUS_OPERATOR:-true}"
 WITH_TEMPO="${WITH_TEMPO:-true}"
 WITH_DPU="${WITH_DPU:-false}"
 OTEL_RECEIVER_VIP="${OTEL_RECEIVER_VIP:-}"
+# MetalLB needs a bare IP, even when the VIP was copied from a URL.
+if [[ "${OTEL_RECEIVER_VIP}" == \[*\] ]]; then
+    OTEL_RECEIVER_VIP="${OTEL_RECEIVER_VIP#\[}"
+    OTEL_RECEIVER_VIP="${OTEL_RECEIVER_VIP%\]}"
+fi
 OTEL_RECEIVER_DNS="${OTEL_RECEIVER_DNS:-otel-receiver.forge}"
 SITE_CA_ISSUER="${SITE_CA_ISSUER:-site-issuer}"
 
@@ -228,7 +233,12 @@ if [[ "${WITH_DPU}" == "true" ]]; then
     #   kubectl -n otel delete secret otel-receiver-tls
     kubectl wait --for=condition=Ready certificate/otel-receiver-tls -n otel --timeout=120s
 
-    echo "--- [DPU 3/3] OTLP/mTLS gateway (${OTEL_RECEIVER_VIP}:443 -> Loki + Prometheus)"
+    # Keep the MetalLB VIP bare; only host:port output needs IPv6 brackets.
+    otel_receiver_host="${OTEL_RECEIVER_VIP}"
+    if [[ "${otel_receiver_host}" == *:* ]]; then
+        otel_receiver_host="[${otel_receiver_host}]"
+    fi
+    echo "--- [DPU 3/3] OTLP/mTLS gateway (${otel_receiver_host}:443 -> Loki + Prometheus)"
     helm upgrade --install otel-collector-gateway open-telemetry/opentelemetry-collector \
         --version "${OTEL_CHART_VER}" -n otel \
         -f "${SCRIPT_DIR}/values-otel-collector-gateway.yaml" \
@@ -311,5 +321,5 @@ echo "  Grafana:    $([[ -n "${GRAFANA_VIP}" ]] && echo "http://${GRAFANA_VIP} (
 echo "  Loki:       loki.loki.svc.cluster.local:3100        (X-Scope-OrgID: forge)"
 [[ "${WITH_TEMPO}" == "true" ]] && echo "  Tempo:      tempo.tempo.svc.cluster.local:4317 (OTLP ingest), :3200 (query API)"
 echo "  Prometheus: obs-prometheus.monitoring.svc.cluster.local:9090"
-[[ "${WITH_DPU}" == "true" ]] && echo "  DPU OTLP:   ${OTEL_RECEIVER_DNS} -> ${OTEL_RECEIVER_VIP}:443 (mTLS)"
+[[ "${WITH_DPU}" == "true" ]] && echo "  DPU OTLP:   ${OTEL_RECEIVER_DNS} -> ${otel_receiver_host}:443 (mTLS)"
 echo "  Docs:       helm-prereqs/observability/README.md"
