@@ -27,10 +27,11 @@ as nico-machine-a-tron. The controller does not support a separate namespace.
 
 ## Helm-only Deployment
 
-The chart creates the namespace, its `nico.nvidia.com/managed` label and the
-image pull Secret that `helm-prereqs/setup-machine-a-tron.sh` otherwise creates,
-so no setup script is required once helm-prereqs (cert-manager ClusterIssuer,
-ESO) is installed:
+The chart creates the Kubernetes resources that
+`helm-prereqs/setup-machine-a-tron.sh` otherwise creates: the namespace, its
+`nico.nvidia.com/managed` label and the image pull Secret. Those resources need
+no setup script once helm-prereqs (cert-manager ClusterIssuer, ESO) is
+installed:
 
 - `global.namespaceOverride` with `createNamespace: true` creates the namespace
   and labels it `nico.nvidia.com/managed: "true"`, so the `nico-roots`
@@ -41,6 +42,11 @@ ESO) is installed:
 - A pod that defines only `racks` (clearing the default group with
   `machines.rack-machines: null`) still gets the bare `[machines]` table that
   machine-a-tron requires at startup.
+
+The chart does not seed the site-default Vault credentials or write the
+nico-core site configuration; follow the
+[deployment guide](../../../docs/development/machine-a-tron-deployment.md) for
+those steps.
 
 ```bash
 helm upgrade --install mat ./helm/charts/nico-machine-a-tron \
