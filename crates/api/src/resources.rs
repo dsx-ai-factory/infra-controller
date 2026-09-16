@@ -609,16 +609,23 @@ async fn import_vault_secrets_once(
         } else {
             &[]
         };
-        let (secrets, excluded_ufm_prefix_found) = vault_client
+        // The vault-token-refresh probe path is always excluded regardless
+        // of `excluded_prefixes` (see `vault_path_exclusion`), but that
+        // exclusion never sets `excluded_prefix_found`: the probe exists on
+        // every site that has ever authenticated to Vault, so counting it
+        // here would let a genuinely empty or misconfigured import source
+        // pass the empty-vault guard in `validate_vault_import_selection`
+        // below and permanently record nothing.
+        let (secrets, excluded_prefix_found) = vault_client
             .get_secrets_strict_excluding_prefixes(excluded_prefixes)
             .await
             .map_err(eyre::Report::from)
             .wrap_err("enumerate vault secrets for import")?;
-        validate_vault_import_selection(secrets.len(), excluded_ufm_prefix_found)?;
+        validate_vault_import_selection(secrets.len(), excluded_prefix_found)?;
 
         tracing::info!(
             import_secret_count = secrets.len(),
-            excluded_ufm_prefix_found,
+            excluded_prefix_found,
             approach = ?options.secrets.import_approach,
             "Importing secrets from vault"
         );
