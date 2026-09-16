@@ -295,7 +295,7 @@ ranges or by interpreting the `health_ok` values provided by BMCs.
 
 Machine endpoints carry the inventory metadata needed to interpret hardware health in fleet context. This includes machine ID, primary Redfish system UUID, serial number, rack ID, rack placement, and NVLink domain UUID when present.
 
-Switch endpoints carry switch ID, serial number, rack ID, rack placement, and NVLink domain UUID when present. Power-shelf endpoints carry power-shelf ID, serial number, rack ID, and NVLink domain UUID when present. The NICo API power shelf record has no domain field, so API discovery resolves a shelf's domain from the machines and switches that share its rack and logs a warning when none of them reports one.
+Switch endpoints carry switch ID, serial number, rack ID, rack placement, and NVLink domain UUID when present. Power-shelf endpoints carry power-shelf ID, serial number, rack ID, and NVLink domain UUID when present. The NICo API power shelf record carries the domain NVLink Manager last observed for the shelf's rack; a nil or unset value leaves the endpoint without a domain.
 
 **For local and test deployments**, you can configure explicit machine, switch, or power-shelf identity with `[[endpoint_sources.static_bmc_endpoints]]`. Direct switch host endpoints can use `[[endpoint_sources.static_switch_host_endpoints]]` or `[[endpoint_sources.static_bmc_endpoints]]`. Note the following:
 
