@@ -57,7 +57,8 @@ raw iPXE script; does not affect templated definitions or user data.
 `--phone-home-enabled <PHONE_HOME_ENABLED>`
 
 Set whether instances using this OS definition wait for a guest
-phone-home callback before reporting ready. If the callback never
+phone-home callback before reporting ready (user-data must use
+`#`cloud-config or `#`cloud-config-archive format). If the callback never
 arrives, the instance remains in a provisioning state. REST workflows
 inject the cloud-init phone_home block and require valid cloud-init
 YAML; callers using Core directly must arrange the callback. See

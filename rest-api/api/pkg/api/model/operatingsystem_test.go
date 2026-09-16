@@ -646,6 +646,28 @@ hostname: "{{ v1.local_hostname }}"
 		assert.Nil(t, req.UserData,
 			"the stored template must be left untouched, the block it holds included")
 	})
+
+	t.Run("renaming an operating system whose blob is a template", func(t *testing.T) {
+		// The request names neither user-data nor phone-home, so the stored blob is
+		// not one it is asking to rewrite - enabling over it would report it.
+		existing := &cdbm.OperatingSystem{
+			ID:   uuid.New(),
+			Name: "ab",
+			UserData: cutil.GetPtr(`## template: jinja
+#cloud-config
+hostname: "{{ v1.local_hostname }}"
+`),
+			PhoneHomeEnabled: true,
+			Status:           cdbm.OperatingSystemStatusReady,
+			Type:             cdbm.OperatingSystemTypeIPXE,
+			CreatedBy:        uuid.New(),
+		}
+
+		req := APIOperatingSystemUpdateRequest{Name: cutil.GetPtr("renamed")}
+
+		require.NoError(t, req.ValidateAndSetUserData(phoneHomeURL, existing))
+		assert.Nil(t, req.UserData)
+	})
 }
 
 func TestAPIOperatingSystemUpdateRequest_ValidateAndSetUserData_EmptiedArchiveKeepsHeader(t *testing.T) {
