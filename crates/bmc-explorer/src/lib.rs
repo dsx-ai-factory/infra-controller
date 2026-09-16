@@ -37,8 +37,8 @@ use itertools::Itertools;
 use mac_address::MacAddress;
 use manager::ExploredManager;
 use model::site_explorer::{
-    EndpointExplorationReport, EndpointType, InternalLockdownStatus, LockdownStatus,
-    MachineSetupDiff, MachineSetupStatus,
+    ComputerSystem, EndpointExplorationReport, EndpointType, InternalLockdownStatus,
+    LockdownStatus, MachineSetupDiff, MachineSetupStatus, derive_hardware_class,
 };
 use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
@@ -314,6 +314,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let system = explored_system.to_model(hw_type, &explored_chassis, &pcie_devices)?;
     let manager = explored_manager.to_model()?;
     let service = explored_inventories.to_model(hw_type);
+    let hardware_class = hardware_class(&root, &system);
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
@@ -325,6 +326,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         chassis: explored_chassis.to_model(),
         service,
         vendor: hw_type.and_then(|hw_type| hw_type.bmc_vendor()),
+        hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
         power_shelf_id: None,
@@ -390,6 +392,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
     let explored_manager = ExploredManager::explore(manager, &manager::Config::default()).await?;
 
     let system = explored_chassis.synthesized_powershelf_system();
+    let hardware_class = hardware_class(root, &system);
 
     Ok(EndpointExplorationReport {
         endpoint_type: EndpointType::Bmc,
@@ -401,6 +404,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
         chassis: explored_chassis.to_model(),
         service: explored_inventories.to_model(Some(hw_type)),
         vendor: hw_type.bmc_vendor(),
+        hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
         power_shelf_id: None,
@@ -418,6 +422,16 @@ async fn build_delta_powershelf_report<B: Bmc>(
         revision_id: None,
         remediation_error: None,
     })
+}
+
+/// The class recorded for an endpoint: the host system's reported identity,
+/// with the service root standing in for the fields it left empty.
+fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
+    derive_hardware_class(
+        Some(system),
+        root.vendor().map(Vendor::into_inner),
+        root.product().map(Product::into_inner),
+    )
 }
 
 pub(crate) fn hw_type<B: Bmc>(
