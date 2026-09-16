@@ -595,7 +595,7 @@ pub mod profile {
     }
 
     /// Rejects a class name that is neither the reserved `any` nor the shape
-    /// exploration derives: three non-empty `_`-separated fields, each of
+    /// exploration derives: two non-empty `_`-separated fields, each of
     /// lowercase alphanumerics and `-`.
     ///
     /// Checking the shape rather than a list of known names is what lets a
@@ -608,10 +608,10 @@ pub mod profile {
         }
 
         let fields: Vec<&str> = hardware_class.split('_').collect();
-        if fields.len() != 3 || !fields.iter().all(|field| is_class_field(field)) {
+        if fields.len() != 2 || !fields.iter().all(|field| is_class_field(field)) {
             return Err(ConfigValidationError::invalid_value(format!(
                 "hardware class '{hardware_class}' must be '{ANY_HARDWARE_CLASS}' or \
-                 <manufacturer>_<model>_<sku>, each field non-empty and made of \
+                 <manufacturer>_<model>, each field non-empty and made of \
                  lowercase letters, digits, and '-'"
             )));
         }
@@ -900,10 +900,10 @@ mod profile_test {
             run = |class: &str| validate_hardware_class(class).map_err(drop);
 
             "a derived class is a profile key" {
-                "dell-inc_poweredge-r750_0a6b" => Yields(()),
+                "dell-inc_poweredge-r750" => Yields(()),
                 // A BMC that reports nothing usable still derives a class, so
                 // the markers exploration substitutes stay writable.
-                "unknown_nomodel_nosku" => Yields(()),
+                "unknown_nomodel" => Yields(()),
             }
 
             // `any` is the one reserved class an operator may write.
@@ -915,10 +915,11 @@ mod profile_test {
             // class, so each way of missing it is refused at the boundary.
             "a class the derivation could not have produced is refused" {
                 "" => Fails,
-                "dell-inc_poweredge-r750" => Fails,
-                "dell-inc_poweredge-r750_0a6b_rev2" => Fails,
-                "dell-inc__0a6b" => Fails,
-                "Dell-Inc_poweredge-r750_0a6b" => Fails,
+                "dell-inc" => Fails,
+                // A third field is what a class keyed on the SKU looked like.
+                "dell-inc_poweredge-r750_0a6b" => Fails,
+                "dell-inc_" => Fails,
+                "Dell-Inc_poweredge-r750" => Fails,
             }
         );
     }

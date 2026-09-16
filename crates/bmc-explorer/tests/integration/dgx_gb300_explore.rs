@@ -48,11 +48,10 @@ async fn explore_dgx_gb300() {
     assert_eq!(report.endpoint_type, EndpointType::Bmc);
     assert_eq!(report.vendor, Some(bmc_vendor::BMCVendor::Nvidia));
     // The class is derived from what the BMC reports about the system, so it
-    // names this tray where the report vendor cannot, and falls back to the
-    // marker for the SKU this BMC leaves empty.
+    // names this tray where the report vendor cannot.
     assert_eq!(
         report.hardware_class.as_deref(),
-        Some("nvidia_gb300-titania-bianca-compute-tray_nosku")
+        Some("nvidia_gb300-titania-bianca-compute-tray")
     );
     assert!(!report.systems.is_empty(), "systems must be present");
     assert!(!report.chassis.is_empty(), "chassis must be present");

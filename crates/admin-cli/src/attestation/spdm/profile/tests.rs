@@ -28,7 +28,7 @@ use crate::cfg::cli_options::{CliCommand, CliOptions};
 const VERSION: &str = "V7-T1789080000000000";
 /// A class in the shape exploration derives, which is the only shape the
 /// commands accept.
-const HARDWARE_CLASS: &str = "dell-inc_poweredge-r750_0a6b";
+const HARDWARE_CLASS: &str = "dell-inc_poweredge-r750";
 
 #[derive(Debug, PartialEq)]
 enum Request {
