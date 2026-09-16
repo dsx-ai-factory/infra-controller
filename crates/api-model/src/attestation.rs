@@ -647,9 +647,10 @@ pub mod profile {
             profile: AttestationProfile,
             used_any_fallback: bool,
         },
-        /// No exploration has recorded a class for the endpoint, so there is
-        /// nothing to key on. `any` is not consulted: the machine is
-        /// unclassified rather than classified as something unprofiled.
+        /// No exploration has recorded a class for the endpoint, and no `any`
+        /// profile covers it either. Distinct from [`Self::NoProfile`] because
+        /// the remedy differs: explore the endpoint, rather than write a
+        /// profile for what it turned out to be.
         ClassNotRecorded,
         /// The class resolved, but neither it nor `any` has a profile.
         NoProfile,

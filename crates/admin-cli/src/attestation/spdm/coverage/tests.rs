@@ -134,7 +134,7 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
                 NO_CLASS_RECORDED,
                 "1",
                 "n/a",
-                "nothing: no class recorded; explore these endpoints again"
+                "nothing: no class recorded and no any profile"
             ],
             vec![
                 ANY_HARDWARE_CLASS,
@@ -145,9 +145,9 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
         ]
     );
 
-    // Storing `any` covers the class with no profile of its own, but not the
-    // endpoints carrying no class at all: resolution reads the class off the
-    // endpoint, so there is nothing there to resolve.
+    // Storing `any` covers the class with no profile of its own and the
+    // endpoints carrying no class at all, which are the two rows the table
+    // reported as covered by nothing.
     let with_fallback = GetAttestationCoverageResponse {
         entries: vec![
             entry(
@@ -157,7 +157,12 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
                 Some(AttesterSelectionMode::All),
             ),
             without_fallback.entries[1].clone(),
-            without_fallback.entries[2].clone(),
+            entry(
+                "",
+                1,
+                AttestationCoverage::AnyFallback,
+                Some(AttesterSelectionMode::All),
+            ),
         ],
         any_profile_mode: Some(AttesterSelectionMode::All.into()),
     };
@@ -170,12 +175,7 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
             HEADERS.to_vec(),
             vec![UNPROFILED_CLASS, "2", "no", "any (all)"],
             vec![PROFILED_CLASS, "72", "yes", "its own profile (allowlist)"],
-            vec![
-                NO_CLASS_RECORDED,
-                "1",
-                "n/a",
-                "nothing: no class recorded; explore these endpoints again"
-            ],
+            vec![NO_CLASS_RECORDED, "1", "n/a", "any (all)"],
             vec![
                 ANY_HARDWARE_CLASS,
                 NOT_APPLICABLE,
@@ -197,7 +197,7 @@ async fn the_coverage_table_names_what_would_attest_each_class_the_site_has() {
             "hardware_class": null,
             "explored_endpoints": 1,
             "own_profile": "n/a",
-            "would_use": "nothing: no class recorded; explore these endpoints again",
+            "would_use": "any (all)",
         })
     );
     assert_eq!(

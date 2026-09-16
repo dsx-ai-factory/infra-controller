@@ -41,7 +41,8 @@ fn outcome(outcome: i32) -> &'static str {
             "nothing scheduled: the profile's requirement went unsatisfied"
         }
         Ok(SpdmSchedulingOutcome::ClassNotRecorded) => {
-            "nothing scheduled: no hardware class recorded; explore this BMC again"
+            "nothing scheduled: no hardware class recorded and no any profile; \
+             explore this BMC again"
         }
         Ok(SpdmSchedulingOutcome::NoProfile) => {
             "nothing scheduled: neither this class nor any has a profile"

@@ -316,8 +316,9 @@ fn reported(
 /// supply the policy for each class the site actually has. The server answers
 /// from the same resolution scheduling applies to a single machine, so this
 /// also pins the rules an operator would otherwise have to infer — a class
-/// profile wins over `any`, a class without one falls through to `any`, and an
-/// endpoint with no class recorded is covered by nothing at all.
+/// profile wins over `any`, and a class without one falls through to `any`, as
+/// does an endpoint with no class recorded, which nothing covers only while no
+/// `any` profile is stored.
 #[sqlx_test]
 async fn coverage_reports_what_would_apply_to_each_class_the_site_has(pool: PgPool) {
     let env = TestHarness::builder(pool).build().await;
@@ -388,7 +389,12 @@ async fn coverage_reports_what_would_apply_to_each_class_the_site_has(pool: PgPo
                 rpc::AttestationCoverage::AnyFallback,
                 Some(rpc::AttesterSelectionMode::All)
             ),
-            ("", 1, rpc::AttestationCoverage::ClassNotRecorded, None),
+            (
+                "",
+                1,
+                rpc::AttestationCoverage::AnyFallback,
+                Some(rpc::AttesterSelectionMode::All)
+            ),
         ]
     );
     assert_eq!(
