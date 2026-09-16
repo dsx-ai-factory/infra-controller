@@ -48,6 +48,8 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
 http-body = { workspace = true }
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["service", "tokio"] }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 mime = { workspace = true }
