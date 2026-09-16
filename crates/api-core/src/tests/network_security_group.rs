@@ -28,6 +28,7 @@ use model::metadata::Metadata;
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::forge_server::Forge;
 use rpc::health::HealthReport;
+use state_controller::CheckApplied;
 use tonic::Code;
 use uuid::uuid;
 
@@ -1366,6 +1367,8 @@ async fn tenant_prefix_reuse_checks_effective_active_policy(
         assert!(
             db::machine::try_update_network_config(&mut txn, &mh.id.into(), version, &network)
                 .await?
+                .check_applied()
+                .is_ok()
         );
         db::machine::update_state(&mut txn, &mh.id.into(), &state).await?;
         sqlx::query(
@@ -1682,7 +1685,10 @@ async fn tenant_prefix_reuse_checks_effective_active_policy(
         .take();
     network.use_admin_network = Some(true);
     assert!(
-        db::machine::try_update_network_config(&mut txn, &mh.id.into(), version, &network).await?
+        db::machine::try_update_network_config(&mut txn, &mh.id.into(), version, &network)
+            .await?
+            .check_applied()
+            .is_ok()
     );
     db::machine::update_state(
         &mut txn,

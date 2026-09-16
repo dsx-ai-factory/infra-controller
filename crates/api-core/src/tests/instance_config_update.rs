@@ -34,6 +34,7 @@ use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::instance_interface_config::NetworkDetails;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use state_controller::CheckApplied;
 use tonic::Request;
 
 use crate::cfg::file::{FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry};
@@ -683,6 +684,8 @@ async fn instance_overlap_config_serving_and_startup_reject_retained_unsafe_poli
         db::machine::try_update_network_config(&mut txn, &host.id.into(), version, &network,)
             .await
             .unwrap()
+            .check_applied()
+            .is_ok()
     );
     db::machine::update_state(
         &mut txn,
