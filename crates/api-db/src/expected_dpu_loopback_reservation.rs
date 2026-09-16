@@ -41,32 +41,46 @@ fn reservation_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<DpuLoopbackReservation, sqlx::Error> {
     let dpu_serial_number: String = row.try_get("dpu_serial_number")?;
-    let loopback_ipv4: Option<IpAddr> = row.try_get("loopback_ipv4")?;
-    let loopback_ipv6: Option<IpAddr> = row.try_get("loopback_ipv6")?;
+    // The table's family CHECK constraints guarantee each column holds its own
+    // address family. Surface any violation as a decode error rather than
+    // silently coercing a wrong-family value to `None`, which would hydrate an
+    // addressless reservation and drop the operator's intended allocation.
+    let loopback_ipv4 = match row.try_get::<Option<IpAddr>, _>("loopback_ipv4")? {
+        None => None,
+        Some(IpAddr::V4(v4)) => Some(v4),
+        Some(IpAddr::V6(addr)) => {
+            return Err(sqlx::Error::Decode(
+                format!("loopback_ipv4 holds a non-IPv4 address: {addr}").into(),
+            ));
+        }
+    };
+    let loopback_ipv6 = match row.try_get::<Option<IpAddr>, _>("loopback_ipv6")? {
+        None => None,
+        Some(IpAddr::V6(v6)) => Some(v6),
+        Some(IpAddr::V4(addr)) => {
+            return Err(sqlx::Error::Decode(
+                format!("loopback_ipv6 holds a non-IPv6 address: {addr}").into(),
+            ));
+        }
+    };
     Ok(DpuLoopbackReservation {
         dpu_serial_number,
-        loopback_ipv4: loopback_ipv4.and_then(|ip| match ip {
-            IpAddr::V4(v4) => Some(v4),
-            IpAddr::V6(_) => None,
-        }),
-        loopback_ipv6: loopback_ipv6.and_then(|ip| match ip {
-            IpAddr::V6(v6) => Some(v6),
-            IpAddr::V4(_) => None,
-        }),
+        loopback_ipv4,
+        loopback_ipv6,
     })
 }
 
 /// Reservations declared for one host expected machine, ordered by serial.
 pub async fn find_for_machine(
     db: impl DbReader<'_>,
-    bmc_mac_address: MacAddress,
+    host_bmc_mac: MacAddress,
 ) -> DatabaseResult<Vec<DpuLoopbackReservation>> {
     let sql = "SELECT dpu_serial_number, loopback_ipv4, loopback_ipv6 \
                FROM expected_dpu_loopback_reservations \
                WHERE bmc_mac_address = $1 \
                ORDER BY dpu_serial_number";
     let rows = sqlx::query(sql)
-        .bind(bmc_mac_address)
+        .bind(host_bmc_mac)
         .fetch_all(db)
         .await
         .map_err(|err| DatabaseError::query(sql, err))?;
@@ -105,12 +119,12 @@ pub async fn find_by_dpu_serial(
 /// so the two move atomically. An empty slice clears the host's reservations.
 pub async fn replace_for_machine(
     txn: &mut PgConnection,
-    bmc_mac_address: MacAddress,
+    host_bmc_mac: MacAddress,
     reservations: &[DpuLoopbackReservation],
 ) -> DatabaseResult<()> {
     let delete = "DELETE FROM expected_dpu_loopback_reservations WHERE bmc_mac_address = $1";
     sqlx::query(delete)
-        .bind(bmc_mac_address)
+        .bind(host_bmc_mac)
         .execute(&mut *txn)
         .await
         .map_err(|err| DatabaseError::query(delete, err))?;
@@ -124,7 +138,7 @@ pub async fn replace_for_machine(
          (bmc_mac_address, dpu_serial_number, loopback_ipv4, loopback_ipv6) ",
     );
     builder.push_values(reservations, |mut b, reservation| {
-        b.push_bind(bmc_mac_address)
+        b.push_bind(host_bmc_mac)
             .push_bind(&reservation.dpu_serial_number)
             .push_bind(reservation.loopback_ipv4.map(IpAddr::V4))
             .push_bind(reservation.loopback_ipv6.map(IpAddr::V6));
@@ -356,6 +370,57 @@ mod tests {
             .map(|_| ())
             .expect_err("one loopback address cannot belong to two DPUs");
         assert!(matches!(error, DatabaseError::FailedPrecondition(_)));
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// The table's family CHECK constraints reject an address stored in the
+    /// wrong column, so the reader never has to reconcile a wrong-family value.
+    /// The Rust write path always binds the correct family, so this exercises a
+    /// raw insert to prove the database, not the caller, owns the invariant.
+    #[crate::sqlx_test]
+    async fn wrong_family_address_is_rejected(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mac = "aa:bb:cc:dd:ee:01";
+        let mut txn = pool.begin().await?;
+        // A host row is required for the reservation's foreign key.
+        crate::expected_machine::create(&mut txn, expected_machine(mac, vec![])).await?;
+
+        let insert = "INSERT INTO expected_dpu_loopback_reservations \
+                      (bmc_mac_address, dpu_serial_number, loopback_ipv4, loopback_ipv6) \
+                      VALUES ($1, $2, $3, $4)";
+
+        // An IPv6 address in the IPv4 column violates family(loopback_ipv4) = 4.
+        let v6_in_v4 = sqlx::query(insert)
+            .bind(mac.parse::<MacAddress>()?)
+            .bind("SER-V6-IN-V4")
+            .bind(IpAddr::V6("2001:db8::1".parse()?))
+            .bind(Option::<IpAddr>::None)
+            .execute(txn.as_mut())
+            .await;
+        assert!(
+            matches!(v6_in_v4, Err(sqlx::Error::Database(_))),
+            "an IPv6 address in the IPv4 column must be rejected",
+        );
+
+        txn.rollback().await?;
+
+        // An IPv4 address in the IPv6 column violates family(loopback_ipv6) = 6.
+        let mut txn = pool.begin().await?;
+        crate::expected_machine::create(&mut txn, expected_machine(mac, vec![])).await?;
+        let v4_in_v6 = sqlx::query(insert)
+            .bind(mac.parse::<MacAddress>()?)
+            .bind("SER-V4-IN-V6")
+            .bind(Option::<IpAddr>::None)
+            .bind(IpAddr::V4("192.0.2.11".parse()?))
+            .execute(txn.as_mut())
+            .await;
+        assert!(
+            matches!(v4_in_v6, Err(sqlx::Error::Database(_))),
+            "an IPv4 address in the IPv6 column must be rejected",
+        );
+
         txn.rollback().await?;
         Ok(())
     }
