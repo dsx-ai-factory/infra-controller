@@ -580,6 +580,7 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
                      host_lifecycle_profile=COALESCE($17, host_lifecycle_profile) \
                  WHERE ",
                 $where_clause,
+                " RETURNING bmc_mac_address",
             )
         };
     }
@@ -595,7 +596,7 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
         ),
     };
 
-    let result = sqlx::query(query)
+    let updated: Option<(MacAddress,)> = sqlx::query_as(query)
         .bind(&machine.data.bmc_username)
         .bind(&machine.data.bmc_password)
         .bind(&machine.data.serial_number)
@@ -617,24 +618,28 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
                 .then_some(sqlx::types::Json(&machine.data.host_lifecycle_profile)),
         )
         .bind(&target_id)
-        .execute(&mut *txn)
+        .fetch_optional(&mut *txn)
         .await
         .map_err(|err| DatabaseError::query(query, err))?;
 
-    if result.rows_affected() == 0 {
+    let Some((bmc_mac_address,)) = updated else {
         return Err(DatabaseError::NotFoundError {
             kind: "expected_machine",
             id: target_id,
         });
-    }
+    };
 
     // `Some` replaces the host's reservations (an empty list clears them);
     // `None` preserves the stored reservations for older clients that omit the
-    // field. The BMC MAC is the reservation key and never changes on update.
+    // field. Key the replacement on the MAC of the row the UPDATE actually
+    // matched (returned above), not the caller-supplied MAC: when the row is
+    // selected by `id`, a mismatched `machine.bmc_mac_address` would otherwise
+    // rewrite a different host's reservations. The BMC MAC never changes on
+    // update, so the two agree for well-formed callers.
     if let Some(reservations) = machine.data.dpu_loopback_reservations.as_deref() {
         crate::expected_dpu_loopback_reservation::replace_for_machine(
             txn,
-            machine.bmc_mac_address,
+            bmc_mac_address,
             reservations,
         )
         .await?;

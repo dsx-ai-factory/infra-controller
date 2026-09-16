@@ -173,6 +173,12 @@ async fn test_add_expected_machine(pool: sqlx::PgPool) {
         {
             expected_machine.default_pause_ingestion_and_poweron = Some(false);
         }
+        // A read always hydrates the reservation wrapper (possibly empty), so an
+        // input that omitted it comes back as an explicit empty list.
+        if expected_machine.dpu_loopback_reservations.is_none() {
+            expected_machine.dpu_loopback_reservations =
+                Some(rpc::forge::DpuLoopbackReservationList::default());
+        }
         assert_eq!(retrieved_expected_machine, expected_machine.clone());
 
         if idx != 1 {
@@ -339,6 +345,13 @@ async fn test_update_expected_machine(pool: sqlx::PgPool) {
             updated_machine.default_pause_ingestion_and_poweron = Some(false);
         }
 
+        // A read always hydrates the reservation wrapper (possibly empty), so an
+        // input that omitted it comes back as an explicit empty list.
+        if updated_machine.dpu_loopback_reservations.is_none() {
+            updated_machine.dpu_loopback_reservations =
+                Some(rpc::forge::DpuLoopbackReservationList::default());
+        }
+
         assert_eq!(retrieved_expected_machine, updated_machine);
     }
 }
@@ -489,11 +502,19 @@ async fn test_replace_all_expected_machines(pool: sqlx::PgPool) {
     let mut resulting_machine_3 = expected_machines[2].clone();
     resulting_machine_3.id = None;
 
+    // A read always hydrates the reservation wrapper (possibly empty), so inputs
+    // that omitted it come back as an explicit empty list.
+    let empty_reservations = || Some(rpc::forge::DpuLoopbackReservationList::default());
+    let mut expected_machine_1_clone = expected_machine_1.clone();
+    expected_machine_1_clone.dpu_loopback_reservations = empty_reservations();
+    let mut expected_machine_2_clone = expected_machine_2.clone();
+    expected_machine_2_clone.dpu_loopback_reservations = empty_reservations();
     // None will become Some(false), so we have to make the adjustment
     let mut expected_machine_3_clone = expected_machine_3.clone();
     expected_machine_3_clone.default_pause_ingestion_and_poweron = Some(false);
-    assert_eq!(expected_machine_1, resulting_machine_1);
-    assert_eq!(expected_machine_2, resulting_machine_2);
+    expected_machine_3_clone.dpu_loopback_reservations = empty_reservations();
+    assert_eq!(expected_machine_1_clone, resulting_machine_1);
+    assert_eq!(expected_machine_2_clone, resulting_machine_2);
     assert_eq!(expected_machine_3_clone, resulting_machine_3);
 }
 
@@ -759,6 +780,11 @@ async fn test_add_expected_machine_dpu_serials(pool: sqlx::PgPool) {
         .into_inner();
     // Zero id for equality test
     retrieved_expected_machine.id = None;
+    // A read always hydrates the reservation wrapper (possibly empty), so the
+    // input that omitted it comes back as an explicit empty list.
+    let mut expected_machine = expected_machine;
+    expected_machine.dpu_loopback_reservations =
+        Some(rpc::forge::DpuLoopbackReservationList::default());
     assert_eq!(retrieved_expected_machine, expected_machine);
 }
 
