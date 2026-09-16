@@ -675,7 +675,10 @@ pub struct ComponentIntegrityEntry {
 
 Recorded unfiltered, so a device present but switched off is distinguishable from
 one that is absent. `None` means the BMC reported no collection — some platforms
-answer `NotSupported` — while `Some([])` means it reported an empty one.
+answer `NotSupported` — while `Some([])` means it reported an empty one. A failed
+fetch also records `None`, with a warning: the list drives coverage while
+scheduling reads the collection live, so it must not fail an exploration that
+otherwise succeeded. The next exploration restores it.
 
 ### 7.2 The profile table
 

@@ -1555,6 +1555,7 @@ async fn test_expected_machine_device_type_metrics(
         (
             machines[0].ip.parse().unwrap(),
             Ok(EndpointExplorationReport {
+                component_integrities: None,
                 hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
@@ -1582,6 +1583,7 @@ async fn test_expected_machine_device_type_metrics(
         (
             machines[1].ip.parse().unwrap(),
             Ok(EndpointExplorationReport {
+                component_integrities: None,
                 hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
@@ -1609,6 +1611,7 @@ async fn test_expected_machine_device_type_metrics(
         (
             machines[2].ip.parse().unwrap(),
             Ok(EndpointExplorationReport {
+                component_integrities: None,
                 hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
@@ -1942,6 +1945,7 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
         (
             machines[2].ip.parse().unwrap(),
             Ok(EndpointExplorationReport {
+                component_integrities: None,
                 hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
@@ -2333,6 +2337,7 @@ async fn test_site_explorer_audit_exploration_results(
         (
             machines[1].ip.parse().unwrap(),
             EndpointExplorationReport {
+                component_integrities: None,
                 hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 // Pretend there was previously a successful exploration
@@ -2366,6 +2371,7 @@ async fn test_site_explorer_audit_exploration_results(
         (
             machines[2].ip.parse().unwrap(),
             EndpointExplorationReport {
+                component_integrities: None,
                 hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 // Pretend there was previously a successful exploration
@@ -2398,6 +2404,7 @@ async fn test_site_explorer_audit_exploration_results(
         (
             machines[3].ip.parse().unwrap(),
             EndpointExplorationReport {
+                component_integrities: None,
                 hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
@@ -2429,6 +2436,7 @@ async fn test_site_explorer_audit_exploration_results(
         (
             machines[5].ip.parse().unwrap(),
             EndpointExplorationReport {
+                component_integrities: None,
                 hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,

@@ -1028,6 +1028,17 @@ impl HostMachineInfo {
         !matches!(self.hw_type, HardwareType::DeltaPowerShelf)
     }
 
+    /// What this host says it can attest. `None` for every profile that does
+    /// not model the collection yet, which is how a BMC without one behaves.
+    fn component_integrity_config(
+        &self,
+    ) -> Option<Vec<redfish::component_integrity::ComponentIntegrity>> {
+        match self.hw_type {
+            HardwareType::NvidiaDgxGb300 => Some(self.dgx_gb300_nvl().component_integrity_config()),
+            _ => None,
+        }
+    }
+
     fn nvidia_switch_nd5200_ld(&self) -> hw::nvidia_switch_nd5200_ld::NvidiaSwitchNd5200Ld<'_> {
         let mut pool = MacAddressPool::new_pool(self.hw_mac_addr_pool);
         let mut next_mac = || pool.allocate().expect("MAC address must be allocated");
@@ -1246,6 +1257,17 @@ impl MachineInfo {
         match self {
             Self::Host(h) => h.exposes_computer_systems(),
             Self::Dpu(_) => true,
+        }
+    }
+
+    /// What this machine says it can attest, or `None` for one that advertises
+    /// no `ComponentIntegrity` collection.
+    pub(super) fn component_integrity_config(
+        &self,
+    ) -> Option<Vec<redfish::component_integrity::ComponentIntegrity>> {
+        match self {
+            Self::Host(h) => h.component_integrity_config(),
+            Self::Dpu(_) => None,
         }
     }
 

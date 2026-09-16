@@ -290,6 +290,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
+            component_integrities: None,
             vendor: value.vendor,
             hardware_class: value.hardware_class,
             managers: vec![Manager {
