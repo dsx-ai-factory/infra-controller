@@ -71,18 +71,56 @@ var obfuscateFields = []string{
 	"defaultBmcUsername",
 	"defaultBmcPassword",
 	"authenticationData",
+	"authToken",
+	"clientSecret",
+	"imageAuthToken",
 	"password",
 	"nvOsPassword",
 }
 
-const auditObfuscatedValue = "*******************"
+const (
+	auditObfuscatedValue          = "*******************"
+	auditBodyValueField           = "value"
+	auditBodyJSONParseFailedField = "jsonParseFailed"
+)
 
-func obfuscateRequestBody(body map[string]interface{}) {
-	for _, field := range obfuscateFields {
-		if _, ok := body[field]; ok {
-			body[field] = auditObfuscatedValue
+func obfuscateRequestBody(body interface{}) {
+	switch body := body.(type) {
+	case map[string]interface{}:
+		for _, field := range obfuscateFields {
+			_, ok := body[field]
+			if ok {
+				body[field] = auditObfuscatedValue
+			}
+		}
+		for _, value := range body {
+			obfuscateRequestBody(value)
+		}
+	case []interface{}:
+		for _, value := range body {
+			obfuscateRequestBody(value)
 		}
 	}
+}
+
+func prepareAuditRequestBody(reqBody []byte) (map[string]interface{}, error) {
+	var body interface{}
+	err := json.Unmarshal(reqBody, &body)
+	if err != nil {
+		return map[string]interface{}{
+			auditBodyJSONParseFailedField: true,
+		}, err
+	}
+
+	obfuscateRequestBody(body)
+	bodyMap, ok := body.(map[string]interface{})
+	if ok {
+		return bodyMap, nil
+	}
+
+	return map[string]interface{}{
+		auditBodyValueField: body,
+	}, nil
 }
 
 type ResponseError struct {
@@ -116,11 +154,10 @@ func AuditBody(dbSession *cdb.Session) echo.MiddlewareFunc {
 			}
 			// save request body
 			if len(reqBody) > 0 {
-				var bodyMap map[string]interface{}
-				if err := json.Unmarshal(reqBody, &bodyMap); err != nil {
+				bodyMap, err := prepareAuditRequestBody(reqBody)
+				if err != nil {
 					log.Error().Err(err).Msgf("failed to unmarshall body for audit entry %s", auditEntryID)
 				}
-				obfuscateRequestBody(bodyMap)
 				updateInput.Body = bodyMap
 			}
 			// update

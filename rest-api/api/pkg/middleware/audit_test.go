@@ -12,8 +12,8 @@ import (
 func TestObfuscateRequestBody(t *testing.T) {
 	tests := []struct {
 		name string
-		body map[string]interface{}
-		want map[string]interface{}
+		body interface{}
+		want interface{}
 	}{
 		{
 			name: "obfuscates authenticationData and preserves non-secret fields",
@@ -59,12 +59,147 @@ func TestObfuscateRequestBody(t *testing.T) {
 				"nvOsPassword": auditObfuscatedValue,
 			},
 		},
+		{
+			name: "obfuscates image authentication token",
+			body: map[string]interface{}{
+				"imageAuthType":  "Bearer",
+				"imageAuthToken": "synthetic-token",
+			},
+			want: map[string]interface{}{
+				"imageAuthType":  "Bearer",
+				"imageAuthToken": auditObfuscatedValue,
+			},
+		},
+		{
+			name: "obfuscates authentication token nested in an array",
+			body: []interface{}{
+				map[string]interface{}{
+					"name":      "first",
+					"authToken": "synthetic-token",
+				},
+			},
+			want: []interface{}{
+				map[string]interface{}{
+					"name":      "first",
+					"authToken": auditObfuscatedValue,
+				},
+			},
+		},
+		{
+			name: "obfuscates tenant identity client secret",
+			body: map[string]interface{}{
+				"clientSecretBasic": map[string]interface{}{
+					"clientId":     "client-1",
+					"clientSecret": "synthetic-secret",
+				},
+			},
+			want: map[string]interface{}{
+				"clientSecretBasic": map[string]interface{}{
+					"clientId":     "client-1",
+					"clientSecret": auditObfuscatedValue,
+				},
+			},
+		},
+		{
+			name: "obfuscates sensitive fields nested in arrays and objects",
+			body: []interface{}{
+				map[string]interface{}{
+					"name": "first",
+					"credentials": map[string]interface{}{
+						"password": "synthetic-secret",
+					},
+				},
+			},
+			want: []interface{}{
+				map[string]interface{}{
+					"name": "first",
+					"credentials": map[string]interface{}{
+						"password": auditObfuscatedValue,
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			obfuscateRequestBody(tt.body)
 			assert.Equal(t, tt.want, tt.body)
+		})
+	}
+}
+
+func TestPrepareAuditRequestBody(t *testing.T) {
+	const malformedRequestBody = `{"password":"synthetic-secret"`
+
+	tests := []struct {
+		name    string
+		reqBody string
+		want    map[string]interface{}
+		wantErr bool
+	}{
+		{
+			name:    "preserves an object",
+			reqBody: `{"name":"first"}`,
+			want: map[string]interface{}{
+				"name": "first",
+			},
+		},
+		{
+			name:    "wraps an array and obfuscates nested sensitive fields",
+			reqBody: `[{"name":"first","password":"synthetic-secret"}]`,
+			want: map[string]interface{}{
+				auditBodyValueField: []interface{}{
+					map[string]interface{}{
+						"name":     "first",
+						"password": auditObfuscatedValue,
+					},
+				},
+			},
+		},
+		{
+			name:    "wraps a string",
+			reqBody: `"first"`,
+			want: map[string]interface{}{
+				auditBodyValueField: "first",
+			},
+		},
+		{
+			name:    "wraps a number",
+			reqBody: `42`,
+			want: map[string]interface{}{
+				auditBodyValueField: float64(42),
+			},
+		},
+		{
+			name:    "wraps a boolean",
+			reqBody: `true`,
+			want: map[string]interface{}{
+				auditBodyValueField: true,
+			},
+		},
+		{
+			name:    "wraps null",
+			reqBody: `null`,
+			want: map[string]interface{}{
+				auditBodyValueField: nil,
+			},
+		},
+		{
+			name:    "records only safe metadata for malformed JSON",
+			reqBody: malformedRequestBody,
+			want: map[string]interface{}{
+				auditBodyJSONParseFailedField: true,
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := prepareAuditRequestBody([]byte(tt.reqBody))
+			assert.Equal(t, tt.wantErr, err != nil)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

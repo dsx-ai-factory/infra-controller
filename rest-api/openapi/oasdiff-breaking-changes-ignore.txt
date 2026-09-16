@@ -268,3 +268,7 @@ API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `vni` response property's max was i
 API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API GET /v2/org/{org}/nico/audit the `items/body` response's property `type` changed from `string` to `object` for status `200`
+API GET /v2/org/{org}/nico/audit the `items/queryParams` response's property `type` changed from `string` to `object` for status `200`
+API GET /v2/org/{org}/nico/audit/{auditEntryId} the `body` response's property `type` changed from `string` to `object` for status `200`
+API GET /v2/org/{org}/nico/audit/{auditEntryId} the `queryParams` response's property `type` changed from `string` to `object` for status `200`
