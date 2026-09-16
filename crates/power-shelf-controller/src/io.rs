@@ -19,7 +19,10 @@
 
 use carbide_uuid::power_shelf::PowerShelfId;
 use config_version::{ConfigVersion, Versioned};
-use db::{DatabaseError, ObjectColumnFilter, power_shelf as db_power_shelf};
+use db::{
+    ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter,
+    power_shelf as db_power_shelf,
+};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::power_shelf::{
     PowerShelf, PowerShelfControllerState, PowerShelfSearchFilter, state_sla,
@@ -109,7 +112,7 @@ impl StateControllerIO for PowerShelfStateControllerIO {
         old_version: ConfigVersion,
         new_version: ConfigVersion,
         new_state: &Self::ControllerState,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
         db_power_shelf::try_update_controller_state(
             txn,
             *object_id,

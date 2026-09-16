@@ -16,6 +16,7 @@
  */
 
 mod boot_interface_resolution;
+mod chassis_reset;
 mod client_resolution;
 pub(in crate::tests) mod common;
 mod component_manager;
@@ -80,6 +81,7 @@ mod site_prefix;
 mod sku;
 mod spdm;
 mod switch;
+mod tenant_prefix_startup;
 mod tenants;
 mod tpm_ca;
 mod vpc;

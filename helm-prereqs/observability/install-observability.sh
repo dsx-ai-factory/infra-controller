@@ -17,8 +17,9 @@
 # install-observability.sh — site-local metrics + logs + traces for a NICo cluster:
 #   Loki (logs) + Tempo (traces) + OTEL collector agent (DaemonSet: pod logs -> Loki,
 #   OTLP spans -> Tempo) + kube-prometheus-stack (Prometheus scraping the carbide_* /metrics
-#   via the NICo charts' ServiceMonitors + Grafana with Prometheus/Loki/Tempo datasources and
-#   auto-loaded dashboards). Optional: an OTLP/mTLS gateway for sites with real DPUs.
+#   endpoints and hardware-health /telemetry via the NICo charts' ServiceMonitors + Grafana
+#   with Prometheus/Loki/Tempo datasources and auto-loaded dashboards). Optional: an OTLP/mTLS
+#   gateway for sites with real DPUs.
 #
 # Fully self-contained: everything runs and stays on the site; nothing leaves the cluster.
 #
@@ -47,9 +48,9 @@
 #                      zone); change it only together with the DPU-side configuration.
 #   SITE_CA_ISSUER     ClusterIssuer for the gateway server cert — MUST be the ca-issuer backed
 #                      by the CA the DPUs trust. Default site-issuer.
-#   NICO_SERVICEMONITORS  Default true: when the NICo Core release is installed, enable its
-#                      charts' ServiceMonitors automatically (carbide_* metrics scrape). Set
-#                      false on clusters installed from a different checkout (chart drift).
+#   NICO_SERVICEMONITORS  Default hint when run standalone. setup.sh supplies true only after
+#                      successfully installing Core from this tree in the same run. true applies
+#                      the NICo Core metrics overlay. Set false to skip reconciliation.
 #   NICO_RELEASE / NICO_NS   NICo Core release name/namespace. Default nico / nico-system.
 #   LOKI_CHART_VER / TEMPO_CHART_VER / OTEL_CHART_VER / KPS_CHART_VER   Chart pin overrides.
 set -euo pipefail
@@ -246,51 +247,62 @@ kubectl -n loki get pods
 kubectl -n otel get pods
 kubectl -n monitoring get pods | head -8
 
-# --- NICo metrics: enable the charts' ServiceMonitors -------------------------------------
+# --- NICo metrics --------------------------------------------------------------------------
 # The NICo subcharts ship ServiceMonitor templates but default them OFF — nothing scrapes the
-# carbide_* metrics until they exist. When the nico release is present and monitors are
-# missing, enable them via the bundled overlay (adds monitor objects only — no pod changes;
-# Prometheus discovers them cluster-wide within a scrape interval).
-# NICO_SERVICEMONITORS: true = enable via a release upgrade with THIS tree's chart (setup.sh
-# passes true — Core was just installed from the same tree); hint (standalone default) = print
-# the command instead, because upgrading with a checkout that differs from what is deployed
-# would apply more than the monitors; false = skip silently.
+# carbide_* metrics until they exist. The bundled overlay enables all required metrics endpoints.
+# NICO_SERVICEMONITORS: true = apply it via a release upgrade with THIS tree's chart (setup.sh
+# passes true only when this run installed Core from the same tree); hint (standalone and
+# setup.sh --skip-core default) = print the command instead, because upgrading with a checkout
+# that differs from what is deployed could change more than metrics collection; false = skip
+# silently. Reapply it unconditionally because existing monitors may not cover all current
+# endpoints.
+_inspect_nico_release() {
+    local status_output
+    local status_code
+
+    if status_output="$(helm status "${NICO_RELEASE}" -n "${NICO_NS}" 2>&1)"; then
+        _NICO_RELEASE_PRESENT=true
+        return 0
+    else
+        status_code=$?
+    fi
+
+    # Helm returns this storage-driver sentinel only when the named release is absent.
+    if [[ "${status_output}" == *"release: not found"* ]]; then
+        _NICO_RELEASE_PRESENT=false
+        return 0
+    fi
+
+    echo "ERROR: unable to inspect NICo release '${NICO_RELEASE}' in ${NICO_NS}:" >&2
+    printf '%s\n' "${status_output}" >&2
+    return "${status_code}"
+}
+
 NICO_SERVICEMONITORS="${NICO_SERVICEMONITORS:-hint}"
 NICO_RELEASE="${NICO_RELEASE:-nico}"
 NICO_NS="${NICO_NS:-nico-system}"
+_NICO_RELEASE_PRESENT=false
+if [[ "${NICO_SERVICEMONITORS}" != "false" ]]; then
+    _inspect_nico_release || exit $?
+fi
+
 if [[ "${NICO_SERVICEMONITORS}" == "false" ]]; then
-    echo "--- NICo ServiceMonitors skipped (NICO_SERVICEMONITORS=false)"
-elif ! helm status "${NICO_RELEASE}" -n "${NICO_NS}" >/dev/null 2>&1; then
-    echo "--- NICo release '${NICO_RELEASE}' not found in ${NICO_NS} — ServiceMonitors deferred."
+    echo "--- NICo direct metrics reconciliation skipped (NICO_SERVICEMONITORS=false)"
+elif [[ "${_NICO_RELEASE_PRESENT}" != "true" ]]; then
+    echo "--- NICo release '${NICO_RELEASE}' not found in ${NICO_NS} — metrics collection deferred."
     echo "    After installing NICo Core, re-run this script (idempotent) or:"
     echo "      helm upgrade ${NICO_RELEASE} <chart-ref> -n ${NICO_NS} --reuse-values \\"
     echo "        -f ${SCRIPT_DIR}/values-nico-servicemonitors.yaml"
+elif [[ "${NICO_SERVICEMONITORS}" == "true" ]]; then
+    echo "--- reconciling NICo direct metrics collection (ServiceMonitors + hardware-health sink)"
+    helm upgrade "${NICO_RELEASE}" "${PREREQS_DIR}/../helm" -n "${NICO_NS}" --reuse-values \
+        -f "${SCRIPT_DIR}/values-nico-servicemonitors.yaml"
 else
-    # A failed API call must read as "unknown", not "absent" — retry briefly.
-    _SM_LIST=""; _SM_KNOWN=false
-    for _i in 1 2 3; do
-        if _SM_LIST="$(kubectl get servicemonitors.monitoring.coreos.com -n "${NICO_NS}" -o name 2>/dev/null)"; then
-            _SM_KNOWN=true; break
-        fi
-        sleep 2
-    done
-    if [[ "${_SM_KNOWN}" == "true" ]] && grep -q nico <<< "${_SM_LIST}"; then
-        echo "--- NICo ServiceMonitors already present"
-    elif [[ "${_SM_KNOWN}" != "true" ]]; then
-        echo "--- could not verify NICo ServiceMonitors (API error) — re-run this script, or enable manually:"
-        echo "      helm upgrade ${NICO_RELEASE} <chart-ref> -n ${NICO_NS} --reuse-values \\"
-        echo "        -f ${SCRIPT_DIR}/values-nico-servicemonitors.yaml"
-    elif [[ "${NICO_SERVICEMONITORS}" == "true" ]]; then
-        echo "--- enabling NICo ServiceMonitors (carbide_* metrics scrape)"
-        helm upgrade "${NICO_RELEASE}" "${PREREQS_DIR}/../helm" -n "${NICO_NS}" --reuse-values \
-            -f "${SCRIPT_DIR}/values-nico-servicemonitors.yaml"
-    else
-        echo "--- NICo ServiceMonitors are NOT enabled — Prometheus is not scraping the carbide_*"
-        echo "    metrics. Enable them with YOUR deployed chart ref (adds monitor objects only):"
-        echo "      helm upgrade ${NICO_RELEASE} <chart-ref> -n ${NICO_NS} --reuse-values \\"
-        echo "        -f ${SCRIPT_DIR}/values-nico-servicemonitors.yaml"
-        echo "    Or re-run with NICO_SERVICEMONITORS=true if this checkout matches the deployed chart."
-    fi
+    echo "--- NICo direct metrics collection was not reconciled (standalone safety default)."
+    echo "    Apply the overlay with YOUR deployed chart ref:"
+    echo "      helm upgrade ${NICO_RELEASE} <chart-ref> -n ${NICO_NS} --reuse-values \\"
+    echo "        -f ${SCRIPT_DIR}/values-nico-servicemonitors.yaml"
+    echo "    Or re-run with NICO_SERVICEMONITORS=true if this checkout matches the deployed chart."
 fi
 
 echo ""

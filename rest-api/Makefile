@@ -893,6 +893,9 @@ generate-sdk: $(OPENAPI_GENERATOR_JAR)
 # OpenAPI Spec Validation
 # =============================================================================
 
+# Keep published HTML on the same renderer instead of upgrading it during API changes.
+REDOCLY_CLI_VERSION := 2.52.1
+
 # Validate OpenAPI spec using Redocly CLI (Docker)
 lint-openapi:
 	npx @redocly/cli lint --skip-rule=no-ambiguous-paths ./openapi/spec.yaml
@@ -903,7 +906,7 @@ preview-openapi:
 	docker run -it --rm -p 8090:80 -v ./openapi/spec.yaml:/usr/share/nginx/html/openapi.yaml -e SPEC_URL=openapi.yaml -e REDOC_OPTIONS="expand-responses=200,201 schemas-expansion-level=2" redocly/redoc:v2.5.1
 
 publish-openapi:
-	npx @redocly/cli build-docs --config=./openapi/redocly.yaml ./openapi/spec.yaml -o ./docs/index.html
+	npx @redocly/cli@$(REDOCLY_CLI_VERSION) build-docs --config=./openapi/redocly.yaml ./openapi/spec.yaml -o ./docs/index.html
 
 # =============================================================================
 # Pre-commit Hooks (TruffleHog Secret Detection)

@@ -2897,19 +2897,21 @@ impl FnnRoutingProfileConfig {
     ///
     /// Evaluate the profile returned by [`FnnConfig::resolve_vpc_routing_profile`],
     /// not the raw base profile, so VPC overrides participate in the decision.
-    /// The caller adds the site-wide conditions for these prefix writers.
-    /// Peering and VPC policy changes are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5114>, and retained
-    /// Instance paths are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5115>. Startup and
-    /// complete writer coverage are tracked in
-    /// <https://github.com/NVIDIA/infra-controller/issues/5116>. All three must
-    /// land before the database cutover in
-    /// <https://github.com/NVIDIA/infra-controller/issues/3892>.
+    /// Admission callers add the site-wide conditions and retained-network
+    /// checks. See peering and policy admission in
+    /// <https://github.com/NVIDIA/infra-controller/issues/5114> and Instance
+    /// admission in <https://github.com/NVIDIA/infra-controller/issues/5115>.
     pub(crate) fn is_eligible_for_tenant_prefix_overlap(&self) -> bool {
+        self.tenant_prefix_overlap_eligible && self.is_isolated_for_tenant_prefixes()
+    }
+
+    /// `is_isolated_for_tenant_prefixes` checks routing safety independently
+    /// of the admission opt-in. Turning that opt-in off must still let safe
+    /// retained networks serve traffic while their prefixes drain.
+    pub(crate) fn is_isolated_for_tenant_prefixes(&self) -> bool {
         // Keep this exhaustive so new profile fields require an explicit eligibility decision.
         let Self {
-            tenant_prefix_overlap_eligible,
+            tenant_prefix_overlap_eligible: _,
             route_target_imports,
             route_targets_on_exports,
             // External profiles cannot participate in exact prefix reuse.
@@ -2923,8 +2925,7 @@ impl FnnRoutingProfileConfig {
             access_tier: _,
         } = self;
 
-        *tenant_prefix_overlap_eligible
-            && *internal == Some(true)
+        *internal == Some(true)
             && route_target_imports.as_ref().is_none_or(Vec::is_empty)
             && route_targets_on_exports.as_ref().is_none_or(Vec::is_empty)
             && !leak_default_route_from_underlay.unwrap_or_default()
@@ -3158,6 +3159,10 @@ impl CarbideConfig {
     }
 
     pub(crate) fn validate_service_vpc_slots(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            !self.tenant_prefix_overlap_enabled || self.dpu_config.service_vpc_slot_count == 0,
+            "dpu_config.service_vpc_slot_count must be zero when tenant_prefix_overlap_enabled is true"
+        );
         eyre::ensure!(
             self.dpu_config.service_vpc_slot_count == 0 || self.site_global_vpc_vni.is_none(),
             "dpu_config.service_vpc_slot_count requires site_global_vpc_vni to be unset because service VPCs require distinct HBN VRFs"
@@ -3488,9 +3493,9 @@ pub struct RackStateControllerConfig {
     pub controller: StateControllerConfig,
 
     /// Switch mTLS services for NMX cluster setup. Accepted and ignored: rack
-    /// maintenance does not configure switch certificates. Per-switch
-    /// certificate configuration uses
-    /// `[switch_state_controller].switch_mtls_services`.
+    /// `ConfigureNmxCluster` uses the fixed `nvue_api` and
+    /// `scale_up_fabric_manager` bindings. Per-switch certificate configuration
+    /// uses `[switch_state_controller].switch_mtls_services`.
     #[serde(default)]
     pub nmx_cluster_switch_mtls_services: Vec<component_manager::config::SwitchMtlsService>,
 }
@@ -5650,6 +5655,16 @@ path = "credentials.yaml"
 
         config.dpu_config.service_vpc_slot_count = 1;
         assert!(config.validate_service_vpc_slots().is_ok());
+
+        config.tenant_prefix_overlap_enabled = true;
+        assert!(
+            config
+                .validate_service_vpc_slots()
+                .unwrap_err()
+                .to_string()
+                .contains("must be zero when tenant_prefix_overlap_enabled is true")
+        );
+        config.tenant_prefix_overlap_enabled = false;
 
         config.site_global_vpc_vni = Some(6_000);
         assert!(

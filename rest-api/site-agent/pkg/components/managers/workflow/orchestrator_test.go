@@ -4,13 +4,18 @@
 package workflow
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,6 +24,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/api/workflowservice/v1"
+	"google.golang.org/grpc"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
@@ -175,4 +182,88 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			}
 		})
 	}
+
+	connections := []struct {
+		name          string
+		network       string
+		host          string
+		listenAddress string
+	}{
+		{name: "Temporal hostname", network: "tcp4", host: "localhost", listenAddress: "127.0.0.1:0"},
+		{name: "Temporal IPv4", network: "tcp4", host: "127.0.0.1", listenAddress: "127.0.0.1:0"},
+		{name: "Temporal IPv6", network: "tcp6", host: "::1", listenAddress: "[::1]:0"},
+		{name: "Temporal bracketed IPv6", network: "tcp6", host: "[::1]", listenAddress: "[::1]:0"},
+	}
+	for _, tt := range connections {
+		t.Run(tt.name, func(t *testing.T) {
+			listener, err := net.Listen(tt.network, tt.listenAddress)
+			if tt.network == "tcp6" && (errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL)) {
+				t.Skipf("IPv6 loopback is unavailable: %v", err)
+			}
+			require.NoError(t, err)
+			_, port, err := net.SplitHostPort(listener.Addr().String())
+			require.NoError(t, err)
+			service := &temporalConnectionServer{}
+			server := grpc.NewServer()
+			workflowservice.RegisterWorkflowServiceServer(server, service)
+			serveErr := make(chan error, 1)
+			go func() { serveErr <- server.Serve(listener) }()
+			previousAccess := ManagerAccess
+			t.Cleanup(func() {
+				server.Stop()
+				serverErr := <-serveErr
+				assert.True(t, serverErr == nil || errors.Is(serverErr, grpc.ErrServerStopped), "%v", serverErr)
+				ManagerAccess = previousAccess
+			})
+
+			conf := &conftypes.Config{
+				Temporal: conftypes.TemporalConfig{
+					Host:                       tt.host,
+					Port:                       port,
+					TemporalPublishNamespace:   "publish",
+					TemporalSubscribeNamespace: "subscribe",
+					TemporalSubscribeQueue:     "test",
+				},
+			}
+			data := &elektratypes.Elektra{Conf: conf, Managers: managertypes.NewManagerType(), Log: zerolog.Nop()}
+			t.Cleanup(func() {
+				if data.Managers.Workflow.Temporal.Publisher != nil {
+					data.Managers.Workflow.Temporal.Publisher.Close()
+				}
+				if data.Managers.Workflow.Temporal.Subscriber != nil {
+					data.Managers.Workflow.Temporal.Subscriber.Close()
+				}
+			})
+
+			// Stop after both clients connect, before registering workflows or
+			// starting the worker.
+			registrationErr := errors.New("stop after connecting Temporal clients")
+			api := &managerapi.ManagerAPI{Site: siteRegistrationFailure{err: registrationErr}}
+			NewWorkflowManager(data, api, &managerapi.ManagerConf{EB: conf})
+			err = workflowOrchestrator()
+			require.ErrorIs(t, err, registrationErr)
+			assert.EqualValues(t, 2, service.calls.Load())
+			assert.NotNil(t, data.Managers.Workflow.Temporal.Publisher)
+			assert.NotNil(t, data.Managers.Workflow.Temporal.Subscriber)
+		})
+	}
+}
+
+type temporalConnectionServer struct {
+	workflowservice.UnimplementedWorkflowServiceServer
+	calls atomic.Int32
+}
+
+func (s *temporalConnectionServer) GetSystemInfo(context.Context, *workflowservice.GetSystemInfoRequest) (*workflowservice.GetSystemInfoResponse, error) {
+	s.calls.Add(1)
+	return &workflowservice.GetSystemInfoResponse{}, nil
+}
+
+type siteRegistrationFailure struct {
+	managerapi.SiteInterface
+	err error
+}
+
+func (s siteRegistrationFailure) RegisterPublisher() error {
+	return s.err
 }

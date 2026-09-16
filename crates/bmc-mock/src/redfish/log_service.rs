@@ -271,15 +271,6 @@ struct Journal {
     entries: VecDeque<StoredEntry>,
 }
 
-/// One page of an entries collection.
-pub(crate) struct EntryPage {
-    pub(crate) members: Vec<Value>,
-    /// Entries in the whole log, as `Members@odata.count`.
-    pub(crate) total: usize,
-    /// `$skip` of the next page, when this one did not reach the end.
-    pub(crate) next_skip: Option<usize>,
-}
-
 /// One system's runtime event log: profile-seeded entries plus the lifecycle
 /// entries the mock appends. Bounded like a real SEL — the oldest entry goes
 /// when the log is full — and clearable through `LogService.ClearLog`.
@@ -287,6 +278,7 @@ pub(crate) struct EventLog {
     id: &'static str,
     capacity: usize,
     /// Entries per collection page; `None` serves the whole log at once.
+    /// Applied by the query layer, not here.
     page_size: Option<usize>,
     journal: Mutex<Journal>,
 }
@@ -369,35 +361,19 @@ impl EventLog {
         journal.next_id = 0;
     }
 
-    /// One page of entries under `collection`, oldest first. `top` is capped
-    /// at the profile's page size; unpaged logs serve everything from `skip`.
-    pub(crate) fn page(
-        &self,
-        collection: &redfish::Collection<'_>,
-        skip: usize,
-        top: Option<usize>,
-    ) -> EntryPage {
-        let journal = self.lock();
-        let total = journal.entries.len();
-        let limit = match (top, self.page_size) {
-            (Some(top), Some(page)) => Some(top.min(page)),
-            (Some(top), None) => Some(top),
-            (None, page) => page,
-        };
-        let members: Vec<Value> = journal
+    /// Every entry under `collection`, oldest first. Paging is the query
+    /// layer's, told [`page_size`](Self::page_size) by the handler.
+    pub(super) fn entries(&self, collection: &redfish::Collection<'_>) -> Vec<Value> {
+        self.lock()
             .entries
             .iter()
-            .skip(skip)
-            .take(limit.unwrap_or(usize::MAX))
             .map(|entry| entry.render(collection))
-            .collect();
-        let served = skip.saturating_add(members.len());
-        let next_skip = (limit.is_some() && served < total).then_some(served);
-        EntryPage {
-            members,
-            total,
-            next_skip,
-        }
+            .collect()
+    }
+
+    /// Entries per collection page, when the profile pages this log.
+    pub(super) fn page_size(&self) -> Option<usize> {
+        self.page_size
     }
 
     /// The LogEntry document with this `Id`, if the log still holds it.
@@ -472,8 +448,7 @@ mod tests {
 
     fn ids(log: &EventLog) -> Vec<String> {
         let collection = system_entries_collection("S", log.id());
-        log.page(&collection, 0, None)
-            .members
+        log.entries(&collection)
             .iter()
             .map(|entry| entry["Id"].as_str().unwrap().to_owned())
             .collect()
@@ -505,27 +480,5 @@ mod tests {
             "0",
             "a cleared log reuses its ids"
         );
-    }
-
-    #[test]
-    fn pages_are_capped_at_the_page_size_and_link_onward() {
-        let log = EventLog::new("SEL", 10, Some(2), ["a", "b", "c", "d", "e"]);
-        let collection = system_entries_collection("S", "SEL");
-        let first = log.page(&collection, 0, None);
-        assert_eq!(
-            (first.members.len(), first.total, first.next_skip),
-            (2, 5, Some(2))
-        );
-        let capped = log.page(&collection, 0, Some(4));
-        assert_eq!(capped.members.len(), 2, "$top cannot exceed the page size");
-        let last = log.page(&collection, 4, None);
-        assert_eq!((last.members.len(), last.next_skip), (1, None));
-        assert!(log.page(&collection, 9, None).members.is_empty());
-
-        let unpaged = EventLog::new("SEL", 10, None, ["a", "b", "c"]);
-        let all = unpaged.page(&collection, 0, None);
-        assert_eq!((all.members.len(), all.next_skip), (3, None));
-        let top = unpaged.page(&collection, 0, Some(2));
-        assert_eq!(top.next_skip, Some(2), "a client-supplied $top still pages");
     }
 }

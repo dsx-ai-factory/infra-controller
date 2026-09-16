@@ -30,7 +30,8 @@ use carbide_rack::rms_node_type::{
     switch_node_identity_for_profile,
 };
 use carbide_secrets::credentials::Credentials;
-use carbide_uuid::rack::RackProfileId;
+use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::switch::SwitchId;
 use db::direct_dispatch_firmware_job::FirmwareJobKind;
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use librms::{RackManagerError, RmsApi};
@@ -58,9 +59,10 @@ use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
     Backend as NvSwitchBackend, ConfigureSwitchCertificateJobStatus, NvSwitchManager,
     ScaleUpFabricManagerJobStatus, ScaleUpFabricResponseStatus, ScaleUpFabricServiceStatuses,
-    ScaleUpFabricStatus, ScaleUpFabricSwitchStatus, SwitchComponentResult, SwitchEndpoint,
-    SwitchFactoryResetJobStatus, SwitchFactoryResetState, SwitchFirmwareUpdateStatus,
-    SwitchPasswordRotationState, SwitchPowerStateResult, SwitchSlotAndTrayResult,
+    ScaleUpFabricStatus, ScaleUpFabricSwitchStatus, SwitchCertificateEndpoint,
+    SwitchComponentResult, SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFactoryResetState,
+    SwitchFirmwareUpdateStatus, SwitchPasswordRotationState, SwitchPowerStateResult,
+    SwitchSlotAndTrayResult,
 };
 use crate::power_shelf_manager::{
     Backend as PowerShelfBackend, PowerShelfComponentResult, PowerShelfEndpoint,
@@ -777,6 +779,7 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
                         .cloned()
                         .or_else(|| parent_job_id.clone()),
                     error_message: None,
+                    ..Default::default()
                 };
 
                 if status.job_id.is_none() {
@@ -885,6 +888,49 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
 
         Ok(updated)
     }
+
+    async fn start_nvos_password_update(
+        &self,
+        rack_id: &RackId,
+        profile: &RackProfile,
+        switch_id: &SwitchId,
+        nvos_ip: IpAddr,
+        credentials: &Credentials,
+    ) -> Result<String, ComponentManagerError> {
+        let switch_identity = switch_node_identity_for_profile(profile)
+            .map_err(|error| ComponentManagerError::InvalidArgument(error.to_string()))?;
+
+        let Credentials::UsernamePassword { password, .. } = credentials;
+
+        let mut node = rms::NodeInfo {
+            node_id: switch_id.to_string(),
+            rack_id: rack_id.to_string(),
+            host_endpoint: Some(rms::Endpoint {
+                interface: Some(rms::NetworkInterface {
+                    ip_address: nvos_ip.to_string(),
+                    ..Default::default()
+                }),
+                credentials: Some(credentials_to_rms(credentials)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        switch_identity.apply_to_node_info(&mut node);
+
+        // RMS image work and job tracking are process-local. After an RMS
+        // restart, sending the desired password as both the current and target
+        // password is safe: RMS verifies it first, then uses the factory admin
+        // credential only when recovery is needed.
+        rms_ensure_switch_password_rotation(self.client.as_ref(), node, credentials, password).await
+    }
+
+    async fn get_nvos_password_update_status(
+        &self,
+        job_id: &str,
+    ) -> Result<SwitchPasswordRotationState, ComponentManagerError> {
+        rms_get_switch_password_rotation_job_status(self.client.as_ref(), job_id).await
+    }
 }
 
 fn apply_nvos_job_status_response(
@@ -945,14 +991,16 @@ fn apply_nvos_job_status_response(
                 response.error_message
             };
 
-            tracing::warn!(
-                job_id = %job_id,
-                job_status = response.status,
-                error = %message,
-                "RMS returned a non-success switch image job status lookup; retrying later",
-            );
-
+            // RMS reports a missing process-local job as an ordinary failure
+            // response. Its image outcome is unknown, so run password recovery.
+            switch.status = "failed".into();
             switch.error_message = Some(message);
+        }
+        Err(RackManagerError::ApiInvocationError(status))
+            if status.code() == tonic::Code::NotFound =>
+        {
+            switch.status = "failed".into();
+            switch.error_message = Some(format!("RMS lost NVOS image job {job_id}"));
         }
         Err(error) => {
             let cause = match error {
@@ -1075,8 +1123,11 @@ impl RmsBackend {
         endpoints: &[SwitchEndpoint],
     ) -> Result<Vec<rms::NodeInfo>, ComponentManagerError> {
         let macs: Vec<MacAddress> = endpoints.iter().map(|endpoint| endpoint.bmc_mac).collect();
+
         let identities = resolve_switch_identities(&self.db, &macs).await?;
+
         let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
+
         let mut nodes = Vec::with_capacity(endpoints.len());
 
         for endpoint in endpoints {
@@ -1093,6 +1144,33 @@ impl RmsBackend {
                 &resolved,
                 hostnames.get(&endpoint.nvos_mac).cloned(),
             ));
+        }
+
+        Ok(nodes)
+    }
+
+    async fn resolve_switch_certificate_nodes(
+        &self,
+        endpoints: &[SwitchCertificateEndpoint],
+    ) -> Result<Vec<rms::NodeInfo>, ComponentManagerError> {
+        let macs = endpoints
+            .iter()
+            .map(|endpoint| endpoint.bmc_mac)
+            .collect::<Vec<_>>();
+
+        let identities = resolve_switch_identities(&self.db, &macs).await?;
+        let mut nodes = Vec::with_capacity(endpoints.len());
+
+        for endpoint in endpoints {
+            let resolved = self
+                .resolve_switch_or_power_shelf_node(
+                    &identities,
+                    endpoint.bmc_mac,
+                    SwitchOrPowerShelfRole::Switch,
+                )
+                .map_err(ComponentManagerError::Internal)?;
+
+            nodes.push(build_switch_certificate_node_info(endpoint, &resolved));
         }
 
         Ok(nodes)
@@ -1824,6 +1902,36 @@ fn build_switch_password_rotation_node_info(
         bmc_endpoint: None,
         ..node
     }
+}
+
+/// Builds the host-only node description required for certificate rotation.
+///
+/// RMS installs certificate material through NVOS, so the request must not
+/// include a BMC endpoint or BMC credentials.
+fn build_switch_certificate_node_info(
+    endpoint: &SwitchCertificateEndpoint,
+    resolved: &ResolvedRmsNode<'_>,
+) -> rms::NodeInfo {
+    let mut node = rms::NodeInfo {
+        node_id: resolved.identity.node_id.clone(),
+        rack_id: resolved.identity.rack_id.clone(),
+        r#type: None,
+        bmc_endpoint: None,
+        host_endpoint: Some(rms::Endpoint {
+            interface: Some(rms::NetworkInterface {
+                ip_address: endpoint.nvos_ip.to_string(),
+                mac_address: endpoint.nvos_mac.to_string(),
+                host_name: endpoint.nvos_host_name.clone(),
+            }),
+            port: 0,
+            credentials: Some(credentials_to_rms(&endpoint.nvos_credentials)),
+        }),
+        node_descriptor: None,
+    };
+
+    resolved.node_identity.apply_to_node_info(&mut node);
+
+    node
 }
 
 async fn resolve_switch_machine_interface_hostnames(
@@ -3023,7 +3131,41 @@ impl NvSwitchManager for RmsBackend {
             &resolved,
             hostnames.get(&endpoint.nvos_mac).cloned(),
         );
-        rms_configure_switch_certificate(self.client.as_ref(), device, domain_name, services).await
+
+        let node_id = device.node_id.clone();
+
+        rms_configure_switch_certificate(
+            self.client.as_ref(),
+            vec![device],
+            Some(&node_id),
+            domain_name,
+            services,
+        )
+        .await
+    }
+
+    #[instrument(skip(self, endpoints, domain_name, services), fields(backend = "rms"))]
+    async fn batch_configure_switch_certificate(
+        &self,
+        endpoints: &[SwitchCertificateEndpoint],
+        domain_name: Option<&str>,
+        services: Option<&[i32]>,
+    ) -> Result<String, ComponentManagerError> {
+        if endpoints.is_empty() {
+            return Err(ComponentManagerError::RejectedBeforeDispatch(
+                "switch certificate configuration requires at least one endpoint".to_string(),
+            ));
+        }
+
+        // Node resolution completes before RMS receives the mutation, so a
+        // preparation failure is safe for the rack controller to retry.
+        let nodes = self
+            .resolve_switch_certificate_nodes(endpoints)
+            .await
+            .map_err(|error| ComponentManagerError::RejectedBeforeDispatch(error.to_string()))?;
+
+        rms_configure_switch_certificate(self.client.as_ref(), nodes, None, domain_name, services)
+            .await
     }
 
     #[instrument(skip(self), fields(backend = "rms", job_id))]
@@ -3672,35 +3814,15 @@ fn map_rms_configure_switch_certificate_job_state(
     }
 }
 
-fn summarize_configure_switch_certificate_response(
-    response: rms::ConfigureSwitchCertificateResponse,
-    node_id: &str,
-) -> (bool, Option<String>, Option<String>) {
-    let node_job_id = response
-        .jobs
-        .iter()
-        .find(|j| j.node_id == node_id && !j.job_id.is_empty())
-        .map(|j| j.job_id.clone());
-
-    summarize_firmware_batch(
-        response.response,
-        node_job_id,
-        node_id,
-        "RMS switch certificate configuration failed",
-    )
-}
-
 async fn rms_configure_switch_certificate(
     client: &dyn RmsApi,
-    device: rms::NodeInfo,
+    nodes: Vec<rms::NodeInfo>,
+    node_id: Option<&str>,
     domain_name: Option<&str>,
     services: Option<&[i32]>,
 ) -> Result<String, ComponentManagerError> {
-    let node_id = device.node_id.clone();
     let request = rms::ConfigureSwitchCertificateRequest {
-        nodes: Some(rms::NodeSet {
-            nodes: vec![device],
-        }),
+        nodes: Some(rms::NodeSet { nodes }),
         services: services.map(<[i32]>::to_vec).unwrap_or_default(),
         test_hello: true,
         domain: domain_name.map(str::to_owned),
@@ -3713,24 +3835,48 @@ async fn rms_configure_switch_certificate(
     )
     .await
     .map_err(|e| {
-        ComponentManagerError::Internal(format!(
+        ComponentManagerError::OperationOutcomeUnknown(format!(
             "failed to start RMS switch certificate configuration: {e}"
         ))
     })?;
 
-    let (success, error, job_id) =
-        summarize_configure_switch_certificate_response(response, &node_id);
+    let node_job_id = node_id.and_then(|node_id| {
+        response
+            .jobs
+            .iter()
+            .find(|job| job.node_id == node_id && !job.job_id.is_empty())
+            .map(|job| job.job_id.clone())
+    });
+
+    let (success, error, job_id) = summarize_firmware_batch(
+        response.response,
+        node_job_id,
+        node_id.unwrap_or_default(),
+        "RMS switch certificate configuration failed",
+    );
 
     if success {
-        job_id.ok_or_else(|| {
-            ComponentManagerError::Internal(
-                "RMS switch certificate configuration succeeded but returned no job id".into(),
-            )
-        })
+        job_id
+            .filter(|job_id| !job_id.trim().is_empty())
+            .ok_or_else(|| {
+                ComponentManagerError::OperationOutcomeUnknown(
+                    "RMS switch certificate configuration succeeded but returned no job id".into(),
+                )
+            })
     } else {
-        Err(ComponentManagerError::Internal(error.unwrap_or_else(
-            || "RMS switch certificate configuration failed".to_owned(),
-        )))
+        let error =
+            error.unwrap_or_else(|| "RMS switch certificate configuration failed".to_owned());
+
+        // A failed batch can still have accepted work. Its parent job covers
+        // only accepted children, so completion cannot prove every requested
+        // switch was updated. Retain the ID for operator reconciliation without
+        // allowing the full rack batch to proceed.
+        let error = match job_id.filter(|job_id| !job_id.trim().is_empty()) {
+            Some(job_id) => format!("{error}; RMS job ID: {job_id}"),
+            None => error,
+        };
+
+        Err(ComponentManagerError::OperationOutcomeUnknown(error))
     }
 }
 
@@ -3755,19 +3901,19 @@ async fn rms_get_configure_switch_certificate_job_status(
     })?;
 
     if response.status != rms::ReturnCode::Success as i32 {
-        let error = if response.error_message.is_empty() {
+        let detail = if response.error_message.is_empty() {
             if response.message.is_empty() {
-                format!("RMS could not report status for switch certificate job {job_id}")
+                "job was not found".to_string()
             } else {
                 response.message
             }
         } else {
             response.error_message
         };
-        return Ok(ConfigureSwitchCertificateJobStatus {
-            state: ConfigureSwitchCertificateState::Failed,
-            error: Some(error),
-        });
+
+        return Err(ComponentManagerError::NotFound(format!(
+            "RMS could not report status for switch certificate job {job_id}: {detail}"
+        )));
     }
 
     let state =
@@ -4452,6 +4598,7 @@ mod tests {
                 status: "pending".into(),
                 job_id: Some("child-job".into()),
                 error_message: Some("stale error".into()),
+                ..Default::default()
             }],
         };
 
@@ -4505,6 +4652,7 @@ mod tests {
             status: "in_progress".into(),
             job_id: Some("job-2".into()),
             error_message: None,
+            ..Default::default()
         };
 
         apply_nvos_job_status_response(
@@ -4536,6 +4684,7 @@ mod tests {
             status: "pending".into(),
             job_id: Some("job-3".into()),
             error_message: None,
+            ..Default::default()
         };
 
         apply_nvos_job_status_response(
@@ -4554,6 +4703,88 @@ mod tests {
             switch.error_message.as_deref(),
             Some("Unknown RMS switch image job state mystery")
         );
+    }
+
+    #[test]
+    fn nvos_polling_treats_missing_rms_job_as_unknown_image_failure() {
+        let mut switch = NvosUpdateSwitchStatus {
+            status: "in_progress".into(),
+            job_id: Some("lost-job".into()),
+            ..Default::default()
+        };
+
+        apply_nvos_job_status_response(
+            &mut switch,
+            "lost-job",
+            Ok(rms::GetSwitchSystemImageJobStatusResponse {
+                message: "job lost-job not found".into(),
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(switch.status, "failed");
+
+        assert_eq!(
+            switch.error_message.as_deref(),
+            Some("job lost-job not found")
+        );
+    }
+
+    #[tokio::test]
+    async fn rack_nvos_password_recovery_uses_desired_password() {
+        let mock = Arc::new(MockRmsApi::new());
+
+        mock.enqueue_update_switch_system_password(Ok(rms::UpdateSwitchSystemPasswordResponse {
+            response: Some(rms::NodeBatchResponse {
+                status: rms::ReturnCode::Success as i32,
+                job_id: "password-job".into(),
+                ..Default::default()
+            }),
+        }))
+        .await;
+
+        let manager = RmsNvosUpdateManager {
+            client: mock.clone(),
+        };
+
+        let credentials = Credentials::UsernamePassword {
+            username: "admin".into(),
+            password: "desired-password".into(),
+        };
+
+        let job_id = manager
+            .start_nvos_password_update(
+                &RackId::new("rack-1"),
+                &test_rms_profile(),
+                &crate::test_support::test_switch_id("switch-1"),
+                "192.0.2.20".parse().unwrap(),
+                &credentials,
+            )
+            .await
+            .unwrap();
+
+        let calls = mock.update_switch_system_password_calls().await;
+        let request = &calls[0];
+
+        let endpoint = request.nodes.as_ref().unwrap().nodes[0]
+            .host_endpoint
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(job_id, "password-job");
+        assert_eq!(request.password, "desired-password");
+
+        assert!(
+            request.nodes.as_ref().unwrap().nodes[0]
+                .bmc_endpoint
+                .is_none()
+        );
+
+        assert!(matches!(
+            endpoint.credentials.as_ref().and_then(|value| value.auth.as_ref()),
+            Some(rms::credentials::Auth::UserPass(value))
+                if value.password == "desired-password"
+        ));
     }
 
     #[tokio::test]
@@ -5110,6 +5341,89 @@ mod tests {
             .await;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].job_id, "cert-job-1");
+    }
+
+    #[tokio::test]
+    async fn switch_certificate_submission_error_has_unknown_outcome() {
+        let responses = [
+            (
+                Err(RackManagerError::ApiInvocationError(
+                    tonic::Status::unavailable("connection lost"),
+                )),
+                None,
+            ),
+            (
+                Ok(rms::ConfigureSwitchCertificateResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Failure as i32,
+                        message: "certificate configuration failed".to_string(),
+                        ..Default::default()
+                    }),
+                    jobs: Vec::new(),
+                }),
+                None,
+            ),
+            (
+                Ok(rms::ConfigureSwitchCertificateResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Failure as i32,
+                        job_id: "partial-certificate-job".to_string(),
+                        message: "certificate configuration partially accepted".to_string(),
+                        ..Default::default()
+                    }),
+                    jobs: Vec::new(),
+                }),
+                Some("partial-certificate-job"),
+            ),
+        ];
+
+        for (response, expected_job_id) in responses {
+            let mock = MockRmsApi::new();
+
+            mock.enqueue_configure_switch_certificate(response).await;
+
+            let error = rms_configure_switch_certificate(
+                &mock,
+                vec![rms::NodeInfo::default()],
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("RMS did not accept the complete certificate batch");
+
+            let ComponentManagerError::OperationOutcomeUnknown(message) = error else {
+                panic!("expected an unknown certificate submission outcome");
+            };
+
+            if let Some(job_id) = expected_job_id {
+                assert!(message.contains(job_id));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_certificate_job_not_found_is_reported() {
+        let mock = MockRmsApi::new();
+
+        mock.enqueue_get_configure_switch_certificate_job_status(Ok(
+            rms::GetConfigureSwitchCertificateJobStatusResponse {
+                status: rms::ReturnCode::Failure as i32,
+                message: "job not found".to_string(),
+                ..Default::default()
+            },
+        ))
+        .await;
+
+        let error = rms_get_configure_switch_certificate_job_status(&mock, "cert-job-1")
+            .await
+            .expect_err("a missing RMS job must be reported");
+
+        assert!(matches!(
+            error,
+            ComponentManagerError::NotFound(message)
+                if message.contains("cert-job-1") && message.contains("job not found")
+        ));
     }
 
     #[test]
@@ -6684,6 +6998,35 @@ mod tests {
             calls[0].services,
             crate::config::switch_mtls_services_as_i32(&SwitchMtlsService::default_services())
         );
+    }
+
+    #[carbide_macros::sqlx_test]
+    async fn sw_batch_configure_switch_certificate_db_failure_is_rejected_before_dispatch(
+        pool: sqlx::PgPool,
+    ) {
+        let (mock, backend, _, _, _, _, _) = make_backend(&pool).await;
+        pool.close().await;
+        let endpoint = make_sw_endpoint(SW_MAC_1);
+
+        let endpoint = SwitchCertificateEndpoint {
+            bmc_mac: endpoint.bmc_mac,
+            nvos_ip: endpoint.nvos_ip,
+            nvos_mac: endpoint.nvos_mac,
+            nvos_credentials: endpoint.nvos_credentials,
+            nvos_host_name: endpoint.nvos_host_name,
+        };
+
+        let error =
+            NvSwitchManager::batch_configure_switch_certificate(&backend, &[endpoint], None, None)
+                .await
+                .expect_err("a closed database must prevent RMS dispatch");
+
+        assert!(matches!(
+            error,
+            ComponentManagerError::RejectedBeforeDispatch(_)
+        ));
+
+        assert!(mock.configure_switch_certificate_calls().await.is_empty());
     }
 
     #[carbide_macros::sqlx_test]

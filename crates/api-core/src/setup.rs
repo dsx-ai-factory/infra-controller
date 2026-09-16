@@ -625,6 +625,7 @@ pub(crate) async fn start_runtime(
     });
 
     if carbide_config.listen_only {
+        crate::handlers::tenant_prefix_overlap::validate_retained_state(&api_service).await?;
         tracing::info!("Not starting background services, as listen_only=true");
     } else {
         initialize_and_start_controllers(
@@ -1376,7 +1377,9 @@ async fn initialize_and_start_controllers<'a>(
         && let Some(admin) = fnn_config.admin_vpc.as_ref()
         && admin.enabled
     {
-        db_init::create_admin_vpc(db_pool, admin.vpc_vni).await?;
+        db_init::create_admin_vpc(&api_service, admin.vpc_vni).await?;
+    } else {
+        crate::handlers::tenant_prefix_overlap::validate_retained_state(&api_service).await?;
     }
     // Update SVI IP to segments which have VPC attached and type is FNN.
     db_init::update_network_segments_svi_ip(db_pool).await?;

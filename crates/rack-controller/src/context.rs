@@ -53,7 +53,7 @@ pub struct RackStateHandlerServices {
 
     /// Switch mTLS services sourced from
     /// `[rack_state_controller].nmx_cluster_switch_mtls_services`. Unread:
-    /// rack maintenance does not configure switch certificates.
+    /// rack `ConfigureNmxCluster` uses fixed certificate bindings.
     pub nmx_cluster_switch_mtls_services: Vec<i32>,
 
     /// Fetches SOT firmware-object documents selected by rack profiles.

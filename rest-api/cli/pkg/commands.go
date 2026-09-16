@@ -185,6 +185,7 @@ var commandPathAliases = map[string][]string{
 	"power-control-racks":                               {"rack", "power-all"},
 	"power-control-tray":                                {"tray", "power"},
 	"power-control-trays":                               {"tray", "power-all"},
+	"release-vpc-inactive-vni":                          {"vpc", "routing-profile", "release-inactive-vni"},
 	"replace-all-expected-rack":                         {"expected-rack", "replace-all"},
 	"reprovision-machine-dpu":                           {"machine", "dpu", "reprovision"},
 	"reset-machine-bmc":                                 {"machine", "bmc", "reset"},

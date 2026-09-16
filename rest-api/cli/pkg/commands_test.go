@@ -447,6 +447,43 @@ func TestGeneratedCommandInfos_ContainsConciseAliases(t *testing.T) {
 	}
 }
 
+func TestNewApp_VpcRoutingProfileCommands(t *testing.T) {
+	tests := []struct {
+		action string
+		flags  []string
+	}{
+		{action: "get"},
+		{action: "update", flags: []string{"--routing-profile", "--vni"}},
+		{action: "release-inactive-vni", flags: []string{"--if-version-match", "--expected-inactive-vni"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			vpc := app.Command("vpc")
+			require.NotNil(t, vpc)
+			routingProfile := vpc.Command("routing-profile")
+			require.NotNil(t, routingProfile)
+			command := routingProfile.Command(tt.action)
+			require.NotNil(t, command)
+			require.NotNil(t, command.Action)
+
+			var output bytes.Buffer
+			app.Writer = &output
+			app.ErrWriter = &output
+			err = app.Run([]string{"nicocli", "vpc", "routing-profile", tt.action, "--help"})
+			require.NoError(t, err)
+			assert.Contains(t, output.String(), "nicocli vpc routing-profile "+tt.action)
+			for _, name := range tt.flags {
+				assert.Contains(t, output.String(), name)
+			}
+			if tt.action == "update" {
+				assert.NotContains(t, output.String(), "--if-version-match")
+			}
+		})
+	}
+}
+
 // TestBuildActionCommand_BodyPropertyFlags verifies body-property flag naming
 // for reserved names and scalar-compatible, single-item arrays.
 func TestBuildActionCommand_BodyPropertyFlags(t *testing.T) {

@@ -85,7 +85,7 @@ behavior.
 | `extension_service_state_controller` | `ExtensionServiceStateControllerConfig` | *(see below)* | `machines` | DPU extension service state controller timing. |
 | `ib_partition_state_controller` | `IbPartitionStateControllerConfig` | *(see below)* | `hardware` | IB partition state controller timing. |
 | `dpa_interface_state_controller` | `DpaInterfaceStateControllerConfig` | *(see below)* | `networking` | DPA interface state controller timing. |
-| `rack_state_controller` | `RackStateControllerConfig` | *(see below)* | `hardware` | Rack state controller timing, optional ingestion firmware update, and primary-switch mTLS service selection. |
+| `rack_state_controller` | `RackStateControllerConfig` | *(see below)* | `hardware` | Rack state controller timing, optional automatic rack firmware and switch NVOS updates, and primary-switch mTLS service selection. |
 | `power_shelf_state_controller` | `PowerShelfStateControllerConfig` | *(see below)* | `hardware` | Power shelf state controller timing and optional rack firmware reprovisioning. |
 | `switch_state_controller` | `SwitchStateControllerConfig` | *(see below)* | `hardware` | Switch state controller timing and per-switch mTLS service selection. |
 | `spdm_state_controller` | `SpdmStateControllerConfig` | *(see below)* | `security` | SPDM state controller timing. |
@@ -238,6 +238,18 @@ count = 9
 vendor = "LiteOn"
 count = 8
 ```
+
+`firmware_object` supplies the SOT JSON for automatic rack firmware and switch
+NVOS image updates. When `firmware_object` is configured for a profile with
+switches, the document must include an NVOS image whose firmware type matches
+`rack_hardware_class`. NICo requests `prod` when `rack_hardware_class` is
+omitted. RMS records an asynchronous update failure when the document does not
+contain the required image. If `firmware_object` is omitted, NICo skips both
+automatic update phases. An explicit maintenance request can supply a firmware
+object instead. If no firmware object is available while a switch in the
+maintenance scope is already waiting for an NVOS update, the rack transitions
+to `Error` instead of skipping the NVOS phase.
+`fetch_timeout` defaults to `30s`.
 
 Example: GB300 rack with Lenovo compute trays and Delta power shelves:
 
@@ -555,7 +567,7 @@ TOML section: `[rack_state_controller]`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
-| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack maintenance does not configure switch certificates. |
+| `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack `ConfigureNmxCluster` uses fixed `nvue_api` and `scale_up_fabric_manager` bindings. |
 
 ### `SwitchStateControllerConfig`
 
@@ -749,7 +761,7 @@ For a non-DPF host, instance admission follows HBN's representor selection even 
 | `dpu_nic_firmware_update_versions` | `Vec<String>` | *(BF2+BF3 NIC versions)* | DPU NIC firmware version strings. |
 | `dpu_enable_secure_boot` | `bool` | `false` | Enable secure boot flow for DPU provisioning via Redfish. |
 | `num_of_vfs` | `u32` | `16` | Number of hardware VFs configured per DPU PF during BlueField provisioning. Max `126`. Under DPF, changing this value changes the immutable BF3/generic-BF4 flavor and requires a carbide-api restart and DPU reprovisioning. Reducing it below the static inventory's previous effective VF count also removes desired VF ServiceInterfaces; because NICo does not prune them, operators must stop NICo, remove the omitted NICo ServiceInterfaces, re-ingest the DPUs, and restart. Configured intercept inventories remain valid only while every selected `vf_id` is both lower than this value and no greater than 15. |
-| `service_vpc_slot_count` | `u32` | `0` | Number of HBN interfaces reserved for externally coordinated service-VPC attachments on BF3 and generic BF4. NICo generates stable names from `iface_svc_0` through `iface_svc_{N-1}`. The generated interfaces count toward HBN's 32-interface limit and increase its `nvidia.com/bf_sf` request. BF4 Astra ignores this field. |
+| `service_vpc_slot_count` | `u32` | `0` | Number of HBN interfaces reserved for externally coordinated service-VPC attachments on BF3 and generic BF4. Must be zero when `tenant_prefix_overlap_enabled = true`; otherwise startup fails. NICo generates stable names from `iface_svc_0` through `iface_svc_{N-1}`. The generated interfaces count toward HBN's 32-interface limit and increase its `nvidia.com/bf_sf` request. BF4 Astra ignores this field when generating interfaces, but the startup restriction still applies. |
 | `additional_managed_sf` | `u32` | `0` | Additional BF3/generic-BF4 SF capacity without a generated HBN interface. This value and `service_vpc_slot_count` are added to the managed SF count used to size or validate `PF_TOTAL_SF`. BF4 Astra ignores this field. |
 | `restart_ovs_on_use_admin_network_change` | `bool` | `false` | Restart OVS on DPU-OS agents when host `use_admin_network` changes. Containerized agents skip the local service restart and still ACK the network config. |
 
@@ -833,14 +845,18 @@ are true:
 - `site_global_vpc_vni` and `common_internal_route_target` are unset, and
   `additional_route_target_imports` is empty, so they cannot bridge the VPCs.
 - The deprecated site-wide `anycast_site_prefixes` list is empty.
+- `dpu_config.service_vpc_slot_count` is zero. Service-VPC attachments have not
+  been qualified for overlapping prefixes; enabling overlap with reserved
+  service-VPC slots fails startup.
 - Each resolved FNN profile, after applying its VPC overrides, has
   `tenant_prefix_overlap_eligible = true` and `internal = true`; has no import
   or export route targets; disables default-route leakage, tenant-host-route
   leakage, and tenant leak communities; and has no accepted underlay leaks or
   allowed anycast prefixes.
 
-The FNN renderer falls back to `anycast_site_prefixes` when the profile's
-`allowed_anycast_prefixes` is empty. The [chart's default configuration](../../../../helm/charts/nico-api/files/carbide-api-config.toml)
+The FNN renderer falls back to `anycast_site_prefixes` for IPv4 when the profile
+has no IPv4 `allowed_anycast_prefixes`. The IPv6 list has no such fallback.
+The [chart's default configuration](../../../../helm/charts/nico-api/files/carbide-api-config.toml)
 sets `anycast_site_prefixes = ["0.0.0.0/0"]`; a site using that default must
 override it with `[]` to meet the overlap requirements.
 
@@ -856,15 +872,86 @@ linked to a `VpcPrefix`; every other direct `NetworkPrefix` overlap on an
 attached segment is rejected. An unattached `CreateNetworkSegment` request does
 not run these checks, but a later attachment does.
 
-These handlers do not validate changes to peering or VPC policy, or Instance
-paths that retain routing state. They also do not cover startup or audit every
-writer. Those checks are tracked in
-[#5114](https://github.com/dsx-ai-factory/infra-controller/issues/5114) and
-[#5115](https://github.com/dsx-ai-factory/infra-controller/issues/5115), while startup
-and complete writer coverage are tracked in
-[#5116](https://github.com/dsx-ai-factory/infra-controller/issues/5116). All three must
-land before the database cutover in
-[#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892).
+With `tenant_prefix_overlap_enabled = true`, peering creation, `VpcPrefix`
+creation, and VPC virtualization changes that add imports also check each
+affected receiver's local and imported prefixes. Core returns `InvalidArgument`
+if a change would make one VPC receive overlapping address space from different
+VPCs. Direct peer imports follow the renderer, including its independent VNI
+imports; there are no transitive peer imports. Prefixes awaiting removal still
+count. These writers also check the combined networks of each affected Instance,
+including Instances waiting for their network segments and pending replacements.
+
+VPC routing-profile changes, VPC NSG assignments, and NSG rule changes check
+the affected tenant-serving FNN interfaces. An Instance's explicit NSG replaces
+its VPC's NSG. Discovery boot suppresses NSGs but still uses the routing profile.
+Allocated Instances remain relevant even before their controllers leave Admin
+networking, including while waiting for network segments. Pending networks and
+deleting Instances not yet in the controller's return-to-Admin state also count.
+Core rejects unsafe policy changes on these paths with `FailedPrecondition`,
+even before duplicate CIDRs exist. Unused definitions remain editable.
+Metadata updates, unchanged stored policy,
+and proven restrictions do not take the overlap transaction lock unless a
+concurrent update changes the policy they replace. With overlap enabled,
+`UpdateVpc` and `UpdateNetworkSecurityGroup` can return `FailedPrecondition` if
+a VPC or NSG changes while the request waits for its row lock. With overlap
+disabled, requests without `if_version_match` instead use the latest locked
+record and repeat any needed policy checks. Explicit version conditions still
+apply in either mode.
+
+Instance allocation and network expansion check all VPCs used by the requested,
+current, and pending networks together, including their direct peer imports.
+An Instance must not connect to overlapping address space from different VPCs,
+even when those VPCs are otherwise isolated. Core returns `InvalidArgument`
+for that conflict. With overlap enabled, allocation, network expansion, and
+NSG changes also check the effective FNN policy before duplicate CIDRs exist.
+Effective NSG rules must be deny-only, and `stateful_egress` must be disabled
+when `stateful_acls_enabled` is enabled; unsafe policy returns
+`FailedPrecondition`. Network expansion also requires an eligible resolved
+routing profile and safe site-wide policy.
+
+When `tenant_prefix_overlap_enabled = false` but another VPC still uses the
+same addresses, Instance allocation and network expansion return
+`InvalidArgument`; unsafe NSG changes return `FailedPrecondition`. Prefixes
+being deleted still count. Metadata edits, removal of unchanged interfaces,
+and safe NSG replacements remain available. A request cannot replace a pending
+network update. Requests that need admission take the overlap transaction lock
+before resource locks, including when the gate is off. A waiting Instance
+update reloads its dependencies but keeps its original configuration version;
+if that version changed, the request returns `FailedPrecondition`.
+
+With the gate off, peering and VPC virtualization changes also reject new
+imports of overlapping address space involving a tenant-managed `VpcPrefix`.
+Existing imports and nonexpanding changes remain available. Unsafe VPC and NSG
+policy changes are rejected where an affected Instance can reach that duplicate
+address space.
+
+Core checks retained prefixes, peer imports, Instance networks, and effective
+FNN policy before starting controllers or the API listener, including with
+`listen_only = true`. Startup network seeding and Admin VPC attachment check
+their changes before committing. An unsafe retained configuration fails startup.
+Tenant DPU configuration requests also check their retained networks before
+returning tenant interfaces; Admin-only responses remain available for cleanup.
+With overlap enabled, the policy checks apply to every retained FNN network on
+a DPU Instance, even before duplicate prefixes exist.
+These checks coordinate with admission writers through the same transaction
+lock. DPU configuration requests share the read lock with each other.
+A routing writer holding the exclusive lock blocks configuration requests
+across the site until its transaction ends.
+
+With overlap disabled, these startup and tenant DPU checks apply only to
+overlaps involving a tenant-managed `VpcPrefix`. Overlaps between existing
+operator-managed or rootless prefixes do not activate them. This preserves
+existing configurations, including Admin networks, without weakening the
+checks on tenant-managed prefixes retained after disabling overlap.
+
+Turning off the site or profile admission opt-in does not invalidate safely
+isolated existing networks. Prefixes and their tenant-managed SitePrefixes may
+be deleting while routes drain, but routing isolation, VNI ownership, and
+effective policy must remain safe. See
+[#5116](https://github.com/dsx-ai-factory/infra-controller/issues/5116) for the
+startup and writer checks, following the
+[peering and policy checks](https://github.com/dsx-ai-factory/infra-controller/issues/5114)
+and [Instance admission](https://github.com/dsx-ai-factory/infra-controller/issues/5115).
 
 Even when the application accepts an eligible pair, the existing `VpcPrefix`
 exclusion rejects overlapping `VpcPrefix` persistence until the cutover tracked

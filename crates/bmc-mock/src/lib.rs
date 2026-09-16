@@ -96,7 +96,7 @@ pub use carbide_axum_utils::authority_router::authority_router as combined_route
 pub use carbide_axum_utils::injection;
 pub use combined_server::{CombinedServer, ListenerOrAddress};
 pub use http::redfish_error_envelope;
-pub use hw::rack::{RackElevation, RackPlacement, RackUnit};
+pub use hw::rack::{RackElevation, RackPlacement, RackUnit, TrayPlacement};
 pub use machine_info::{
     DpuFirmwareVersions, DpuMachineInfo, DpuSettings, HostFirmwareVersions, HostMachineInfo,
     MachineInfo,
@@ -106,6 +106,9 @@ pub use mock_machine_router::{
     SetSystemPowerResult, machine_router, machine_router_with_injection_store,
 };
 pub use rack_info::RackInfo;
+/// BMC account state and the credential snapshot type used to persist and
+/// restore rotated passwords across a mock rebuild.
+pub use redfish::account_service::{AccountServiceState, BmcAccountCredential};
 pub use redfish::event_service::{
     EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
 };

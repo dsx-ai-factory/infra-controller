@@ -43,7 +43,8 @@ pub struct NvLinkConfig {
     /// PEM file path: client private key for mTLS to NMX-C (optional; pair with `nmx_c_tls_client_cert_path`).
     #[serde(default)]
     pub nmx_c_tls_client_key_path: Option<String>,
-    /// TLS server name (SNI / cert verification hostname) for NMX-C HTTPS. Defaults to the endpoint URL host if unset.
+    /// TLS server name for NMX-C HTTPS: a DNS name or bare IP address.
+    /// Defaults to the endpoint URL host if unset.
     #[serde(default)]
     pub nmx_c_tls_authority: Option<String>,
     /// TCP port for NMX-C endpoints derived from switch NVOS IP. Defaults to the production NMX-C port.

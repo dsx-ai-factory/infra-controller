@@ -20,7 +20,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use carbide_redfish::boot_interface::BootInterfaceTarget;
+use carbide_site_explorer::MachineCreator;
 use carbide_site_explorer::config::SiteExplorerConfig;
+use carbide_site_explorer::errors::SiteExplorerError;
 use common::api_fixtures::TestEnv;
 use db::{self};
 use ipnetwork::IpNetwork;
@@ -30,7 +32,8 @@ use model::hardware_info::HardwareInfo;
 use model::machine::ManagedHostStateSnapshot;
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use model::site_explorer::{
-    Chassis, EndpointExplorationError, EndpointExplorationReport, MachineSetupStatus,
+    Chassis, EndpointExplorationError, EndpointExplorationReport, ExploredDpu, ExploredManagedHost,
+    MachineSetupStatus,
 };
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::forge_server::Forge;
@@ -103,6 +106,132 @@ async fn test_disable_machine_creation_outside_site_explorer(
 
     // assert!(dm_response.is_err_and(|e| e.message().contains("was not discovered by site-explore")));
 
+    Ok(())
+}
+
+#[sqlx_test]
+async fn rejected_admin_address_reconciliation_rolls_back(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = api_fixtures::create_test_env(pool).await;
+    let host_config = ManagedHostConfig::default();
+    let bmc_mac_address = host_config.bmc_mac_address;
+    let mh = api_fixtures::create_managed_host_with_config(&env, host_config).await;
+    let host_id = mh.host().id;
+    let creator = MachineCreator::new(
+        env.pool.clone(),
+        env.config.site_explorer.clone(),
+        env.common_pools.clone(),
+        Arc::new(env.config.rack_profiles.clone()),
+        None,
+        env.test_credential_manager.clone(),
+        false,
+    );
+    let host_bmc_ip = host_bmc_ip(&env, &mh).await?;
+    let mut host_report = explored_endpoint(&env, host_bmc_ip).await?.report;
+
+    let mut txn = env.pool.begin().await?;
+    let expected_machine =
+        db::expected_machine::find_by_bmc_mac_address(&mut *txn, bmc_mac_address)
+            .await?
+            .unwrap();
+    let dpu_bmc_ip = mh.dpu().bmc_ip(&mut txn).await.unwrap();
+    let interfaces = db::machine_interface::find_by_machine_ids(&mut txn, &[host_id]).await?;
+    let primary = interfaces[&host_id]
+        .iter()
+        .find(|interface| interface.primary_interface)
+        .unwrap();
+    assert_eq!(primary.attached_dpu_machine_id, Some(mh.dpu().id));
+    assert!(!primary.addresses.is_empty());
+
+    // Leave the existing host needing an admin address and DNS metadata repair.
+    sqlx::query("DELETE FROM machine_interface_addresses WHERE interface_id = $1")
+        .bind(primary.id)
+        .execute(&mut *txn)
+        .await?;
+    sqlx::query(
+        "UPDATE machine_interfaces SET hostname = 'needs-reconciliation', domain_id = NULL
+         WHERE id = $1",
+    )
+    .bind(primary.id)
+    .execute(&mut *txn)
+    .await?;
+    let before = db::machine_interface::find_one(&mut *txn, primary.id).await?;
+    assert!(before.addresses.is_empty());
+    txn.commit().await?;
+
+    let explored_host = ExploredManagedHost {
+        host_bmc_ip,
+        dpus: vec![ExploredDpu {
+            bmc_ip: dpu_bmc_ip,
+            host_pf_mac_address: Some(primary.mac_address),
+            host_chassis_id: None,
+            report: Arc::new(explored_endpoint(&env, dpu_bmc_ip).await?.report),
+        }],
+    };
+    let mut writer = env.db_txn().await;
+    let writer_pid: i32 =
+        sqlx::query_scalar("SELECT pg_backend_pid() FROM machines WHERE id = $1 FOR UPDATE")
+            .bind(host_id)
+            .fetch_one(&mut *writer)
+            .await?;
+    let network_config = db::machine::get_network_config(&mut *writer, &host_id).await?;
+    let mut winning_config = network_config.value.clone();
+    winning_config.use_admin_network = Some(!winning_config.use_admin_network.unwrap_or(true));
+
+    let reconcile = creator.create_managed_host(
+        &explored_host,
+        &mut host_report,
+        Some(&expected_machine),
+        &env.pool,
+    );
+    let competing_write = async {
+        // Reconciliation has repaired the address rows and read the old version.
+        // Change the config before releasing the machine row it needs to update.
+        common::postgres::wait_for_blocked_query(
+            &env.pool,
+            writer_pid,
+            "UPDATE machines SET network_config_version",
+        )
+        .await;
+        assert_eq!(
+            db::machine::try_update_network_config(
+                &mut writer,
+                &host_id,
+                network_config.version,
+                &winning_config,
+            )
+            .await
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
+        );
+        let winning_version = db::machine::get_network_config(&mut *writer, &host_id)
+            .await
+            .unwrap()
+            .version;
+        writer.commit().await.unwrap();
+        winning_version
+    };
+    let (result, winning_version) =
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(reconcile, competing_write)
+        })
+        .await
+        .expect("admin address reconciliation should finish after the competing writer commits");
+    assert!(matches!(
+        result.expect_err("rejected network config must fail admin address reconciliation"),
+        SiteExplorerError::DatabaseError(db::DatabaseError::FailedPrecondition(_))
+    ));
+
+    let mut txn = env.pool.begin().await?;
+    let after = db::machine_interface::find_one(&mut *txn, primary.id).await?;
+    assert_eq!(after.addresses, before.addresses);
+    assert_eq!(after.hostname, before.hostname);
+    assert_eq!(after.domain_id, before.domain_id);
+    let after_config = db::machine::get_network_config(&mut *txn, &host_id).await?;
+    assert_eq!(after_config.value, winning_config);
+    assert_eq!(after_config.version, winning_version);
+    txn.commit().await?;
     Ok(())
 }
 
@@ -547,8 +676,17 @@ async fn test_get_machine_position_info(pool: PgPool) -> Result<(), Box<dyn std:
     report.compute_tray_index = Some(2);
     report.topology_id = Some(10);
     report.revision_id = Some(3);
-    db::explored_endpoints::try_update(bmc_ip, existing.report_version, &report, false, &mut txn)
-        .await?;
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            bmc_ip,
+            existing.report_version,
+            &report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
     txn.commit().await?;
 
     // Call the API
@@ -1038,7 +1176,7 @@ async fn test_refresh_endpoint_report_rejects_concurrent_report_update(
         evaluated_boot_interface: Some(concurrent_target.clone()),
     });
     let mut txn = env.pool.begin().await?;
-    assert!(
+    assert_eq!(
         db::explored_endpoints::try_update(
             bmc_ip,
             baseline.report_version,
@@ -1047,6 +1185,7 @@ async fn test_refresh_endpoint_report_rejects_concurrent_report_update(
             &mut txn,
         )
         .await?,
+        db::ConditionalWrite::Applied(()),
         "concurrent report update should succeed"
     );
     txn.commit().await?;
@@ -1094,7 +1233,7 @@ async fn test_refresh_endpoint_report_failure_persists_error_and_bumps_version(
         evaluated_boot_interface: Some(preserved_target.clone()),
     });
     let mut txn = env.pool.begin().await?;
-    assert!(
+    assert_eq!(
         db::explored_endpoints::try_update(
             bmc_ip,
             initial.report_version,
@@ -1102,7 +1241,8 @@ async fn test_refresh_endpoint_report_failure_persists_error_and_bumps_version(
             initial.waiting_for_explorer_refresh,
             &mut txn,
         )
-        .await?
+        .await?,
+        db::ConditionalWrite::Applied(())
     );
     txn.commit().await?;
     let initial_version = explored_endpoint(&env, bmc_ip).await?.report_version;

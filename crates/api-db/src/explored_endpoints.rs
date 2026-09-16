@@ -356,17 +356,19 @@ pub async fn lookup_bmc_metadata_by_ip(
     ))
 }
 
-/// Updates the explored information about a node
+/// Replaces an endpoint's report if its version still matches.
 ///
-/// This operation will return `Ok(false)` if the entry had been deleted in
-/// the meantime or otherwise modified. It will not fail.
+/// An applied write advances the report version, stores the supplied
+/// `waiting_for_explorer_refresh`, and clears `exploration_requested` in the
+/// caller's transaction. A missing endpoint or changed report version returns
+/// `NotApplied(EndpointReportNotCurrent)`; database failures remain errors.
 pub async fn try_update(
     address: IpAddr,
     old_version: ConfigVersion,
     exploration_report: &EndpointExplorationReport,
     waiting_for_explorer_refresh: bool,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
     let query = "
 UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false
@@ -381,7 +383,11 @@ WHERE address=$4 AND version=$5";
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(query_result.rows_affected() > 0)
+    Ok(if query_result.rows_affected() > 0 {
+        ConditionalWrite::Applied(())
+    } else {
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent)
+    })
 }
 
 /// `EndpointReportNotCurrent` means the endpoint is missing or its report version
@@ -452,25 +458,30 @@ pub async fn clear_last_known_error(
 
     let mut report = row.report;
     report.last_exploration_error = None;
-    if !try_update(address, row.report_version, &report, true, txn).await? {
-        return Err(DatabaseError::ConcurrentModificationError(
-            "ExploredEndpoint",
-            row.report_version.version_string(),
-        ));
+    match try_update(address, row.report_version, &report, true, txn).await? {
+        ConditionalWrite::Applied(()) => {}
+        ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
+            return Err(DatabaseError::ConcurrentModificationError(
+                "ExploredEndpoint",
+                row.report_version.version_string(),
+            ));
+        }
     }
 
     Ok(())
 }
 
-/// Sets the `exploration_requested` flag on an explored_endpoint
+/// `re_explore_if_version_matches` requests exploration without advancing the
+/// report version, so an in-flight report can still be published.
 ///
-/// Returns Ok(`true`) if the endpoint record is updated and Ok(`false`) if no
-/// record with the given version exists.
+/// Returns `Applied(())` when `exploration_requested` is set, including when it
+/// was already set. A missing endpoint or changed report version returns
+/// `NotApplied(EndpointReportNotCurrent)`; database failures remain errors.
 pub async fn re_explore_if_version_matches(
     address: IpAddr,
     version: ConfigVersion,
     txn: &mut PgConnection,
-) -> Result<bool, DatabaseError> {
+) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let query = "UPDATE explored_endpoints SET exploration_requested = true WHERE address = $1 AND version = $2 RETURNING address";
     let query_result: Result<(IpAddr,), _> = sqlx::query_as(query)
         .bind(address)
@@ -479,9 +490,9 @@ pub async fn re_explore_if_version_matches(
         .await;
 
     match query_result {
-        Ok((_address,)) => Ok(true),
+        Ok((_address,)) => Ok(ConditionalWrite::Applied(())),
         Err(e) => match e {
-            sqlx::Error::RowNotFound => Ok(false),
+            sqlx::Error::RowNotFound => Ok(ConditionalWrite::NotApplied(EndpointReportNotCurrent)),
             e => Err(DatabaseError::query(query, e)),
         },
     }
@@ -946,6 +957,38 @@ mod tests {
     use model::site_explorer::{Chassis, NetworkAdapter};
 
     use super::*;
+
+    #[crate::sqlx_test]
+    async fn re_exploration_request_preserves_report_version(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        let address = "10.0.3.1".parse().unwrap();
+        assert_eq!(
+            re_explore_if_version_matches(address, ConfigVersion::initial(), &mut txn)
+                .await
+                .unwrap(),
+            ConditionalWrite::NotApplied(EndpointReportNotCurrent)
+        );
+        insert(
+            address,
+            &EndpointExplorationReport::default(),
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap();
+        let endpoint = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
+
+        assert_eq!(
+            re_explore_if_version_matches(address, endpoint.report_version, &mut txn)
+                .await
+                .unwrap(),
+            ConditionalWrite::Applied(())
+        );
+
+        let requested = find_all_by_ip(address, &mut txn).await.unwrap().remove(0);
+        assert!(requested.exploration_requested);
+        assert_eq!(requested.report_version, endpoint.report_version);
+    }
 
     /// An `UpgradeFirmwareWait` state — the one the "installing" predicate keys
     /// on. Built from the real enum so the row-returning path can deserialize it.

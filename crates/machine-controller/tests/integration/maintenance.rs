@@ -135,7 +135,7 @@ enum EntryState {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct ReconciliationCase {
     operation: MachineMaintenanceOperation,
     entry_state: EntryState,
@@ -160,6 +160,9 @@ fn expected_action(operation: MachineMaintenanceOperation) -> PowerAction {
         MachineMaintenanceOperation::PowerOn => PowerAction::On,
         MachineMaintenanceOperation::PowerOff => PowerAction::ForceOff,
         MachineMaintenanceOperation::Reset => PowerAction::ForceRestart,
+        MachineMaintenanceOperation::ChassisReset { .. } => {
+            unreachable!("chassis resets do not use the compute-tray backend")
+        }
     }
 }
 
@@ -257,14 +260,14 @@ async fn reconcile(
     case: ReconciliationCase,
 ) -> Result<Observation, String> {
     backend.set_outcome(case.backend_outcome);
-    enter_requested_state(env, host, case.operation, case.entry_state).await;
+    enter_requested_state(env, host, case.operation.clone(), case.entry_state).await;
 
     // First iteration accepts the request from Ready or Failed.
     env.run_single_iteration().await;
     let entered = host.host.machine().await;
     if !matches!(
-        entered.state.value,
-        ManagedHostState::Maintenance { operation } if operation == case.operation
+        &entered.state.value,
+        ManagedHostState::Maintenance { operation } if operation == &case.operation
     ) {
         return Err(format!(
             "request did not enter Maintenance from {:?}: {:?}",
@@ -309,7 +312,7 @@ fn backend_cases() -> Vec<Case<ReconciliationCase, Observation, String>> {
                             .into_boxed_str(),
                     ),
                     input: ReconciliationCase {
-                        operation,
+                        operation: operation.clone(),
                         entry_state,
                         backend_outcome,
                     },
@@ -320,7 +323,7 @@ fn backend_cases() -> Vec<Case<ReconciliationCase, Observation, String>> {
                         } else {
                             ResultingState::Failed
                         },
-                        actions: vec![expected_action(operation)],
+                        actions: vec![expected_action(operation.clone())],
                     }),
                 });
             }
@@ -392,7 +395,7 @@ fn precondition_cases() -> Vec<Case<(MachineMaintenanceOperation, EntryState), O
         for entry_state in [EntryState::Ready, EntryState::Failed] {
             cases.push(Case {
                 scenario: Box::leak(format!("{operation:?} / {entry_state:?}").into_boxed_str()),
-                input: (operation, entry_state),
+                input: (operation.clone(), entry_state),
                 expect: Outcome::Yields(Observation {
                     request_cleared: true,
                     resulting_state: ResultingState::Failed,

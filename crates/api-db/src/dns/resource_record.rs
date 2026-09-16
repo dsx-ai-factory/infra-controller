@@ -18,6 +18,7 @@ use std::net::IpAddr;
 
 use carbide_uuid::domain::DomainId;
 use dns_record::SoaRecord;
+use ipnetwork::IpNetwork;
 use sqlx::postgres::PgRow;
 use sqlx::{Error, FromRow, Row};
 
@@ -108,15 +109,20 @@ pub async fn find_record(
     txn: impl DbReader<'_>,
     query_name: &str,
 ) -> Result<Vec<DbResourceRecord>, DatabaseError> {
+    // The dns_records view does not filter on the owning domain's lifecycle,
+    // so join it here: a record whose zone is soft-deleted is not served, even
+    // when a live parent zone would otherwise hold the name.
     // TODO: Configurable defaults for TTL
     let query = r#"
     SELECT
-     q_name,
-     resource_record,
-     domain_id,
-     COALESCE(ttl, 300) as ttl,
-     COALESCE(q_type, CASE WHEN family(resource_record) = 6 THEN 'AAAA' ELSE 'A' END) as q_type
-     from dns_records WHERE q_name=$1"#;
+     dr.q_name,
+     dr.resource_record,
+     dr.domain_id,
+     COALESCE(dr.ttl, 300) as ttl,
+     COALESCE(dr.q_type, CASE WHEN family(dr.resource_record) = 6 THEN 'AAAA' ELSE 'A' END) as q_type
+     FROM dns_records dr
+     JOIN domains d ON d.id = dr.domain_id
+     WHERE dr.q_name = $1 AND d.deleted IS NULL"#;
 
     tracing::info!(query_name, "Looking up DNS record",);
     let result = sqlx::query_as::<_, DbResourceRecord>(query)
@@ -220,6 +226,82 @@ pub async fn find_ptr_record(
     sqlx::query_as::<_, DbPtrRecord>(query)
         .bind(address.to_string())
         .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Is there any published record under `name`?
+///
+/// `name` is absolute and lowercase with its trailing dot, such as
+/// `rack1.example.com.`. Only names strictly below it count; a record at
+/// `name` itself does not.
+///
+/// This decides NODATA versus NXDOMAIN for a name that has no records of its
+/// own. If `gpu1.rack1.example.com.` exists then `rack1.example.com.` exists
+/// too, even with nothing published at it (RFC 8020 §2), and a query for it
+/// must not be answered NXDOMAIN.
+///
+/// Only records in a live zone count. A record under a soft-deleted child
+/// zone would otherwise turn NXDOMAIN into NODATA for a name in the live
+/// parent, matching [`find_record`], which does not serve those records.
+// TODO: the suffix predicate cannot use an index and `dns_records` is a view,
+// so this scans the view on every in-zone miss. The only forward names this
+// product publishes under are `adm.<zone>` and `bmc.<zone>`; replace the scan
+// with `EXISTS` probes on those two source tables keyed by `domain_id`.
+pub async fn any_record_below(txn: impl DbReader<'_>, name: &str) -> Result<bool, DatabaseError> {
+    let query = r#"
+    SELECT EXISTS (
+        SELECT 1
+        FROM dns_records dr
+        JOIN domains d ON d.id = dr.domain_id
+        WHERE right(lower(dr.q_name), length($1) + 1) = '.' || $1
+          AND d.deleted IS NULL
+    )"#;
+    sqlx::query_scalar::<_, bool>(query)
+        .bind(name)
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// True when any address inside `prefix` has a PTR that would be published.
+///
+/// The two arms are the `ptr_candidates` arms of [`find_ptr_record`] with
+/// `<<=` in place of `=`: a primary or BMC machine interface with a live
+/// domain, or an instance address the `dns_records_instance` view publishes.
+/// An address whose only owner cannot publish a name does not count, so a
+/// reverse name exists exactly when some PTR exists at or below it. Used to
+/// tell an empty non-terminal in a reverse zone (NODATA) from a name with
+/// nothing under it (NXDOMAIN).
+///
+/// An address with two publishable owners does count, even though
+/// [`find_ptr_record`] withholds its answer. The name then classifies as
+/// NODATA: the site has PTR data for it and declines to choose. NXDOMAIN would
+/// deny the whole subtree, and under RFC 8020 a resolver may stop asking about
+/// names below it for the negative TTL.
+pub async fn any_ptr_published_within(
+    txn: impl DbReader<'_>,
+    prefix: IpNetwork,
+) -> Result<bool, DatabaseError> {
+    let query = r#"
+    SELECT EXISTS (
+        SELECT 1
+        FROM machine_interface_addresses mia
+        JOIN machine_interfaces mi ON mi.id = mia.interface_id
+        JOIN domains d ON d.id = mi.domain_id
+        WHERE mia.address <<= $1::inet
+          AND (mi.primary_interface = TRUE OR mi.interface_type = 'Bmc')
+          AND d.deleted IS NULL
+    ) OR EXISTS (
+        SELECT 1
+        FROM dns_records_instance instance_records
+        JOIN domains d ON d.id = instance_records.domain_id
+        WHERE instance_records.resource_record <<= $1::inet
+          AND d.deleted IS NULL
+    )"#;
+    sqlx::query_scalar::<_, bool>(query)
+        .bind(prefix.to_string())
+        .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -626,6 +708,83 @@ mod tests {
     }
 
     #[crate::sqlx_test]
+    async fn reverse_existence_follows_publishable_ptrs_not_owners(pool: sqlx::PgPool) {
+        // The prefix probe and find_ptr_record must agree on what counts: an
+        // owner that cannot publish a name must not make a reverse name exist.
+        let mut txn = pool.begin().await.unwrap();
+        let (instance_id, segment_id, vpc_id) =
+            seed_instance_segment(txn.as_mut(), "existence", "tenant.example.com", "tenant").await;
+        let prefix: ipnetwork::IpNetwork = "10.1.2.0/24".parse().unwrap();
+
+        assert!(
+            !super::any_ptr_published_within(txn.as_mut(), prefix)
+                .await
+                .unwrap(),
+            "no addresses at all"
+        );
+
+        // A Data interface owns an address but publishes no PTR.
+        let interface_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces (
+                 segment_id, mac_address, primary_interface, hostname, interface_type
+             )
+             VALUES ($1, '02:00:00:00:38:91', false, 'data-only', 'Data')
+             RETURNING id",
+        )
+        .bind(segment_id)
+        .fetch_one(txn.as_mut())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO machine_interface_addresses (interface_id, address)
+             VALUES ($1, '10.1.2.7'::inet)",
+        )
+        .bind(interface_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        // An instance address with no hostname owns an address but publishes nothing.
+        sqlx::query(
+            "INSERT INTO instance_addresses (instance_id, address, segment_id, prefix, vpc_id)
+             VALUES ($1::uuid, '10.1.2.8'::inet, $2::uuid, '10.1.2.0/24'::cidr, $3::uuid)",
+        )
+        .bind(instance_id)
+        .bind(segment_id)
+        .bind(vpc_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+        assert!(
+            !super::any_ptr_published_within(txn.as_mut(), prefix)
+                .await
+                .unwrap(),
+            "owners without a publishable name do not make the range exist"
+        );
+
+        add_address(
+            txn.as_mut(),
+            instance_id,
+            segment_id,
+            vpc_id,
+            "10.1.2.3",
+            "10.1.2.0/24",
+        )
+        .await;
+        assert!(
+            super::any_ptr_published_within(txn.as_mut(), prefix)
+                .await
+                .unwrap(),
+            "a published instance PTR makes the range exist"
+        );
+        assert!(
+            !super::any_ptr_published_within(txn.as_mut(), "10.1.3.0/24".parse().unwrap())
+                .await
+                .unwrap(),
+            "a neighbouring range is unaffected"
+        );
+    }
+
+    #[crate::sqlx_test]
     async fn host_inband_instance_addresses_have_no_instance_ptr(pool: sqlx::PgPool) {
         // A host_inband address is the host's own; its PTR comes from the machine
         // source, not the instance arm. With no machine interface here there is no
@@ -695,6 +854,64 @@ mod tests {
             .await
             .unwrap();
         assert!(soa.is_none(), "a deleted forward zone cannot serve SOA");
+    }
+
+    #[crate::sqlx_test]
+    async fn a_deleted_child_zone_neither_serves_nor_exists_under_a_live_parent(
+        pool: sqlx::PgPool,
+    ) {
+        // The dns_records view keeps publishing rows whose zone is soft-deleted.
+        // With a live parent zone above, the handler would otherwise answer the
+        // child's stale A record as authoritative through the parent, and its
+        // existence would turn the parent's NXDOMAIN into NODATA.
+        let mut txn = pool.begin().await.unwrap();
+        domain::persist(NewDomain::new("example.com"), txn.as_mut())
+            .await
+            .unwrap();
+        let (instance_id, segment_id, vpc_id) =
+            seed_instance_segment(txn.as_mut(), "deleted-child", "child.example.com", "tenant")
+                .await;
+        add_address(
+            txn.as_mut(),
+            instance_id,
+            segment_id,
+            vpc_id,
+            "10.1.2.3",
+            "10.1.2.0/24",
+        )
+        .await;
+
+        let q_name = "10-1-2-3.child.example.com.";
+        assert_eq!(
+            find_record(txn.as_mut(), q_name).await.unwrap().len(),
+            1,
+            "the record is served while the child zone is live"
+        );
+        assert!(
+            super::any_record_below(txn.as_mut(), "child.example.com.")
+                .await
+                .unwrap(),
+            "the child zone has a record below it while live"
+        );
+
+        let domains = domain::find_by_name(txn.as_mut(), "child.example.com")
+            .await
+            .unwrap();
+        let [child] = domains.as_slice() else {
+            panic!("test fixture should have exactly one child domain");
+        };
+        domain::delete(child.clone(), txn.as_mut()).await.unwrap();
+
+        assert!(
+            find_record(txn.as_mut(), q_name).await.unwrap().is_empty(),
+            "a deleted zone's records are not served through the live parent"
+        );
+        assert!(
+            !super::any_record_below(txn.as_mut(), "child.example.com.")
+                .await
+                .unwrap(),
+            "a deleted zone's records do not make its name exist in the live parent"
+        );
     }
 
     #[crate::sqlx_test]

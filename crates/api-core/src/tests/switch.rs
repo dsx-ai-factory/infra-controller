@@ -330,7 +330,11 @@ async fn test_switch_controller_state_transitions(
         &new_state,
     )
     .await?;
-    assert!(updated, "update with correct version should succeed");
+    assert_eq!(
+        updated,
+        db::ConditionalWrite::Applied(()),
+        "update with correct version should succeed"
+    );
 
     // Verify the state was updated
     let updated_switches = db_switch::find_by(
@@ -362,8 +366,9 @@ async fn test_switch_controller_state_transitions(
         &SwitchControllerState::Created,
     )
     .await?;
-    assert!(
-        !stale_update,
+    assert_eq!(
+        stale_update,
+        db::ConditionalWrite::NotApplied(db::ControllerStateNotCurrent),
         "update with stale version should be rejected"
     );
 
@@ -377,7 +382,11 @@ async fn test_switch_controller_state_transitions(
         &SwitchControllerState::Created,
     )
     .await?;
-    assert!(updated_again, "update with current version should succeed");
+    assert_eq!(
+        updated_again,
+        db::ConditionalWrite::Applied(()),
+        "update with current version should succeed"
+    );
 
     txn.rollback().await?;
 

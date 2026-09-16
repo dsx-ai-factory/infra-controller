@@ -96,7 +96,11 @@ pub(crate) async fn seed_test_data(
     )
     .await
     .expect("failed to advance rack to Ready");
-    assert!(advanced, "rack controller_state version mismatch");
+    assert_eq!(
+        advanced,
+        db::ConditionalWrite::Applied(()),
+        "rack controller_state version mismatch"
+    );
 
     txn.commit().await.unwrap();
     (rack_id, ps1, ps2, sw1, sw2)

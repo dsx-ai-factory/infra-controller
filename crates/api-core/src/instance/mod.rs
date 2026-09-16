@@ -1954,6 +1954,14 @@ pub(crate) async fn batch_allocate_instances(
 
     // Start a single transaction for all allocations
     let mut txn = api.txn_begin().await?;
+    if requests
+        .iter()
+        .any(|request| request.config.network.auto_config.is_none())
+    {
+        // Take the overlap lock before Machine, NSG, or prefix locks so a
+        // waiting allocation reads the policy committed by the prior writer.
+        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    }
 
     // ==== Phase 2: Check against allocations for tenants in requests ====
 
@@ -2457,6 +2465,16 @@ pub(crate) async fn batch_allocate_instances(
             }
         }
 
+        if mh_snapshot.has_managed_dpus() {
+            crate::handlers::tenant_prefix_overlap::validate_instance_network(
+                api,
+                txn.as_mut(),
+                &request.config,
+                None,
+                true,
+            )
+            .await?;
+        }
         processed_requests.push((request, mh_snapshot));
     }
 
