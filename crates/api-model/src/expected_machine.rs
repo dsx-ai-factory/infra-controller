@@ -827,6 +827,22 @@ impl ExpectedMachine {
     }
 }
 
+/// Trim surrounding whitespace from a DPU pairing serial during deserialization.
+///
+/// The `expected_machines.json` startup import deserializes straight into this
+/// model, unlike the RPC boundary, which already trims the serial in its
+/// `TryFrom` conversion. Without this, a serial such as `" MT2000X00001 "` would
+/// persist verbatim, pass the non-empty check, yet never match the trimmed DPU
+/// pairing serial that Site Explorer compares against -- silently dropping the
+/// deterministic reservation and letting the DPU fall back to an automatic
+/// address.
+fn deserialize_trimmed_serial<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(String::deserialize(deserializer)?.trim().to_string())
+}
+
 /// A deterministic DPU underlay loopback reservation.
 ///
 /// Keyed by the trimmed DPU pairing serial number -- the same identity NICo
@@ -839,6 +855,7 @@ impl ExpectedMachine {
 /// uniqueness of serials and per-family addresses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpuLoopbackReservation {
+    #[serde(deserialize_with = "deserialize_trimmed_serial")]
     pub dpu_serial_number: String,
     #[serde(default)]
     pub loopback_ipv4: Option<Ipv4Addr>,
@@ -1083,6 +1100,24 @@ mod tests {
                 r#""no_dpu""# => Yields(HostDpuPolicy::Ignore),
             }
         );
+    }
+
+    /// The startup `expected_machines.json` import deserializes straight into the
+    /// model, so a reservation serial carrying surrounding whitespace must be
+    /// trimmed on the way in; otherwise it would never match Site Explorer's
+    /// trimmed DPU pairing serial and the deterministic reservation is lost.
+    #[test]
+    fn dpu_loopback_reservation_trims_serial_on_deserialize() {
+        let reservation: DpuLoopbackReservation = serde_json::from_str(
+            r#"{"dpu_serial_number":"  MT2000X00001  ","loopback_ipv4":"192.0.2.10"}"#,
+        )
+        .expect("valid reservation JSON");
+        assert_eq!(reservation.dpu_serial_number, "MT2000X00001");
+        assert_eq!(
+            reservation.loopback_ipv4,
+            Some("192.0.2.10".parse().unwrap())
+        );
+        assert_eq!(reservation.loopback_ipv6, None);
     }
 
     #[test]

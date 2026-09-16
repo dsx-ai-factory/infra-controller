@@ -4913,6 +4913,7 @@ async fn test_create_missing_from_preallocates_interfaces(
     let mut txn = env.pool.begin().await?;
     crate::handlers::expected_machine::create_missing_from(
         &mut txn,
+        &env.api.common_pools,
         std::slice::from_ref(&machine),
     )
     .await?;
@@ -4971,6 +4972,7 @@ async fn test_create_missing_from_preallocates_interfaces(
     let mut txn = env.pool.begin().await?;
     crate::handlers::expected_machine::create_missing_from(
         &mut txn,
+        &env.api.common_pools,
         std::slice::from_ref(&machine),
     )
     .await?;
@@ -5144,4 +5146,87 @@ async fn dpu_loopback_reservation_pool_membership(pool: sqlx::PgPool) {
         )))
         .await
         .expect("re-submitting an unchanged reservation must be a no-op");
+}
+
+/// Build a minimal model `ExpectedMachine` (as the `expected_machines.json`
+/// import deserializes) carrying a single DPU loopback reservation.
+fn model_expected_machine_with_reservation(
+    bmc_mac_address: &str,
+    serial_number: &str,
+    reservation: model::expected_machine::DpuLoopbackReservation,
+) -> ExpectedMachine {
+    ExpectedMachine {
+        id: None,
+        bmc_mac_address: bmc_mac_address.parse().unwrap(),
+        data: ExpectedMachineData {
+            bmc_username: "ADMIN".into(),
+            bmc_password: "PASS".into(),
+            serial_number: serial_number.into(),
+            dpu_loopback_reservations: Some(vec![reservation]),
+            ..Default::default()
+        },
+    }
+}
+
+/// The `expected_machines.json` startup import (`create_missing_from`) runs the
+/// same reservation pool-membership validation as the RPC write paths, so a
+/// reserved address outside its pool is rejected at import rather than persisted
+/// for DPU discovery to fail on later; a free requestable value still imports.
+/// The three rejection reasons themselves are covered at the shared-helper layer
+/// by `dpu_loopback_reservation_pool_membership`.
+#[crate::sqlx_test()]
+async fn create_missing_from_validates_reservation_pool_membership(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool.clone()).await;
+    let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
+
+    // Seed one free, requestable loopback value.
+    let free: std::net::IpAddr = "192.0.2.10".parse()?;
+    let mut txn = pool.begin().await?;
+    db::resource_pool::populate(loopback_pool, &mut txn, vec![free], false).await?;
+    txn.commit().await?;
+
+    // An address outside the pool must be rejected at import, not deferred.
+    let outside_pool = model_expected_machine_with_reservation(
+        "1A:1B:1C:1D:1E:01",
+        "VVG12101",
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_serial_number: "D1".into(),
+            loopback_ipv4: Some("198.51.100.1".parse()?),
+            loopback_ipv6: None,
+        },
+    );
+    let mut txn = pool.begin().await?;
+    let error = crate::handlers::expected_machine::create_missing_from(
+        &mut txn,
+        &env.api.common_pools,
+        std::slice::from_ref(&outside_pool),
+    )
+    .await
+    .expect_err("an address outside the pool must be rejected at import");
+    assert!(matches!(error, CarbideError::InvalidArgument(_)));
+    txn.rollback().await?;
+
+    // A free, requestable value imports successfully.
+    let valid = model_expected_machine_with_reservation(
+        "1A:1B:1C:1D:1E:02",
+        "VVG12102",
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_serial_number: "D2".into(),
+            loopback_ipv4: Some("192.0.2.10".parse()?),
+            loopback_ipv6: None,
+        },
+    );
+    let mut txn = pool.begin().await?;
+    crate::handlers::expected_machine::create_missing_from(
+        &mut txn,
+        &env.api.common_pools,
+        std::slice::from_ref(&valid),
+    )
+    .await
+    .expect("a free requestable value must import");
+    txn.commit().await?;
+
+    Ok(())
 }

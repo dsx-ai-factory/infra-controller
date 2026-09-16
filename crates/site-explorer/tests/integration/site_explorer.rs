@@ -975,6 +975,8 @@ async fn test_rejected_successful_report_preserves_topology_and_skips_only_its_r
             ManagedHostState::Ready,
             None,
             CURRENT_STATE_MODEL_VERSION,
+            // Hosts never receive a DPU loopback reservation.
+            None,
         )
         .await?;
         // Leave the BMC interface unattached for preingestion remediation.
