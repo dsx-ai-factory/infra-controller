@@ -9,7 +9,11 @@ CREATE TABLE expected_dpu_loopback_reservations (
     dpu_serial_number text NOT NULL UNIQUE,
     loopback_ipv4 inet,
     loopback_ipv6 inet,
-    CHECK (loopback_ipv4 IS NOT NULL OR loopback_ipv6 IS NOT NULL)
+    CHECK (loopback_ipv4 IS NOT NULL OR loopback_ipv6 IS NOT NULL),
+    -- Each column holds only its own address family, so a reader never has to
+    -- reconcile a wrong-family value against the field it was stored in.
+    CHECK (loopback_ipv4 IS NULL OR family(loopback_ipv4) = 4),
+    CHECK (loopback_ipv6 IS NULL OR family(loopback_ipv6) = 6)
 );
 
 -- Direct discovery resolves a reservation by the DPU serial alone, and cascade

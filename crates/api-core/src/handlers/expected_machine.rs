@@ -193,6 +193,25 @@ fn validate_expected_machine_for_insert(machine: &ExpectedMachine) -> Result<(),
     Ok(())
 }
 
+/// Full pre-insert validation: the pure shape checks in
+/// [`validate_expected_machine_for_insert`] followed by the transaction-backed
+/// [`validate_reservation_pool_membership`]. The cheap shape checks run first so
+/// a malformed request never pays for pool lookups.
+///
+/// Call sites that parse via [`parse_expected_machine_for_insert`] already run
+/// the shape checks there and only need the pool step; this wrapper is for the
+/// sites that hold an already-normalized machine and would otherwise call both
+/// halves back to back.
+async fn validate_expected_machine(
+    txn: &mut sqlx::PgConnection,
+    common_pools: &CommonPools,
+    machine: &ExpectedMachine,
+    existing: Option<&ExpectedMachine>,
+) -> Result<(), CarbideError> {
+    validate_expected_machine_for_insert(machine)?;
+    validate_reservation_pool_membership(txn, common_pools, machine, existing).await
+}
+
 /// Request-shape validation for DPU loopback reservations that needs no
 /// database: each reservation names a non-empty serial and at least one
 /// address, and neither a serial nor a per-family address repeats within the
@@ -286,7 +305,7 @@ async fn validate_reservation_pool_membership(
                 txn,
                 common_pools.ethernet.pool_loopback_ip.as_ref(),
                 IpAddr::V4(ipv4),
-                "lo-ip",
+                model::resource_pool::common::LOOPBACK_IP,
             )
             .await?;
         }
@@ -298,7 +317,7 @@ async fn validate_reservation_pool_membership(
                 txn,
                 common_pools.ethernet.pool_loopback_ip_v6.as_ref(),
                 ipv6,
-                "lo-ip-v6",
+                model::resource_pool::common::LOOPBACK_IP_V6,
             )
             .await?;
         }
@@ -489,9 +508,7 @@ pub(crate) async fn update(
         data,
     };
     normalize_host_bmc_configuration(&mut machine, existing.as_ref(), overrides)?;
-    validate_expected_machine_for_insert(&machine)?;
-    validate_reservation_pool_membership(&mut txn, &api.common_pools, &machine, existing.as_ref())
-        .await?;
+    validate_expected_machine(&mut txn, &api.common_pools, &machine, existing.as_ref()).await?;
 
     let preallocations = update_preallocated_interfaces(
         &mut txn,
@@ -1327,8 +1344,7 @@ async fn create_expected_machine(
     };
 
     normalize_host_bmc_configuration(&mut expected_machine, None, overrides)?;
-    validate_expected_machine_for_insert(&expected_machine)?;
-    validate_reservation_pool_membership(&mut *txn, common_pools, &expected_machine, None).await?;
+    validate_expected_machine(&mut *txn, common_pools, &expected_machine, None).await?;
     db::expected_machine::create(txn, expected_machine).await?;
 
     Ok((result_machine, Vec::new()))
@@ -1366,8 +1382,7 @@ async fn update_expected_machine(
         data,
     };
     normalize_host_bmc_configuration(&mut expected_machine, existing.as_ref(), overrides)?;
-    validate_expected_machine_for_insert(&expected_machine)?;
-    validate_reservation_pool_membership(
+    validate_expected_machine(
         &mut *txn,
         common_pools,
         &expected_machine,

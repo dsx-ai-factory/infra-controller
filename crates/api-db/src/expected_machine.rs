@@ -35,10 +35,23 @@ const SQL_VIOLATION_DUPLICATE_MAC: &str = "expected_machines_bmc_mac_address_key
 
 /// Select every `expected_machines` column plus a JSON array of the row's DPU
 /// loopback reservations, hydrated from the child table in one round trip. The
-/// `$rest` fragment supplies the trailing `WHERE` / `ORDER BY` clause. Reads
-/// through this macro always yield `Some(..)` reservations (possibly empty).
+/// `$expected_machines_filter` fragment supplies the trailing `WHERE` /
+/// `ORDER BY` clause. Reads through this macro always yield `Some(..)`
+/// reservations (possibly empty).
+///
+/// This is a macro rather than a helper function on purpose: the reservations
+/// live in the `expected_dpu_loopback_reservations` child table (one machine,
+/// many rows), but `ExpectedMachine`'s `FromRow` decodes a single row, so a
+/// correlated `json_agg` subquery collapses the child rows into one JSON column
+/// named `dpu_loopback_reservations` that `FromRow` reads directly. `host(..)`
+/// yields the bare address text so it parses into `Ipv4Addr` / `Ipv6Addr`.
+/// `concat!` keeps the result a compile-time `&'static str`, which `sqlx::query`
+/// requires to prove the SQL is static and not dynamically built -- a helper
+/// returning `String` trips sqlx's dynamic-SQL-injection guard. The
+/// `$expected_machines_filter:literal` bound enforces that the trailing clause is
+/// a string literal, never caller input.
 macro_rules! select_expected_machine {
-    ($rest:literal) => {
+    ($expected_machines_filter:literal) => {
         concat!(
             "SELECT expected_machines.*, ",
             "(SELECT COALESCE(json_agg(json_build_object(",
@@ -48,7 +61,7 @@ macro_rules! select_expected_machine {
             "FROM expected_dpu_loopback_reservations r ",
             "WHERE r.bmc_mac_address = expected_machines.bmc_mac_address) AS dpu_loopback_reservations ",
             "FROM expected_machines ",
-            $rest,
+            $expected_machines_filter,
         )
     };
 }
