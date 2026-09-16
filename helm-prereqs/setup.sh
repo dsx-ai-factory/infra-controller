@@ -719,6 +719,23 @@ echo "MetalLB ready"
 if [[ "${INSTALL_CONTOUR}" == "true" ]]; then
     _SETUP_PHASE="[1d] Contour/Envoy"
     echo "=== [1d] Contour/Envoy ==="
+    # helmfile sync runs `helm upgrade --install`, so a contour release already
+    # in projectcontour is upgraded rather than rejected. Left unchecked that
+    # reconfigures a site's own ingress controller with our values and stamps it
+    # with the ownership label clean.sh keys on, which would then delete it.
+    # Only a release using our own name reaches this: a foreign release under a
+    # different name makes the sync a fresh install, and Helm refuses that
+    # because the cluster-scoped IngressClass already belongs to another release.
+    if kubectl get deployment contour-contour -n projectcontour &>/dev/null; then
+        _CONTOUR_OWNER="$(kubectl get deployment contour-contour -n projectcontour \
+            -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null || true)"
+        if [[ "${_CONTOUR_OWNER}" != "nico" ]]; then
+            echo "ERROR: projectcontour already runs a Contour that NICo does not manage." >&2
+            echo "  Drop --install-contour and point nico-rest-api.ingress.className at it," >&2
+            echo "  or remove it first: helm uninstall contour -n projectcontour" >&2
+            exit 1
+        fi
+    fi
     # No --include-needs. Phase 1c above already installed MetalLB, and pulling
     # it in here would re-sync that release without the CRD apply/re-apply that
     # phase 1c wraps around it. The release sets wait: true, so this returns
