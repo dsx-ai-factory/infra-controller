@@ -1802,6 +1802,21 @@ jobs:
           registry-password: ${{ secrets.NVCR_TOKEN }}
           charts: helm-prereqs
 
+      - name: Test observability release status
+        run: bash helm-prereqs/tests/install-observability-release-status_test.sh
+
+      - name: Test observability setup gate
+        run: bash helm-prereqs/tests/setup-observability-core-gate_test.sh
+
+      - name: Test legacy Flow upgrade guard
+        run: bash helm-prereqs/tests/setup-legacy-flow-upgrade-guard_test.sh
+
+      - name: Test Flow cleanup order
+        run: bash helm-prereqs/tests/setup-flow-cleanup-order_test.sh
+
+      - name: Test legacy Flow manager cleanup
+        run: bash helm-prereqs/tests/cleanup-legacy-flow-managers_test.sh
+
       - name: Test Vault Kubernetes URLs
         run: bash helm-prereqs/tests/vault-kubernetes-url_test.sh
 
