@@ -2588,6 +2588,280 @@ async fn test_allocate_network_vpc_prefix_id(_: PgPoolOptions, options: PgConnec
 }
 
 #[crate::sqlx_test]
+async fn initial_network_wait_keeps_admin_until_tenant_configuration_is_ready(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let mut config = get_config();
+    config.dpu_config.restart_ovs_on_use_admin_network_change = true;
+    let env = Box::pin(create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config).with_fnn_config(None),
+    ))
+    .await;
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID)
+        .await
+        .unwrap();
+    let vpc_id = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let prefix_id = create_tenant_overlay_prefix(&env, vpc_id).await;
+
+    struct Case {
+        scenario: &'static str,
+        predecessor_selected_tenant: bool,
+    }
+    for Case {
+        scenario,
+        predecessor_selected_tenant,
+    } in [
+        Case {
+            scenario: "new allocation",
+            predecessor_selected_tenant: false,
+        },
+        Case {
+            scenario: "predecessor selected tenant before network readiness",
+            predecessor_selected_tenant: true,
+        },
+    ] {
+        let mh = create_managed_host_multi_dpu(&env, 2).await;
+        env.api
+            .allocate_instance(
+                InstanceAllocationRequest::builder(false)
+                    .machine_id(mh.id)
+                    .config(
+                        InstanceConfig::default_tenant_and_os()
+                            .tenant(fixture_tenant_config())
+                            .network(single_interface_network_config_with_vpc_prefix(prefix_id)),
+                    )
+                    .tonic_request(),
+            )
+            .await
+            .unwrap();
+        let waiting = ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
+        };
+        env.run_machine_state_controller_iteration_until_state_matches(
+            &mh.id.into(),
+            10,
+            waiting.clone(),
+        )
+        .await;
+
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert_eq!(
+            snapshot.host_snapshot.network_config.use_admin_network,
+            Some(true),
+            "{scenario}"
+        );
+        assert_eq!(snapshot.managed_state, waiting, "{scenario}");
+        assert!(
+            snapshot
+                .dpu_snapshots
+                .iter()
+                .all(|dpu| dpu.network_config.use_admin_network_changed != Some(true)),
+            "{scenario}"
+        );
+        let primary_dpu_id = snapshot
+            .host_snapshot
+            .status
+            .interfaces
+            .iter()
+            .find(|interface| interface.primary_interface)
+            .and_then(|interface| interface.attached_dpu_machine_id)
+            .unwrap();
+        txn.commit().await.unwrap();
+        if predecessor_selected_tenant {
+            // The predecessor persisted tenant mode and its restart before entering this wait.
+            let mut txn = env.db_txn().await;
+            let snapshot = mh.snapshot(&mut txn).await;
+            let mut network = snapshot.host_snapshot.network_config.value.clone();
+            network.use_admin_network = Some(false);
+            assert_eq!(
+                db::machine::try_update_network_config(
+                    &mut txn,
+                    &mh.id.into(),
+                    snapshot.host_snapshot.network_config.version,
+                    &network,
+                )
+                .await
+                .unwrap(),
+                db::ConditionalWrite::Applied(()),
+                "{scenario}"
+            );
+            db::machine::set_use_admin_network_changed(&mut txn, &primary_dpu_id, true)
+                .await
+                .unwrap();
+            txn.commit().await.unwrap();
+        }
+
+        let mut admin_responses = Vec::new();
+        for dpu_id in &mh.dpu_ids {
+            let response = env
+                .api
+                .get_managed_host_network_config(Request::new(
+                    rpc::forge::ManagedHostNetworkConfigRequest {
+                        dpu_machine_id: Some(*dpu_id),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(response.use_admin_network, "{scenario}");
+            assert!(response.admin_interface.is_some(), "{scenario}");
+            assert!(response.tenant_interfaces.is_empty(), "{scenario}");
+            assert!(
+                response.instance_network_config_version.is_empty(),
+                "{scenario}"
+            );
+            assert!(response.vni_device.is_empty(), "{scenario}");
+            admin_responses.push((*dpu_id, response));
+        }
+        // This also consumes the predecessor's early restart acknowledgement.
+        mh.network_configured(&env).await;
+
+        env.run_machine_state_controller_iteration().await;
+        let tenant_wait = ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForNetworkConfig,
+        };
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert_eq!(snapshot.managed_state, tenant_wait, "{scenario}");
+        assert_eq!(
+            snapshot.host_snapshot.network_config.use_admin_network,
+            Some(false),
+            "{scenario}"
+        );
+        let tenant_version = snapshot.host_snapshot.network_config.version;
+        let (_, previous_admin_response) = &admin_responses[0];
+        assert_ne!(
+            tenant_version.version_string(),
+            previous_admin_response.managed_host_config_version,
+            "{scenario}"
+        );
+        for dpu in &snapshot.dpu_snapshots {
+            assert_eq!(dpu.network_config.version, tenant_version, "{scenario}");
+            assert_eq!(
+                dpu.network_config.use_admin_network_changed == Some(true),
+                dpu.id == primary_dpu_id,
+                "{scenario}"
+            );
+        }
+        txn.commit().await.unwrap();
+
+        for (dpu_id, admin_response) in admin_responses {
+            let response = env
+                .api
+                .get_managed_host_network_config(Request::new(
+                    rpc::forge::ManagedHostNetworkConfigRequest {
+                        dpu_machine_id: Some(dpu_id),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(
+                response.use_admin_network,
+                dpu_id != primary_dpu_id,
+                "{scenario}"
+            );
+            assert_eq!(
+                response.tenant_interfaces.len(),
+                usize::from(dpu_id == primary_dpu_id),
+                "{scenario}"
+            );
+            assert_eq!(
+                response.instance_network_config_version.is_empty(),
+                dpu_id != primary_dpu_id,
+                "{scenario}"
+            );
+            env.api
+                .record_dpu_network_status(Request::new(rpc::forge::DpuNetworkStatus {
+                    dpu_machine_id: Some(dpu_id),
+                    network_config_version: Some(admin_response.managed_host_config_version),
+                    dpu_health: Some(
+                        health_report::HealthReport::empty("forge-dpu-agent".to_string()).into(),
+                    ),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap();
+        }
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert_eq!(snapshot.managed_state, tenant_wait, "{scenario}");
+        assert!(
+            matches!(
+                &snapshot.host_snapshot.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+                    if reason.contains("Waiting for DPU agent(s) to apply network config")
+            ),
+            "{scenario}"
+        );
+        assert!(
+            snapshot
+                .instance
+                .as_ref()
+                .unwrap()
+                .observations
+                .network
+                .is_empty(),
+            "{scenario}"
+        );
+        assert_eq!(
+            snapshot
+                .dpu_snapshots
+                .iter()
+                .find(|dpu| dpu.id == primary_dpu_id)
+                .unwrap()
+                .network_config
+                .use_admin_network_changed,
+            Some(true),
+            "{scenario}"
+        );
+        txn.commit().await.unwrap();
+
+        mh.network_configured(&env).await;
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert!(
+            snapshot.managed_host_network_config_version_synced(),
+            "{scenario}"
+        );
+        let instance = snapshot.instance.as_ref().unwrap();
+        assert_eq!(
+            instance.observations.network[&primary_dpu_id].config_version,
+            instance.network_config_version,
+            "{scenario}"
+        );
+        txn.commit().await.unwrap();
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let snapshot = mh.snapshot(&mut txn).await;
+        assert_eq!(
+            snapshot.managed_state,
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::WaitingForRebootToReady,
+            },
+            "{scenario}"
+        );
+        txn.commit().await.unwrap();
+    }
+}
+
+#[crate::sqlx_test]
 async fn test_allocate_and_release_instance_vpc_prefix_id(
     _: PgPoolOptions,
     options: PgConnectOptions,

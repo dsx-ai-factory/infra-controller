@@ -234,7 +234,7 @@ async fn rejected_machine_network_config_stops_before_transition(pool: sqlx::PgP
 
     for instance_state in [
         InstanceState::SwitchToAdminNetwork,
-        InstanceState::WaitingForDpaToBeReady,
+        InstanceState::WaitingForNetworkSegmentToBeReady,
     ] {
         let state = ManagedHostState::Assigned { instance_state };
         let mut txn = env.db_txn().await;

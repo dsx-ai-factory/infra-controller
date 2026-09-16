@@ -679,10 +679,11 @@ async fn instance_overlap_config_serving_and_startup_reject_retained_unsafe_poli
         .unwrap()
         .take();
     network.use_admin_network = Some(true);
-    assert!(
+    assert_eq!(
         db::machine::try_update_network_config(&mut txn, &host.id.into(), version, &network,)
             .await
-            .unwrap()
+            .unwrap(),
+        db::ConditionalWrite::Applied(())
     );
     db::machine::update_state(
         &mut txn,

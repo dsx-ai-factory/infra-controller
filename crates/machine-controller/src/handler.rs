@@ -2181,8 +2181,7 @@ impl MachineStateHandler {
 
                 if !ctx.services.site_config.ewethers_enabled {
                     // If DPA is not enabled, we don't need to do any DPA provisioning.
-                    // So go directly to WaitingForDpaToBeReady state, where we will change
-                    // the network status of our DPUs.
+                    // Go directly to WaitingForDpaToBeReady.
                     next_state = ManagedHostState::Assigned {
                         instance_state: InstanceState::WaitingForDpaToBeReady,
                     };
@@ -8358,23 +8357,44 @@ impl StateHandler for InstanceStateHandler {
                         .filter_map(InstanceInterfaceConfig::generated_network_segment_id)
                         .collect_vec();
 
-                    // No generated VPC-prefix segment needs readiness tracking.
-                    if network_segment_ids_with_vpc.is_empty() {
-                        return Ok(StateHandlerOutcome::transition(next_state));
-                    }
-
-                    let network_segments_are_ready =
-                        db::network_segment::are_network_segments_ready(
+                    // Only generated segments need this readiness check.
+                    if !network_segment_ids_with_vpc.is_empty()
+                        && !db::network_segment::are_network_segments_ready(
                             &mut ctx.services.db_reader,
                             &network_segment_ids_with_vpc,
                         )
-                        .await?;
-                    if !network_segments_are_ready {
+                        .await?
+                    {
                         return Ok(StateHandlerOutcome::wait(
                             "Waiting for all segments to come in ready state.".to_string(),
                         ));
                     }
-                    Ok(StateHandlerOutcome::transition(next_state))
+
+                    // Switch to tenant networking after the initial network check.
+                    // Always use a fresh version: an older Core may have stored tenant
+                    // mode before this wait, but its Admin acknowledgement must not
+                    // satisfy the tenant configuration or consume its OVS restart.
+                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let host_version = mh_snapshot.host_snapshot.network_config.version;
+                    let mut host_netconf = mh_snapshot.host_snapshot.network_config.value.clone();
+                    host_netconf.use_admin_network = Some(false);
+                    db::machine::try_update_network_config(
+                        &mut txn,
+                        &mh_snapshot.host_snapshot.id,
+                        host_version,
+                        &host_netconf,
+                    )
+                    .await?
+                    .check_applied()?;
+
+                    if ctx
+                        .services
+                        .site_config
+                        .restart_ovs_on_use_admin_network_change
+                    {
+                        process_dpu_use_admin_network_state_change(&mut txn, mh_snapshot).await?;
+                    }
+                    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
                 }
                 InstanceState::WaitingForNetworkConfig => {
                     // It should be first state to process here.
@@ -9386,17 +9406,8 @@ impl StateHandler for InstanceStateHandler {
                     .await
                 }
                 InstanceState::DpaProvisioning => {
-                    // An instance is being created. The host was already flipped
-                    // to tenant network in the Ready -> Assigned transition; here
-                    // we just bump each DPA interface's config version so the
-                    // DPA state controller re-evaluates with the new host value
-                    // (READY -> WaitingForSetVNI, triggering SetVNI).
-
-                    // Note that we have to defer setting use_admin_network for the DPUs
-                    // till after DPA provisioning is complete. This is due to the fact
-                    // that we have to interact with scout to unlock/apply firmware/lock
-                    // the card. If we switch the DPUs also out of admin network, we will
-                    // no longer be able to interact with scout.
+                    // Configure the DPAs before moving the host off Admin: provisioning
+                    // needs Scout access to unlock, update and lock the cards.
 
                     let mut txn = ctx.services.db_pool.begin().await?;
                     if ctx.services.site_config.ewethers_enabled {
@@ -9439,39 +9450,10 @@ impl StateHandler for InstanceStateHandler {
                         }
                     }
 
-                    let mut txn = ctx.services.db_pool.begin().await?;
-                    let host_version = mh_snapshot.host_snapshot.network_config.version;
-                    let mut host_netconf = mh_snapshot.host_snapshot.network_config.value.clone();
-                    let old_use_admin_network = host_netconf.use_admin_network;
-                    host_netconf.use_admin_network = Some(false);
-                    db::machine::try_update_network_config(
-                        &mut txn,
-                        &mh_snapshot.host_snapshot.id,
-                        host_version,
-                        &host_netconf,
-                    )
-                    .await?
-                    .check_applied()?;
-
-                    // Set use_admin_network_changed if we want to reboot
-                    // ovs on admin network change.
-                    if old_use_admin_network != host_netconf.use_admin_network
-                        && ctx
-                            .services
-                            .site_config
-                            .restart_ovs_on_use_admin_network_change
-                    {
-                        process_dpu_use_admin_network_state_change(&mut txn, mh_snapshot).await?;
-                    }
-
-                    // The host was already flipped to tenant network in the
-                    // Ready -> Assigned transition; that write fanned out via
-                    // `try_update_network_config`'s group sync to bump every
-                    // DPU's version too, so no DPU bumps are needed here.
                     let next_state = ManagedHostState::Assigned {
                         instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
                     };
-                    return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn));
+                    Ok(StateHandlerOutcome::transition(next_state))
                 }
             }
         } else {
@@ -9494,7 +9476,7 @@ async fn process_dpu_use_admin_network_state_change(
 ) -> Result<(), StateHandlerError> {
     tracing::info!(
         machine_id = %mh_snapshot.host_snapshot.id,
-        "Set use_admin_network_changed flag as host has changed use_admin_network state and site-restart-ovs is set"
+        "Request an OVS restart for DPUs switching between Admin and tenant networking"
     );
 
     // Determine which DPUs have tenant interface configs. A DPU matches if:
