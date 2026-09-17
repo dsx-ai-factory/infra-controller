@@ -66,10 +66,11 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli component-manager component-power-control switch --switch-id 12345678-1234-5678-90ab-cdef01234567 --action on
-nico-admin-cli component-manager component-power-control compute-tray --machine-id 12345678-1234-5678-90ab-cdef01234567 --action force-off
-nico-admin-cli component-manager component-power-control compute-tray --mac-address 00:11:22:33:44:55 --action force-off
-nico-admin-cli component-manager component-power-control power-shelf --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --action ac-powercycle
+nico-admin-cli component-manager component-power-control --action on switch --switch-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli component-manager component-power-control --action on switch --mac-address 00:11:22:33:44:55
+nico-admin-cli component-manager component-power-control --action force-off compute-tray --machine-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli component-manager component-power-control --action force-off compute-tray --mac-address 00:11:22:33:44:55
+nico-admin-cli component-manager component-power-control --action ac-powercycle power-shelf --power-shelf-id 12345678-1234-5678-90ab-cdef01234567
 ```
 
 ## Subcommands
