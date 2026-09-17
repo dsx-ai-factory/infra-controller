@@ -24982,7 +24982,15 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -26147,7 +26155,15 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         targets:
           type: array
           items:
@@ -26335,7 +26351,15 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version.
+          description: |-
+            Firmware input serialized as a string: either one shared value for
+            all selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input.
+            These exact lowercase top-level keys are reserved for per-tray
+            mappings; a shared JSON object must not contain any of them.
+            A missing tray type in the mapping receives an empty input, which
+            does not guarantee a skipped update. Empty, null, or omitted input
+            is handled by the selected backend and operation rule.
         targets:
           type: array
           items:
