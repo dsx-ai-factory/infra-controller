@@ -661,18 +661,21 @@ pub async fn find_by_mac_address(
     Ok(machine)
 }
 
+/// Finds the machine with this address in either loopback field.
+/// Both fields are serialized from typed IP addresses, so their stored text
+/// matches `IpAddr::to_string()`.
 pub async fn find_by_loopback_ip(
     txn: impl DbReader<'_>,
-    loopback_ip: &str,
+    loopback_ip: IpAddr,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            "{} WHERE m.network_config->>'loopback_ip' = $1",
+            "{} WHERE m.network_config->>'loopback_ip' = $1 OR m.network_config->>'loopback_ip_v6' = $1",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .bind(loopback_ip)
+        .bind(loopback_ip.to_string())
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
