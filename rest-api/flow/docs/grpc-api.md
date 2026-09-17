@@ -572,13 +572,14 @@ selection criteria, not the concrete components selected after planning.
 <a name="v1-ComponentOperationStatus"></a>
 
 ### ComponentOperationStatus
-ComponentOperationStatus is Flow&#39;s view of a component&#39;s operability.
+ComponentOperationStatus is Flow&#39;s view of a component&#39;s operability. The
+inventory loop computes it on every sync from core&#39;s controller_state.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | phase | [Phase](#v1-Phase) |  |  |
-| reason | [string](#string) |  | Human-readable source status detail. |
+| reason | [string](#string) |  | Human-readable detail (typically the raw core state string). |
 | blocked_operations | [OperationType](#v1-OperationType) | repeated | Operations Flow will reject while the component is in this status. Empty when phase is READY. |
 
 
@@ -2692,6 +2693,7 @@ PatchComponent - update a single component&#39;s fields
 | description | [string](#string) | optional | Update description (JSON string) |
 | rack_id | [UUID](#v1-UUID) | optional | Re-assign to a different rack |
 | bmcs | [BMCInfo](#v1-BMCInfo) | repeated | Update BMCs (matched by MAC address; create if new) |
+| update_mask | [google.protobuf.FieldMask](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Optional for backward compatibility. When omitted, position replaces all three coordinates. When set, supported paths are position.slot_id, position.tray_idx, and position.host_id; only those coordinates change. |
 
 
 
@@ -2980,7 +2982,7 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | nvl_domain_ids | [UUID](#v1-UUID) | repeated | NVLink Domains containing this rack; empty when unassigned |
 | task_stats | [TaskStats](#v1-TaskStats) |  | All active Tasks on this rack, including component-scoped Tasks. |
 | external_id | [string](#string) |  |  |
-| operation_status | [Phase](#v1-Phase) |  | Operability phase aggregated from component phases. |
+| operation_status | [Phase](#v1-Phase) |  | Flow-derived operability summary across active Compute, NVSwitch, and PowerShelf components in this rack. Unknown or missing component status wins, followed by Error, Initializing, Deleting, InUse, and Ready. A rack with no supported active components is Unknown. This is independent of component expansion and is not the Core rack lifecycle/controller state. |
 
 
 
@@ -3832,7 +3834,9 @@ execution for the same scope is still active.
 <a name="v1-Phase"></a>
 
 ### Phase
-Phase is Flow&#39;s coarse operability bucket.
+Phase is Flow&#39;s coarse operability bucket. Component phases are derived from
+Core&#39;s type-specific state machines; Rack.operation_status aggregates those
+component phases.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |

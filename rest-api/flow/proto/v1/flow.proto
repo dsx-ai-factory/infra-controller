@@ -239,7 +239,9 @@ enum TaskExecutorType {
     TASK_EXECUTOR_TYPE_TEMPORAL = 1;
 }
 
-// Phase is Flow's coarse operability bucket.
+// Phase is Flow's coarse operability bucket. Component phases are derived from
+// Core's type-specific state machines; Rack.operation_status aggregates those
+// component phases.
 enum Phase {
     PHASE_UNKNOWN = 0;
     PHASE_INITIALIZING = 1;
@@ -259,10 +261,11 @@ enum LeakStatus {
     LEAK_STATUS_NOT_DETECTED = 2;
 }
 
-// ComponentOperationStatus is Flow's view of a component's operability.
+// ComponentOperationStatus is Flow's view of a component's operability. The
+// inventory loop computes it on every sync from core's controller_state.
 message ComponentOperationStatus {
     Phase phase = 1;
-    // Human-readable source status detail.
+    // Human-readable detail (typically the raw core state string).
     string reason = 2;
     // Operations Flow will reject while the component is in this status.
     // Empty when phase is READY.
@@ -299,7 +302,11 @@ message Rack {
     repeated UUID nvl_domain_ids = 4;  // NVLink Domains containing this rack; empty when unassigned
     TaskStats task_stats = 5;  // All active Tasks on this rack, including component-scoped Tasks.
     string external_id = 6;
-    // Operability phase aggregated from component phases.
+    // Flow-derived operability summary across active Compute, NVSwitch, and PowerShelf
+    // components in this rack. Unknown or missing component status wins, followed by
+    // Error, Initializing, Deleting, InUse, and Ready. A rack with no supported active
+    // components is Unknown. This is independent of component expansion and is not the
+    // Core rack lifecycle/controller state.
     Phase operation_status = 7;
 }
 
@@ -681,6 +688,10 @@ message PatchComponentRequest {
     optional string description = 4;      // Update description (JSON string)
     optional UUID rack_id = 5;            // Re-assign to a different rack
     repeated BMCInfo bmcs = 6;            // Update BMCs (matched by MAC address; create if new)
+    // Optional for backward compatibility. When omitted, position replaces all
+    // three coordinates. When set, supported paths are position.slot_id,
+    // position.tray_idx, and position.host_id; only those coordinates change.
+    google.protobuf.FieldMask update_mask = 7;
 }
 
 message PatchComponentResponse {
