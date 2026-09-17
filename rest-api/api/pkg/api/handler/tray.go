@@ -231,13 +231,13 @@ func (gth GetTrayHandler) Handle(c echo.Context) error {
 	// about its transport, so the policy crosses to the proxy unchanged.
 	var flowResponse flowv1.GetComponentInfoResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_GetComponentInfoByID_FullMethodName,
 		flowRequest, &flowResponse,
 		common.FlowWorkflowID(fmt.Sprintf("tray-get-%s", trayStrID)), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -425,13 +425,13 @@ func (gath GetAllTrayHandler) Handle(c echo.Context) error {
 	// it onto the proxy.
 	var flowResponse flowv1.GetComponentsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_GetComponents_FullMethodName,
 		flowRequest, &flowResponse,
 		common.FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	components := flowResponse.GetComponents()
@@ -618,13 +618,13 @@ func (vth ValidateTrayHandler) Handle(c echo.Context) error {
 	// Execute workflow
 	var flowResponse flowv1.ValidateComponentsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ValidateComponents_FullMethodName,
 		flowRequest, &flowResponse,
 		common.FlowWorkflowID(fmt.Sprintf("tray-validate-%s", trayStrID)), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
@@ -783,13 +783,13 @@ func (vtsh ValidateTraysHandler) Handle(c echo.Context) error {
 
 	var flowResponse flowv1.ValidateComponentsResponse
 	proxyErr := common.ProxyFlowGRPC(
-		ctx, c, logger, stc,
+		ctx, logger, stc,
 		flowv1.Flow_ValidateComponents_FullMethodName,
 		flowRequest, &flowResponse,
 		common.FlowWorkflowID(workflowID), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 	)
 	if proxyErr != nil {
-		return proxyErr
+		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
 
 	// Convert to API model
