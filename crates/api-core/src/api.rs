@@ -1471,6 +1471,21 @@ impl Forge for Api {
         crate::handlers::host_reprovisioning::trigger_host_reprovisioning(self, request).await
     }
 
+    async fn trigger_managed_host_reset(
+        &self,
+        request: Request<rpc::ManagedHostResetRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::managed_host_reset::trigger_managed_host_reset(self, request).await
+    }
+
+    async fn list_managed_hosts_waiting_for_reset(
+        &self,
+        request: Request<rpc::ManagedHostResetListRequest>,
+    ) -> Result<Response<rpc::ManagedHostResetListResponse>, Status> {
+        crate::handlers::managed_host_reset::list_managed_hosts_waiting_for_reset(self, request)
+            .await
+    }
+
     async fn trigger_bmc_credential_rotation(
         &self,
         request: Request<rpc::BmcCredentialRotationRequest>,

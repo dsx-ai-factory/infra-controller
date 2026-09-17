@@ -51,6 +51,7 @@ Print help (see a summary with -h)
 | [`set-primary-dpu`](./managed-host-set-primary-dpu.md) | Deprecated: use set-primary-interface with a machine-interface ID, not a DPU machine ID |
 | [`debug-bundle`](./managed-host-debug-bundle.md) | Download debug bundle with logs for a specific host |
 | [`decommission`](./managed-host-decommission.md) | Start decommissioning a managed host |
+| [`reset`](./managed-host-reset.md) | Reset a managed host: tear down its instance and DPF resources, then re-ingest |
 
 ---
 
