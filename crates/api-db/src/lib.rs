@@ -114,7 +114,6 @@ pub use conditional_write::{ConditionalWrite, ControllerStateNotCurrent};
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-use std::backtrace::{Backtrace, BacktraceStatus};
 use std::convert::Infallible;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -131,7 +130,6 @@ use model::ConfigValidationError;
 use model::hardware_info::HardwareInfoError;
 use model::tenant::TenantError;
 use sqlx::{Acquire, PgPool, PgTransaction, Postgres};
-use tonic::Status;
 
 use crate::ip_allocator::DhcpError;
 use crate::machine_interface_address::AddressAlreadyInUseError;
@@ -553,85 +551,6 @@ impl Error for AnnotatedSqlxError {
     }
 }
 
-impl From<DatabaseError> for tonic::Status {
-    fn from(from: DatabaseError) -> Self {
-        // If env RUST_BACKTRACE is set extract handler and err location
-        // If it's not set `Backtrace::capture()` is very cheap to call
-        let b = Backtrace::capture();
-        let printed = if b.status() == BacktraceStatus::Captured {
-            let b_str = b.to_string();
-            let f = b_str
-                .lines()
-                .skip(1)
-                .skip_while(|l| !l.contains("carbide"))
-                .take(2)
-                .collect::<Vec<&str>>();
-            if f.len() == 2 {
-                let handler = f[0].trim();
-                let location = f[1].trim().replace("at ", "");
-                tracing::error!(
-                    error = %from,
-                    error_location = %location,
-                    handler,
-                    "database error conversion",
-                );
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        if !printed {
-            match from {
-                DatabaseError::NotImplemented => {}
-                _ => tracing::error!(error = %from, "database error conversion"),
-            }
-        }
-
-        match &from {
-            DatabaseError::AddressParseError(e) => Status::invalid_argument(e.to_string()),
-            error @ DatabaseError::AlreadyFoundError { .. } => {
-                Status::failed_precondition(error.to_string())
-            }
-            error @ DatabaseError::ConcurrentModificationError(_, _) => {
-                Status::failed_precondition(error.to_string())
-            }
-            error @ DatabaseError::ExpectedHostDuplicateMacAddress(_) => {
-                Status::failed_precondition(error.to_string())
-            }
-            error @ DatabaseError::ExpectedSwitchDuplicateNvosMacAddress(_) => {
-                Status::failed_precondition(error.to_string())
-            }
-            error @ DatabaseError::FailedPrecondition(_) => {
-                Status::failed_precondition(error.to_string())
-            }
-            error @ DatabaseError::Internal { .. } => Status::internal(error.to_string()),
-            DatabaseError::InvalidArgument(msg) => Status::invalid_argument(msg),
-            DatabaseError::InvalidConfiguration(e) => Status::invalid_argument(e.to_string()),
-            error @ DatabaseError::DhcpError(_) => Status::resource_exhausted(error.to_string()),
-            DatabaseError::MissingArgument(msg) => Status::invalid_argument(*msg),
-            DatabaseError::NetworkParseError(e) => Status::invalid_argument(e.to_string()),
-            DatabaseError::NetworkSegmentDelete(msg) => Status::invalid_argument(msg),
-            DatabaseError::NotFoundError { kind, id } => {
-                Status::not_found(format!("{kind} not found: {id}"))
-            }
-            DatabaseError::ResourceExhausted(kind) => Status::resource_exhausted(kind),
-            error @ DatabaseError::TenantSitePrefixQuotaExceeded { .. } => {
-                Status::resource_exhausted(error.to_string())
-            }
-            error @ DatabaseError::RpcUuidConversionError(_) => {
-                Status::invalid_argument(error.to_string())
-            }
-            error @ DatabaseError::UuidConversionError(_) => {
-                Status::invalid_argument(error.to_string())
-            }
-            other => Status::internal(other.to_string()),
-        }
-    }
-}
-
 // MARK: - Custom DatabaseError From<> impls to flatten error variants
 
 impl From<ResourcePoolDatabaseError> for DatabaseError {
@@ -912,8 +831,6 @@ mod tests {
     use carbide_test_support::{Check, check_values};
 
     use super::*;
-    use crate::ip_allocator::DhcpError;
-
     const TRANSACTION_ROLLBACK_FAILURES_METRIC: &str =
         "carbide_database_transaction_rollback_failures_total";
 
@@ -1043,14 +960,5 @@ mod tests {
         assert_eq!(err.line, line!() - 4);
         assert_eq!(err.file, file!());
         assert!(format!("{err}").contains(DB_QUERY));
-    }
-
-    #[test]
-    fn test_dhcp_error_maps_to_resource_exhausted_status() {
-        let err = DatabaseError::DhcpError(DhcpError::PrefixExhausted(
-            "10.217.5.160".parse().expect("valid IP"),
-        ));
-        let status: tonic::Status = err.into();
-        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
     }
 }

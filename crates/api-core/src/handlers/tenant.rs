@@ -101,16 +101,17 @@ pub(crate) async fn create(
         (false, None) => None,
     };
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let response =
         db::tenant::create_and_persist(organization_id, metadata, routing_profile_type, &mut txn)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .try_into()
             .map(Response::new)
             .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(response)
 }
@@ -127,11 +128,12 @@ pub(crate) async fn find(
 
     log_tenant_organization_id(&tenant_organization_id);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let response = match db::tenant::find(tenant_organization_id, false, &mut txn)
         .await
-        .map(Response::new)?
+        .map(Response::new)
+        .map_err(crate::CarbideError::from)?
         .into_inner()
     {
         None => rpc::FindTenantResponse {
@@ -176,7 +178,7 @@ pub(crate) async fn find(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(response))
 }
@@ -200,10 +202,13 @@ pub(crate) async fn update(
 
     metadata.validate(true).map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Grab the tenant details and a row-lock
-    let Some(current_tenant) = db::tenant::find(&organization_id, true, &mut txn).await? else {
+    let Some(current_tenant) = db::tenant::find(&organization_id, true, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?
+    else {
         return Err(CarbideError::NotFoundError {
             kind: "tenant",
             id: organization_id.clone(),
@@ -250,7 +255,8 @@ pub(crate) async fn update(
                 ..Default::default()
             },
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .is_empty()
     {
         return Err(CarbideError::FailedPrecondition(
@@ -272,12 +278,13 @@ pub(crate) async fn update(
         routing_profile_type,
         &mut txn,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .try_into()
     .map(Response::new)
     .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(response)
 }
@@ -289,7 +296,7 @@ pub(crate) async fn find_tenants_by_organization_ids(
     crate::api::log_request_data(&request);
     let request = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let tenant_organization_ids: Vec<String> = request.organization_ids;
 
@@ -307,12 +314,13 @@ pub(crate) async fn find_tenants_by_organization_ids(
 
     let tenants: Vec<rpc::Tenant> =
         db::tenant::load_by_organization_ids(&mut txn, &tenant_organization_ids)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .into_iter()
             .filter_map(|tenant| rpc::Tenant::try_from(tenant).ok())
             .collect();
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(rpc::TenantList { tenants }))
 }
@@ -324,7 +332,9 @@ pub(crate) async fn find_tenant_organization_ids(
     crate::api::log_request_data(&request);
     let search_config: model::tenant::TenantSearchFilter = request.into_inner().into();
     let tenant_org_ids =
-        db::tenant::find_tenant_organization_ids(&api.database_connection, search_config).await?;
+        db::tenant::find_tenant_organization_ids(&api.database_connection, search_config)
+            .await
+            .map_err(crate::CarbideError::from)?;
     Ok(tonic::Response::new(rpc::TenantOrganizationIdList {
         tenant_organization_ids: tenant_org_ids.into_iter().collect(),
     }))

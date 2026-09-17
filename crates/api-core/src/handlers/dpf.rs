@@ -37,9 +37,10 @@ pub(crate) async fn modify_dpf_state(
     let request = request.get_ref();
     let machine_id: HostMachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let machine_snapshot = load_snapshot(&mut txn, &machine_id, LoadSnapshotOptions::default())
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "snapshot",
             id: machine_id.to_string(),
@@ -53,13 +54,17 @@ pub(crate) async fn modify_dpf_state(
         .into());
     }
 
-    db::machine::modify_dpf_state(&mut txn, &machine_id, request.dpf_enabled).await?;
+    db::machine::modify_dpf_state(&mut txn, &machine_id, request.dpf_enabled)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     // Keep DPUs also in sync.
     for dpu in machine_snapshot.dpu_snapshots {
-        db::machine::modify_dpf_state(&mut txn, &dpu.id, request.dpf_enabled).await?;
+        db::machine::modify_dpf_state(&mut txn, &dpu.id, request.dpf_enabled)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -80,15 +85,17 @@ pub(crate) async fn get_dpf_state(
         }
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let filter = if request.machine_ids.is_empty() {
         ObjectFilter::All
     } else {
         ObjectFilter::List(&request.machine_ids)
     };
 
-    let dpf_states = db::machine::find(&mut txn, filter, MachineSearchConfig::default()).await?;
-    txn.commit().await?;
+    let dpf_states = db::machine::find(&mut txn, filter, MachineSearchConfig::default())
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::DpfStateResponse {
         dpf_states: dpf_states
@@ -113,14 +120,15 @@ pub(crate) async fn get_dpf_host_snapshot(
         .into());
     };
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let machine = find_one(&mut txn, &machine_id, MachineSearchConfig::default())
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
         })?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let host_dpf_id = machine.dpf_id().ok_or_else(|| {
         CarbideError::InvalidArgument(format!(

@@ -43,11 +43,12 @@ pub(crate) async fn set_managed_host_quarantine_state(
 
     let message = quarantine_state.reason.clone().unwrap_or_default();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let prior_quarantine_state =
         db::machine::set_quarantine_state(&mut txn, &machine_id, quarantine_state)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .map(Into::into);
 
     match db::machine::remove_health_report(
@@ -71,9 +72,10 @@ pub(crate) async fn set_managed_host_quarantine_state(
         &report,
         false,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::SetManagedHostQuarantineStateResponse {
         prior_quarantine_state,
@@ -89,7 +91,8 @@ pub(crate) async fn get_managed_host_quarantine_state(
     let machine_id: HostMachineId = convert_and_log_machine_id(machine_id.as_ref())?;
 
     let quarantine_state = db::machine::get_quarantine_state(&api.database_connection, &machine_id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .map(Into::into);
 
     Ok(Response::new(rpc::GetManagedHostQuarantineStateResponse {
@@ -106,10 +109,11 @@ pub(crate) async fn clear_managed_host_quarantine_state(
     let rpc::ClearManagedHostQuarantineStateRequest { machine_id } = request.into_inner();
     let machine_id: HostMachineId = convert_and_log_machine_id(machine_id.as_ref())?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let prior_quarantine_state = db::machine::clear_quarantine_state(&mut txn, &machine_id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .map(Into::into);
 
     match db::machine::remove_health_report(
@@ -126,7 +130,7 @@ pub(crate) async fn clear_managed_host_quarantine_state(
         Err(e) => return Err(e.into()),
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         rpc::ClearManagedHostQuarantineStateResponse {

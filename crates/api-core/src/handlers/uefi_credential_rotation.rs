@@ -45,16 +45,20 @@ pub(crate) async fn trigger_uefi_credential_rotation(
     let req = request.into_inner();
     let mode = req.mode();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let machine_id = resolve_target(&mut txn, req.machine_id, req.bmc_mac).await?;
 
     match mode {
         Mode::Set => {
-            db::machine::set_uefi_credential_rotation_requested(&mut txn, machine_id).await?;
+            db::machine::set_uefi_credential_rotation_requested(&mut txn, machine_id)
+                .await
+                .map_err(crate::CarbideError::from)?;
         }
         Mode::Clear => {
-            db::machine::clear_uefi_credential_rotation_requested(&mut txn, machine_id).await?;
+            db::machine::clear_uefi_credential_rotation_requested(&mut txn, machine_id)
+                .await
+                .map_err(crate::CarbideError::from)?;
         }
         // An omitted `mode` decodes as `Unspecified`; reject it rather than let a
         // request fall through to an action it did not name.
@@ -65,7 +69,7 @@ pub(crate) async fn trigger_uefi_credential_rotation(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }

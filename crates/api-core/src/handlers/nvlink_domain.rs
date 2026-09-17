@@ -38,7 +38,8 @@ pub(crate) async fn list_nv_link_domain_health_reports(
 
     let health_reports =
         db::nvlink_domain_health_report::find(api.db_reader().as_mut(), &domain_id)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .unwrap_or_default();
 
     Ok(Response::new(list_response(health_reports)))
@@ -76,9 +77,10 @@ pub(crate) async fn insert_nv_link_domain_health_report(
 
     let mode: HealthReportApplyMode = mode.into();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let health_reports = db::nvlink_domain_health_report::find(&mut txn, &domain_id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .unwrap_or_default();
 
     let mut report = health_report::HealthReport::try_from(report.clone())
@@ -96,9 +98,10 @@ pub(crate) async fn insert_nv_link_domain_health_report(
     }
 
     db::nvlink_domain_health_report::insert_health_report(&mut txn, &domain_id, mode, &report)
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -112,13 +115,14 @@ pub(crate) async fn remove_nv_link_domain_health_report(
     let rpc::RemoveNvLinkDomainHealthReportRequest { domain_id, source } = request.into_inner();
     let domain_id = domain_id.ok_or_else(|| CarbideError::MissingArgument("domain_id"))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let health_reports = db::nvlink_domain_health_report::find(&mut txn, &domain_id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .unwrap_or_default();
 
     remove_by_source(&mut txn, &domain_id, &health_reports, source).await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }

@@ -404,7 +404,9 @@ pub(crate) async fn admin_network(
         routing_profile: admin_vpc_routing_profile,
     } = options;
 
-    let admin_segments = db::network_segment::admin(txn).await?;
+    let admin_segments = db::network_segment::admin(txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let admin_segment_ids = admin_segments
         .iter()
         .map(|s| s.id)
@@ -531,7 +533,8 @@ pub(crate) async fn admin_network(
             Some(vpc_id) => {
                 let mut vpcs =
                     db::vpc::find_by(&mut *txn, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id))
-                        .await?;
+                        .await
+                        .map_err(crate::CarbideError::from)?;
                 if vpcs.is_empty() {
                     return Err(CarbideError::FindOneReturnedNoResultsError(vpc_id.into()).into());
                 }
@@ -546,7 +549,8 @@ pub(crate) async fn admin_network(
                                     dpu_machine_id,
                                     &vpc.id,
                                 )
-                                .await?,
+                                .await
+                                .map_err(crate::CarbideError::from)?,
                             )
                         } else {
                             None
@@ -667,11 +671,13 @@ pub(crate) async fn tenant_network(
     let vpc_prefixes: Vec<String> = match segment.config.vpc_id {
         Some(vpc_id) => {
             let vpc_prefixes = db::vpc_prefix::find_by_vpc(txn, vpc_id)
-                .await?
+                .await
+                .map_err(crate::CarbideError::from)?
                 .into_iter()
                 .map(|vpc_prefix| vpc_prefix.config.prefix.to_string());
             let vpc_segment_prefixes = db::network_prefix::find_by_vpc(txn, vpc_id)
-                .await?
+                .await
+                .map_err(crate::CarbideError::from)?
                 .into_iter()
                 .map(|segment_prefix| segment_prefix.prefix.to_string());
             vpc_prefixes.chain(vpc_segment_prefixes).collect()
@@ -700,16 +706,21 @@ pub(crate) async fn tenant_network(
                     .peers_with
                     .to_vec();
                 db::vpc_peering::get_vpc_peer_vnis(txn, vpc_id, allowed_peer_types)
-                    .await?
+                    .await
+                    .map_err(crate::CarbideError::from)?
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect()
             }
-            VpcPeeringPolicy::Mixed => db::vpc_peering::get_vpc_peer_ids(txn, vpc_id).await?,
+            VpcPeeringPolicy::Mixed => db::vpc_peering::get_vpc_peer_ids(txn, vpc_id)
+                .await
+                .map_err(crate::CarbideError::from)?,
             VpcPeeringPolicy::None => vec![],
         };
 
-        vpc_peer_prefixes = get_prefixes_by_vpcs(txn, &vpc_peer_ids).await?;
+        vpc_peer_prefixes = get_prefixes_by_vpcs(txn, &vpc_peer_ids)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
         // VNI-based peer route imports are independent of peering
         // policy: they're a per-type question on both sides.
@@ -726,7 +737,8 @@ pub(crate) async fn tenant_network(
                 .filter(|t| t.vni_advertised_to_peers())
                 .collect();
             vpc_peer_vnis = db::vpc_peering::get_vpc_peer_vnis(txn, vpc_id, vni_peer_types)
-                .await?
+                .await
+                .map_err(crate::CarbideError::from)?
                 .iter()
                 .map(|(_, vni)| *vni as u32)
                 .collect();
@@ -741,7 +753,8 @@ pub(crate) async fn tenant_network(
         Some(vpc_id) => {
             let mut vpcs =
                 db::vpc::find_by(&mut *txn, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id))
-                    .await?;
+                    .await
+                    .map_err(crate::CarbideError::from)?;
             if vpcs.is_empty() {
                 return Err(CarbideError::FindOneReturnedNoResultsError(vpc_id.into()).into());
             }
@@ -813,7 +826,8 @@ pub(crate) async fn tenant_network(
                         })?),
                         false,
                     )
-                    .await?
+                    .await
+                    .map_err(crate::CarbideError::from)?
                     .pop()
                     .ok_or(CarbideError::NotFoundError {
                         kind: "NetworkSecurityGroup",

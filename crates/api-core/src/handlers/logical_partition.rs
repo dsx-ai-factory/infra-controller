@@ -39,7 +39,7 @@ pub(crate) async fn create(
         log_tenant_organization_id(&config.tenant_organization_id);
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let req = NewLogicalPartition::try_from(request_inner)?;
 
@@ -50,7 +50,7 @@ pub(crate) async fn create(
         .await
         .map_err(CarbideError::from)?;
     let resp = rpc::NvLinkLogicalPartition::try_from(resp).map(Response::new)?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(resp)
 }
@@ -64,8 +64,9 @@ pub(crate) async fn find_ids(
     let filter: model::nvl_logical_partition::NvLinkLogicalPartitionSearchFilter =
         request.into_inner().into();
 
-    let partition_ids =
-        db::nvl_logical_partition::find_ids(&api.database_connection, filter).await?;
+    let partition_ids = db::nvl_logical_partition::find_ids(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::NvLinkLogicalPartitionIdList {
         partition_ids,
@@ -151,9 +152,11 @@ pub(crate) async fn delete(
 
     let resp = api
         .with_txn(|txn| db::nvl_logical_partition::mark_as_deleted(&partition, txn).boxed())
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .map(|_| rpc::NvLinkLogicalPartitionDeletionResult {})
-        .map(Response::new)?;
+        .map(Response::new)
+        .map_err(crate::CarbideError::from)?;
 
     Ok(resp)
 }
@@ -215,7 +218,7 @@ pub(crate) async fn update(
         .try_into()?;
     metadata.validate(true).map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let mut partitions = db::nvl_logical_partition::find_by(
         &mut txn,
@@ -260,7 +263,10 @@ pub(crate) async fn update(
 
     let name = metadata.name;
     let description = metadata.description;
-    match db::nvl_logical_partition::update(&partition, name, description, &mut txn).await? {
+    match db::nvl_logical_partition::update(&partition, name, description, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?
+    {
         ConditionalWrite::Applied(_) => {}
         ConditionalWrite::NotApplied(nvl_logical_partition::LogicalPartitionNotCurrent) => {
             // A missing partition here was removed after the initial lookup, so
@@ -273,7 +279,7 @@ pub(crate) async fn update(
         }
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::NvLinkLogicalPartitionUpdateResult {}))
 }

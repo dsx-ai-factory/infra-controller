@@ -35,7 +35,7 @@ pub(crate) async fn tpm_add_ca_cert(
     // parse ca cert, extract serial num, nvb, nva, subject (in binary)
     let (not_valid_before, not_valid_after, subject) = attest::extract_ca_fields(ca_cert_bytes)?;
     // insert cert into the DB (in binary) + all the extracted fields above
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let db_ca_cert_opt = db_attest::tpm_ca_certs::insert(
         &mut txn,
@@ -44,7 +44,8 @@ pub(crate) async fn tpm_add_ca_cert(
         ca_cert_bytes,
         subject.as_slice(),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let db_ca_cert = match db_ca_cert_opt {
         Some(cert) => cert,
@@ -58,7 +59,9 @@ pub(crate) async fn tpm_add_ca_cert(
 
     // now update all the existing EK statuses
     let ek_certs =
-        db_attest::ek_cert_verification_status::get_by_issuer(&mut txn, subject.as_slice()).await?;
+        db_attest::ek_cert_verification_status::get_by_issuer(&mut txn, subject.as_slice())
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     let mut ek_certs_updated: u32 = 0;
     if !ek_certs.is_empty() {
@@ -77,7 +80,7 @@ pub(crate) async fn tpm_add_ca_cert(
         }
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::TpmCaAddedCaStatus {
         id: Some(rpc::TpmCaCertId {
@@ -93,11 +96,13 @@ pub(crate) async fn tpm_show_ca_certs(
 ) -> Result<Response<rpc::TpmCaCertDetailCollection>, tonic::Status> {
     log_request_data(request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let ca_certs = db_attest::tpm_ca_certs::get_all(&mut txn).await?;
+    let ca_certs = db_attest::tpm_ca_certs::get_all(&mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let ca_cert_details = ca_certs
         .iter()
@@ -122,12 +127,14 @@ pub(crate) async fn tpm_show_unmatched_ek_certs(
 ) -> Result<Response<rpc::TpmEkCertStatusCollection>, tonic::Status> {
     log_request_data(request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let unmatched_ek_statuses =
-        db_attest::ek_cert_verification_status::get_by_unmatched_ca(&mut txn).await?;
+        db_attest::ek_cert_verification_status::get_by_unmatched_ca(&mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let unmatched_eks = unmatched_ek_statuses
         .iter()
@@ -155,14 +162,17 @@ pub(crate) async fn tpm_delete_ca_cert(
     let payload = request.into_inner();
     let ca_cert_id = payload.ca_cert_id;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     db_attest::ek_cert_verification_status::unmatch_ca_verification_status(&mut txn, ca_cert_id)
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    db_attest::tpm_ca_certs::delete(&mut txn, ca_cert_id).await?;
+    db_attest::tpm_ca_certs::delete(&mut txn, ca_cert_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }

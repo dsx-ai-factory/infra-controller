@@ -63,13 +63,14 @@ pub(super) async fn get_astra_config(
         only_astra: true,
     };
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let dpa_interfaces =
         db::dpa_interface::find_by_machine_id(&mut txn, snapshot.host_snapshot.id, search_config)
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     if dpa_interfaces.is_empty() {
         tracing::debug!(
@@ -136,7 +137,8 @@ pub(super) async fn get_astra_config(
                 txn.as_mut(),
                 ObjectColumnFilter::One(db::spx_partition::IdColumn, &spx_partition_id),
             )
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
             if dpa_vni.is_empty() {
                 tracing::error!(
                     %spx_partition_id,
@@ -207,11 +209,12 @@ pub(super) async fn process_astra_config_status(
         return Ok(());
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Get the machine snapshot given the dpu_machine_id
     let snapshot = db::managed_host::load_snapshot(&mut txn, dpu_machine_id, Default::default())
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or(CarbideError::NotFoundError {
             kind: "machine",
             id: dpu_machine_id.to_string(),
@@ -225,7 +228,8 @@ pub(super) async fn process_astra_config_status(
 
     let dpa_interfaces =
         db::dpa_interface::find_by_machine_id(&mut txn, snapshot.host_snapshot.id, search_config)
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     if dpa_interfaces.is_empty() {
         // This should not happen. How is the DPU reporting the Astra config status if there are no Astra NICs?
@@ -233,7 +237,7 @@ pub(super) async fn process_astra_config_status(
         return Ok(());
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let mut txn = api
         .database_connection
@@ -368,9 +372,10 @@ pub(super) async fn process_astra_config_status(
         &snapshot.host_snapshot.id,
         &machine_observation,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     {
-        return Err(db::DatabaseError::from(reason).into());
+        return Err(CarbideError::from(db::DatabaseError::from(reason)).into());
     }
 
     txn.commit().await.map_err(|e| CarbideError::Internal {

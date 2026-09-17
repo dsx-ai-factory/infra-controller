@@ -115,7 +115,7 @@ pub(crate) async fn create(
 
     let req = NewSpxPartition::try_from(request_inner)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let vni = allocate_dpa_vni(api, &mut txn, &req.id.to_string(), req.vni).await?;
 
@@ -123,7 +123,7 @@ pub(crate) async fn create(
         .await
         .map_err(CarbideError::from)?;
     let resp = rpc::SpxPartition::try_from(partition).map(Response::new)?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(resp)
 }
 
@@ -140,17 +140,18 @@ pub(crate) async fn delete(
 
     let resp = api
         .with_txn(|txn| db::spx_partition::mark_as_deleted(id, txn).boxed())
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .map_err(CarbideError::from)?;
 
     if let Some(vni) = resp.vni {
-        let mut txn = api.txn_begin().await?;
+        let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
         db::resource_pool::release(&api.common_pools.ethernet.pool_dpa_vni, &mut txn, vni)
             .await
             .map_err(CarbideError::from)?;
 
-        txn.commit().await?;
+        txn.commit().await.map_err(crate::CarbideError::from)?;
     }
 
     Ok(Response::new(rpc::SpxPartitionDeletionResult {}))
@@ -168,7 +169,9 @@ pub(crate) async fn find_ids(
     }
 
     let filter: model::spx_partition::SpxPartitionSearchFilter = rpc_filter.into();
-    let spx_partition_ids = db::spx_partition::find_ids(&api.database_connection, filter).await?;
+    let spx_partition_ids = db::spx_partition::find_ids(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::SpxPartitionIdList { spx_partition_ids }))
 }

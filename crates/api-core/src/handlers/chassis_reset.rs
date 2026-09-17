@@ -77,7 +77,8 @@ pub(crate) async fn admin_chassis_reset(
         ));
     }
     if db::instance::find_id_by_machine_id(&mut txn, &host_machine.id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .is_some()
     {
         return Err(Status::failed_precondition(
@@ -103,8 +104,9 @@ pub(crate) async fn admin_chassis_reset(
         "admin-chassis-reset",
         MachineMaintenanceOperation::ChassisReset { chassis_id },
     )
-    .await?;
-    txn.commit().await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     if let Err(error) = api
         .machine_state_handler_enqueuer

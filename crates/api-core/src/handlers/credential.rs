@@ -546,7 +546,8 @@ pub(crate) async fn get_bmc_credentals(
         &api.database_connection,
         bmc_mac_address,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let bmc_ip = bmc_ips
         .iter()
@@ -611,12 +612,13 @@ pub(crate) async fn get_switch_nvos_credentials(
         .ok_or_else(|| CarbideError::InvalidArgument("switch_id is required".to_string()))?;
 
     let bmc_mac_address = {
-        let mut txn = api.txn_begin().await?;
+        let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
         let switches = db::switch::find_by(
             &mut txn,
             db::ObjectColumnFilter::One(db::switch::IdColumn, &switch_id),
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
         txn.rollback_or_log("read-only load of switch for credential lookup")
             .await;
 

@@ -128,7 +128,9 @@ pub(crate) async fn redfish_list_actions(
 
     let filter: model::redfish::RedfishListActionsFilter = request.into_inner().into();
 
-    let result = list_requests(filter, &api.database_connection).await?;
+    let result = list_requests(filter, &api.database_connection)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         rpc::forge::RedfishListActionsResponse {
@@ -151,9 +153,11 @@ pub(crate) async fn redfish_create_action(
     let ips = rpc_request.ips.clone();
     let create_action: model::redfish::RedfishCreateAction = rpc_request.into();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let ip_to_serial = find_serials(&ips, &mut txn).await?;
+    let ip_to_serial = find_serials(&ips, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let machine_ips: Vec<_> = ip_to_serial.keys().cloned().collect();
     // this is the neatest way I could think of splitting the iterator/map into two vecs
     // explicitly in the same order. could be a for loop instead.
@@ -162,10 +166,11 @@ pub(crate) async fn redfish_create_action(
         .map(|ip| ip_to_serial.get(ip).unwrap())
         .collect();
 
-    let request_id =
-        insert_request(authored_by, create_action, &mut txn, machine_ips, serials).await?;
+    let request_id = insert_request(authored_by, create_action, &mut txn, machine_ips, serials)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         ::rpc::forge::RedfishCreateActionResponse { request_id },
@@ -184,21 +189,25 @@ pub(crate) async fn redfish_approve_action(
 
     let request: model::redfish::RedfishActionId = request.into_inner().into();
 
-    let mut txn = api.txn_begin().await?;
-    let action_request = fetch_request(request, &mut txn).await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    let action_request = fetch_request(request, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     if action_request.approvers.contains(&approver) {
         return Err(
             CarbideError::InvalidArgument("user already approved request".to_owned()).into(),
         );
     }
 
-    let is_approved = approve_request(approver, request, &mut txn).await?;
+    let is_approved = approve_request(approver, request, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     if !is_approved {
         return Err(
             CarbideError::InvalidArgument("user already approved request".to_owned()).into(),
         );
     }
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         ::rpc::forge::RedfishApproveActionResponse {},
@@ -217,9 +226,11 @@ pub(crate) async fn redfish_apply_action(
 
     let request: model::redfish::RedfishActionId = request.into_inner().into();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let action_request = fetch_request(request, &mut txn).await?;
+    let action_request = fetch_request(request, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     if action_request.applied_at.is_some() {
         return Err(CarbideError::InvalidArgument("action already applied".to_owned()).into());
     }
@@ -228,9 +239,13 @@ pub(crate) async fn redfish_apply_action(
         return Err(CarbideError::InvalidArgument("insufficient approvals".to_owned()).into());
     }
 
-    let ip_to_serial = find_serials(&action_request.machine_ips, &mut txn).await?;
+    let ip_to_serial = find_serials(&action_request.machine_ips, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    let is_applied = set_applied(applier, request, &mut txn).await?;
+    let is_applied = set_applied(applier, request, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     if !is_applied {
         return Err(CarbideError::InvalidArgument("request was already applied".to_owned()).into());
     }
@@ -252,7 +267,7 @@ pub(crate) async fn redfish_apply_action(
                 status: "not executed".to_owned(),
                 body: "machine serial did not match original serial at time of request creation. IP address was reused".to_owned(),
                 completed_at: DateTime::from(Local::now()),
-            }, index).await?;
+            }, index).await.map_err(crate::CarbideError::from)?;
         } else {
             uris.push((
                 redfish_action_uri(&machine_ip, &action_request.target)?,
@@ -300,7 +315,7 @@ pub(crate) async fn redfish_apply_action(
         });
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         ::rpc::forge::RedfishApplyActionResponse {},
@@ -313,9 +328,13 @@ async fn update_response_in_tx(
     index: usize,
     response: BMCResponse,
 ) -> Result<(), tonic::Status> {
-    let mut txn = Transaction::begin(pool).await?;
-    update_response(request, &mut txn, response, index).await?;
-    txn.commit().await?;
+    let mut txn = Transaction::begin(pool)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    update_response(request, &mut txn, response, index)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(())
 }
 
@@ -633,11 +652,13 @@ pub(crate) async fn redfish_cancel_action(
 
     let request: model::redfish::RedfishActionId = request.into_inner().into();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    delete_request(request, &mut txn).await?;
+    delete_request(request, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         ::rpc::forge::RedfishCancelActionResponse {},

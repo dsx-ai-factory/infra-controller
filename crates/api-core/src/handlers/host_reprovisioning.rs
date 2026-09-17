@@ -33,11 +33,12 @@ pub(crate) async fn reset_host_reprovisioning(
     log_request_data(&request);
     let machine_id = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     db::host_machine_update::reset_host_reprovisioning_request(&mut txn, &machine_id, false)
-        .await?;
-    txn.commit().await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -52,11 +53,12 @@ pub(crate) async fn trigger_host_reprovisioning(
     let req = request.into_inner();
     let machine_id: StableHostMachineId = convert_and_log_machine_id(req.machine_id.as_ref())?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let snapshot =
         db::managed_host::load_snapshot(&mut txn, &machine_id, LoadSnapshotOptions::default())
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .ok_or(CarbideError::NotFoundError {
                 kind: "machine",
                 id: machine_id.to_string(),
@@ -76,17 +78,19 @@ pub(crate) async fn trigger_host_reprovisioning(
                 initiator,
                 &machine_id,
             )
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
             Some(initiator)
         }
         Mode::Clear => {
             db::host_machine_update::clear_host_reprovisioning_request(&mut txn, &machine_id)
-                .await?;
+                .await
+                .map_err(crate::CarbideError::from)?;
             None
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Manual initiations pair with the same completion emit the update
     // manager's automatic path gets, keeping the started-to-completed gap
@@ -114,7 +118,8 @@ pub(crate) async fn list_hosts_waiting_for_reprovisioning(
 
     let hosts =
         db::machine::list_machines_requested_for_host_reprovisioning(&api.database_connection)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .into_iter()
             .map(
                 |x| rpc::host_reprovisioning_list_response::HostReprovisioningListItem {
@@ -153,11 +158,13 @@ pub(crate) async fn mark_manual_firmware_upgrade_complete(
     log_request_data(&request);
     let machine_id = convert_and_log_machine_id(Some(&request.into_inner()))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    db::host_machine_update::set_manual_firmware_upgrade_completed(&mut txn, &machine_id).await?;
+    db::host_machine_update::set_manual_firmware_upgrade_completed(&mut txn, &machine_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -257,9 +264,11 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         },
     };
 
-    db::machine::advance(&machine, &mut txn, &new_state, None).await?;
+    db::machine::advance(&machine, &mut txn, &new_state, None)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     if let Err(err) = api
         .machine_state_handler_enqueuer

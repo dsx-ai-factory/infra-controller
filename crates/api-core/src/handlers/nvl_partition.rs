@@ -34,7 +34,9 @@ pub(crate) async fn find_ids(
     }
 
     let filter: model::nvl_partition::NvLinkPartitionSearchFilter = rpc_filter.into();
-    let partition_ids = db::nvl_partition::find_ids(&api.database_connection, filter).await?;
+    let partition_ids = db::nvl_partition::find_ids(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::NvLinkPartitionIdList { partition_ids }))
 }
@@ -63,7 +65,8 @@ pub(crate) async fn find_by_ids(
         &api.database_connection,
         ObjectColumnFilter::List(nvl_partition::IdColumn, &partition_ids),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let mut result = Vec::with_capacity(partitions.len());
     for ibp in partitions {
@@ -93,8 +96,9 @@ pub(crate) async fn for_tenant(
 
     log_tenant_organization_id(&tenant_org_id_str);
 
-    let results =
-        db::nvl_partition::for_tenant(&api.database_connection, tenant_org_id_str).await?;
+    let results = db::nvl_partition::for_tenant(&api.database_connection, tenant_org_id_str)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let mut partitions = Vec::with_capacity(results.len());
 

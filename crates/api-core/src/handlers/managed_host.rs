@@ -35,7 +35,7 @@ pub(crate) async fn decommission_managed_host(
     let machine_id: StableHostMachineId =
         convert_and_log_machine_id(request.into_inner().machine_id.as_ref())?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let machine = db::machine::find_one(
         &mut txn,
         &machine_id,
@@ -44,7 +44,8 @@ pub(crate) async fn decommission_managed_host(
             ..Default::default()
         },
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "managed host",
         id: machine_id.to_string(),
@@ -58,7 +59,9 @@ pub(crate) async fn decommission_managed_host(
         .into());
     }
 
-    let dpus = db::machine::find_dpus_by_host_machine_id(&mut txn, &machine_id).await?;
+    let dpus = db::machine::find_dpus_by_host_machine_id(&mut txn, &machine_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let unsupported_dpus = dpus
         .iter()
         .filter(|dpu| !dpu.status.bmc_info.supports_bfb_install())
@@ -82,8 +85,10 @@ pub(crate) async fn decommission_managed_host(
         .into());
     }
 
-    db::machine::set_decommission_requested(&mut txn, machine_id).await?;
-    txn.commit().await?;
+    db::machine::set_decommission_requested(&mut txn, machine_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     if let Err(error) = api
         .machine_state_handler_enqueuer
@@ -201,8 +206,10 @@ pub(crate) async fn set_maintenance(
     let (_, mut txn) = api
         .load_machine(&machine_id, MachineSearchConfig::default())
         .await?;
-    let dpu_machines = db::machine::find_dpus_by_host_machine_id(&mut txn, &machine_id).await?;
-    txn.commit().await?;
+    let dpu_machines = db::machine::find_dpus_by_host_machine_id(&mut txn, &machine_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // We set status on both host and dpu machine to make them easier to query from DB
     match req.operation() {

@@ -651,6 +651,17 @@ fn test_dhcp_error_maps_to_resource_exhausted_status() {
 }
 
 #[test]
+fn database_error_maps_to_status_through_carbide_error() {
+    let err = DatabaseError::AlreadyFoundError {
+        kind: "machine",
+        id: "test-machine".to_string(),
+    };
+    let status: tonic::Status = CarbideError::from(err).into();
+
+    assert_eq!(status.code(), tonic::Code::AlreadyExists);
+}
+
+#[test]
 fn tenant_site_prefix_quota_error_is_actionable() {
     let err = CarbideError::TenantSitePrefixQuotaExceeded { used: 8, limit: 8 };
     let status: tonic::Status = err.into();

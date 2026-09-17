@@ -33,7 +33,7 @@ pub(crate) async fn create(
 ) -> Result<Response<rpc::IbPartition>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let req = request.into_inner();
     let requested_pkey = req
         .config
@@ -87,7 +87,7 @@ pub(crate) async fn create(
     })?;
     let resp = rpc::IbPartition::try_from(resp).map(Response::new)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(resp)
 }
@@ -98,7 +98,7 @@ pub(crate) async fn update(
 ) -> Result<Response<rpc::IbPartition>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let req = request.into_inner();
     let id = req.id.ok_or(CarbideError::MissingArgument("id"))?;
@@ -111,7 +111,8 @@ pub(crate) async fn update(
         &mut txn,
         ObjectColumnFilter::One(ib_partition::IdColumn, &id),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let partition = match partitions.len() {
         1 => partitions.remove(0),
@@ -167,7 +168,8 @@ pub(crate) async fn update(
         &metadata,
         &mut txn,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     {
         ConditionalWrite::Applied(partition) => partition,
         ConditionalWrite::NotApplied(ib_partition::PartitionNotCurrent) => {
@@ -180,7 +182,7 @@ pub(crate) async fn update(
             .into());
         }
     };
-    txn.commit().await?;
+    txn.commit().await.map_err(CarbideError::from)?;
 
     Ok(Response::new(rpc::IbPartition::try_from(resp)?))
 }
@@ -193,7 +195,9 @@ pub(crate) async fn find_ids(
 
     let filter: model::ib_partition::IbPartitionSearchFilter = request.into_inner().into();
 
-    let ib_partition_ids = db::ib_partition::find_ids(&api.database_connection, filter).await?;
+    let ib_partition_ids = db::ib_partition::find_ids(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::IbPartitionIdList { ib_partition_ids }))
 }
@@ -224,7 +228,8 @@ pub(crate) async fn find_by_ids(
         &api.database_connection,
         ObjectColumnFilter::List(ib_partition::IdColumn, &ib_partition_ids),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let mut result = Vec::with_capacity(partitions.len());
     for ibp in partitions {
@@ -241,7 +246,7 @@ pub(crate) async fn delete(
 ) -> Result<Response<rpc::IbPartitionDeletionResult>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let rpc::IbPartitionDeletionRequest { id, .. } = request.into_inner();
 
@@ -251,7 +256,8 @@ pub(crate) async fn delete(
         &mut txn,
         ObjectColumnFilter::One(ib_partition::IdColumn, &uuid),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let segment = match segments.len() {
         1 => segments.remove(0),
@@ -268,7 +274,9 @@ pub(crate) async fn delete(
     // It is still possible for a new reference to be made after this check is made.
     // In that case partition will remain in terminating state until the reference is removed.
     let instance_count =
-        db::ib_partition::count_instances_referencing_partition(&mut txn, segment.id).await?;
+        db::ib_partition::count_instances_referencing_partition(&mut txn, segment.id)
+            .await
+            .map_err(crate::CarbideError::from)?;
     if instance_count > 0 {
         return Err(CarbideError::FailedPrecondition(format!(
             "IB partition cannot be deleted while {instance_count} instance(s) are still using it"
@@ -279,9 +287,10 @@ pub(crate) async fn delete(
     let resp = db::ib_partition::mark_as_deleted(&segment, &mut txn)
         .await
         .map(|_| rpc::IbPartitionDeletionResult {})
-        .map(Response::new)?;
+        .map(Response::new)
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(resp)
 }
@@ -303,8 +312,9 @@ pub(crate) async fn for_tenant(
         }
     };
 
-    let results =
-        db::ib_partition::for_tenant(&api.database_connection, _tenant_organization_id).await?;
+    let results = db::ib_partition::for_tenant(&api.database_connection, _tenant_organization_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let mut ib_partitions = Vec::with_capacity(results.len());
 

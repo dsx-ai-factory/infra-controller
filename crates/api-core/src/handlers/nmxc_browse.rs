@@ -176,7 +176,8 @@ pub(crate) async fn nmxc_browse(
             },
             nvlink_config,
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
 
         let url = match resolution {
             NmxCEndpointResolution::Resolved(url) => url,

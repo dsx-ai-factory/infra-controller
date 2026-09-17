@@ -63,7 +63,8 @@ pub(crate) async fn trigger_machine_attestation(
         ObjectFilter::List(&[machine_id]),
         MachineSearchConfig::default(),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let bmc_info = match machines.len() {
         0 => {
             return Err(Status::from(CarbideError::NotFoundError {
@@ -84,7 +85,8 @@ pub(crate) async fn trigger_machine_attestation(
 
     let bmc_access_info =
         db::machine_interface::lookup_bmc_access_info(&mut db_reader, bmc_ip_addr, bmc_info.port)
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
     drop(db_reader);
 
     let redfish_client_future = api.redfish_pool.client_by_info(&bmc_access_info);
@@ -129,9 +131,11 @@ pub(crate) async fn cancel_machine_attestation(
     let machine_id = request.get_ref();
     log_machine_id(machine_id);
 
-    let mut txn = api.txn_begin().await?;
-    db::attestation::spdm::cancel_machine_attestation(&mut txn, machine_id).await?;
-    txn.commit().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    db::attestation::spdm::cancel_machine_attestation(&mut txn, machine_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -161,7 +165,7 @@ pub(crate) async fn list_attestation_machines(
     // if machine id is None AND selector is unsuccessful, print failed attestations
     // if machine is None AND selector is in progress, print all machines that are in progress
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let response = match &request.get_ref().variant {
         None => db::attestation::spdm::list_all_attestation_statuses(
@@ -179,7 +183,8 @@ pub(crate) async fn list_attestation_machines(
                     })
                     .collect(),
             })
-        })?,
+        })
+        .map_err(crate::CarbideError::from)?,
         Some(variant) => match variant {
             rpc::spdm_list_attestation_machines_request::Variant::MachineId(machine_id) => {
                 db::attestation::spdm::list_single_machine_attestation_status(&mut txn, machine_id)
@@ -192,7 +197,8 @@ pub(crate) async fn list_attestation_machines(
                                     .into(),
                             }],
                         })
-                    })?
+                    })
+                    .map_err(crate::CarbideError::from)?
             }
             rpc::spdm_list_attestation_machines_request::Variant::Selector(selector) => {
                 let request_selector = rpc::SpdmListAttestationMachinesRequestSelector::try_from(
@@ -221,12 +227,13 @@ pub(crate) async fn list_attestation_machines(
                                 })
                                 .collect(),
                         })
-                    })?
+                    })
+                    .map_err(crate::CarbideError::from)?
             }
         },
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(response)
 }
@@ -240,10 +247,12 @@ pub(crate) async fn get_attestation_machine(
     let machine_id = request.get_ref();
     log_machine_id(machine_id);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let attestations_details =
-        db::attestation::spdm::get_attestations_for_machine_id(&mut txn, machine_id).await?;
-    txn.commit().await?;
+        db::attestation::spdm::get_attestations_for_machine_id(&mut txn, machine_id)
+            .await
+            .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::SpdmGetAttestationMachineResponse {
         attestations_details: attestations_details
@@ -269,10 +278,13 @@ pub(crate) async fn attest_quote(
     let machine_id: MachineId =
         crate::handlers::utils::convert_and_log_machine_id(request.machine_id.as_ref())?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let ak_pub_bytes =
-        match db::attestation::secret_ak_pub::get_by_secret(&mut txn, &request.credential).await? {
+        match db::attestation::secret_ak_pub::get_by_secret(&mut txn, &request.credential)
+            .await
+            .map_err(crate::CarbideError::from)?
+        {
             Some(entry) => entry.ak_pub,
             None => {
                 return Err(CarbideError::AttestQuoteError(
@@ -321,7 +333,9 @@ pub(crate) async fn attest_quote(
     // If we've reached this point, we can now clean up
     // now ephemeral secret data from the database, and send
     // off the PCR values as a MeasurementReport.
-    db::attestation::secret_ak_pub::delete(&mut txn, &request.credential).await?;
+    db::attestation::secret_ak_pub::delete(&mut txn, &request.credential)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let pcr_values: ::measured_boot::pcr::PcrRegisterValueVec = request
         .pcr_values
@@ -353,7 +367,7 @@ pub(crate) async fn attest_quote(
         false
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     if attestation_failed {
         tracing::info!(

@@ -291,9 +291,10 @@ pub(crate) async fn update(
     log_request_data(&request);
 
     let update = UpdateSitePrefixMetadata::try_from(request.into_inner())?;
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let current = db::site_prefix::find_by_id_for_update(&mut txn, update.id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "site prefix",
             id: update.id.to_string(),
@@ -307,13 +308,15 @@ pub(crate) async fn update(
     }
 
     let expected_version = update.if_version_match.unwrap_or(current.version);
-    let site_prefix =
-        db::site_prefix::update_tenant_metadata(&update, expected_version, &mut txn).await?;
-    let used =
-        db::site_prefix::count_tenant_managed(&mut txn, &update.tenant_organization_id).await?;
+    let site_prefix = db::site_prefix::update_tenant_metadata(&update, expected_version, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    let used = db::site_prefix::count_tenant_managed(&mut txn, &update.tenant_organization_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let response = rpc::SitePrefix::from(site_prefix)
         .with_quota(used, api.runtime_config.max_site_prefixes_per_tenant);
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(response))
 }
@@ -325,9 +328,10 @@ pub(crate) async fn delete(
     log_request_data(&request);
 
     let retire = RetireTenantManagedSitePrefix::try_from(request.into_inner())?;
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let current = db::site_prefix::find_by_id_for_update(&mut txn, retire.id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "site prefix",
             id: retire.id.to_string(),
@@ -335,12 +339,15 @@ pub(crate) async fn delete(
     authorize_tenant_mutation(&current, &retire.tenant_organization_id)?;
     let previous_state = current.status.lifecycle_state;
 
-    let site_prefix = db::site_prefix::retire_tenant_managed(&retire, &current, &mut txn).await?;
-    let used =
-        db::site_prefix::count_tenant_managed(&mut txn, &retire.tenant_organization_id).await?;
+    let site_prefix = db::site_prefix::retire_tenant_managed(&retire, &current, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    let used = db::site_prefix::count_tenant_managed(&mut txn, &retire.tenant_organization_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let response = rpc::SitePrefix::from(site_prefix)
         .with_quota(used, api.runtime_config.max_site_prefixes_per_tenant);
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     if previous_state != SitePrefixLifecycleState::Deleting {
         emit(SitePrefixRetirement {
@@ -362,7 +369,9 @@ pub(crate) async fn find_ids(
     log_request_data(&request);
 
     let filter: model::site_prefix::SitePrefixSearchFilter = request.into_inner().try_into()?;
-    let site_prefix_ids = db::site_prefix::find_ids(&api.database_connection, filter).await?;
+    let site_prefix_ids = db::site_prefix::find_ids(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::SitePrefixIdList { site_prefix_ids }))
 }
@@ -389,8 +398,9 @@ pub(crate) async fn find_by_ids(
     }
 
     let mut reader = api.db_reader();
-    let site_prefixes =
-        db::site_prefix::find_by_ids(reader.as_mut(), site_prefix_ids.as_slice()).await?;
+    let site_prefixes = db::site_prefix::find_by_ids(reader.as_mut(), site_prefix_ids.as_slice())
+        .await
+        .map_err(crate::CarbideError::from)?;
     let tenant_organization_ids: Vec<_> = site_prefixes
         .iter()
         .filter_map(|site_prefix| site_prefix.config.tenant_organization_id.clone())
@@ -399,7 +409,8 @@ pub(crate) async fn find_by_ids(
         reader.as_mut(),
         &tenant_organization_ids,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let quota_limit = api.runtime_config.max_site_prefixes_per_tenant;
     let site_prefixes = site_prefixes
         .into_iter()
@@ -429,13 +440,14 @@ pub(crate) async fn find_state_histories(
         .into());
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let results = db::state_history::find_by_object_ids(
         &mut txn,
         db::state_history::StateHistoryTableId::SitePrefix,
         &site_prefix_ids,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let mut response = rpc::StateHistories::default();
     for (site_prefix_id, records) in results {
         response.histories.insert(
@@ -445,7 +457,7 @@ pub(crate) async fn find_state_histories(
             },
         );
     }
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(response))
 }

@@ -37,8 +37,9 @@ pub(crate) async fn find_ids(
 
     let filter: model::network_segment::NetworkSegmentSearchFilter = request.into_inner().into();
 
-    let network_segments_ids =
-        db::network_segment::find_ids(&api.database_connection, filter).await?;
+    let network_segments_ids = db::network_segment::find_ids(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::NetworkSegmentIdList {
         network_segments_ids,
@@ -77,7 +78,8 @@ pub(crate) async fn find_by_ids(
             include_num_free_ips,
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let mut result = Vec::with_capacity(segments.len());
     for seg in segments {
@@ -149,9 +151,11 @@ pub(crate) async fn create(
         }
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     if new_network_segment.vpc_id.is_some() {
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        db::tenant_prefix_overlap::lock_checks(txn.as_mut())
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
 
     let allocate_svi_ip = if let Some(vpc_id) = new_network_segment.vpc_id {
@@ -159,7 +163,8 @@ pub(crate) async fn create(
             &mut txn,
             ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_id),
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
 
         let vpc = vpcs
             .first()
@@ -189,7 +194,7 @@ pub(crate) async fn create(
 
     let network_segment = save(api, &mut txn, new_network_segment, false, allocate_svi_ip).await?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(network_segment.into()))
 }
@@ -211,15 +216,18 @@ pub(crate) async fn attach_to_vpc(
         network_segment_id.ok_or(CarbideError::MissingArgument("network_segment_id"))?;
     let vpc_id = vpc_id.ok_or(CarbideError::MissingArgument("vpc_id"))?;
 
-    let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    db::tenant_prefix_overlap::lock_checks(txn.as_mut())
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let vpcs = db::vpc::find_by_with_lock(
         txn.as_mut(),
         ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_id),
         db::vpc::VpcRowLock::Mutation,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let vpc = vpcs.first().ok_or_else(|| CarbideError::NotFoundError {
         kind: "vpc",
         id: vpc_id.to_string(),
@@ -230,7 +238,8 @@ pub(crate) async fn attach_to_vpc(
         ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
         NetworkSegmentSearchConfig::default(),
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .into_iter()
     .find(|segment| !segment.is_marked_as_deleted())
     .ok_or_else(|| CarbideError::NotFoundError {
@@ -268,11 +277,13 @@ pub(crate) async fn attach_to_vpc(
                 .map(|prefix| prefix.prefix)
                 .collect::<Vec<_>>();
             reject_vpc_prefix_overlaps(&mut txn, &prefixes).await?;
-            db::network_segment::attach_to_vpc(&segment, txn.as_mut(), vpc_id).await?
+            db::network_segment::attach_to_vpc(&segment, txn.as_mut(), vpc_id)
+                .await
+                .map_err(crate::CarbideError::from)?
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(Response::new(network_segment.into()))
 }
 
@@ -282,7 +293,7 @@ pub(crate) async fn delete(
 ) -> Result<Response<rpc::NetworkSegmentDeletionResult>, Status> {
     crate::api::log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let rpc::NetworkSegmentDeletionRequest { id, .. } = request.into_inner();
 
@@ -293,7 +304,8 @@ pub(crate) async fn delete(
         ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
         NetworkSegmentSearchConfig::default(),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let segment = match segments.len() {
         1 => segments.remove(0),
@@ -306,7 +318,9 @@ pub(crate) async fn delete(
         }
     };
 
-    db::network_segment::mark_as_deleted(&segment, &mut txn).await?;
+    db::network_segment::mark_as_deleted(&segment, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     // A network's reverse-DNS zone exists only because the network does, so it
     // is dropped with the segment -- the inverse of the create-time hook in
@@ -316,9 +330,11 @@ pub(crate) async fn delete(
         .iter()
         .map(|network_prefix| network_prefix.prefix)
         .collect::<Vec<_>>();
-    db::dns::remove_reverse_zones(&prefixes, segment.id, &mut txn).await?;
+    db::dns::remove_reverse_zones(&prefixes, segment.id, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::NetworkSegmentDeletionResult {}))
 }
@@ -333,7 +349,9 @@ pub(crate) async fn for_vpc(
 
     let uuid = id.ok_or_else(|| CarbideError::InvalidArgument("id".to_string()))?;
 
-    let results = db::network_segment::for_vpc(&api.database_connection, uuid).await?;
+    let results = db::network_segment::for_vpc(&api.database_connection, uuid)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::NetworkSegmentList {
         network_segments: results.into_iter().map(Into::into).collect(),
@@ -359,13 +377,14 @@ pub(crate) async fn find_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let results = db::state_history::find_by_object_ids(
         &mut txn,
         db::state_history::StateHistoryTableId::NetworkSegment,
         &segment_ids,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let mut response = rpc::StateHistories::default();
     for (segment_id, records) in results {
@@ -377,7 +396,7 @@ pub(crate) async fn find_state_histories(
         );
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(tonic::Response::new(response))
 }
 

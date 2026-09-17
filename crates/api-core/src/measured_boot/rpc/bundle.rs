@@ -48,7 +48,7 @@ pub(crate) async fn handle_create_measurement_bundle(
     api: &Api,
     req: CreateMeasurementBundleRequest,
 ) -> Result<CreateMeasurementBundleResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let state = req.state();
     let bundle = db::measured_boot::bundle::new(
         &mut txn,
@@ -63,7 +63,7 @@ pub(crate) async fn handle_create_measurement_bundle(
         message: format!("failed to create new bundle: {e}"),
     })?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(CreateMeasurementBundleResponse {
         bundle: Some(bundle.into()),
     })
@@ -75,7 +75,7 @@ pub(crate) async fn handle_delete_measurement_bundle(
     api: &Api,
     req: DeleteMeasurementBundleRequest,
 ) -> Result<DeleteMeasurementBundleResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let bundle = match req.selector {
         // Delete for the given bundle ID.
         Some(delete_measurement_bundle_request::Selector::BundleId(bundle_uuid)) => {
@@ -103,7 +103,7 @@ pub(crate) async fn handle_delete_measurement_bundle(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(DeleteMeasurementBundleResponse {
         bundle: Some(bundle.into()),
     })
@@ -115,7 +115,7 @@ pub(crate) async fn handle_rename_measurement_bundle(
     api: &Api,
     req: RenameMeasurementBundleRequest,
 ) -> Result<RenameMeasurementBundleResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let bundle = match req.selector {
         // Rename for the given bundle ID.
         Some(rename_measurement_bundle_request::Selector::BundleId(bundle_uuid)) => {
@@ -143,7 +143,7 @@ pub(crate) async fn handle_rename_measurement_bundle(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(RenameMeasurementBundleResponse {
         bundle: Some(bundle.into()),
     })
@@ -155,7 +155,7 @@ pub(crate) async fn handle_update_measurement_bundle(
     api: &Api,
     req: UpdateMeasurementBundleRequest,
 ) -> Result<UpdateMeasurementBundleResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let state = req.state();
     let bundle_id = match req.selector {
         // Update for the given bundle ID.
@@ -184,7 +184,7 @@ pub(crate) async fn handle_update_measurement_bundle(
             message: format!("failed to update bundle: {e}"),
         })?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(UpdateMeasurementBundleResponse {
         bundle: Some(bundle.into()),
     })
@@ -196,7 +196,7 @@ pub(crate) async fn handle_show_measurement_bundle(
     api: &Api,
     req: ShowMeasurementBundleRequest,
 ) -> Result<ShowMeasurementBundleResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let bundle = match req.selector {
         Some(show_measurement_bundle_request::Selector::BundleId(bundle_uuid)) => {
             db::measured_boot::bundle::from_id(&mut txn, bundle_uuid)
@@ -218,7 +218,7 @@ pub(crate) async fn handle_show_measurement_bundle(
             );
         }
     };
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(ShowMeasurementBundleResponse {
         bundle: Some(bundle.into()),
@@ -268,7 +268,7 @@ pub(crate) async fn handle_list_measurement_bundle_machines(
     api: &Api,
     req: ListMeasurementBundleMachinesRequest,
 ) -> Result<ListMeasurementBundleMachinesResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let machine_ids: Vec<String> = match req.selector {
         // Select by bundle ID.
         Some(list_measurement_bundle_machines_request::Selector::BundleId(bundle_uuid)) => {
@@ -296,7 +296,7 @@ pub(crate) async fn handle_list_measurement_bundle_machines(
         None => return Err(CarbideError::InvalidArgument("selector required".to_string()).into()),
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(ListMeasurementBundleMachinesResponse { machine_ids })
 }
@@ -305,7 +305,7 @@ pub(crate) async fn handle_find_closest_match(
     api: &Api,
     req: FindClosestBundleMatchRequest,
 ) -> Result<ShowMeasurementBundleResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let report_id = req
         .report_id
@@ -318,8 +318,9 @@ pub(crate) async fn handle_find_closest_match(
         })?;
 
     // get profile
-    let journal =
-        db::measured_boot::journal::get_journal_for_report_id(&mut txn, report_id).await?;
+    let journal = db::measured_boot::journal::get_journal_for_report_id(&mut txn, report_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let bundle = match bundle::find_closest_match(
         &mut txn,
@@ -328,7 +329,8 @@ pub(crate) async fn handle_find_closest_match(
         ))?,
         &report.pcr_values(),
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     {
         Some(matched_bundle) => matched_bundle,
         None => {
@@ -336,7 +338,7 @@ pub(crate) async fn handle_find_closest_match(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(ShowMeasurementBundleResponse {
         bundle: Some(bundle.into()),

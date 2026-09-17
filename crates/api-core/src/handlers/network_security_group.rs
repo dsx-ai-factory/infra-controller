@@ -107,7 +107,7 @@ pub(crate) async fn create(
             })?;
 
     // Start a new transaction for a db write.
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Write a new NetworkSecurityGroup to the DB and get back
     // our new NetworkSecurityGroup.
@@ -120,7 +120,8 @@ pub(crate) async fn create(
         stateful_egress,
         &rules,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Prepare the response to send back
     let rpc_out = rpc::CreateNetworkSecurityGroupResponse {
@@ -128,7 +129,7 @@ pub(crate) async fn create(
     };
 
     //  Commit our txn if nothing has gone wrong so far.
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back.
     Ok(Response::new(rpc_out))
@@ -155,7 +156,7 @@ pub(crate) async fn find_ids(
             CarbideError::from(RpcDataConversionError::InvalidTenantOrg(e.to_string()))
         })?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let network_security_group_ids = network_security_group::find_ids(
         &mut txn,
@@ -163,7 +164,8 @@ pub(crate) async fn find_ids(
         tenant_organization_id.as_ref(),
         false,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let rpc_out = rpc::FindNetworkSecurityGroupIdsResponse {
         network_security_group_ids: network_security_group_ids
@@ -172,7 +174,7 @@ pub(crate) async fn find_ids(
             .collect(),
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc_out))
 }
@@ -226,7 +228,7 @@ pub(crate) async fn find_by_ids(
         })?;
 
     // Prepare our txn to grab the NetworkSecurityGroups from the DB
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Make our DB query for the IDs to get our NetworkSecurityGroups
     let network_security_groups = network_security_group::find_by_ids(
@@ -235,7 +237,8 @@ pub(crate) async fn find_by_ids(
         tenant_organization_id.as_ref(),
         false,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Convert the list of internal NetworkSecurityGroup to a
     // list of proto message NetworkSecurityGroup to send back
@@ -252,7 +255,7 @@ pub(crate) async fn find_by_ids(
     };
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back
     Ok(Response::new(rpc_out))
@@ -318,7 +321,7 @@ pub(crate) async fn update(
             })?;
 
     // Start a new transaction for a db write.
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Classify the policy before taking resource locks: an expanding change
     // must acquire the overlap lock first. The row is rechecked below.
@@ -328,7 +331,8 @@ pub(crate) async fn update(
         Some(&tenant_organization_id),
         false,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // If we found more than one, the DB is corrupt.
     if current_network_security_group.len() > 1 {
@@ -386,7 +390,9 @@ pub(crate) async fn update(
     };
     let overlap_locked = !policy_is_nonexpanding(current_network_security_group);
     if overlap_locked {
-        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
     let locked_nsg = network_security_group::find_by_ids(
         &mut txn,
@@ -394,7 +400,8 @@ pub(crate) async fn update(
         Some(&tenant_organization_id),
         true,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop();
     if (api.runtime_config.tenant_prefix_overlap_enabled || req.if_version_match.is_some())
         && locked_nsg.as_ref().map(|nsg| nsg.version)
@@ -417,16 +424,19 @@ pub(crate) async fn update(
     if !overlap_locked && !policy_is_nonexpanding(&locked_nsg) {
         // Release the NSG lock before taking the overlap lock. Then read under
         // both locks; no further restart is needed, even if the policy changed.
-        txn.rollback().await?;
-        txn = api.txn_begin().await?;
-        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        txn.rollback().await.map_err(crate::CarbideError::from)?;
+        txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
         locked_nsg = network_security_group::find_by_ids(
             &mut txn,
             std::slice::from_ref(&id),
             Some(&tenant_organization_id),
             true,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .pop()
         .ok_or_else(not_found)?;
     }
@@ -455,7 +465,8 @@ pub(crate) async fn update(
         locked_nsg.version,
         None,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Prepare the response to send back
     let rpc_out = rpc::UpdateNetworkSecurityGroupResponse {
@@ -463,7 +474,7 @@ pub(crate) async fn update(
     };
 
     // Commit our txn if nothing has gone wrong so far.
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back.
     Ok(Response::new(rpc_out))
@@ -495,7 +506,7 @@ pub(crate) async fn delete(
             })?;
 
     // Prepare our txn to delete from the DB
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Make our DB query for the NetworkSecurityGroup.
     // This is mainly to get a row-level lock if the record exists
@@ -511,7 +522,8 @@ pub(crate) async fn delete(
         None,
         true,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop();
 
     // Since we needed to query for the record anyway,
@@ -540,7 +552,8 @@ pub(crate) async fn delete(
         Some(std::slice::from_ref(&id)),
         Some(&tenant_organization_id),
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop();
 
     if existing_associated_objects
@@ -554,13 +567,15 @@ pub(crate) async fn delete(
     }
 
     // Make our DB query to soft delete the NetworkSecurityGroup
-    let _id = network_security_group::soft_delete(&mut txn, &id, &tenant_organization_id).await?;
+    let _id = network_security_group::soft_delete(&mut txn, &id, &tenant_organization_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     // Prepare the response message
     let rpc_out = rpc::DeleteNetworkSecurityGroupResponse {};
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back
     Ok(Response::new(rpc_out))
@@ -606,7 +621,7 @@ pub(crate) async fn get_propagation_status(
         })?;
 
     // Prepare our txn to associate machines with the NetworkSecurityGroup
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Query the DB for propagation status.
     let (vpcs, instances) = network_security_group::get_propagation_status(
@@ -627,7 +642,8 @@ pub(crate) async fn get_propagation_status(
         Some(&vpc_ids),
         Some(&instance_ids),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Prepare the response message
     let rpc_out = rpc::GetNetworkSecurityGroupPropagationStatusResponse {
@@ -636,7 +652,7 @@ pub(crate) async fn get_propagation_status(
     };
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back
     Ok(Response::new(rpc_out))
@@ -675,7 +691,7 @@ pub(crate) async fn get_attachments(
             ))
         })?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Query the DB for propagation status.
     let attachments = network_security_group::find_objects_with_attachments(
@@ -683,7 +699,8 @@ pub(crate) async fn get_attachments(
         Some(&network_security_group_ids),
         None,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Prepare the response message
     let rpc_out = rpc::GetNetworkSecurityGroupAttachmentsResponse {
@@ -691,7 +708,7 @@ pub(crate) async fn get_attachments(
     };
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back
     Ok(Response::new(rpc_out))

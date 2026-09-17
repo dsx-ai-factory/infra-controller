@@ -56,7 +56,7 @@ pub(crate) async fn set_firmware_update_time_window(
         }
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     tracing::info!(
         start_time = ?chrono::Utc.timestamp_opt(start, 0),
@@ -77,9 +77,10 @@ pub(crate) async fn set_firmware_update_time_window(
             .unwrap_or(chrono::Utc::now()),
         &mut txn,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::SetFirmwareUpdateTimeWindowResponse {}))
 }
@@ -174,19 +175,24 @@ pub(crate) async fn upsert_host_firmware_config(
     let request = request.into_inner();
     let patch = HostFirmwareConfigPatch::from_request(&request)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let vendor = patch.vendor.to_pascalcase();
     let model = patch.model.clone();
 
-    db::host_firmware_config::lock_for_update(&mut txn, &vendor, &model).await?;
+    db::host_firmware_config::lock_for_update(&mut txn, &vendor, &model)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let existing = db::host_firmware_config::get(&mut txn, &vendor, &model)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .map(|row| row.into_config());
     let firmware = merge_host_firmware_config_patch(existing, patch)?;
-    let row = db::host_firmware_config::upsert(&mut txn, &firmware).await?;
+    let row = db::host_firmware_config::upsert(&mut txn, &firmware)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(host_firmware_config_response(row)))
 }
@@ -201,12 +207,16 @@ pub(crate) async fn delete_host_firmware_config(
     let vendor = parse_vendor(&request.vendor)?.to_pascalcase();
     let model = parse_host_firmware_config_model(&request.model)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    db::host_firmware_config::lock_for_update(&mut txn, &vendor, &model).await?;
-    db::host_firmware_config::delete(&mut txn, &vendor, &model).await?;
+    db::host_firmware_config::lock_for_update(&mut txn, &vendor, &model)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    db::host_firmware_config::delete(&mut txn, &vendor, &model)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }

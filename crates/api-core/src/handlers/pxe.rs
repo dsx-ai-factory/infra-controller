@@ -34,7 +34,7 @@ pub(crate) async fn get_pxe_instructions(
 ) -> Result<Response<rpc::PxeInstructions>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let pxe_request: PxeInstructionRequest = request.into_inner().try_into()?;
 
@@ -78,7 +78,7 @@ pub(crate) async fn get_pxe_instructions(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::PxeInstructions {
         pxe_script,
@@ -111,9 +111,9 @@ pub(crate) async fn get_cloud_init_instructions(
     // transaction. Instance allocation takes ACCESS EXCLUSIVE on
     // instance_addresses, so a second owner cannot appear while Core selects
     // tenant data.
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let instructions = resolve_cloud_init_instructions(api, txn.as_pgconn(), ip).await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(instructions))
 }

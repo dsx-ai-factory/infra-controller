@@ -31,7 +31,7 @@ pub(crate) async fn grow(
 
     let toml_text = request.into_inner().text;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let mut pools = HashMap::new();
     let table: toml::Table = toml_text
@@ -47,7 +47,7 @@ pub(crate) async fn grow(
     use db::resource_pool::DefineResourcePoolError as DE;
     match db::resource_pool::define_all_from(&mut txn, &pools).await {
         Ok(()) => {
-            txn.commit().await?;
+            txn.commit().await.map_err(crate::CarbideError::from)?;
             if reconcile_dpu_loopbacks {
                 // The backfill opens one transaction per DPU, so publish the
                 // new pool rows before it starts reconciliation.
@@ -79,13 +79,13 @@ pub(crate) async fn list(
 ) -> Result<tonic::Response<rpc::ResourcePools>, tonic::Status> {
     crate::api::log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let snapshot = db::resource_pool::all(&mut txn)
         .await
         .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::ResourcePools {
         pools: snapshot.into_iter().map(|s| s.into()).collect(),

@@ -53,7 +53,7 @@ pub(crate) async fn handle_create_system_measurement_profile(
     api: &Api,
     req: CreateMeasurementSystemProfileRequest,
 ) -> Result<CreateMeasurementSystemProfileResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     // sys_vendor and product_name are the two baseline attrs, so
     // just treat them as requirements, and then smash the
     // remaining ones on as "extra-attrs".
@@ -69,7 +69,7 @@ pub(crate) async fn handle_create_system_measurement_profile(
         .await
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(CreateMeasurementSystemProfileResponse {
         system_profile: Some(system_profile.into()),
     })
@@ -81,7 +81,7 @@ pub(crate) async fn handle_rename_measurement_system_profile(
     api: &Api,
     req: RenameMeasurementSystemProfileRequest,
 ) -> Result<RenameMeasurementSystemProfileResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let profile = match req.selector {
         // Rename for the given system_profile ID.
         Some(rename_measurement_system_profile_request::Selector::ProfileId(
@@ -117,7 +117,7 @@ pub(crate) async fn handle_rename_measurement_system_profile(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(RenameMeasurementSystemProfileResponse {
         profile: Some(profile.into()),
     })
@@ -129,7 +129,7 @@ pub(crate) async fn handle_delete_measurement_system_profile(
     api: &Api,
     req: DeleteMeasurementSystemProfileRequest,
 ) -> Result<DeleteMeasurementSystemProfileResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let profile: Option<MeasurementSystemProfile> = match req.selector {
         // Deleting a profile based on profile ID.
         Some(delete_measurement_system_profile_request::Selector::ProfileId(profile_uuid)) => {
@@ -152,7 +152,7 @@ pub(crate) async fn handle_delete_measurement_system_profile(
         id: "provided selector".to_string(),
     })?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(DeleteMeasurementSystemProfileResponse {
         system_profile: Some(system_profile.into()),
     })
@@ -164,7 +164,7 @@ pub(crate) async fn handle_show_measurement_system_profile(
     api: &Api,
     req: ShowMeasurementSystemProfileRequest,
 ) -> Result<ShowMeasurementSystemProfileResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let system_profile = match req.selector {
         // Show a system profile with the given profile ID.
         Some(show_measurement_system_profile_request::Selector::ProfileId(profile_uuid)) => {
@@ -185,7 +185,7 @@ pub(crate) async fn handle_show_measurement_system_profile(
         // Show all system profiles.
         None => return Err(CarbideError::InvalidArgument("selector required".to_string()).into()),
     };
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(ShowMeasurementSystemProfileResponse {
         system_profile: Some(system_profile.into()),
@@ -235,7 +235,7 @@ pub(crate) async fn handle_list_measurement_system_profile_bundles(
     api: &Api,
     req: ListMeasurementSystemProfileBundlesRequest,
 ) -> Result<ListMeasurementSystemProfileBundlesResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let bundle_ids = match req.selector {
         // ...and do it by profile ID.
         Some(list_measurement_system_profile_bundles_request::Selector::ProfileId(
@@ -259,7 +259,7 @@ pub(crate) async fn handle_list_measurement_system_profile_bundles(
         None => return Err(CarbideError::InvalidArgument("selector required".to_string()).into()),
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(ListMeasurementSystemProfileBundlesResponse { bundle_ids })
 }
@@ -270,7 +270,7 @@ pub(crate) async fn handle_list_measurement_system_profile_machines(
     api: &Api,
     req: ListMeasurementSystemProfileMachinesRequest,
 ) -> Result<ListMeasurementSystemProfileMachinesResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let machine_ids: Vec<String> = match req.selector {
         // ...and do it by profile ID.
         Some(list_measurement_system_profile_machines_request::Selector::ProfileId(profile_id)) => {
@@ -297,7 +297,7 @@ pub(crate) async fn handle_list_measurement_system_profile_machines(
         // ...and it has to be either by ID or name.
         None => return Err(CarbideError::InvalidArgument("selector required".to_string()).into()),
     };
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(ListMeasurementSystemProfileMachinesResponse { machine_ids })
 }

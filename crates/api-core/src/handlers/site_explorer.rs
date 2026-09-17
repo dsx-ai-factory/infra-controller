@@ -38,7 +38,9 @@ pub(crate) async fn find_explored_endpoint_ids(
 
     let filter: model::site_explorer::ExploredEndpointSearchFilter = request.into_inner().into();
 
-    let endpoint_ips = db::explored_endpoints::find_ips(&api.database_connection, filter).await?;
+    let endpoint_ips = db::explored_endpoints::find_ips(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(
         ::rpc::site_explorer::ExploredEndpointIdList {
@@ -81,7 +83,8 @@ pub(crate) async fn find_explored_endpoints_by_ids(
                 .map(::rpc::site_explorer::ExploredEndpoint::from)
                 .collect(),
         })
-        .map(Response::new)?;
+        .map(Response::new)
+        .map_err(crate::CarbideError::from)?;
     Ok(result)
 }
 
@@ -93,7 +96,9 @@ pub(crate) async fn find_explored_managed_host_ids(
 
     let filter: model::site_explorer::ExploredManagedHostSearchFilter = request.into_inner().into();
 
-    let host_ips = db::explored_managed_host::find_ips(&api.database_connection, filter).await?;
+    let host_ips = db::explored_managed_host::find_ips(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(
         ::rpc::site_explorer::ExploredManagedHostIdList {
@@ -136,7 +141,8 @@ pub(crate) async fn find_explored_managed_hosts_by_ids(
                 .map(::rpc::site_explorer::ExploredManagedHost::from)
                 .collect(),
         })
-        .map(Response::new)?;
+        .map(Response::new)
+        .map_err(crate::CarbideError::from)?;
 
     Ok(result)
 }
@@ -147,7 +153,9 @@ pub(crate) async fn get_site_exploration_report(
 ) -> Result<Response<::rpc::site_explorer::SiteExplorationReport>, Status> {
     log_request_data(&request);
 
-    let report = db::site_exploration_report::fetch(&mut api.db_reader()).await?;
+    let report = db::site_exploration_report::fetch(&mut api.db_reader())
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(report.into()))
 }
@@ -158,7 +166,9 @@ pub(crate) async fn get_site_explorer_last_run(
 ) -> Result<Response<::rpc::site_explorer::SiteExplorerLastRunResponse>, Status> {
     log_request_data(&request);
 
-    let last_run = db::site_explorer_run_status::fetch(&mut api.db_reader()).await?;
+    let last_run = db::site_explorer_run_status::fetch(&mut api.db_reader())
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         ::rpc::site_explorer::SiteExplorerLastRunResponse {
@@ -176,7 +186,9 @@ pub(crate) async fn find_explored_mlx_device_host_ids(
     // The host BMC IPs whose Redfish PCIe inventory carries a BlueField device --
     // the pages the client walks. DPU endpoints are excluded; they report no
     // host-side inventory and would yield no devices.
-    let endpoints = db::explored_endpoints::find_all(&api.database_connection).await?;
+    let endpoints = db::explored_endpoints::find_all(&api.database_connection)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let host_ids = endpoints
         .iter()
         .filter(|ep| !ep.report.is_dpu() && ep.report.has_bluefield_devices())
@@ -219,7 +231,9 @@ pub(crate) async fn find_explored_mlx_devices_by_ids(
     // than scanning every explored endpoint per page. The serial query is
     // constrained to DPU reports, so a host with a coincidentally matching serial
     // is not pulled in.
-    let mut endpoints = db::explored_endpoints::find_by_ips(&api.database_connection, ips).await?;
+    let mut endpoints = db::explored_endpoints::find_by_ips(&api.database_connection, ips)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let serials: Vec<String> = endpoints
         .iter()
         .flat_map(|ep| ep.report.bluefield_device_serials())
@@ -227,7 +241,8 @@ pub(crate) async fn find_explored_mlx_devices_by_ids(
     if !serials.is_empty() {
         let dpus =
             db::explored_endpoints::find_by_dpu_serial_numbers(&api.database_connection, serials)
-                .await?;
+                .await
+                .map_err(crate::CarbideError::from)?;
         endpoints.extend(dpus);
     }
 
@@ -250,22 +265,27 @@ pub(crate) async fn clear_site_exploration_error(
 
     let bmc_ip = IpAddr::from_str(&req.ip_address).map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    db::explored_endpoints::clear_last_known_error(bmc_ip, &mut txn).await?;
+    db::explored_endpoints::clear_last_known_error(bmc_ip, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     // A terminal preingestion `Failed` state is the operator-visible error for a
     // stuck host, but it lives in `preingestion_state`, not in the exploration
     // report cleared above. Reset it to `Initial` here so clearing the error
     // actually retries preingestion instead of requiring a force-delete of the
     // endpoint. Non-failed states are left untouched.
-    if db::explored_endpoints::reset_failed_preingestion(bmc_ip, &mut txn).await? {
+    if db::explored_endpoints::reset_failed_preingestion(bmc_ip, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?
+    {
         tracing::info!(
             bmc_ip_address = %bmc_ip,
             "Reset failed preingestion to initial after clearing the site exploration error",
         );
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -284,9 +304,11 @@ pub(crate) async fn re_explore_endpoint(
         .transpose()
         .map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let eps = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn).await?;
+    let eps = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     if eps.is_empty() {
         return Err(CarbideError::NotFoundError {
             kind: "explored_endpoint",
@@ -295,13 +317,16 @@ pub(crate) async fn re_explore_endpoint(
         .into());
     }
 
-    if let Some(bmc_interface) = db::machine_interface::find_by_ip(&mut txn, bmc_ip).await?
+    if let Some(bmc_interface) = db::machine_interface::find_by_ip(&mut txn, bmc_ip)
+        .await
+        .map_err(crate::CarbideError::from)?
         && db::bmc_suppression::is_suppressed(
             txn.as_pgconn(),
             bmc_interface.mac_address,
             BmcSuppressionSubsystem::SiteExplorer,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
     {
         return Err(
             CarbideError::from(EndpointExplorationServiceError::Suppressed {
@@ -339,7 +364,7 @@ pub(crate) async fn re_explore_endpoint(
         }
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -371,9 +396,11 @@ pub(crate) async fn pause_explored_endpoint_remediation(
 
     let bmc_ip = IpAddr::from_str(&req.ip_address).map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let eps = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn).await?;
+    let eps = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     if eps.is_empty() {
         return Err(CarbideError::NotFoundError {
             kind: "explored_endpoint",
@@ -395,9 +422,11 @@ pub(crate) async fn pause_explored_endpoint_remediation(
         .into());
     }
 
-    db::explored_endpoints::set_pause_remediation(bmc_ip, req.pause, &mut txn).await?;
+    db::explored_endpoints::set_pause_remediation(bmc_ip, req.pause, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -429,10 +458,12 @@ pub(crate) async fn delete_explored_endpoint(
 
     let bmc_ip = IpAddr::from_str(&req.ip_address).map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Check if the endpoint exists
-    let endpoints = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn).await?;
+    let endpoints = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     if endpoints.is_empty() {
         return Ok(Response::new(rpc::DeleteExploredEndpointResponse {
@@ -455,9 +486,11 @@ pub(crate) async fn delete_explored_endpoint(
     }
 
     // Delete the endpoint
-    db::explored_endpoints::delete(&mut txn, bmc_ip).await?;
+    db::explored_endpoints::delete(&mut txn, bmc_ip)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::DeleteExploredEndpointResponse {
         deleted: true,

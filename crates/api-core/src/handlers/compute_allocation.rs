@@ -89,14 +89,16 @@ pub(crate) async fn create(
     metadata.validate(true).map_err(CarbideError::from)?;
 
     // Start a new transaction for a db write.
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Grab a row-level lock on instance type ID for coordination with the other handlers
     // so we can check that a) the number of machines associated with the instance type supports this new
     // allocation, and b) we don't allow concurrent adds or concurrent add+updates to exceed that machine count.
     // We need this so that an allocation can't be added until we're done because
     // a concurrent addition wouldn't be seen by the select for_udpate.
-    instance_type::find_by_ids(&mut txn, std::slice::from_ref(&instance_type_id), true).await?;
+    instance_type::find_by_ids(&mut txn, std::slice::from_ref(&instance_type_id), true)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     // Grab the sum of existing allocations for all tenants,
     // and increase it by the new amount.
@@ -109,7 +111,8 @@ pub(crate) async fn create(
         None,
         false,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .get(&instance_type_id)
     .copied()
     .unwrap_or_default()
@@ -159,7 +162,8 @@ pub(crate) async fn create(
             })?,
         &instance_type_id,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Prepare the response to send back
     let rpc_out = rpc::CreateComputeAllocationResponse {
@@ -167,7 +171,7 @@ pub(crate) async fn create(
     };
 
     //  Commit our txn if nothing has gone wrong so far.
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back.
     Ok(Response::new(rpc_out))
@@ -181,7 +185,7 @@ pub(crate) async fn find_ids(
 
     let req = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let instance_type_ids = req
         .instance_type_id
@@ -205,13 +209,14 @@ pub(crate) async fn find_ids(
         instance_type_ids.as_deref(),
         false,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let rpc_out = rpc::FindComputeAllocationIdsResponse {
         ids: allocation_ids,
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc_out))
 }
@@ -239,11 +244,12 @@ pub(crate) async fn find_by_ids(
     }
 
     // Prepare our txn to grab the ComputeAllocations from the DB
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Make our DB query for the IDs to get our ComputeAllocations
-    let compute_allocations =
-        compute_allocation::find_by_ids(&mut txn, &req.ids, None, false).await?;
+    let compute_allocations = compute_allocation::find_by_ids(&mut txn, &req.ids, None, false)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     // Convert the list of internal ComputeAllocation to a
     // list of proto message ComputeAllocation to send back
@@ -260,7 +266,7 @@ pub(crate) async fn find_by_ids(
     };
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back
     Ok(Response::new(rpc_out))
@@ -317,7 +323,7 @@ pub(crate) async fn update(
     metadata.validate(true).map_err(CarbideError::from)?;
 
     // Start a new transaction for a db write.
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let tenant_organization_id =
         req.tenant_organization_id
@@ -334,7 +340,8 @@ pub(crate) async fn update(
         Some(&tenant_organization_id),
         true,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // If we found more than one, the DB is corrupt.
     if current_compute_allocation.len() > 1 {
@@ -377,7 +384,9 @@ pub(crate) async fn update(
         // Make our DB query for the IDs to get and row-lock our instance types.
         // We need this so that an allocation can't be added until we're done because
         // a concurrent addition wouldn't be seen by the select for_udpate.
-        instance_type::find_by_ids(&mut txn, std::slice::from_ref(&instance_type_id), true).await?;
+        instance_type::find_by_ids(&mut txn, std::slice::from_ref(&instance_type_id), true)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
         // Grab the sum of existing allocations for all tenants,
         // and increase it by the amount the existing allocation is being increased.
@@ -388,7 +397,8 @@ pub(crate) async fn update(
             None,
             false,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .get(&instance_type_id)
         .ok_or_else(|| CarbideError::Internal {
             message: format!(
@@ -433,7 +443,8 @@ pub(crate) async fn update(
             Some(&tenant_organization_id),
             true,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .get(&instance_type_id)
         .ok_or_else(|| CarbideError::Internal {
             message: format!(
@@ -451,7 +462,9 @@ pub(crate) async fn update(
             instance_type_id: Some(instance_type_id.to_string()),
         };
 
-        let instance_count = instance::count_ids(&mut txn, filter).await?;
+        let instance_count = instance::count_ids(&mut txn, filter)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
         if instance_count > i64::from(new_tenant_allocation_total) {
             return Err(CarbideError::FailedPrecondition(format!(
@@ -491,7 +504,8 @@ pub(crate) async fn update(
         current_compute_allocation.version,
         req.updated_by.as_deref(),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Prepare the response to send back
     let rpc_out = rpc::UpdateComputeAllocationResponse {
@@ -499,7 +513,7 @@ pub(crate) async fn update(
     };
 
     // Commit our txn if nothing has gone wrong so far.
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back.
     Ok(Response::new(rpc_out))
@@ -520,7 +534,7 @@ pub(crate) async fn delete(
         )))?;
 
     // Prepare our txn to delete from the DB
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let tenant_organization_id =
         req.tenant_organization_id
@@ -540,7 +554,8 @@ pub(crate) async fn delete(
         Some(&tenant_organization_id),
         true,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop();
 
     // Since we needed to query for the record anyway,
@@ -567,7 +582,8 @@ pub(crate) async fn delete(
             Some(&tenant_organization_id),
             true,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .get(&allocation.instance_type_id)
         .ok_or_else(|| CarbideError::Internal {
             message: format!(
@@ -586,7 +602,9 @@ pub(crate) async fn delete(
             instance_type_id: Some(allocation.instance_type_id.to_string()),
         };
 
-        let instance_count = instance::count_ids(&mut txn, filter).await?;
+        let instance_count = instance::count_ids(&mut txn, filter)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
         if instance_count > i64::from(new_tenant_allocation_total) {
             return Err(CarbideError::FailedPrecondition(format!(
@@ -596,14 +614,16 @@ pub(crate) async fn delete(
         }
 
         // Make our DB query to soft delete the ComputeAllocation
-        compute_allocation::soft_delete(&mut txn, &id, &tenant_organization_id).await?;
+        compute_allocation::soft_delete(&mut txn, &id, &tenant_organization_id)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
 
     // Prepare the response message
     let rpc_out = rpc::DeleteComputeAllocationResponse {};
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back
     Ok(Response::new(rpc_out))

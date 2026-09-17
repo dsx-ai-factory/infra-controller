@@ -197,7 +197,7 @@ pub(crate) async fn create_operating_system(
     api: &Api,
     request: Request<rpc::CreateOperatingSystemRequest>,
 ) -> Result<Response<rpc::OperatingSystem>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let req = request.into_inner();
 
     let (
@@ -338,7 +338,7 @@ pub(crate) async fn update_operating_system(
     api: &Api,
     request: Request<rpc::UpdateOperatingSystemRequest>,
 ) -> Result<Response<rpc::OperatingSystem>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let req = request.into_inner();
 
     let id_proto = req
@@ -484,7 +484,7 @@ pub(crate) async fn delete_operating_system(
     api: &Api,
     request: Request<rpc::DeleteOperatingSystemRequest>,
 ) -> Result<Response<rpc::DeleteOperatingSystemResponse>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let req = request.into_inner();
 
     let id_proto = req
@@ -555,7 +555,7 @@ pub(crate) async fn update_operating_system_cachable_ipxe_script_artifacts(
     api: &Api,
     request: Request<rpc::UpdateOperatingSystemIpxeTemplateArtifactRequest>,
 ) -> Result<Response<rpc::IpxeTemplateArtifactList>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let req = request.into_inner();
 
     let id_proto = req
