@@ -3609,6 +3609,11 @@ pub async fn update_segment_id(
 ///   alone -- the operator's static assignment takes priority over DHCP.
 /// - If the interface is on a different managed segment, error -- this
 ///   is a real network mismatch (wrong VLAN/port).
+///
+/// Before moving an addressless static interface, lock it and reread its
+/// segment and addresses. Callers must keep a transaction open through this
+/// function so the lock covers the reread and segment update. Callers that
+/// allocate from a pool must acquire their segment locks first.
 async fn reconcile_interface_segment(
     txn: &mut PgConnection,
     existing_interface: &mut MachineInterfaceSnapshot,
@@ -3649,11 +3654,23 @@ async fn reconcile_interface_segment(
         return Ok(());
     }
 
-    let on_static_assignments = existing_interface.segment_id
-        == crate::network_segment::static_assignments(txn)
-            .await
-            .map(|s| s.id)
-            .unwrap_or_default();
+    let static_segment_id = crate::network_segment::static_assignments(txn)
+        .await
+        .map(|s| s.id)
+        .unwrap_or_default();
+
+    if existing_interface.segment_id == static_segment_id && existing_interface.addresses.is_empty()
+    {
+        // Static assignment locks the interface before inserting an address.
+        // Wait for that writer, then refresh both the segment and addresses so
+        // an old addressless snapshot cannot move its new static allocation.
+        lock_for_address_assignment(txn, existing_interface.id).await?;
+        *existing_interface = find_one(&mut *txn, existing_interface.id).await?;
+        if authoritative_segment_ids.contains(&existing_interface.segment_id) {
+            return Ok(());
+        }
+    }
+    let on_static_assignments = existing_interface.segment_id == static_segment_id;
 
     // If the interface is on static-assignments with no addresses (as in
     // the static address was removed), move it to the relay's segment
