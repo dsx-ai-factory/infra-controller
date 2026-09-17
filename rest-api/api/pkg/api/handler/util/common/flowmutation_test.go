@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -82,20 +81,23 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		siteID     = "58fe7a29-58b7-4d61-9b64-e355eaff6024"
 		workflowID = "rack-power-1"
 		entityName = "rack r1"
+		token      = "firmware-access-token"
 	)
 	ruleIDArg := ruleID
 	version := "1.2.3"
 
 	cases := []struct {
 		name           string
-		execute        func(context.Context, echo.Context, tclient.Client) (*flowv1.SubmitTaskResponse, error)
+		execute        func(context.Context, tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError)
 		wantFullMethod string
 		wantRequest    proto.Message
+		wantAPIError   *cutil.APIError
+		wantSecrets    bool
 	}{
 		{
 			name: "power on",
-			execute: func(ctx context.Context, c echo.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, error) {
-				return ExecutePowerControlWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName)
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_PowerOnRack_FullMethodName,
 			wantRequest: &flowv1.PowerOnRackRequest{
@@ -106,8 +108,8 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		},
 		{
 			name: "power off",
-			execute: func(ctx context.Context, c echo.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, error) {
-				return ExecutePowerControlWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOff, nil, false, workflowID, entityName)
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateOff, nil, false, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_PowerOffRack_FullMethodName,
 			wantRequest: &flowv1.PowerOffRackRequest{
@@ -117,8 +119,8 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		},
 		{
 			name: "power cycle",
-			execute: func(ctx context.Context, c echo.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, error) {
-				return ExecutePowerControlWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateCycle, nil, false, workflowID, entityName)
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateCycle, nil, false, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_PowerResetRack_FullMethodName,
 			wantRequest: &flowv1.PowerResetRackRequest{
@@ -130,8 +132,8 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 			// Forced shares PowerOffRack with the unforced state, so the flag is
 			// the only thing separating them on the wire.
 			name: "force power off",
-			execute: func(ctx context.Context, c echo.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, error) {
-				return ExecutePowerControlWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateForceOff, nil, true, workflowID, entityName)
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateForceOff, nil, true, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_PowerOffRack_FullMethodName,
 			wantRequest: &flowv1.PowerOffRackRequest{
@@ -143,8 +145,8 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		},
 		{
 			name: "force power cycle",
-			execute: func(ctx context.Context, c echo.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, error) {
-				return ExecutePowerControlWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateForceCycle, nil, false, workflowID, entityName)
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), cam.PowerControlStateForceCycle, nil, false, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_PowerResetRack_FullMethodName,
 			wantRequest: &flowv1.PowerResetRackRequest{
@@ -155,8 +157,8 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		},
 		{
 			name: "bring up",
-			execute: func(ctx context.Context, c echo.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, error) {
-				return ExecuteBringUpRackWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName)
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecuteBringUpRackWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_BringUpRack_FullMethodName,
 			wantRequest: &flowv1.BringUpRackRequest{
@@ -168,8 +170,8 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 		},
 		{
 			name: "firmware update",
-			execute: func(ctx context.Context, c echo.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, error) {
-				return ExecuteFirmwareUpdateWorkflow(ctx, c, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, workflowID, entityName)
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, siteID, nil, false, workflowID, entityName)
 			},
 			wantFullMethod: flowv1.Flow_UpgradeFirmware_FullMethodName,
 			wantRequest: &flowv1.UpgradeFirmwareRequest{
@@ -179,91 +181,70 @@ func TestFlowMutationHelpersProxyRequests(t *testing.T) {
 				Description:   "API firmware update rack r1",
 			},
 		},
+		{
+			name: "firmware update encrypts authentication data",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), nil, nil,
+					&flowv1.FirmwareAuthenticationData{Value: &flowv1.FirmwareAuthenticationData_Shared{Shared: token}},
+					siteID, nil, false, workflowID, entityName)
+			},
+			wantFullMethod: flowv1.Flow_UpgradeFirmware_FullMethodName,
+			wantRequest: &flowv1.UpgradeFirmwareRequest{
+				TargetSpec:         mutationTargetSpec(rackID),
+				Description:        "API firmware update rack r1",
+				AuthenticationData: &flowv1.FirmwareAuthenticationData{Value: &flowv1.FirmwareAuthenticationData_Shared{Shared: token}},
+			},
+			wantSecrets: true,
+		},
+		{
+			name: "unknown power state returns an error without dispatch",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, mutationTargetSpec(rackID), "hibernate", nil, false, workflowID, entityName)
+			},
+			wantAPIError: cutil.NewAPIError(http.StatusBadRequest, "Invalid power control state: hibernate", nil),
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			reply := &flowv1.SubmitTaskResponse{}
 			temporalClient, call := newMutationProxyClient(t, reply)
-			echoCtx, _ := newProxyEchoContext()
 
-			got, err := tc.execute(context.Background(), echoCtx, temporalClient)
+			got, apiErr := tc.execute(context.Background(), temporalClient)
 
-			require.NoError(t, err)
+			if tc.wantAPIError != nil {
+				assert.Nil(t, got)
+				assert.Equal(t, tc.wantAPIError, apiErr)
+				temporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+				return
+			}
+			require.Nil(t, apiErr)
 			require.NotNil(t, got)
 
 			assert.Equal(t, grpcproxy.Flow.WorkflowName, call.workflowName)
 			assert.Equal(t, tc.wantFullMethod, call.request.FullMethod)
 
-			t.Run("coalesces retries onto the mutation already in flight", func(t *testing.T) {
+			requestJSON := call.request.RequestJSON
+			if tc.wantSecrets {
+				assert.True(t, strings.HasPrefix(call.options.ID, FlowWorkflowID(workflowID+"-")))
+				assert.NotContains(t, call.options.ID, token)
+				assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, call.options.WorkflowIDConflictPolicy)
+				assert.NotContains(t, string(requestJSON), token)
+				assert.Contains(t, string(requestJSON), grpcproxy.RedactedPlaceholder)
+				require.NotEmpty(t, call.request.EncryptedSecrets)
+				secretsJSON := cutil.DecryptData(call.request.EncryptedSecrets, siteID)
+				var err error
+				requestJSON, err = grpcproxy.MergeSecrets(requestJSON, secretsJSON)
+				require.NoError(t, err)
+			} else {
 				assert.Equal(t, FlowWorkflowID(workflowID), call.options.ID)
 				assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, call.options.WorkflowIDConflictPolicy)
-			})
-
-			t.Run("sends the expected request", func(t *testing.T) {
-				decoded := tc.wantRequest.ProtoReflect().New().Interface()
-				require.NoError(t, protojson.Unmarshal(call.request.RequestJSON, decoded))
 				assert.Empty(t, call.request.EncryptedSecrets)
-				assert.True(t, proto.Equal(tc.wantRequest, decoded), "want %v, got %v", tc.wantRequest, decoded)
-			})
+			}
+
+			decoded := tc.wantRequest.ProtoReflect().New().Interface()
+			require.NoError(t, protojson.Unmarshal(requestJSON, decoded))
+			assert.True(t, proto.Equal(tc.wantRequest, decoded), "want %v, got %v", tc.wantRequest, decoded)
 		})
 	}
-}
-
-func TestExecuteFirmwareUpdateWorkflowEncryptsAuthenticationData(t *testing.T) {
-	const (
-		rackID     = "6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04"
-		siteID     = "58fe7a29-58b7-4d61-9b64-e355eaff6024"
-		workflowID = "rack-firmware-1"
-		token      = "firmware-access-token"
-	)
-	authenticationData := &flowv1.FirmwareAuthenticationData{
-		Value: &flowv1.FirmwareAuthenticationData_Shared{Shared: token},
-	}
-	wantRequest := &flowv1.UpgradeFirmwareRequest{
-		TargetSpec:         mutationTargetSpec(rackID),
-		Description:        "API firmware update rack r1",
-		AuthenticationData: authenticationData,
-	}
-	temporalClient, call := newMutationProxyClient(t, &flowv1.SubmitTaskResponse{})
-	echoCtx, _ := newProxyEchoContext()
-
-	got, err := ExecuteFirmwareUpdateWorkflow(
-		context.Background(), echoCtx, zerolog.Nop(), temporalClient,
-		mutationTargetSpec(rackID), nil, nil, authenticationData, siteID, nil, false,
-		workflowID, "rack r1",
-	)
-
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.True(t, strings.HasPrefix(call.options.ID, FlowWorkflowID(workflowID+"-")))
-	assert.NotContains(t, call.options.ID, token)
-	assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, call.options.WorkflowIDConflictPolicy)
-	assert.NotContains(t, string(call.request.RequestJSON), token)
-	assert.Contains(t, string(call.request.RequestJSON), grpcproxy.RedactedPlaceholder)
-	require.NotEmpty(t, call.request.EncryptedSecrets)
-
-	secretsJSON := cutil.DecryptData(call.request.EncryptedSecrets, siteID)
-	restoredJSON, err := grpcproxy.MergeSecrets(call.request.RequestJSON, secretsJSON)
-	require.NoError(t, err)
-	gotRequest := &flowv1.UpgradeFirmwareRequest{}
-	require.NoError(t, protojson.Unmarshal(restoredJSON, gotRequest))
-	assert.True(t, proto.Equal(wantRequest, gotRequest), "want %v, got %v", wantRequest, gotRequest)
-}
-
-// TestExecutePowerControlWorkflowRejectsUnknownState keeps an unroutable state
-// from reaching Flow: the helper picks the method from it, so there is nothing
-// to proxy. It answers 400 on the response itself rather than through the
-// returned error, which stays nil once the write succeeds.
-func TestExecutePowerControlWorkflowRejectsUnknownState(t *testing.T) {
-	temporalClient := &tmocks.Client{}
-	echoCtx, recorder := newProxyEchoContext()
-
-	got, err := ExecutePowerControlWorkflow(context.Background(), echoCtx, zerolog.Nop(), temporalClient, mutationTargetSpec("6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04"), "hibernate", nil, false, "rack-power-1", "rack r1")
-
-	assert.Nil(t, got)
-	assert.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, recorder.Code)
-	assert.Contains(t, recorder.Body.String(), "Invalid power control state: hibernate")
-	temporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 }
