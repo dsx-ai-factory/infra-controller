@@ -28,7 +28,10 @@ use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
-use db::{DatabaseError, ObjectColumnFilter, WithTransaction, network_security_group};
+use db::instance::InstanceExtensionServicesNotCurrent;
+use db::{
+    ConditionalWrite, DatabaseError, ObjectColumnFilter, WithTransaction, network_security_group,
+};
 use futures_util::FutureExt;
 use health_report::{
     HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode,
@@ -2079,16 +2082,24 @@ async fn update_instance_extension_services_config(
         &existing_active_service_ids,
     )?;
 
-    db::instance::update_extension_services_config(
+    match db::instance::update_extension_services_config(
         txn,
         instance.id,
         instance.extension_services_config_version,
+        current,
         &new_extension_services_config,
         true,
     )
-    .await?;
-
-    Ok(())
+    .await?
+    {
+        ConditionalWrite::Applied(()) => Ok(()),
+        ConditionalWrite::NotApplied(InstanceExtensionServicesNotCurrent) => {
+            Err(CarbideError::FailedPrecondition(format!(
+                "extension-service attachments for instance {} changed or the instance no longer exists; read the instance again before updating",
+                instance.id,
+            )))
+        }
+    }
 }
 
 /// Extracts the RPC representation of Instances from a ManagedHost snapshot

@@ -7605,6 +7605,134 @@ async fn test_extension_service_removed_after_all_dpus_report_terminated(
 }
 
 #[crate::sqlx_test]
+async fn test_extension_cleanup_rejects_an_instance_update_from_before_cleanup(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+    let (removed_service, new_service, _) = create_dpu_extension_services(&env).await?;
+    let config = rpc::InstanceConfig {
+        tenant: Some(default_tenant_config()),
+        os: Some(default_os_config()),
+        network: Some(single_interface_network_config(segment_id)),
+        dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+            service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+                service_id: removed_service.service_id,
+                version: removed_service.latest_version_info.unwrap().version,
+            }],
+        }),
+        ..Default::default()
+    };
+    let tinstance = mh.instance_builer(&env).config(config).build().await;
+    let instance = tinstance.rpc_instance().await.into_inner();
+    let mut detached_config = instance.config.unwrap();
+    detached_config.dpu_extension_services = None;
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(tinstance.id),
+            config: Some(detached_config.clone()),
+            metadata: instance.metadata,
+            if_version_match: None,
+        }))
+        .await?;
+    network_configured_with_health_and_ext_services(
+        &env,
+        &mh.dpu_ids[0],
+        None,
+        Some(rpc::forge::DpuExtensionServiceDeploymentStatus::DpuExtensionServiceTerminated),
+    )
+    .await;
+
+    let before_cleanup = db::instance::find_by_id(&env.pool, tinstance.id)
+        .await?
+        .unwrap();
+    assert_eq!(
+        before_cleanup
+            .config
+            .extension_services
+            .service_configs
+            .len(),
+        1
+    );
+    assert!(
+        before_cleanup.config.extension_services.service_configs[0]
+            .removed
+            .is_some()
+    );
+
+    // The API locks service definitions after reading and merging attachments.
+    // Blocking on the new service lets the controller clean up the old one.
+    let mut service_lock = env.db_txn().await;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(service_lock.as_mut())
+        .await?;
+    db::extension_service::find_by_ids(
+        service_lock.as_mut(),
+        &[new_service.service_id.parse()?],
+        false,
+        true,
+    )
+    .await?;
+    detached_config.dpu_extension_services = Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+        service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+            service_id: new_service.service_id,
+            version: new_service.latest_version_info.unwrap().version,
+        }],
+    });
+    let update =
+        env.api
+            .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: Some(tinstance.id),
+                config: Some(detached_config),
+                metadata: Some(rpc::Metadata {
+                    name: "must-not-be-saved".to_string(),
+                    ..Default::default()
+                }),
+                if_version_match: None,
+            }));
+    let cleanup = async {
+        common::postgres::wait_for_blocked_query(&env.pool, blocker_pid, "extension_services")
+            .await;
+        env.run_machine_state_controller_iteration().await;
+        let cleaned = db::instance::find_by_id(&env.pool, tinstance.id)
+            .await?
+            .unwrap();
+        assert!(cleaned.config.extension_services.service_configs.is_empty());
+        assert_eq!(
+            cleaned.extension_services_config_version,
+            before_cleanup.extension_services_config_version,
+            "cleanup must not request another DPU configuration generation",
+        );
+        service_lock.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (update_result, cleanup_result) = tokio::join!(update, cleanup);
+    cleanup_result?;
+    let error = update_result.expect_err("the API must reject the attachments read before cleanup");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("extension-service attachments"));
+
+    let persisted = db::instance::find_by_id(&env.pool, tinstance.id)
+        .await?
+        .unwrap();
+    assert!(
+        persisted
+            .config
+            .extension_services
+            .service_configs
+            .is_empty()
+    );
+    assert_eq!(persisted.config_version, before_cleanup.config_version);
+    assert_eq!(persisted.metadata, before_cleanup.metadata);
+    assert_eq!(
+        persisted.extension_services_config_version,
+        before_cleanup.extension_services_config_version,
+    );
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_extension_services_status_observation(
     _: PgPoolOptions,
     options: PgConnectOptions,
