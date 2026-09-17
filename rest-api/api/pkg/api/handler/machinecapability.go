@@ -83,7 +83,7 @@ func (gamch GetAllMachineCapabilityHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
 	}
 	if pageRequest.OrderByStr == nil {
-		pageRequest.OrderByStr = cutil.GetPtr("TYPE_ASC")
+		pageRequest.OrderByStr = cutil.GetPtr(cdbp.NewDefaultOrderBy(cdbm.MachineCapabilityDistinctOrderByDefault).ToAPIRequest())
 	}
 
 	// Validate request attributes
