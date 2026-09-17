@@ -1375,6 +1375,23 @@ message AttestationCoverageEntry {
   AttestationCoverage coverage = 3;
   // The mode of the profile that would apply, absent when none would.
   optional AttesterSelectionMode mode = 4;
+  // The distinct sets of SPDM-capable attesters recorded for this class, one
+  // entry per digest, ordered by digest. Empty until an exploration records
+  // one. More than one means the class spans hardware carrying different
+  // attestable components, which a profile's patterns cannot show on their
+  // own.
+  repeated AttesterSet attester_sets = 5;
+}
+
+// One set of SPDM-capable attesters recorded for a hardware class.
+message AttesterSet {
+  // Identifies the set: a digest over the attester IDs, which moves with
+  // membership and not with whether a member's integrity reporting is on.
+  string digest = 1;
+  // Explored endpoints of this class last reporting this set. Sums to at most
+  // the entry's `endpoints`, since an endpoint explored before this was
+  // recorded carries no digest yet.
+  int32 endpoints = 2;
 }
 
 message GetAttestationCoverageResponse {

@@ -17,7 +17,8 @@
 
 use ::rpc::forge as rpc;
 use carbide_test_harness::prelude::*;
-use model::site_explorer::EndpointExplorationReport;
+use itertools::Itertools;
+use model::site_explorer::{ComponentIntegrityEntry, EndpointExplorationReport};
 use tonic::{Code, Request};
 
 /// Classes in the shape exploration derives. Creating a profile requires one an
@@ -401,5 +402,93 @@ async fn coverage_reports_what_would_apply_to_each_class_the_site_has(pool: PgPo
         selection_mode(coverage.any_profile_mode),
         Some(rpc::AttesterSelectionMode::All),
         "the site's posture for everything unprofiled is visible on its own"
+    );
+}
+
+/// Records an endpoint that reported these SPDM attesters, and the set against
+/// its class, which is what an exploration does.
+async fn explored_with_attesters(
+    env: &TestHarness,
+    address: &str,
+    hardware_class: &str,
+    attester_ids: &[&str],
+) {
+    let report = EndpointExplorationReport {
+        hardware_class: Some(hardware_class.to_string()),
+        component_integrities: Some(
+            attester_ids
+                .iter()
+                .map(|id| ComponentIntegrityEntry {
+                    id: (*id).to_string(),
+                    component_integrity_type: "SPDM".to_string(),
+                    component_integrity_enabled: true,
+                })
+                .collect(),
+        ),
+        ..Default::default()
+    };
+    let attesters = report.attester_set().expect("the report reported a set");
+
+    let mut txn = env.db_txn().await;
+    db::explored_endpoints::insert(address.parse().unwrap(), &report, false, &mut txn)
+        .await
+        .expect("the endpoint is recorded");
+    db::hardware_class_attesters::record(&mut txn, hardware_class, &attesters)
+        .await
+        .expect("the set is recorded");
+    txn.commit().await.expect("the api can read the endpoint");
+}
+
+/// A profile's patterns cannot show that one tray reports different components
+/// from its peers: a prefix matches either way. Coverage reports the recorded
+/// sets per class so it is visible, and the per-set endpoint counts are what
+/// separate an outlier from an even split.
+#[sqlx_test]
+async fn coverage_reports_the_attester_sets_each_class_carries(pool: PgPool) {
+    let env = TestHarness::builder(pool).build().await;
+
+    let peers = ["HGX_ERoT_GPU_0", "HGX_ERoT_GPU_1"];
+    let outlier = ["HGX_ERoT_GPU_0"];
+    explored_with_attesters(&env, "192.0.2.1", HARDWARE_CLASS, &peers).await;
+    explored_with_attesters(&env, "192.0.2.2", HARDWARE_CLASS, &peers).await;
+    explored_with_attesters(&env, "192.0.2.3", HARDWARE_CLASS, &outlier).await;
+    // Explored before its BMC reported a collection, so it carries no set.
+    explored(&env, "192.0.2.4", Some(OTHER_HARDWARE_CLASS)).await;
+
+    let coverage = env
+        .api()
+        .get_attestation_coverage(Request::new(()))
+        .await
+        .expect("coverage reads")
+        .into_inner();
+
+    let sets: Vec<Vec<i32>> = coverage
+        .entries
+        .iter()
+        .map(|entry| {
+            entry
+                .attester_sets
+                .iter()
+                .map(|set| set.endpoints)
+                .sorted()
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        sets,
+        [vec![1, 2], Vec::new()],
+        "the class spans two sets, two endpoints on one and the outlier alone; \
+         the class whose endpoint reported no collection carries none"
+    );
+
+    let digests: Vec<&str> = coverage.entries[0]
+        .attester_sets
+        .iter()
+        .map(|set| set.digest.as_str())
+        .collect();
+    assert_eq!(
+        digests.len(),
+        digests.iter().unique().count(),
+        "each set is reported once, under its own digest"
     );
 }
