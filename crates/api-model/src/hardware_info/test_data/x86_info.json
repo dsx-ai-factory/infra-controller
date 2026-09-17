@@ -15,7 +15,7 @@
       "serial": "61M0A0D2TCD8",
       "firmware_rev": "2.1.3",
       "size_mb": 1831420,
-      "pci_path": "/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme/nvme0/nvme0n1"
+      "pci_path": "/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme/nvme0"
     }
   ],
   "dmi_data": {
