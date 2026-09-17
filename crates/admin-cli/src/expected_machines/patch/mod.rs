@@ -25,8 +25,7 @@ use crate::cfg::runtime::RuntimeContext;
 use crate::errors::CarbideCliResult;
 
 /// `expected-machine patch`: forwards CLI flags to `ApiClient::patch_expected_machine` (partial
-/// update; unset flags keep existing values). `--bmc-ip-address` uses the same server-side
-/// static-interface logic as a full RPC update.
+/// update; unset flags keep existing values).
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
         if let Err(e) = self.validate() {
