@@ -79,7 +79,8 @@ gateway:
   ## on hosts where IPv6 sockets are disabled.
   listenIpAddress: "0.0.0.0"
 
-  ## HTTPS port of the UFM API and the probes; also the Service port
+  ## HTTPS port of the UFM API, the RMS gRPC API and the probes; also the
+  ## Service port
   port: 8443
 
   ## Secret with a `token` key holding the UFM HTTP Basic credential. Empty

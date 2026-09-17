@@ -28,6 +28,9 @@ use crate::config::SourceClientConfig;
 /// Route every machine-a-tron serves its inventory snapshot on.
 const STATUS_PATH: &str = "/machines/status";
 
+/// Route every machine-a-tron serves the racks it simulates on.
+const RACKS_STATUS_PATH: &str = "/racks/status";
+
 /// Body of `GET /v1/sources` served by the Go controller.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct SourceList {
@@ -124,11 +127,21 @@ impl SourceList {
 }
 
 impl Source {
-    /// Joins [`STATUS_PATH`] onto the base URL, keeping any path prefix the base URL carries.
+    /// The inventory snapshot URL, [`STATUS_PATH`] on the base URL.
     fn status_url(&self) -> Url {
+        self.url(STATUS_PATH)
+    }
+
+    /// The rack membership URL, [`RACKS_STATUS_PATH`] on the base URL.
+    pub(crate) fn racks_status_url(&self) -> Url {
+        self.url(RACKS_STATUS_PATH)
+    }
+
+    /// Joins `path` onto the base URL, keeping any path prefix the base URL carries.
+    fn url(&self, path: &str) -> Url {
         let mut url = self.base_url.clone();
         let base_path = url.path().trim_end_matches('/');
-        url.set_path(&format!("{base_path}{STATUS_PATH}"));
+        url.set_path(&format!("{base_path}{path}"));
         url.set_query(None);
         url.set_fragment(None);
         url
@@ -320,6 +333,10 @@ mod tests {
         assert_eq!(
             source.status_url().as_str(),
             "https://a.example:1266/prefix/machines/status"
+        );
+        assert_eq!(
+            source.racks_status_url().as_str(),
+            "https://a.example:1266/prefix/racks/status"
         );
     }
 

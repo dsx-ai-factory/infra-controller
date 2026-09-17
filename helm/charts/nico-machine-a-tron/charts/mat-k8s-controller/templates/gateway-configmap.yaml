@@ -17,8 +17,9 @@ data:
     cert_path = "/var/run/secrets/spiffe.io/tls.crt"
     key_path = "/var/run/secrets/spiffe.io/tls.key"
 
-    # Inventory requests to the discovered machine-a-tron instances, whose
-    # certificates come from the same issuer as the gateway's own.
+    # Inventory, rack status, and RMS requests to the discovered machine-a-tron
+    # instances, whose certificates come from the same issuer as the gateway's
+    # own.
     [sources]
     {{- if not .Values.config.insecureSkipVerify }}
     ca_cert_path = "/var/run/secrets/spiffe.io/ca.crt"

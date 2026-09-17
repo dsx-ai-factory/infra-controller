@@ -19,8 +19,9 @@
 //!
 //! The gateway runs beside the Go `mat-k8s-controller` in one pod. The controller owns all
 //! Kubernetes access and publishes a versioned list of machine-a-tron base URLs on a pod-local
-//! endpoint. The gateway turns that list into UFM inventory sources and hosts the UFM API from
-//! `ufm-mock`.
+//! endpoint. The gateway turns that list into UFM inventory sources, hosts the UFM API from
+//! `ufm-mock`, learns from each instance's `/racks/status` which racks it simulates, and routes
+//! RMS requests to that instance.
 //!
 //! The process is bound to the source set it started with: the sorted `(name, base_url)` pairs
 //! of the controller's list. When the controller publishes a different set the process exits
@@ -31,13 +32,20 @@
 mod config;
 mod gateway;
 mod health;
+mod ownership;
+mod rms_client;
+mod rms_jobs;
+mod rms_proxy;
 mod sources;
 
-pub use config::{ControllerConfig, GatewayConfig, SourceClientConfig, TlsConfig};
+pub use config::{
+    ControllerConfig, GatewayConfig, OwnershipConfig, RmsConfig, SourceClientConfig, TlsConfig,
+};
 pub use gateway::{
     ExitReason, Gateway, SOURCE_LIST_CHANGED_EXIT_CODE, run, wait_for_source_list,
     watch_source_list,
 };
+pub use rms_proxy::RMS_VERSION;
 pub use sources::{
     Source, SourceList, SourceListCheck, SourceListClient, SourceListError, SourceSetChange,
 };

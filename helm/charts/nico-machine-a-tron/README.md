@@ -111,16 +111,29 @@ complete MAT configuration, including its `[ufm_mock]` section.
 In controller mode, `mat-k8s-controller.gateway.enabled: true` adds the
 `mat-protocol-gateway` container to the controller pod. The gateway takes the
 machine-a-tron instances the controller discovers and serves one UFM API whose
-InfiniBand inventory covers all of them, so a multi-pod deployment needs a
-single NICo fabric configuration. It listens over HTTPS behind the ClusterIP
+InfiniBand inventory covers all of them, and one RMS gRPC API that forwards
+each request to the instance simulating the rack it names (learned from every
+instance's `/racks/status`), so a multi-pod deployment needs a single NICo
+fabric and RMS configuration. It listens over HTTPS behind the ClusterIP
 Service `<release>-mat-k8s-controller-gateway`; for a release named
 `nico-machine-a-tron` in `nico-system` the endpoint is
 `https://nico-machine-a-tron-mat-k8s-controller-gateway.nico-system.svc.cluster.local:8443`
-with `/ufmRestV3` as the UFM API path. The gateway exits and is restarted by
+with `/ufmRestV3` as the UFM API path, and the same URL without a path is the
+NICo `[rms] api_url`. Refer to
+[Machine-a-tron RMS Mock](../../../docs/development/machine-a-tron-rms-mock.md)
+for the `nico-api.rms` values and to the
+[gateway README](../../../crates/mat-protocol-gateway/README.md#rms-routing)
+for the RPCs it routes. The gateway exits and is restarted by
 the kubelet whenever the set of discovered instances changes. Partitions and
 other state created through the UFM API are lost on that restart; ports return
 with the first inventory poll and callers must re-create partitions once
-`/readyz` returns 200 again.
+`/readyz` returns 200 again. RMS job ids are held in gateway memory as well.
+After that restart, a status poll for an id issued by the previous process is
+answered as the per-pod RMS mock answers an id it never issued: completed on
+`GetJobStatus` and `GetConfigureSwitchCertificateJobStatus`, and
+`RETURN_CODE_FAILURE` with `job <id> not found` on `GetFirmwareJobStatus` and
+`GetSwitchSystemImageJobStatus`. Refer to "In-Memory State Is Lost on Restart"
+in the gateway README.
 
 The controller image ships both binaries: `dev/k8s/machine-a-tron-controller/Dockerfile`
 builds the Go controller and `mat-protocol-gateway` from the repository root,
@@ -128,16 +141,17 @@ and the `mat-k8s-controller` image published by this repository's CI is built
 from it. The gateway's listener certificate is issued through
 `global.certificate.issuerRef`. The gateway re-reads the mounted certificate
 and key every 30 seconds, so a renewed certificate is served without a
-container restart. For its inventory requests to the
-machine-a-tron pods it trusts that certificate's CA unless
-`mat-k8s-controller.config.insecureSkipVerify` is set, which disables
-certificate verification for those requests only; the listener is unaffected.
+container restart. For its inventory, rack status, and RMS requests to the
+machine-a-tron pods it trusts that certificate's CA, which is the only root
+trusted for RMS forwarding, unless `mat-k8s-controller.config.insecureSkipVerify`
+is set. That setting disables certificate verification for all of those
+requests. The listener is unaffected.
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `mat-k8s-controller.gateway.enabled` | `false` | Add the gateway container, Service, ConfigMap and Certificate |
+| `mat-k8s-controller.gateway.enabled` | `false` | Add the gateway container, Service, ConfigMap, and Certificate |
 | `mat-k8s-controller.gateway.listenIpAddress` | `"0.0.0.0"` | Bare IP address to bind. Set to `"::"` for IPv6; keep the IPv4 default on hosts where IPv6 sockets are disabled. Changing this setting requires restarting the controller Deployment |
-| `mat-k8s-controller.gateway.port` | `8443` | HTTPS port of the UFM API, the probes and the Service |
+| `mat-k8s-controller.gateway.port` | `8443` | HTTPS port of the UFM API, the RMS gRPC API, the probes, and the Service |
 | `mat-k8s-controller.gateway.existingAuthSecret` | `""` | Secret with a `token` key for UFM HTTP Basic auth. Empty means the `nico-machine-a-tron-ufm-mock-auth` Secret this chart generates; the gateway does not inherit `ufmMock.existingAuthSecret`. Required whenever that default Secret is absent or renamed: set it to the Secret holding the token when `ufmMock.existingAuthSecret` is set, `ufmMock.enabled` is `false`, or the parent chart uses `nameOverride`, or the gateway fails to start |
 | `mat-k8s-controller.gateway.resources` | 100m/256Mi requests, 1 CPU/1Gi limits | Gateway container resources |
 

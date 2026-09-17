@@ -66,6 +66,12 @@ pub struct GatewayConfig {
     /// TLS trust settings for discovered inventory endpoints.
     #[serde(default)]
     pub sources: SourceClientConfig,
+    /// Rack ownership polling of the discovered instances; see [`crate::ownership`].
+    #[serde(default)]
+    pub ownership: OwnershipConfig,
+    /// Forwarding of RMS requests to the discovered instances.
+    #[serde(default)]
+    pub rms: RmsConfig,
     /// Fabric and reconciliation settings shared with `ufm-mock`.
     #[serde(default)]
     pub ufm: UfmMockConfig,
@@ -119,6 +125,22 @@ impl GatewayConfig {
             self.controller.startup_attempts > 0,
             "controller.startup_attempts must be at least 1"
         );
+        eyre::ensure!(
+            !self.ownership.poll_interval.is_zero(),
+            "ownership.poll_interval must be nonzero"
+        );
+        eyre::ensure!(
+            !self.ownership.request_timeout.is_zero(),
+            "ownership.request_timeout must be nonzero"
+        );
+        eyre::ensure!(
+            self.ownership.stale_after >= self.ownership.poll_interval,
+            "ownership.stale_after must be at least ownership.poll_interval"
+        );
+        eyre::ensure!(
+            !self.rms.request_timeout.is_zero(),
+            "rms.request_timeout must be nonzero"
+        );
         Ok(())
     }
 }
@@ -131,6 +153,8 @@ impl Default for GatewayConfig {
             metrics_address: None,
             controller: ControllerConfig::default(),
             sources: SourceClientConfig::default(),
+            ownership: OwnershipConfig::default(),
+            rms: RmsConfig::default(),
             ufm: UfmMockConfig {
                 enabled: true,
                 ..UfmMockConfig::default()
@@ -199,6 +223,71 @@ pub struct SourceClientConfig {
     pub insecure_skip_verify: bool,
 }
 
+/// How the gateway learns which source simulates which rack; see [`crate::ownership`].
+///
+/// Every source's `/racks/status` is polled on `poll_interval` with the `[sources]` TLS
+/// settings. A source whose polls fail keeps its last answer for `stale_after` and is then
+/// dropped from routing until it answers again.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OwnershipConfig {
+    /// Interval between rack status polls of every source.
+    #[serde(
+        default = "default_ownership_poll_interval",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub poll_interval: Duration,
+    /// Per-request timeout for `/racks/status`.
+    #[serde(
+        default = "default_ownership_request_timeout",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub request_timeout: Duration,
+    /// How long a failing source's last answer keeps routing; at least `poll_interval`.
+    #[serde(
+        default = "default_stale_after",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub stale_after: Duration,
+}
+
+impl Default for OwnershipConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval: default_ownership_poll_interval(),
+            request_timeout: default_ownership_request_timeout(),
+            stale_after: default_stale_after(),
+        }
+    }
+}
+
+/// How RMS requests are forwarded to the discovered instances.
+///
+/// The instances are reached at their `base_url` over HTTP/2 with the `[sources]` TLS settings,
+/// because RMS shares the listener that serves `/machines/status`.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RmsConfig {
+    /// Deadline for each forwarded request, connection setup included.
+    #[serde(
+        default = "default_rms_request_timeout",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub request_timeout: Duration,
+}
+
+impl Default for RmsConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout: default_rms_request_timeout(),
+        }
+    }
+}
+
 fn default_listen_address() -> SocketAddr {
     "0.0.0.0:9888".parse().unwrap()
 }
@@ -221,6 +310,22 @@ fn default_startup_attempts() -> u32 {
 
 fn default_startup_retry_interval() -> Duration {
     Duration::from_secs(2)
+}
+
+fn default_ownership_poll_interval() -> Duration {
+    Duration::from_secs(10)
+}
+
+fn default_ownership_request_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+
+fn default_stale_after() -> Duration {
+    Duration::from_secs(60)
+}
+
+fn default_rms_request_timeout() -> Duration {
+    Duration::from_secs(30)
 }
 
 #[cfg(test)]
@@ -282,6 +387,8 @@ mod tests {
                 "[sources]\ninsecure_skip_verif = true",
                 "insecure_skip_verif",
             ),
+            ("[ownership]\nstale_afer = \"1m\"", "stale_afer"),
+            ("[rms]\nrequest_timeou = \"1s\"", "request_timeou"),
             (
                 "[tls]\ncert_path = \"/c\"\nkey_path = \"/k\"\nca_path = \"/ca\"",
                 "ca_path",
@@ -315,12 +422,23 @@ mod tests {
 
                 [sources]
                 insecure_skip_verify = true
+
+                [ownership]
+                poll_interval = "3s"
+                stale_after = "45s"
+
+                [rms]
+                request_timeout = "45s"
                 "#,
             ))
             .extract()
             .unwrap();
 
         assert_eq!(config.listen_address.port(), 9443);
+        assert_eq!(config.ownership.poll_interval, Duration::from_secs(3));
+        assert_eq!(config.ownership.request_timeout, Duration::from_secs(5));
+        assert_eq!(config.ownership.stale_after, Duration::from_secs(45));
+        assert_eq!(config.rms.request_timeout, Duration::from_secs(45));
         assert_eq!(
             config.tls.as_ref().unwrap().cert_path,
             PathBuf::from("/certs/tls.crt")
@@ -329,6 +447,29 @@ mod tests {
         assert_eq!(config.controller.startup_attempts, 3);
         assert!(config.sources.insecure_skip_verify);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_ownership_and_rms_settings_that_cannot_become_active() {
+        for (toml, key) in [
+            (
+                "[ownership]\npoll_interval = \"0s\"",
+                "ownership.poll_interval",
+            ),
+            (
+                "[ownership]\nrequest_timeout = \"0s\"",
+                "ownership.request_timeout",
+            ),
+            (
+                "[ownership]\npoll_interval = \"30s\"\nstale_after = \"29s\"",
+                "ownership.stale_after",
+            ),
+            ("[rms]\nrequest_timeout = \"0s\"", "rms.request_timeout"),
+        ] {
+            let config: GatewayConfig = Figment::new().merge(Toml::string(toml)).extract().unwrap();
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains(key), "{toml}: {error}");
+        }
     }
 
     #[test]

@@ -64,6 +64,19 @@ and its certificate is issued by the chart's `global.certificate.issuerRef`,
 the same issuer that signs the `nico-api` certificate, with the Service name
 as its DNS name.
 
+In controller mode with `mat-k8s-controller.gateway.enabled: true`, set
+`nico-api.rms.apiUrl` to the protocol gateway Service instead:
+`https://<release>-mat-k8s-controller-gateway.<namespace>.svc.cluster.local:8443`,
+where `8443` is the default `mat-k8s-controller.gateway.port`. The gateway
+forwards each request to the pod that simulates the rack it names, so the racks
+of every pod are reachable through one endpoint. Its certificate comes from the
+same `global.certificate.issuerRef`, so `nico-api.rms.enforceTls` can stay at
+its default here as well. Refer to the
+[Protocol gateway](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/charts/nico-machine-a-tron/README.md#protocol-gateway)
+section of the chart README for the gateway settings, and to the
+[gateway README](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/mat-protocol-gateway/README.md#rms-routing)
+for the RPCs it routes and how its job ids differ from the mock's.
+
 <Warning>
 On a site that also runs a real RMS, pointing `apiUrl` at machine-a-tron
 diverts every RMS-backed operation, for real racks as well as simulated ones,
@@ -93,6 +106,8 @@ to the mock. Use it only on simulation-only sites.
   upgrade does not use it.
 - Placement is reported for compute and switch trays only, and power shelves
   report none.
-- One pod, one inventory: only the racks of the pod that `apiUrl` names are
-  reachable through RMS.
+- A single pod's mock serves only its own racks. In controller mode, the
+  protocol gateway fronts every pod behind one Service. Refer to the
+  [Protocol gateway](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/charts/nico-machine-a-tron/README.md#protocol-gateway)
+  section of the chart README.
 - Jobs carry no timestamps.

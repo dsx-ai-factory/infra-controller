@@ -41,21 +41,29 @@ clap = { features = ["derive"], workspace = true }
 duration-str = { workspace = true }
 eyre = { workspace = true }
 figment = { features = ["env", "toml"], workspace = true }
+futures = { workspace = true }
+librms = { workspace = true }
 metrics-endpoint = { path = "../metrics-endpoint" }
 reqwest = { default-features = false, features = ["json", "rustls"], workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+tonic = { features = ["tls-native-roots"], workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { features = ["env-filter"], workspace = true }
 url = { features = ["serde"], workspace = true }
 
 [dev-dependencies]
+axum-server = { features = ["tls-rustls"], workspace = true }
 carbide-test-support = { path = "../test-support" }
 figment = { features = ["test"], workspace = true }
+mac_address = { workspace = true }
 rcgen = { workspace = true }
+rms-mock = { package = "carbide-rms-mock", path = "../rms-mock" }
 tempfile = { workspace = true }
 tower = { features = ["util"], workspace = true }
 
