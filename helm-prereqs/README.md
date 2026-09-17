@@ -550,15 +550,17 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
    without a restart. Authoritative `local` mode requires version 0 before
    startup when v0 is current or the current target cannot be resolved.
 
-Requirements (unless `--skip-dpf`): `envsubst`, plus `git` unless `NICO_DPF_SRC`
-is set, on the machine running setup, an NGC API key, and `NICO_DPF_DPU_INTERFACE` /
-`NICO_DPF_DPU_CLUSTER_VIP` for the DPU cluster VIP. The BMC root is optional at
-install time in `local_first` or `backend` mode but required before DPU
-provisioning. The DPF and RMS phases
-also need `setup.sh` to run from a git checkout of this repository with the
-`helm-prereqs/doca-platform` and `helm-prereqs/nv-rms` submodules reachable
-(or `NICO_DPF_SRC` / `NICO_RMS_CHART` pointing at local clones); a source
-tarball or the packaged `nico-prereqs` chart is not enough. Per-host enablement is
+Requirements (unless `--skip-dpf`): `envsubst` on the machine running setup,
+an NGC API key, and `NICO_DPF_DPU_INTERFACE` / `NICO_DPF_DPU_CLUSTER_VIP` for
+the DPU cluster VIP. The BMC root is optional at install time in `local_first`
+or `backend` mode but required before DPU provisioning. The DPF and RMS phases
+each also need `git` and a git checkout of this repository that records their
+submodule (`helm-prereqs/doca-platform` for DPF, `helm-prereqs/nv-rms` for
+RMS); a source tarball or the packaged `nico-prereqs` chart is not enough, and
+`preflight.sh` rejects it before any phase runs. A phase drops that requirement
+only when its local source override is set (`NICO_DPF_SRC=<clone>` for DPF,
+`NICO_RMS_CHART=<clone>/helm` for RMS) or it is skipped (`--skip-dpf` /
+`--skip-rms`). Per-host enablement is
 controlled by `dpf_enabled` on expected machines
 (defaults to true). See [docs/manuals/dpf.md](../docs/manuals/dpf.md) for the
 full background, BF4 opt-in, proxy configuration, and troubleshooting.

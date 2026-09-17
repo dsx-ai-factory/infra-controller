@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETUP_SH="${SCRIPT_DIR}/../setup.sh"
+PREFLIGHT_SH="${SCRIPT_DIR}/../preflight.sh"
 
 for fn in _sync_pinned_submodule _reject_retired_dpf_vars; do
     definition="$(sed -n "/^${fn}()/,/^}/p" "${SETUP_SH}")"
@@ -15,6 +16,7 @@ for fn in _sync_pinned_submodule _reject_retired_dpf_vars; do
     fi
     eval "${definition}"
 done
+eval "$(sed -n '/^_check_pinned_submodule()/,/^}/p' "${PREFLIGHT_SH}")"
 
 # Hermetic fixtures: a local bare repo behind a file:// URL stands in for the
 # upstream submodule URL (git ignores --depth for plain paths).
@@ -75,6 +77,21 @@ rc=0
 out="$(_sync_pinned_submodule fake "${UPSTREAM_URL}" 'NICO_FAKE_SRC=<clone>' 2>&1)" || rc=$?
 if [[ "${rc}" -ne 1 || "${out}" != *"is not a git checkout"* ]]; then
     echo "non-git checkout must be refused with rc 1 (got rc ${rc}: ${out})" >&2
+    exit 1
+fi
+
+# preflight.sh must refuse the same tarball before any phase runs, and accept
+# a checkout that records the gitlink.
+ERRORS=()
+SCRIPT_DIR="${WORK}/tarball/helm-prereqs" _check_pinned_submodule Fake fake 'NICO_FAKE_SRC=<clone>' --skip-fake
+if [[ "${#ERRORS[@]}" -ne 1 || "${ERRORS[0]}" != *"a source tarball or the packaged chart is not enough"* ]]; then
+    echo "preflight must reject a non-git checkout (got: ${ERRORS[*]:-none})" >&2
+    exit 1
+fi
+ERRORS=()
+SCRIPT_DIR="${WORK}/clone/helm-prereqs" _check_pinned_submodule Fake fake 'NICO_FAKE_SRC=<clone>' --skip-fake
+if [[ "${#ERRORS[@]}" -ne 0 ]]; then
+    echo "preflight must accept a checkout with the recorded gitlink (got: ${ERRORS[*]})" >&2
     exit 1
 fi
 
