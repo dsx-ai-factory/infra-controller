@@ -26,7 +26,7 @@ authors = ["NVIDIA Carbide Engineering <carbide-dev@exchange.nvidia.com>"]
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.44.21.3" }
+libredfish = { git = "https://github.com/NVIDIA/libredfish.git", tag = "v0.44.21.4" }
 librms = { git = "https://github.com/NVIDIA/nv-rms-client.git", tag = "v0.9.0-mts-rc04" }
 ansi-to-html = "0.2.2"
 
