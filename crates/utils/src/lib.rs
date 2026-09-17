@@ -29,6 +29,8 @@ pub mod metrics;
 pub mod none_if_empty;
 pub mod periodic_timer;
 pub mod redfish;
+#[cfg(feature = "shutdown-handler")]
+pub mod shutdown_handler;
 pub mod sku;
 #[cfg(feature = "test-support")]
 pub mod test_support;

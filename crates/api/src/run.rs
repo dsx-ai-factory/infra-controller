@@ -18,8 +18,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use carbide_api_core::AdminUiRoutesBuilder;
-use carbide_api_core::bootstrap::{Logging, RuntimeInputs, start_runtime, start_runtime_prelude};
+use carbide_api_core::bootstrap::{Logging, RuntimeInputs, start_runtime_prelude};
+use carbide_api_core::start_runtime;
 use carbide_secrets::CredentialConfig;
 use eyre::WrapErr;
 use ipnetwork::IpNetwork;
@@ -42,8 +42,7 @@ pub struct ApiServerAddresses {
     pub metrics_address: Option<SocketAddr>,
 }
 
-/// Run the carbide-api server until `cancel_token` is cancelled or the process
-/// receives a shutdown signal.
+/// Run the carbide-api server until `cancel_token` is cancelled.
 ///
 /// Once startup completes, `ready_channel` receives the effective API and metrics listener
 /// addresses. This includes OS-selected ports when either endpoint is configured with port zero.
@@ -54,7 +53,6 @@ pub async fn run(
     site_config_path: Option<PathBuf>,
     credential_config: CredentialConfig,
     skip_logging_setup: bool,
-    admin_ui_routes_builder: Option<AdminUiRoutesBuilder>,
     cancel_token: CancellationToken,
     ready_channel: Sender<ApiServerAddresses>,
 ) -> eyre::Result<()> {
@@ -62,6 +60,19 @@ pub async fn run(
         &config_path,
         site_config_path.as_deref(),
     )?;
+
+    // The server has two separate route trees on one listener: the gRPC API
+    // (always served, lives in `carbide-api-core`) and the admin web UI — the
+    // HTML pages under `/admin`, which live in `carbide-api-web`. Handing the
+    // web pages in here is the one thing only this crate can do: `carbide-api-web`
+    // and `carbide-api-core` can't reference each other without a dependency
+    // cycle, and this top-level binary is the only crate that depends on both.
+    //
+    // We always supply the builder; whether it's actually mounted is decided
+    // downstream from the `enable_admin_ui` config flag (default true) — see
+    // the core runtime. (We can't read config here: it's parsed inside `carbide::run`.)
+    // See the docs on `carbide::AdminUiRoutesBuilder` for the full story.
+    let admin_ui_routes_builder = Box::new(carbide_api_web::routes);
 
     // If `CarbideConfig.initial_objects_file` is set, load it into an
     // `InitialObjectsConfig` so that the core runtime can reconcile its contents
@@ -107,7 +118,6 @@ pub async fn run(
     // initialization is complete, we use [`JoinSet::join_all`] to wait for them all to complete,
     // while propagating any panics to the current task.
     let mut join_set = JoinSet::new();
-    crate::shutdown_handler::start(&mut join_set, cancel_token.clone());
     let metrics_address = start_metrics_endpoint(
         &mut join_set,
         &carbide_config,

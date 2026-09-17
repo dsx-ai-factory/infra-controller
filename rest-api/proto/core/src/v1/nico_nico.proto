@@ -6,6 +6,7 @@ syntax = "proto3";
 package forge;
 
 import "common_nico.proto";
+import "console_log_nico.proto";
 import "dns_nico.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
@@ -23,6 +24,10 @@ option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
 service Forge {
   // What version of NICo is this service running? Matches `--version` command line.
   rpc Version(VersionRequest) returns (BuildInfo);
+
+  // Stream recent and live machine console output.
+  rpc StreamConsoleLogs(console_log.StreamConsoleLogsRequest)
+      returns (stream console_log.ConsoleLogLine);
 
   // Domain
   rpc CreateDomain(dns.CreateDomainRequest) returns (dns.Domain);

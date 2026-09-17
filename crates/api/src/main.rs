@@ -23,7 +23,6 @@ use carbide_secrets::CredentialConfig;
 use clap::CommandFactory;
 use sqlx::PgPool;
 use sqlx::postgres::PgSslMode;
-use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -55,30 +54,22 @@ async fn main() -> eyre::Result<()> {
         }
         Command::Run(run) => {
             // THIS SECTION HAS BEEN INTENTIONALLY KEPT SMALL.
-            // Nothing should go before the call to carbide::run that isn't already here.
-            // Everything that you think might belong here, belongs in carbide::run.
+            // carbide::run does all the work, the only parameters it should take are things where
+            // we *must* have overridden values for integration tests. Any other behavior that needs
+            // to be overridden in tests should be expressed via the config files.
+
+            // production cancel_token is driven by SIGTERM/SIGINT
+            let cancel_token = carbide_utils::shutdown_handler::start()?;
+            // production readiness is gated by a TCP check on the gRPC port: ready_tx is a no-op
             let (ready_tx, _ready_rx) = tokio::sync::oneshot::channel();
-            // The server has two separate route trees on one listener: the gRPC API
-            // (always served, lives in `carbide-api-core`) and the admin web UI — the
-            // HTML pages under `/admin`, which live in `carbide-api-web`. Handing the
-            // web pages in here is the one thing only this crate can do: `carbide-api-web`
-            // and `carbide-api-core` can't reference each other without a dependency
-            // cycle, and this top-level binary is the only crate that depends on both.
-            //
-            // We always supply the builder; whether it's actually mounted is decided
-            // downstream from the `enable_admin_ui` config flag (default true) — see
-            // the core runtime. (We can't read config here: it's parsed inside `carbide::run`.)
-            // See the docs on `carbide::AdminUiRoutesBuilder` for the full story.
-            let admin_ui_routes_builder: Option<carbide::AdminUiRoutesBuilder> =
-                Some(Box::new(carbide_api_web::routes));
+
             carbide::run(
                 debug,
                 run.config_path,
                 run.site_config_path,
                 CredentialConfig::default(),
                 false,
-                admin_ui_routes_builder,
-                CancellationToken::new(),
+                cancel_token,
                 ready_tx,
             )
             .await?;

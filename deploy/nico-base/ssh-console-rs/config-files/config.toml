@@ -16,6 +16,8 @@
 #
 ## What address to listen on.
 listen_address = "[::]:22"
+api_listen_address = "[::]:1079"
+api_allowed_client_spiffe_id = "spiffe://nico.local/nico-system/sa/nico-api"
 metrics_address = "[::]:9009"
 
 ## Address for nico-api
@@ -51,6 +53,9 @@ admin_certificate_role = "swngc-nico-admins"
 
 ## If true, use insecure ciphers when connecting to IPMI, like SHA1. Useful for ipmi_sim.
 insecure_ipmi_ciphers = false
+
+## Path to the ipmitool executable.
+ipmitool_path = "ipmitool"
 
 ## Force-deactivate a conflicting IPMI SOL session before reconnecting. The BMC cannot determine
 ## whether the existing session is stale or belongs to an active operator, so enabling this may

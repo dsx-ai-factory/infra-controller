@@ -597,6 +597,11 @@ pub struct MachineATronConfig {
     /// it is configured with an `rms.api_url` pointing here.
     #[serde(default)]
     pub rms_mock: RmsMockConfig,
+
+    /// Whether to generate mock console logs in mocked hosts. Useful for demonstration, may cause
+    /// issues in tests that assert on deterministic log contents.
+    #[serde(default)]
+    pub generate_console_logs: bool,
 }
 
 impl MachineATronConfig {

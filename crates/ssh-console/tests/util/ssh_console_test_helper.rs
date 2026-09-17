@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use eyre::Context;
@@ -36,6 +37,7 @@ pub(crate) struct ConfigOverrides {
     pub(crate) reconnect_interval_max: Option<Duration>,
     pub(crate) successful_connection_minimum_duration: Option<Duration>,
     pub(crate) force_deactivate_conflicting_ipmi_sol_sessions: Option<bool>,
+    pub(crate) ipmitool_path: Option<PathBuf>,
 }
 
 pub(crate) async fn spawn(
@@ -44,12 +46,15 @@ pub(crate) async fn spawn(
 ) -> eyre::Result<NewSshConsoleHandle> {
     let listen_address = "127.0.0.1:0".parse().expect("Invalid listen address");
     let metrics_address = "127.0.0.1:0".parse().expect("Invalid metrics address");
+    let api_listen_address = "127.0.0.1:0".parse().expect("Invalid API listen address");
 
     let logs_dir = TempDir::new().context("error creating temp dir for console logs")?;
 
     let config = ssh_console::config::Config {
         listen_address,
         metrics_address,
+        api_listen_address,
+        api_allowed_client_spiffe_id: Defaults::api_allowed_client_spiffe_id(),
         carbide_uri: format!("https://localhost:{carbide_port}")
             .try_into()
             .expect("Invalid URI?"),
@@ -61,6 +66,10 @@ pub(crate) async fn spawn(
         override_bmc_ssh_port: None,
         override_ipmi_port: Some(1623),
         insecure_ipmi_ciphers: true,
+        ipmitool_path: config_overrides
+            .as_ref()
+            .and_then(|config| config.ipmitool_path.clone())
+            .unwrap_or_else(Defaults::ipmitool_path),
         force_deactivate_conflicting_ipmi_sol_sessions: config_overrides
             .as_ref()
             .and_then(|c| c.force_deactivate_conflicting_ipmi_sol_sessions)
@@ -94,7 +103,7 @@ pub(crate) async fn spawn(
         openssh_certificate_authorization: ssh_console::config::Defaults::cert_authorization(),
     };
 
-    let spawn_handle = ssh_console::spawn(config).await?;
+    let spawn_handle = ssh_console::spawn(config, None).await?;
     let listen_address = spawn_handle.listen_address();
     let metrics_address = spawn_handle.metrics_address();
     assert_ne!(listen_address.port(), 0);

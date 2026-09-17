@@ -1263,6 +1263,7 @@ where
         mac_address_pool: None,
         ufm_mock: Default::default(),
         rms_mock: Default::default(),
+        generate_console_logs: false,
     };
 
     let (provisionable_handles, mat_handle) = api_test_helper::machine_a_tron::run_local(

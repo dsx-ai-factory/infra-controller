@@ -17,8 +17,10 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::result::Result as StdResult;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bmc_mock::HostnameQuerying;
+use chrono::Utc;
 use eyre::Context;
 use rand::rand_core::UnwrapErr;
 use rand::rngs::SysRng;
@@ -26,13 +28,15 @@ use russh::keys::PublicKeyBase64;
 use russh::server::{Auth, ChannelOpenHandle, Config, Msg, Server as _, Session, run_stream};
 use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty, server};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 #[derive(Debug)]
 pub struct MockSshServerHandle {
     pub host_pubkey: String,
     pub port: u16,
-    _shutdown_handle: Option<oneshot::Sender<()>>,
+    _drop_guard: DropGuard,
 }
 
 #[derive(Debug, Clone)]
@@ -60,15 +64,20 @@ pub async fn spawn(
     prompt_hostname: Arc<dyn HostnameQuerying>,
     require_credentials: Option<Credentials>,
     prompt_behavior: PromptBehavior,
+    generate_console_logs: bool,
 ) -> eyre::Result<MockSshServerHandle> {
     let mut rng = SysRng;
     let host_key =
         russh::keys::PrivateKey::random(&mut UnwrapErr(&mut rng), russh::keys::Algorithm::Ed25519)?;
     let host_pubkey = host_key.public_key_base64();
+    let cancel_token = CancellationToken::new();
+    let (log_messages_tx, _) = broadcast::channel(4096);
     let server = Server {
         prompt_hostname,
         prompt_behavior,
         require_credentials,
+        cancel_token: cancel_token.clone(),
+        log_messages_tx: log_messages_tx.downgrade(),
     };
     let listener = if let Some(port) = port {
         let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
@@ -83,21 +92,44 @@ pub async fn spawn(
 
     let port = listener.local_addr()?.port();
 
-    let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(server.run(
         Arc::new(russh::server::Config {
             keys: vec![host_key],
             ..Default::default()
         }),
         listener,
-        rx,
     ));
 
+    if generate_console_logs {
+        tokio::spawn(run_log_message_writer(
+            log_messages_tx,
+            cancel_token.clone(),
+        ));
+    }
+
     Ok(MockSshServerHandle {
-        _shutdown_handle: Some(tx),
+        _drop_guard: cancel_token.drop_guard(),
         port,
         host_pubkey,
     })
+}
+
+// Spawns a loop which broadcasts log messages to all connected sessions, so that we can get some
+// mock output
+async fn run_log_message_writer(
+    log_messages_tx: broadcast::Sender<Vec<u8>>,
+    cancel_token: CancellationToken,
+) {
+    let mut idx: usize = 0;
+    while let Some(()) = cancel_token
+        .run_until_cancelled(tokio::time::sleep(Duration::from_secs(5)))
+        .await
+    {
+        log_messages_tx
+            .send(format!("[{}] log message {}\r\n", Utc::now().to_rfc3339(), idx).into_bytes())
+            .ok();
+        idx += 1;
+    }
 }
 
 #[derive(Clone)]
@@ -105,15 +137,12 @@ struct Server {
     prompt_hostname: Arc<dyn HostnameQuerying>,
     prompt_behavior: PromptBehavior,
     require_credentials: Option<Credentials>,
+    cancel_token: CancellationToken,
+    log_messages_tx: broadcast::WeakSender<Vec<u8>>,
 }
 
 impl Server {
-    async fn run(
-        mut self,
-        config: Arc<Config>,
-        socket: TcpListener,
-        mut shutdown: oneshot::Receiver<()>,
-    ) -> eyre::Result<()> {
+    async fn run(mut self, config: Arc<Config>, socket: TcpListener) -> eyre::Result<()> {
         loop {
             tokio::select! {
                 accept_result = socket.accept() => {
@@ -158,7 +187,7 @@ impl Server {
                     }
                 },
 
-                _ = &mut shutdown => break,
+                _ = self.cancel_token.cancelled() => break,
             }
         }
 
@@ -173,6 +202,7 @@ impl server::Server for Server {
             self.prompt_hostname.clone(),
             self.prompt_behavior,
             self.require_credentials.clone(),
+            self.log_messages_tx.upgrade().map(|s| s.subscribe()),
         )
     }
 }
@@ -183,6 +213,7 @@ struct MockSshHandler {
     console_state: ConsoleState,
     buffer: Vec<u8>,
     require_credentials: Option<Credentials>,
+    log_message_rx: Option<broadcast::Receiver<Vec<u8>>>,
 }
 
 impl MockSshHandler {
@@ -190,6 +221,7 @@ impl MockSshHandler {
         prompt_hostname: Arc<dyn HostnameQuerying>,
         prompt_behavior: PromptBehavior,
         require_credentials: Option<Credentials>,
+        log_message_rx: Option<broadcast::Receiver<Vec<u8>>>,
     ) -> Self {
         Self {
             prompt_hostname,
@@ -197,6 +229,7 @@ impl MockSshHandler {
             console_state: ConsoleState::default(),
             buffer: Vec::default(),
             require_credentials,
+            log_message_rx,
         }
     }
 
@@ -239,11 +272,26 @@ impl server::Handler for MockSshHandler {
 
     async fn channel_open_session(
         &mut self,
-        _channel: Channel<Msg>,
+        channel: Channel<Msg>,
         reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> StdResult<(), Self::Error> {
         tracing::debug!("channel_open_session");
+
+        if let Some(mut log_message_rx) = self.log_message_rx.take() {
+            tokio::spawn(async move {
+                loop {
+                    match log_message_rx.recv().await {
+                        Ok(msg) => {
+                            channel.data_bytes(msg).await.ok();
+                        }
+                        Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+
         reply.accept().await;
         Ok(())
     }

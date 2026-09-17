@@ -53,9 +53,6 @@ use crate::node_auth::NodeJwtValidator;
 /// handle, it returns the axum router holding those pages. The web crate installs
 /// admission after its authentication middleware so fair scheduling sees the
 /// authenticated user identity.
-///
-/// `None` means "don't serve the admin UI at all" -- used by the in-process test
-/// servers, which only exercise the gRPC API and never load the web pages.
 pub type AdminUiRoutesBuilder = Box<
     dyn FnOnce(Arc<Api>, Option<AdminAdmissionControl>) -> eyre::Result<NormalizePath<axum::Router>>
         + Send,

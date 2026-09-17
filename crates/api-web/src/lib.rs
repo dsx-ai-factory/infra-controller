@@ -248,6 +248,7 @@ mod attestation;
 mod auth;
 mod compute_allocation;
 mod configuration;
+mod console_logs;
 mod domain;
 mod dpa;
 mod dpu_versions;
@@ -649,6 +650,14 @@ fn routes_with_auth_mode(
             .route("/machine", get(machine::show_all_html))
             .route("/machine.json", get(machine::show_all_json))
             .route("/machine/{machine_id}", get(machine::detail))
+            .route(
+                "/machine/{machine_id}/console-logs",
+                get(console_logs::page),
+            )
+            .route(
+                "/machine/{machine_id}/console-logs/stream",
+                get(console_logs::stream),
+            )
             .route(
                 "/machine/{machine_id}/maintenance",
                 post(machine::maintenance),
