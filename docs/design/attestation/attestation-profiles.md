@@ -92,6 +92,13 @@ sink the key.
 | manufacturer | `ComputerSystem.Manufacturer` → `ServiceRoot.Vendor` → `unknown`    |
 | model        | `ComputerSystem.Model` → `ServiceRoot.Product` → `nomodel`          |
 
+The `ComputerSystem` is the one exploration treats as the host: the first member
+after the first that reports a BIOS, or the first member when none does. A BMC
+serving several — an NVIDIA compute tray exposes a host system beside its GPU
+baseboard — can therefore move a class by reordering its `Systems` collection,
+which is the same re-keying the `any` fallback (§4.2) and the coverage view
+(§6.4) already cover.
+
 Each field is normalised on its own: lowercased, every run of characters outside
 `a-z0-9` becomes a single `-`, and leading and trailing `-` are dropped. The
 fields are then joined with `_`, which cannot appear inside a normalised field,
