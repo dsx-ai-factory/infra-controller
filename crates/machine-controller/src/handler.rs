@@ -1229,6 +1229,7 @@ impl MachineStateHandler {
                             machine_state: MachineState::UefiSetup {
                                 uefi_setup_info: UefiSetupInfo {
                                     uefi_password_jid: None,
+                                    credential_version: None,
                                     uefi_setup_state: UefiSetupState::UnlockHost,
                                 },
                             },
@@ -1259,6 +1260,7 @@ impl MachineStateHandler {
                         ManagedHostState::RotatingHostUefi {
                             uefi_setup_info: UefiSetupInfo {
                                 uefi_password_jid: None,
+                                credential_version: None,
                                 uefi_setup_state: UefiSetupState::UnlockHost,
                             },
                         },
@@ -5030,10 +5032,15 @@ impl DpuMachineStateHandler {
                     }
                 }
 
-                let dpu_uefi_credentials = resolve_site_uefi_credentials(
+                let dpu_uefi_version = current_site_uefi_target(
                     &ctx.services.db_pool,
+                    db::credential_rotation::CredentialRotationType::DpuUefi,
+                )
+                .await?;
+                let dpu_uefi_credentials = read_site_uefi_credentials(
                     ctx.services.bmc_credential_ops.credential_reader(),
                     db::credential_rotation::CredentialRotationType::DpuUefi,
+                    dpu_uefi_version,
                 )
                 .await?;
                 let credentials_updated = match ctx
@@ -5090,17 +5097,14 @@ impl DpuMachineStateHandler {
                 .next_state(&state.managed_state, dpu_machine_id)?;
 
                 if credentials_updated {
-                    // The DPU's UEFI password is now the site-wide value (just set via
-                    // uefi_setup above): record dpu_uefi convergence so the rotation
-                    // engine tracks this DPU from ingestion onward (mirrors the
-                    // backfill, which keys DPU UEFI by the DPU BMC MAC). The MAC was
-                    // validated as a precondition at the top of this state. Committed
-                    // with the state transition below.
+                    // Record the version sent to `uefi_setup`, not a target
+                    // published while the DPU was restarting.
                     let mut txn = ctx.services.db_pool.begin().await?;
-                    db::credential_rotation::record_device_converged(
+                    db::credential_rotation::record_device_enrolled(
                         &mut txn,
                         dpu_bmc_mac,
                         db::credential_rotation::CredentialRotationType::DpuUefi,
+                        Some(dpu_uefi_version as i32),
                     )
                     .await
                     .map_err(|e| {
@@ -7401,20 +7405,13 @@ async fn current_site_uefi_target(
     })
 }
 
-/// Resolve the site-wide UEFI credential to set on a device during ingestion:
-/// the secret at the current `host_uefi`/`dpu_uefi` target version. The
-/// low-level `redfish` `uefi_setup` no longer reads the credential store itself,
-/// so we resolve the version (table-driven) and read the credential here.
-///
-/// Takes `db_pool` and `reader` rather than the whole `StateHandlerContext`
-/// because the context is not `Send`/`Sync` and must not be held across an await
-/// in a handler future (`&PgPool` and `&dyn CredentialReader` both are).
-async fn resolve_site_uefi_credentials(
-    db_pool: &sqlx::PgPool,
+/// Read the credential at the caller's selected version. Enrollment and rotation
+/// keep that same version for bookkeeping instead of rereading a newer target.
+async fn read_site_uefi_credentials(
     reader: &dyn CredentialReader,
     credential_type: db::credential_rotation::CredentialRotationType,
+    version: u32,
 ) -> Result<Credentials, StateHandlerError> {
-    let version = current_site_uefi_target(db_pool, credential_type).await?;
     let key = match credential_type {
         db::credential_rotation::CredentialRotationType::HostUefi => {
             CredentialKey::host_uefi_site_default(version)
@@ -7424,7 +7421,7 @@ async fn resolve_site_uefi_credentials(
         }
         other => {
             return Err(StateHandlerError::GenericError(eyre!(
-                "resolve_site_uefi_credentials called with non-UEFI credential type {other:?}"
+                "read_site_uefi_credentials called with non-UEFI credential type {other:?}"
             )));
         }
     };
@@ -7482,6 +7479,7 @@ async fn handle_host_uefi_setup(
                     machine_state: MachineState::UefiSetup {
                         uefi_setup_info: UefiSetupInfo {
                             uefi_password_jid: None,
+                            credential_version: None,
                             uefi_setup_state: UefiSetupState::SetUefiPassword,
                         },
                     },
@@ -7489,10 +7487,15 @@ async fn handle_host_uefi_setup(
             ))
         }
         UefiSetupState::SetUefiPassword => {
-            let host_uefi_credentials = resolve_site_uefi_credentials(
+            let host_uefi_version = current_site_uefi_target(
                 &ctx.services.db_pool,
+                db::credential_rotation::CredentialRotationType::HostUefi,
+            )
+            .await?;
+            let host_uefi_credentials = read_site_uefi_credentials(
                 ctx.services.bmc_credential_ops.credential_reader(),
                 db::credential_rotation::CredentialRotationType::HostUefi,
+                host_uefi_version,
             )
             .await?;
             let host_bmc_access = ctx
@@ -7510,6 +7513,7 @@ async fn handle_host_uefi_setup(
                         machine_state: MachineState::UefiSetup {
                             uefi_setup_info: UefiSetupInfo {
                                 uefi_password_jid: job_id,
+                                credential_version: Some(host_uefi_version),
                                 uefi_setup_state: UefiSetupState::WaitForPasswordJobScheduled,
                             },
                         },
@@ -7579,6 +7583,7 @@ async fn handle_host_uefi_setup(
                     machine_state: MachineState::UefiSetup {
                         uefi_setup_info: UefiSetupInfo {
                             uefi_password_jid: uefi_setup_info.uefi_password_jid.clone(),
+                            credential_version: uefi_setup_info.credential_version,
                             uefi_setup_state: UefiSetupState::PowercycleHost,
                         },
                     },
@@ -7592,6 +7597,7 @@ async fn handle_host_uefi_setup(
                     machine_state: MachineState::UefiSetup {
                         uefi_setup_info: UefiSetupInfo {
                             uefi_password_jid: uefi_setup_info.uefi_password_jid.clone(),
+                            credential_version: uefi_setup_info.credential_version,
                             uefi_setup_state: UefiSetupState::WaitForPasswordJobCompletion,
                         },
                     },
@@ -7629,15 +7635,16 @@ async fn handle_host_uefi_setup(
                     ))
                 })?;
 
-            // The host's UEFI password is now the site-wide value: record it as
-            // converged to the current host_uefi target so the rotation engine
-            // tracks this host from ingestion onward (mirrors the backfill, which
-            // keys host UEFI by the host BMC MAC). The MAC was validated as a
-            // precondition at the top of this handler.
-            db::credential_rotation::record_device_converged(
+            // Completion proves the password was set, but older saved jobs did
+            // not record its version. Keep that version unknown rather than
+            // claiming today's target or replaying setup with the wrong password.
+            db::credential_rotation::record_device_enrolled(
                 &mut txn,
                 host_bmc_mac,
                 db::credential_rotation::CredentialRotationType::HostUefi,
+                uefi_setup_info
+                    .credential_version
+                    .map(|version| version as i32),
             )
             .await
             .map_err(|e| {
@@ -7980,6 +7987,7 @@ impl StateHandler for HostMachineStateHandler {
                             machine_state: MachineState::UefiSetup {
                                 uefi_setup_info: UefiSetupInfo {
                                     uefi_password_jid: None,
+                                    credential_version: None,
                                     uefi_setup_state: UefiSetupState::SetUefiPassword,
                                 },
                             },

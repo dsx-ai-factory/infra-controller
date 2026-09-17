@@ -31,7 +31,7 @@ use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use chrono::{Duration, Utc};
 use db::credential_rotation::{
     CredentialRotationType, device_rotation_status, increment_rotate_attempt,
-    record_device_converged, set_next_target_version,
+    record_device_enrolled, set_next_target_version,
 };
 use mac_address::MacAddress;
 use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
@@ -100,7 +100,7 @@ async fn stage_lagging_bmc(
         .expect("staging the per-device secret should succeed");
     {
         let mut conn = pool.acquire().await?;
-        record_device_converged(&mut conn, host_mac, BMC).await?;
+        record_device_enrolled(&mut conn, host_mac, BMC, Some(0)).await?;
         assert!(
             matches!(
                 set_next_target_version(&mut conn, BMC, 0, serde_json::json!({})).await?,

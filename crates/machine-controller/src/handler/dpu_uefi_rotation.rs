@@ -51,7 +51,7 @@ use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
-use super::{current_site_uefi_target, handler_restart_dpu, resolve_site_uefi_credentials};
+use super::{current_site_uefi_target, handler_restart_dpu, read_site_uefi_credentials};
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
 
 /// `true` when this DPU's UEFI credential lags the staged site-wide `dpu_uefi`
@@ -255,7 +255,7 @@ pub(crate) async fn handle_rotating_dpu_uefi(
         let Credentials::UsernamePassword {
             password: new_password,
             ..
-        } = resolve_site_uefi_credentials(&db_pool, reader, DpuUefi).await?;
+        } = read_site_uefi_credentials(reader, DpuUefi, target).await?;
         (candidates, new_password)
     };
 
@@ -298,11 +298,16 @@ pub(crate) async fn handle_rotating_dpu_uefi(
                 StateHandlerError::GenericError(eyre!("promote dpu uefi rotating_to_version: {e}"))
             })?;
             if let db::ConditionalWrite::NotApplied(NoStagedCredentialRotation) = promoted {
-                db::credential_rotation::record_device_converged(&mut txn, dpu_bmc_mac, DpuUefi)
-                    .await
-                    .map_err(|e| {
-                        StateHandlerError::GenericError(eyre!("record dpu uefi convergence: {e}"))
-                    })?;
+                db::credential_rotation::record_device_enrolled(
+                    &mut txn,
+                    dpu_bmc_mac,
+                    DpuUefi,
+                    Some(target as i32),
+                )
+                .await
+                .map_err(|e| {
+                    StateHandlerError::GenericError(eyre!("record dpu uefi convergence: {e}"))
+                })?;
             }
             tracing::info!(mac = %dpu_bmc_mac, %dpu_machine_id, "DPU UEFI converged to site-wide rotation target");
             // A forced attempt genuinely fired, so clear the one-shot request on
