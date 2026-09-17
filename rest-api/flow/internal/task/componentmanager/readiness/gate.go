@@ -8,8 +8,9 @@
 // directly for state-machine state.
 //
 // All component / rack identifiers are the Core (external) IDs that flow
-// through the Temporal task targets unchanged — the gate joins through
-// component.external_id (and rack.id, which is the same UUID Core uses).
+// through the Temporal task targets unchanged. The gate joins components
+// through component.external_id and resolves racks through rack.external_id;
+// Flow's rack UUID is an independent internal identifier.
 //
 // Semantics:
 //   - empty input → no-op success
@@ -51,11 +52,12 @@ type StatusReader interface {
 	// the result map.
 	GetStatusesByExternalIDs(ctx context.Context, externalIDs []string) (map[string]*types.ComponentOperationStatus, error)
 
-	// GetHostExternalIDsByRackIDs returns, for each rack (Core rack ID,
-	// matching component.rack_id), the external_id of every host (compute)
-	// member. Other component types are intentionally excluded — the
-	// rack-scoped readiness check is a tenant-safety guard, and tenants
-	// only attach to hosts.
+	// GetHostExternalIDsByRackIDs returns, for each Core rack ID (matching
+	// rack.external_id), the external_id of every host (compute) member.
+	// Other component types are intentionally excluded — the rack-scoped
+	// readiness check is a tenant-safety guard, and tenants only attach to
+	// hosts. An unresolved rack ID returns an error rather than appearing to
+	// be an empty rack.
 	GetHostExternalIDsByRackIDs(ctx context.Context, rackIDs []string) (map[string][]string, error)
 }
 
