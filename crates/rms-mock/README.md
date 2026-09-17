@@ -7,6 +7,24 @@ calls. The mock keeps no inventory of its own: it reports node placement from
 the same simulated hardware the Redfish chassis are built from, so the two
 cannot disagree. RPCs outside its scope return `UNIMPLEMENTED`.
 
+## Served RPCs
+
+Besides `GetVersion` and `BatchGetNodeDeviceInfo`, the mock serves the RPCs a
+rack passes on its way to ready: `ConfigureSwitchCertificate` with
+`GetConfigureSwitchCertificateJobStatus`, the V2
+`ConfigureScaleUpFabricManager` with `GetJobStatus`, `GetScaleUpFabricStatus`
+and `BatchGetScaleUpFabricServiceStatus`. Nothing is installed on a simulated
+switch. The mock elects one fabric-manager primary per rack, which is the one
+switch that reads back enabled: the requested primary when it is one of the
+rack's simulated switches, otherwise the one lowest in the rack, with node id
+breaking ties. A node the request names but no simulated device answers for is
+a per-node failure: the batch fails, the node's result says why, and no job is
+issued for it.
+`ConfigureScaleUpFabricManager` has no per-node results, so when none of its
+switches match, the job it returns fails and names them. Jobs advance each
+time they are polled rather than with time, and a poll for a job id this
+process never issued reports it completed.
+
 ## Pointing NICo at the mock
 
 NICo reaches RMS through the `nico-api` chart's `rms` values. Set

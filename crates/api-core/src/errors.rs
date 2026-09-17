@@ -457,9 +457,9 @@ impl OperatorError for CarbideError {
             CarbideError::ClientCertificateMissingInformation(_) => ErrorCode::nico(Api, 401),
             CarbideError::PermissionDeniedError(_) => ErrorCode::nico(Api, 403),
             CarbideError::NotFoundError { .. } => ErrorCode::nico(Api, 404),
-            CarbideError::AlreadyFoundError { .. } | CarbideError::AlreadyInProgress(_) => {
-                ErrorCode::nico(Api, 409)
-            }
+            CarbideError::AlreadyFoundError { .. }
+            | CarbideError::AlreadyInProgress(_)
+            | CarbideError::ExpectedHostDuplicateMacAddress(_) => ErrorCode::nico(Api, 409),
             CarbideError::MaintenanceMode
             | CarbideError::UnhealthyHost
             | CarbideError::ConcurrentModificationError(_, _)
@@ -556,6 +556,9 @@ impl From<CarbideError> for tonic::Status {
             }
             error @ CarbideError::FailedPrecondition(_) => {
                 Status::failed_precondition(error.to_string())
+            }
+            error @ CarbideError::ExpectedHostDuplicateMacAddress(_) => {
+                Status::already_exists(error.to_string())
             }
             error @ CarbideError::ExpectedSwitchDuplicateNvosMacAddress(_) => {
                 Status::failed_precondition(error.to_string())

@@ -192,10 +192,16 @@ func (Managers *Manager) Start() {
 	Managers.FlowGrpc().Start()
 }
 
+func newMetricsServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	return mux
+}
+
 // StartMetricServer - Start serving Metric Server
 func StartMetricServer() {
 	log.Info().Msgf("Beginning to serve on port %v", ManagerAccess.Conf.EB.MetricsPort)
-	http.Handle("/metrics", promhttp.Handler())
 	port := ":" + ManagerAccess.Conf.EB.MetricsPort
-	http.ListenAndServe(port, nil)
+	mux := newMetricsServeMux()
+	http.ListenAndServe(port, mux)
 }

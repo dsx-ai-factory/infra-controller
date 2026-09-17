@@ -1388,11 +1388,10 @@ impl Default for LeakDetectorCollectorConfig {
 /// How log events are collected from each BMC endpoint.
 ///
 /// - `Auto` (default): tries SSE first, downgrades to periodic per-endpoint
-///   when SSE is unsupported or keeps failing.
+///   when SSE is unsupported or keeps failing. Downgrades remain periodic
+///   unless `retry_sse_after_downgrade` is enabled.
 /// - `Sse`: SSE only, retries forever. Use when every BMC has `/EventService`.
 /// - `Periodic`: polling only, no SSE attempt.
-///
-/// Downgrades are in-memory; restart the health service to retry SSE.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogCollectionMode {
@@ -1519,9 +1518,7 @@ fn default_excluded_log_services() -> Vec<String> {
     vec!["Journal".to_string()]
 }
 
-/// downgrade thresholds and periodic fallback for `collectors.logs.mode = "auto"`.
-/// sse_not_available is terminal (defaults to 1), everything else goes
-/// through a rolling window.
+/// Downgrade thresholds and periodic fallback for `collectors.logs.mode = "auto"`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoModeConfig {
@@ -1529,6 +1526,13 @@ pub struct AutoModeConfig {
     #[serde(with = "humantime_serde")]
     pub connect_failure_window: Duration,
     pub connect_failure_threshold: u32,
+
+    /// Whether periodic fallback stops after 30 minutes so the next discovery
+    /// pass can retry SSE. Transitions can duplicate records on downgrade or
+    /// miss records on upgrade because SSE and periodic cursors can cover
+    /// different Redfish LogService endpoints. Defaults to false.
+    pub retry_sse_after_downgrade: bool,
+
     #[serde(default, flatten)]
     pub periodic: PeriodicLogConfig,
 }
@@ -1539,6 +1543,7 @@ impl Default for AutoModeConfig {
             sse_not_available_threshold: 1,
             connect_failure_window: Duration::from_secs(300),
             connect_failure_threshold: 5,
+            retry_sse_after_downgrade: false,
             periodic: PeriodicLogConfig::default(),
         }
     }
@@ -1581,9 +1586,13 @@ impl LogsCollectorConfig {
             }
             LogCollectionMode::Periodic => {
                 if self.auto.is_some() {
-                    return Err(
-                        "[collectors.logs.auto] should not be set when mode = \"periodic\""
-                            .to_string(),
+                    tracing::warn!(
+                        "[collectors.logs.auto] is set but ignored when mode = \"periodic\""
+                    );
+                }
+                if self.sse.is_some() {
+                    tracing::warn!(
+                        "[collectors.logs.sse] is set but ignored when mode = \"periodic\""
                     );
                 }
                 if self.periodic.is_none() {
@@ -1592,23 +1601,14 @@ impl LogsCollectorConfig {
                             .to_string(),
                     );
                 }
-                if self.sse.is_some() {
-                    return Err(
-                        "[collectors.logs.sse] should not be set when mode = \"periodic\""
-                            .to_string(),
-                    );
-                }
             }
             LogCollectionMode::Sse => {
                 if self.auto.is_some() {
-                    return Err(
-                        "[collectors.logs.auto] should not be set when mode = \"sse\"".to_string(),
-                    );
+                    tracing::warn!("[collectors.logs.auto] is set but ignored when mode = \"sse\"");
                 }
                 if self.periodic.is_some() {
-                    return Err(
-                        "[collectors.logs.periodic] should not be set when mode = \"sse\""
-                            .to_string(),
+                    tracing::warn!(
+                        "[collectors.logs.periodic] is set but ignored when mode = \"sse\""
                     );
                 }
                 if let Some(sse) = &self.sse {
@@ -3064,6 +3064,8 @@ mod tests {
             assert_eq!(auto.sse_not_available_threshold, 1);
             assert_eq!(auto.connect_failure_window, Duration::from_secs(300));
             assert_eq!(auto.connect_failure_threshold, 5);
+            assert!(!auto.retry_sse_after_downgrade);
+
             assert_eq!(
                 auto.periodic.logs_collection_interval,
                 Duration::from_secs(300)
@@ -6024,10 +6026,7 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     periodic: Some(PeriodicLogConfig::default()),
                     auto: Some(AutoModeConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.auto] should not be set when mode = \"periodic\""
-                        .to_string()
-                ),
+                } => Yields(()), // auto is ignored in periodic mode (warn only)
 
                 LogsCollectorConfig {
                     mode: LogCollectionMode::Periodic,
@@ -6041,9 +6040,7 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     periodic: Some(PeriodicLogConfig::default()),
                     sse: Some(SseLogConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.sse] should not be set when mode = \"periodic\"".to_string()
-                ),
+                } => Yields(()), // sse is ignored in periodic mode (warn only)
             }
 
             "SSE mode" {
@@ -6062,17 +6059,13 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     mode: LogCollectionMode::Sse,
                     auto: Some(AutoModeConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.auto] should not be set when mode = \"sse\"".to_string()
-                ),
+                } => Yields(()), // auto is ignored in sse mode (warn only)
 
                 LogsCollectorConfig {
                     mode: LogCollectionMode::Sse,
                     periodic: Some(PeriodicLogConfig::default()),
                     ..LogsCollectorConfig::default()
-                } => FailsWith(
-                    "[collectors.logs.periodic] should not be set when mode = \"sse\"".to_string()
-                ),
+                } => Yields(()), // periodic is ignored in sse mode (warn only)
 
                 LogsCollectorConfig {
                     mode: LogCollectionMode::Sse,
@@ -6086,6 +6079,179 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                         .to_string()
                 ),
             }
+        );
+    }
+
+    /// Capture tracing WARN events emitted during a closure.
+    /// Uses a per-call dispatcher so parallel tests don't interfere.
+    fn capture_warnings(f: impl FnOnce()) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+
+        use tracing::Level;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        struct WarnCapture(Arc<Mutex<Vec<String>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCapture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() != Level::WARN {
+                    return;
+                }
+                struct Visitor(String);
+                impl tracing::field::Visit for Visitor {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}").trim_matches('"').to_string();
+                        }
+                    }
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        if field.name() == "message" {
+                            self.0 = value.to_string();
+                        }
+                    }
+                }
+                let mut v = Visitor(String::new());
+                event.record(&mut v);
+                self.0.lock().unwrap().push(v.0);
+            }
+        }
+
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(WarnCapture(captured_clone)),
+            f,
+        );
+        Arc::try_unwrap(captured).unwrap().into_inner().unwrap()
+    }
+
+    #[test]
+    fn logs_collector_ignored_subsection_warnings() {
+        // periodic mode + auto: warn about auto
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Periodic,
+                periodic: Some(PeriodicLogConfig::default()),
+                auto: Some(AutoModeConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("periodic")),
+            "expected auto-ignored warning in periodic mode, got: {warnings:?}"
+        );
+
+        // periodic mode + sse: warn about sse
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Periodic,
+                periodic: Some(PeriodicLogConfig::default()),
+                sse: Some(SseLogConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.sse]") && w.contains("periodic")),
+            "expected sse-ignored warning in periodic mode, got: {warnings:?}"
+        );
+
+        // periodic mode + auto + sse: warn about both
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Periodic,
+                periodic: Some(PeriodicLogConfig::default()),
+                auto: Some(AutoModeConfig::default()),
+                sse: Some(SseLogConfig::default()),
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("periodic")),
+            "expected auto warning in periodic+auto+sse: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.sse]") && w.contains("periodic")),
+            "expected sse warning in periodic+auto+sse: {warnings:?}"
+        );
+
+        // SSE mode + auto: warn about auto
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Sse,
+                auto: Some(AutoModeConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("sse")),
+            "expected auto-ignored warning in sse mode, got: {warnings:?}"
+        );
+
+        // SSE mode + periodic: warn about periodic
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Sse,
+                periodic: Some(PeriodicLogConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.periodic]") && w.contains("sse")),
+            "expected periodic-ignored warning in sse mode, got: {warnings:?}"
+        );
+
+        // SSE mode + auto + periodic: warn about both
+        let warnings = capture_warnings(|| {
+            LogsCollectorConfig {
+                mode: LogCollectionMode::Sse,
+                auto: Some(AutoModeConfig::default()),
+                periodic: Some(PeriodicLogConfig::default()),
+                ..LogsCollectorConfig::default()
+            }
+            .validate()
+            .unwrap();
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.auto]") && w.contains("sse")),
+            "expected auto warning in sse+auto+periodic: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("[collectors.logs.periodic]") && w.contains("sse")),
+            "expected periodic warning in sse+auto+periodic: {warnings:?}"
         );
     }
 
@@ -6230,6 +6396,7 @@ logs_collection_interval = "5m"
 sse_not_available_threshold = 2
 connect_failure_window = "10m"
 connect_failure_threshold = 8
+retry_sse_after_downgrade = true
 "# => Yields(LogsConfigProjection {
                     mode: LogCollectionMode::Auto,
                     validation: Ok(()),
@@ -6239,6 +6406,7 @@ connect_failure_threshold = 8
                         sse_not_available_threshold: 2,
                         connect_failure_window: Duration::from_secs(600),
                         connect_failure_threshold: 8,
+                        retry_sse_after_downgrade: true,
                         periodic: parsed_periodic_defaults(),
                     }),
                     effective_sse: SseLogConfig::default(),
@@ -6264,6 +6432,7 @@ logs_state_file = "/tmp/auto_{machine_id}.json"
                         sse_not_available_threshold: 2,
                         connect_failure_window: Duration::from_secs(600),
                         connect_failure_threshold: 8,
+                        retry_sse_after_downgrade: false,
                         periodic: PeriodicLogConfig {
                             logs_collection_interval: Duration::from_secs(120),
                             state_refresh_interval: Duration::from_secs(1200),
@@ -6314,6 +6483,8 @@ max_backoff = "45s"
         assert_eq!(defaults.sse_not_available_threshold, 1);
         assert_eq!(defaults.connect_failure_window, Duration::from_secs(300));
         assert_eq!(defaults.connect_failure_threshold, 5);
+        assert!(!defaults.retry_sse_after_downgrade);
+
         assert_eq!(
             defaults.periodic.logs_collection_interval,
             Duration::from_secs(300)

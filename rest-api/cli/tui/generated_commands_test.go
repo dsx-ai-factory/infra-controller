@@ -93,19 +93,32 @@ func TestAllCommands_CoversGeneratedCLISurface(t *testing.T) {
 
 func TestAllCommands_RegistersConciseAliases(t *testing.T) {
 	commands := commandNames(AllCommands())
-	for _, name := range []string{
-		"machine power",
-		"machine power-control-machine machine-power-control-machine",
-		"measured-boot machine approve",
-		"measured-boot machine list",
-		"measured-boot machine remove",
-		"measured-boot profile approve",
-		"measured-boot profile list",
-		"measured-boot profile remove",
-		"site-explorer endpoint action",
+	for _, test := range []struct {
+		name string
+		want bool
+	}{
+		{name: "machine power", want: true},
+		{name: "machine power-control-machine machine-power-control-machine", want: true},
+		{name: "measured-boot machine approve", want: true},
+		{name: "measured-boot machine list", want: true},
+		{name: "measured-boot machine remove", want: true},
+		{name: "measured-boot profile approve", want: true},
+		{name: "measured-boot profile list", want: true},
+		{name: "measured-boot profile remove", want: true},
+		{name: "site-explorer endpoint action", want: true},
+		{name: "machine health-report delete", want: true},
+		{name: "machine health-report list", want: true},
+		{name: "machine health-report update", want: true},
+		{name: "health-report delete", want: false},
+		{name: "health-report list", want: false},
+		{name: "health-report update", want: false},
 	} {
-		t.Run(name, func(t *testing.T) {
-			assert.Containsf(t, commands, name, "expected concise command %q", name)
+		t.Run(test.name, func(t *testing.T) {
+			if test.want {
+				assert.Containsf(t, commands, test.name, "expected concise command %q", test.name)
+			} else {
+				assert.NotContainsf(t, commands, test.name, "unexpected top-level command %q", test.name)
+			}
 		})
 	}
 }
@@ -154,7 +167,6 @@ func TestAllCommands_RegistersRepresentativeFormerGaps(t *testing.T) {
 		"bmc-credential create",
 		"dpu-extension-service version get",
 		"expected-machine batch-create",
-		"health-report list",
 		"instance-type machine-association create",
 		"ip-block derived list",
 		"ipxe-template list",
@@ -540,7 +552,7 @@ func TestGeneratedCommand_UnpaginatedListDoesNotFetchAll(t *testing.T) {
 		Cache:  NewCache(),
 		Scope:  Scope{SiteID: "site-1"},
 	}
-	command := requireTUICommand(t, "health-report list")
+	command := requireTUICommand(t, "machine health-report list")
 	var runErr error
 	output := captureStdout(func() {
 		runErr = command.Run(session, []string{"machine-1"})
@@ -692,7 +704,7 @@ func TestResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 		},
 		{
 			name:    "health report source",
-			command: "health-report delete",
+			command: "machine health-report delete",
 			cache: map[string][]NamedItem{
 				"machine": {{Name: "host-one", ID: "machine-1"}},
 			},
@@ -863,7 +875,7 @@ func TestResolveGeneratedResource_NilResolverReturnsErrorForInteractiveDependent
 	}
 	_, supported, err := session.ResolveGeneratedResource(
 		context.Background(),
-		GeneratedPathResourceDescriptor("health-report delete", "source"),
+		GeneratedPathResourceDescriptor("machine health-report delete", "source"),
 		map[string]string{"machineId": "machine-1"},
 		"Source",
 		"",

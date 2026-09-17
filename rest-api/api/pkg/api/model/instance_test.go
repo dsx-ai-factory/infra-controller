@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -412,11 +413,6 @@ func TestNewAPIInstance(t *testing.T) {
 			assert.Equal(t, tt.args.dbic.Created, got.Created)
 			assert.Equal(t, tt.args.dbic.Updated, got.Updated)
 
-			serialConsoleURL := fmt.Sprintf("ssh://%s@%s", tt.args.dbic.ControllerInstanceID.String(), *dbs.SerialConsoleHostname)
-
-			assert.Equal(t, serialConsoleURL, *got.SerialConsoleURL)
-
-			assert.Equal(t, serialConsoleURL, *got.SerialConsoleURL)
 			assert.Equal(t, len(tt.args.dbsds), len(got.StatusHistory))
 
 			assert.Equal(t, len(tt.args.dbis), len(got.Interfaces))
@@ -465,6 +461,32 @@ func TestNewAPIInstance(t *testing.T) {
 			var attrMap map[string]interface{}
 			err = json.Unmarshal(jsonResp, &attrMap)
 			assert.NoError(t, err)
+		})
+	}
+
+	controllerInstanceID := uuid.New()
+	urlPrefix := "ssh://" + controllerInstanceID.String() + "@"
+	serialConsoleTests := []struct {
+		name    string
+		host    string
+		wantURL string
+	}{
+		{name: "DNS", host: "test-hostname", wantURL: urlPrefix + "test-hostname"},
+		{name: "IPv4", host: "192.0.2.1", wantURL: urlPrefix + "192.0.2.1"},
+		{name: "IPv6", host: "2001:db8::1", wantURL: urlPrefix + "[2001:db8::1]"},
+	}
+	for _, tt := range serialConsoleTests {
+		t.Run("serial console URL/"+tt.name, func(t *testing.T) {
+			instance := &cdbm.Instance{ControllerInstanceID: &controllerInstanceID}
+			site := &cdbm.Site{SerialConsoleHostname: &tt.host}
+			got := NewAPIInstance(instance, site, nil, nil, nil, nil, nil, nil, nil)
+			require.NotNil(t, got.SerialConsoleURL)
+			assert.Equal(t, tt.wantURL, *got.SerialConsoleURL)
+
+			parsed, err := url.Parse(*got.SerialConsoleURL)
+			require.NoError(t, err)
+			assert.Equal(t, tt.host, parsed.Hostname())
+			assert.Empty(t, parsed.Port())
 		})
 	}
 }

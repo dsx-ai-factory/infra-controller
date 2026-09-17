@@ -56,7 +56,7 @@ jobs:
           template: 'true'
           valueOverrides: ${{ matrix.valueOverrides }}
 
-      - name: Test Temporal SQL addresses
+      - name: Test Temporal chart addresses
         if: matrix.chart == 'rest-api/temporal-helm/temporal'
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
         with:

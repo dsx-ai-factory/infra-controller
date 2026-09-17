@@ -132,6 +132,136 @@ async fn create_managed_segment(
 }
 
 #[crate::sqlx_test]
+async fn observed_dhcp_rechecks_static_assignment_before_moving_segment(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_static_assignments_segment(&pool).await?;
+    let relay_segment_id = create_managed_segment(
+        &pool,
+        "observed-dhcp-static-race",
+        "2001:db8:6311::/64",
+        NetworkSegmentType::HostInband,
+        AllocationStrategy::Dynamic,
+    )
+    .await?;
+    let relay: IpAddr = "2001:db8:6311::1".parse()?;
+    let mut setup = pool.begin().await?;
+    let static_domain =
+        db::dns::domain::persist(model::dns::NewDomain::new("static.example.com"), &mut setup)
+            .await?;
+    let relay_domain =
+        db::dns::domain::persist(model::dns::NewDomain::new("relay.example.com"), &mut setup)
+            .await?;
+    let mut static_segment = db::network_segment::static_assignments(&mut setup).await?;
+    for (segment_id, domain_id) in [
+        (static_segment.id, static_domain.id),
+        (relay_segment_id, relay_domain.id),
+    ] {
+        sqlx::query("UPDATE network_segments SET subdomain_id = $1 WHERE id = $2")
+            .bind(domain_id)
+            .bind(segment_id)
+            .execute(&mut *setup)
+            .await?;
+    }
+    static_segment.config.subdomain_id = Some(static_domain.id);
+    setup.commit().await?;
+
+    let mac_address = "02:00:00:00:63:11".parse()?;
+    let assigned_address: IpAddr = "2001:db8:6312::42".parse()?;
+    let mut setup = pool.begin().await?;
+    let interface = create_without_addresses(
+        &mut setup,
+        &static_segment,
+        &mac_address,
+        true,
+        InterfaceType::Data,
+        None,
+    )
+    .await?;
+    assert!(interface.addresses.is_empty());
+    setup.commit().await?;
+
+    let mut assigning = pool.begin().await?;
+    lock_for_address_assignment(&mut assigning, interface.id).await?;
+    let assigning_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *assigning)
+        .await?;
+    let mut observing = pool.begin().await?;
+    let observing_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *observing)
+        .await?;
+
+    // INFORMATION-REQUEST uses this entry point without allocating an
+    // address. Its initial snapshot can precede an operator assignment.
+    let observe = async {
+        let observed = find_or_create_observed_machine_interface(
+            &mut observing,
+            None,
+            mac_address,
+            &[relay],
+            None,
+            None,
+            None,
+        )
+        .await?;
+        observing.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(observed)
+    };
+    let assign = async {
+        // Both a locking read and a segment UPDATE wait for the interface row
+        // lock. Keep it until DHCP is blocked, proving its initial snapshot
+        // was read before we assign the address.
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                .bind(assigning_pid)
+                .bind(observing_pid)
+                .fetch_one(&pool)
+                .await?;
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let result = db::machine_interface_address::assign_static(
+            &mut assigning,
+            interface.id,
+            assigned_address,
+        )
+        .await?;
+        assert_eq!(result, model::allocation_type::AssignStaticResult::Assigned);
+        sync_hostname_after_address_assignment(
+            &mut assigning,
+            interface.id,
+            Some(static_domain.id),
+        )
+        .await?;
+        assigning.commit().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let (observed, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::try_join!(observe, assign)
+    })
+    .await??;
+
+    let mut connection = pool.acquire().await?;
+    let persisted = find_one(&mut *connection, interface.id).await?;
+    for (label, snapshot) in [("persisted", &persisted), ("observed", &observed)] {
+        assert_eq!(snapshot.segment_id, static_segment.id, "{label} segment");
+        assert_eq!(snapshot.domain_id, Some(static_domain.id), "{label} domain");
+        assert_eq!(
+            snapshot.addresses,
+            vec![assigned_address],
+            "{label} addresses"
+        );
+    }
+    let addresses =
+        db::machine_interface_address::find_for_interface(&mut connection, interface.id).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn discovery_lookup_rechecks_address_after_assignment(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

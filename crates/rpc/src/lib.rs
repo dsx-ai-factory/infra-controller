@@ -76,6 +76,7 @@ pub use crate::protos::machine_discovery::{
 };
 pub use crate::protos::{agent_local, fmds, health, scout_firmware_upgrade, site_explorer};
 
+pub mod admission_retry;
 pub mod errors;
 pub mod forge_tls_client;
 pub mod libmlx;

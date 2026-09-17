@@ -535,12 +535,17 @@ impl MediaSource {
                         "virtual media URLs must not contain credentials or a query".to_string(),
                     ));
                 }
-                let host = url.host_str().ok_or_else(|| {
+                let host = url.host().ok_or_else(|| {
                     VirtualMediaError::BadRequest(format!("virtual media URL has no host: {image}"))
                 })?;
+                // `Host::Display` brackets IPv6, but libvirt needs the bare address.
+                let host = match host {
+                    url::Host::Ipv6(address) => address.to_string(),
+                    host => host.to_string(),
+                };
                 Ok(Self::Network {
                     protocol: url.scheme().to_string(),
-                    host: host.to_string(),
+                    host,
                     port: url
                         .port_or_known_default()
                         .expect("HTTP(S) has a default port"),
@@ -637,6 +642,8 @@ mod tests {
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases};
     use serde_json::json;
     use tower::ServiceExt;
 
@@ -907,15 +914,40 @@ esac
     }
 
     #[test]
-    fn builds_http_virtual_media_device() {
-        let actual =
-            virtual_media_xml("Cd", "sdb", "http://127.0.0.1:8080/installer.iso", true).unwrap();
-
-        assert!(actual.contains("<disk type=\"network\" device=\"cdrom\">"));
-        assert!(actual.contains("<source protocol=\"http\" name=\"/installer.iso\">"));
-        assert!(actual.contains("<host name=\"127.0.0.1\" port=\"8080\"/>"));
-        assert!(actual.contains("<target dev=\"sdb\" bus=\"sata\"/>"));
-        assert!(actual.contains("<readonly/>"));
+    fn builds_network_virtual_media_device() {
+        let device = |source| {
+            format!(
+                "<disk type=\"network\" device=\"cdrom\"><driver name=\"qemu\" type=\"raw\"/>\
+                {source}</source><target dev=\"sdb\" bus=\"sata\"/><readonly/>\
+                <alias name=\"ua-bmc-mock-vmedia-Cd\"/></disk>"
+            )
+        };
+        check_cases(
+            [
+                Case {
+                    scenario: "IPv4 with an explicit port",
+                    input: "http://127.0.0.1:8080/installer.iso",
+                    expect: Yields(device(
+                        "<source protocol=\"http\" name=\"/installer.iso\"><host name=\"127.0.0.1\" port=\"8080\"/>",
+                    )),
+                },
+                Case {
+                    scenario: "IPv6 with an explicit port",
+                    input: "http://[2001:db8::10]:8080/installer.iso",
+                    expect: Yields(device(
+                        "<source protocol=\"http\" name=\"/installer.iso\"><host name=\"2001:db8::10\" port=\"8080\"/>",
+                    )),
+                },
+                Case {
+                    scenario: "domain with the default HTTPS port",
+                    input: "https://images.example.com/installer.iso",
+                    expect: Yields(device(
+                        "<source protocol=\"https\" name=\"/installer.iso\"><host name=\"images.example.com\" port=\"443\"/>",
+                    )),
+                },
+            ],
+            |image| virtual_media_xml("Cd", "sdb", image, true).map_err(|error| error.to_string()),
+        );
     }
 
     #[test]

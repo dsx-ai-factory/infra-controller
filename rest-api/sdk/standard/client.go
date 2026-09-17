@@ -75,8 +75,6 @@ type APIClient struct {
 
 	ExpectedSwitchAPI *ExpectedSwitchAPIService
 
-	HealthReportAPI *HealthReportAPIService
-
 	HostFirmwareConfigAPI *HostFirmwareConfigAPIService
 
 	IPBlockAPI *IPBlockAPIService
@@ -180,7 +178,6 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.ExpectedPowerShelfAPI = (*ExpectedPowerShelfAPIService)(&c.common)
 	c.ExpectedRackAPI = (*ExpectedRackAPIService)(&c.common)
 	c.ExpectedSwitchAPI = (*ExpectedSwitchAPIService)(&c.common)
-	c.HealthReportAPI = (*HealthReportAPIService)(&c.common)
 	c.HostFirmwareConfigAPI = (*HostFirmwareConfigAPIService)(&c.common)
 	c.IPBlockAPI = (*IPBlockAPIService)(&c.common)
 	c.IPXETemplateAPI = (*IPXETemplateAPIService)(&c.common)

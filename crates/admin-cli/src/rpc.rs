@@ -1982,7 +1982,6 @@ impl ApiClient {
             };
             tracing::debug!(vfs_per_pf, "VFs per PF",);
             let mut vf_chunk_iter = vf_vpc_prefix_ids.chunks(vfs_per_pf);
-            let mut ipv6_vf_chunk_iter = allocate_instance.ipv6_vf_prefix_id.chunks(vfs_per_pf);
             for (map_index, i) in discovery_info
                 .network_interfaces
                 .iter()
@@ -2033,8 +2032,9 @@ impl ApiClient {
                     interface_configs.push(new_interface);
 
                     if let Some(vf_prefix_chunks) = vf_chunk_iter.next() {
-                        let ipv6_vf_chunk = ipv6_vf_chunk_iter.next();
                         for (vf_idx, vf_vpc_prefix_id) in vf_prefix_chunks.iter().enumerate() {
+                            // VF prefix and address lists span all physical interfaces.
+                            let vf_list_index = map_index * vfs_per_pf + vf_idx;
                             let new_interface = rpc::InstanceInterfaceConfig {
                                 function_type: rpc::InterfaceFunctionType::Virtual as i32,
                                 network_segment_id: None,
@@ -2044,18 +2044,20 @@ impl ApiClient {
                                 device: Some(pci_properties.device.clone()),
                                 device_instance,
                                 virtual_function_id: Some(vf_function_id),
-                                ip_address: allocate_instance.vf_ip_address.get(vf_idx).cloned(),
-                                ipv6_interface_config: ipv6_vf_chunk
-                                    .and_then(|c| c.get(vf_idx))
+                                ip_address: allocate_instance
+                                    .vf_ip_address
+                                    .get(vf_list_index)
+                                    .cloned(),
+                                ipv6_interface_config: allocate_instance
+                                    .ipv6_vf_prefix_id
+                                    .get(vf_list_index)
                                     .copied()
                                     .map(|vpc_prefix_id| rpc::InstanceInterfaceIpv6Config {
                                         vpc_prefix_id: Some(vpc_prefix_id),
-                                        ip_address: ipv6_vf_chunk.and_then(|_| {
-                                            allocate_instance
-                                                .ipv6_vf_ip_address
-                                                .get(vf_idx)
-                                                .cloned()
-                                        }),
+                                        ip_address: allocate_instance
+                                            .ipv6_vf_ip_address
+                                            .get(vf_list_index)
+                                            .cloned(),
                                     }),
                                 routing_profile: None,
                             };
@@ -3037,11 +3039,161 @@ impl ApiClient {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use ::rpc::{DiscoveryInfo, NetworkInterface, PciDeviceProperties};
+    use carbide_test_support::{Case, Check, Outcome, check_cases_async, check_values};
+    use clap::Parser;
 
     use super::{
-        LegacyBmcPatchFields, cap_chunk_size, legacy_bmc_patch_fields, maybe_unimplemented, rpc,
+        AllocateInstance, ApiClient, ForgeApiClient, LegacyBmcPatchFields, Machine, NetworkDetails,
+        cap_chunk_size, legacy_bmc_patch_fields, maybe_unimplemented, rpc,
     };
+
+    #[tokio::test]
+    async fn vf_addresses_follow_prefix_order_across_physical_interfaces() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "each VF gets its requested addresses",
+                    input: true,
+                    expect: Outcome::Yields(vec![
+                        (
+                            Some("192.0.2.10".to_string()),
+                            Some("2001:db8:1::10".to_string()),
+                        ),
+                        (
+                            Some("192.0.2.11".to_string()),
+                            Some("2001:db8:1::11".to_string()),
+                        ),
+                        (
+                            Some("198.51.100.10".to_string()),
+                            Some("2001:db8:2::10".to_string()),
+                        ),
+                        (
+                            Some("198.51.100.11".to_string()),
+                            Some("2001:db8:2::11".to_string()),
+                        ),
+                    ]),
+                },
+                Case {
+                    scenario: "an omitted later address does not reuse an earlier address",
+                    input: false,
+                    expect: Outcome::Yields(vec![
+                        (
+                            Some("192.0.2.10".to_string()),
+                            Some("2001:db8:1::10".to_string()),
+                        ),
+                        (
+                            Some("192.0.2.11".to_string()),
+                            Some("2001:db8:1::11".to_string()),
+                        ),
+                        (
+                            Some("198.51.100.10".to_string()),
+                            Some("2001:db8:2::10".to_string()),
+                        ),
+                        (None, None),
+                    ]),
+                },
+            ],
+            |request_last_address| async move {
+                let mut command = vec![
+                    "allocate",
+                    "--prefix-name",
+                    "vf-test",
+                    "--tenant-org",
+                    "test-org",
+                    "--vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000001",
+                    "--vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000002",
+                    "--vf-vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000003",
+                    "--vf-vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000004",
+                    "--vf-vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000007",
+                    "--vf-vpc-prefix-id",
+                    "00000000-0000-0000-0000-000000000008",
+                    "--ipv6-vf-prefix-id",
+                    "00000000-0000-0000-0000-000000000005",
+                    "--ipv6-vf-prefix-id",
+                    "00000000-0000-0000-0000-000000000006",
+                    "--ipv6-vf-prefix-id",
+                    "00000000-0000-0000-0000-000000000009",
+                    "--ipv6-vf-prefix-id",
+                    "00000000-0000-0000-0000-00000000000a",
+                    "--vf-ip-address",
+                    "192.0.2.10",
+                    "--vf-ip-address",
+                    "192.0.2.11",
+                    "--vf-ip-address",
+                    "198.51.100.10",
+                    "--ipv6-vf-ip-address",
+                    "2001:db8:1::10",
+                    "--ipv6-vf-ip-address",
+                    "2001:db8:1::11",
+                    "--ipv6-vf-ip-address",
+                    "2001:db8:2::10",
+                ];
+                if request_last_address {
+                    command.extend([
+                        "--vf-ip-address",
+                        "198.51.100.11",
+                        "--ipv6-vf-ip-address",
+                        "2001:db8:2::11",
+                    ]);
+                }
+                let args = AllocateInstance::try_parse_from(command).unwrap();
+                // The allocation builder still reads the legacy discovery field.
+                #[allow(deprecated)]
+                let machine = Machine {
+                    discovery_info: Some(DiscoveryInfo {
+                        network_interfaces: ["00:11:22:33:44:55", "00:11:22:33:44:66"]
+                            .into_iter()
+                            .map(|mac_address| NetworkInterface {
+                                mac_address: mac_address.to_string(),
+                                pci_properties: Some(PciDeviceProperties {
+                                    vendor: "Mellanox".to_string(),
+                                    device: "BlueField-3".to_string(),
+                                    ..Default::default()
+                                }),
+                            })
+                            .collect(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let client = ApiClient(ForgeApiClient::new(&ApiConfig::new(
+                    "invalid-unconnected-url",
+                    &ForgeClientConfig::default(),
+                )));
+                let request = client
+                    .build_instance_request(machine, &args, "vf-test", None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let interfaces = request.config.unwrap().network.unwrap().interfaces;
+                let addresses = interfaces
+                    .into_iter()
+                    .filter(|interface| {
+                        interface.function_type == rpc::InterfaceFunctionType::Virtual as i32
+                    })
+                    .enumerate()
+                    .map(|(index, interface)| {
+                        assert_eq!(interface.device_instance, (index / 2) as u32);
+                        assert_eq!(
+                            interface.network_details,
+                            Some(NetworkDetails::VpcPrefixId(args.vf_vpc_prefix_id[index]))
+                        );
+                        let ipv6 = interface.ipv6_interface_config.unwrap();
+                        assert_eq!(ipv6.vpc_prefix_id, Some(args.ipv6_vf_prefix_id[index]));
+                        (interface.ip_address, ipv6.ip_address)
+                    })
+                    .collect::<Vec<_>>();
+                Ok::<_, String>(addresses)
+            },
+        )
+        .await;
+    }
 
     /// Inputs that differ across the `legacy_bmc_patch_fields` table.
     #[derive(Debug)]

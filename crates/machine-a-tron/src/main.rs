@@ -168,7 +168,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Machines are created paused here. While paused, their actors do not advance the FSM, so
     // BMC DHCP and shared-router registration cannot run before the combined BMC mock listener is
     // started below.
-    let simulators = mat.make_devices(true).await?;
+    let (simulators, expected_inventory) = mat.make_devices(true).await?;
 
     // Persist them once in case of unclean shutdown
     app_context.app_config.write_persisted_devices(
@@ -187,7 +187,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         simulators.clone(),
         DeviceStatusConfig::new(bmc_mock_port),
         inventory_id.into(),
-    );
+    )
+    .with_expected_inventory(expected_inventory);
     // Hosted mode mounts the shared UFM mock router on machine-a-tron's control server. Its
     // ControlState can be injected as an in-process inventory provider; the standalone binary
     // initializes the same mock without this provider and relies on configured HTTP sources.

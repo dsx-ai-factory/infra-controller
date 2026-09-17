@@ -96,7 +96,7 @@ pub async fn run_local(
     });
 
     let mat = MachineATron::new(app_context.clone());
-    let simulators = mat.make_devices(false).await?;
+    let (simulators, _) = mat.make_devices(false).await?;
     let provisionable_handles = simulators.provisionable_handles();
 
     let (stop_tx, stop_rx) = oneshot::channel();

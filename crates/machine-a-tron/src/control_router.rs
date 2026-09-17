@@ -36,6 +36,7 @@ use ufm_mock::{
 
 use crate::device_handle::DeviceHandle;
 use crate::device_simulator::SimulatorLifecycle;
+use crate::expected_inventory::ExpectedInventorySummary;
 use crate::simulator_registry::SimulatorRegistry;
 use crate::status::{DeviceKind, DeviceStatus, DeviceStatusConfig, DevicesStatusResponse};
 
@@ -45,6 +46,10 @@ pub fn append(router: Option<Router>, control_state: ControlState) -> Router {
         .route("/machines/status", get(get_machines_status))
         .route("/racks/status", get(get_racks_status))
         .route("/racks/{rack_id}/status", get(get_rack_status))
+        .route(
+            "/expected-inventory/status",
+            get(get_expected_inventory_status),
+        )
         .route(
             "/machines/{id}/bmc/injection/rules",
             get(list_bmc_injection_rules).post(upsert_bmc_injection_rule),
@@ -66,6 +71,7 @@ pub struct ControlState {
     status_config: DeviceStatusConfig,
     inventory_version: Arc<Mutex<InventoryVersion>>,
     rms_snapshot: Arc<Mutex<RmsSnapshot>>,
+    expected_inventory: Arc<ExpectedInventorySummary>,
 }
 
 #[derive(Debug)]
@@ -120,7 +126,15 @@ impl ControlState {
                 snapshot: Self::inventory_snapshot(&devices),
             })),
             rms_snapshot: Arc::default(),
+            expected_inventory: Arc::default(),
         }
+    }
+
+    /// Publishes the startup expected inventory registration outcome on
+    /// `/expected-inventory/status`.
+    pub fn with_expected_inventory(mut self, summary: ExpectedInventorySummary) -> Self {
+        self.expected_inventory = Arc::new(summary);
+        self
     }
 
     fn devices_status(&self) -> DevicesStatusResponse {
@@ -348,6 +362,12 @@ async fn get_rack_status(
         .unwrap_or_else(|| (StatusCode::NOT_FOUND, "rack not found").into_response())
 }
 
+async fn get_expected_inventory_status(
+    State(state): State<ControlRouter>,
+) -> Json<ExpectedInventorySummary> {
+    Json(state.control_state.expected_inventory.as_ref().clone())
+}
+
 async fn get_machines_ui() -> Html<&'static str> {
     Html(include_str!("../web/index.html"))
 }
@@ -444,6 +464,7 @@ mod tests {
     use crate::DeviceHandle;
     use crate::device_simulator::DeviceSimulator;
     use crate::dpu_machine::DpuMachineHandle;
+    use crate::expected_inventory::ExpectedInventorySummary;
     use crate::rack::{RackMemberRegistration, RackRegistration};
     use crate::simulator_registry::SimulatorRegistry;
     use crate::status::DeviceStatusConfig;
@@ -544,6 +565,41 @@ mod tests {
         assert!(!Arc::ptr_eq(&second, &third));
         assert_eq!(third[0].bmc_ip, Some(IpAddr::from([10, 0, 0, 7])));
         assert!(Arc::ptr_eq(&third, &state.nodes()));
+    }
+
+    #[tokio::test]
+    async fn expected_inventory_status_reports_registration_summary() {
+        let summary = ExpectedInventorySummary {
+            registered: 3,
+            already_present: 1,
+            failed_identifiers: vec!["switch SW1 (02:00:00:00:00:01)".to_string()],
+        };
+        let router = append(
+            None,
+            control_state(Vec::new()).with_expected_inventory(summary),
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/expected-inventory/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "registered": 3,
+                "already_present": 1,
+                "failed_identifiers": ["switch SW1 (02:00:00:00:00:01)"],
+            })
+        );
     }
 
     #[tokio::test]

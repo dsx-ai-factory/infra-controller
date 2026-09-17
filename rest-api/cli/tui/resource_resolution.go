@@ -72,7 +72,7 @@ func GeneratedPathResourceDescriptor(commandName, parameter string) GeneratedRes
 	case strings.HasPrefix(commandName, "dpu-extension-service version ") && strings.EqualFold(parameter, "version"):
 		descriptor.ResourceType = "dpu-extension-service-version"
 		descriptor.ParentParameter = "dpuExtensionServiceId"
-	case commandName == "health-report delete" && strings.EqualFold(parameter, "source"):
+	case commandName == "machine health-report delete" && strings.EqualFold(parameter, "source"):
 		descriptor.ResourceType = "health-report-source"
 		descriptor.ParentParameter = "machineId"
 	case commandName == "instance-type machine-association delete" && strings.EqualFold(parameter, "machineAssociationId"):

@@ -307,7 +307,14 @@ fi
 
 echo ""
 echo "=== Observability install complete ==="
-echo "  Grafana:    $([[ -n "${GRAFANA_VIP}" ]] && echo "http://${GRAFANA_VIP} (VIP)" || echo "kubectl -n monitoring port-forward svc/obs-grafana 3000:80  ->  http://localhost:3000")"
+if [[ -n "${GRAFANA_VIP}" ]]; then
+    grafana_host="${GRAFANA_VIP}"
+    # IPv6 URLs need brackets; MetalLB uses the original bare address.
+    [[ "${grafana_host}" == *:* ]] && grafana_host="[${grafana_host}]"
+    echo "  Grafana:    http://${grafana_host} (VIP)"
+else
+    echo "  Grafana:    kubectl -n monitoring port-forward svc/obs-grafana 3000:80  ->  http://localhost:3000"
+fi
 echo "  Loki:       loki.loki.svc.cluster.local:3100        (X-Scope-OrgID: forge)"
 [[ "${WITH_TEMPO}" == "true" ]] && echo "  Tempo:      tempo.tempo.svc.cluster.local:4317 (OTLP ingest), :3200 (query API)"
 echo "  Prometheus: obs-prometheus.monitoring.svc.cluster.local:9090"
