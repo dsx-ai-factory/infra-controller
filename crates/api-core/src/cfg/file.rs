@@ -4699,7 +4699,8 @@ mod tests {
     use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
     use figment::Figment;
     use figment::error::Kind;
-    use figment::providers::{Env, Format, Toml};
+    use figment::providers::{Format, Toml};
+    use figment::value::Value;
     use model::expected_machine::HostDpuPolicy;
     use model::vpc::VpcRoutingProfileOverrides;
 
@@ -6233,129 +6234,121 @@ path = "credentials.yaml"
     }
 
     #[test]
-    #[allow(clippy::result_large_err)] // complains about figma::Error which we don't control
     fn deserialize_env_patched_full_config() {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("CARBIDE_API_DATABASE_URL", "postgres://othersql");
-            jail.set_env("CARBIDE_API_ASN", 777);
-            jail.set_env("CARBIDE_API_SCOUT_BOOT_INTERFACE_CORRECTION_ENABLED", true);
-            jail.set_env("CARBIDE_API_AUTH", "{permissive_mode=true}");
-            jail.set_env(
-                "CARBIDE_API_DSX_EXCHANGE_EVENT_BUS",
+        // Use Env's value parser without changing the environment shared with
+        // parallel API tests. Keys are already stripped of CARBIDE_API_ and lowercased.
+        let environment = [
+            ("database_url", "postgres://othersql"),
+            ("asn", "777"),
+            ("scout_boot_interface_correction_enabled", "true"),
+            ("auth", "{permissive_mode=true}"),
+            (
+                "dsx_exchange_event_bus",
                 r#"{enabled=true,mqtt_endpoint="dsx-exchange",mqtt_broker_port=1883,auth={auth_mode="none"},periodic_state_republish={interval="10s"}}"#,
-            );
-            jail.set_env(
-                "CARBIDE_API_TLS",
+            ),
+            (
+                "tls",
                 "{identity_pemfile_path=/patched/path/to/cert}",
-            );
+            ),
+        ].into_iter().fold(Figment::new(), |figment, (key, value)| {
+            figment.merge((key, value.parse::<Value>().unwrap()))
+        });
 
-            let config: CarbideConfig = Figment::new()
-                .merge(Toml::file(format!("{TEST_DATA_DIR}/full_config.toml")))
-                .merge(Env::prefixed("CARBIDE_API_"))
-                .extract()
-                .unwrap();
-            assert_eq!(config.listen, "[::]:1081".parse().unwrap());
-            assert_eq!(config.metrics_endpoint, Some("[::]:1080".parse().unwrap()));
-            assert_eq!(config.database_url, "postgres://othersql".to_string());
-            assert_eq!(config.asn, 777);
-            assert!(config.scout_boot_interface_correction_enabled);
-            assert_eq!(
-                config.credentials,
-                CredentialsConfig {
-                    ufm_source: UfmCredentialSource::Backend,
-                    file: Some(CredentialFileSourceConfig {
-                        path: PathBuf::from("/var/run/secrets/nico/ufm/credentials.yaml"),
-                        poll_interval: std::time::Duration::from_secs(17),
-                    }),
-                }
-            );
-            assert_eq!(
-                config.dhcp_servers,
-                vec![Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(5, 6, 7, 8)]
-            );
-            assert_eq!(config.route_servers, vec![Ipv4Addr::new(9, 10, 11, 12)]);
-            assert_eq!(config.dpu_network_monitor_pinger_type, None);
-            assert_eq!(
-                config.tls.as_ref().unwrap().identity_pemfile_path,
-                "/patched/path/to/cert"
-            );
-            assert_eq!(
-                config.tls.as_ref().unwrap().identity_keyfile_path,
-                "/path/to/key"
-            );
-            assert_eq!(config.tls.as_ref().unwrap().root_cafile_path, "/path/to/ca");
-            assert!(config.auth.as_ref().unwrap().permissive_mode);
-            let dsx_exchange = config.dsx_exchange_event_bus.as_ref().unwrap();
-            assert!(dsx_exchange.enabled);
-            assert_eq!(dsx_exchange.mqtt_endpoint, "dsx-exchange");
-            assert_eq!(dsx_exchange.mqtt_broker_port, 1883);
-            assert_eq!(dsx_exchange.auth.auth_mode, MqttAuthMode::None);
-            assert_eq!(
-                dsx_exchange.periodic_state_republish.interval,
-                std::time::Duration::from_secs(10)
-            );
-            assert_eq!(
-                config
-                    .auth
-                    .as_ref()
-                    .unwrap()
-                    .casbin_policy_file
-                    .clone()
-                    .unwrap()
-                    .as_os_str(),
-                "/path/to/policy"
-            );
-
-            Ok(())
-        })
+        let config: CarbideConfig = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/full_config.toml")))
+            .merge(environment)
+            .extract()
+            .unwrap();
+        assert_eq!(config.listen, "[::]:1081".parse().unwrap());
+        assert_eq!(config.metrics_endpoint, Some("[::]:1080".parse().unwrap()));
+        assert_eq!(config.database_url, "postgres://othersql".to_string());
+        assert_eq!(config.asn, 777);
+        assert!(config.scout_boot_interface_correction_enabled);
+        assert_eq!(
+            config.credentials,
+            CredentialsConfig {
+                ufm_source: UfmCredentialSource::Backend,
+                file: Some(CredentialFileSourceConfig {
+                    path: PathBuf::from("/var/run/secrets/nico/ufm/credentials.yaml"),
+                    poll_interval: std::time::Duration::from_secs(17),
+                }),
+            }
+        );
+        assert_eq!(
+            config.dhcp_servers,
+            vec![Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(5, 6, 7, 8)]
+        );
+        assert_eq!(config.route_servers, vec![Ipv4Addr::new(9, 10, 11, 12)]);
+        assert_eq!(config.dpu_network_monitor_pinger_type, None);
+        assert_eq!(
+            config.tls.as_ref().unwrap().identity_pemfile_path,
+            "/patched/path/to/cert"
+        );
+        assert_eq!(
+            config.tls.as_ref().unwrap().identity_keyfile_path,
+            "/path/to/key"
+        );
+        assert_eq!(config.tls.as_ref().unwrap().root_cafile_path, "/path/to/ca");
+        assert!(config.auth.as_ref().unwrap().permissive_mode);
+        let dsx_exchange = config.dsx_exchange_event_bus.as_ref().unwrap();
+        assert!(dsx_exchange.enabled);
+        assert_eq!(dsx_exchange.mqtt_endpoint, "dsx-exchange");
+        assert_eq!(dsx_exchange.mqtt_broker_port, 1883);
+        assert_eq!(dsx_exchange.auth.auth_mode, MqttAuthMode::None);
+        assert_eq!(
+            dsx_exchange.periodic_state_republish.interval,
+            std::time::Duration::from_secs(10)
+        );
+        assert_eq!(
+            config
+                .auth
+                .as_ref()
+                .unwrap()
+                .casbin_policy_file
+                .clone()
+                .unwrap()
+                .as_os_str(),
+            "/path/to/policy"
+        );
     }
 
     #[test]
-    #[allow(clippy::result_large_err)]
     fn deserialize_unknown_environment_field_is_rejected() {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("CARBIDE_API_UNKNOWN_FIELD", true);
+        let error = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .merge(("unknown_field", true))
+            .extract::<CarbideConfig>()
+            .unwrap_err();
 
-            let error = Figment::new()
-                .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
-                .merge(Env::prefixed("CARBIDE_API_"))
-                .extract::<CarbideConfig>()
-                .unwrap_err();
-
-            assert!(matches!(
-                &error.kind,
-                Kind::UnknownField(field, _) if field == "unknown_field"
-            ));
-            assert_eq!(error.path, vec!["unknown_field".to_string()]);
-            Ok(())
-        })
+        assert!(matches!(
+            &error.kind,
+            Kind::UnknownField(field, _) if field == "unknown_field"
+        ));
+        assert_eq!(error.path, vec!["unknown_field".to_string()]);
     }
 
     #[test]
-    #[allow(clippy::result_large_err)]
     fn deserialize_unknown_nested_environment_field_is_rejected() {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("CARBIDE_API_SITE_EXPLORER", "{unknown_nested_field=true}");
+        let error = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+            .merge((
+                "site_explorer",
+                "{unknown_nested_field=true}".parse::<Value>().unwrap(),
+            ))
+            .extract::<CarbideConfig>()
+            .unwrap_err();
 
-            let error = Figment::new()
-                .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
-                .merge(Env::prefixed("CARBIDE_API_"))
-                .extract::<CarbideConfig>()
-                .unwrap_err();
-
-            assert!(matches!(
-                &error.kind,
-                Kind::UnknownField(field, _) if field == "unknown_nested_field"
-            ));
-            assert_eq!(
-                error.path,
-                vec![
-                    "site_explorer".to_string(),
-                    "unknown_nested_field".to_string()
-                ]
-            );
-            Ok(())
-        })
+        assert!(matches!(
+            &error.kind,
+            Kind::UnknownField(field, _) if field == "unknown_nested_field"
+        ));
+        assert_eq!(
+            error.path,
+            vec![
+                "site_explorer".to_string(),
+                "unknown_nested_field".to_string()
+            ]
+        );
     }
 
     #[test]

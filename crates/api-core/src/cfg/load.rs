@@ -203,16 +203,19 @@ impl<P: Provider> Provider for NormalizeLegacyDpuPolicy<P> {
     }
 }
 
+/// Merge global, site, then environment configuration, normalizing each layer.
+/// Accept the environment provider explicitly so tests need not mutate process state.
 pub(crate) fn merged_carbide_config_figment(
     config_path: &Path,
     site_config_path: Option<&Path>,
+    environment: impl Provider,
 ) -> Figment {
     let mut figment = Figment::new().merge(NormalizeLegacyDpuPolicy(Toml::file(config_path)));
     if let Some(site_config_path) = site_config_path {
         figment = figment.merge(NormalizeLegacyDpuPolicy(Toml::file(site_config_path)));
     }
 
-    figment.merge(NormalizeLegacyDpuPolicy(Env::prefixed("CARBIDE_API_")))
+    figment.merge(NormalizeLegacyDpuPolicy(environment))
 }
 
 /// Load, normalize, and validate the Carbide API configuration.
@@ -220,7 +223,8 @@ pub fn parse_carbide_config(
     config_path: &Path,
     site_config_path: Option<&Path>,
 ) -> eyre::Result<Arc<CarbideConfig>> {
-    let merged_config = merged_carbide_config_figment(config_path, site_config_path);
+    let merged_config =
+        merged_carbide_config_figment(config_path, site_config_path, Env::prefixed("CARBIDE_API_"));
     let (mut config, unknown_fields) = extract_with_unknown_fields::<CarbideConfig>(&merged_config)
         .wrap_err("failed to load configuration files")?;
     tracing::info!(
@@ -389,86 +393,85 @@ mod tests {
     use crate::logging::stream::{LogStream, LogStreamLayer};
 
     #[test]
-    #[allow(clippy::result_large_err)]
     fn legacy_rack_management_key_is_accepted_warned_and_omitted() {
-        figment::Jail::expect_with(|jail| {
-            let config_text = format!(
-                "{}\ndeny_unknown_fields = true\nrack_management_enabled = true\n",
-                include_str!("test_data/min_config.toml")
-            );
-            jail.create_file("config.toml", &config_text)?;
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let config_text = format!(
+            "{}\ndeny_unknown_fields = true\nrack_management_enabled = true\n",
+            include_str!("test_data/min_config.toml")
+        );
+        std::fs::write(&config_path, config_text).unwrap();
 
-            let stream = LogStream::new(16, 64 * 1024);
-            let mut logs = stream.subscribe();
-            let subscriber = tracing_subscriber::registry().with(LogStreamLayer::new(stream));
-            let config = tracing::subscriber::with_default(subscriber, || {
-                parse_carbide_config(Path::new("config.toml"), None)
-            })
-            .expect("strict configuration with the deprecated key must load");
-
-            assert_eq!(config.deprecated_rack_management_enabled, Some(true));
-            let serialized =
-                toml::to_string(config.as_ref()).expect("loaded configuration must serialize");
-            assert!(!serialized.contains("rack_management_enabled"));
-
-            let warning = std::iter::from_fn(|| logs.try_recv().ok())
-                .find(|line| line.message == "Ignoring deprecated configuration key")
-                .expect("deprecated key warning");
-            assert_eq!(warning.level, "WARN");
-            assert_eq!(
-                warning.fields.get("config_key").map(String::as_str),
-                Some("rack_management_enabled")
-            );
-            assert_eq!(
-                warning.fields.get("config_source").map(String::as_str),
-                Some("config.toml")
-            );
-            Ok(())
+        let stream = LogStream::new(16, 64 * 1024);
+        let mut logs = stream.subscribe();
+        let subscriber = tracing_subscriber::registry().with(LogStreamLayer::new(stream));
+        let config = tracing::subscriber::with_default(subscriber, || {
+            parse_carbide_config(&config_path, None)
         })
+        .expect("strict configuration with the deprecated key must load");
+
+        assert_eq!(config.deprecated_rack_management_enabled, Some(true));
+        let serialized =
+            toml::to_string(config.as_ref()).expect("loaded configuration must serialize");
+        assert!(!serialized.contains("rack_management_enabled"));
+
+        let warning = std::iter::from_fn(|| logs.try_recv().ok())
+            .find(|line| line.message == "Ignoring deprecated configuration key")
+            .expect("deprecated key warning");
+        assert_eq!(warning.level, "WARN");
+        assert_eq!(
+            warning.fields.get("config_key").map(String::as_str),
+            Some("rack_management_enabled")
+        );
+        assert_eq!(
+            warning.fields.get("config_source").map(String::as_str),
+            Some("config.toml")
+        );
     }
 
     #[test]
-    #[allow(clippy::result_large_err)]
     fn unknown_site_override_field_is_collected_with_source() {
-        figment::Jail::expect_with(|jail| {
-            jail.create_file(
-                "base.toml",
-                r#"
+        let directory = tempfile::tempdir().unwrap();
+        let base_path = directory.path().join("base.toml");
+        let site_path = directory.path().join("site.toml");
+        std::fs::write(
+            &base_path,
+            r#"
                 database_url = "postgres://test"
                 listen = "[::]:1081"
                 asn = 1
                 "#,
-            )?;
-            jail.create_file(
-                "site.toml",
-                "[site_explorer]\nunknown_site_override_field = true",
-            )?;
+        )
+        .unwrap();
+        std::fs::write(
+            &site_path,
+            "[site_explorer]\nunknown_site_override_field = true",
+        )
+        .unwrap();
 
-            let figment =
-                merged_carbide_config_figment(Path::new("base.toml"), Some(Path::new("site.toml")));
-            let (config, unknown_fields) = extract_with_unknown_fields::<CarbideConfig>(&figment)?;
+        let figment = merged_carbide_config_figment(&base_path, Some(&site_path), Figment::new());
+        let (config, unknown_fields) =
+            extract_with_unknown_fields::<CarbideConfig>(&figment).unwrap();
 
-            assert!(!config.deny_unknown_fields);
-            assert_eq!(
-                unknown_fields,
-                vec![UnknownConfigurationField {
-                    path: "site_explorer.unknown_site_override_field".to_string(),
-                    source: "site.toml".to_string(),
-                }]
-            );
-            apply_unknown_field_policy(&unknown_fields, config.deny_unknown_fields)
-                .expect("unknown fields warn by default");
-            Ok(())
-        })
+        assert!(!config.deny_unknown_fields);
+        assert_eq!(
+            unknown_fields,
+            vec![UnknownConfigurationField {
+                path: "site_explorer.unknown_site_override_field".to_string(),
+                source: "site.toml".to_string(),
+            }]
+        );
+        apply_unknown_field_policy(&unknown_fields, config.deny_unknown_fields)
+            .expect("unknown fields warn by default");
     }
 
     #[test]
-    #[allow(clippy::result_large_err)]
     fn strict_mode_rejects_all_unknown_fields() {
-        figment::Jail::expect_with(|jail| {
-            jail.create_file(
-                "base.toml",
-                r#"
+        let directory = tempfile::tempdir().unwrap();
+        let base_path = directory.path().join("base.toml");
+        std::fs::write(
+            &base_path,
+            r#"
                 database_url = "postgres://test"
                 listen = "[::]:1081"
                 asn = 1
@@ -477,39 +480,38 @@ mod tests {
                 [site_explorer]
                 unknown_nested_field = true
                 "#,
-            )?;
+        )
+        .unwrap();
 
-            let figment = merged_carbide_config_figment(Path::new("base.toml"), None);
-            let (config, unknown_fields) = extract_with_unknown_fields::<CarbideConfig>(&figment)?;
-            let error = apply_unknown_field_policy(&unknown_fields, config.deny_unknown_fields)
-                .expect_err("strict mode rejects unknown fields");
-            let message = error.to_string();
-            assert!(message.contains("unknown_root_field (base.toml)"));
-            assert!(message.contains("site_explorer.unknown_nested_field (base.toml)"));
-            Ok(())
-        })
+        let figment = merged_carbide_config_figment(&base_path, None, Figment::new());
+        let (config, unknown_fields) =
+            extract_with_unknown_fields::<CarbideConfig>(&figment).unwrap();
+        let error = apply_unknown_field_policy(&unknown_fields, config.deny_unknown_fields)
+            .expect_err("strict mode rejects unknown fields");
+        let message = error.to_string();
+        assert!(message.contains("unknown_root_field (base.toml)"));
+        assert!(message.contains("site_explorer.unknown_nested_field (base.toml)"));
     }
 
     #[test]
-    #[allow(clippy::result_large_err)]
     fn invalid_known_field_still_fails_in_warning_mode() {
-        figment::Jail::expect_with(|jail| {
-            jail.create_file(
-                "base.toml",
-                r#"
+        let directory = tempfile::tempdir().unwrap();
+        let base_path = directory.path().join("base.toml");
+        std::fs::write(
+            &base_path,
+            r#"
                 database_url = "postgres://test"
                 listen = "[::]:1081"
                 asn = 1
                 max_database_connections = "many"
                 "#,
-            )?;
+        )
+        .unwrap();
 
-            let figment = merged_carbide_config_figment(Path::new("base.toml"), None);
-            let error = extract_with_unknown_fields::<CarbideConfig>(&figment)
-                .expect_err("invalid known values remain fatal");
-            assert!(matches!(error.kind, figment::error::Kind::InvalidType(..)));
-            assert_eq!(error.path, vec!["max_database_connections".to_string()]);
-            Ok(())
-        })
+        let figment = merged_carbide_config_figment(&base_path, None, Figment::new());
+        let error = extract_with_unknown_fields::<CarbideConfig>(&figment)
+            .expect_err("invalid known values remain fatal");
+        assert!(matches!(error.kind, figment::error::Kind::InvalidType(..)));
+        assert_eq!(error.path, vec!["max_database_connections".to_string()]);
     }
 }
