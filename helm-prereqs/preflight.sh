@@ -34,6 +34,8 @@
 #   9. NICo REST source/charts   — in-tree rest-api/ and helm/rest/ are present
 #
 # Configurable:
+#   NICO_CORE_IMAGE_NAME  — NICo Core image name under NICO_IMAGE_REGISTRY
+#                           (default: nico; use nvmetal-carbide for legacy images)
 #   PREFLIGHT_CHECK_IMAGE — image used for per-node pod checks (default: busybox:1.36)
 #                           Override for air-gapped clusters:
 #                           export PREFLIGHT_CHECK_IMAGE=my-registry.example.com/busybox:1.36
@@ -91,6 +93,7 @@ fi
 
 ERRORS=()
 WARNINGS=()
+NICO_CORE_IMAGE_NAME="${NICO_CORE_IMAGE_NAME:-nico}"
 
 _CORE_VALUES_CFG="${CORE_VALUES:-${SCRIPT_DIR}/values/nico-core.yaml}"
 _CORE_VALUES_LABEL="${CORE_VALUES:-values/nico-core.yaml}"
@@ -171,6 +174,14 @@ _UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-
 # NICO_IMAGE_REGISTRY must not include a protocol prefix
 if [[ -n "${NICO_IMAGE_REGISTRY:-}" ]] && [[ "${NICO_IMAGE_REGISTRY}" =~ ^https?:// ]]; then
     ERRORS+=("NICO_IMAGE_REGISTRY must not include a protocol prefix — remove 'https://' or 'http://'")
+fi
+
+# NICO_CORE_IMAGE_NAME is appended to NICO_IMAGE_REGISTRY as one repository
+# path component. Reject full paths and tags so the resulting reference is
+# unambiguous and remains under the configured registry prefix.
+if [[ "${SKIP_CORE:-false}" != "true" ]] && \
+   [[ ! "${NICO_CORE_IMAGE_NAME}" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+    ERRORS+=("NICO_CORE_IMAGE_NAME='${NICO_CORE_IMAGE_NAME}' is not a valid image name — use one lowercase path component without a tag (e.g. nico or nvmetal-carbide)")
 fi
 
 # NICO_SITE_UUID must be a valid UUID if set (used as Temporal namespace + CLUSTER_ID)

@@ -7,9 +7,10 @@
 ## EXAMPLE/placeholder tokens.
 ##
 ## Image registry and tag are injected at install time via --set flags:
-##   --set global.image.repository=<your-registry>/nvmetal-carbide
+##   --set global.image.repository=<your-registry>/<core-image-name>
 ##   --set global.image.tag=<tag>
-## In setup.sh these come from NICO_IMAGE_REGISTRY and NICO_CORE_IMAGE_TAG.
+## In setup.sh these come from NICO_IMAGE_REGISTRY, NICO_CORE_IMAGE_NAME
+## (default: nico), and NICO_CORE_IMAGE_TAG.
 ## =============================================================================
 
 global:
@@ -380,7 +381,7 @@ nico-pxe:
   ## Boot artifacts (ipxe.efi, BFB, OS images) — REQUIRED or DPU/host HTTP boot 404s and
   ## falls back to the local OS (never re-images). These init containers populate the
   ## /boot-artifacts/blobs/internal volume that nico-pxe serves at /public/blobs/internal.
-  ## Pin the images to the same build/registry as nvmetal-carbide.
+  ## Pin the images to the same build/registry as the NICo Core image.
   ## NOTE: the aarch64 image ships /aarch64 + /apt (NOT /firmware) — copying a missing dir crash-loops the init.
   bootArtifactContainers: []
   # bootArtifactContainers:
