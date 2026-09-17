@@ -22,7 +22,7 @@ Related guidance:
 - [NVLink Partitioning](../manuals/nvlink_partitioning.md)
 - [Switch Certificate Configuration](../architecture/state_machines/switch_configure_certificate.md)
 - [Rack State Machine](../architecture/state_machines/rackstatemachine.md)
-- [Component Manager RMS Backends](../configuration/component-manager-rms.md)
+- [RMS Configuration](../configuration/rms.md)
 
 ## How Rotation Works
 
