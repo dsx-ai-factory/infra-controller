@@ -24,12 +24,11 @@ func SetMachineMaintenance(ctx workflow.Context, request *corev1.MaintenanceRequ
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
@@ -59,12 +58,11 @@ func UpdateMachineMetadata(ctx workflow.Context, request *corev1.MachineMetadata
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.
@@ -94,11 +92,11 @@ func CreateMachineHealthReport(ctx workflow.Context, request *corev1.InsertMachi
 	logger := log.With().Str("Workflow", "CreateMachineHealthReport").Logger()
 	logger.Info().Msg("Starting workflow")
 
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
@@ -121,11 +119,11 @@ func DeleteMachineHealthReport(ctx workflow.Context, request *corev1.RemoveMachi
 	logger := log.With().Str("Workflow", "DeleteMachineHealthReport").Logger()
 	logger.Info().Msg("Starting workflow")
 
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		StartToCloseTimeout: cloudutils.ActivityStartToCloseTimeout,
@@ -185,12 +183,11 @@ func GetDpuMachines(ctx workflow.Context, dpuMachineIDs []string) (*corev1.DpuMa
 
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
+	// No automatic retries: the on-site call is a non-idempotent mutation, and a
+	// second attempt gets a fresh activity budget that can outlive both the workflow
+	// and the caller. The caller decides whether to retry.
 	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    1 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    10 * time.Second,
-		MaximumAttempts:    2,
+		MaximumAttempts: 1,
 	}
 	options := workflow.ActivityOptions{
 		// Timeout options specify when to automatically timeout Activity functions.

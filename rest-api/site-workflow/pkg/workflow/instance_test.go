@@ -263,6 +263,30 @@ func (s *CreateInstanceV2TestSuite) Test_CreateInstanceV2_ActivityDeadlineTracks
 	s.LessOrEqual(remaining, cloudutils.ActivityStartToCloseTimeout)
 }
 
+// Test_CreateInstanceV2_DoesNotRetry pins the single attempt. Temporal anchors
+// StartToCloseTimeout at the moment an attempt starts, so a second attempt gets a
+// fresh budget that can outlive both the workflow and the caller, letting Core
+// commit an Instance the handler has already rolled back.
+func (s *CreateInstanceV2TestSuite) Test_CreateInstanceV2_DoesNotRetry() {
+	var machineManager iActivity.ManageInstance
+
+	attempts := 0
+
+	s.env.RegisterActivity(machineManager.CreateInstanceOnSite)
+	s.env.OnActivity(machineManager.CreateInstanceOnSite, mock.Anything, mock.Anything).
+		Run(func(mock.Arguments) {
+			attempts++
+		}).Return(errors.New("Site Controller communication error"))
+
+	s.env.ExecuteWorkflow(CreateInstanceV2, &corev1.InstanceAllocationRequest{
+		MachineId: &corev1.MachineId{Id: uuid.NewString()},
+	})
+
+	s.True(s.env.IsWorkflowCompleted())
+	s.Error(s.env.GetWorkflowError())
+	s.Equal(1, attempts)
+}
+
 func TestCreateInstanceV2TestSuite(t *testing.T) {
 	suite.Run(t, new(CreateInstanceV2TestSuite))
 }
