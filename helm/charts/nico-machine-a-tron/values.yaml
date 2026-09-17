@@ -441,3 +441,16 @@ mat-k8s-controller:
     syncInterval: "30s"
     insecureSkipVerify: false
     logLevel: "info"
+
+## nico-site-health-probe — synthetic monitoring for NICo APIs (#5360).
+## Disabled by default because it needs site-specific configuration to run:
+## the image has no registry prefix until overridden. Enable it per site with:
+##   nico-site-health-probe:
+##     enabled: true
+##     image:
+##       repository: <registry>/site-health-probe
+##       tag: "<version>"
+## REST probes additionally need org + Keycloak client secrets — see the
+## subchart's values.yaml.
+nico-site-health-probe:
+  enabled: false

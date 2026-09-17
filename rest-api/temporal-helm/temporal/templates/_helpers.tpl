@@ -353,6 +353,15 @@ Server configuration and schema tools append :port to this host, so IPv6 needs b
 {{- include (printf "temporal.persistence.%s.secretKey" (include "temporal.persistence.driver" (list $global $store))) (list $global $store) -}}
 {{- end -}}
 
+{{/* IPv6 literals need brackets before the port in Elasticsearch URLs. */}}
+{{- define "temporal.elasticsearch.address" -}}
+{{- $host := .Values.elasticsearch.host | toString -}}
+{{- if and (contains ":" $host) (not (hasPrefix "[" $host)) -}}
+{{- $host = printf "[%s]" $host -}}
+{{- end -}}
+{{- printf "%s:%v" $host .Values.elasticsearch.port -}}
+{{- end -}}
+
 {{/*
 All Cassandra hosts.
 */}}

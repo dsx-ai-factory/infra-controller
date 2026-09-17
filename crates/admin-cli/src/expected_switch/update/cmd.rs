@@ -27,7 +27,7 @@ pub(super) async fn update(data: Args, api_client: &ApiClient) -> color_eyre::Re
 
     api_client
         .0
-        .patch_expected_switch(patch, &update_mask)
+        .update_expected_switch_with_mask(patch, &update_mask)
         .await?;
 
     Ok(())

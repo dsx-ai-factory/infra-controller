@@ -16213,9 +16213,12 @@ paths:
                   value:
                     - id: e313b3ca-c47a-4ec1-a79b-a147fad51a50
                       endpoint: /v2/org/test-org-1/nico/ep
-                      queryParams: '{"test":["1234"]}'
+                      queryParams:
+                        test:
+                          - '1234'
                       method: POST
-                      body: '{"key1":"value1"}'
+                      body:
+                        key1: value1
                       statusCode: 200
                       clientIP: 12.123.43.112
                       userID: 5d9fe319-14d4-40e3-8e5a-7d79e680d55b
@@ -16230,9 +16233,12 @@ paths:
                       apiVersion: 0.1.91
                     - id: e313b3ca-c47a-4ec1-a79b-a147fad51a50
                       endpoint: /v2/org/test-org-1/nico/ep
-                      queryParams: '{"test":["1234"]}'
+                      queryParams:
+                        test:
+                          - '1234'
                       method: POST
-                      body: '{"key1":"value1"}'
+                      body:
+                        key1: value1
                       statusCode: 403
                       statusMessage: User does not have permissions
                       clientIP: 12.123.43.112
@@ -16312,9 +16318,12 @@ paths:
                   value:
                     id: e313b3ca-c47a-4ec1-a79b-a147fad51a50
                     endpoint: /v2/org/test-org-1/nico/ep
-                    queryParams: '{"test":["1234"]}'
+                    queryParams:
+                      test:
+                        - '1234'
                     method: POST
-                    body: '{"key1":"value1"}'
+                    body:
+                      key1: value1
                     statusCode: 200
                     clientIP: 12.123.43.112
                     userID: 5d9fe319-14d4-40e3-8e5a-7d79e680d55b
@@ -26602,7 +26611,9 @@ components:
           readOnly: true
         isUsableByTenant:
           type: boolean
-          description: Indicates whether the machine is usable by or currently in use by a tenant.
+          description: >-
+            Indicates whether the machine is usable by or currently in use by a tenant. It does not indicate that a
+            Machine is available for Instance creation.
           readOnly: true
         statusHistory:
           type: array
@@ -27012,7 +27023,7 @@ components:
       type: object
       description: Describes BMC information of a Machine
       examples:
-        - ip: 10.217.133.5
+        - ip: '2001:db8::5'
           mac: 'C8:4B:D6:7A:C9:8A'
           version: '1'
           firmwareRevision: '6.00'
@@ -27021,8 +27032,7 @@ components:
           type:
             - string
             - 'null'
-          description: 'IP address of the Machine BMC'
-          format: ipv4
+          description: 'IPv4 or IPv6 address of the Machine BMC'
         mac:
           type:
             - string
@@ -30538,9 +30548,12 @@ components:
       examples:
         - id: e313b3ca-c47a-4ec1-a79b-a147fad51a50
           endpoint: /v2/org/test-org-1/nico/ep
-          queryParams: '{"test":["1234"]}'
+          queryParams:
+            test:
+              - '1234'
           method: POST
-          body: '{"key1":"value1"}'
+          body:
+            key1: value1
           statusCode: 200
           clientIP: 12.123.43.112
           userID: 5d9fe319-14d4-40e3-8e5a-7d79e680d55b
@@ -30555,9 +30568,12 @@ components:
           apiVersion: 0.1.91
         - id: e313b3ca-c47a-4ec1-a79b-a147fad51a50
           endpoint: /v2/org/test-org-1/nico/ep
-          queryParams: '{"test":["1234"]}'
+          queryParams:
+            test:
+              - '1234'
           method: POST
-          body: '{"key1":"value1"}'
+          body:
+            key1: value1
           statusCode: 403
           statusMessage: User does not have permissions
           clientIP: 12.123.43.112
@@ -30581,14 +30597,31 @@ components:
           type: string
           description: API endpoint
         queryParams:
-          type: string
-          description: Query parameters
+          type: object
+          description: Query parameters from the request URL, keyed by parameter name. Each value contains all values supplied for that parameter.
+          additionalProperties:
+            type: array
+            items:
+              type: string
         method:
           type: string
           description: HTTP method
         body:
-          type: string
-          description: HTTP body in JSON format
+          type: object
+          description: |-
+            Audited request body. JSON object bodies retain their properties directly
+            after sensitive fields are recursively obfuscated. Valid non-object JSON is
+            stored in `value`. Malformed JSON is represented by `jsonParseFailed: true`
+            without retaining the raw request content.
+          additionalProperties: true
+          properties:
+            value:
+              description: Original top-level JSON value when the valid request body is not an object. Sensitive fields nested in objects are obfuscated.
+            jsonParseFailed:
+              type: boolean
+              enum:
+                - true
+              description: Indicates that parsing the request body as JSON failed and its raw content was not retained.
         statusCode:
           type: integer
           description: HTTP response status code

@@ -248,6 +248,8 @@ impl<B: Bmc + 'static> SensorCollector<B> {
         let mut attributes = entity.base_attributes();
         attributes.extend(entity.entity_specific_attributes());
         for metric in derived {
+            let mut labels = attributes.clone();
+            labels.extend(metric.labels);
             self.emit_event(CollectorEvent::Metric(
                 MetricSample {
                     key: format!("{}/{}", entity.key(), metric.metric_type),
@@ -255,7 +257,7 @@ impl<B: Bmc + 'static> SensorCollector<B> {
                     metric_type: metric.metric_type.to_string(),
                     unit: metric.unit.to_string(),
                     value: metric.value,
-                    labels: attributes.clone(),
+                    labels,
                     context: None,
                 }
                 .into(),
@@ -349,29 +351,21 @@ fn project_sensor(
     attributes.reserve(6);
     attributes.push((Cow::Borrowed("sensor_name"), sensor.base.id.clone()));
 
+    // An absent threshold is omitted rather than written as `0`: a zero upper
+    // bound would read as "every positive value is critical".
     if let Some(thresholds) = sensor
         .thresholds
         .as_ref()
         .filter(|_| include_sensor_thresholds)
     {
-        attributes.push((
-            Cow::Borrowed("upper_critical_threshold"),
-            thresholds
-                .upper_critical
-                .as_ref()
-                .and_then(|th| th.reading.flatten())
-                .unwrap_or_default()
-                .to_string(),
-        ));
-        attributes.push((
-            Cow::Borrowed("lower_critical_threshold"),
-            thresholds
-                .lower_critical
-                .as_ref()
-                .and_then(|th| th.reading.flatten())
-                .unwrap_or_default()
-                .to_string(),
-        ));
+        for (key, threshold) in [
+            ("upper_critical_threshold", &thresholds.upper_critical),
+            ("lower_critical_threshold", &thresholds.lower_critical),
+        ] {
+            if let Some(reading) = threshold.as_ref().and_then(|th| th.reading.flatten()) {
+                attributes.push((Cow::Borrowed(key), reading.to_string()));
+            }
+        }
     }
 
     let physical_context = sensor
@@ -980,6 +974,40 @@ mod tests {
                     }),
                 },
                 Case {
+                    scenario: "partial thresholds omit the absent critical label",
+                    input: ProjectionInput {
+                        sensor: sensor_json_with([(
+                            "Thresholds",
+                            json!({ "UpperCritical": { "Reading": 1.8 } }),
+                        )]),
+                        entity_type: "chassis",
+                        physical_context_fallback: "chassis",
+                        base_attributes: vec![("chassis_id", "CH0")],
+                        entity_attributes: vec![],
+                        include_sensor_thresholds: true,
+                    },
+                    expect: Yields(ObservedProjection {
+                        primary: observed_metric(
+                            SENSOR_PATH,
+                            "hw_sensor",
+                            "temperature",
+                            "celsius",
+                            42.5,
+                            &[
+                                ("chassis_id", "CH0"),
+                                ("sensor_name", "Sensor0"),
+                                ("upper_critical_threshold", "1.8"),
+                                ("physical_context", "chassis"),
+                            ],
+                            Some(ObservedContext {
+                                upper_critical: Some(1.8),
+                                ..empty_context("chassis", "Sensor0", "ok")
+                            }),
+                        ),
+                        ranges: Vec::new(),
+                    }),
+                },
+                Case {
                     scenario: "threshold exposition without sensor thresholds",
                     input: ProjectionInput {
                         sensor: sensor_json(),
@@ -1185,6 +1213,7 @@ mod tests {
                     vec![DiscoveredEntity::Chassis {
                         entity: chassis,
                         sensors: vec![sensor],
+                        shelf_power: None,
                         gpu: None,
                     }],
                 );
@@ -1195,10 +1224,7 @@ mod tests {
                     selector: Selector::OdataId(
                         "/redfish/v1/Chassis/*/PowerSubsystem/PowerSupplies/*".to_string(),
                     ),
-                    action: Action::JsonMerge(json!({
-                        "Model": "PSU-3KW",
-                        "PowerCapacityWatts": 3000.0
-                    })),
+                    action: Action::JsonMerge(json!({ "Model": "PSU-3KW" })),
                     remaining: None,
                 });
                 let chassis = first_chassis(&handle).await;
@@ -1217,6 +1243,7 @@ mod tests {
                         entity: power_supply,
                         chassis,
                         sensors: Vec::new(),
+                        oem_capacity_watts: Some(5500.0),
                     }],
                 );
             }
@@ -1324,11 +1351,26 @@ mod tests {
                                 "hw",
                                 "powersupply_capacity",
                                 "watts",
-                                3000.0,
+                                5500.0,
                                 &[
                                     ("powersupply_id", "0"),
                                     ("chassis_id", "powershelf"),
                                     ("model", "PSU-3KW"),
+                                ],
+                                None,
+                            ))),
+                            ObservedEvent::Metric(Box::new(observed_metric(
+                                "/redfish/v1/Chassis/powershelf/PowerSubsystem/PowerSupplies/0/powersupply_status",
+                                "hw",
+                                "powersupply_status",
+                                "state",
+                                1.0,
+                                &[
+                                    ("powersupply_id", "0"),
+                                    ("chassis_id", "powershelf"),
+                                    ("model", "PSU-3KW"),
+                                    ("powersupply_state", "enabled"),
+                                    ("powersupply_health", "ok"),
                                 ],
                                 None,
                             ))),

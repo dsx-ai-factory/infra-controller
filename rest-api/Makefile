@@ -792,9 +792,14 @@ configure-local-core-site-agent:
 		echo "Resolved $$CORE_HOST -> $$IPV4 (using IPv4 to avoid Go IPv6-first dialer issue)" ; \
 		CORE_HOST="$$IPV4" ; \
 	fi ; \
-	echo "Patching site-agent ConfigMap: CORE_GRPC_ADDRESS=$$CORE_HOST:$(LOCAL_CORE_PORT), CORE_GRPC_SEC_OPT=1, SKIP_GRPC_SERVER_AUTH=true..." ; \
+	case "$$CORE_HOST" in \
+		\[*\]) ;; \
+		*:*) CORE_HOST="[$$CORE_HOST]" ;; \
+	esac ; \
+	CORE_ADDRESS="$$CORE_HOST:$(LOCAL_CORE_PORT)" ; \
+	echo "Patching site-agent ConfigMap: CORE_GRPC_ADDRESS=$$CORE_ADDRESS, CORE_GRPC_SEC_OPT=1, SKIP_GRPC_SERVER_AUTH=true..." ; \
 	kubectl -n nico-rest patch configmap nico-rest-site-agent-config --type merge \
-		-p "{\"data\":{\"CORE_GRPC_ADDRESS\":\"$$CORE_HOST:$(LOCAL_CORE_PORT)\",\"CORE_GRPC_SEC_OPT\":\"1\",\"CORE_GRPC_CA_CERT_PATH\":\"/etc/core-grpc/ca.crt\",\"CORE_GRPC_CLIENT_CERT_PATH\":\"/etc/core-grpc/tls.crt\",\"CORE_GRPC_CLIENT_KEY_PATH\":\"/etc/core-grpc/tls.key\",\"CARBIDE_ADDRESS\":\"$$CORE_HOST:$(LOCAL_CORE_PORT)\",\"CARBIDE_SEC_OPT\":\"1\",\"SKIP_GRPC_SERVER_AUTH\":\"true\"}}" ; \
+		-p "{\"data\":{\"CORE_GRPC_ADDRESS\":\"$$CORE_ADDRESS\",\"CORE_GRPC_SEC_OPT\":\"1\",\"CORE_GRPC_CA_CERT_PATH\":\"/etc/core-grpc/ca.crt\",\"CORE_GRPC_CLIENT_CERT_PATH\":\"/etc/core-grpc/tls.crt\",\"CORE_GRPC_CLIENT_KEY_PATH\":\"/etc/core-grpc/tls.key\",\"CARBIDE_ADDRESS\":\"$$CORE_ADDRESS\",\"CARBIDE_SEC_OPT\":\"1\",\"SKIP_GRPC_SERVER_AUTH\":\"true\"}}" ; \
 	echo "Restarting site-agent to pick up local core settings..." ; \
 	kubectl -n nico-rest rollout restart statefulset/nico-rest-site-agent ; \
 	kubectl -n nico-rest rollout status statefulset/nico-rest-site-agent --timeout=120s

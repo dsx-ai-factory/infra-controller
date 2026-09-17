@@ -35,7 +35,7 @@ use db::sku::CURRENT_SKU_VERSION;
 use db::{ConditionalWrite, ObjectFilter};
 use itertools::Itertools;
 use mac_address::MacAddress;
-use model::bmc_suppression::{BmcSuppressionSubsystem, NewBmcSuppression};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::hardware_info::{DmiData, HardwareInfo};
 use model::machine::machine_id::from_hardware_info_with_type;
@@ -156,6 +156,7 @@ fn suppression_input(
 ) -> NewBmcSuppression {
     NewBmcSuppression {
         bmc_mac_address,
+        source: BmcSuppressionSource::Decommissioning,
         reason: "site explorer suppression test".to_string(),
         subsystem,
     }
@@ -265,6 +266,7 @@ async fn test_periodic_suppression_skips_every_candidate_class(
                 txn.as_mut(),
                 machine.mac,
                 BmcSuppressionSubsystem::SiteExplorer,
+                BmcSuppressionSource::Decommissioning,
             )
             .await?
             .unwrap()
@@ -272,10 +274,14 @@ async fn test_periodic_suppression_skips_every_candidate_class(
             .is_some()
         );
     }
-    let dhcp_only_suppression =
-        db::bmc_suppression::find(txn.as_mut(), machines[3].mac, BmcSuppressionSubsystem::Dhcp)
-            .await?
-            .unwrap();
+    let dhcp_only_suppression = db::bmc_suppression::find(
+        txn.as_mut(),
+        machines[3].mac,
+        BmcSuppressionSubsystem::Dhcp,
+        BmcSuppressionSource::Decommissioning,
+    )
+    .await?
+    .unwrap();
     assert!(dhcp_only_suppression.acknowledged_at.is_none());
     txn.commit().await?;
 
@@ -476,6 +482,7 @@ async fn test_suppressed_unexplored_endpoint_does_not_consume_budget_and_resumes
         txn.as_mut(),
         machines[0].mac,
         BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::Decommissioning,
     )
     .await?;
     txn.commit().await?;
@@ -547,6 +554,7 @@ async fn test_suppression_is_acknowledged_before_precondition_failure(
             txn.as_mut(),
             suppressed_mac,
             BmcSuppressionSubsystem::SiteExplorer,
+            BmcSuppressionSource::Decommissioning,
         )
         .await?
         .unwrap()
@@ -595,6 +603,7 @@ async fn test_suppression_acknowledgement_waits_for_in_flight_exploration(
         &env.pool,
         machine.mac,
         BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::Decommissioning,
     )
     .await?
     .unwrap();
@@ -610,6 +619,7 @@ async fn test_suppression_acknowledgement_waits_for_in_flight_exploration(
         &env.pool,
         machine.mac,
         BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::Decommissioning,
     )
     .await?
     .unwrap();

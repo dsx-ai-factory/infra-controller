@@ -1340,6 +1340,45 @@ async fn test_network_segment_metrics_tor(
 }
 
 #[crate::sqlx_test]
+async fn test_network_segment_metrics_ipv6_total_capacity(pool: sqlx::PgPool) {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let cases = [
+        ("IPV6_SMALL", "2001:db8:1::/126", 4usize),
+        ("IPV6_LARGE", "2001:db8:2::/64", usize::MAX),
+    ];
+
+    for (name, prefix, _) in cases {
+        env.api
+            .create_network_segment(Request::new(rpc::forge::NetworkSegmentCreationRequest {
+                name: name.to_string(),
+                mtu: Some(1500),
+                prefixes: vec![rpc::forge::NetworkPrefix {
+                    prefix: prefix.to_string(),
+                    ..Default::default()
+                }],
+                segment_type: rpc::forge::NetworkSegmentType::Admin as i32,
+                ..Default::default()
+            }))
+            .await
+            .expect("create IPv6-only Admin segment");
+    }
+
+    env.run_network_segment_controller_iteration().await;
+
+    let mut expected = cases.map(|(name, prefix, count)| {
+        format!(
+            "{{fresh=\"true\",name=\"{name}\",prefix=\"{prefix}\",type=\"admin\"}} {}",
+            count as f64
+        )
+    });
+    expected.sort();
+    assert_eq!(
+        env.test_meter.formatted_metrics("carbide_total_ips_count"),
+        expected
+    );
+}
+
+#[crate::sqlx_test]
 async fn test_update_svi_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     env.create_vpc_and_tenant_segment().await;

@@ -14,6 +14,7 @@ import (
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	durationpb "google.golang.org/protobuf/types/known/durationpb"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
+	fieldmaskpb "google.golang.org/protobuf/types/known/fieldmaskpb"
 	_ "google.golang.org/protobuf/types/known/structpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
@@ -4133,6 +4134,59 @@ func (TrimTableTarget) EnumDescriptor() ([]byte, []int) {
 }
 
 // DPU Extension Service Types and Messages
+// Immutable registration placement policy; required for DPF_HELM_CHART only.
+type DpuExtensionServiceDpuTarget int32
+
+const (
+	// The host's primary attached DPU.
+	DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY DpuExtensionServiceDpuTarget = 0
+	// DPUs used by the instance network configuration (including its legacy fallbacks).
+	DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE DpuExtensionServiceDpuTarget = 1
+	// Every attached DPU, including DPUs unused by the instance network configuration.
+	DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL DpuExtensionServiceDpuTarget = 2
+)
+
+// Enum value maps for DpuExtensionServiceDpuTarget.
+var (
+	DpuExtensionServiceDpuTarget_name = map[int32]string{
+		0: "DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY",
+		1: "DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE",
+		2: "DPU_EXTENSION_SERVICE_DPU_TARGET_ALL",
+	}
+	DpuExtensionServiceDpuTarget_value = map[string]int32{
+		"DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY":    0,
+		"DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE": 1,
+		"DPU_EXTENSION_SERVICE_DPU_TARGET_ALL":        2,
+	}
+)
+
+func (x DpuExtensionServiceDpuTarget) Enum() *DpuExtensionServiceDpuTarget {
+	p := new(DpuExtensionServiceDpuTarget)
+	*p = x
+	return p
+}
+
+func (x DpuExtensionServiceDpuTarget) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DpuExtensionServiceDpuTarget) Descriptor() protoreflect.EnumDescriptor {
+	return file_nico_nico_proto_enumTypes[75].Descriptor()
+}
+
+func (DpuExtensionServiceDpuTarget) Type() protoreflect.EnumType {
+	return &file_nico_nico_proto_enumTypes[75]
+}
+
+func (x DpuExtensionServiceDpuTarget) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DpuExtensionServiceDpuTarget.Descriptor instead.
+func (DpuExtensionServiceDpuTarget) EnumDescriptor() ([]byte, []int) {
+	return file_nico_nico_proto_rawDescGZIP(), []int{75}
+}
+
 type DpuExtensionServiceType int32
 
 const (
@@ -4163,11 +4217,11 @@ func (x DpuExtensionServiceType) String() string {
 }
 
 func (DpuExtensionServiceType) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[75].Descriptor()
+	return file_nico_nico_proto_enumTypes[76].Descriptor()
 }
 
 func (DpuExtensionServiceType) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[75]
+	return &file_nico_nico_proto_enumTypes[76]
 }
 
 func (x DpuExtensionServiceType) Number() protoreflect.EnumNumber {
@@ -4176,7 +4230,7 @@ func (x DpuExtensionServiceType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DpuExtensionServiceType.Descriptor instead.
 func (DpuExtensionServiceType) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{75}
+	return file_nico_nico_proto_rawDescGZIP(), []int{76}
 }
 
 // Enumerates the lifecycle states of an extension service registration.
@@ -4225,11 +4279,11 @@ func (x DpuExtensionServiceLifecycleState) String() string {
 }
 
 func (DpuExtensionServiceLifecycleState) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[76].Descriptor()
+	return file_nico_nico_proto_enumTypes[77].Descriptor()
 }
 
 func (DpuExtensionServiceLifecycleState) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[76]
+	return &file_nico_nico_proto_enumTypes[77]
 }
 
 func (x DpuExtensionServiceLifecycleState) Number() protoreflect.EnumNumber {
@@ -4238,7 +4292,7 @@ func (x DpuExtensionServiceLifecycleState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DpuExtensionServiceLifecycleState.Descriptor instead.
 func (DpuExtensionServiceLifecycleState) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{76}
+	return file_nico_nico_proto_rawDescGZIP(), []int{77}
 }
 
 type DpuExtensionServiceDeploymentStatus int32
@@ -4286,11 +4340,11 @@ func (x DpuExtensionServiceDeploymentStatus) String() string {
 }
 
 func (DpuExtensionServiceDeploymentStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[77].Descriptor()
+	return file_nico_nico_proto_enumTypes[78].Descriptor()
 }
 
 func (DpuExtensionServiceDeploymentStatus) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[77]
+	return &file_nico_nico_proto_enumTypes[78]
 }
 
 func (x DpuExtensionServiceDeploymentStatus) Number() protoreflect.EnumNumber {
@@ -4299,7 +4353,7 @@ func (x DpuExtensionServiceDeploymentStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DpuExtensionServiceDeploymentStatus.Descriptor instead.
 func (DpuExtensionServiceDeploymentStatus) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{77}
+	return file_nico_nico_proto_rawDescGZIP(), []int{78}
 }
 
 // ScoutStreamErrorStatus is an internal code to set to help
@@ -4331,11 +4385,11 @@ func (x ScoutStreamErrorStatus) String() string {
 }
 
 func (ScoutStreamErrorStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[78].Descriptor()
+	return file_nico_nico_proto_enumTypes[79].Descriptor()
 }
 
 func (ScoutStreamErrorStatus) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[78]
+	return &file_nico_nico_proto_enumTypes[79]
 }
 
 func (x ScoutStreamErrorStatus) Number() protoreflect.EnumNumber {
@@ -4344,7 +4398,7 @@ func (x ScoutStreamErrorStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ScoutStreamErrorStatus.Descriptor instead.
 func (ScoutStreamErrorStatus) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{78}
+	return file_nico_nico_proto_rawDescGZIP(), []int{79}
 }
 
 type DPUServiceSyncReleaseStatus int32
@@ -4404,11 +4458,11 @@ func (x DPUServiceSyncReleaseStatus) String() string {
 }
 
 func (DPUServiceSyncReleaseStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[79].Descriptor()
+	return file_nico_nico_proto_enumTypes[80].Descriptor()
 }
 
 func (DPUServiceSyncReleaseStatus) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[79]
+	return &file_nico_nico_proto_enumTypes[80]
 }
 
 func (x DPUServiceSyncReleaseStatus) Number() protoreflect.EnumNumber {
@@ -4417,7 +4471,7 @@ func (x DPUServiceSyncReleaseStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DPUServiceSyncReleaseStatus.Descriptor instead.
 func (DPUServiceSyncReleaseStatus) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{79}
+	return file_nico_nico_proto_rawDescGZIP(), []int{80}
 }
 
 type ComponentManagerStatusCode int32
@@ -4462,11 +4516,11 @@ func (x ComponentManagerStatusCode) String() string {
 }
 
 func (ComponentManagerStatusCode) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[80].Descriptor()
+	return file_nico_nico_proto_enumTypes[81].Descriptor()
 }
 
 func (ComponentManagerStatusCode) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[80]
+	return &file_nico_nico_proto_enumTypes[81]
 }
 
 func (x ComponentManagerStatusCode) Number() protoreflect.EnumNumber {
@@ -4475,7 +4529,7 @@ func (x ComponentManagerStatusCode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ComponentManagerStatusCode.Descriptor instead.
 func (ComponentManagerStatusCode) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{80}
+	return file_nico_nico_proto_rawDescGZIP(), []int{81}
 }
 
 type FirmwareUpdateState int32
@@ -4523,11 +4577,11 @@ func (x FirmwareUpdateState) String() string {
 }
 
 func (FirmwareUpdateState) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[81].Descriptor()
+	return file_nico_nico_proto_enumTypes[82].Descriptor()
 }
 
 func (FirmwareUpdateState) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[81]
+	return &file_nico_nico_proto_enumTypes[82]
 }
 
 func (x FirmwareUpdateState) Number() protoreflect.EnumNumber {
@@ -4536,7 +4590,7 @@ func (x FirmwareUpdateState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FirmwareUpdateState.Descriptor instead.
 func (FirmwareUpdateState) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{81}
+	return file_nico_nico_proto_rawDescGZIP(), []int{82}
 }
 
 type NvSwitchComponent int32
@@ -4578,11 +4632,11 @@ func (x NvSwitchComponent) String() string {
 }
 
 func (NvSwitchComponent) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[82].Descriptor()
+	return file_nico_nico_proto_enumTypes[83].Descriptor()
 }
 
 func (NvSwitchComponent) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[82]
+	return &file_nico_nico_proto_enumTypes[83]
 }
 
 func (x NvSwitchComponent) Number() protoreflect.EnumNumber {
@@ -4591,7 +4645,7 @@ func (x NvSwitchComponent) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use NvSwitchComponent.Descriptor instead.
 func (NvSwitchComponent) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{82}
+	return file_nico_nico_proto_rawDescGZIP(), []int{83}
 }
 
 type PowerShelfComponent int32
@@ -4627,11 +4681,11 @@ func (x PowerShelfComponent) String() string {
 }
 
 func (PowerShelfComponent) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[83].Descriptor()
+	return file_nico_nico_proto_enumTypes[84].Descriptor()
 }
 
 func (PowerShelfComponent) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[83]
+	return &file_nico_nico_proto_enumTypes[84]
 }
 
 func (x PowerShelfComponent) Number() protoreflect.EnumNumber {
@@ -4640,7 +4694,7 @@ func (x PowerShelfComponent) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PowerShelfComponent.Descriptor instead.
 func (PowerShelfComponent) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{83}
+	return file_nico_nico_proto_rawDescGZIP(), []int{84}
 }
 
 type ComputeTrayComponent int32
@@ -4700,11 +4754,11 @@ func (x ComputeTrayComponent) String() string {
 }
 
 func (ComputeTrayComponent) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[84].Descriptor()
+	return file_nico_nico_proto_enumTypes[85].Descriptor()
 }
 
 func (ComputeTrayComponent) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[84]
+	return &file_nico_nico_proto_enumTypes[85]
 }
 
 func (x ComputeTrayComponent) Number() protoreflect.EnumNumber {
@@ -4713,7 +4767,7 @@ func (x ComputeTrayComponent) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ComputeTrayComponent.Descriptor instead.
 func (ComputeTrayComponent) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{84}
+	return file_nico_nico_proto_rawDescGZIP(), []int{85}
 }
 
 // Operating system definition (CRUD resource, table operating_systems).
@@ -4751,11 +4805,11 @@ func (x OperatingSystemType) String() string {
 }
 
 func (OperatingSystemType) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[85].Descriptor()
+	return file_nico_nico_proto_enumTypes[86].Descriptor()
 }
 
 func (OperatingSystemType) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[85]
+	return &file_nico_nico_proto_enumTypes[86]
 }
 
 func (x OperatingSystemType) Number() protoreflect.EnumNumber {
@@ -4764,7 +4818,7 @@ func (x OperatingSystemType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use OperatingSystemType.Descriptor instead.
 func (OperatingSystemType) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{85}
+	return file_nico_nico_proto_rawDescGZIP(), []int{86}
 }
 
 // Identifies which machine endpoint owns an entry in `ExpectedMachine.host_nics`.
@@ -4820,11 +4874,11 @@ func (x ExpectedInterfaceRole) String() string {
 }
 
 func (ExpectedInterfaceRole) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[86].Descriptor()
+	return file_nico_nico_proto_enumTypes[87].Descriptor()
 }
 
 func (ExpectedInterfaceRole) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[86]
+	return &file_nico_nico_proto_enumTypes[87]
 }
 
 func (x ExpectedInterfaceRole) Number() protoreflect.EnumNumber {
@@ -4833,7 +4887,7 @@ func (x ExpectedInterfaceRole) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ExpectedInterfaceRole.Descriptor instead.
 func (ExpectedInterfaceRole) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{86}
+	return file_nico_nico_proto_rawDescGZIP(), []int{87}
 }
 
 // Controls how an expected interface receives and retains its IP address.
@@ -4892,11 +4946,11 @@ func (x ExpectedInterfaceIpAllocation) String() string {
 }
 
 func (ExpectedInterfaceIpAllocation) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[87].Descriptor()
+	return file_nico_nico_proto_enumTypes[88].Descriptor()
 }
 
 func (ExpectedInterfaceIpAllocation) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[87]
+	return &file_nico_nico_proto_enumTypes[88]
 }
 
 func (x ExpectedInterfaceIpAllocation) Number() protoreflect.EnumNumber {
@@ -4905,7 +4959,7 @@ func (x ExpectedInterfaceIpAllocation) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ExpectedInterfaceIpAllocation.Descriptor instead.
 func (ExpectedInterfaceIpAllocation) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{87}
+	return file_nico_nico_proto_rawDescGZIP(), []int{88}
 }
 
 // Why the current desired boot interface target was selected. The target
@@ -4970,11 +5024,11 @@ func (x BootInterfaceSelectionSource) String() string {
 }
 
 func (BootInterfaceSelectionSource) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[88].Descriptor()
+	return file_nico_nico_proto_enumTypes[89].Descriptor()
 }
 
 func (BootInterfaceSelectionSource) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[88]
+	return &file_nico_nico_proto_enumTypes[89]
 }
 
 func (x BootInterfaceSelectionSource) Number() protoreflect.EnumNumber {
@@ -4983,7 +5037,7 @@ func (x BootInterfaceSelectionSource) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use BootInterfaceSelectionSource.Descriptor instead.
 func (BootInterfaceSelectionSource) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{88}
+	return file_nico_nico_proto_rawDescGZIP(), []int{89}
 }
 
 // Identifies the lifecycle authority responsible for a site prefix.
@@ -5024,11 +5078,11 @@ func (x SitePrefixAuthority) String() string {
 }
 
 func (SitePrefixAuthority) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[89].Descriptor()
+	return file_nico_nico_proto_enumTypes[90].Descriptor()
 }
 
 func (SitePrefixAuthority) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[89]
+	return &file_nico_nico_proto_enumTypes[90]
 }
 
 func (x SitePrefixAuthority) Number() protoreflect.EnumNumber {
@@ -5037,7 +5091,7 @@ func (x SitePrefixAuthority) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use SitePrefixAuthority.Descriptor instead.
 func (SitePrefixAuthority) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{89}
+	return file_nico_nico_proto_rawDescGZIP(), []int{90}
 }
 
 // Describes where a site prefix may be routed.
@@ -5071,11 +5125,11 @@ func (x SitePrefixRoutingScope) String() string {
 }
 
 func (SitePrefixRoutingScope) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[90].Descriptor()
+	return file_nico_nico_proto_enumTypes[91].Descriptor()
 }
 
 func (SitePrefixRoutingScope) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[90]
+	return &file_nico_nico_proto_enumTypes[91]
 }
 
 func (x SitePrefixRoutingScope) Number() protoreflect.EnumNumber {
@@ -5084,7 +5138,7 @@ func (x SitePrefixRoutingScope) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use SitePrefixRoutingScope.Descriptor instead.
 func (SitePrefixRoutingScope) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{90}
+	return file_nico_nico_proto_rawDescGZIP(), []int{91}
 }
 
 // Describes the current lifecycle state of a site prefix.
@@ -5127,11 +5181,11 @@ func (x SitePrefixLifecycleState) String() string {
 }
 
 func (SitePrefixLifecycleState) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[91].Descriptor()
+	return file_nico_nico_proto_enumTypes[92].Descriptor()
 }
 
 func (SitePrefixLifecycleState) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[91]
+	return &file_nico_nico_proto_enumTypes[92]
 }
 
 func (x SitePrefixLifecycleState) Number() protoreflect.EnumNumber {
@@ -5140,7 +5194,7 @@ func (x SitePrefixLifecycleState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use SitePrefixLifecycleState.Descriptor instead.
 func (SitePrefixLifecycleState) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{91}
+	return file_nico_nico_proto_rawDescGZIP(), []int{92}
 }
 
 // Selects a fixed, versioned mlxconfig profile for DPU provisioning.
@@ -5176,11 +5230,11 @@ func (x DpuNvConfigProfile) String() string {
 }
 
 func (DpuNvConfigProfile) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[92].Descriptor()
+	return file_nico_nico_proto_enumTypes[93].Descriptor()
 }
 
 func (DpuNvConfigProfile) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[92]
+	return &file_nico_nico_proto_enumTypes[93]
 }
 
 func (x DpuNvConfigProfile) Number() protoreflect.EnumNumber {
@@ -5189,7 +5243,7 @@ func (x DpuNvConfigProfile) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DpuNvConfigProfile.Descriptor instead.
 func (DpuNvConfigProfile) EnumDescriptor() ([]byte, []int) {
-	return file_nico_nico_proto_rawDescGZIP(), []int{92}
+	return file_nico_nico_proto_rawDescGZIP(), []int{93}
 }
 
 type InstancePowerRequest_Operation int32
@@ -5219,11 +5273,11 @@ func (x InstancePowerRequest_Operation) String() string {
 }
 
 func (InstancePowerRequest_Operation) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[93].Descriptor()
+	return file_nico_nico_proto_enumTypes[94].Descriptor()
 }
 
 func (InstancePowerRequest_Operation) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[93]
+	return &file_nico_nico_proto_enumTypes[94]
 }
 
 func (x InstancePowerRequest_Operation) Number() protoreflect.EnumNumber {
@@ -5262,11 +5316,11 @@ func (x InstanceUpdateStatus_Module) String() string {
 }
 
 func (InstanceUpdateStatus_Module) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[94].Descriptor()
+	return file_nico_nico_proto_enumTypes[95].Descriptor()
 }
 
 func (InstanceUpdateStatus_Module) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[94]
+	return &file_nico_nico_proto_enumTypes[95]
 }
 
 func (x InstanceUpdateStatus_Module) Number() protoreflect.EnumNumber {
@@ -5313,11 +5367,11 @@ func (x AdminBmcResetRequest_ResetType) String() string {
 }
 
 func (AdminBmcResetRequest_ResetType) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[95].Descriptor()
+	return file_nico_nico_proto_enumTypes[96].Descriptor()
 }
 
 func (AdminBmcResetRequest_ResetType) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[95]
+	return &file_nico_nico_proto_enumTypes[96]
 }
 
 func (x AdminBmcResetRequest_ResetType) Number() protoreflect.EnumNumber {
@@ -5359,11 +5413,11 @@ func (x MachineCredentialsUpdateRequest_CredentialPurpose) String() string {
 }
 
 func (MachineCredentialsUpdateRequest_CredentialPurpose) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[96].Descriptor()
+	return file_nico_nico_proto_enumTypes[97].Descriptor()
 }
 
 func (MachineCredentialsUpdateRequest_CredentialPurpose) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[96]
+	return &file_nico_nico_proto_enumTypes[97]
 }
 
 func (x MachineCredentialsUpdateRequest_CredentialPurpose) Number() protoreflect.EnumNumber {
@@ -5430,11 +5484,11 @@ func (x ForgeAgentControlResponse_LegacyAction) String() string {
 }
 
 func (ForgeAgentControlResponse_LegacyAction) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[97].Descriptor()
+	return file_nico_nico_proto_enumTypes[98].Descriptor()
 }
 
 func (ForgeAgentControlResponse_LegacyAction) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[97]
+	return &file_nico_nico_proto_enumTypes[98]
 }
 
 func (x ForgeAgentControlResponse_LegacyAction) Number() protoreflect.EnumNumber {
@@ -5476,11 +5530,11 @@ func (x MachineCleanupInfo_CleanupResult) String() string {
 }
 
 func (MachineCleanupInfo_CleanupResult) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[98].Descriptor()
+	return file_nico_nico_proto_enumTypes[99].Descriptor()
 }
 
 func (MachineCleanupInfo_CleanupResult) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[98]
+	return &file_nico_nico_proto_enumTypes[99]
 }
 
 func (x MachineCleanupInfo_CleanupResult) Number() protoreflect.EnumNumber {
@@ -5525,11 +5579,11 @@ func (x DpuReprovisioningRequest_Mode) String() string {
 }
 
 func (DpuReprovisioningRequest_Mode) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[99].Descriptor()
+	return file_nico_nico_proto_enumTypes[100].Descriptor()
 }
 
 func (DpuReprovisioningRequest_Mode) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[99]
+	return &file_nico_nico_proto_enumTypes[100]
 }
 
 func (x DpuReprovisioningRequest_Mode) Number() protoreflect.EnumNumber {
@@ -5571,11 +5625,11 @@ func (x HostReprovisioningRequest_Mode) String() string {
 }
 
 func (HostReprovisioningRequest_Mode) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[100].Descriptor()
+	return file_nico_nico_proto_enumTypes[101].Descriptor()
 }
 
 func (HostReprovisioningRequest_Mode) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[100]
+	return &file_nico_nico_proto_enumTypes[101]
 }
 
 func (x HostReprovisioningRequest_Mode) Number() protoreflect.EnumNumber {
@@ -5622,11 +5676,11 @@ func (x BmcCredentialRotationRequest_Mode) String() string {
 }
 
 func (BmcCredentialRotationRequest_Mode) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[101].Descriptor()
+	return file_nico_nico_proto_enumTypes[102].Descriptor()
 }
 
 func (BmcCredentialRotationRequest_Mode) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[101]
+	return &file_nico_nico_proto_enumTypes[102]
 }
 
 func (x BmcCredentialRotationRequest_Mode) Number() protoreflect.EnumNumber {
@@ -5673,11 +5727,11 @@ func (x UefiCredentialRotationRequest_Mode) String() string {
 }
 
 func (UefiCredentialRotationRequest_Mode) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[102].Descriptor()
+	return file_nico_nico_proto_enumTypes[103].Descriptor()
 }
 
 func (UefiCredentialRotationRequest_Mode) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[102]
+	return &file_nico_nico_proto_enumTypes[103]
 }
 
 func (x UefiCredentialRotationRequest_Mode) Number() protoreflect.EnumNumber {
@@ -5724,11 +5778,11 @@ func (x NicLockdownCredentialRotationRequest_Mode) String() string {
 }
 
 func (NicLockdownCredentialRotationRequest_Mode) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[103].Descriptor()
+	return file_nico_nico_proto_enumTypes[104].Descriptor()
 }
 
 func (NicLockdownCredentialRotationRequest_Mode) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[103]
+	return &file_nico_nico_proto_enumTypes[104]
 }
 
 func (x NicLockdownCredentialRotationRequest_Mode) Number() protoreflect.EnumNumber {
@@ -5773,11 +5827,11 @@ func (x MachineSetAutoUpdateRequest_SetAutoupdateAction) String() string {
 }
 
 func (MachineSetAutoUpdateRequest_SetAutoupdateAction) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[104].Descriptor()
+	return file_nico_nico_proto_enumTypes[105].Descriptor()
 }
 
 func (MachineSetAutoUpdateRequest_SetAutoupdateAction) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[104]
+	return &file_nico_nico_proto_enumTypes[105]
 }
 
 func (x MachineSetAutoUpdateRequest_SetAutoupdateAction) Number() protoreflect.EnumNumber {
@@ -5819,11 +5873,11 @@ func (x MachineValidationOnDemandRequest_Action) String() string {
 }
 
 func (MachineValidationOnDemandRequest_Action) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[105].Descriptor()
+	return file_nico_nico_proto_enumTypes[106].Descriptor()
 }
 
 func (MachineValidationOnDemandRequest_Action) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[105]
+	return &file_nico_nico_proto_enumTypes[106]
 }
 
 func (x MachineValidationOnDemandRequest_Action) Number() protoreflect.EnumNumber {
@@ -5883,11 +5937,11 @@ func (x AdminPowerControlRequest_SystemPowerControl) String() string {
 }
 
 func (AdminPowerControlRequest_SystemPowerControl) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[106].Descriptor()
+	return file_nico_nico_proto_enumTypes[107].Descriptor()
 }
 
 func (AdminPowerControlRequest_SystemPowerControl) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[106]
+	return &file_nico_nico_proto_enumTypes[107]
 }
 
 func (x AdminPowerControlRequest_SystemPowerControl) Number() protoreflect.EnumNumber {
@@ -5938,11 +5992,11 @@ func (x GetRedfishJobStateResponse_RedfishJobState) String() string {
 }
 
 func (GetRedfishJobStateResponse_RedfishJobState) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[107].Descriptor()
+	return file_nico_nico_proto_enumTypes[108].Descriptor()
 }
 
 func (GetRedfishJobStateResponse_RedfishJobState) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[107]
+	return &file_nico_nico_proto_enumTypes[108]
 }
 
 func (x GetRedfishJobStateResponse_RedfishJobState) Number() protoreflect.EnumNumber {
@@ -6002,11 +6056,11 @@ func (x GetMachineBootInterfacesResponse_Reconciliation_State) String() string {
 }
 
 func (GetMachineBootInterfacesResponse_Reconciliation_State) Descriptor() protoreflect.EnumDescriptor {
-	return file_nico_nico_proto_enumTypes[108].Descriptor()
+	return file_nico_nico_proto_enumTypes[109].Descriptor()
 }
 
 func (GetMachineBootInterfacesResponse_Reconciliation_State) Type() protoreflect.EnumType {
-	return &file_nico_nico_proto_enumTypes[108]
+	return &file_nico_nico_proto_enumTypes[109]
 }
 
 func (x GetMachineBootInterfacesResponse_Reconciliation_State) Number() protoreflect.EnumNumber {
@@ -55334,8 +55388,10 @@ type DpuExtensionService struct {
 	// The lifecycle of the extension service registration itself. This is
 	// independent from deployment status on individual instances.
 	LifecycleStatus *LifecycleStatus `protobuf:"bytes,11,opt,name=lifecycle_status,json=lifecycleStatus,proto3" json:"lifecycle_status,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Required primary/all-active/all policy for Helm; absent for Kubernetes Pod services.
+	DpuTarget     *DpuExtensionServiceDpuTarget `protobuf:"varint,12,opt,name=dpu_target,json=dpuTarget,proto3,enum=forge.DpuExtensionServiceDpuTarget,oneof" json:"dpu_target,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DpuExtensionService) Reset() {
@@ -55445,6 +55501,13 @@ func (x *DpuExtensionService) GetLifecycleStatus() *LifecycleStatus {
 	return nil
 }
 
+func (x *DpuExtensionService) GetDpuTarget() DpuExtensionServiceDpuTarget {
+	if x != nil && x.DpuTarget != nil {
+		return *x.DpuTarget
+	}
+	return DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY
+}
+
 type CreateDpuExtensionServiceRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Metadata
@@ -55459,6 +55522,8 @@ type CreateDpuExtensionServiceRequest struct {
 	// Metrics configuration to be added to the existing
 	// metrics collection service that runs on the DPU.
 	Observability *DpuExtensionServiceObservability `protobuf:"bytes,8,opt,name=observability,proto3,oneof" json:"observability,omitempty"`
+	// Required for Helm: PRIMARY, ALL_ACTIVE, or ALL. Immutable; forbidden for Kubernetes Pod.
+	DpuTarget     *DpuExtensionServiceDpuTarget `protobuf:"varint,9,opt,name=dpu_target,json=dpuTarget,proto3,enum=forge.DpuExtensionServiceDpuTarget,oneof" json:"dpu_target,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -55547,6 +55612,13 @@ func (x *CreateDpuExtensionServiceRequest) GetObservability() *DpuExtensionServi
 		return x.Observability
 	}
 	return nil
+}
+
+func (x *CreateDpuExtensionServiceRequest) GetDpuTarget() DpuExtensionServiceDpuTarget {
+	if x != nil && x.DpuTarget != nil {
+		return *x.DpuTarget
+	}
+	return DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY
 }
 
 type UpdateDpuExtensionServiceRequest struct {
@@ -64691,6 +64763,295 @@ func (x *VpcChangeRoutingProfileRequest) GetVni() uint32 {
 	return 0
 }
 
+// Partial update of an existing expected power shelf, selected by ID.
+type PatchExpectedPowerShelfRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. expected_power_shelf_id identifies the row. A nonempty BMC MAC
+	// may reassert the stored identity but cannot change it.
+	ExpectedPowerShelf *ExpectedPowerShelf `protobuf:"bytes,1,opt,name=expected_power_shelf,json=expectedPowerShelf,proto3" json:"expected_power_shelf,omitempty"`
+	// Required; an empty mask checks existence without changing the row.
+	// Paths: bmc_username, bmc_password, shelf_serial_number, bmc_ip_address,
+	// bmc_retain_credentials, rack_id, metadata.name, metadata.description,
+	// metadata.labels.
+	// Unselected values are ignored. Selected values replace the stored field,
+	// including empty labels, an absent `rack_id` (clear), and an empty BMC IP
+	// (clear). Nonempty IPs must parse as IPv4 or IPv6. A selected
+	// `bmc_retain_credentials` must be present; false is an update.
+	// BMC username and password must be selected together and both be nonempty;
+	// clearing credentials is unsupported. Only the listed paths are accepted;
+	// duplicate paths have no additional effect.
+	// Selected metadata leaves use empty values when metadata is absent.
+	// Selected labels replace the collection; keys must be unique, and absent
+	// label values become empty strings. Label order is not preserved.
+	UpdateMask    *fieldmaskpb.FieldMask `protobuf:"bytes,2,opt,name=update_mask,json=updateMask,proto3" json:"update_mask,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PatchExpectedPowerShelfRequest) Reset() {
+	*x = PatchExpectedPowerShelfRequest{}
+	mi := &file_nico_nico_proto_msgTypes[918]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PatchExpectedPowerShelfRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PatchExpectedPowerShelfRequest) ProtoMessage() {}
+
+func (x *PatchExpectedPowerShelfRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nico_nico_proto_msgTypes[918]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PatchExpectedPowerShelfRequest.ProtoReflect.Descriptor instead.
+func (*PatchExpectedPowerShelfRequest) Descriptor() ([]byte, []int) {
+	return file_nico_nico_proto_rawDescGZIP(), []int{918}
+}
+
+func (x *PatchExpectedPowerShelfRequest) GetExpectedPowerShelf() *ExpectedPowerShelf {
+	if x != nil {
+		return x.ExpectedPowerShelf
+	}
+	return nil
+}
+
+func (x *PatchExpectedPowerShelfRequest) GetUpdateMask() *fieldmaskpb.FieldMask {
+	if x != nil {
+		return x.UpdateMask
+	}
+	return nil
+}
+
+// Partial update of an existing expected switch, selected by ID.
+type PatchExpectedSwitchRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. expected_switch_id identifies the row. A nonempty BMC MAC
+	// may reassert the stored identity but cannot change it.
+	ExpectedSwitch *ExpectedSwitch `protobuf:"bytes,1,opt,name=expected_switch,json=expectedSwitch,proto3" json:"expected_switch,omitempty"`
+	// Required; an empty mask checks existence without changing the row.
+	// Paths: bmc_username, bmc_password, switch_serial_number, bmc_ip_address,
+	// bmc_retain_credentials, rack_id, nvos_mac_addresses, nvos_ip_address,
+	// nvos_username, nvos_password, metadata.name, metadata.description,
+	// metadata.labels.
+	// Unselected values are ignored. Selected values replace the stored field,
+	// including empty collections, an absent `rack_id` (clear), and an empty BMC
+	// IP (clear). A selected `nvos_ip_address` clears with an absent or empty value.
+	// Nonempty IPs must parse as IPv4 or IPv6. A selected `bmc_retain_credentials`
+	// must be present; false is an update. Each username/password pair must be
+	// selected together with both values present and nonempty; clearing
+	// credentials is unsupported. BMC and NVOS pairs can change independently.
+	// The merged NVOS IP, when set, requires exactly one NVOS MAC; both fields
+	// can change in the same patch. Only the listed paths are accepted;
+	// duplicate paths have no additional effect.
+	// Selected metadata leaves use empty values when metadata is absent.
+	// Selected labels replace the collection; keys must be unique, and absent
+	// label values become empty strings. Label order is not preserved.
+	UpdateMask    *fieldmaskpb.FieldMask `protobuf:"bytes,2,opt,name=update_mask,json=updateMask,proto3" json:"update_mask,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PatchExpectedSwitchRequest) Reset() {
+	*x = PatchExpectedSwitchRequest{}
+	mi := &file_nico_nico_proto_msgTypes[919]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PatchExpectedSwitchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PatchExpectedSwitchRequest) ProtoMessage() {}
+
+func (x *PatchExpectedSwitchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nico_nico_proto_msgTypes[919]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PatchExpectedSwitchRequest.ProtoReflect.Descriptor instead.
+func (*PatchExpectedSwitchRequest) Descriptor() ([]byte, []int) {
+	return file_nico_nico_proto_rawDescGZIP(), []int{919}
+}
+
+func (x *PatchExpectedSwitchRequest) GetExpectedSwitch() *ExpectedSwitch {
+	if x != nil {
+		return x.ExpectedSwitch
+	}
+	return nil
+}
+
+func (x *PatchExpectedSwitchRequest) GetUpdateMask() *fieldmaskpb.FieldMask {
+	if x != nil {
+		return x.UpdateMask
+	}
+	return nil
+}
+
+// Partial update of an existing expected machine, selected by ID.
+type PatchExpectedMachineRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. id identifies the row. A nonempty BMC MAC may reassert the stored
+	// identity but cannot change it.
+	ExpectedMachine *ExpectedMachine `protobuf:"bytes,1,opt,name=expected_machine,json=expectedMachine,proto3" json:"expected_machine,omitempty"`
+	// Required; an empty mask checks existence without changing the row.
+	// Paths: bmc_username, bmc_password, chassis_serial_number,
+	// fallback_dpu_serial_numbers, sku_id, rack_id, is_dpf_enabled,
+	// default_pause_ingestion_and_poweron, bmc_retain_credentials, dpu_mode,
+	// bmc_ip_address, bmc_ip_allocation, host_nics,
+	// host_lifecycle_profile.disable_lockdown,
+	// metadata.name, metadata.description, metadata.labels.
+	//
+	// Unselected values are ignored. Selected values replace the stored field,
+	// including empty collections, false, and absent `sku_id` or `rack_id` (clear).
+	// A selected `bmc_ip_address` must be present: an empty string clears it,
+	// otherwise it must parse as IPv4 or IPv6. Selected optional booleans and
+	// enums must be present. False disables the selected setting; for
+	// `disable_lockdown`, it restores lockdown. `DPU_MODE_UNSPECIFIED` resets to
+	// site inheritance. Selecting only `bmc_ip_address` preserves the merged
+	// allocation policy; an address incompatible with that policy is rejected.
+	// Select `bmc_ip_allocation` with `BMC_IP_ALLOCATION_TYPE_UNSPECIFIED` to
+	// reset allocation to inference from the BMC address. Unknown enum values
+	// are rejected.
+	// Selecting Dynamic or Retained allocation clears a stored fixed address;
+	// selecting a nonempty BMC address with either policy is invalid.
+	//
+	// Selecting `host_nics` replaces the entire list, including an empty list.
+	// Matched interfaces retain omitted roles and allocation policies under
+	// `ExpectedHostNic`'s update rules; explicit Unspecified resets them.
+	// Selected top-level `bmc_ip_address` and `bmc_ip_allocation` override the
+	// nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
+	// only the mask selects interface replacement.
+	//
+	// A selected `chassis_serial_number` must contain 4-64 ASCII letters,
+	// digits, hyphens, or underscores. Selected `fallback_dpu_serial_numbers`
+	// must not contain duplicate strings.
+	//
+	// Selected metadata leaves use empty values when metadata is absent.
+	// Selected labels replace the collection; keys must be unique, and absent
+	// label values become empty strings. Label order is not preserved.
+	// Every nonempty patch validates the complete merged metadata. The name
+	// must contain 0-256 ASCII bytes; the description may contain up to 1024
+	// UTF-8 bytes. At most 16 labels are allowed. Label keys must contain
+	// 1-255 ASCII bytes, and label values may contain up to 255 UTF-8 bytes.
+	//
+	// BMC username and password must be selected together and both be nonempty;
+	// clearing credentials is unsupported. Only the listed paths are accepted;
+	// duplicate paths have no additional effect.
+	UpdateMask    *fieldmaskpb.FieldMask `protobuf:"bytes,2,opt,name=update_mask,json=updateMask,proto3" json:"update_mask,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PatchExpectedMachineRequest) Reset() {
+	*x = PatchExpectedMachineRequest{}
+	mi := &file_nico_nico_proto_msgTypes[920]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PatchExpectedMachineRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PatchExpectedMachineRequest) ProtoMessage() {}
+
+func (x *PatchExpectedMachineRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nico_nico_proto_msgTypes[920]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PatchExpectedMachineRequest.ProtoReflect.Descriptor instead.
+func (*PatchExpectedMachineRequest) Descriptor() ([]byte, []int) {
+	return file_nico_nico_proto_rawDescGZIP(), []int{920}
+}
+
+func (x *PatchExpectedMachineRequest) GetExpectedMachine() *ExpectedMachine {
+	if x != nil {
+		return x.ExpectedMachine
+	}
+	return nil
+}
+
+func (x *PatchExpectedMachineRequest) GetUpdateMask() *fieldmaskpb.FieldMask {
+	if x != nil {
+		return x.UpdateMask
+	}
+	return nil
+}
+
+// Atomic batch of expected-machine patches. Each ID may appear only once.
+type PatchExpectedMachinesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Each item follows PatchExpectedMachineRequest. All validation and writes
+	// succeed together or no row changes. No resource or credentials are echoed
+	// in the response. An empty list is invalid.
+	Patches       []*PatchExpectedMachineRequest `protobuf:"bytes,1,rep,name=patches,proto3" json:"patches,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PatchExpectedMachinesRequest) Reset() {
+	*x = PatchExpectedMachinesRequest{}
+	mi := &file_nico_nico_proto_msgTypes[921]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PatchExpectedMachinesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PatchExpectedMachinesRequest) ProtoMessage() {}
+
+func (x *PatchExpectedMachinesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nico_nico_proto_msgTypes[921]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PatchExpectedMachinesRequest.ProtoReflect.Descriptor instead.
+func (*PatchExpectedMachinesRequest) Descriptor() ([]byte, []int) {
+	return file_nico_nico_proto_rawDescGZIP(), []int{921}
+}
+
+func (x *PatchExpectedMachinesRequest) GetPatches() []*PatchExpectedMachineRequest {
+	if x != nil {
+		return x.Patches
+	}
+	return nil
+}
+
 type DNSMessage_DNSQuestion struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	QName         *string                `protobuf:"bytes,1,opt,name=q_name,json=qName,proto3,oneof" json:"q_name,omitempty"` // FQDN including trailing dot
@@ -64702,7 +65063,7 @@ type DNSMessage_DNSQuestion struct {
 
 func (x *DNSMessage_DNSQuestion) Reset() {
 	*x = DNSMessage_DNSQuestion{}
-	mi := &file_nico_nico_proto_msgTypes[919]
+	mi := &file_nico_nico_proto_msgTypes[923]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -64714,7 +65075,7 @@ func (x *DNSMessage_DNSQuestion) String() string {
 func (*DNSMessage_DNSQuestion) ProtoMessage() {}
 
 func (x *DNSMessage_DNSQuestion) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[919]
+	mi := &file_nico_nico_proto_msgTypes[923]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -64760,7 +65121,7 @@ type DNSMessage_DNSResponse struct {
 
 func (x *DNSMessage_DNSResponse) Reset() {
 	*x = DNSMessage_DNSResponse{}
-	mi := &file_nico_nico_proto_msgTypes[920]
+	mi := &file_nico_nico_proto_msgTypes[924]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -64772,7 +65133,7 @@ func (x *DNSMessage_DNSResponse) String() string {
 func (*DNSMessage_DNSResponse) ProtoMessage() {}
 
 func (x *DNSMessage_DNSResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[920]
+	mi := &file_nico_nico_proto_msgTypes[924]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -64804,7 +65165,7 @@ type DNSMessage_DNSResponse_DNSRR struct {
 
 func (x *DNSMessage_DNSResponse_DNSRR) Reset() {
 	*x = DNSMessage_DNSResponse_DNSRR{}
-	mi := &file_nico_nico_proto_msgTypes[921]
+	mi := &file_nico_nico_proto_msgTypes[925]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -64816,7 +65177,7 @@ func (x *DNSMessage_DNSResponse_DNSRR) String() string {
 func (*DNSMessage_DNSResponse_DNSRR) ProtoMessage() {}
 
 func (x *DNSMessage_DNSResponse_DNSRR) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[921]
+	mi := &file_nico_nico_proto_msgTypes[925]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -64850,7 +65211,7 @@ type MachineCredentialsUpdateRequest_Credentials struct {
 
 func (x *MachineCredentialsUpdateRequest_Credentials) Reset() {
 	*x = MachineCredentialsUpdateRequest_Credentials{}
-	mi := &file_nico_nico_proto_msgTypes[926]
+	mi := &file_nico_nico_proto_msgTypes[930]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -64862,7 +65223,7 @@ func (x *MachineCredentialsUpdateRequest_Credentials) String() string {
 func (*MachineCredentialsUpdateRequest_Credentials) ProtoMessage() {}
 
 func (x *MachineCredentialsUpdateRequest_Credentials) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[926]
+	mi := &file_nico_nico_proto_msgTypes[930]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -64909,7 +65270,7 @@ type ForgeAgentControlResponse_ForgeAgentControlExtraInfo struct {
 
 func (x *ForgeAgentControlResponse_ForgeAgentControlExtraInfo) Reset() {
 	*x = ForgeAgentControlResponse_ForgeAgentControlExtraInfo{}
-	mi := &file_nico_nico_proto_msgTypes[927]
+	mi := &file_nico_nico_proto_msgTypes[931]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -64921,7 +65282,7 @@ func (x *ForgeAgentControlResponse_ForgeAgentControlExtraInfo) String() string {
 func (*ForgeAgentControlResponse_ForgeAgentControlExtraInfo) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_ForgeAgentControlExtraInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[927]
+	mi := &file_nico_nico_proto_msgTypes[931]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -64952,7 +65313,7 @@ type ForgeAgentControlResponse_Noop struct {
 
 func (x *ForgeAgentControlResponse_Noop) Reset() {
 	*x = ForgeAgentControlResponse_Noop{}
-	mi := &file_nico_nico_proto_msgTypes[928]
+	mi := &file_nico_nico_proto_msgTypes[932]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -64964,7 +65325,7 @@ func (x *ForgeAgentControlResponse_Noop) String() string {
 func (*ForgeAgentControlResponse_Noop) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_Noop) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[928]
+	mi := &file_nico_nico_proto_msgTypes[932]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -64988,7 +65349,7 @@ type ForgeAgentControlResponse_Reset struct {
 
 func (x *ForgeAgentControlResponse_Reset) Reset() {
 	*x = ForgeAgentControlResponse_Reset{}
-	mi := &file_nico_nico_proto_msgTypes[929]
+	mi := &file_nico_nico_proto_msgTypes[933]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65000,7 +65361,7 @@ func (x *ForgeAgentControlResponse_Reset) String() string {
 func (*ForgeAgentControlResponse_Reset) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_Reset) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[929]
+	mi := &file_nico_nico_proto_msgTypes[933]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65024,7 +65385,7 @@ type ForgeAgentControlResponse_Discovery struct {
 
 func (x *ForgeAgentControlResponse_Discovery) Reset() {
 	*x = ForgeAgentControlResponse_Discovery{}
-	mi := &file_nico_nico_proto_msgTypes[930]
+	mi := &file_nico_nico_proto_msgTypes[934]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65036,7 +65397,7 @@ func (x *ForgeAgentControlResponse_Discovery) String() string {
 func (*ForgeAgentControlResponse_Discovery) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_Discovery) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[930]
+	mi := &file_nico_nico_proto_msgTypes[934]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65060,7 +65421,7 @@ type ForgeAgentControlResponse_Rebuild struct {
 
 func (x *ForgeAgentControlResponse_Rebuild) Reset() {
 	*x = ForgeAgentControlResponse_Rebuild{}
-	mi := &file_nico_nico_proto_msgTypes[931]
+	mi := &file_nico_nico_proto_msgTypes[935]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65072,7 +65433,7 @@ func (x *ForgeAgentControlResponse_Rebuild) String() string {
 func (*ForgeAgentControlResponse_Rebuild) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_Rebuild) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[931]
+	mi := &file_nico_nico_proto_msgTypes[935]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65096,7 +65457,7 @@ type ForgeAgentControlResponse_Retry struct {
 
 func (x *ForgeAgentControlResponse_Retry) Reset() {
 	*x = ForgeAgentControlResponse_Retry{}
-	mi := &file_nico_nico_proto_msgTypes[932]
+	mi := &file_nico_nico_proto_msgTypes[936]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65108,7 +65469,7 @@ func (x *ForgeAgentControlResponse_Retry) String() string {
 func (*ForgeAgentControlResponse_Retry) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_Retry) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[932]
+	mi := &file_nico_nico_proto_msgTypes[936]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65132,7 +65493,7 @@ type ForgeAgentControlResponse_Measure struct {
 
 func (x *ForgeAgentControlResponse_Measure) Reset() {
 	*x = ForgeAgentControlResponse_Measure{}
-	mi := &file_nico_nico_proto_msgTypes[933]
+	mi := &file_nico_nico_proto_msgTypes[937]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65144,7 +65505,7 @@ func (x *ForgeAgentControlResponse_Measure) String() string {
 func (*ForgeAgentControlResponse_Measure) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_Measure) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[933]
+	mi := &file_nico_nico_proto_msgTypes[937]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65168,7 +65529,7 @@ type ForgeAgentControlResponse_LogError struct {
 
 func (x *ForgeAgentControlResponse_LogError) Reset() {
 	*x = ForgeAgentControlResponse_LogError{}
-	mi := &file_nico_nico_proto_msgTypes[934]
+	mi := &file_nico_nico_proto_msgTypes[938]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65180,7 +65541,7 @@ func (x *ForgeAgentControlResponse_LogError) String() string {
 func (*ForgeAgentControlResponse_LogError) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_LogError) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[934]
+	mi := &file_nico_nico_proto_msgTypes[938]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65208,7 +65569,7 @@ type ForgeAgentControlResponse_MachineValidation struct {
 
 func (x *ForgeAgentControlResponse_MachineValidation) Reset() {
 	*x = ForgeAgentControlResponse_MachineValidation{}
-	mi := &file_nico_nico_proto_msgTypes[935]
+	mi := &file_nico_nico_proto_msgTypes[939]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65220,7 +65581,7 @@ func (x *ForgeAgentControlResponse_MachineValidation) String() string {
 func (*ForgeAgentControlResponse_MachineValidation) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_MachineValidation) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[935]
+	mi := &file_nico_nico_proto_msgTypes[939]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65276,7 +65637,7 @@ type ForgeAgentControlResponse_MachineValidationFilter struct {
 
 func (x *ForgeAgentControlResponse_MachineValidationFilter) Reset() {
 	*x = ForgeAgentControlResponse_MachineValidationFilter{}
-	mi := &file_nico_nico_proto_msgTypes[936]
+	mi := &file_nico_nico_proto_msgTypes[940]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65288,7 +65649,7 @@ func (x *ForgeAgentControlResponse_MachineValidationFilter) String() string {
 func (*ForgeAgentControlResponse_MachineValidationFilter) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_MachineValidationFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[936]
+	mi := &file_nico_nico_proto_msgTypes[940]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65341,7 +65702,7 @@ type ForgeAgentControlResponse_MlxAction struct {
 
 func (x *ForgeAgentControlResponse_MlxAction) Reset() {
 	*x = ForgeAgentControlResponse_MlxAction{}
-	mi := &file_nico_nico_proto_msgTypes[937]
+	mi := &file_nico_nico_proto_msgTypes[941]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65353,7 +65714,7 @@ func (x *ForgeAgentControlResponse_MlxAction) String() string {
 func (*ForgeAgentControlResponse_MlxAction) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_MlxAction) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[937]
+	mi := &file_nico_nico_proto_msgTypes[941]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65393,7 +65754,7 @@ type ForgeAgentControlResponse_MlxDeviceAction struct {
 
 func (x *ForgeAgentControlResponse_MlxDeviceAction) Reset() {
 	*x = ForgeAgentControlResponse_MlxDeviceAction{}
-	mi := &file_nico_nico_proto_msgTypes[938]
+	mi := &file_nico_nico_proto_msgTypes[942]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65405,7 +65766,7 @@ func (x *ForgeAgentControlResponse_MlxDeviceAction) String() string {
 func (*ForgeAgentControlResponse_MlxDeviceAction) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_MlxDeviceAction) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[938]
+	mi := &file_nico_nico_proto_msgTypes[942]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65527,7 +65888,7 @@ type ForgeAgentControlResponse_MlxDeviceNoop struct {
 
 func (x *ForgeAgentControlResponse_MlxDeviceNoop) Reset() {
 	*x = ForgeAgentControlResponse_MlxDeviceNoop{}
-	mi := &file_nico_nico_proto_msgTypes[939]
+	mi := &file_nico_nico_proto_msgTypes[943]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65539,7 +65900,7 @@ func (x *ForgeAgentControlResponse_MlxDeviceNoop) String() string {
 func (*ForgeAgentControlResponse_MlxDeviceNoop) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_MlxDeviceNoop) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[939]
+	mi := &file_nico_nico_proto_msgTypes[943]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65564,7 +65925,7 @@ type ForgeAgentControlResponse_MlxDeviceLock struct {
 
 func (x *ForgeAgentControlResponse_MlxDeviceLock) Reset() {
 	*x = ForgeAgentControlResponse_MlxDeviceLock{}
-	mi := &file_nico_nico_proto_msgTypes[940]
+	mi := &file_nico_nico_proto_msgTypes[944]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65576,7 +65937,7 @@ func (x *ForgeAgentControlResponse_MlxDeviceLock) String() string {
 func (*ForgeAgentControlResponse_MlxDeviceLock) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_MlxDeviceLock) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[940]
+	mi := &file_nico_nico_proto_msgTypes[944]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65608,7 +65969,7 @@ type ForgeAgentControlResponse_MlxDeviceUnlock struct {
 
 func (x *ForgeAgentControlResponse_MlxDeviceUnlock) Reset() {
 	*x = ForgeAgentControlResponse_MlxDeviceUnlock{}
-	mi := &file_nico_nico_proto_msgTypes[941]
+	mi := &file_nico_nico_proto_msgTypes[945]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65620,7 +65981,7 @@ func (x *ForgeAgentControlResponse_MlxDeviceUnlock) String() string {
 func (*ForgeAgentControlResponse_MlxDeviceUnlock) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_MlxDeviceUnlock) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[941]
+	mi := &file_nico_nico_proto_msgTypes[945]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65652,7 +66013,7 @@ type ForgeAgentControlResponse_MlxDeviceApplyProfile struct {
 
 func (x *ForgeAgentControlResponse_MlxDeviceApplyProfile) Reset() {
 	*x = ForgeAgentControlResponse_MlxDeviceApplyProfile{}
-	mi := &file_nico_nico_proto_msgTypes[942]
+	mi := &file_nico_nico_proto_msgTypes[946]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65664,7 +66025,7 @@ func (x *ForgeAgentControlResponse_MlxDeviceApplyProfile) String() string {
 func (*ForgeAgentControlResponse_MlxDeviceApplyProfile) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_MlxDeviceApplyProfile) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[942]
+	mi := &file_nico_nico_proto_msgTypes[946]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65696,7 +66057,7 @@ type ForgeAgentControlResponse_MlxDeviceApplyFirmware struct {
 
 func (x *ForgeAgentControlResponse_MlxDeviceApplyFirmware) Reset() {
 	*x = ForgeAgentControlResponse_MlxDeviceApplyFirmware{}
-	mi := &file_nico_nico_proto_msgTypes[943]
+	mi := &file_nico_nico_proto_msgTypes[947]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65708,7 +66069,7 @@ func (x *ForgeAgentControlResponse_MlxDeviceApplyFirmware) String() string {
 func (*ForgeAgentControlResponse_MlxDeviceApplyFirmware) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_MlxDeviceApplyFirmware) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[943]
+	mi := &file_nico_nico_proto_msgTypes[947]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65740,7 +66101,7 @@ type ForgeAgentControlResponse_FirmwareUpgrade struct {
 
 func (x *ForgeAgentControlResponse_FirmwareUpgrade) Reset() {
 	*x = ForgeAgentControlResponse_FirmwareUpgrade{}
-	mi := &file_nico_nico_proto_msgTypes[944]
+	mi := &file_nico_nico_proto_msgTypes[948]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65752,7 +66113,7 @@ func (x *ForgeAgentControlResponse_FirmwareUpgrade) String() string {
 func (*ForgeAgentControlResponse_FirmwareUpgrade) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_FirmwareUpgrade) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[944]
+	mi := &file_nico_nico_proto_msgTypes[948]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65785,7 +66146,7 @@ type ForgeAgentControlResponse_ForgeAgentControlExtraInfo_KeyValuePair struct {
 
 func (x *ForgeAgentControlResponse_ForgeAgentControlExtraInfo_KeyValuePair) Reset() {
 	*x = ForgeAgentControlResponse_ForgeAgentControlExtraInfo_KeyValuePair{}
-	mi := &file_nico_nico_proto_msgTypes[945]
+	mi := &file_nico_nico_proto_msgTypes[949]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65797,7 +66158,7 @@ func (x *ForgeAgentControlResponse_ForgeAgentControlExtraInfo_KeyValuePair) Stri
 func (*ForgeAgentControlResponse_ForgeAgentControlExtraInfo_KeyValuePair) ProtoMessage() {}
 
 func (x *ForgeAgentControlResponse_ForgeAgentControlExtraInfo_KeyValuePair) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[945]
+	mi := &file_nico_nico_proto_msgTypes[949]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65838,7 +66199,7 @@ type MachineCleanupInfo_CleanupStepResult struct {
 
 func (x *MachineCleanupInfo_CleanupStepResult) Reset() {
 	*x = MachineCleanupInfo_CleanupStepResult{}
-	mi := &file_nico_nico_proto_msgTypes[946]
+	mi := &file_nico_nico_proto_msgTypes[950]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65850,7 +66211,7 @@ func (x *MachineCleanupInfo_CleanupStepResult) String() string {
 func (*MachineCleanupInfo_CleanupStepResult) ProtoMessage() {}
 
 func (x *MachineCleanupInfo_CleanupStepResult) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[946]
+	mi := &file_nico_nico_proto_msgTypes[950]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65895,7 +66256,7 @@ type DpuReprovisioningListResponse_DpuReprovisioningListItem struct {
 
 func (x *DpuReprovisioningListResponse_DpuReprovisioningListItem) Reset() {
 	*x = DpuReprovisioningListResponse_DpuReprovisioningListItem{}
-	mi := &file_nico_nico_proto_msgTypes[947]
+	mi := &file_nico_nico_proto_msgTypes[951]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65907,7 +66268,7 @@ func (x *DpuReprovisioningListResponse_DpuReprovisioningListItem) String() strin
 func (*DpuReprovisioningListResponse_DpuReprovisioningListItem) ProtoMessage() {}
 
 func (x *DpuReprovisioningListResponse_DpuReprovisioningListItem) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[947]
+	mi := &file_nico_nico_proto_msgTypes[951]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65986,7 +66347,7 @@ type HostReprovisioningListResponse_HostReprovisioningListItem struct {
 
 func (x *HostReprovisioningListResponse_HostReprovisioningListItem) Reset() {
 	*x = HostReprovisioningListResponse_HostReprovisioningListItem{}
-	mi := &file_nico_nico_proto_msgTypes[948]
+	mi := &file_nico_nico_proto_msgTypes[952]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -65998,7 +66359,7 @@ func (x *HostReprovisioningListResponse_HostReprovisioningListItem) String() str
 func (*HostReprovisioningListResponse_HostReprovisioningListItem) ProtoMessage() {}
 
 func (x *HostReprovisioningListResponse_HostReprovisioningListItem) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[948]
+	mi := &file_nico_nico_proto_msgTypes[952]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -66085,7 +66446,7 @@ type MachineValidationTestUpdateRequest_Payload struct {
 
 func (x *MachineValidationTestUpdateRequest_Payload) Reset() {
 	*x = MachineValidationTestUpdateRequest_Payload{}
-	mi := &file_nico_nico_proto_msgTypes[949]
+	mi := &file_nico_nico_proto_msgTypes[953]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -66097,7 +66458,7 @@ func (x *MachineValidationTestUpdateRequest_Payload) String() string {
 func (*MachineValidationTestUpdateRequest_Payload) ProtoMessage() {}
 
 func (x *MachineValidationTestUpdateRequest_Payload) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[949]
+	mi := &file_nico_nico_proto_msgTypes[953]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -66257,7 +66618,7 @@ type DPFStateResponse_DPFState struct {
 
 func (x *DPFStateResponse_DPFState) Reset() {
 	*x = DPFStateResponse_DPFState{}
-	mi := &file_nico_nico_proto_msgTypes[955]
+	mi := &file_nico_nico_proto_msgTypes[959]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -66269,7 +66630,7 @@ func (x *DPFStateResponse_DPFState) String() string {
 func (*DPFStateResponse_DPFState) ProtoMessage() {}
 
 func (x *DPFStateResponse_DPFState) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[955]
+	mi := &file_nico_nico_proto_msgTypes[959]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -66347,7 +66708,7 @@ type GetMachineBootInterfacesResponse_Reconciliation struct {
 
 func (x *GetMachineBootInterfacesResponse_Reconciliation) Reset() {
 	*x = GetMachineBootInterfacesResponse_Reconciliation{}
-	mi := &file_nico_nico_proto_msgTypes[956]
+	mi := &file_nico_nico_proto_msgTypes[960]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -66359,7 +66720,7 @@ func (x *GetMachineBootInterfacesResponse_Reconciliation) String() string {
 func (*GetMachineBootInterfacesResponse_Reconciliation) ProtoMessage() {}
 
 func (x *GetMachineBootInterfacesResponse_Reconciliation) ProtoReflect() protoreflect.Message {
-	mi := &file_nico_nico_proto_msgTypes[956]
+	mi := &file_nico_nico_proto_msgTypes[960]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -66456,7 +66817,7 @@ var File_nico_nico_proto protoreflect.FileDescriptor
 
 const file_nico_nico_proto_rawDesc = "" +
 	"\n" +
-	"\x0fnico_nico.proto\x12\x05forge\x1a\x11common_nico.proto\x1a\x0edns_nico.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x11health_nico.proto\x1a\x1cmachine_discovery_nico.proto\x1a\x18measured_boot_nico.proto\x1a\x15mlx_device_nico.proto\x1a!scout_firmware_upgrade_nico.proto\x1a\x18site_explorer_nico.proto\"\xbb\x01\n" +
+	"\x0fnico_nico.proto\x12\x05forge\x1a\x11common_nico.proto\x1a\x0edns_nico.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1bgoogle/protobuf/empty.proto\x1a google/protobuf/field_mask.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x11health_nico.proto\x1a\x1cmachine_discovery_nico.proto\x1a\x18measured_boot_nico.proto\x1a\x15mlx_device_nico.proto\x1a!scout_firmware_upgrade_nico.proto\x1a\x18site_explorer_nico.proto\"\xbb\x01\n" +
 	"\x0fLifecycleStatus\x12\x14\n" +
 	"\x05state\x18\x01 \x01(\tR\x05state\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12D\n" +
@@ -71086,7 +71447,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x0ehas_credential\x18\x03 \x01(\bR\rhasCredential\x12\x18\n" +
 	"\acreated\x18\x04 \x01(\tR\acreated\x12R\n" +
 	"\robservability\x18\x05 \x01(\v2'.forge.DpuExtensionServiceObservabilityH\x00R\robservability\x88\x01\x01B\x10\n" +
-	"\x0e_observability\"\xa7\x04\n" +
+	"\x0e_observability\"\xff\x04\n" +
 	"\x13DpuExtensionService\x12\x1d\n" +
 	"\n" +
 	"service_id\x18\x01 \x01(\tR\tserviceId\x12A\n" +
@@ -71101,8 +71462,11 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\acreated\x18\t \x01(\tR\acreated\x12\x18\n" +
 	"\aupdated\x18\n" +
 	" \x01(\tR\aupdated\x12A\n" +
-	"\x10lifecycle_status\x18\v \x01(\v2\x16.forge.LifecycleStatusR\x0flifecycleStatusB\x16\n" +
-	"\x14_latest_version_info\"\xfc\x03\n" +
+	"\x10lifecycle_status\x18\v \x01(\v2\x16.forge.LifecycleStatusR\x0flifecycleStatus\x12G\n" +
+	"\n" +
+	"dpu_target\x18\f \x01(\x0e2#.forge.DpuExtensionServiceDpuTargetH\x01R\tdpuTarget\x88\x01\x01B\x16\n" +
+	"\x14_latest_version_infoB\r\n" +
+	"\v_dpu_target\"\xd4\x04\n" +
 	" CreateDpuExtensionServiceRequest\x12\"\n" +
 	"\n" +
 	"service_id\x18\x01 \x01(\tH\x00R\tserviceId\x88\x01\x01\x12!\n" +
@@ -71114,11 +71478,14 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\n" +
 	"credential\x18\a \x01(\v2$.forge.DpuExtensionServiceCredentialH\x02R\n" +
 	"credential\x88\x01\x01\x12R\n" +
-	"\robservability\x18\b \x01(\v2'.forge.DpuExtensionServiceObservabilityH\x03R\robservability\x88\x01\x01B\r\n" +
+	"\robservability\x18\b \x01(\v2'.forge.DpuExtensionServiceObservabilityH\x03R\robservability\x88\x01\x01\x12G\n" +
+	"\n" +
+	"dpu_target\x18\t \x01(\x0e2#.forge.DpuExtensionServiceDpuTargetH\x04R\tdpuTarget\x88\x01\x01B\r\n" +
 	"\v_service_idB\x0e\n" +
 	"\f_descriptionB\r\n" +
 	"\v_credentialB\x10\n" +
-	"\x0e_observability\"\xd4\x03\n" +
+	"\x0e_observabilityB\r\n" +
+	"\v_dpu_target\"\xd4\x03\n" +
 	" UpdateDpuExtensionServiceRequest\x12\x1d\n" +
 	"\n" +
 	"service_id\x18\x01 \x01(\tR\tserviceId\x12&\n" +
@@ -71849,7 +72216,21 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x14routing_profile_type\x18\x03 \x01(\tR\x12routingProfileType\x12\x15\n" +
 	"\x03vni\x18\x04 \x01(\rH\x01R\x03vni\x88\x01\x01B\x13\n" +
 	"\x11_if_version_matchB\x06\n" +
-	"\x04_vni*s\n" +
+	"\x04_vni\"\xaa\x01\n" +
+	"\x1ePatchExpectedPowerShelfRequest\x12K\n" +
+	"\x14expected_power_shelf\x18\x01 \x01(\v2\x19.forge.ExpectedPowerShelfR\x12expectedPowerShelf\x12;\n" +
+	"\vupdate_mask\x18\x02 \x01(\v2\x1a.google.protobuf.FieldMaskR\n" +
+	"updateMask\"\x99\x01\n" +
+	"\x1aPatchExpectedSwitchRequest\x12>\n" +
+	"\x0fexpected_switch\x18\x01 \x01(\v2\x15.forge.ExpectedSwitchR\x0eexpectedSwitch\x12;\n" +
+	"\vupdate_mask\x18\x02 \x01(\v2\x1a.google.protobuf.FieldMaskR\n" +
+	"updateMask\"\x9d\x01\n" +
+	"\x1bPatchExpectedMachineRequest\x12A\n" +
+	"\x10expected_machine\x18\x01 \x01(\v2\x16.forge.ExpectedMachineR\x0fexpectedMachine\x12;\n" +
+	"\vupdate_mask\x18\x02 \x01(\v2\x1a.google.protobuf.FieldMaskR\n" +
+	"updateMask\"\\\n" +
+	"\x1cPatchExpectedMachinesRequest\x12<\n" +
+	"\apatches\x18\x01 \x03(\v2\".forge.PatchExpectedMachineRequestR\apatches*s\n" +
 	"\x15SpdmAttestationStatus\x12\x18\n" +
 	"\x14SPDM_ATT_IN_PROGRESS\x10\x00\x12\x16\n" +
 	"\x12SPDM_ATT_CANCELLED\x10\x01\x12\x13\n" +
@@ -72256,7 +72637,11 @@ const file_nico_nico_proto_rawDesc = "" +
 	" HOST_FIRMWARE_COMPONENT_TYPE_CX7\x10\n" +
 	"*#\n" +
 	"\x0fTrimTableTarget\x12\x10\n" +
-	"\fMeasuredBoot\x10\x00*A\n" +
+	"\fMeasuredBoot\x10\x00*\xa7\x01\n" +
+	"\x1cDpuExtensionServiceDpuTarget\x12,\n" +
+	"(DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY\x10\x00\x12/\n" +
+	"+DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE\x10\x01\x12(\n" +
+	"$DPU_EXTENSION_SERVICE_DPU_TARGET_ALL\x10\x02*A\n" +
 	"\x17DpuExtensionServiceType\x12\x12\n" +
 	"\x0eKUBERNETES_POD\x10\x00\x12\x12\n" +
 	"\x0eDPF_HELM_CHART\x10\x01*\xd5\x02\n" +
@@ -72363,7 +72748,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"!SITE_PREFIX_LIFECYCLE_STATE_ERROR\x10\x04*e\n" +
 	"\x12DpuNvConfigProfile\x12%\n" +
 	"!DPU_NV_CONFIG_PROFILE_UNSPECIFIED\x10\x00\x12(\n" +
-	"$DPU_NV_CONFIG_PROFILE_GB200_B3240_V1\x10\x012\xdc\xe8\x02\n" +
+	"$DPU_NV_CONFIG_PROFILE_GB200_B3240_V1\x10\x012\xb2\xeb\x02\n" +
 	"\x05Forge\x122\n" +
 	"\aVersion\x12\x15.forge.VersionRequest\x1a\x10.forge.BuildInfo\x125\n" +
 	"\fCreateDomain\x12\x18.dns.CreateDomainRequest\x1a\v.dns.Domain\x125\n" +
@@ -72581,7 +72966,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x12SetDpuUefiPassword\x12 .forge.SetDpuUefiPasswordRequest\x1a!.forge.SetDpuUefiPasswordResponse\x12D\n" +
 	"\x12AddExpectedMachine\x12\x16.forge.ExpectedMachine\x1a\x16.google.protobuf.Empty\x12N\n" +
 	"\x15DeleteExpectedMachine\x12\x1d.forge.ExpectedMachineRequest\x1a\x16.google.protobuf.Empty\x12G\n" +
-	"\x15UpdateExpectedMachine\x12\x16.forge.ExpectedMachine\x1a\x16.google.protobuf.Empty\x12K\n" +
+	"\x15UpdateExpectedMachine\x12\x16.forge.ExpectedMachine\x1a\x16.google.protobuf.Empty\x12R\n" +
+	"\x14PatchExpectedMachine\x12\".forge.PatchExpectedMachineRequest\x1a\x16.google.protobuf.Empty\x12K\n" +
 	"\x12GetExpectedMachine\x12\x1d.forge.ExpectedMachineRequest\x1a\x16.forge.ExpectedMachine\x12L\n" +
 	"\x16GetAllExpectedMachines\x12\x16.google.protobuf.Empty\x1a\x1a.forge.ExpectedMachineList\x12P\n" +
 	"\x1aReplaceAllExpectedMachines\x12\x1a.forge.ExpectedMachineList\x1a\x16.google.protobuf.Empty\x12K\n" +
@@ -72589,10 +72975,12 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1cGetAllExpectedMachinesLinked\x12\x16.google.protobuf.Empty\x1a .forge.LinkedExpectedMachineList\x12P\n" +
 	"\x18GetAllUnexpectedMachines\x12\x16.google.protobuf.Empty\x1a\x1c.forge.UnexpectedMachineList\x12s\n" +
 	"\x16CreateExpectedMachines\x12+.forge.BatchExpectedMachineOperationRequest\x1a,.forge.BatchExpectedMachineOperationResponse\x12s\n" +
-	"\x16UpdateExpectedMachines\x12+.forge.BatchExpectedMachineOperationRequest\x1a,.forge.BatchExpectedMachineOperationResponse\x12J\n" +
+	"\x16UpdateExpectedMachines\x12+.forge.BatchExpectedMachineOperationRequest\x1a,.forge.BatchExpectedMachineOperationResponse\x12T\n" +
+	"\x15PatchExpectedMachines\x12#.forge.PatchExpectedMachinesRequest\x1a\x16.google.protobuf.Empty\x12J\n" +
 	"\x15AddExpectedPowerShelf\x12\x19.forge.ExpectedPowerShelf\x1a\x16.google.protobuf.Empty\x12T\n" +
 	"\x18DeleteExpectedPowerShelf\x12 .forge.ExpectedPowerShelfRequest\x1a\x16.google.protobuf.Empty\x12M\n" +
-	"\x18UpdateExpectedPowerShelf\x12\x19.forge.ExpectedPowerShelf\x1a\x16.google.protobuf.Empty\x12T\n" +
+	"\x18UpdateExpectedPowerShelf\x12\x19.forge.ExpectedPowerShelf\x1a\x16.google.protobuf.Empty\x12X\n" +
+	"\x17PatchExpectedPowerShelf\x12%.forge.PatchExpectedPowerShelfRequest\x1a\x16.google.protobuf.Empty\x12T\n" +
 	"\x15GetExpectedPowerShelf\x12 .forge.ExpectedPowerShelfRequest\x1a\x19.forge.ExpectedPowerShelf\x12S\n" +
 	"\x1aGetAllExpectedPowerShelves\x12\x16.google.protobuf.Empty\x1a\x1d.forge.ExpectedPowerShelfList\x12W\n" +
 	"\x1eReplaceAllExpectedPowerShelves\x12\x1d.forge.ExpectedPowerShelfList\x1a\x16.google.protobuf.Empty\x12O\n" +
@@ -72600,7 +72988,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	" GetAllExpectedPowerShelvesLinked\x12\x16.google.protobuf.Empty\x1a#.forge.LinkedExpectedPowerShelfList\x12B\n" +
 	"\x11AddExpectedSwitch\x12\x15.forge.ExpectedSwitch\x1a\x16.google.protobuf.Empty\x12L\n" +
 	"\x14DeleteExpectedSwitch\x12\x1c.forge.ExpectedSwitchRequest\x1a\x16.google.protobuf.Empty\x12E\n" +
-	"\x14UpdateExpectedSwitch\x12\x15.forge.ExpectedSwitch\x1a\x16.google.protobuf.Empty\x12H\n" +
+	"\x14UpdateExpectedSwitch\x12\x15.forge.ExpectedSwitch\x1a\x16.google.protobuf.Empty\x12P\n" +
+	"\x13PatchExpectedSwitch\x12!.forge.PatchExpectedSwitchRequest\x1a\x16.google.protobuf.Empty\x12H\n" +
 	"\x11GetExpectedSwitch\x12\x1c.forge.ExpectedSwitchRequest\x1a\x15.forge.ExpectedSwitch\x12K\n" +
 	"\x16GetAllExpectedSwitches\x12\x16.google.protobuf.Empty\x1a\x19.forge.ExpectedSwitchList\x12O\n" +
 	"\x1aReplaceAllExpectedSwitches\x12\x19.forge.ExpectedSwitchList\x1a\x16.google.protobuf.Empty\x12K\n" +
@@ -72883,8 +73272,8 @@ func file_nico_nico_proto_rawDescGZIP() []byte {
 	return file_nico_nico_proto_rawDescData
 }
 
-var file_nico_nico_proto_enumTypes = make([]protoimpl.EnumInfo, 109)
-var file_nico_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 957)
+var file_nico_nico_proto_enumTypes = make([]protoimpl.EnumInfo, 110)
+var file_nico_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 961)
 var file_nico_nico_proto_goTypes = []any{
 	(SpdmAttestationStatus)(0),                      // 0: forge.SpdmAttestationStatus
 	(SpdmListAttestationMachinesRequestSelector)(0), // 1: forge.SpdmListAttestationMachinesRequestSelector
@@ -72961,3514 +73350,3537 @@ var file_nico_nico_proto_goTypes = []any{
 	(NmxcBrowseOperation)(0),                                                  // 72: forge.NmxcBrowseOperation
 	(HostFirmwareComponentType)(0),                                            // 73: forge.HostFirmwareComponentType
 	(TrimTableTarget)(0),                                                      // 74: forge.TrimTableTarget
-	(DpuExtensionServiceType)(0),                                              // 75: forge.DpuExtensionServiceType
-	(DpuExtensionServiceLifecycleState)(0),                                    // 76: forge.DpuExtensionServiceLifecycleState
-	(DpuExtensionServiceDeploymentStatus)(0),                                  // 77: forge.DpuExtensionServiceDeploymentStatus
-	(ScoutStreamErrorStatus)(0),                                               // 78: forge.ScoutStreamErrorStatus
-	(DPUServiceSyncReleaseStatus)(0),                                          // 79: forge.DPUServiceSyncReleaseStatus
-	(ComponentManagerStatusCode)(0),                                           // 80: forge.ComponentManagerStatusCode
-	(FirmwareUpdateState)(0),                                                  // 81: forge.FirmwareUpdateState
-	(NvSwitchComponent)(0),                                                    // 82: forge.NvSwitchComponent
-	(PowerShelfComponent)(0),                                                  // 83: forge.PowerShelfComponent
-	(ComputeTrayComponent)(0),                                                 // 84: forge.ComputeTrayComponent
-	(OperatingSystemType)(0),                                                  // 85: forge.OperatingSystemType
-	(ExpectedInterfaceRole)(0),                                                // 86: forge.ExpectedInterfaceRole
-	(ExpectedInterfaceIpAllocation)(0),                                        // 87: forge.ExpectedInterfaceIpAllocation
-	(BootInterfaceSelectionSource)(0),                                         // 88: forge.BootInterfaceSelectionSource
-	(SitePrefixAuthority)(0),                                                  // 89: forge.SitePrefixAuthority
-	(SitePrefixRoutingScope)(0),                                               // 90: forge.SitePrefixRoutingScope
-	(SitePrefixLifecycleState)(0),                                             // 91: forge.SitePrefixLifecycleState
-	(DpuNvConfigProfile)(0),                                                   // 92: forge.DpuNvConfigProfile
-	(InstancePowerRequest_Operation)(0),                                       // 93: forge.InstancePowerRequest.Operation
-	(InstanceUpdateStatus_Module)(0),                                          // 94: forge.InstanceUpdateStatus.Module
-	(AdminBmcResetRequest_ResetType)(0),                                       // 95: forge.AdminBmcResetRequest.ResetType
-	(MachineCredentialsUpdateRequest_CredentialPurpose)(0),                    // 96: forge.MachineCredentialsUpdateRequest.CredentialPurpose
-	(ForgeAgentControlResponse_LegacyAction)(0),                               // 97: forge.ForgeAgentControlResponse.LegacyAction
-	(MachineCleanupInfo_CleanupResult)(0),                                     // 98: forge.MachineCleanupInfo.CleanupResult
-	(DpuReprovisioningRequest_Mode)(0),                                        // 99: forge.DpuReprovisioningRequest.Mode
-	(HostReprovisioningRequest_Mode)(0),                                       // 100: forge.HostReprovisioningRequest.Mode
-	(BmcCredentialRotationRequest_Mode)(0),                                    // 101: forge.BmcCredentialRotationRequest.Mode
-	(UefiCredentialRotationRequest_Mode)(0),                                   // 102: forge.UefiCredentialRotationRequest.Mode
-	(NicLockdownCredentialRotationRequest_Mode)(0),                            // 103: forge.NicLockdownCredentialRotationRequest.Mode
-	(MachineSetAutoUpdateRequest_SetAutoupdateAction)(0),                      // 104: forge.MachineSetAutoUpdateRequest.SetAutoupdateAction
-	(MachineValidationOnDemandRequest_Action)(0),                              // 105: forge.MachineValidationOnDemandRequest.Action
-	(AdminPowerControlRequest_SystemPowerControl)(0),                          // 106: forge.AdminPowerControlRequest.SystemPowerControl
-	(GetRedfishJobStateResponse_RedfishJobState)(0),                           // 107: forge.GetRedfishJobStateResponse.RedfishJobState
-	(GetMachineBootInterfacesResponse_Reconciliation_State)(0),                // 108: forge.GetMachineBootInterfacesResponse.Reconciliation.State
-	(*LifecycleStatus)(nil),                                                   // 109: forge.LifecycleStatus
-	(*SpdmMachineAttestationStatus)(nil),                                      // 110: forge.SpdmMachineAttestationStatus
-	(*SpdmMachineAttestationTriggerResponse)(nil),                             // 111: forge.SpdmMachineAttestationTriggerResponse
-	(*SpdmAttestationDetails)(nil),                                            // 112: forge.SpdmAttestationDetails
-	(*SpdmGetAttestationMachineResponse)(nil),                                 // 113: forge.SpdmGetAttestationMachineResponse
-	(*SpdmMachineAttestationTriggerRequest)(nil),                              // 114: forge.SpdmMachineAttestationTriggerRequest
-	(*SpdmListAttestationMachinesRequest)(nil),                                // 115: forge.SpdmListAttestationMachinesRequest
-	(*SpdmListAttestationMachinesResponse)(nil),                               // 116: forge.SpdmListAttestationMachinesResponse
-	(*MachineIdentityRequest)(nil),                                            // 117: forge.MachineIdentityRequest
-	(*MachineIdentityResponse)(nil),                                           // 118: forge.MachineIdentityResponse
-	(*GetTenantIdentityConfigRequest)(nil),                                    // 119: forge.GetTenantIdentityConfigRequest
-	(*TenantIdentitySigningKey)(nil),                                          // 120: forge.TenantIdentitySigningKey
-	(*TenantIdentityConfig)(nil),                                              // 121: forge.TenantIdentityConfig
-	(*SetTenantIdentityConfigRequest)(nil),                                    // 122: forge.SetTenantIdentityConfigRequest
-	(*TenantIdentityConfigResponse)(nil),                                      // 123: forge.TenantIdentityConfigResponse
-	(*ClientSecretBasic)(nil),                                                 // 124: forge.ClientSecretBasic
-	(*ClientSecretBasicResponse)(nil),                                         // 125: forge.ClientSecretBasicResponse
-	(*TokenDelegationResponse)(nil),                                           // 126: forge.TokenDelegationResponse
-	(*GetTokenDelegationRequest)(nil),                                         // 127: forge.GetTokenDelegationRequest
-	(*TokenDelegation)(nil),                                                   // 128: forge.TokenDelegation
-	(*TokenDelegationRequest)(nil),                                            // 129: forge.TokenDelegationRequest
-	(*ReencryptTenantIdentitySecretsRequest)(nil),                             // 130: forge.ReencryptTenantIdentitySecretsRequest
-	(*ReencryptTenantIdentityFailure)(nil),                                    // 131: forge.ReencryptTenantIdentityFailure
-	(*ReencryptTenantIdentitySecretsResponse)(nil),                            // 132: forge.ReencryptTenantIdentitySecretsResponse
-	(*Jwks)(nil),                                                              // 133: forge.Jwks
-	(*OpenIdConfiguration)(nil),                                               // 134: forge.OpenIdConfiguration
-	(*JwksRequest)(nil),                                                       // 135: forge.JwksRequest
-	(*OpenIdConfigRequest)(nil),                                               // 136: forge.OpenIdConfigRequest
-	(*MachineIngestionStateResponse)(nil),                                     // 137: forge.MachineIngestionStateResponse
-	(*TpmCaAddedCaStatus)(nil),                                                // 138: forge.TpmCaAddedCaStatus
-	(*TpmCaCertId)(nil),                                                       // 139: forge.TpmCaCertId
-	(*TpmEkCertStatus)(nil),                                                   // 140: forge.TpmEkCertStatus
-	(*TpmEkCertStatusCollection)(nil),                                         // 141: forge.TpmEkCertStatusCollection
-	(*TpmCaCert)(nil),                                                         // 142: forge.TpmCaCert
-	(*TpmCaCertDetail)(nil),                                                   // 143: forge.TpmCaCertDetail
-	(*TpmCaCertDetailCollection)(nil),                                         // 144: forge.TpmCaCertDetailCollection
-	(*AttestKeyBindChallenge)(nil),                                            // 145: forge.AttestKeyBindChallenge
-	(*AttestQuoteRequest)(nil),                                                // 146: forge.AttestQuoteRequest
-	(*AttestQuoteResponse)(nil),                                               // 147: forge.AttestQuoteResponse
-	(*CredentialCreationRequest)(nil),                                         // 148: forge.CredentialCreationRequest
-	(*CredentialDeletionRequest)(nil),                                         // 149: forge.CredentialDeletionRequest
-	(*CredentialCreationResult)(nil),                                          // 150: forge.CredentialCreationResult
-	(*CredentialDeletionResult)(nil),                                          // 151: forge.CredentialDeletionResult
-	(*RotateCredentialRequest)(nil),                                           // 152: forge.RotateCredentialRequest
-	(*RotateCredentialResult)(nil),                                            // 153: forge.RotateCredentialResult
-	(*CredentialRotationStatusRequest)(nil),                                   // 154: forge.CredentialRotationStatusRequest
-	(*DeviceCredentialRotationStatus)(nil),                                    // 155: forge.DeviceCredentialRotationStatus
-	(*CredentialRotationStatusResult)(nil),                                    // 156: forge.CredentialRotationStatusResult
-	(*VersionRequest)(nil),                                                    // 157: forge.VersionRequest
-	(*BuildInfo)(nil),                                                         // 158: forge.BuildInfo
-	(*RuntimeConfig)(nil),                                                     // 159: forge.RuntimeConfig
-	(*EchoRequest)(nil),                                                       // 160: forge.EchoRequest
-	(*EchoResponse)(nil),                                                      // 161: forge.EchoResponse
-	(*DNSMessage)(nil),                                                        // 162: forge.DNSMessage
-	(*DnsRequest)(nil),                                                        // 163: forge.DnsRequest
-	(*DnsReply)(nil),                                                          // 164: forge.DnsReply
-	(*ConsoleInput)(nil),                                                      // 165: forge.ConsoleInput
-	(*ConsoleOutput)(nil),                                                     // 166: forge.ConsoleOutput
-	(*InstanceEvent)(nil),                                                     // 167: forge.InstanceEvent
-	(*VpcSearchQuery)(nil),                                                    // 168: forge.VpcSearchQuery
-	(*VpcSearchFilter)(nil),                                                   // 169: forge.VpcSearchFilter
-	(*VpcIdList)(nil),                                                         // 170: forge.VpcIdList
-	(*VpcsByIdsRequest)(nil),                                                  // 171: forge.VpcsByIdsRequest
-	(*TenantSearchQuery)(nil),                                                 // 172: forge.TenantSearchQuery
-	(*PrefixFilterPolicyEntries)(nil),                                         // 173: forge.PrefixFilterPolicyEntries
-	(*VpcRoutingProfileOverrides)(nil),                                        // 174: forge.VpcRoutingProfileOverrides
-	(*VpcEffectiveRoutingProfile)(nil),                                        // 175: forge.VpcEffectiveRoutingProfile
-	(*VpcConfig)(nil),                                                         // 176: forge.VpcConfig
-	(*VpcStatus)(nil),                                                         // 177: forge.VpcStatus
-	(*Vpc)(nil),                                                               // 178: forge.Vpc
-	(*VpcCreationRequest)(nil),                                                // 179: forge.VpcCreationRequest
-	(*VpcUpdateRequest)(nil),                                                  // 180: forge.VpcUpdateRequest
-	(*VpcUpdateResult)(nil),                                                   // 181: forge.VpcUpdateResult
-	(*VpcUpdateVirtualizationRequest)(nil),                                    // 182: forge.VpcUpdateVirtualizationRequest
-	(*VpcUpdateVirtualizationResult)(nil),                                     // 183: forge.VpcUpdateVirtualizationResult
-	(*VpcDeletionRequest)(nil),                                                // 184: forge.VpcDeletionRequest
-	(*VpcDeletionResult)(nil),                                                 // 185: forge.VpcDeletionResult
-	(*VpcList)(nil),                                                           // 186: forge.VpcList
-	(*VpcPrefix)(nil),                                                         // 187: forge.VpcPrefix
-	(*VpcPrefixConfig)(nil),                                                   // 188: forge.VpcPrefixConfig
-	(*VpcPrefixStatus)(nil),                                                   // 189: forge.VpcPrefixStatus
-	(*VpcPrefixCreationRequest)(nil),                                          // 190: forge.VpcPrefixCreationRequest
-	(*VpcPrefixSearchQuery)(nil),                                              // 191: forge.VpcPrefixSearchQuery
-	(*VpcPrefixGetRequest)(nil),                                               // 192: forge.VpcPrefixGetRequest
-	(*VpcPrefixIdList)(nil),                                                   // 193: forge.VpcPrefixIdList
-	(*VpcPrefixList)(nil),                                                     // 194: forge.VpcPrefixList
-	(*VpcPrefixUpdateRequest)(nil),                                            // 195: forge.VpcPrefixUpdateRequest
-	(*VpcPrefixDeletionRequest)(nil),                                          // 196: forge.VpcPrefixDeletionRequest
-	(*VpcPrefixDeletionResult)(nil),                                           // 197: forge.VpcPrefixDeletionResult
-	(*VpcPrefixStateHistoriesRequest)(nil),                                    // 198: forge.VpcPrefixStateHistoriesRequest
-	(*VpcPeering)(nil),                                                        // 199: forge.VpcPeering
-	(*VpcPeeringIdList)(nil),                                                  // 200: forge.VpcPeeringIdList
-	(*VpcPeeringList)(nil),                                                    // 201: forge.VpcPeeringList
-	(*VpcPeeringCreationRequest)(nil),                                         // 202: forge.VpcPeeringCreationRequest
-	(*VpcPeeringSearchFilter)(nil),                                            // 203: forge.VpcPeeringSearchFilter
-	(*VpcPeeringsByIdsRequest)(nil),                                           // 204: forge.VpcPeeringsByIdsRequest
-	(*VpcPeeringDeletionRequest)(nil),                                         // 205: forge.VpcPeeringDeletionRequest
-	(*VpcPeeringDeletionResult)(nil),                                          // 206: forge.VpcPeeringDeletionResult
-	(*IBPartitionConfig)(nil),                                                 // 207: forge.IBPartitionConfig
-	(*IBPartitionStatus)(nil),                                                 // 208: forge.IBPartitionStatus
-	(*IBPartition)(nil),                                                       // 209: forge.IBPartition
-	(*IBPartitionList)(nil),                                                   // 210: forge.IBPartitionList
-	(*IBPartitionCreationRequest)(nil),                                        // 211: forge.IBPartitionCreationRequest
-	(*IBPartitionUpdateRequest)(nil),                                          // 212: forge.IBPartitionUpdateRequest
-	(*IBPartitionDeletionRequest)(nil),                                        // 213: forge.IBPartitionDeletionRequest
-	(*IBPartitionDeletionResult)(nil),                                         // 214: forge.IBPartitionDeletionResult
-	(*IBPartitionSearchFilter)(nil),                                           // 215: forge.IBPartitionSearchFilter
-	(*IBPartitionsByIdsRequest)(nil),                                          // 216: forge.IBPartitionsByIdsRequest
-	(*IBPartitionIdList)(nil),                                                 // 217: forge.IBPartitionIdList
-	(*PowerShelfConfig)(nil),                                                  // 218: forge.PowerShelfConfig
-	(*PowerShelfStatus)(nil),                                                  // 219: forge.PowerShelfStatus
-	(*PowerShelf)(nil),                                                        // 220: forge.PowerShelf
-	(*PowerShelfList)(nil),                                                    // 221: forge.PowerShelfList
-	(*PowerShelfCreationRequest)(nil),                                         // 222: forge.PowerShelfCreationRequest
-	(*DecommissionPowerShelfRequest)(nil),                                     // 223: forge.DecommissionPowerShelfRequest
-	(*DecommissionPowerShelfResponse)(nil),                                    // 224: forge.DecommissionPowerShelfResponse
-	(*PowerShelfDeletionRequest)(nil),                                         // 225: forge.PowerShelfDeletionRequest
-	(*PowerShelfDeletionResult)(nil),                                          // 226: forge.PowerShelfDeletionResult
-	(*PowerShelfMaintenanceRequest)(nil),                                      // 227: forge.PowerShelfMaintenanceRequest
-	(*PowerShelfStateHistoriesRequest)(nil),                                   // 228: forge.PowerShelfStateHistoriesRequest
-	(*PowerShelfHealthHistoriesRequest)(nil),                                  // 229: forge.PowerShelfHealthHistoriesRequest
-	(*PowerShelfQuery)(nil),                                                   // 230: forge.PowerShelfQuery
-	(*PowerShelfSearchFilter)(nil),                                            // 231: forge.PowerShelfSearchFilter
-	(*PowerShelvesByIdsRequest)(nil),                                          // 232: forge.PowerShelvesByIdsRequest
-	(*ExpectedPowerShelf)(nil),                                                // 233: forge.ExpectedPowerShelf
-	(*ExpectedPowerShelfRequest)(nil),                                         // 234: forge.ExpectedPowerShelfRequest
-	(*ExpectedPowerShelfList)(nil),                                            // 235: forge.ExpectedPowerShelfList
-	(*LinkedExpectedPowerShelfList)(nil),                                      // 236: forge.LinkedExpectedPowerShelfList
-	(*LinkedExpectedPowerShelf)(nil),                                          // 237: forge.LinkedExpectedPowerShelf
-	(*SwitchConfig)(nil),                                                      // 238: forge.SwitchConfig
-	(*FabricManagerConfig)(nil),                                               // 239: forge.FabricManagerConfig
-	(*FabricManagerStatus)(nil),                                               // 240: forge.FabricManagerStatus
-	(*SwitchStatus)(nil),                                                      // 241: forge.SwitchStatus
-	(*PlacementInRack)(nil),                                                   // 242: forge.PlacementInRack
-	(*Switch)(nil),                                                            // 243: forge.Switch
-	(*SwitchList)(nil),                                                        // 244: forge.SwitchList
-	(*SwitchCreationRequest)(nil),                                             // 245: forge.SwitchCreationRequest
-	(*SwitchDeletionRequest)(nil),                                             // 246: forge.SwitchDeletionRequest
-	(*SwitchDeletionResult)(nil),                                              // 247: forge.SwitchDeletionResult
-	(*DecommissionSwitchRequest)(nil),                                         // 248: forge.DecommissionSwitchRequest
-	(*DecommissionSwitchResponse)(nil),                                        // 249: forge.DecommissionSwitchResponse
-	(*StateHistoryRecord)(nil),                                                // 250: forge.StateHistoryRecord
-	(*StateHistoryRecords)(nil),                                               // 251: forge.StateHistoryRecords
-	(*SwitchStateHistoriesRequest)(nil),                                       // 252: forge.SwitchStateHistoriesRequest
-	(*SwitchHealthHistoriesRequest)(nil),                                      // 253: forge.SwitchHealthHistoriesRequest
-	(*StateHistories)(nil),                                                    // 254: forge.StateHistories
-	(*SwitchQuery)(nil),                                                       // 255: forge.SwitchQuery
-	(*SwitchSearchFilter)(nil),                                                // 256: forge.SwitchSearchFilter
-	(*SwitchesByIdsRequest)(nil),                                              // 257: forge.SwitchesByIdsRequest
-	(*ExpectedSwitch)(nil),                                                    // 258: forge.ExpectedSwitch
-	(*ExpectedSwitchRequest)(nil),                                             // 259: forge.ExpectedSwitchRequest
-	(*ExpectedSwitchList)(nil),                                                // 260: forge.ExpectedSwitchList
-	(*LinkedExpectedSwitchList)(nil),                                          // 261: forge.LinkedExpectedSwitchList
-	(*LinkedExpectedSwitch)(nil),                                              // 262: forge.LinkedExpectedSwitch
-	(*ExpectedRack)(nil),                                                      // 263: forge.ExpectedRack
-	(*ExpectedRackRequest)(nil),                                               // 264: forge.ExpectedRackRequest
-	(*ExpectedRackList)(nil),                                                  // 265: forge.ExpectedRackList
-	(*IBFabricSearchFilter)(nil),                                              // 266: forge.IBFabricSearchFilter
-	(*IBFabricIdList)(nil),                                                    // 267: forge.IBFabricIdList
-	(*NetworkSegmentStateHistory)(nil),                                        // 268: forge.NetworkSegmentStateHistory
-	(*NetworkSegmentConfig)(nil),                                              // 269: forge.NetworkSegmentConfig
-	(*NetworkSegmentStatus)(nil),                                              // 270: forge.NetworkSegmentStatus
-	(*NetworkSegment)(nil),                                                    // 271: forge.NetworkSegment
-	(*NetworkSegmentCreationRequest)(nil),                                     // 272: forge.NetworkSegmentCreationRequest
-	(*NetworkSegmentDeletionRequest)(nil),                                     // 273: forge.NetworkSegmentDeletionRequest
-	(*AttachNetworkSegmentToVpcRequest)(nil),                                  // 274: forge.AttachNetworkSegmentToVpcRequest
-	(*NetworkSegmentDeletionResult)(nil),                                      // 275: forge.NetworkSegmentDeletionResult
-	(*NetworkSegmentStateHistoriesRequest)(nil),                               // 276: forge.NetworkSegmentStateHistoriesRequest
-	(*NetworkSegmentSearchConfig)(nil),                                        // 277: forge.NetworkSegmentSearchConfig
-	(*NetworkSegmentSearchFilter)(nil),                                        // 278: forge.NetworkSegmentSearchFilter
-	(*NetworkSegmentIdList)(nil),                                              // 279: forge.NetworkSegmentIdList
-	(*NetworkSegmentsByIdsRequest)(nil),                                       // 280: forge.NetworkSegmentsByIdsRequest
-	(*NetworkPrefix)(nil),                                                     // 281: forge.NetworkPrefix
-	(*MachineState)(nil),                                                      // 282: forge.MachineState
-	(*InstancePowerRequest)(nil),                                              // 283: forge.InstancePowerRequest
-	(*InstancePowerResult)(nil),                                               // 284: forge.InstancePowerResult
-	(*InstanceList)(nil),                                                      // 285: forge.InstanceList
-	(*Label)(nil),                                                             // 286: forge.Label
-	(*Metadata)(nil),                                                          // 287: forge.Metadata
-	(*InstanceSearchFilter)(nil),                                              // 288: forge.InstanceSearchFilter
-	(*InstanceIdList)(nil),                                                    // 289: forge.InstanceIdList
-	(*InstancesByIdsRequest)(nil),                                             // 290: forge.InstancesByIdsRequest
-	(*InstanceAllocationRequest)(nil),                                         // 291: forge.InstanceAllocationRequest
-	(*BatchInstanceAllocationRequest)(nil),                                    // 292: forge.BatchInstanceAllocationRequest
-	(*BatchInstanceAllocationResponse)(nil),                                   // 293: forge.BatchInstanceAllocationResponse
-	(*IpxeTemplateParameter)(nil),                                             // 294: forge.IpxeTemplateParameter
-	(*IpxeTemplateArtifact)(nil),                                              // 295: forge.IpxeTemplateArtifact
-	(*IpxeTemplate)(nil),                                                      // 296: forge.IpxeTemplate
-	(*TenantConfig)(nil),                                                      // 297: forge.TenantConfig
-	(*InstanceOperatingSystemConfig)(nil),                                     // 298: forge.InstanceOperatingSystemConfig
-	(*InlineIpxe)(nil),                                                        // 299: forge.InlineIpxe
-	(*InstanceConfig)(nil),                                                    // 300: forge.InstanceConfig
-	(*InstanceNetworkConfig)(nil),                                             // 301: forge.InstanceNetworkConfig
-	(*InstanceNetworkAutoConfig)(nil),                                         // 302: forge.InstanceNetworkAutoConfig
-	(*InstanceInfinibandConfig)(nil),                                          // 303: forge.InstanceInfinibandConfig
-	(*InstanceDpuExtensionServiceConfig)(nil),                                 // 304: forge.InstanceDpuExtensionServiceConfig
-	(*InstanceDpuExtensionServicesConfig)(nil),                                // 305: forge.InstanceDpuExtensionServicesConfig
-	(*InstanceNVLinkConfig)(nil),                                              // 306: forge.InstanceNVLinkConfig
-	(*InstanceSpxConfig)(nil),                                                 // 307: forge.InstanceSpxConfig
-	(*InstanceSpxAttachment)(nil),                                             // 308: forge.InstanceSpxAttachment
-	(*InstanceOperatingSystemUpdateRequest)(nil),                              // 309: forge.InstanceOperatingSystemUpdateRequest
-	(*InstanceConfigUpdateRequest)(nil),                                       // 310: forge.InstanceConfigUpdateRequest
-	(*InstanceStatus)(nil),                                                    // 311: forge.InstanceStatus
-	(*InstanceSpxStatus)(nil),                                                 // 312: forge.InstanceSpxStatus
-	(*InstanceSpxAttachmentStatus)(nil),                                       // 313: forge.InstanceSpxAttachmentStatus
-	(*InstanceNetworkStatus)(nil),                                             // 314: forge.InstanceNetworkStatus
-	(*InstanceInfinibandStatus)(nil),                                          // 315: forge.InstanceInfinibandStatus
-	(*DpuExtensionServiceStatus)(nil),                                         // 316: forge.DpuExtensionServiceStatus
-	(*InstanceDpuExtensionServiceStatus)(nil),                                 // 317: forge.InstanceDpuExtensionServiceStatus
-	(*InstanceDpuExtensionServicesStatus)(nil),                                // 318: forge.InstanceDpuExtensionServicesStatus
-	(*InstanceNVLinkStatus)(nil),                                              // 319: forge.InstanceNVLinkStatus
-	(*Instance)(nil),                                                          // 320: forge.Instance
-	(*InstanceUpdateStatus)(nil),                                              // 321: forge.InstanceUpdateStatus
-	(*InstanceInterfaceConfig)(nil),                                           // 322: forge.InstanceInterfaceConfig
-	(*InstanceInterfaceVpcSelection)(nil),                                     // 323: forge.InstanceInterfaceVpcSelection
-	(*InstanceInterfaceIpv6Config)(nil),                                       // 324: forge.InstanceInterfaceIpv6Config
-	(*InstanceInterfaceRoutingProfile)(nil),                                   // 325: forge.InstanceInterfaceRoutingProfile
-	(*InstanceIBInterfaceConfig)(nil),                                         // 326: forge.InstanceIBInterfaceConfig
-	(*InstanceInterfaceResolvedVpcPrefixes)(nil),                              // 327: forge.InstanceInterfaceResolvedVpcPrefixes
-	(*InstanceInterfaceStatus)(nil),                                           // 328: forge.InstanceInterfaceStatus
-	(*InstanceIBInterfaceStatus)(nil),                                         // 329: forge.InstanceIBInterfaceStatus
-	(*InstanceNVLinkGpuStatus)(nil),                                           // 330: forge.InstanceNVLinkGpuStatus
-	(*InstanceNVLinkGpuConfig)(nil),                                           // 331: forge.InstanceNVLinkGpuConfig
-	(*InstancePhoneHomeLastContactRequest)(nil),                               // 332: forge.InstancePhoneHomeLastContactRequest
-	(*InstancePhoneHomeLastContactResponse)(nil),                              // 333: forge.InstancePhoneHomeLastContactResponse
-	(*Issue)(nil),                                                             // 334: forge.Issue
-	(*DeleteInitiatedBy)(nil),                                                 // 335: forge.DeleteInitiatedBy
-	(*DeleteAttribution)(nil),                                                 // 336: forge.DeleteAttribution
-	(*InstanceReleaseRequest)(nil),                                            // 337: forge.InstanceReleaseRequest
-	(*InstanceReleaseResult)(nil),                                             // 338: forge.InstanceReleaseResult
-	(*BatchInstanceReleaseRequest)(nil),                                       // 339: forge.BatchInstanceReleaseRequest
-	(*InstanceReleaseOutcome)(nil),                                            // 340: forge.InstanceReleaseOutcome
-	(*BatchInstanceReleaseResponse)(nil),                                      // 341: forge.BatchInstanceReleaseResponse
-	(*MachinesByIdsRequest)(nil),                                              // 342: forge.MachinesByIdsRequest
-	(*MachineSearchConfig)(nil),                                               // 343: forge.MachineSearchConfig
-	(*MachineStateHistoriesRequest)(nil),                                      // 344: forge.MachineStateHistoriesRequest
-	(*MachineStateHistories)(nil),                                             // 345: forge.MachineStateHistories
-	(*MachineStateHistoryRecords)(nil),                                        // 346: forge.MachineStateHistoryRecords
-	(*MachineHealthHistoriesRequest)(nil),                                     // 347: forge.MachineHealthHistoriesRequest
-	(*HealthHistories)(nil),                                                   // 348: forge.HealthHistories
-	(*HealthHistoryRecords)(nil),                                              // 349: forge.HealthHistoryRecords
-	(*HealthHistoryRecord)(nil),                                               // 350: forge.HealthHistoryRecord
-	(*TenantByOrganizationIdsRequest)(nil),                                    // 351: forge.TenantByOrganizationIdsRequest
-	(*TenantSearchFilter)(nil),                                                // 352: forge.TenantSearchFilter
-	(*TenantList)(nil),                                                        // 353: forge.TenantList
-	(*TenantOrganizationIdList)(nil),                                          // 354: forge.TenantOrganizationIdList
-	(*InterfaceList)(nil),                                                     // 355: forge.InterfaceList
-	(*MachineList)(nil),                                                       // 356: forge.MachineList
-	(*InterfaceDeleteQuery)(nil),                                              // 357: forge.InterfaceDeleteQuery
-	(*InterfaceSearchQuery)(nil),                                              // 358: forge.InterfaceSearchQuery
-	(*AssignStaticAddressRequest)(nil),                                        // 359: forge.AssignStaticAddressRequest
-	(*AssignStaticAddressResponse)(nil),                                       // 360: forge.AssignStaticAddressResponse
-	(*RemoveStaticAddressRequest)(nil),                                        // 361: forge.RemoveStaticAddressRequest
-	(*RemoveStaticAddressResponse)(nil),                                       // 362: forge.RemoveStaticAddressResponse
-	(*FindInterfaceAddressesRequest)(nil),                                     // 363: forge.FindInterfaceAddressesRequest
-	(*InterfaceAddress)(nil),                                                  // 364: forge.InterfaceAddress
-	(*FindInterfaceAddressesResponse)(nil),                                    // 365: forge.FindInterfaceAddressesResponse
-	(*BmcInfo)(nil),                                                           // 366: forge.BmcInfo
-	(*SwitchNvosInfo)(nil),                                                    // 367: forge.SwitchNvosInfo
-	(*MachineConfig)(nil),                                                     // 368: forge.MachineConfig
-	(*MachineStatus)(nil),                                                     // 369: forge.MachineStatus
-	(*Machine)(nil),                                                           // 370: forge.Machine
-	(*DpfMachineState)(nil),                                                   // 371: forge.DpfMachineState
-	(*InstanceNetworkRestrictions)(nil),                                       // 372: forge.InstanceNetworkRestrictions
-	(*MachineMetadataUpdateRequest)(nil),                                      // 373: forge.MachineMetadataUpdateRequest
-	(*RackMetadataUpdateRequest)(nil),                                         // 374: forge.RackMetadataUpdateRequest
-	(*SwitchMetadataUpdateRequest)(nil),                                       // 375: forge.SwitchMetadataUpdateRequest
-	(*PowerShelfMetadataUpdateRequest)(nil),                                   // 376: forge.PowerShelfMetadataUpdateRequest
-	(*DpuAgentInventoryReport)(nil),                                           // 377: forge.DpuAgentInventoryReport
-	(*MachineComponentInventory)(nil),                                         // 378: forge.MachineComponentInventory
-	(*MachineInventorySoftwareComponent)(nil),                                 // 379: forge.MachineInventorySoftwareComponent
-	(*HealthSourceOrigin)(nil),                                                // 380: forge.HealthSourceOrigin
-	(*ControllerStateReason)(nil),                                             // 381: forge.ControllerStateReason
-	(*ControllerStateSourceReference)(nil),                                    // 382: forge.ControllerStateSourceReference
-	(*StateSla)(nil),                                                          // 383: forge.StateSla
-	(*InstanceTenantStatus)(nil),                                              // 384: forge.InstanceTenantStatus
-	(*MachineEvent)(nil),                                                      // 385: forge.MachineEvent
-	(*MachineInterface)(nil),                                                  // 386: forge.MachineInterface
-	(*InfinibandStatusObservation)(nil),                                       // 387: forge.InfinibandStatusObservation
-	(*MachineIbInterface)(nil),                                                // 388: forge.MachineIbInterface
-	(*DhcpDiscovery)(nil),                                                     // 389: forge.DhcpDiscovery
-	(*ExpireDhcpLeaseRequest)(nil),                                            // 390: forge.ExpireDhcpLeaseRequest
-	(*ExpireDhcpLeaseResponse)(nil),                                           // 391: forge.ExpireDhcpLeaseResponse
-	(*DhcpRecord)(nil),                                                        // 392: forge.DhcpRecord
-	(*NetworkSegmentList)(nil),                                                // 393: forge.NetworkSegmentList
-	(*SSHKeyValidationRequest)(nil),                                           // 394: forge.SSHKeyValidationRequest
-	(*SSHKeyValidationResponse)(nil),                                          // 395: forge.SSHKeyValidationResponse
-	(*GetBmcCredentialsRequest)(nil),                                          // 396: forge.GetBmcCredentialsRequest
-	(*GetSwitchNvosCredentialsRequest)(nil),                                   // 397: forge.GetSwitchNvosCredentialsRequest
-	(*GetBmcCredentialsResponse)(nil),                                         // 398: forge.GetBmcCredentialsResponse
-	(*BmcCredentials)(nil),                                                    // 399: forge.BmcCredentials
-	(*GetSiteExplorationRequest)(nil),                                         // 400: forge.GetSiteExplorationRequest
-	(*ClearSiteExplorationErrorRequest)(nil),                                  // 401: forge.ClearSiteExplorationErrorRequest
-	(*ReExploreEndpointRequest)(nil),                                          // 402: forge.ReExploreEndpointRequest
-	(*RefreshEndpointReportRequest)(nil),                                      // 403: forge.RefreshEndpointReportRequest
-	(*DeleteExploredEndpointRequest)(nil),                                     // 404: forge.DeleteExploredEndpointRequest
-	(*PauseExploredEndpointRemediationRequest)(nil),                           // 405: forge.PauseExploredEndpointRemediationRequest
-	(*DeleteExploredEndpointResponse)(nil),                                    // 406: forge.DeleteExploredEndpointResponse
-	(*BmcEndpointRequest)(nil),                                                // 407: forge.BmcEndpointRequest
-	(*SshTimeoutConfig)(nil),                                                  // 408: forge.SshTimeoutConfig
-	(*SshRequest)(nil),                                                        // 409: forge.SshRequest
-	(*CopyBfbToDpuRshimRequest)(nil),                                          // 410: forge.CopyBfbToDpuRshimRequest
-	(*UpdateMachineHardwareInfoRequest)(nil),                                  // 411: forge.UpdateMachineHardwareInfoRequest
-	(*MachineHardwareInfo)(nil),                                               // 412: forge.MachineHardwareInfo
-	(*ManagedHostNetworkConfigRequest)(nil),                                   // 413: forge.ManagedHostNetworkConfigRequest
-	(*ManagedHostNetworkConfigResponse)(nil),                                  // 414: forge.ManagedHostNetworkConfigResponse
-	(*ManagedHostDpuExtensionServiceConfig)(nil),                              // 415: forge.ManagedHostDpuExtensionServiceConfig
-	(*ManagedHostQuarantineState)(nil),                                        // 416: forge.ManagedHostQuarantineState
-	(*GetManagedHostQuarantineStateRequest)(nil),                              // 417: forge.GetManagedHostQuarantineStateRequest
-	(*GetManagedHostQuarantineStateResponse)(nil),                             // 418: forge.GetManagedHostQuarantineStateResponse
-	(*SetManagedHostQuarantineStateRequest)(nil),                              // 419: forge.SetManagedHostQuarantineStateRequest
-	(*SetManagedHostQuarantineStateResponse)(nil),                             // 420: forge.SetManagedHostQuarantineStateResponse
-	(*ClearManagedHostQuarantineStateRequest)(nil),                            // 421: forge.ClearManagedHostQuarantineStateRequest
-	(*ClearManagedHostQuarantineStateResponse)(nil),                           // 422: forge.ClearManagedHostQuarantineStateResponse
-	(*ManagedHostNetworkConfig)(nil),                                          // 423: forge.ManagedHostNetworkConfig
-	(*FlatInterfaceConfig)(nil),                                               // 424: forge.FlatInterfaceConfig
-	(*FlatInterfaceRoutingProfile)(nil),                                       // 425: forge.FlatInterfaceRoutingProfile
-	(*FlatInterfaceIpv6Config)(nil),                                           // 426: forge.FlatInterfaceIpv6Config
-	(*FlatInterfaceNetworkSecurityGroupConfig)(nil),                           // 427: forge.FlatInterfaceNetworkSecurityGroupConfig
-	(*ManagedHostNetworkStatusRequest)(nil),                                   // 428: forge.ManagedHostNetworkStatusRequest
-	(*ManagedHostNetworkStatusResponse)(nil),                                  // 429: forge.ManagedHostNetworkStatusResponse
-	(*DpuAgentUpgradeCheckRequest)(nil),                                       // 430: forge.DpuAgentUpgradeCheckRequest
-	(*DpuAgentUpgradeCheckResponse)(nil),                                      // 431: forge.DpuAgentUpgradeCheckResponse
-	(*DpuAgentUpgradePolicyRequest)(nil),                                      // 432: forge.DpuAgentUpgradePolicyRequest
-	(*DpuAgentUpgradePolicyResponse)(nil),                                     // 433: forge.DpuAgentUpgradePolicyResponse
-	(*AdminForceDeleteMachineRequest)(nil),                                    // 434: forge.AdminForceDeleteMachineRequest
-	(*DecommissionManagedHostRequest)(nil),                                    // 435: forge.DecommissionManagedHostRequest
-	(*DecommissionManagedHostResponse)(nil),                                   // 436: forge.DecommissionManagedHostResponse
-	(*AdminForceDeleteMachineResponse)(nil),                                   // 437: forge.AdminForceDeleteMachineResponse
-	(*DisableSecureBootResponse)(nil),                                         // 438: forge.DisableSecureBootResponse
-	(*LockdownRequest)(nil),                                                   // 439: forge.LockdownRequest
-	(*LockdownResponse)(nil),                                                  // 440: forge.LockdownResponse
-	(*LockdownStatusRequest)(nil),                                             // 441: forge.LockdownStatusRequest
-	(*MachineSetupStatusRequest)(nil),                                         // 442: forge.MachineSetupStatusRequest
-	(*MachineSetupRequest)(nil),                                               // 443: forge.MachineSetupRequest
-	(*MachineSetupResponse)(nil),                                              // 444: forge.MachineSetupResponse
-	(*SetDpuFirstBootOrderRequest)(nil),                                       // 445: forge.SetDpuFirstBootOrderRequest
-	(*SetDpuFirstBootOrderResponse)(nil),                                      // 446: forge.SetDpuFirstBootOrderResponse
-	(*AdminRebootRequest)(nil),                                                // 447: forge.AdminRebootRequest
-	(*AdminRebootResponse)(nil),                                               // 448: forge.AdminRebootResponse
-	(*AdminBmcResetRequest)(nil),                                              // 449: forge.AdminBmcResetRequest
-	(*AdminBmcResetResponse)(nil),                                             // 450: forge.AdminBmcResetResponse
-	(*EnableInfiniteBootRequest)(nil),                                         // 451: forge.EnableInfiniteBootRequest
-	(*EnableInfiniteBootResponse)(nil),                                        // 452: forge.EnableInfiniteBootResponse
-	(*IsInfiniteBootEnabledRequest)(nil),                                      // 453: forge.IsInfiniteBootEnabledRequest
-	(*IsInfiniteBootEnabledResponse)(nil),                                     // 454: forge.IsInfiniteBootEnabledResponse
-	(*BMCMetaDataGetRequest)(nil),                                             // 455: forge.BMCMetaDataGetRequest
-	(*BMCMetaDataGetResponse)(nil),                                            // 456: forge.BMCMetaDataGetResponse
-	(*MachineCredentialsUpdateRequest)(nil),                                   // 457: forge.MachineCredentialsUpdateRequest
-	(*MachineCredentialsUpdateResponse)(nil),                                  // 458: forge.MachineCredentialsUpdateResponse
-	(*ForgeAgentControlRequest)(nil),                                          // 459: forge.ForgeAgentControlRequest
-	(*ForgeAgentControlResponse)(nil),                                         // 460: forge.ForgeAgentControlResponse
-	(*MachineDiscoveryInfo)(nil),                                              // 461: forge.MachineDiscoveryInfo
-	(*MachineDiscoveryCompletedRequest)(nil),                                  // 462: forge.MachineDiscoveryCompletedRequest
-	(*MachineCleanupInfo)(nil),                                                // 463: forge.MachineCleanupInfo
-	(*MachineCertificate)(nil),                                                // 464: forge.MachineCertificate
-	(*MachineCertificateRenewRequest)(nil),                                    // 465: forge.MachineCertificateRenewRequest
-	(*MachineCertificateResult)(nil),                                          // 466: forge.MachineCertificateResult
-	(*MachineDiscoveryResult)(nil),                                            // 467: forge.MachineDiscoveryResult
-	(*MachineDiscoveryCompletedResponse)(nil),                                 // 468: forge.MachineDiscoveryCompletedResponse
-	(*MachineCleanupResult)(nil),                                              // 469: forge.MachineCleanupResult
-	(*ForgeScoutErrorReport)(nil),                                             // 470: forge.ForgeScoutErrorReport
-	(*ForgeScoutErrorReportResult)(nil),                                       // 471: forge.ForgeScoutErrorReportResult
-	(*PxeInstructionRequest)(nil),                                             // 472: forge.PxeInstructionRequest
-	(*PxeInstructions)(nil),                                                   // 473: forge.PxeInstructions
-	(*CloudInitDiscoveryInstructions)(nil),                                    // 474: forge.CloudInitDiscoveryInstructions
-	(*CloudInitMetaData)(nil),                                                 // 475: forge.CloudInitMetaData
-	(*CloudInitInstructionsRequest)(nil),                                      // 476: forge.CloudInitInstructionsRequest
-	(*CloudInitInstructions)(nil),                                             // 477: forge.CloudInitInstructions
-	(*DpuNetworkStatus)(nil),                                                  // 478: forge.DpuNetworkStatus
-	(*LastDhcpRequest)(nil),                                                   // 479: forge.LastDhcpRequest
-	(*DpuExtensionServiceStatusObservation)(nil),                              // 480: forge.DpuExtensionServiceStatusObservation
-	(*DpuExtensionServiceComponent)(nil),                                      // 481: forge.DpuExtensionServiceComponent
-	(*OptionalHealthReport)(nil),                                              // 482: forge.OptionalHealthReport
-	(*HealthReportEntry)(nil),                                                 // 483: forge.HealthReportEntry
-	(*InsertMachineHealthReportRequest)(nil),                                  // 484: forge.InsertMachineHealthReportRequest
-	(*InsertRackHealthReportRequest)(nil),                                     // 485: forge.InsertRackHealthReportRequest
-	(*RemoveRackHealthReportRequest)(nil),                                     // 486: forge.RemoveRackHealthReportRequest
-	(*ListRackHealthReportsRequest)(nil),                                      // 487: forge.ListRackHealthReportsRequest
-	(*InsertSwitchHealthReportRequest)(nil),                                   // 488: forge.InsertSwitchHealthReportRequest
-	(*RemoveSwitchHealthReportRequest)(nil),                                   // 489: forge.RemoveSwitchHealthReportRequest
-	(*ListSwitchHealthReportsRequest)(nil),                                    // 490: forge.ListSwitchHealthReportsRequest
-	(*InsertPowerShelfHealthReportRequest)(nil),                               // 491: forge.InsertPowerShelfHealthReportRequest
-	(*RemovePowerShelfHealthReportRequest)(nil),                               // 492: forge.RemovePowerShelfHealthReportRequest
-	(*ListPowerShelfHealthReportsRequest)(nil),                                // 493: forge.ListPowerShelfHealthReportsRequest
-	(*ListHealthReportResponse)(nil),                                          // 494: forge.ListHealthReportResponse
-	(*RemoveMachineHealthReportRequest)(nil),                                  // 495: forge.RemoveMachineHealthReportRequest
-	(*ListNVLinkDomainHealthReportsRequest)(nil),                              // 496: forge.ListNVLinkDomainHealthReportsRequest
-	(*InsertNVLinkDomainHealthReportRequest)(nil),                             // 497: forge.InsertNVLinkDomainHealthReportRequest
-	(*RemoveNVLinkDomainHealthReportRequest)(nil),                             // 498: forge.RemoveNVLinkDomainHealthReportRequest
-	(*InstanceInterfaceStatusObservation)(nil),                                // 499: forge.InstanceInterfaceStatusObservation
-	(*FabricInterfaceData)(nil),                                               // 500: forge.FabricInterfaceData
-	(*LinkData)(nil),                                                          // 501: forge.LinkData
-	(*Tenant)(nil),                                                            // 502: forge.Tenant
-	(*CreateTenantRequest)(nil),                                               // 503: forge.CreateTenantRequest
-	(*CreateTenantResponse)(nil),                                              // 504: forge.CreateTenantResponse
-	(*UpdateTenantRequest)(nil),                                               // 505: forge.UpdateTenantRequest
-	(*UpdateTenantResponse)(nil),                                              // 506: forge.UpdateTenantResponse
-	(*FindTenantRequest)(nil),                                                 // 507: forge.FindTenantRequest
-	(*FindTenantResponse)(nil),                                                // 508: forge.FindTenantResponse
-	(*TenantKeysetIdentifier)(nil),                                            // 509: forge.TenantKeysetIdentifier
-	(*TenantPublicKey)(nil),                                                   // 510: forge.TenantPublicKey
-	(*TenantKeysetContent)(nil),                                               // 511: forge.TenantKeysetContent
-	(*TenantKeyset)(nil),                                                      // 512: forge.TenantKeyset
-	(*CreateTenantKeysetRequest)(nil),                                         // 513: forge.CreateTenantKeysetRequest
-	(*CreateTenantKeysetResponse)(nil),                                        // 514: forge.CreateTenantKeysetResponse
-	(*TenantKeySetList)(nil),                                                  // 515: forge.TenantKeySetList
-	(*UpdateTenantKeysetRequest)(nil),                                         // 516: forge.UpdateTenantKeysetRequest
-	(*UpdateTenantKeysetResponse)(nil),                                        // 517: forge.UpdateTenantKeysetResponse
-	(*DeleteTenantKeysetRequest)(nil),                                         // 518: forge.DeleteTenantKeysetRequest
-	(*DeleteTenantKeysetResponse)(nil),                                        // 519: forge.DeleteTenantKeysetResponse
-	(*TenantKeysetSearchFilter)(nil),                                          // 520: forge.TenantKeysetSearchFilter
-	(*TenantKeysetIdList)(nil),                                                // 521: forge.TenantKeysetIdList
-	(*TenantKeysetsByIdsRequest)(nil),                                         // 522: forge.TenantKeysetsByIdsRequest
-	(*ValidateTenantPublicKeyRequest)(nil),                                    // 523: forge.ValidateTenantPublicKeyRequest
-	(*ValidateTenantPublicKeyResponse)(nil),                                   // 524: forge.ValidateTenantPublicKeyResponse
-	(*ListResourcePoolsRequest)(nil),                                          // 525: forge.ListResourcePoolsRequest
-	(*ResourcePools)(nil),                                                     // 526: forge.ResourcePools
-	(*ResourcePool)(nil),                                                      // 527: forge.ResourcePool
-	(*GrowResourcePoolRequest)(nil),                                           // 528: forge.GrowResourcePoolRequest
-	(*GrowResourcePoolResponse)(nil),                                          // 529: forge.GrowResourcePoolResponse
-	(*Range)(nil),                                                             // 530: forge.Range
-	(*MigrateVpcVniResponse)(nil),                                             // 531: forge.MigrateVpcVniResponse
-	(*MaintenanceRequest)(nil),                                                // 532: forge.MaintenanceRequest
-	(*SetDynamicConfigRequest)(nil),                                           // 533: forge.SetDynamicConfigRequest
-	(*FindIpAddressRequest)(nil),                                              // 534: forge.FindIpAddressRequest
-	(*FindIpAddressResponse)(nil),                                             // 535: forge.FindIpAddressResponse
-	(*IdentifyUuidRequest)(nil),                                               // 536: forge.IdentifyUuidRequest
-	(*IdentifyUuidResponse)(nil),                                              // 537: forge.IdentifyUuidResponse
-	(*FindBmcIpsRequest)(nil),                                                 // 538: forge.FindBmcIpsRequest
-	(*IdentifyMacRequest)(nil),                                                // 539: forge.IdentifyMacRequest
-	(*IdentifyMacResponse)(nil),                                               // 540: forge.IdentifyMacResponse
-	(*IdentifySerialRequest)(nil),                                             // 541: forge.IdentifySerialRequest
-	(*IdentifySerialResponse)(nil),                                            // 542: forge.IdentifySerialResponse
-	(*DpuReprovisioningRequest)(nil),                                          // 543: forge.DpuReprovisioningRequest
-	(*DpuReprovisioningListRequest)(nil),                                      // 544: forge.DpuReprovisioningListRequest
-	(*DpuReprovisioningListResponse)(nil),                                     // 545: forge.DpuReprovisioningListResponse
-	(*HostReprovisioningRequest)(nil),                                         // 546: forge.HostReprovisioningRequest
-	(*BmcCredentialRotationRequest)(nil),                                      // 547: forge.BmcCredentialRotationRequest
-	(*UefiCredentialRotationRequest)(nil),                                     // 548: forge.UefiCredentialRotationRequest
-	(*NicLockdownCredentialRotationRequest)(nil),                              // 549: forge.NicLockdownCredentialRotationRequest
-	(*HostReprovisioningListRequest)(nil),                                     // 550: forge.HostReprovisioningListRequest
-	(*HostReprovisioningListResponse)(nil),                                    // 551: forge.HostReprovisioningListResponse
-	(*DpuOsOperationalState)(nil),                                             // 552: forge.DpuOsOperationalState
-	(*DpuRepresentorStatus)(nil),                                              // 553: forge.DpuRepresentorStatus
-	(*DpuInfoStatusObservation)(nil),                                          // 554: forge.DpuInfoStatusObservation
-	(*DpuInfo)(nil),                                                           // 555: forge.DpuInfo
-	(*GetDpuInfoListRequest)(nil),                                             // 556: forge.GetDpuInfoListRequest
-	(*GetDpuInfoListResponse)(nil),                                            // 557: forge.GetDpuInfoListResponse
-	(*IpAddressMatch)(nil),                                                    // 558: forge.IpAddressMatch
-	(*MachineBootOverride)(nil),                                               // 559: forge.MachineBootOverride
-	(*ConnectedDevice)(nil),                                                   // 560: forge.ConnectedDevice
-	(*ConnectedDeviceList)(nil),                                               // 561: forge.ConnectedDeviceList
-	(*BmcIpList)(nil),                                                         // 562: forge.BmcIpList
-	(*BmcIp)(nil),                                                             // 563: forge.BmcIp
-	(*MacAddressBmcIp)(nil),                                                   // 564: forge.MacAddressBmcIp
-	(*MachineIdBmcIpPairs)(nil),                                               // 565: forge.MachineIdBmcIpPairs
-	(*MachineIdBmcIp)(nil),                                                    // 566: forge.MachineIdBmcIp
-	(*NetworkDevice)(nil),                                                     // 567: forge.NetworkDevice
-	(*NetworkTopologyRequest)(nil),                                            // 568: forge.NetworkTopologyRequest
-	(*NetworkDeviceIdList)(nil),                                               // 569: forge.NetworkDeviceIdList
-	(*NetworkTopologyData)(nil),                                               // 570: forge.NetworkTopologyData
-	(*RouteServers)(nil),                                                      // 571: forge.RouteServers
-	(*RouteServerEntries)(nil),                                                // 572: forge.RouteServerEntries
-	(*RouteServer)(nil),                                                       // 573: forge.RouteServer
-	(*SetHostUefiPasswordRequest)(nil),                                        // 574: forge.SetHostUefiPasswordRequest
-	(*SetHostUefiPasswordResponse)(nil),                                       // 575: forge.SetHostUefiPasswordResponse
-	(*ClearHostUefiPasswordRequest)(nil),                                      // 576: forge.ClearHostUefiPasswordRequest
-	(*ClearHostUefiPasswordResponse)(nil),                                     // 577: forge.ClearHostUefiPasswordResponse
-	(*SetDpuUefiPasswordRequest)(nil),                                         // 578: forge.SetDpuUefiPasswordRequest
-	(*SetDpuUefiPasswordResponse)(nil),                                        // 579: forge.SetDpuUefiPasswordResponse
-	(*OsImageAttributes)(nil),                                                 // 580: forge.OsImageAttributes
-	(*OsImage)(nil),                                                           // 581: forge.OsImage
-	(*ListOsImageRequest)(nil),                                                // 582: forge.ListOsImageRequest
-	(*ListOsImageResponse)(nil),                                               // 583: forge.ListOsImageResponse
-	(*DeleteOsImageRequest)(nil),                                              // 584: forge.DeleteOsImageRequest
-	(*DeleteOsImageResponse)(nil),                                             // 585: forge.DeleteOsImageResponse
-	(*GetIpxeTemplateRequest)(nil),                                            // 586: forge.GetIpxeTemplateRequest
-	(*ListIpxeTemplatesRequest)(nil),                                          // 587: forge.ListIpxeTemplatesRequest
-	(*IpxeTemplateList)(nil),                                                  // 588: forge.IpxeTemplateList
-	(*ExpectedHostNic)(nil),                                                   // 589: forge.ExpectedHostNic
-	(*HostLifecycleProfile)(nil),                                              // 590: forge.HostLifecycleProfile
-	(*ExpectedMachine)(nil),                                                   // 591: forge.ExpectedMachine
-	(*ExpectedMachineRequest)(nil),                                            // 592: forge.ExpectedMachineRequest
-	(*ExpectedMachineList)(nil),                                               // 593: forge.ExpectedMachineList
-	(*LinkedExpectedMachineList)(nil),                                         // 594: forge.LinkedExpectedMachineList
-	(*LinkedExpectedMachine)(nil),                                             // 595: forge.LinkedExpectedMachine
-	(*UnexpectedMachineList)(nil),                                             // 596: forge.UnexpectedMachineList
-	(*UnexpectedMachine)(nil),                                                 // 597: forge.UnexpectedMachine
-	(*BatchExpectedMachineOperationRequest)(nil),                              // 598: forge.BatchExpectedMachineOperationRequest
-	(*ExpectedMachineOperationResult)(nil),                                    // 599: forge.ExpectedMachineOperationResult
-	(*BatchExpectedMachineOperationResponse)(nil),                             // 600: forge.BatchExpectedMachineOperationResponse
-	(*MachineRebootCompletedResponse)(nil),                                    // 601: forge.MachineRebootCompletedResponse
-	(*MachineRebootCompletedRequest)(nil),                                     // 602: forge.MachineRebootCompletedRequest
-	(*ScoutFirmwareUpgradeStatusRequest)(nil),                                 // 603: forge.ScoutFirmwareUpgradeStatusRequest
-	(*MachineValidationCompletedRequest)(nil),                                 // 604: forge.MachineValidationCompletedRequest
-	(*MachineValidationCompletedResponse)(nil),                                // 605: forge.MachineValidationCompletedResponse
-	(*MachineValidationResult)(nil),                                           // 606: forge.MachineValidationResult
-	(*MachineValidationResultPostRequest)(nil),                                // 607: forge.MachineValidationResultPostRequest
-	(*MachineValidationResultList)(nil),                                       // 608: forge.MachineValidationResultList
-	(*MachineValidationGetRequest)(nil),                                       // 609: forge.MachineValidationGetRequest
-	(*MachineValidationStatus)(nil),                                           // 610: forge.MachineValidationStatus
-	(*MachineValidationRun)(nil),                                              // 611: forge.MachineValidationRun
-	(*MachineSetAutoUpdateRequest)(nil),                                       // 612: forge.MachineSetAutoUpdateRequest
-	(*MachineSetAutoUpdateResponse)(nil),                                      // 613: forge.MachineSetAutoUpdateResponse
-	(*GetMachineValidationExternalConfigRequest)(nil),                         // 614: forge.GetMachineValidationExternalConfigRequest
-	(*MachineValidationExternalConfig)(nil),                                   // 615: forge.MachineValidationExternalConfig
-	(*GetMachineValidationExternalConfigResponse)(nil),                        // 616: forge.GetMachineValidationExternalConfigResponse
-	(*GetMachineValidationExternalConfigsRequest)(nil),                        // 617: forge.GetMachineValidationExternalConfigsRequest
-	(*GetMachineValidationExternalConfigsResponse)(nil),                       // 618: forge.GetMachineValidationExternalConfigsResponse
-	(*AddUpdateMachineValidationExternalConfigRequest)(nil),                   // 619: forge.AddUpdateMachineValidationExternalConfigRequest
-	(*RemoveMachineValidationExternalConfigRequest)(nil),                      // 620: forge.RemoveMachineValidationExternalConfigRequest
-	(*MachineValidationOnDemandRequest)(nil),                                  // 621: forge.MachineValidationOnDemandRequest
-	(*MachineValidationOnDemandResponse)(nil),                                 // 622: forge.MachineValidationOnDemandResponse
-	(*FirmwareUpgradeActivity)(nil),                                           // 623: forge.FirmwareUpgradeActivity
-	(*NvosUpdateActivity)(nil),                                                // 624: forge.NvosUpdateActivity
-	(*ConfigureNmxClusterActivity)(nil),                                       // 625: forge.ConfigureNmxClusterActivity
-	(*PowerSequenceActivity)(nil),                                             // 626: forge.PowerSequenceActivity
-	(*MaintenanceActivityConfig)(nil),                                         // 627: forge.MaintenanceActivityConfig
-	(*RackMaintenanceScope)(nil),                                              // 628: forge.RackMaintenanceScope
-	(*RackMaintenanceOnDemandRequest)(nil),                                    // 629: forge.RackMaintenanceOnDemandRequest
-	(*RackMaintenanceOnDemandResponse)(nil),                                   // 630: forge.RackMaintenanceOnDemandResponse
-	(*RackMaintenanceTerminateRequest)(nil),                                   // 631: forge.RackMaintenanceTerminateRequest
-	(*RackMaintenanceTerminateResponse)(nil),                                  // 632: forge.RackMaintenanceTerminateResponse
-	(*AdminPowerControlRequest)(nil),                                          // 633: forge.AdminPowerControlRequest
-	(*AdminPowerControlResponse)(nil),                                         // 634: forge.AdminPowerControlResponse
-	(*AdminChassisResetRequest)(nil),                                          // 635: forge.AdminChassisResetRequest
-	(*AdminChassisResetResponse)(nil),                                         // 636: forge.AdminChassisResetResponse
-	(*GetRedfishJobStateRequest)(nil),                                         // 637: forge.GetRedfishJobStateRequest
-	(*GetRedfishJobStateResponse)(nil),                                        // 638: forge.GetRedfishJobStateResponse
-	(*MachineValidationRunList)(nil),                                          // 639: forge.MachineValidationRunList
-	(*MachineValidationRunListGetRequest)(nil),                                // 640: forge.MachineValidationRunListGetRequest
-	(*MachineValidationRunItemSearchFilter)(nil),                              // 641: forge.MachineValidationRunItemSearchFilter
-	(*MachineValidationRunItemIdList)(nil),                                    // 642: forge.MachineValidationRunItemIdList
-	(*MachineValidationRunItemsByIdsRequest)(nil),                             // 643: forge.MachineValidationRunItemsByIdsRequest
-	(*MachineValidationRunItemList)(nil),                                      // 644: forge.MachineValidationRunItemList
-	(*MachineValidationRunItem)(nil),                                          // 645: forge.MachineValidationRunItem
-	(*MachineValidationAttemptGetRequest)(nil),                                // 646: forge.MachineValidationAttemptGetRequest
-	(*MachineValidationAttempt)(nil),                                          // 647: forge.MachineValidationAttempt
-	(*MachineValidationHeartbeatRequest)(nil),                                 // 648: forge.MachineValidationHeartbeatRequest
-	(*MachineValidationHeartbeatResponse)(nil),                                // 649: forge.MachineValidationHeartbeatResponse
-	(*IsBmcInManagedHostResponse)(nil),                                        // 650: forge.IsBmcInManagedHostResponse
-	(*BmcCredentialStatusResponse)(nil),                                       // 651: forge.BmcCredentialStatusResponse
-	(*MachineValidationTestsGetRequest)(nil),                                  // 652: forge.MachineValidationTestsGetRequest
-	(*MachineValidationTestUpdateRequest)(nil),                                // 653: forge.MachineValidationTestUpdateRequest
-	(*MachineValidationTestAddRequest)(nil),                                   // 654: forge.MachineValidationTestAddRequest
-	(*MachineValidationTestAddUpdateResponse)(nil),                            // 655: forge.MachineValidationTestAddUpdateResponse
-	(*MachineValidationTestsGetResponse)(nil),                                 // 656: forge.MachineValidationTestsGetResponse
-	(*MachineValidationTestVerfiedRequest)(nil),                               // 657: forge.MachineValidationTestVerfiedRequest
-	(*MachineValidationTestVerfiedResponse)(nil),                              // 658: forge.MachineValidationTestVerfiedResponse
-	(*MachineValidationTest)(nil),                                             // 659: forge.MachineValidationTest
-	(*MachineValidationPlugin)(nil),                                           // 660: forge.MachineValidationPlugin
-	(*MachineValidationTestFullHostApprovalRequest)(nil),                      // 661: forge.MachineValidationTestFullHostApprovalRequest
-	(*MachineValidationTestFullHostApprovalResponse)(nil),                     // 662: forge.MachineValidationTestFullHostApprovalResponse
-	(*MachineValidationTestNextVersionResponse)(nil),                          // 663: forge.MachineValidationTestNextVersionResponse
-	(*MachineValidationTestNextVersionRequest)(nil),                           // 664: forge.MachineValidationTestNextVersionRequest
-	(*MachineValidationTestEnableDisableTestRequest)(nil),                     // 665: forge.MachineValidationTestEnableDisableTestRequest
-	(*MachineValidationTestEnableDisableTestResponse)(nil),                    // 666: forge.MachineValidationTestEnableDisableTestResponse
-	(*MachineValidationRunRequest)(nil),                                       // 667: forge.MachineValidationRunRequest
-	(*MachineValidationRunResponse)(nil),                                      // 668: forge.MachineValidationRunResponse
-	(*MachineCapabilityAttributesCpu)(nil),                                    // 669: forge.MachineCapabilityAttributesCpu
-	(*MachineCapabilityAttributesGpu)(nil),                                    // 670: forge.MachineCapabilityAttributesGpu
-	(*MachineCapabilityAttributesMemory)(nil),                                 // 671: forge.MachineCapabilityAttributesMemory
-	(*MachineCapabilityAttributesStorage)(nil),                                // 672: forge.MachineCapabilityAttributesStorage
-	(*MachineCapabilityAttributesNetwork)(nil),                                // 673: forge.MachineCapabilityAttributesNetwork
-	(*MachineCapabilityAttributesInfiniband)(nil),                             // 674: forge.MachineCapabilityAttributesInfiniband
-	(*MachineCapabilityAttributesDpu)(nil),                                    // 675: forge.MachineCapabilityAttributesDpu
-	(*MachineCapabilitiesSet)(nil),                                            // 676: forge.MachineCapabilitiesSet
-	(*InstanceTypeAttributes)(nil),                                            // 677: forge.InstanceTypeAttributes
-	(*InstanceType)(nil),                                                      // 678: forge.InstanceType
-	(*InstanceTypeMachineCapabilityFilterAttributes)(nil),                     // 679: forge.InstanceTypeMachineCapabilityFilterAttributes
-	(*CreateInstanceTypeRequest)(nil),                                         // 680: forge.CreateInstanceTypeRequest
-	(*CreateInstanceTypeResponse)(nil),                                        // 681: forge.CreateInstanceTypeResponse
-	(*FindInstanceTypeIdsRequest)(nil),                                        // 682: forge.FindInstanceTypeIdsRequest
-	(*FindInstanceTypeIdsResponse)(nil),                                       // 683: forge.FindInstanceTypeIdsResponse
-	(*FindInstanceTypesByIdsRequest)(nil),                                     // 684: forge.FindInstanceTypesByIdsRequest
-	(*FindInstanceTypesByIdsResponse)(nil),                                    // 685: forge.FindInstanceTypesByIdsResponse
-	(*DeleteInstanceTypeRequest)(nil),                                         // 686: forge.DeleteInstanceTypeRequest
-	(*DeleteInstanceTypeResponse)(nil),                                        // 687: forge.DeleteInstanceTypeResponse
-	(*UpdateInstanceTypeResponse)(nil),                                        // 688: forge.UpdateInstanceTypeResponse
-	(*UpdateInstanceTypeRequest)(nil),                                         // 689: forge.UpdateInstanceTypeRequest
-	(*AssociateMachinesWithInstanceTypeRequest)(nil),                          // 690: forge.AssociateMachinesWithInstanceTypeRequest
-	(*AssociateMachinesWithInstanceTypeResponse)(nil),                         // 691: forge.AssociateMachinesWithInstanceTypeResponse
-	(*RemoveMachineInstanceTypeAssociationRequest)(nil),                       // 692: forge.RemoveMachineInstanceTypeAssociationRequest
-	(*RemoveMachineInstanceTypeAssociationResponse)(nil),                      // 693: forge.RemoveMachineInstanceTypeAssociationResponse
-	(*RedfishBrowseRequest)(nil),                                              // 694: forge.RedfishBrowseRequest
-	(*RedfishBrowseResponse)(nil),                                             // 695: forge.RedfishBrowseResponse
-	(*RedfishListActionsRequest)(nil),                                         // 696: forge.RedfishListActionsRequest
-	(*RedfishListActionsResponse)(nil),                                        // 697: forge.RedfishListActionsResponse
-	(*RedfishAction)(nil),                                                     // 698: forge.RedfishAction
-	(*OptionalRedfishActionResult)(nil),                                       // 699: forge.OptionalRedfishActionResult
-	(*RedfishActionResult)(nil),                                               // 700: forge.RedfishActionResult
-	(*RedfishCreateActionRequest)(nil),                                        // 701: forge.RedfishCreateActionRequest
-	(*RedfishCreateActionResponse)(nil),                                       // 702: forge.RedfishCreateActionResponse
-	(*RedfishActionID)(nil),                                                   // 703: forge.RedfishActionID
-	(*RedfishApproveActionResponse)(nil),                                      // 704: forge.RedfishApproveActionResponse
-	(*RedfishApplyActionResponse)(nil),                                        // 705: forge.RedfishApplyActionResponse
-	(*RedfishCancelActionResponse)(nil),                                       // 706: forge.RedfishCancelActionResponse
-	(*UfmBrowseRequest)(nil),                                                  // 707: forge.UfmBrowseRequest
-	(*UfmBrowseResponse)(nil),                                                 // 708: forge.UfmBrowseResponse
-	(*NetworkSecurityGroupAttributes)(nil),                                    // 709: forge.NetworkSecurityGroupAttributes
-	(*NetworkSecurityGroup)(nil),                                              // 710: forge.NetworkSecurityGroup
-	(*CreateNetworkSecurityGroupRequest)(nil),                                 // 711: forge.CreateNetworkSecurityGroupRequest
-	(*CreateNetworkSecurityGroupResponse)(nil),                                // 712: forge.CreateNetworkSecurityGroupResponse
-	(*FindNetworkSecurityGroupIdsRequest)(nil),                                // 713: forge.FindNetworkSecurityGroupIdsRequest
-	(*FindNetworkSecurityGroupIdsResponse)(nil),                               // 714: forge.FindNetworkSecurityGroupIdsResponse
-	(*FindNetworkSecurityGroupsByIdsRequest)(nil),                             // 715: forge.FindNetworkSecurityGroupsByIdsRequest
-	(*FindNetworkSecurityGroupsByIdsResponse)(nil),                            // 716: forge.FindNetworkSecurityGroupsByIdsResponse
-	(*UpdateNetworkSecurityGroupResponse)(nil),                                // 717: forge.UpdateNetworkSecurityGroupResponse
-	(*UpdateNetworkSecurityGroupRequest)(nil),                                 // 718: forge.UpdateNetworkSecurityGroupRequest
-	(*DeleteNetworkSecurityGroupRequest)(nil),                                 // 719: forge.DeleteNetworkSecurityGroupRequest
-	(*DeleteNetworkSecurityGroupResponse)(nil),                                // 720: forge.DeleteNetworkSecurityGroupResponse
-	(*NetworkSecurityGroupStatus)(nil),                                        // 721: forge.NetworkSecurityGroupStatus
-	(*NetworkSecurityGroupPropagationObjectStatus)(nil),                       // 722: forge.NetworkSecurityGroupPropagationObjectStatus
-	(*GetNetworkSecurityGroupPropagationStatusResponse)(nil),                  // 723: forge.GetNetworkSecurityGroupPropagationStatusResponse
-	(*NetworkSecurityGroupIdList)(nil),                                        // 724: forge.NetworkSecurityGroupIdList
-	(*GetNetworkSecurityGroupPropagationStatusRequest)(nil),                   // 725: forge.GetNetworkSecurityGroupPropagationStatusRequest
-	(*NetworkSecurityGroupRuleAttributes)(nil),                                // 726: forge.NetworkSecurityGroupRuleAttributes
-	(*ResolvedNetworkSecurityGroupRule)(nil),                                  // 727: forge.ResolvedNetworkSecurityGroupRule
-	(*GetNetworkSecurityGroupAttachmentsRequest)(nil),                         // 728: forge.GetNetworkSecurityGroupAttachmentsRequest
-	(*NetworkSecurityGroupAttachments)(nil),                                   // 729: forge.NetworkSecurityGroupAttachments
-	(*GetNetworkSecurityGroupAttachmentsResponse)(nil),                        // 730: forge.GetNetworkSecurityGroupAttachmentsResponse
-	(*GetDesiredFirmwareVersionsRequest)(nil),                                 // 731: forge.GetDesiredFirmwareVersionsRequest
-	(*GetDesiredFirmwareVersionsResponse)(nil),                                // 732: forge.GetDesiredFirmwareVersionsResponse
-	(*DesiredFirmwareVersionEntry)(nil),                                       // 733: forge.DesiredFirmwareVersionEntry
-	(*SkuComponentChassis)(nil),                                               // 734: forge.SkuComponentChassis
-	(*SkuComponentCpu)(nil),                                                   // 735: forge.SkuComponentCpu
-	(*SkuComponentGpu)(nil),                                                   // 736: forge.SkuComponentGpu
-	(*SkuComponentEthernetDevices)(nil),                                       // 737: forge.SkuComponentEthernetDevices
-	(*SkuComponentInfinibandDevices)(nil),                                     // 738: forge.SkuComponentInfinibandDevices
-	(*SkuComponentStorage)(nil),                                               // 739: forge.SkuComponentStorage
-	(*SkuComponentStorageController)(nil),                                     // 740: forge.SkuComponentStorageController
-	(*SkuComponentMemory)(nil),                                                // 741: forge.SkuComponentMemory
-	(*SkuComponentTpm)(nil),                                                   // 742: forge.SkuComponentTpm
-	(*SkuComponents)(nil),                                                     // 743: forge.SkuComponents
-	(*Sku)(nil),                                                               // 744: forge.Sku
-	(*SkuMachinePair)(nil),                                                    // 745: forge.SkuMachinePair
-	(*RemoveSkuRequest)(nil),                                                  // 746: forge.RemoveSkuRequest
-	(*SkuList)(nil),                                                           // 747: forge.SkuList
-	(*SkuIdList)(nil),                                                         // 748: forge.SkuIdList
-	(*SkuStatus)(nil),                                                         // 749: forge.SkuStatus
-	(*SkusByIdsRequest)(nil),                                                  // 750: forge.SkusByIdsRequest
-	(*SkuSearchFilter)(nil),                                                   // 751: forge.SkuSearchFilter
-	(*DpaInterface)(nil),                                                      // 752: forge.DpaInterface
-	(*DpaInterfaceCreationRequest)(nil),                                       // 753: forge.DpaInterfaceCreationRequest
-	(*DpaInterfaceIdList)(nil),                                                // 754: forge.DpaInterfaceIdList
-	(*DpaInterfacesByIdsRequest)(nil),                                         // 755: forge.DpaInterfacesByIdsRequest
-	(*DpaInterfaceList)(nil),                                                  // 756: forge.DpaInterfaceList
-	(*DpaNetworkObservationSetRequest)(nil),                                   // 757: forge.DpaNetworkObservationSetRequest
-	(*DpaInterfaceDeletionRequest)(nil),                                       // 758: forge.DpaInterfaceDeletionRequest
-	(*DpaInterfaceDeletionResult)(nil),                                        // 759: forge.DpaInterfaceDeletionResult
-	(*SkuUpdateMetadataRequest)(nil),                                          // 760: forge.SkuUpdateMetadataRequest
-	(*PowerOptionRequest)(nil),                                                // 761: forge.PowerOptionRequest
-	(*PowerOptionUpdateRequest)(nil),                                          // 762: forge.PowerOptionUpdateRequest
-	(*PowerOptions)(nil),                                                      // 763: forge.PowerOptions
-	(*PowerOptionResponse)(nil),                                               // 764: forge.PowerOptionResponse
-	(*ComputeAllocationAttributes)(nil),                                       // 765: forge.ComputeAllocationAttributes
-	(*ComputeAllocation)(nil),                                                 // 766: forge.ComputeAllocation
-	(*CreateComputeAllocationRequest)(nil),                                    // 767: forge.CreateComputeAllocationRequest
-	(*CreateComputeAllocationResponse)(nil),                                   // 768: forge.CreateComputeAllocationResponse
-	(*FindComputeAllocationIdsRequest)(nil),                                   // 769: forge.FindComputeAllocationIdsRequest
-	(*FindComputeAllocationIdsResponse)(nil),                                  // 770: forge.FindComputeAllocationIdsResponse
-	(*FindComputeAllocationsByIdsRequest)(nil),                                // 771: forge.FindComputeAllocationsByIdsRequest
-	(*FindComputeAllocationsByIdsResponse)(nil),                               // 772: forge.FindComputeAllocationsByIdsResponse
-	(*UpdateComputeAllocationResponse)(nil),                                   // 773: forge.UpdateComputeAllocationResponse
-	(*UpdateComputeAllocationRequest)(nil),                                    // 774: forge.UpdateComputeAllocationRequest
-	(*DeleteComputeAllocationRequest)(nil),                                    // 775: forge.DeleteComputeAllocationRequest
-	(*DeleteComputeAllocationResponse)(nil),                                   // 776: forge.DeleteComputeAllocationResponse
-	(*InstanceTypeAllocationStats)(nil),                                       // 777: forge.InstanceTypeAllocationStats
-	(*GetRackRequest)(nil),                                                    // 778: forge.GetRackRequest
-	(*GetRackResponse)(nil),                                                   // 779: forge.GetRackResponse
-	(*RackList)(nil),                                                          // 780: forge.RackList
-	(*RackSearchFilter)(nil),                                                  // 781: forge.RackSearchFilter
-	(*RackIdList)(nil),                                                        // 782: forge.RackIdList
-	(*RacksByIdsRequest)(nil),                                                 // 783: forge.RacksByIdsRequest
-	(*Rack)(nil),                                                              // 784: forge.Rack
-	(*RackConfig)(nil),                                                        // 785: forge.RackConfig
-	(*RackStatus)(nil),                                                        // 786: forge.RackStatus
-	(*RackStateHistoriesRequest)(nil),                                         // 787: forge.RackStateHistoriesRequest
-	(*RackHealthHistoriesRequest)(nil),                                        // 788: forge.RackHealthHistoriesRequest
-	(*DeleteRackRequest)(nil),                                                 // 789: forge.DeleteRackRequest
-	(*AdminForceDeleteRackRequest)(nil),                                       // 790: forge.AdminForceDeleteRackRequest
-	(*AdminForceDeleteRackResponse)(nil),                                      // 791: forge.AdminForceDeleteRackResponse
-	(*RackCapabilityCompute)(nil),                                             // 792: forge.RackCapabilityCompute
-	(*RackCapabilitySwitch)(nil),                                              // 793: forge.RackCapabilitySwitch
-	(*RackCapabilityPowerShelf)(nil),                                          // 794: forge.RackCapabilityPowerShelf
-	(*RackCapabilitiesSet)(nil),                                               // 795: forge.RackCapabilitiesSet
-	(*RackProfile)(nil),                                                       // 796: forge.RackProfile
-	(*GetRackProfileRequest)(nil),                                             // 797: forge.GetRackProfileRequest
-	(*GetRackProfileResponse)(nil),                                            // 798: forge.GetRackProfileResponse
-	(*ConfiguredRackProfile)(nil),                                             // 799: forge.ConfiguredRackProfile
-	(*ListRackProfilesResponse)(nil),                                          // 800: forge.ListRackProfilesResponse
-	(*RackManagerForgeRequest)(nil),                                           // 801: forge.RackManagerForgeRequest
-	(*RackManagerForgeResponse)(nil),                                          // 802: forge.RackManagerForgeResponse
-	(*MachineNVLinkInfo)(nil),                                                 // 803: forge.MachineNVLinkInfo
-	(*UpdateMachineNvLinkInfoRequest)(nil),                                    // 804: forge.UpdateMachineNvLinkInfoRequest
-	(*MachineSpxStatusObservation)(nil),                                       // 805: forge.MachineSpxStatusObservation
-	(*MachineSpxAttachmentStatusObservation)(nil),                             // 806: forge.MachineSpxAttachmentStatusObservation
-	(*AstraConfig)(nil),                                                       // 807: forge.AstraConfig
-	(*AstraAttachment)(nil),                                                   // 808: forge.AstraAttachment
-	(*AstraConfigStatus)(nil),                                                 // 809: forge.AstraConfigStatus
-	(*AstraAttachmentStatus)(nil),                                             // 810: forge.AstraAttachmentStatus
-	(*AstraStatus)(nil),                                                       // 811: forge.AstraStatus
-	(*NVLinkGpu)(nil),                                                         // 812: forge.NVLinkGpu
-	(*MachineNVLinkStatusObservation)(nil),                                    // 813: forge.MachineNVLinkStatusObservation
-	(*MachineNVLinkGpuStatusObservation)(nil),                                 // 814: forge.MachineNVLinkGpuStatusObservation
-	(*NmxcBrowseRequest)(nil),                                                 // 815: forge.NmxcBrowseRequest
-	(*NmxcBrowseResponse)(nil),                                                // 816: forge.NmxcBrowseResponse
-	(*NVLinkPartition)(nil),                                                   // 817: forge.NVLinkPartition
-	(*NVLinkPartitionList)(nil),                                               // 818: forge.NVLinkPartitionList
-	(*NVLinkPartitionSearchConfig)(nil),                                       // 819: forge.NVLinkPartitionSearchConfig
-	(*NVLinkPartitionQuery)(nil),                                              // 820: forge.NVLinkPartitionQuery
-	(*NVLinkPartitionSearchFilter)(nil),                                       // 821: forge.NVLinkPartitionSearchFilter
-	(*NVLinkPartitionsByIdsRequest)(nil),                                      // 822: forge.NVLinkPartitionsByIdsRequest
-	(*NVLinkPartitionIdList)(nil),                                             // 823: forge.NVLinkPartitionIdList
-	(*NVLinkFabricSearchFilter)(nil),                                          // 824: forge.NVLinkFabricSearchFilter
-	(*NVLinkLogicalPartitionConfig)(nil),                                      // 825: forge.NVLinkLogicalPartitionConfig
-	(*NVLinkLogicalPartitionStatus)(nil),                                      // 826: forge.NVLinkLogicalPartitionStatus
-	(*NVLinkLogicalPartition)(nil),                                            // 827: forge.NVLinkLogicalPartition
-	(*NVLinkLogicalPartitionList)(nil),                                        // 828: forge.NVLinkLogicalPartitionList
-	(*NVLinkLogicalPartitionCreationRequest)(nil),                             // 829: forge.NVLinkLogicalPartitionCreationRequest
-	(*NVLinkLogicalPartitionDeletionRequest)(nil),                             // 830: forge.NVLinkLogicalPartitionDeletionRequest
-	(*NVLinkLogicalPartitionDeletionResult)(nil),                              // 831: forge.NVLinkLogicalPartitionDeletionResult
-	(*NVLinkLogicalPartitionSearchFilter)(nil),                                // 832: forge.NVLinkLogicalPartitionSearchFilter
-	(*NVLinkLogicalPartitionsByIdsRequest)(nil),                               // 833: forge.NVLinkLogicalPartitionsByIdsRequest
-	(*NVLinkLogicalPartitionIdList)(nil),                                      // 834: forge.NVLinkLogicalPartitionIdList
-	(*NVLinkLogicalPartitionUpdateRequest)(nil),                               // 835: forge.NVLinkLogicalPartitionUpdateRequest
-	(*NVLinkLogicalPartitionUpdateResult)(nil),                                // 836: forge.NVLinkLogicalPartitionUpdateResult
-	(*CreateBmcUserRequest)(nil),                                              // 837: forge.CreateBmcUserRequest
-	(*CreateBmcUserResponse)(nil),                                             // 838: forge.CreateBmcUserResponse
-	(*DeleteBmcUserRequest)(nil),                                              // 839: forge.DeleteBmcUserRequest
-	(*DeleteBmcUserResponse)(nil),                                             // 840: forge.DeleteBmcUserResponse
-	(*SetBmcRootPasswordRequest)(nil),                                         // 841: forge.SetBmcRootPasswordRequest
-	(*SetBmcRootPasswordResponse)(nil),                                        // 842: forge.SetBmcRootPasswordResponse
-	(*ProbeBmcVendorRequest)(nil),                                             // 843: forge.ProbeBmcVendorRequest
-	(*ProbeBmcVendorResponse)(nil),                                            // 844: forge.ProbeBmcVendorResponse
-	(*SetFirmwareUpdateTimeWindowRequest)(nil),                                // 845: forge.SetFirmwareUpdateTimeWindowRequest
-	(*SetFirmwareUpdateTimeWindowResponse)(nil),                               // 846: forge.SetFirmwareUpdateTimeWindowResponse
-	(*UpsertHostFirmwareConfigRequest)(nil),                                   // 847: forge.UpsertHostFirmwareConfigRequest
-	(*DeleteHostFirmwareConfigRequest)(nil),                                   // 848: forge.DeleteHostFirmwareConfigRequest
-	(*UpsertHostFirmwareComponentConfig)(nil),                                 // 849: forge.UpsertHostFirmwareComponentConfig
-	(*HostFirmwareComponentConfigResponse)(nil),                               // 850: forge.HostFirmwareComponentConfigResponse
-	(*HostFirmwareVersionConfig)(nil),                                         // 851: forge.HostFirmwareVersionConfig
-	(*HostFirmwareArtifact)(nil),                                              // 852: forge.HostFirmwareArtifact
-	(*HostFirmwareConfigResponse)(nil),                                        // 853: forge.HostFirmwareConfigResponse
-	(*ListHostFirmwareRequest)(nil),                                           // 854: forge.ListHostFirmwareRequest
-	(*ListHostFirmwareResponse)(nil),                                          // 855: forge.ListHostFirmwareResponse
-	(*AvailableHostFirmware)(nil),                                             // 856: forge.AvailableHostFirmware
-	(*TrimTableRequest)(nil),                                                  // 857: forge.TrimTableRequest
-	(*TrimTableResponse)(nil),                                                 // 858: forge.TrimTableResponse
-	(*NvlinkNmxcEndpoint)(nil),                                                // 859: forge.NvlinkNmxcEndpoint
-	(*NvlinkNmxcEndpointList)(nil),                                            // 860: forge.NvlinkNmxcEndpointList
-	(*DeleteNvlinkNmxcEndpointRequest)(nil),                                   // 861: forge.DeleteNvlinkNmxcEndpointRequest
-	(*CreateRemediationRequest)(nil),                                          // 862: forge.CreateRemediationRequest
-	(*CreateRemediationResponse)(nil),                                         // 863: forge.CreateRemediationResponse
-	(*RemediationIdList)(nil),                                                 // 864: forge.RemediationIdList
-	(*RemediationList)(nil),                                                   // 865: forge.RemediationList
-	(*Remediation)(nil),                                                       // 866: forge.Remediation
-	(*ApproveRemediationRequest)(nil),                                         // 867: forge.ApproveRemediationRequest
-	(*RevokeRemediationRequest)(nil),                                          // 868: forge.RevokeRemediationRequest
-	(*EnableRemediationRequest)(nil),                                          // 869: forge.EnableRemediationRequest
-	(*DisableRemediationRequest)(nil),                                         // 870: forge.DisableRemediationRequest
-	(*FindAppliedRemediationIdsRequest)(nil),                                  // 871: forge.FindAppliedRemediationIdsRequest
-	(*AppliedRemediationIdList)(nil),                                          // 872: forge.AppliedRemediationIdList
-	(*FindAppliedRemediationsRequest)(nil),                                    // 873: forge.FindAppliedRemediationsRequest
-	(*AppliedRemediation)(nil),                                                // 874: forge.AppliedRemediation
-	(*AppliedRemediationList)(nil),                                            // 875: forge.AppliedRemediationList
-	(*GetNextRemediationForMachineRequest)(nil),                               // 876: forge.GetNextRemediationForMachineRequest
-	(*GetNextRemediationForMachineResponse)(nil),                              // 877: forge.GetNextRemediationForMachineResponse
-	(*RemediationAppliedRequest)(nil),                                         // 878: forge.RemediationAppliedRequest
-	(*RemediationApplicationStatus)(nil),                                      // 879: forge.RemediationApplicationStatus
-	(*SetPrimaryDpuRequest)(nil),                                              // 880: forge.SetPrimaryDpuRequest
-	(*SetPrimaryInterfaceRequest)(nil),                                        // 881: forge.SetPrimaryInterfaceRequest
-	(*UsernamePassword)(nil),                                                  // 882: forge.UsernamePassword
-	(*SessionToken)(nil),                                                      // 883: forge.SessionToken
-	(*DpuExtensionServiceCredential)(nil),                                     // 884: forge.DpuExtensionServiceCredential
-	(*DpuExtensionServiceVersionInfo)(nil),                                    // 885: forge.DpuExtensionServiceVersionInfo
-	(*DpuExtensionService)(nil),                                               // 886: forge.DpuExtensionService
-	(*CreateDpuExtensionServiceRequest)(nil),                                  // 887: forge.CreateDpuExtensionServiceRequest
-	(*UpdateDpuExtensionServiceRequest)(nil),                                  // 888: forge.UpdateDpuExtensionServiceRequest
-	(*DeleteDpuExtensionServiceRequest)(nil),                                  // 889: forge.DeleteDpuExtensionServiceRequest
-	(*DeleteDpuExtensionServiceResponse)(nil),                                 // 890: forge.DeleteDpuExtensionServiceResponse
-	(*DpuExtensionServiceSearchFilter)(nil),                                   // 891: forge.DpuExtensionServiceSearchFilter
-	(*DpuExtensionServiceIdList)(nil),                                         // 892: forge.DpuExtensionServiceIdList
-	(*DpuExtensionServicesByIdsRequest)(nil),                                  // 893: forge.DpuExtensionServicesByIdsRequest
-	(*DpuExtensionServiceList)(nil),                                           // 894: forge.DpuExtensionServiceList
-	(*GetDpuExtensionServiceVersionsInfoRequest)(nil),                         // 895: forge.GetDpuExtensionServiceVersionsInfoRequest
-	(*DpuExtensionServiceVersionInfoList)(nil),                                // 896: forge.DpuExtensionServiceVersionInfoList
-	(*FindInstancesByDpuExtensionServiceRequest)(nil),                         // 897: forge.FindInstancesByDpuExtensionServiceRequest
-	(*FindInstancesByDpuExtensionServiceResponse)(nil),                        // 898: forge.FindInstancesByDpuExtensionServiceResponse
-	(*InstanceDpuExtensionServiceInfo)(nil),                                   // 899: forge.InstanceDpuExtensionServiceInfo
-	(*DpuExtensionServiceObservabilityConfigPrometheus)(nil),                  // 900: forge.DpuExtensionServiceObservabilityConfigPrometheus
-	(*DpuExtensionServiceObservabilityConfigLogging)(nil),                     // 901: forge.DpuExtensionServiceObservabilityConfigLogging
-	(*DpuExtensionServiceObservabilityConfig)(nil),                            // 902: forge.DpuExtensionServiceObservabilityConfig
-	(*DpuExtensionServiceObservability)(nil),                                  // 903: forge.DpuExtensionServiceObservability
-	(*ScoutStreamApiBoundMessage)(nil),                                        // 904: forge.ScoutStreamApiBoundMessage
-	(*ScoutStreamScoutBoundMessage)(nil),                                      // 905: forge.ScoutStreamScoutBoundMessage
-	(*ScoutStreamInitRequest)(nil),                                            // 906: forge.ScoutStreamInitRequest
-	(*ScoutStreamShowConnectionsRequest)(nil),                                 // 907: forge.ScoutStreamShowConnectionsRequest
-	(*ScoutStreamShowConnectionsResponse)(nil),                                // 908: forge.ScoutStreamShowConnectionsResponse
-	(*ScoutStreamDisconnectRequest)(nil),                                      // 909: forge.ScoutStreamDisconnectRequest
-	(*ScoutStreamDisconnectResponse)(nil),                                     // 910: forge.ScoutStreamDisconnectResponse
-	(*ScoutStreamAdminPingRequest)(nil),                                       // 911: forge.ScoutStreamAdminPingRequest
-	(*ScoutStreamAdminPingResponse)(nil),                                      // 912: forge.ScoutStreamAdminPingResponse
-	(*ScoutStreamAgentPingRequest)(nil),                                       // 913: forge.ScoutStreamAgentPingRequest
-	(*ScoutStreamAgentPingResponse)(nil),                                      // 914: forge.ScoutStreamAgentPingResponse
-	(*ScoutStreamConnectionInfo)(nil),                                         // 915: forge.ScoutStreamConnectionInfo
-	(*ScoutStreamError)(nil),                                                  // 916: forge.ScoutStreamError
-	(*PrefixFilterPolicyEntry)(nil),                                           // 917: forge.PrefixFilterPolicyEntry
-	(*RoutingProfile)(nil),                                                    // 918: forge.RoutingProfile
-	(*DomainLegacy)(nil),                                                      // 919: forge.DomainLegacy
-	(*DomainListLegacy)(nil),                                                  // 920: forge.DomainListLegacy
-	(*DomainDeletionLegacy)(nil),                                              // 921: forge.DomainDeletionLegacy
-	(*DomainDeletionResultLegacy)(nil),                                        // 922: forge.DomainDeletionResultLegacy
-	(*DomainSearchQueryLegacy)(nil),                                           // 923: forge.DomainSearchQueryLegacy
-	(*PxeDomain)(nil),                                                         // 924: forge.PxeDomain
-	(*MachinePositionQuery)(nil),                                              // 925: forge.MachinePositionQuery
-	(*MachinePositionInfoList)(nil),                                           // 926: forge.MachinePositionInfoList
-	(*MachinePositionInfo)(nil),                                               // 927: forge.MachinePositionInfo
-	(*ModifyDPFStateRequest)(nil),                                             // 928: forge.ModifyDPFStateRequest
-	(*DPFStateResponse)(nil),                                                  // 929: forge.DPFStateResponse
-	(*GetDPFStateRequest)(nil),                                                // 930: forge.GetDPFStateRequest
-	(*GetDPFHostSnapshotRequest)(nil),                                         // 931: forge.GetDPFHostSnapshotRequest
-	(*DPFHostSnapshotResponse)(nil),                                           // 932: forge.DPFHostSnapshotResponse
-	(*GetDPFServiceVersionsRequest)(nil),                                      // 933: forge.GetDPFServiceVersionsRequest
-	(*DPFServiceVersion)(nil),                                                 // 934: forge.DPFServiceVersion
-	(*DPFServiceVersionsResponse)(nil),                                        // 935: forge.DPFServiceVersionsResponse
-	(*ReleaseDPUServiceSyncHoldRequest)(nil),                                  // 936: forge.ReleaseDPUServiceSyncHoldRequest
-	(*DPUServiceSyncReleaseResult)(nil),                                       // 937: forge.DPUServiceSyncReleaseResult
-	(*ReleaseDPUServiceSyncHoldResponse)(nil),                                 // 938: forge.ReleaseDPUServiceSyncHoldResponse
-	(*FindPendingDPUServiceSyncIdsRequest)(nil),                               // 939: forge.FindPendingDPUServiceSyncIdsRequest
-	(*FindPendingDPUServiceSyncsByIdsRequest)(nil),                            // 940: forge.FindPendingDPUServiceSyncsByIdsRequest
-	(*ListDPUServiceSyncHistoryRequest)(nil),                                  // 941: forge.ListDPUServiceSyncHistoryRequest
-	(*PendingDPUServiceSync)(nil),                                             // 942: forge.PendingDPUServiceSync
-	(*ListPendingDPUServiceSyncsResponse)(nil),                                // 943: forge.ListPendingDPUServiceSyncsResponse
-	(*ComponentResult)(nil),                                                   // 944: forge.ComponentResult
-	(*SwitchIdList)(nil),                                                      // 945: forge.SwitchIdList
-	(*PowerShelfIdList)(nil),                                                  // 946: forge.PowerShelfIdList
-	(*MacAddressList)(nil),                                                    // 947: forge.MacAddressList
-	(*GetComponentInventoryRequest)(nil),                                      // 948: forge.GetComponentInventoryRequest
-	(*ComponentInventoryEntry)(nil),                                           // 949: forge.ComponentInventoryEntry
-	(*GetComponentInventoryResponse)(nil),                                     // 950: forge.GetComponentInventoryResponse
-	(*ComponentPowerControlRequest)(nil),                                      // 951: forge.ComponentPowerControlRequest
-	(*ComponentPowerControlResponse)(nil),                                     // 952: forge.ComponentPowerControlResponse
-	(*ComponentConfigureSwitchCertificateRequest)(nil),                        // 953: forge.ComponentConfigureSwitchCertificateRequest
-	(*ComponentConfigureSwitchCertificateResponse)(nil),                       // 954: forge.ComponentConfigureSwitchCertificateResponse
-	(*FirmwareUpdateStatus)(nil),                                              // 955: forge.FirmwareUpdateStatus
-	(*UpdateComputeTrayFirmwareTarget)(nil),                                   // 956: forge.UpdateComputeTrayFirmwareTarget
-	(*UpdateSwitchFirmwareTarget)(nil),                                        // 957: forge.UpdateSwitchFirmwareTarget
-	(*UpdatePowerShelfFirmwareTarget)(nil),                                    // 958: forge.UpdatePowerShelfFirmwareTarget
-	(*UpdateFirmwareObjectTarget)(nil),                                        // 959: forge.UpdateFirmwareObjectTarget
-	(*UpdateComponentFirmwareRequest)(nil),                                    // 960: forge.UpdateComponentFirmwareRequest
-	(*UpdateComponentFirmwareResponse)(nil),                                   // 961: forge.UpdateComponentFirmwareResponse
-	(*GetComponentFirmwareStatusRequest)(nil),                                 // 962: forge.GetComponentFirmwareStatusRequest
-	(*GetComponentFirmwareStatusResponse)(nil),                                // 963: forge.GetComponentFirmwareStatusResponse
-	(*ListComponentFirmwareVersionsRequest)(nil),                              // 964: forge.ListComponentFirmwareVersionsRequest
-	(*ComputeTrayFirmwareVersions)(nil),                                       // 965: forge.ComputeTrayFirmwareVersions
-	(*DeviceFirmwareVersions)(nil),                                            // 966: forge.DeviceFirmwareVersions
-	(*ListComponentFirmwareVersionsResponse)(nil),                             // 967: forge.ListComponentFirmwareVersionsResponse
-	(*SpxPartitionCreationRequest)(nil),                                       // 968: forge.SpxPartitionCreationRequest
-	(*SpxPartition)(nil),                                                      // 969: forge.SpxPartition
-	(*SpxPartitionIdList)(nil),                                                // 970: forge.SpxPartitionIdList
-	(*SpxPartitionDeletionRequest)(nil),                                       // 971: forge.SpxPartitionDeletionRequest
-	(*SpxPartitionDeletionResult)(nil),                                        // 972: forge.SpxPartitionDeletionResult
-	(*SpxPartitionSearchFilter)(nil),                                          // 973: forge.SpxPartitionSearchFilter
-	(*SpxPartitionList)(nil),                                                  // 974: forge.SpxPartitionList
-	(*SpxPartitionsByIdsRequest)(nil),                                         // 975: forge.SpxPartitionsByIdsRequest
-	(*AdminForceDeleteSwitchRequest)(nil),                                     // 976: forge.AdminForceDeleteSwitchRequest
-	(*AdminForceDeleteSwitchResponse)(nil),                                    // 977: forge.AdminForceDeleteSwitchResponse
-	(*AdminForceDeletePowerShelfRequest)(nil),                                 // 978: forge.AdminForceDeletePowerShelfRequest
-	(*AdminForceDeletePowerShelfResponse)(nil),                                // 979: forge.AdminForceDeletePowerShelfResponse
-	(*OperatingSystem)(nil),                                                   // 980: forge.OperatingSystem
-	(*CreateOperatingSystemRequest)(nil),                                      // 981: forge.CreateOperatingSystemRequest
-	(*IpxeTemplateParameters)(nil),                                            // 982: forge.IpxeTemplateParameters
-	(*IpxeTemplateArtifacts)(nil),                                             // 983: forge.IpxeTemplateArtifacts
-	(*UpdateOperatingSystemRequest)(nil),                                      // 984: forge.UpdateOperatingSystemRequest
-	(*DeleteOperatingSystemRequest)(nil),                                      // 985: forge.DeleteOperatingSystemRequest
-	(*DeleteOperatingSystemResponse)(nil),                                     // 986: forge.DeleteOperatingSystemResponse
-	(*OperatingSystemSearchFilter)(nil),                                       // 987: forge.OperatingSystemSearchFilter
-	(*OperatingSystemIdList)(nil),                                             // 988: forge.OperatingSystemIdList
-	(*OperatingSystemsByIdsRequest)(nil),                                      // 989: forge.OperatingSystemsByIdsRequest
-	(*OperatingSystemList)(nil),                                               // 990: forge.OperatingSystemList
-	(*GetOperatingSystemCachableIpxeTemplateArtifactsRequest)(nil),            // 991: forge.GetOperatingSystemCachableIpxeTemplateArtifactsRequest
-	(*IpxeTemplateArtifactList)(nil),                                          // 992: forge.IpxeTemplateArtifactList
-	(*IpxeTemplateArtifactUpdateRequest)(nil),                                 // 993: forge.IpxeTemplateArtifactUpdateRequest
-	(*UpdateOperatingSystemIpxeTemplateArtifactRequest)(nil),                  // 994: forge.UpdateOperatingSystemIpxeTemplateArtifactRequest
-	(*ReWrapSecretsRequest)(nil),                                              // 995: forge.ReWrapSecretsRequest
-	(*ReWrapSecretsResponse)(nil),                                             // 996: forge.ReWrapSecretsResponse
-	(*GetMachineBootInterfacesRequest)(nil),                                   // 997: forge.GetMachineBootInterfacesRequest
-	(*MachineBootInterface)(nil),                                              // 998: forge.MachineBootInterface
-	(*MachineInterfaceBootInterface)(nil),                                     // 999: forge.MachineInterfaceBootInterface
-	(*PredictedBootInterface)(nil),                                            // 1000: forge.PredictedBootInterface
-	(*ExploredBootInterface)(nil),                                             // 1001: forge.ExploredBootInterface
-	(*RetainedBootInterface)(nil),                                             // 1002: forge.RetainedBootInterface
-	(*GetMachineBootInterfacesResponse)(nil),                                  // 1003: forge.GetMachineBootInterfacesResponse
-	(*GetContainerRegistryCredentialRequest)(nil),                             // 1004: forge.GetContainerRegistryCredentialRequest
-	(*GetContainerRegistryCredentialResponse)(nil),                            // 1005: forge.GetContainerRegistryCredentialResponse
-	(*SetContainerRegistryCredentialRequest)(nil),                             // 1006: forge.SetContainerRegistryCredentialRequest
-	(*SitePrefix)(nil),                                                        // 1007: forge.SitePrefix
-	(*SitePrefixConfig)(nil),                                                  // 1008: forge.SitePrefixConfig
-	(*SitePrefixStatus)(nil),                                                  // 1009: forge.SitePrefixStatus
-	(*SitePrefixQuotaUsage)(nil),                                              // 1010: forge.SitePrefixQuotaUsage
-	(*SitePrefixCreationRequest)(nil),                                         // 1011: forge.SitePrefixCreationRequest
-	(*SitePrefixUpdateRequest)(nil),                                           // 1012: forge.SitePrefixUpdateRequest
-	(*SitePrefixDeletionRequest)(nil),                                         // 1013: forge.SitePrefixDeletionRequest
-	(*SitePrefixDeletionResult)(nil),                                          // 1014: forge.SitePrefixDeletionResult
-	(*SitePrefixStateHistoriesRequest)(nil),                                   // 1015: forge.SitePrefixStateHistoriesRequest
-	(*SitePrefixSearchFilter)(nil),                                            // 1016: forge.SitePrefixSearchFilter
-	(*SitePrefixesByIdsRequest)(nil),                                          // 1017: forge.SitePrefixesByIdsRequest
-	(*SitePrefixIdList)(nil),                                                  // 1018: forge.SitePrefixIdList
-	(*SitePrefixList)(nil),                                                    // 1019: forge.SitePrefixList
-	(*InterfaceAddressConfig)(nil),                                            // 1020: forge.InterfaceAddressConfig
-	(*VpcReleaseInactiveVniRequest)(nil),                                      // 1021: forge.VpcReleaseInactiveVniRequest
-	(*VpcReleaseInactiveVniResult)(nil),                                       // 1022: forge.VpcReleaseInactiveVniResult
-	(*VpcRoutingStateRequest)(nil),                                            // 1023: forge.VpcRoutingStateRequest
-	(*VpcRoutingState)(nil),                                                   // 1024: forge.VpcRoutingState
-	(*VpcRetainedVniAllocation)(nil),                                          // 1025: forge.VpcRetainedVniAllocation
-	(*VpcChangeRoutingProfileRequest)(nil),                                    // 1026: forge.VpcChangeRoutingProfileRequest
-	nil,                                                                       // 1027: forge.RuntimeConfig.DpuNicFirmwareUpdateVersionEntry
-	(*DNSMessage_DNSQuestion)(nil),                                            // 1028: forge.DNSMessage.DNSQuestion
-	(*DNSMessage_DNSResponse)(nil),                                            // 1029: forge.DNSMessage.DNSResponse
-	(*DNSMessage_DNSResponse_DNSRR)(nil),                                      // 1030: forge.DNSMessage.DNSResponse.DNSRR
-	nil,                                                                       // 1031: forge.FabricManagerConfig.ConfigMapEntry
-	nil,                                                                       // 1032: forge.StateHistories.HistoriesEntry
-	nil,                                                                       // 1033: forge.MachineStateHistories.HistoriesEntry
-	nil,                                                                       // 1034: forge.HealthHistories.HistoriesEntry
-	(*MachineCredentialsUpdateRequest_Credentials)(nil),                       // 1035: forge.MachineCredentialsUpdateRequest.Credentials
-	(*ForgeAgentControlResponse_ForgeAgentControlExtraInfo)(nil),              // 1036: forge.ForgeAgentControlResponse.ForgeAgentControlExtraInfo
-	(*ForgeAgentControlResponse_Noop)(nil),                                    // 1037: forge.ForgeAgentControlResponse.Noop
-	(*ForgeAgentControlResponse_Reset)(nil),                                   // 1038: forge.ForgeAgentControlResponse.Reset
-	(*ForgeAgentControlResponse_Discovery)(nil),                               // 1039: forge.ForgeAgentControlResponse.Discovery
-	(*ForgeAgentControlResponse_Rebuild)(nil),                                 // 1040: forge.ForgeAgentControlResponse.Rebuild
-	(*ForgeAgentControlResponse_Retry)(nil),                                   // 1041: forge.ForgeAgentControlResponse.Retry
-	(*ForgeAgentControlResponse_Measure)(nil),                                 // 1042: forge.ForgeAgentControlResponse.Measure
-	(*ForgeAgentControlResponse_LogError)(nil),                                // 1043: forge.ForgeAgentControlResponse.LogError
-	(*ForgeAgentControlResponse_MachineValidation)(nil),                       // 1044: forge.ForgeAgentControlResponse.MachineValidation
-	(*ForgeAgentControlResponse_MachineValidationFilter)(nil),                 // 1045: forge.ForgeAgentControlResponse.MachineValidationFilter
-	(*ForgeAgentControlResponse_MlxAction)(nil),                               // 1046: forge.ForgeAgentControlResponse.MlxAction
-	(*ForgeAgentControlResponse_MlxDeviceAction)(nil),                         // 1047: forge.ForgeAgentControlResponse.MlxDeviceAction
-	(*ForgeAgentControlResponse_MlxDeviceNoop)(nil),                           // 1048: forge.ForgeAgentControlResponse.MlxDeviceNoop
-	(*ForgeAgentControlResponse_MlxDeviceLock)(nil),                           // 1049: forge.ForgeAgentControlResponse.MlxDeviceLock
-	(*ForgeAgentControlResponse_MlxDeviceUnlock)(nil),                         // 1050: forge.ForgeAgentControlResponse.MlxDeviceUnlock
-	(*ForgeAgentControlResponse_MlxDeviceApplyProfile)(nil),                   // 1051: forge.ForgeAgentControlResponse.MlxDeviceApplyProfile
-	(*ForgeAgentControlResponse_MlxDeviceApplyFirmware)(nil),                  // 1052: forge.ForgeAgentControlResponse.MlxDeviceApplyFirmware
-	(*ForgeAgentControlResponse_FirmwareUpgrade)(nil),                         // 1053: forge.ForgeAgentControlResponse.FirmwareUpgrade
-	(*ForgeAgentControlResponse_ForgeAgentControlExtraInfo_KeyValuePair)(nil), // 1054: forge.ForgeAgentControlResponse.ForgeAgentControlExtraInfo.KeyValuePair
-	(*MachineCleanupInfo_CleanupStepResult)(nil),                              // 1055: forge.MachineCleanupInfo.CleanupStepResult
-	(*DpuReprovisioningListResponse_DpuReprovisioningListItem)(nil),           // 1056: forge.DpuReprovisioningListResponse.DpuReprovisioningListItem
-	(*HostReprovisioningListResponse_HostReprovisioningListItem)(nil),         // 1057: forge.HostReprovisioningListResponse.HostReprovisioningListItem
-	(*MachineValidationTestUpdateRequest_Payload)(nil),                        // 1058: forge.MachineValidationTestUpdateRequest.Payload
-	nil,                               // 1059: forge.RedfishBrowseResponse.HeadersEntry
-	nil,                               // 1060: forge.RedfishActionResult.HeadersEntry
-	nil,                               // 1061: forge.UfmBrowseResponse.HeadersEntry
-	nil,                               // 1062: forge.DesiredFirmwareVersionEntry.ComponentVersionsEntry
-	nil,                               // 1063: forge.NmxcBrowseResponse.HeadersEntry
-	(*DPFStateResponse_DPFState)(nil), // 1064: forge.DPFStateResponse.DPFState
-	(*GetMachineBootInterfacesResponse_Reconciliation)(nil), // 1065: forge.GetMachineBootInterfacesResponse.Reconciliation
-	(*MachineId)(nil),                                    // 1066: common.MachineId
-	(*timestamppb.Timestamp)(nil),                        // 1067: google.protobuf.Timestamp
-	(*VpcId)(nil),                                        // 1068: common.VpcId
-	(*RouteTargets)(nil),                                 // 1069: common.RouteTargets
-	(*RouteTarget)(nil),                                  // 1070: common.RouteTarget
-	(*NVLinkLogicalPartitionId)(nil),                     // 1071: common.NVLinkLogicalPartitionId
-	(*VpcPrefixId)(nil),                                  // 1072: common.VpcPrefixId
-	(*SitePrefixId)(nil),                                 // 1073: common.SitePrefixId
-	(*VpcPeeringId)(nil),                                 // 1074: common.VpcPeeringId
-	(*IBPartitionId)(nil),                                // 1075: common.IBPartitionId
-	(*HealthReport)(nil),                                 // 1076: health.HealthReport
-	(*PowerShelfId)(nil),                                 // 1077: common.PowerShelfId
-	(*RackId)(nil),                                       // 1078: common.RackId
-	(*NVLinkDomainId)(nil),                               // 1079: common.NVLinkDomainId
-	(*UUID)(nil),                                         // 1080: common.UUID
-	(*SwitchId)(nil),                                     // 1081: common.SwitchId
-	(*RackProfileId)(nil),                                // 1082: common.RackProfileId
-	(*DomainId)(nil),                                     // 1083: common.DomainId
-	(*NetworkSegmentId)(nil),                             // 1084: common.NetworkSegmentId
-	(*NetworkPrefixId)(nil),                              // 1085: common.NetworkPrefixId
-	(*InstanceId)(nil),                                   // 1086: common.InstanceId
-	(*IpxeTemplateId)(nil),                               // 1087: common.IpxeTemplateId
-	(*OperatingSystemId)(nil),                            // 1088: common.OperatingSystemId
-	(*SpxPartitionId)(nil),                               // 1089: common.SpxPartitionId
-	(*MachineInterfaceId)(nil),                           // 1090: common.MachineInterfaceId
-	(*DiscoveryInfo)(nil),                                // 1091: machine_discovery.DiscoveryInfo
-	(*durationpb.Duration)(nil),                          // 1092: google.protobuf.Duration
-	(*StringList)(nil),                                   // 1093: common.StringList
-	(*Gpu)(nil),                                          // 1094: machine_discovery.Gpu
-	(*DeviceId)(nil),                                     // 1095: common.DeviceId
-	(*MachineValidationId)(nil),                          // 1096: common.MachineValidationId
-	(*Uint32List)(nil),                                   // 1097: common.Uint32List
-	(*DpaInterfaceId)(nil),                               // 1098: common.DpaInterfaceId
-	(*ComputeAllocationId)(nil),                          // 1099: common.ComputeAllocationId
-	(*RackHardwareType)(nil),                             // 1100: common.RackHardwareType
-	(*NVLinkPartitionId)(nil),                            // 1101: common.NVLinkPartitionId
-	(*RemediationId)(nil),                                // 1102: common.RemediationId
-	(*MlxDeviceLockdownResponse)(nil),                    // 1103: mlx_device.MlxDeviceLockdownResponse
-	(*MlxDeviceProfileSyncResponse)(nil),                 // 1104: mlx_device.MlxDeviceProfileSyncResponse
-	(*MlxDeviceProfileCompareResponse)(nil),              // 1105: mlx_device.MlxDeviceProfileCompareResponse
-	(*MlxDeviceInfoDeviceResponse)(nil),                  // 1106: mlx_device.MlxDeviceInfoDeviceResponse
-	(*MlxDeviceInfoReportResponse)(nil),                  // 1107: mlx_device.MlxDeviceInfoReportResponse
-	(*MlxDeviceRegistryListResponse)(nil),                // 1108: mlx_device.MlxDeviceRegistryListResponse
-	(*MlxDeviceRegistryShowResponse)(nil),                // 1109: mlx_device.MlxDeviceRegistryShowResponse
-	(*MlxDeviceConfigQueryResponse)(nil),                 // 1110: mlx_device.MlxDeviceConfigQueryResponse
-	(*MlxDeviceConfigSetResponse)(nil),                   // 1111: mlx_device.MlxDeviceConfigSetResponse
-	(*MlxDeviceConfigSyncResponse)(nil),                  // 1112: mlx_device.MlxDeviceConfigSyncResponse
-	(*MlxDeviceConfigCompareResponse)(nil),               // 1113: mlx_device.MlxDeviceConfigCompareResponse
-	(*MlxDeviceLockdownLockRequest)(nil),                 // 1114: mlx_device.MlxDeviceLockdownLockRequest
-	(*MlxDeviceLockdownUnlockRequest)(nil),               // 1115: mlx_device.MlxDeviceLockdownUnlockRequest
-	(*MlxDeviceLockdownStatusRequest)(nil),               // 1116: mlx_device.MlxDeviceLockdownStatusRequest
-	(*MlxDeviceProfileSyncRequest)(nil),                  // 1117: mlx_device.MlxDeviceProfileSyncRequest
-	(*MlxDeviceProfileCompareRequest)(nil),               // 1118: mlx_device.MlxDeviceProfileCompareRequest
-	(*MlxDeviceInfoDeviceRequest)(nil),                   // 1119: mlx_device.MlxDeviceInfoDeviceRequest
-	(*MlxDeviceInfoReportRequest)(nil),                   // 1120: mlx_device.MlxDeviceInfoReportRequest
-	(*MlxDeviceRegistryListRequest)(nil),                 // 1121: mlx_device.MlxDeviceRegistryListRequest
-	(*MlxDeviceRegistryShowRequest)(nil),                 // 1122: mlx_device.MlxDeviceRegistryShowRequest
-	(*MlxDeviceConfigQueryRequest)(nil),                  // 1123: mlx_device.MlxDeviceConfigQueryRequest
-	(*MlxDeviceConfigSetRequest)(nil),                    // 1124: mlx_device.MlxDeviceConfigSetRequest
-	(*MlxDeviceConfigSyncRequest)(nil),                   // 1125: mlx_device.MlxDeviceConfigSyncRequest
-	(*MlxDeviceConfigCompareRequest)(nil),                // 1126: mlx_device.MlxDeviceConfigCompareRequest
-	(*Domain)(nil),                                       // 1127: dns.Domain
-	(*MachineIdList)(nil),                                // 1128: common.MachineIdList
-	(*EndpointExplorationReport)(nil),                    // 1129: site_explorer.EndpointExplorationReport
-	(SystemPowerControl)(0),                              // 1130: common.SystemPowerControl
-	(*SerializableMlxConfigProfile)(nil),                 // 1131: mlx_device.SerializableMlxConfigProfile
-	(*FirmwareFlasherProfile)(nil),                       // 1132: mlx_device.FirmwareFlasherProfile
-	(*ScoutFirmwareUpgradeTask)(nil),                     // 1133: scout_firmware_upgrade.ScoutFirmwareUpgradeTask
-	(*CreateDomainRequest)(nil),                          // 1134: dns.CreateDomainRequest
-	(*UpdateDomainRequest)(nil),                          // 1135: dns.UpdateDomainRequest
-	(*DomainDeletionRequest)(nil),                        // 1136: dns.DomainDeletionRequest
-	(*DomainSearchQuery)(nil),                            // 1137: dns.DomainSearchQuery
-	(*DnsResourceRecordLookupRequest)(nil),               // 1138: dns.DnsResourceRecordLookupRequest
-	(*GetAllDomainsRequest)(nil),                         // 1139: dns.GetAllDomainsRequest
-	(*DomainMetadataRequest)(nil),                        // 1140: dns.DomainMetadataRequest
-	(*emptypb.Empty)(nil),                                // 1141: google.protobuf.Empty
-	(*ExploredEndpointSearchFilter)(nil),                 // 1142: site_explorer.ExploredEndpointSearchFilter
-	(*ExploredEndpointsByIdsRequest)(nil),                // 1143: site_explorer.ExploredEndpointsByIdsRequest
-	(*ExploredManagedHostSearchFilter)(nil),              // 1144: site_explorer.ExploredManagedHostSearchFilter
-	(*ExploredManagedHostsByIdsRequest)(nil),             // 1145: site_explorer.ExploredManagedHostsByIdsRequest
-	(*ExploredMlxDeviceHostSearchFilter)(nil),            // 1146: site_explorer.ExploredMlxDeviceHostSearchFilter
-	(*ExploredMlxDevicesByIdsRequest)(nil),               // 1147: site_explorer.ExploredMlxDevicesByIdsRequest
-	(*CreateMeasurementBundleRequest)(nil),               // 1148: measured_boot.CreateMeasurementBundleRequest
-	(*DeleteMeasurementBundleRequest)(nil),               // 1149: measured_boot.DeleteMeasurementBundleRequest
-	(*RenameMeasurementBundleRequest)(nil),               // 1150: measured_boot.RenameMeasurementBundleRequest
-	(*UpdateMeasurementBundleRequest)(nil),               // 1151: measured_boot.UpdateMeasurementBundleRequest
-	(*ShowMeasurementBundleRequest)(nil),                 // 1152: measured_boot.ShowMeasurementBundleRequest
-	(*ShowMeasurementBundlesRequest)(nil),                // 1153: measured_boot.ShowMeasurementBundlesRequest
-	(*ListMeasurementBundlesRequest)(nil),                // 1154: measured_boot.ListMeasurementBundlesRequest
-	(*ListMeasurementBundleMachinesRequest)(nil),         // 1155: measured_boot.ListMeasurementBundleMachinesRequest
-	(*FindClosestBundleMatchRequest)(nil),                // 1156: measured_boot.FindClosestBundleMatchRequest
-	(*DeleteMeasurementJournalRequest)(nil),              // 1157: measured_boot.DeleteMeasurementJournalRequest
-	(*ShowMeasurementJournalRequest)(nil),                // 1158: measured_boot.ShowMeasurementJournalRequest
-	(*ShowMeasurementJournalsRequest)(nil),               // 1159: measured_boot.ShowMeasurementJournalsRequest
-	(*ListMeasurementJournalRequest)(nil),                // 1160: measured_boot.ListMeasurementJournalRequest
-	(*AttestCandidateMachineRequest)(nil),                // 1161: measured_boot.AttestCandidateMachineRequest
-	(*ShowCandidateMachineRequest)(nil),                  // 1162: measured_boot.ShowCandidateMachineRequest
-	(*ShowCandidateMachinesRequest)(nil),                 // 1163: measured_boot.ShowCandidateMachinesRequest
-	(*ListCandidateMachinesRequest)(nil),                 // 1164: measured_boot.ListCandidateMachinesRequest
-	(*CreateMeasurementSystemProfileRequest)(nil),        // 1165: measured_boot.CreateMeasurementSystemProfileRequest
-	(*DeleteMeasurementSystemProfileRequest)(nil),        // 1166: measured_boot.DeleteMeasurementSystemProfileRequest
-	(*RenameMeasurementSystemProfileRequest)(nil),        // 1167: measured_boot.RenameMeasurementSystemProfileRequest
-	(*ShowMeasurementSystemProfileRequest)(nil),          // 1168: measured_boot.ShowMeasurementSystemProfileRequest
-	(*ShowMeasurementSystemProfilesRequest)(nil),         // 1169: measured_boot.ShowMeasurementSystemProfilesRequest
-	(*ListMeasurementSystemProfilesRequest)(nil),         // 1170: measured_boot.ListMeasurementSystemProfilesRequest
-	(*ListMeasurementSystemProfileBundlesRequest)(nil),   // 1171: measured_boot.ListMeasurementSystemProfileBundlesRequest
-	(*ListMeasurementSystemProfileMachinesRequest)(nil),  // 1172: measured_boot.ListMeasurementSystemProfileMachinesRequest
-	(*CreateMeasurementReportRequest)(nil),               // 1173: measured_boot.CreateMeasurementReportRequest
-	(*DeleteMeasurementReportRequest)(nil),               // 1174: measured_boot.DeleteMeasurementReportRequest
-	(*PromoteMeasurementReportRequest)(nil),              // 1175: measured_boot.PromoteMeasurementReportRequest
-	(*RevokeMeasurementReportRequest)(nil),               // 1176: measured_boot.RevokeMeasurementReportRequest
-	(*ShowMeasurementReportForIdRequest)(nil),            // 1177: measured_boot.ShowMeasurementReportForIdRequest
-	(*ShowMeasurementReportsForMachineRequest)(nil),      // 1178: measured_boot.ShowMeasurementReportsForMachineRequest
-	(*ShowMeasurementReportsRequest)(nil),                // 1179: measured_boot.ShowMeasurementReportsRequest
-	(*ListMeasurementReportRequest)(nil),                 // 1180: measured_boot.ListMeasurementReportRequest
-	(*MatchMeasurementReportRequest)(nil),                // 1181: measured_boot.MatchMeasurementReportRequest
-	(*ImportSiteMeasurementsRequest)(nil),                // 1182: measured_boot.ImportSiteMeasurementsRequest
-	(*ExportSiteMeasurementsRequest)(nil),                // 1183: measured_boot.ExportSiteMeasurementsRequest
-	(*AddMeasurementTrustedMachineRequest)(nil),          // 1184: measured_boot.AddMeasurementTrustedMachineRequest
-	(*RemoveMeasurementTrustedMachineRequest)(nil),       // 1185: measured_boot.RemoveMeasurementTrustedMachineRequest
-	(*AddMeasurementTrustedProfileRequest)(nil),          // 1186: measured_boot.AddMeasurementTrustedProfileRequest
-	(*RemoveMeasurementTrustedProfileRequest)(nil),       // 1187: measured_boot.RemoveMeasurementTrustedProfileRequest
-	(*ListMeasurementTrustedMachinesRequest)(nil),        // 1188: measured_boot.ListMeasurementTrustedMachinesRequest
-	(*ListMeasurementTrustedProfilesRequest)(nil),        // 1189: measured_boot.ListMeasurementTrustedProfilesRequest
-	(*ListAttestationSummaryRequest)(nil),                // 1190: measured_boot.ListAttestationSummaryRequest
-	(*PublishMlxDeviceReportRequest)(nil),                // 1191: mlx_device.PublishMlxDeviceReportRequest
-	(*PublishMlxObservationReportRequest)(nil),           // 1192: mlx_device.PublishMlxObservationReportRequest
-	(*MlxAdminProfileSyncRequest)(nil),                   // 1193: mlx_device.MlxAdminProfileSyncRequest
-	(*MlxAdminProfileShowRequest)(nil),                   // 1194: mlx_device.MlxAdminProfileShowRequest
-	(*MlxAdminProfileCompareRequest)(nil),                // 1195: mlx_device.MlxAdminProfileCompareRequest
-	(*MlxAdminProfileListRequest)(nil),                   // 1196: mlx_device.MlxAdminProfileListRequest
-	(*MlxAdminLockdownLockRequest)(nil),                  // 1197: mlx_device.MlxAdminLockdownLockRequest
-	(*MlxAdminLockdownUnlockRequest)(nil),                // 1198: mlx_device.MlxAdminLockdownUnlockRequest
-	(*MlxAdminLockdownStatusRequest)(nil),                // 1199: mlx_device.MlxAdminLockdownStatusRequest
-	(*MlxAdminDeviceInfoRequest)(nil),                    // 1200: mlx_device.MlxAdminDeviceInfoRequest
-	(*MlxAdminDeviceReportRequest)(nil),                  // 1201: mlx_device.MlxAdminDeviceReportRequest
-	(*MlxAdminRegistryListRequest)(nil),                  // 1202: mlx_device.MlxAdminRegistryListRequest
-	(*MlxAdminRegistryShowRequest)(nil),                  // 1203: mlx_device.MlxAdminRegistryShowRequest
-	(*MlxAdminConfigQueryRequest)(nil),                   // 1204: mlx_device.MlxAdminConfigQueryRequest
-	(*MlxAdminConfigSetRequest)(nil),                     // 1205: mlx_device.MlxAdminConfigSetRequest
-	(*MlxAdminConfigSyncRequest)(nil),                    // 1206: mlx_device.MlxAdminConfigSyncRequest
-	(*MlxAdminConfigCompareRequest)(nil),                 // 1207: mlx_device.MlxAdminConfigCompareRequest
-	(*DomainDeletionResult)(nil),                         // 1208: dns.DomainDeletionResult
-	(*DomainList)(nil),                                   // 1209: dns.DomainList
-	(*DnsResourceRecordLookupResponse)(nil),              // 1210: dns.DnsResourceRecordLookupResponse
-	(*GetAllDomainsResponse)(nil),                        // 1211: dns.GetAllDomainsResponse
-	(*DomainMetadataResponse)(nil),                       // 1212: dns.DomainMetadataResponse
-	(*SiteExplorationReport)(nil),                        // 1213: site_explorer.SiteExplorationReport
-	(*SiteExplorerLastRunResponse)(nil),                  // 1214: site_explorer.SiteExplorerLastRunResponse
-	(*ExploredEndpoint)(nil),                             // 1215: site_explorer.ExploredEndpoint
-	(*ExploredEndpointIdList)(nil),                       // 1216: site_explorer.ExploredEndpointIdList
-	(*ExploredEndpointList)(nil),                         // 1217: site_explorer.ExploredEndpointList
-	(*ExploredManagedHostIdList)(nil),                    // 1218: site_explorer.ExploredManagedHostIdList
-	(*ExploredManagedHostList)(nil),                      // 1219: site_explorer.ExploredManagedHostList
-	(*ExploredMlxDeviceHostIdList)(nil),                  // 1220: site_explorer.ExploredMlxDeviceHostIdList
-	(*ExploredMlxDeviceList)(nil),                        // 1221: site_explorer.ExploredMlxDeviceList
-	(*CreateMeasurementBundleResponse)(nil),              // 1222: measured_boot.CreateMeasurementBundleResponse
-	(*DeleteMeasurementBundleResponse)(nil),              // 1223: measured_boot.DeleteMeasurementBundleResponse
-	(*RenameMeasurementBundleResponse)(nil),              // 1224: measured_boot.RenameMeasurementBundleResponse
-	(*UpdateMeasurementBundleResponse)(nil),              // 1225: measured_boot.UpdateMeasurementBundleResponse
-	(*ShowMeasurementBundleResponse)(nil),                // 1226: measured_boot.ShowMeasurementBundleResponse
-	(*ShowMeasurementBundlesResponse)(nil),               // 1227: measured_boot.ShowMeasurementBundlesResponse
-	(*ListMeasurementBundlesResponse)(nil),               // 1228: measured_boot.ListMeasurementBundlesResponse
-	(*ListMeasurementBundleMachinesResponse)(nil),        // 1229: measured_boot.ListMeasurementBundleMachinesResponse
-	(*DeleteMeasurementJournalResponse)(nil),             // 1230: measured_boot.DeleteMeasurementJournalResponse
-	(*ShowMeasurementJournalResponse)(nil),               // 1231: measured_boot.ShowMeasurementJournalResponse
-	(*ShowMeasurementJournalsResponse)(nil),              // 1232: measured_boot.ShowMeasurementJournalsResponse
-	(*ListMeasurementJournalResponse)(nil),               // 1233: measured_boot.ListMeasurementJournalResponse
-	(*AttestCandidateMachineResponse)(nil),               // 1234: measured_boot.AttestCandidateMachineResponse
-	(*ShowCandidateMachineResponse)(nil),                 // 1235: measured_boot.ShowCandidateMachineResponse
-	(*ShowCandidateMachinesResponse)(nil),                // 1236: measured_boot.ShowCandidateMachinesResponse
-	(*ListCandidateMachinesResponse)(nil),                // 1237: measured_boot.ListCandidateMachinesResponse
-	(*CreateMeasurementSystemProfileResponse)(nil),       // 1238: measured_boot.CreateMeasurementSystemProfileResponse
-	(*DeleteMeasurementSystemProfileResponse)(nil),       // 1239: measured_boot.DeleteMeasurementSystemProfileResponse
-	(*RenameMeasurementSystemProfileResponse)(nil),       // 1240: measured_boot.RenameMeasurementSystemProfileResponse
-	(*ShowMeasurementSystemProfileResponse)(nil),         // 1241: measured_boot.ShowMeasurementSystemProfileResponse
-	(*ShowMeasurementSystemProfilesResponse)(nil),        // 1242: measured_boot.ShowMeasurementSystemProfilesResponse
-	(*ListMeasurementSystemProfilesResponse)(nil),        // 1243: measured_boot.ListMeasurementSystemProfilesResponse
-	(*ListMeasurementSystemProfileBundlesResponse)(nil),  // 1244: measured_boot.ListMeasurementSystemProfileBundlesResponse
-	(*ListMeasurementSystemProfileMachinesResponse)(nil), // 1245: measured_boot.ListMeasurementSystemProfileMachinesResponse
-	(*CreateMeasurementReportResponse)(nil),              // 1246: measured_boot.CreateMeasurementReportResponse
-	(*DeleteMeasurementReportResponse)(nil),              // 1247: measured_boot.DeleteMeasurementReportResponse
-	(*PromoteMeasurementReportResponse)(nil),             // 1248: measured_boot.PromoteMeasurementReportResponse
-	(*RevokeMeasurementReportResponse)(nil),              // 1249: measured_boot.RevokeMeasurementReportResponse
-	(*ShowMeasurementReportForIdResponse)(nil),           // 1250: measured_boot.ShowMeasurementReportForIdResponse
-	(*ShowMeasurementReportsForMachineResponse)(nil),     // 1251: measured_boot.ShowMeasurementReportsForMachineResponse
-	(*ShowMeasurementReportsResponse)(nil),               // 1252: measured_boot.ShowMeasurementReportsResponse
-	(*ListMeasurementReportResponse)(nil),                // 1253: measured_boot.ListMeasurementReportResponse
-	(*MatchMeasurementReportResponse)(nil),               // 1254: measured_boot.MatchMeasurementReportResponse
-	(*ImportSiteMeasurementsResponse)(nil),               // 1255: measured_boot.ImportSiteMeasurementsResponse
-	(*ExportSiteMeasurementsResponse)(nil),               // 1256: measured_boot.ExportSiteMeasurementsResponse
-	(*AddMeasurementTrustedMachineResponse)(nil),         // 1257: measured_boot.AddMeasurementTrustedMachineResponse
-	(*RemoveMeasurementTrustedMachineResponse)(nil),      // 1258: measured_boot.RemoveMeasurementTrustedMachineResponse
-	(*AddMeasurementTrustedProfileResponse)(nil),         // 1259: measured_boot.AddMeasurementTrustedProfileResponse
-	(*RemoveMeasurementTrustedProfileResponse)(nil),      // 1260: measured_boot.RemoveMeasurementTrustedProfileResponse
-	(*ListMeasurementTrustedMachinesResponse)(nil),       // 1261: measured_boot.ListMeasurementTrustedMachinesResponse
-	(*ListMeasurementTrustedProfilesResponse)(nil),       // 1262: measured_boot.ListMeasurementTrustedProfilesResponse
-	(*ListAttestationSummaryResponse)(nil),               // 1263: measured_boot.ListAttestationSummaryResponse
-	(*LockdownStatus)(nil),                               // 1264: site_explorer.LockdownStatus
-	(*PublishMlxDeviceReportResponse)(nil),               // 1265: mlx_device.PublishMlxDeviceReportResponse
-	(*PublishMlxObservationReportResponse)(nil),          // 1266: mlx_device.PublishMlxObservationReportResponse
-	(*MlxAdminProfileSyncResponse)(nil),                  // 1267: mlx_device.MlxAdminProfileSyncResponse
-	(*MlxAdminProfileShowResponse)(nil),                  // 1268: mlx_device.MlxAdminProfileShowResponse
-	(*MlxAdminProfileCompareResponse)(nil),               // 1269: mlx_device.MlxAdminProfileCompareResponse
-	(*MlxAdminProfileListResponse)(nil),                  // 1270: mlx_device.MlxAdminProfileListResponse
-	(*MlxAdminLockdownLockResponse)(nil),                 // 1271: mlx_device.MlxAdminLockdownLockResponse
-	(*MlxAdminLockdownUnlockResponse)(nil),               // 1272: mlx_device.MlxAdminLockdownUnlockResponse
-	(*MlxAdminLockdownStatusResponse)(nil),               // 1273: mlx_device.MlxAdminLockdownStatusResponse
-	(*MlxAdminDeviceInfoResponse)(nil),                   // 1274: mlx_device.MlxAdminDeviceInfoResponse
-	(*MlxAdminDeviceReportResponse)(nil),                 // 1275: mlx_device.MlxAdminDeviceReportResponse
-	(*MlxAdminRegistryListResponse)(nil),                 // 1276: mlx_device.MlxAdminRegistryListResponse
-	(*MlxAdminRegistryShowResponse)(nil),                 // 1277: mlx_device.MlxAdminRegistryShowResponse
-	(*MlxAdminConfigQueryResponse)(nil),                  // 1278: mlx_device.MlxAdminConfigQueryResponse
-	(*MlxAdminConfigSetResponse)(nil),                    // 1279: mlx_device.MlxAdminConfigSetResponse
-	(*MlxAdminConfigSyncResponse)(nil),                   // 1280: mlx_device.MlxAdminConfigSyncResponse
-	(*MlxAdminConfigCompareResponse)(nil),                // 1281: mlx_device.MlxAdminConfigCompareResponse
+	(DpuExtensionServiceDpuTarget)(0),                                         // 75: forge.DpuExtensionServiceDpuTarget
+	(DpuExtensionServiceType)(0),                                              // 76: forge.DpuExtensionServiceType
+	(DpuExtensionServiceLifecycleState)(0),                                    // 77: forge.DpuExtensionServiceLifecycleState
+	(DpuExtensionServiceDeploymentStatus)(0),                                  // 78: forge.DpuExtensionServiceDeploymentStatus
+	(ScoutStreamErrorStatus)(0),                                               // 79: forge.ScoutStreamErrorStatus
+	(DPUServiceSyncReleaseStatus)(0),                                          // 80: forge.DPUServiceSyncReleaseStatus
+	(ComponentManagerStatusCode)(0),                                           // 81: forge.ComponentManagerStatusCode
+	(FirmwareUpdateState)(0),                                                  // 82: forge.FirmwareUpdateState
+	(NvSwitchComponent)(0),                                                    // 83: forge.NvSwitchComponent
+	(PowerShelfComponent)(0),                                                  // 84: forge.PowerShelfComponent
+	(ComputeTrayComponent)(0),                                                 // 85: forge.ComputeTrayComponent
+	(OperatingSystemType)(0),                                                  // 86: forge.OperatingSystemType
+	(ExpectedInterfaceRole)(0),                                                // 87: forge.ExpectedInterfaceRole
+	(ExpectedInterfaceIpAllocation)(0),                                        // 88: forge.ExpectedInterfaceIpAllocation
+	(BootInterfaceSelectionSource)(0),                                         // 89: forge.BootInterfaceSelectionSource
+	(SitePrefixAuthority)(0),                                                  // 90: forge.SitePrefixAuthority
+	(SitePrefixRoutingScope)(0),                                               // 91: forge.SitePrefixRoutingScope
+	(SitePrefixLifecycleState)(0),                                             // 92: forge.SitePrefixLifecycleState
+	(DpuNvConfigProfile)(0),                                                   // 93: forge.DpuNvConfigProfile
+	(InstancePowerRequest_Operation)(0),                                       // 94: forge.InstancePowerRequest.Operation
+	(InstanceUpdateStatus_Module)(0),                                          // 95: forge.InstanceUpdateStatus.Module
+	(AdminBmcResetRequest_ResetType)(0),                                       // 96: forge.AdminBmcResetRequest.ResetType
+	(MachineCredentialsUpdateRequest_CredentialPurpose)(0),                    // 97: forge.MachineCredentialsUpdateRequest.CredentialPurpose
+	(ForgeAgentControlResponse_LegacyAction)(0),                               // 98: forge.ForgeAgentControlResponse.LegacyAction
+	(MachineCleanupInfo_CleanupResult)(0),                                     // 99: forge.MachineCleanupInfo.CleanupResult
+	(DpuReprovisioningRequest_Mode)(0),                                        // 100: forge.DpuReprovisioningRequest.Mode
+	(HostReprovisioningRequest_Mode)(0),                                       // 101: forge.HostReprovisioningRequest.Mode
+	(BmcCredentialRotationRequest_Mode)(0),                                    // 102: forge.BmcCredentialRotationRequest.Mode
+	(UefiCredentialRotationRequest_Mode)(0),                                   // 103: forge.UefiCredentialRotationRequest.Mode
+	(NicLockdownCredentialRotationRequest_Mode)(0),                            // 104: forge.NicLockdownCredentialRotationRequest.Mode
+	(MachineSetAutoUpdateRequest_SetAutoupdateAction)(0),                      // 105: forge.MachineSetAutoUpdateRequest.SetAutoupdateAction
+	(MachineValidationOnDemandRequest_Action)(0),                              // 106: forge.MachineValidationOnDemandRequest.Action
+	(AdminPowerControlRequest_SystemPowerControl)(0),                          // 107: forge.AdminPowerControlRequest.SystemPowerControl
+	(GetRedfishJobStateResponse_RedfishJobState)(0),                           // 108: forge.GetRedfishJobStateResponse.RedfishJobState
+	(GetMachineBootInterfacesResponse_Reconciliation_State)(0),                // 109: forge.GetMachineBootInterfacesResponse.Reconciliation.State
+	(*LifecycleStatus)(nil),                                                   // 110: forge.LifecycleStatus
+	(*SpdmMachineAttestationStatus)(nil),                                      // 111: forge.SpdmMachineAttestationStatus
+	(*SpdmMachineAttestationTriggerResponse)(nil),                             // 112: forge.SpdmMachineAttestationTriggerResponse
+	(*SpdmAttestationDetails)(nil),                                            // 113: forge.SpdmAttestationDetails
+	(*SpdmGetAttestationMachineResponse)(nil),                                 // 114: forge.SpdmGetAttestationMachineResponse
+	(*SpdmMachineAttestationTriggerRequest)(nil),                              // 115: forge.SpdmMachineAttestationTriggerRequest
+	(*SpdmListAttestationMachinesRequest)(nil),                                // 116: forge.SpdmListAttestationMachinesRequest
+	(*SpdmListAttestationMachinesResponse)(nil),                               // 117: forge.SpdmListAttestationMachinesResponse
+	(*MachineIdentityRequest)(nil),                                            // 118: forge.MachineIdentityRequest
+	(*MachineIdentityResponse)(nil),                                           // 119: forge.MachineIdentityResponse
+	(*GetTenantIdentityConfigRequest)(nil),                                    // 120: forge.GetTenantIdentityConfigRequest
+	(*TenantIdentitySigningKey)(nil),                                          // 121: forge.TenantIdentitySigningKey
+	(*TenantIdentityConfig)(nil),                                              // 122: forge.TenantIdentityConfig
+	(*SetTenantIdentityConfigRequest)(nil),                                    // 123: forge.SetTenantIdentityConfigRequest
+	(*TenantIdentityConfigResponse)(nil),                                      // 124: forge.TenantIdentityConfigResponse
+	(*ClientSecretBasic)(nil),                                                 // 125: forge.ClientSecretBasic
+	(*ClientSecretBasicResponse)(nil),                                         // 126: forge.ClientSecretBasicResponse
+	(*TokenDelegationResponse)(nil),                                           // 127: forge.TokenDelegationResponse
+	(*GetTokenDelegationRequest)(nil),                                         // 128: forge.GetTokenDelegationRequest
+	(*TokenDelegation)(nil),                                                   // 129: forge.TokenDelegation
+	(*TokenDelegationRequest)(nil),                                            // 130: forge.TokenDelegationRequest
+	(*ReencryptTenantIdentitySecretsRequest)(nil),                             // 131: forge.ReencryptTenantIdentitySecretsRequest
+	(*ReencryptTenantIdentityFailure)(nil),                                    // 132: forge.ReencryptTenantIdentityFailure
+	(*ReencryptTenantIdentitySecretsResponse)(nil),                            // 133: forge.ReencryptTenantIdentitySecretsResponse
+	(*Jwks)(nil),                                                              // 134: forge.Jwks
+	(*OpenIdConfiguration)(nil),                                               // 135: forge.OpenIdConfiguration
+	(*JwksRequest)(nil),                                                       // 136: forge.JwksRequest
+	(*OpenIdConfigRequest)(nil),                                               // 137: forge.OpenIdConfigRequest
+	(*MachineIngestionStateResponse)(nil),                                     // 138: forge.MachineIngestionStateResponse
+	(*TpmCaAddedCaStatus)(nil),                                                // 139: forge.TpmCaAddedCaStatus
+	(*TpmCaCertId)(nil),                                                       // 140: forge.TpmCaCertId
+	(*TpmEkCertStatus)(nil),                                                   // 141: forge.TpmEkCertStatus
+	(*TpmEkCertStatusCollection)(nil),                                         // 142: forge.TpmEkCertStatusCollection
+	(*TpmCaCert)(nil),                                                         // 143: forge.TpmCaCert
+	(*TpmCaCertDetail)(nil),                                                   // 144: forge.TpmCaCertDetail
+	(*TpmCaCertDetailCollection)(nil),                                         // 145: forge.TpmCaCertDetailCollection
+	(*AttestKeyBindChallenge)(nil),                                            // 146: forge.AttestKeyBindChallenge
+	(*AttestQuoteRequest)(nil),                                                // 147: forge.AttestQuoteRequest
+	(*AttestQuoteResponse)(nil),                                               // 148: forge.AttestQuoteResponse
+	(*CredentialCreationRequest)(nil),                                         // 149: forge.CredentialCreationRequest
+	(*CredentialDeletionRequest)(nil),                                         // 150: forge.CredentialDeletionRequest
+	(*CredentialCreationResult)(nil),                                          // 151: forge.CredentialCreationResult
+	(*CredentialDeletionResult)(nil),                                          // 152: forge.CredentialDeletionResult
+	(*RotateCredentialRequest)(nil),                                           // 153: forge.RotateCredentialRequest
+	(*RotateCredentialResult)(nil),                                            // 154: forge.RotateCredentialResult
+	(*CredentialRotationStatusRequest)(nil),                                   // 155: forge.CredentialRotationStatusRequest
+	(*DeviceCredentialRotationStatus)(nil),                                    // 156: forge.DeviceCredentialRotationStatus
+	(*CredentialRotationStatusResult)(nil),                                    // 157: forge.CredentialRotationStatusResult
+	(*VersionRequest)(nil),                                                    // 158: forge.VersionRequest
+	(*BuildInfo)(nil),                                                         // 159: forge.BuildInfo
+	(*RuntimeConfig)(nil),                                                     // 160: forge.RuntimeConfig
+	(*EchoRequest)(nil),                                                       // 161: forge.EchoRequest
+	(*EchoResponse)(nil),                                                      // 162: forge.EchoResponse
+	(*DNSMessage)(nil),                                                        // 163: forge.DNSMessage
+	(*DnsRequest)(nil),                                                        // 164: forge.DnsRequest
+	(*DnsReply)(nil),                                                          // 165: forge.DnsReply
+	(*ConsoleInput)(nil),                                                      // 166: forge.ConsoleInput
+	(*ConsoleOutput)(nil),                                                     // 167: forge.ConsoleOutput
+	(*InstanceEvent)(nil),                                                     // 168: forge.InstanceEvent
+	(*VpcSearchQuery)(nil),                                                    // 169: forge.VpcSearchQuery
+	(*VpcSearchFilter)(nil),                                                   // 170: forge.VpcSearchFilter
+	(*VpcIdList)(nil),                                                         // 171: forge.VpcIdList
+	(*VpcsByIdsRequest)(nil),                                                  // 172: forge.VpcsByIdsRequest
+	(*TenantSearchQuery)(nil),                                                 // 173: forge.TenantSearchQuery
+	(*PrefixFilterPolicyEntries)(nil),                                         // 174: forge.PrefixFilterPolicyEntries
+	(*VpcRoutingProfileOverrides)(nil),                                        // 175: forge.VpcRoutingProfileOverrides
+	(*VpcEffectiveRoutingProfile)(nil),                                        // 176: forge.VpcEffectiveRoutingProfile
+	(*VpcConfig)(nil),                                                         // 177: forge.VpcConfig
+	(*VpcStatus)(nil),                                                         // 178: forge.VpcStatus
+	(*Vpc)(nil),                                                               // 179: forge.Vpc
+	(*VpcCreationRequest)(nil),                                                // 180: forge.VpcCreationRequest
+	(*VpcUpdateRequest)(nil),                                                  // 181: forge.VpcUpdateRequest
+	(*VpcUpdateResult)(nil),                                                   // 182: forge.VpcUpdateResult
+	(*VpcUpdateVirtualizationRequest)(nil),                                    // 183: forge.VpcUpdateVirtualizationRequest
+	(*VpcUpdateVirtualizationResult)(nil),                                     // 184: forge.VpcUpdateVirtualizationResult
+	(*VpcDeletionRequest)(nil),                                                // 185: forge.VpcDeletionRequest
+	(*VpcDeletionResult)(nil),                                                 // 186: forge.VpcDeletionResult
+	(*VpcList)(nil),                                                           // 187: forge.VpcList
+	(*VpcPrefix)(nil),                                                         // 188: forge.VpcPrefix
+	(*VpcPrefixConfig)(nil),                                                   // 189: forge.VpcPrefixConfig
+	(*VpcPrefixStatus)(nil),                                                   // 190: forge.VpcPrefixStatus
+	(*VpcPrefixCreationRequest)(nil),                                          // 191: forge.VpcPrefixCreationRequest
+	(*VpcPrefixSearchQuery)(nil),                                              // 192: forge.VpcPrefixSearchQuery
+	(*VpcPrefixGetRequest)(nil),                                               // 193: forge.VpcPrefixGetRequest
+	(*VpcPrefixIdList)(nil),                                                   // 194: forge.VpcPrefixIdList
+	(*VpcPrefixList)(nil),                                                     // 195: forge.VpcPrefixList
+	(*VpcPrefixUpdateRequest)(nil),                                            // 196: forge.VpcPrefixUpdateRequest
+	(*VpcPrefixDeletionRequest)(nil),                                          // 197: forge.VpcPrefixDeletionRequest
+	(*VpcPrefixDeletionResult)(nil),                                           // 198: forge.VpcPrefixDeletionResult
+	(*VpcPrefixStateHistoriesRequest)(nil),                                    // 199: forge.VpcPrefixStateHistoriesRequest
+	(*VpcPeering)(nil),                                                        // 200: forge.VpcPeering
+	(*VpcPeeringIdList)(nil),                                                  // 201: forge.VpcPeeringIdList
+	(*VpcPeeringList)(nil),                                                    // 202: forge.VpcPeeringList
+	(*VpcPeeringCreationRequest)(nil),                                         // 203: forge.VpcPeeringCreationRequest
+	(*VpcPeeringSearchFilter)(nil),                                            // 204: forge.VpcPeeringSearchFilter
+	(*VpcPeeringsByIdsRequest)(nil),                                           // 205: forge.VpcPeeringsByIdsRequest
+	(*VpcPeeringDeletionRequest)(nil),                                         // 206: forge.VpcPeeringDeletionRequest
+	(*VpcPeeringDeletionResult)(nil),                                          // 207: forge.VpcPeeringDeletionResult
+	(*IBPartitionConfig)(nil),                                                 // 208: forge.IBPartitionConfig
+	(*IBPartitionStatus)(nil),                                                 // 209: forge.IBPartitionStatus
+	(*IBPartition)(nil),                                                       // 210: forge.IBPartition
+	(*IBPartitionList)(nil),                                                   // 211: forge.IBPartitionList
+	(*IBPartitionCreationRequest)(nil),                                        // 212: forge.IBPartitionCreationRequest
+	(*IBPartitionUpdateRequest)(nil),                                          // 213: forge.IBPartitionUpdateRequest
+	(*IBPartitionDeletionRequest)(nil),                                        // 214: forge.IBPartitionDeletionRequest
+	(*IBPartitionDeletionResult)(nil),                                         // 215: forge.IBPartitionDeletionResult
+	(*IBPartitionSearchFilter)(nil),                                           // 216: forge.IBPartitionSearchFilter
+	(*IBPartitionsByIdsRequest)(nil),                                          // 217: forge.IBPartitionsByIdsRequest
+	(*IBPartitionIdList)(nil),                                                 // 218: forge.IBPartitionIdList
+	(*PowerShelfConfig)(nil),                                                  // 219: forge.PowerShelfConfig
+	(*PowerShelfStatus)(nil),                                                  // 220: forge.PowerShelfStatus
+	(*PowerShelf)(nil),                                                        // 221: forge.PowerShelf
+	(*PowerShelfList)(nil),                                                    // 222: forge.PowerShelfList
+	(*PowerShelfCreationRequest)(nil),                                         // 223: forge.PowerShelfCreationRequest
+	(*DecommissionPowerShelfRequest)(nil),                                     // 224: forge.DecommissionPowerShelfRequest
+	(*DecommissionPowerShelfResponse)(nil),                                    // 225: forge.DecommissionPowerShelfResponse
+	(*PowerShelfDeletionRequest)(nil),                                         // 226: forge.PowerShelfDeletionRequest
+	(*PowerShelfDeletionResult)(nil),                                          // 227: forge.PowerShelfDeletionResult
+	(*PowerShelfMaintenanceRequest)(nil),                                      // 228: forge.PowerShelfMaintenanceRequest
+	(*PowerShelfStateHistoriesRequest)(nil),                                   // 229: forge.PowerShelfStateHistoriesRequest
+	(*PowerShelfHealthHistoriesRequest)(nil),                                  // 230: forge.PowerShelfHealthHistoriesRequest
+	(*PowerShelfQuery)(nil),                                                   // 231: forge.PowerShelfQuery
+	(*PowerShelfSearchFilter)(nil),                                            // 232: forge.PowerShelfSearchFilter
+	(*PowerShelvesByIdsRequest)(nil),                                          // 233: forge.PowerShelvesByIdsRequest
+	(*ExpectedPowerShelf)(nil),                                                // 234: forge.ExpectedPowerShelf
+	(*ExpectedPowerShelfRequest)(nil),                                         // 235: forge.ExpectedPowerShelfRequest
+	(*ExpectedPowerShelfList)(nil),                                            // 236: forge.ExpectedPowerShelfList
+	(*LinkedExpectedPowerShelfList)(nil),                                      // 237: forge.LinkedExpectedPowerShelfList
+	(*LinkedExpectedPowerShelf)(nil),                                          // 238: forge.LinkedExpectedPowerShelf
+	(*SwitchConfig)(nil),                                                      // 239: forge.SwitchConfig
+	(*FabricManagerConfig)(nil),                                               // 240: forge.FabricManagerConfig
+	(*FabricManagerStatus)(nil),                                               // 241: forge.FabricManagerStatus
+	(*SwitchStatus)(nil),                                                      // 242: forge.SwitchStatus
+	(*PlacementInRack)(nil),                                                   // 243: forge.PlacementInRack
+	(*Switch)(nil),                                                            // 244: forge.Switch
+	(*SwitchList)(nil),                                                        // 245: forge.SwitchList
+	(*SwitchCreationRequest)(nil),                                             // 246: forge.SwitchCreationRequest
+	(*SwitchDeletionRequest)(nil),                                             // 247: forge.SwitchDeletionRequest
+	(*SwitchDeletionResult)(nil),                                              // 248: forge.SwitchDeletionResult
+	(*DecommissionSwitchRequest)(nil),                                         // 249: forge.DecommissionSwitchRequest
+	(*DecommissionSwitchResponse)(nil),                                        // 250: forge.DecommissionSwitchResponse
+	(*StateHistoryRecord)(nil),                                                // 251: forge.StateHistoryRecord
+	(*StateHistoryRecords)(nil),                                               // 252: forge.StateHistoryRecords
+	(*SwitchStateHistoriesRequest)(nil),                                       // 253: forge.SwitchStateHistoriesRequest
+	(*SwitchHealthHistoriesRequest)(nil),                                      // 254: forge.SwitchHealthHistoriesRequest
+	(*StateHistories)(nil),                                                    // 255: forge.StateHistories
+	(*SwitchQuery)(nil),                                                       // 256: forge.SwitchQuery
+	(*SwitchSearchFilter)(nil),                                                // 257: forge.SwitchSearchFilter
+	(*SwitchesByIdsRequest)(nil),                                              // 258: forge.SwitchesByIdsRequest
+	(*ExpectedSwitch)(nil),                                                    // 259: forge.ExpectedSwitch
+	(*ExpectedSwitchRequest)(nil),                                             // 260: forge.ExpectedSwitchRequest
+	(*ExpectedSwitchList)(nil),                                                // 261: forge.ExpectedSwitchList
+	(*LinkedExpectedSwitchList)(nil),                                          // 262: forge.LinkedExpectedSwitchList
+	(*LinkedExpectedSwitch)(nil),                                              // 263: forge.LinkedExpectedSwitch
+	(*ExpectedRack)(nil),                                                      // 264: forge.ExpectedRack
+	(*ExpectedRackRequest)(nil),                                               // 265: forge.ExpectedRackRequest
+	(*ExpectedRackList)(nil),                                                  // 266: forge.ExpectedRackList
+	(*IBFabricSearchFilter)(nil),                                              // 267: forge.IBFabricSearchFilter
+	(*IBFabricIdList)(nil),                                                    // 268: forge.IBFabricIdList
+	(*NetworkSegmentStateHistory)(nil),                                        // 269: forge.NetworkSegmentStateHistory
+	(*NetworkSegmentConfig)(nil),                                              // 270: forge.NetworkSegmentConfig
+	(*NetworkSegmentStatus)(nil),                                              // 271: forge.NetworkSegmentStatus
+	(*NetworkSegment)(nil),                                                    // 272: forge.NetworkSegment
+	(*NetworkSegmentCreationRequest)(nil),                                     // 273: forge.NetworkSegmentCreationRequest
+	(*NetworkSegmentDeletionRequest)(nil),                                     // 274: forge.NetworkSegmentDeletionRequest
+	(*AttachNetworkSegmentToVpcRequest)(nil),                                  // 275: forge.AttachNetworkSegmentToVpcRequest
+	(*NetworkSegmentDeletionResult)(nil),                                      // 276: forge.NetworkSegmentDeletionResult
+	(*NetworkSegmentStateHistoriesRequest)(nil),                               // 277: forge.NetworkSegmentStateHistoriesRequest
+	(*NetworkSegmentSearchConfig)(nil),                                        // 278: forge.NetworkSegmentSearchConfig
+	(*NetworkSegmentSearchFilter)(nil),                                        // 279: forge.NetworkSegmentSearchFilter
+	(*NetworkSegmentIdList)(nil),                                              // 280: forge.NetworkSegmentIdList
+	(*NetworkSegmentsByIdsRequest)(nil),                                       // 281: forge.NetworkSegmentsByIdsRequest
+	(*NetworkPrefix)(nil),                                                     // 282: forge.NetworkPrefix
+	(*MachineState)(nil),                                                      // 283: forge.MachineState
+	(*InstancePowerRequest)(nil),                                              // 284: forge.InstancePowerRequest
+	(*InstancePowerResult)(nil),                                               // 285: forge.InstancePowerResult
+	(*InstanceList)(nil),                                                      // 286: forge.InstanceList
+	(*Label)(nil),                                                             // 287: forge.Label
+	(*Metadata)(nil),                                                          // 288: forge.Metadata
+	(*InstanceSearchFilter)(nil),                                              // 289: forge.InstanceSearchFilter
+	(*InstanceIdList)(nil),                                                    // 290: forge.InstanceIdList
+	(*InstancesByIdsRequest)(nil),                                             // 291: forge.InstancesByIdsRequest
+	(*InstanceAllocationRequest)(nil),                                         // 292: forge.InstanceAllocationRequest
+	(*BatchInstanceAllocationRequest)(nil),                                    // 293: forge.BatchInstanceAllocationRequest
+	(*BatchInstanceAllocationResponse)(nil),                                   // 294: forge.BatchInstanceAllocationResponse
+	(*IpxeTemplateParameter)(nil),                                             // 295: forge.IpxeTemplateParameter
+	(*IpxeTemplateArtifact)(nil),                                              // 296: forge.IpxeTemplateArtifact
+	(*IpxeTemplate)(nil),                                                      // 297: forge.IpxeTemplate
+	(*TenantConfig)(nil),                                                      // 298: forge.TenantConfig
+	(*InstanceOperatingSystemConfig)(nil),                                     // 299: forge.InstanceOperatingSystemConfig
+	(*InlineIpxe)(nil),                                                        // 300: forge.InlineIpxe
+	(*InstanceConfig)(nil),                                                    // 301: forge.InstanceConfig
+	(*InstanceNetworkConfig)(nil),                                             // 302: forge.InstanceNetworkConfig
+	(*InstanceNetworkAutoConfig)(nil),                                         // 303: forge.InstanceNetworkAutoConfig
+	(*InstanceInfinibandConfig)(nil),                                          // 304: forge.InstanceInfinibandConfig
+	(*InstanceDpuExtensionServiceConfig)(nil),                                 // 305: forge.InstanceDpuExtensionServiceConfig
+	(*InstanceDpuExtensionServicesConfig)(nil),                                // 306: forge.InstanceDpuExtensionServicesConfig
+	(*InstanceNVLinkConfig)(nil),                                              // 307: forge.InstanceNVLinkConfig
+	(*InstanceSpxConfig)(nil),                                                 // 308: forge.InstanceSpxConfig
+	(*InstanceSpxAttachment)(nil),                                             // 309: forge.InstanceSpxAttachment
+	(*InstanceOperatingSystemUpdateRequest)(nil),                              // 310: forge.InstanceOperatingSystemUpdateRequest
+	(*InstanceConfigUpdateRequest)(nil),                                       // 311: forge.InstanceConfigUpdateRequest
+	(*InstanceStatus)(nil),                                                    // 312: forge.InstanceStatus
+	(*InstanceSpxStatus)(nil),                                                 // 313: forge.InstanceSpxStatus
+	(*InstanceSpxAttachmentStatus)(nil),                                       // 314: forge.InstanceSpxAttachmentStatus
+	(*InstanceNetworkStatus)(nil),                                             // 315: forge.InstanceNetworkStatus
+	(*InstanceInfinibandStatus)(nil),                                          // 316: forge.InstanceInfinibandStatus
+	(*DpuExtensionServiceStatus)(nil),                                         // 317: forge.DpuExtensionServiceStatus
+	(*InstanceDpuExtensionServiceStatus)(nil),                                 // 318: forge.InstanceDpuExtensionServiceStatus
+	(*InstanceDpuExtensionServicesStatus)(nil),                                // 319: forge.InstanceDpuExtensionServicesStatus
+	(*InstanceNVLinkStatus)(nil),                                              // 320: forge.InstanceNVLinkStatus
+	(*Instance)(nil),                                                          // 321: forge.Instance
+	(*InstanceUpdateStatus)(nil),                                              // 322: forge.InstanceUpdateStatus
+	(*InstanceInterfaceConfig)(nil),                                           // 323: forge.InstanceInterfaceConfig
+	(*InstanceInterfaceVpcSelection)(nil),                                     // 324: forge.InstanceInterfaceVpcSelection
+	(*InstanceInterfaceIpv6Config)(nil),                                       // 325: forge.InstanceInterfaceIpv6Config
+	(*InstanceInterfaceRoutingProfile)(nil),                                   // 326: forge.InstanceInterfaceRoutingProfile
+	(*InstanceIBInterfaceConfig)(nil),                                         // 327: forge.InstanceIBInterfaceConfig
+	(*InstanceInterfaceResolvedVpcPrefixes)(nil),                              // 328: forge.InstanceInterfaceResolvedVpcPrefixes
+	(*InstanceInterfaceStatus)(nil),                                           // 329: forge.InstanceInterfaceStatus
+	(*InstanceIBInterfaceStatus)(nil),                                         // 330: forge.InstanceIBInterfaceStatus
+	(*InstanceNVLinkGpuStatus)(nil),                                           // 331: forge.InstanceNVLinkGpuStatus
+	(*InstanceNVLinkGpuConfig)(nil),                                           // 332: forge.InstanceNVLinkGpuConfig
+	(*InstancePhoneHomeLastContactRequest)(nil),                               // 333: forge.InstancePhoneHomeLastContactRequest
+	(*InstancePhoneHomeLastContactResponse)(nil),                              // 334: forge.InstancePhoneHomeLastContactResponse
+	(*Issue)(nil),                                                             // 335: forge.Issue
+	(*DeleteInitiatedBy)(nil),                                                 // 336: forge.DeleteInitiatedBy
+	(*DeleteAttribution)(nil),                                                 // 337: forge.DeleteAttribution
+	(*InstanceReleaseRequest)(nil),                                            // 338: forge.InstanceReleaseRequest
+	(*InstanceReleaseResult)(nil),                                             // 339: forge.InstanceReleaseResult
+	(*BatchInstanceReleaseRequest)(nil),                                       // 340: forge.BatchInstanceReleaseRequest
+	(*InstanceReleaseOutcome)(nil),                                            // 341: forge.InstanceReleaseOutcome
+	(*BatchInstanceReleaseResponse)(nil),                                      // 342: forge.BatchInstanceReleaseResponse
+	(*MachinesByIdsRequest)(nil),                                              // 343: forge.MachinesByIdsRequest
+	(*MachineSearchConfig)(nil),                                               // 344: forge.MachineSearchConfig
+	(*MachineStateHistoriesRequest)(nil),                                      // 345: forge.MachineStateHistoriesRequest
+	(*MachineStateHistories)(nil),                                             // 346: forge.MachineStateHistories
+	(*MachineStateHistoryRecords)(nil),                                        // 347: forge.MachineStateHistoryRecords
+	(*MachineHealthHistoriesRequest)(nil),                                     // 348: forge.MachineHealthHistoriesRequest
+	(*HealthHistories)(nil),                                                   // 349: forge.HealthHistories
+	(*HealthHistoryRecords)(nil),                                              // 350: forge.HealthHistoryRecords
+	(*HealthHistoryRecord)(nil),                                               // 351: forge.HealthHistoryRecord
+	(*TenantByOrganizationIdsRequest)(nil),                                    // 352: forge.TenantByOrganizationIdsRequest
+	(*TenantSearchFilter)(nil),                                                // 353: forge.TenantSearchFilter
+	(*TenantList)(nil),                                                        // 354: forge.TenantList
+	(*TenantOrganizationIdList)(nil),                                          // 355: forge.TenantOrganizationIdList
+	(*InterfaceList)(nil),                                                     // 356: forge.InterfaceList
+	(*MachineList)(nil),                                                       // 357: forge.MachineList
+	(*InterfaceDeleteQuery)(nil),                                              // 358: forge.InterfaceDeleteQuery
+	(*InterfaceSearchQuery)(nil),                                              // 359: forge.InterfaceSearchQuery
+	(*AssignStaticAddressRequest)(nil),                                        // 360: forge.AssignStaticAddressRequest
+	(*AssignStaticAddressResponse)(nil),                                       // 361: forge.AssignStaticAddressResponse
+	(*RemoveStaticAddressRequest)(nil),                                        // 362: forge.RemoveStaticAddressRequest
+	(*RemoveStaticAddressResponse)(nil),                                       // 363: forge.RemoveStaticAddressResponse
+	(*FindInterfaceAddressesRequest)(nil),                                     // 364: forge.FindInterfaceAddressesRequest
+	(*InterfaceAddress)(nil),                                                  // 365: forge.InterfaceAddress
+	(*FindInterfaceAddressesResponse)(nil),                                    // 366: forge.FindInterfaceAddressesResponse
+	(*BmcInfo)(nil),                                                           // 367: forge.BmcInfo
+	(*SwitchNvosInfo)(nil),                                                    // 368: forge.SwitchNvosInfo
+	(*MachineConfig)(nil),                                                     // 369: forge.MachineConfig
+	(*MachineStatus)(nil),                                                     // 370: forge.MachineStatus
+	(*Machine)(nil),                                                           // 371: forge.Machine
+	(*DpfMachineState)(nil),                                                   // 372: forge.DpfMachineState
+	(*InstanceNetworkRestrictions)(nil),                                       // 373: forge.InstanceNetworkRestrictions
+	(*MachineMetadataUpdateRequest)(nil),                                      // 374: forge.MachineMetadataUpdateRequest
+	(*RackMetadataUpdateRequest)(nil),                                         // 375: forge.RackMetadataUpdateRequest
+	(*SwitchMetadataUpdateRequest)(nil),                                       // 376: forge.SwitchMetadataUpdateRequest
+	(*PowerShelfMetadataUpdateRequest)(nil),                                   // 377: forge.PowerShelfMetadataUpdateRequest
+	(*DpuAgentInventoryReport)(nil),                                           // 378: forge.DpuAgentInventoryReport
+	(*MachineComponentInventory)(nil),                                         // 379: forge.MachineComponentInventory
+	(*MachineInventorySoftwareComponent)(nil),                                 // 380: forge.MachineInventorySoftwareComponent
+	(*HealthSourceOrigin)(nil),                                                // 381: forge.HealthSourceOrigin
+	(*ControllerStateReason)(nil),                                             // 382: forge.ControllerStateReason
+	(*ControllerStateSourceReference)(nil),                                    // 383: forge.ControllerStateSourceReference
+	(*StateSla)(nil),                                                          // 384: forge.StateSla
+	(*InstanceTenantStatus)(nil),                                              // 385: forge.InstanceTenantStatus
+	(*MachineEvent)(nil),                                                      // 386: forge.MachineEvent
+	(*MachineInterface)(nil),                                                  // 387: forge.MachineInterface
+	(*InfinibandStatusObservation)(nil),                                       // 388: forge.InfinibandStatusObservation
+	(*MachineIbInterface)(nil),                                                // 389: forge.MachineIbInterface
+	(*DhcpDiscovery)(nil),                                                     // 390: forge.DhcpDiscovery
+	(*ExpireDhcpLeaseRequest)(nil),                                            // 391: forge.ExpireDhcpLeaseRequest
+	(*ExpireDhcpLeaseResponse)(nil),                                           // 392: forge.ExpireDhcpLeaseResponse
+	(*DhcpRecord)(nil),                                                        // 393: forge.DhcpRecord
+	(*NetworkSegmentList)(nil),                                                // 394: forge.NetworkSegmentList
+	(*SSHKeyValidationRequest)(nil),                                           // 395: forge.SSHKeyValidationRequest
+	(*SSHKeyValidationResponse)(nil),                                          // 396: forge.SSHKeyValidationResponse
+	(*GetBmcCredentialsRequest)(nil),                                          // 397: forge.GetBmcCredentialsRequest
+	(*GetSwitchNvosCredentialsRequest)(nil),                                   // 398: forge.GetSwitchNvosCredentialsRequest
+	(*GetBmcCredentialsResponse)(nil),                                         // 399: forge.GetBmcCredentialsResponse
+	(*BmcCredentials)(nil),                                                    // 400: forge.BmcCredentials
+	(*GetSiteExplorationRequest)(nil),                                         // 401: forge.GetSiteExplorationRequest
+	(*ClearSiteExplorationErrorRequest)(nil),                                  // 402: forge.ClearSiteExplorationErrorRequest
+	(*ReExploreEndpointRequest)(nil),                                          // 403: forge.ReExploreEndpointRequest
+	(*RefreshEndpointReportRequest)(nil),                                      // 404: forge.RefreshEndpointReportRequest
+	(*DeleteExploredEndpointRequest)(nil),                                     // 405: forge.DeleteExploredEndpointRequest
+	(*PauseExploredEndpointRemediationRequest)(nil),                           // 406: forge.PauseExploredEndpointRemediationRequest
+	(*DeleteExploredEndpointResponse)(nil),                                    // 407: forge.DeleteExploredEndpointResponse
+	(*BmcEndpointRequest)(nil),                                                // 408: forge.BmcEndpointRequest
+	(*SshTimeoutConfig)(nil),                                                  // 409: forge.SshTimeoutConfig
+	(*SshRequest)(nil),                                                        // 410: forge.SshRequest
+	(*CopyBfbToDpuRshimRequest)(nil),                                          // 411: forge.CopyBfbToDpuRshimRequest
+	(*UpdateMachineHardwareInfoRequest)(nil),                                  // 412: forge.UpdateMachineHardwareInfoRequest
+	(*MachineHardwareInfo)(nil),                                               // 413: forge.MachineHardwareInfo
+	(*ManagedHostNetworkConfigRequest)(nil),                                   // 414: forge.ManagedHostNetworkConfigRequest
+	(*ManagedHostNetworkConfigResponse)(nil),                                  // 415: forge.ManagedHostNetworkConfigResponse
+	(*ManagedHostDpuExtensionServiceConfig)(nil),                              // 416: forge.ManagedHostDpuExtensionServiceConfig
+	(*ManagedHostQuarantineState)(nil),                                        // 417: forge.ManagedHostQuarantineState
+	(*GetManagedHostQuarantineStateRequest)(nil),                              // 418: forge.GetManagedHostQuarantineStateRequest
+	(*GetManagedHostQuarantineStateResponse)(nil),                             // 419: forge.GetManagedHostQuarantineStateResponse
+	(*SetManagedHostQuarantineStateRequest)(nil),                              // 420: forge.SetManagedHostQuarantineStateRequest
+	(*SetManagedHostQuarantineStateResponse)(nil),                             // 421: forge.SetManagedHostQuarantineStateResponse
+	(*ClearManagedHostQuarantineStateRequest)(nil),                            // 422: forge.ClearManagedHostQuarantineStateRequest
+	(*ClearManagedHostQuarantineStateResponse)(nil),                           // 423: forge.ClearManagedHostQuarantineStateResponse
+	(*ManagedHostNetworkConfig)(nil),                                          // 424: forge.ManagedHostNetworkConfig
+	(*FlatInterfaceConfig)(nil),                                               // 425: forge.FlatInterfaceConfig
+	(*FlatInterfaceRoutingProfile)(nil),                                       // 426: forge.FlatInterfaceRoutingProfile
+	(*FlatInterfaceIpv6Config)(nil),                                           // 427: forge.FlatInterfaceIpv6Config
+	(*FlatInterfaceNetworkSecurityGroupConfig)(nil),                           // 428: forge.FlatInterfaceNetworkSecurityGroupConfig
+	(*ManagedHostNetworkStatusRequest)(nil),                                   // 429: forge.ManagedHostNetworkStatusRequest
+	(*ManagedHostNetworkStatusResponse)(nil),                                  // 430: forge.ManagedHostNetworkStatusResponse
+	(*DpuAgentUpgradeCheckRequest)(nil),                                       // 431: forge.DpuAgentUpgradeCheckRequest
+	(*DpuAgentUpgradeCheckResponse)(nil),                                      // 432: forge.DpuAgentUpgradeCheckResponse
+	(*DpuAgentUpgradePolicyRequest)(nil),                                      // 433: forge.DpuAgentUpgradePolicyRequest
+	(*DpuAgentUpgradePolicyResponse)(nil),                                     // 434: forge.DpuAgentUpgradePolicyResponse
+	(*AdminForceDeleteMachineRequest)(nil),                                    // 435: forge.AdminForceDeleteMachineRequest
+	(*DecommissionManagedHostRequest)(nil),                                    // 436: forge.DecommissionManagedHostRequest
+	(*DecommissionManagedHostResponse)(nil),                                   // 437: forge.DecommissionManagedHostResponse
+	(*AdminForceDeleteMachineResponse)(nil),                                   // 438: forge.AdminForceDeleteMachineResponse
+	(*DisableSecureBootResponse)(nil),                                         // 439: forge.DisableSecureBootResponse
+	(*LockdownRequest)(nil),                                                   // 440: forge.LockdownRequest
+	(*LockdownResponse)(nil),                                                  // 441: forge.LockdownResponse
+	(*LockdownStatusRequest)(nil),                                             // 442: forge.LockdownStatusRequest
+	(*MachineSetupStatusRequest)(nil),                                         // 443: forge.MachineSetupStatusRequest
+	(*MachineSetupRequest)(nil),                                               // 444: forge.MachineSetupRequest
+	(*MachineSetupResponse)(nil),                                              // 445: forge.MachineSetupResponse
+	(*SetDpuFirstBootOrderRequest)(nil),                                       // 446: forge.SetDpuFirstBootOrderRequest
+	(*SetDpuFirstBootOrderResponse)(nil),                                      // 447: forge.SetDpuFirstBootOrderResponse
+	(*AdminRebootRequest)(nil),                                                // 448: forge.AdminRebootRequest
+	(*AdminRebootResponse)(nil),                                               // 449: forge.AdminRebootResponse
+	(*AdminBmcResetRequest)(nil),                                              // 450: forge.AdminBmcResetRequest
+	(*AdminBmcResetResponse)(nil),                                             // 451: forge.AdminBmcResetResponse
+	(*EnableInfiniteBootRequest)(nil),                                         // 452: forge.EnableInfiniteBootRequest
+	(*EnableInfiniteBootResponse)(nil),                                        // 453: forge.EnableInfiniteBootResponse
+	(*IsInfiniteBootEnabledRequest)(nil),                                      // 454: forge.IsInfiniteBootEnabledRequest
+	(*IsInfiniteBootEnabledResponse)(nil),                                     // 455: forge.IsInfiniteBootEnabledResponse
+	(*BMCMetaDataGetRequest)(nil),                                             // 456: forge.BMCMetaDataGetRequest
+	(*BMCMetaDataGetResponse)(nil),                                            // 457: forge.BMCMetaDataGetResponse
+	(*MachineCredentialsUpdateRequest)(nil),                                   // 458: forge.MachineCredentialsUpdateRequest
+	(*MachineCredentialsUpdateResponse)(nil),                                  // 459: forge.MachineCredentialsUpdateResponse
+	(*ForgeAgentControlRequest)(nil),                                          // 460: forge.ForgeAgentControlRequest
+	(*ForgeAgentControlResponse)(nil),                                         // 461: forge.ForgeAgentControlResponse
+	(*MachineDiscoveryInfo)(nil),                                              // 462: forge.MachineDiscoveryInfo
+	(*MachineDiscoveryCompletedRequest)(nil),                                  // 463: forge.MachineDiscoveryCompletedRequest
+	(*MachineCleanupInfo)(nil),                                                // 464: forge.MachineCleanupInfo
+	(*MachineCertificate)(nil),                                                // 465: forge.MachineCertificate
+	(*MachineCertificateRenewRequest)(nil),                                    // 466: forge.MachineCertificateRenewRequest
+	(*MachineCertificateResult)(nil),                                          // 467: forge.MachineCertificateResult
+	(*MachineDiscoveryResult)(nil),                                            // 468: forge.MachineDiscoveryResult
+	(*MachineDiscoveryCompletedResponse)(nil),                                 // 469: forge.MachineDiscoveryCompletedResponse
+	(*MachineCleanupResult)(nil),                                              // 470: forge.MachineCleanupResult
+	(*ForgeScoutErrorReport)(nil),                                             // 471: forge.ForgeScoutErrorReport
+	(*ForgeScoutErrorReportResult)(nil),                                       // 472: forge.ForgeScoutErrorReportResult
+	(*PxeInstructionRequest)(nil),                                             // 473: forge.PxeInstructionRequest
+	(*PxeInstructions)(nil),                                                   // 474: forge.PxeInstructions
+	(*CloudInitDiscoveryInstructions)(nil),                                    // 475: forge.CloudInitDiscoveryInstructions
+	(*CloudInitMetaData)(nil),                                                 // 476: forge.CloudInitMetaData
+	(*CloudInitInstructionsRequest)(nil),                                      // 477: forge.CloudInitInstructionsRequest
+	(*CloudInitInstructions)(nil),                                             // 478: forge.CloudInitInstructions
+	(*DpuNetworkStatus)(nil),                                                  // 479: forge.DpuNetworkStatus
+	(*LastDhcpRequest)(nil),                                                   // 480: forge.LastDhcpRequest
+	(*DpuExtensionServiceStatusObservation)(nil),                              // 481: forge.DpuExtensionServiceStatusObservation
+	(*DpuExtensionServiceComponent)(nil),                                      // 482: forge.DpuExtensionServiceComponent
+	(*OptionalHealthReport)(nil),                                              // 483: forge.OptionalHealthReport
+	(*HealthReportEntry)(nil),                                                 // 484: forge.HealthReportEntry
+	(*InsertMachineHealthReportRequest)(nil),                                  // 485: forge.InsertMachineHealthReportRequest
+	(*InsertRackHealthReportRequest)(nil),                                     // 486: forge.InsertRackHealthReportRequest
+	(*RemoveRackHealthReportRequest)(nil),                                     // 487: forge.RemoveRackHealthReportRequest
+	(*ListRackHealthReportsRequest)(nil),                                      // 488: forge.ListRackHealthReportsRequest
+	(*InsertSwitchHealthReportRequest)(nil),                                   // 489: forge.InsertSwitchHealthReportRequest
+	(*RemoveSwitchHealthReportRequest)(nil),                                   // 490: forge.RemoveSwitchHealthReportRequest
+	(*ListSwitchHealthReportsRequest)(nil),                                    // 491: forge.ListSwitchHealthReportsRequest
+	(*InsertPowerShelfHealthReportRequest)(nil),                               // 492: forge.InsertPowerShelfHealthReportRequest
+	(*RemovePowerShelfHealthReportRequest)(nil),                               // 493: forge.RemovePowerShelfHealthReportRequest
+	(*ListPowerShelfHealthReportsRequest)(nil),                                // 494: forge.ListPowerShelfHealthReportsRequest
+	(*ListHealthReportResponse)(nil),                                          // 495: forge.ListHealthReportResponse
+	(*RemoveMachineHealthReportRequest)(nil),                                  // 496: forge.RemoveMachineHealthReportRequest
+	(*ListNVLinkDomainHealthReportsRequest)(nil),                              // 497: forge.ListNVLinkDomainHealthReportsRequest
+	(*InsertNVLinkDomainHealthReportRequest)(nil),                             // 498: forge.InsertNVLinkDomainHealthReportRequest
+	(*RemoveNVLinkDomainHealthReportRequest)(nil),                             // 499: forge.RemoveNVLinkDomainHealthReportRequest
+	(*InstanceInterfaceStatusObservation)(nil),                                // 500: forge.InstanceInterfaceStatusObservation
+	(*FabricInterfaceData)(nil),                                               // 501: forge.FabricInterfaceData
+	(*LinkData)(nil),                                                          // 502: forge.LinkData
+	(*Tenant)(nil),                                                            // 503: forge.Tenant
+	(*CreateTenantRequest)(nil),                                               // 504: forge.CreateTenantRequest
+	(*CreateTenantResponse)(nil),                                              // 505: forge.CreateTenantResponse
+	(*UpdateTenantRequest)(nil),                                               // 506: forge.UpdateTenantRequest
+	(*UpdateTenantResponse)(nil),                                              // 507: forge.UpdateTenantResponse
+	(*FindTenantRequest)(nil),                                                 // 508: forge.FindTenantRequest
+	(*FindTenantResponse)(nil),                                                // 509: forge.FindTenantResponse
+	(*TenantKeysetIdentifier)(nil),                                            // 510: forge.TenantKeysetIdentifier
+	(*TenantPublicKey)(nil),                                                   // 511: forge.TenantPublicKey
+	(*TenantKeysetContent)(nil),                                               // 512: forge.TenantKeysetContent
+	(*TenantKeyset)(nil),                                                      // 513: forge.TenantKeyset
+	(*CreateTenantKeysetRequest)(nil),                                         // 514: forge.CreateTenantKeysetRequest
+	(*CreateTenantKeysetResponse)(nil),                                        // 515: forge.CreateTenantKeysetResponse
+	(*TenantKeySetList)(nil),                                                  // 516: forge.TenantKeySetList
+	(*UpdateTenantKeysetRequest)(nil),                                         // 517: forge.UpdateTenantKeysetRequest
+	(*UpdateTenantKeysetResponse)(nil),                                        // 518: forge.UpdateTenantKeysetResponse
+	(*DeleteTenantKeysetRequest)(nil),                                         // 519: forge.DeleteTenantKeysetRequest
+	(*DeleteTenantKeysetResponse)(nil),                                        // 520: forge.DeleteTenantKeysetResponse
+	(*TenantKeysetSearchFilter)(nil),                                          // 521: forge.TenantKeysetSearchFilter
+	(*TenantKeysetIdList)(nil),                                                // 522: forge.TenantKeysetIdList
+	(*TenantKeysetsByIdsRequest)(nil),                                         // 523: forge.TenantKeysetsByIdsRequest
+	(*ValidateTenantPublicKeyRequest)(nil),                                    // 524: forge.ValidateTenantPublicKeyRequest
+	(*ValidateTenantPublicKeyResponse)(nil),                                   // 525: forge.ValidateTenantPublicKeyResponse
+	(*ListResourcePoolsRequest)(nil),                                          // 526: forge.ListResourcePoolsRequest
+	(*ResourcePools)(nil),                                                     // 527: forge.ResourcePools
+	(*ResourcePool)(nil),                                                      // 528: forge.ResourcePool
+	(*GrowResourcePoolRequest)(nil),                                           // 529: forge.GrowResourcePoolRequest
+	(*GrowResourcePoolResponse)(nil),                                          // 530: forge.GrowResourcePoolResponse
+	(*Range)(nil),                                                             // 531: forge.Range
+	(*MigrateVpcVniResponse)(nil),                                             // 532: forge.MigrateVpcVniResponse
+	(*MaintenanceRequest)(nil),                                                // 533: forge.MaintenanceRequest
+	(*SetDynamicConfigRequest)(nil),                                           // 534: forge.SetDynamicConfigRequest
+	(*FindIpAddressRequest)(nil),                                              // 535: forge.FindIpAddressRequest
+	(*FindIpAddressResponse)(nil),                                             // 536: forge.FindIpAddressResponse
+	(*IdentifyUuidRequest)(nil),                                               // 537: forge.IdentifyUuidRequest
+	(*IdentifyUuidResponse)(nil),                                              // 538: forge.IdentifyUuidResponse
+	(*FindBmcIpsRequest)(nil),                                                 // 539: forge.FindBmcIpsRequest
+	(*IdentifyMacRequest)(nil),                                                // 540: forge.IdentifyMacRequest
+	(*IdentifyMacResponse)(nil),                                               // 541: forge.IdentifyMacResponse
+	(*IdentifySerialRequest)(nil),                                             // 542: forge.IdentifySerialRequest
+	(*IdentifySerialResponse)(nil),                                            // 543: forge.IdentifySerialResponse
+	(*DpuReprovisioningRequest)(nil),                                          // 544: forge.DpuReprovisioningRequest
+	(*DpuReprovisioningListRequest)(nil),                                      // 545: forge.DpuReprovisioningListRequest
+	(*DpuReprovisioningListResponse)(nil),                                     // 546: forge.DpuReprovisioningListResponse
+	(*HostReprovisioningRequest)(nil),                                         // 547: forge.HostReprovisioningRequest
+	(*BmcCredentialRotationRequest)(nil),                                      // 548: forge.BmcCredentialRotationRequest
+	(*UefiCredentialRotationRequest)(nil),                                     // 549: forge.UefiCredentialRotationRequest
+	(*NicLockdownCredentialRotationRequest)(nil),                              // 550: forge.NicLockdownCredentialRotationRequest
+	(*HostReprovisioningListRequest)(nil),                                     // 551: forge.HostReprovisioningListRequest
+	(*HostReprovisioningListResponse)(nil),                                    // 552: forge.HostReprovisioningListResponse
+	(*DpuOsOperationalState)(nil),                                             // 553: forge.DpuOsOperationalState
+	(*DpuRepresentorStatus)(nil),                                              // 554: forge.DpuRepresentorStatus
+	(*DpuInfoStatusObservation)(nil),                                          // 555: forge.DpuInfoStatusObservation
+	(*DpuInfo)(nil),                                                           // 556: forge.DpuInfo
+	(*GetDpuInfoListRequest)(nil),                                             // 557: forge.GetDpuInfoListRequest
+	(*GetDpuInfoListResponse)(nil),                                            // 558: forge.GetDpuInfoListResponse
+	(*IpAddressMatch)(nil),                                                    // 559: forge.IpAddressMatch
+	(*MachineBootOverride)(nil),                                               // 560: forge.MachineBootOverride
+	(*ConnectedDevice)(nil),                                                   // 561: forge.ConnectedDevice
+	(*ConnectedDeviceList)(nil),                                               // 562: forge.ConnectedDeviceList
+	(*BmcIpList)(nil),                                                         // 563: forge.BmcIpList
+	(*BmcIp)(nil),                                                             // 564: forge.BmcIp
+	(*MacAddressBmcIp)(nil),                                                   // 565: forge.MacAddressBmcIp
+	(*MachineIdBmcIpPairs)(nil),                                               // 566: forge.MachineIdBmcIpPairs
+	(*MachineIdBmcIp)(nil),                                                    // 567: forge.MachineIdBmcIp
+	(*NetworkDevice)(nil),                                                     // 568: forge.NetworkDevice
+	(*NetworkTopologyRequest)(nil),                                            // 569: forge.NetworkTopologyRequest
+	(*NetworkDeviceIdList)(nil),                                               // 570: forge.NetworkDeviceIdList
+	(*NetworkTopologyData)(nil),                                               // 571: forge.NetworkTopologyData
+	(*RouteServers)(nil),                                                      // 572: forge.RouteServers
+	(*RouteServerEntries)(nil),                                                // 573: forge.RouteServerEntries
+	(*RouteServer)(nil),                                                       // 574: forge.RouteServer
+	(*SetHostUefiPasswordRequest)(nil),                                        // 575: forge.SetHostUefiPasswordRequest
+	(*SetHostUefiPasswordResponse)(nil),                                       // 576: forge.SetHostUefiPasswordResponse
+	(*ClearHostUefiPasswordRequest)(nil),                                      // 577: forge.ClearHostUefiPasswordRequest
+	(*ClearHostUefiPasswordResponse)(nil),                                     // 578: forge.ClearHostUefiPasswordResponse
+	(*SetDpuUefiPasswordRequest)(nil),                                         // 579: forge.SetDpuUefiPasswordRequest
+	(*SetDpuUefiPasswordResponse)(nil),                                        // 580: forge.SetDpuUefiPasswordResponse
+	(*OsImageAttributes)(nil),                                                 // 581: forge.OsImageAttributes
+	(*OsImage)(nil),                                                           // 582: forge.OsImage
+	(*ListOsImageRequest)(nil),                                                // 583: forge.ListOsImageRequest
+	(*ListOsImageResponse)(nil),                                               // 584: forge.ListOsImageResponse
+	(*DeleteOsImageRequest)(nil),                                              // 585: forge.DeleteOsImageRequest
+	(*DeleteOsImageResponse)(nil),                                             // 586: forge.DeleteOsImageResponse
+	(*GetIpxeTemplateRequest)(nil),                                            // 587: forge.GetIpxeTemplateRequest
+	(*ListIpxeTemplatesRequest)(nil),                                          // 588: forge.ListIpxeTemplatesRequest
+	(*IpxeTemplateList)(nil),                                                  // 589: forge.IpxeTemplateList
+	(*ExpectedHostNic)(nil),                                                   // 590: forge.ExpectedHostNic
+	(*HostLifecycleProfile)(nil),                                              // 591: forge.HostLifecycleProfile
+	(*ExpectedMachine)(nil),                                                   // 592: forge.ExpectedMachine
+	(*ExpectedMachineRequest)(nil),                                            // 593: forge.ExpectedMachineRequest
+	(*ExpectedMachineList)(nil),                                               // 594: forge.ExpectedMachineList
+	(*LinkedExpectedMachineList)(nil),                                         // 595: forge.LinkedExpectedMachineList
+	(*LinkedExpectedMachine)(nil),                                             // 596: forge.LinkedExpectedMachine
+	(*UnexpectedMachineList)(nil),                                             // 597: forge.UnexpectedMachineList
+	(*UnexpectedMachine)(nil),                                                 // 598: forge.UnexpectedMachine
+	(*BatchExpectedMachineOperationRequest)(nil),                              // 599: forge.BatchExpectedMachineOperationRequest
+	(*ExpectedMachineOperationResult)(nil),                                    // 600: forge.ExpectedMachineOperationResult
+	(*BatchExpectedMachineOperationResponse)(nil),                             // 601: forge.BatchExpectedMachineOperationResponse
+	(*MachineRebootCompletedResponse)(nil),                                    // 602: forge.MachineRebootCompletedResponse
+	(*MachineRebootCompletedRequest)(nil),                                     // 603: forge.MachineRebootCompletedRequest
+	(*ScoutFirmwareUpgradeStatusRequest)(nil),                                 // 604: forge.ScoutFirmwareUpgradeStatusRequest
+	(*MachineValidationCompletedRequest)(nil),                                 // 605: forge.MachineValidationCompletedRequest
+	(*MachineValidationCompletedResponse)(nil),                                // 606: forge.MachineValidationCompletedResponse
+	(*MachineValidationResult)(nil),                                           // 607: forge.MachineValidationResult
+	(*MachineValidationResultPostRequest)(nil),                                // 608: forge.MachineValidationResultPostRequest
+	(*MachineValidationResultList)(nil),                                       // 609: forge.MachineValidationResultList
+	(*MachineValidationGetRequest)(nil),                                       // 610: forge.MachineValidationGetRequest
+	(*MachineValidationStatus)(nil),                                           // 611: forge.MachineValidationStatus
+	(*MachineValidationRun)(nil),                                              // 612: forge.MachineValidationRun
+	(*MachineSetAutoUpdateRequest)(nil),                                       // 613: forge.MachineSetAutoUpdateRequest
+	(*MachineSetAutoUpdateResponse)(nil),                                      // 614: forge.MachineSetAutoUpdateResponse
+	(*GetMachineValidationExternalConfigRequest)(nil),                         // 615: forge.GetMachineValidationExternalConfigRequest
+	(*MachineValidationExternalConfig)(nil),                                   // 616: forge.MachineValidationExternalConfig
+	(*GetMachineValidationExternalConfigResponse)(nil),                        // 617: forge.GetMachineValidationExternalConfigResponse
+	(*GetMachineValidationExternalConfigsRequest)(nil),                        // 618: forge.GetMachineValidationExternalConfigsRequest
+	(*GetMachineValidationExternalConfigsResponse)(nil),                       // 619: forge.GetMachineValidationExternalConfigsResponse
+	(*AddUpdateMachineValidationExternalConfigRequest)(nil),                   // 620: forge.AddUpdateMachineValidationExternalConfigRequest
+	(*RemoveMachineValidationExternalConfigRequest)(nil),                      // 621: forge.RemoveMachineValidationExternalConfigRequest
+	(*MachineValidationOnDemandRequest)(nil),                                  // 622: forge.MachineValidationOnDemandRequest
+	(*MachineValidationOnDemandResponse)(nil),                                 // 623: forge.MachineValidationOnDemandResponse
+	(*FirmwareUpgradeActivity)(nil),                                           // 624: forge.FirmwareUpgradeActivity
+	(*NvosUpdateActivity)(nil),                                                // 625: forge.NvosUpdateActivity
+	(*ConfigureNmxClusterActivity)(nil),                                       // 626: forge.ConfigureNmxClusterActivity
+	(*PowerSequenceActivity)(nil),                                             // 627: forge.PowerSequenceActivity
+	(*MaintenanceActivityConfig)(nil),                                         // 628: forge.MaintenanceActivityConfig
+	(*RackMaintenanceScope)(nil),                                              // 629: forge.RackMaintenanceScope
+	(*RackMaintenanceOnDemandRequest)(nil),                                    // 630: forge.RackMaintenanceOnDemandRequest
+	(*RackMaintenanceOnDemandResponse)(nil),                                   // 631: forge.RackMaintenanceOnDemandResponse
+	(*RackMaintenanceTerminateRequest)(nil),                                   // 632: forge.RackMaintenanceTerminateRequest
+	(*RackMaintenanceTerminateResponse)(nil),                                  // 633: forge.RackMaintenanceTerminateResponse
+	(*AdminPowerControlRequest)(nil),                                          // 634: forge.AdminPowerControlRequest
+	(*AdminPowerControlResponse)(nil),                                         // 635: forge.AdminPowerControlResponse
+	(*AdminChassisResetRequest)(nil),                                          // 636: forge.AdminChassisResetRequest
+	(*AdminChassisResetResponse)(nil),                                         // 637: forge.AdminChassisResetResponse
+	(*GetRedfishJobStateRequest)(nil),                                         // 638: forge.GetRedfishJobStateRequest
+	(*GetRedfishJobStateResponse)(nil),                                        // 639: forge.GetRedfishJobStateResponse
+	(*MachineValidationRunList)(nil),                                          // 640: forge.MachineValidationRunList
+	(*MachineValidationRunListGetRequest)(nil),                                // 641: forge.MachineValidationRunListGetRequest
+	(*MachineValidationRunItemSearchFilter)(nil),                              // 642: forge.MachineValidationRunItemSearchFilter
+	(*MachineValidationRunItemIdList)(nil),                                    // 643: forge.MachineValidationRunItemIdList
+	(*MachineValidationRunItemsByIdsRequest)(nil),                             // 644: forge.MachineValidationRunItemsByIdsRequest
+	(*MachineValidationRunItemList)(nil),                                      // 645: forge.MachineValidationRunItemList
+	(*MachineValidationRunItem)(nil),                                          // 646: forge.MachineValidationRunItem
+	(*MachineValidationAttemptGetRequest)(nil),                                // 647: forge.MachineValidationAttemptGetRequest
+	(*MachineValidationAttempt)(nil),                                          // 648: forge.MachineValidationAttempt
+	(*MachineValidationHeartbeatRequest)(nil),                                 // 649: forge.MachineValidationHeartbeatRequest
+	(*MachineValidationHeartbeatResponse)(nil),                                // 650: forge.MachineValidationHeartbeatResponse
+	(*IsBmcInManagedHostResponse)(nil),                                        // 651: forge.IsBmcInManagedHostResponse
+	(*BmcCredentialStatusResponse)(nil),                                       // 652: forge.BmcCredentialStatusResponse
+	(*MachineValidationTestsGetRequest)(nil),                                  // 653: forge.MachineValidationTestsGetRequest
+	(*MachineValidationTestUpdateRequest)(nil),                                // 654: forge.MachineValidationTestUpdateRequest
+	(*MachineValidationTestAddRequest)(nil),                                   // 655: forge.MachineValidationTestAddRequest
+	(*MachineValidationTestAddUpdateResponse)(nil),                            // 656: forge.MachineValidationTestAddUpdateResponse
+	(*MachineValidationTestsGetResponse)(nil),                                 // 657: forge.MachineValidationTestsGetResponse
+	(*MachineValidationTestVerfiedRequest)(nil),                               // 658: forge.MachineValidationTestVerfiedRequest
+	(*MachineValidationTestVerfiedResponse)(nil),                              // 659: forge.MachineValidationTestVerfiedResponse
+	(*MachineValidationTest)(nil),                                             // 660: forge.MachineValidationTest
+	(*MachineValidationPlugin)(nil),                                           // 661: forge.MachineValidationPlugin
+	(*MachineValidationTestFullHostApprovalRequest)(nil),                      // 662: forge.MachineValidationTestFullHostApprovalRequest
+	(*MachineValidationTestFullHostApprovalResponse)(nil),                     // 663: forge.MachineValidationTestFullHostApprovalResponse
+	(*MachineValidationTestNextVersionResponse)(nil),                          // 664: forge.MachineValidationTestNextVersionResponse
+	(*MachineValidationTestNextVersionRequest)(nil),                           // 665: forge.MachineValidationTestNextVersionRequest
+	(*MachineValidationTestEnableDisableTestRequest)(nil),                     // 666: forge.MachineValidationTestEnableDisableTestRequest
+	(*MachineValidationTestEnableDisableTestResponse)(nil),                    // 667: forge.MachineValidationTestEnableDisableTestResponse
+	(*MachineValidationRunRequest)(nil),                                       // 668: forge.MachineValidationRunRequest
+	(*MachineValidationRunResponse)(nil),                                      // 669: forge.MachineValidationRunResponse
+	(*MachineCapabilityAttributesCpu)(nil),                                    // 670: forge.MachineCapabilityAttributesCpu
+	(*MachineCapabilityAttributesGpu)(nil),                                    // 671: forge.MachineCapabilityAttributesGpu
+	(*MachineCapabilityAttributesMemory)(nil),                                 // 672: forge.MachineCapabilityAttributesMemory
+	(*MachineCapabilityAttributesStorage)(nil),                                // 673: forge.MachineCapabilityAttributesStorage
+	(*MachineCapabilityAttributesNetwork)(nil),                                // 674: forge.MachineCapabilityAttributesNetwork
+	(*MachineCapabilityAttributesInfiniband)(nil),                             // 675: forge.MachineCapabilityAttributesInfiniband
+	(*MachineCapabilityAttributesDpu)(nil),                                    // 676: forge.MachineCapabilityAttributesDpu
+	(*MachineCapabilitiesSet)(nil),                                            // 677: forge.MachineCapabilitiesSet
+	(*InstanceTypeAttributes)(nil),                                            // 678: forge.InstanceTypeAttributes
+	(*InstanceType)(nil),                                                      // 679: forge.InstanceType
+	(*InstanceTypeMachineCapabilityFilterAttributes)(nil),                     // 680: forge.InstanceTypeMachineCapabilityFilterAttributes
+	(*CreateInstanceTypeRequest)(nil),                                         // 681: forge.CreateInstanceTypeRequest
+	(*CreateInstanceTypeResponse)(nil),                                        // 682: forge.CreateInstanceTypeResponse
+	(*FindInstanceTypeIdsRequest)(nil),                                        // 683: forge.FindInstanceTypeIdsRequest
+	(*FindInstanceTypeIdsResponse)(nil),                                       // 684: forge.FindInstanceTypeIdsResponse
+	(*FindInstanceTypesByIdsRequest)(nil),                                     // 685: forge.FindInstanceTypesByIdsRequest
+	(*FindInstanceTypesByIdsResponse)(nil),                                    // 686: forge.FindInstanceTypesByIdsResponse
+	(*DeleteInstanceTypeRequest)(nil),                                         // 687: forge.DeleteInstanceTypeRequest
+	(*DeleteInstanceTypeResponse)(nil),                                        // 688: forge.DeleteInstanceTypeResponse
+	(*UpdateInstanceTypeResponse)(nil),                                        // 689: forge.UpdateInstanceTypeResponse
+	(*UpdateInstanceTypeRequest)(nil),                                         // 690: forge.UpdateInstanceTypeRequest
+	(*AssociateMachinesWithInstanceTypeRequest)(nil),                          // 691: forge.AssociateMachinesWithInstanceTypeRequest
+	(*AssociateMachinesWithInstanceTypeResponse)(nil),                         // 692: forge.AssociateMachinesWithInstanceTypeResponse
+	(*RemoveMachineInstanceTypeAssociationRequest)(nil),                       // 693: forge.RemoveMachineInstanceTypeAssociationRequest
+	(*RemoveMachineInstanceTypeAssociationResponse)(nil),                      // 694: forge.RemoveMachineInstanceTypeAssociationResponse
+	(*RedfishBrowseRequest)(nil),                                              // 695: forge.RedfishBrowseRequest
+	(*RedfishBrowseResponse)(nil),                                             // 696: forge.RedfishBrowseResponse
+	(*RedfishListActionsRequest)(nil),                                         // 697: forge.RedfishListActionsRequest
+	(*RedfishListActionsResponse)(nil),                                        // 698: forge.RedfishListActionsResponse
+	(*RedfishAction)(nil),                                                     // 699: forge.RedfishAction
+	(*OptionalRedfishActionResult)(nil),                                       // 700: forge.OptionalRedfishActionResult
+	(*RedfishActionResult)(nil),                                               // 701: forge.RedfishActionResult
+	(*RedfishCreateActionRequest)(nil),                                        // 702: forge.RedfishCreateActionRequest
+	(*RedfishCreateActionResponse)(nil),                                       // 703: forge.RedfishCreateActionResponse
+	(*RedfishActionID)(nil),                                                   // 704: forge.RedfishActionID
+	(*RedfishApproveActionResponse)(nil),                                      // 705: forge.RedfishApproveActionResponse
+	(*RedfishApplyActionResponse)(nil),                                        // 706: forge.RedfishApplyActionResponse
+	(*RedfishCancelActionResponse)(nil),                                       // 707: forge.RedfishCancelActionResponse
+	(*UfmBrowseRequest)(nil),                                                  // 708: forge.UfmBrowseRequest
+	(*UfmBrowseResponse)(nil),                                                 // 709: forge.UfmBrowseResponse
+	(*NetworkSecurityGroupAttributes)(nil),                                    // 710: forge.NetworkSecurityGroupAttributes
+	(*NetworkSecurityGroup)(nil),                                              // 711: forge.NetworkSecurityGroup
+	(*CreateNetworkSecurityGroupRequest)(nil),                                 // 712: forge.CreateNetworkSecurityGroupRequest
+	(*CreateNetworkSecurityGroupResponse)(nil),                                // 713: forge.CreateNetworkSecurityGroupResponse
+	(*FindNetworkSecurityGroupIdsRequest)(nil),                                // 714: forge.FindNetworkSecurityGroupIdsRequest
+	(*FindNetworkSecurityGroupIdsResponse)(nil),                               // 715: forge.FindNetworkSecurityGroupIdsResponse
+	(*FindNetworkSecurityGroupsByIdsRequest)(nil),                             // 716: forge.FindNetworkSecurityGroupsByIdsRequest
+	(*FindNetworkSecurityGroupsByIdsResponse)(nil),                            // 717: forge.FindNetworkSecurityGroupsByIdsResponse
+	(*UpdateNetworkSecurityGroupResponse)(nil),                                // 718: forge.UpdateNetworkSecurityGroupResponse
+	(*UpdateNetworkSecurityGroupRequest)(nil),                                 // 719: forge.UpdateNetworkSecurityGroupRequest
+	(*DeleteNetworkSecurityGroupRequest)(nil),                                 // 720: forge.DeleteNetworkSecurityGroupRequest
+	(*DeleteNetworkSecurityGroupResponse)(nil),                                // 721: forge.DeleteNetworkSecurityGroupResponse
+	(*NetworkSecurityGroupStatus)(nil),                                        // 722: forge.NetworkSecurityGroupStatus
+	(*NetworkSecurityGroupPropagationObjectStatus)(nil),                       // 723: forge.NetworkSecurityGroupPropagationObjectStatus
+	(*GetNetworkSecurityGroupPropagationStatusResponse)(nil),                  // 724: forge.GetNetworkSecurityGroupPropagationStatusResponse
+	(*NetworkSecurityGroupIdList)(nil),                                        // 725: forge.NetworkSecurityGroupIdList
+	(*GetNetworkSecurityGroupPropagationStatusRequest)(nil),                   // 726: forge.GetNetworkSecurityGroupPropagationStatusRequest
+	(*NetworkSecurityGroupRuleAttributes)(nil),                                // 727: forge.NetworkSecurityGroupRuleAttributes
+	(*ResolvedNetworkSecurityGroupRule)(nil),                                  // 728: forge.ResolvedNetworkSecurityGroupRule
+	(*GetNetworkSecurityGroupAttachmentsRequest)(nil),                         // 729: forge.GetNetworkSecurityGroupAttachmentsRequest
+	(*NetworkSecurityGroupAttachments)(nil),                                   // 730: forge.NetworkSecurityGroupAttachments
+	(*GetNetworkSecurityGroupAttachmentsResponse)(nil),                        // 731: forge.GetNetworkSecurityGroupAttachmentsResponse
+	(*GetDesiredFirmwareVersionsRequest)(nil),                                 // 732: forge.GetDesiredFirmwareVersionsRequest
+	(*GetDesiredFirmwareVersionsResponse)(nil),                                // 733: forge.GetDesiredFirmwareVersionsResponse
+	(*DesiredFirmwareVersionEntry)(nil),                                       // 734: forge.DesiredFirmwareVersionEntry
+	(*SkuComponentChassis)(nil),                                               // 735: forge.SkuComponentChassis
+	(*SkuComponentCpu)(nil),                                                   // 736: forge.SkuComponentCpu
+	(*SkuComponentGpu)(nil),                                                   // 737: forge.SkuComponentGpu
+	(*SkuComponentEthernetDevices)(nil),                                       // 738: forge.SkuComponentEthernetDevices
+	(*SkuComponentInfinibandDevices)(nil),                                     // 739: forge.SkuComponentInfinibandDevices
+	(*SkuComponentStorage)(nil),                                               // 740: forge.SkuComponentStorage
+	(*SkuComponentStorageController)(nil),                                     // 741: forge.SkuComponentStorageController
+	(*SkuComponentMemory)(nil),                                                // 742: forge.SkuComponentMemory
+	(*SkuComponentTpm)(nil),                                                   // 743: forge.SkuComponentTpm
+	(*SkuComponents)(nil),                                                     // 744: forge.SkuComponents
+	(*Sku)(nil),                                                               // 745: forge.Sku
+	(*SkuMachinePair)(nil),                                                    // 746: forge.SkuMachinePair
+	(*RemoveSkuRequest)(nil),                                                  // 747: forge.RemoveSkuRequest
+	(*SkuList)(nil),                                                           // 748: forge.SkuList
+	(*SkuIdList)(nil),                                                         // 749: forge.SkuIdList
+	(*SkuStatus)(nil),                                                         // 750: forge.SkuStatus
+	(*SkusByIdsRequest)(nil),                                                  // 751: forge.SkusByIdsRequest
+	(*SkuSearchFilter)(nil),                                                   // 752: forge.SkuSearchFilter
+	(*DpaInterface)(nil),                                                      // 753: forge.DpaInterface
+	(*DpaInterfaceCreationRequest)(nil),                                       // 754: forge.DpaInterfaceCreationRequest
+	(*DpaInterfaceIdList)(nil),                                                // 755: forge.DpaInterfaceIdList
+	(*DpaInterfacesByIdsRequest)(nil),                                         // 756: forge.DpaInterfacesByIdsRequest
+	(*DpaInterfaceList)(nil),                                                  // 757: forge.DpaInterfaceList
+	(*DpaNetworkObservationSetRequest)(nil),                                   // 758: forge.DpaNetworkObservationSetRequest
+	(*DpaInterfaceDeletionRequest)(nil),                                       // 759: forge.DpaInterfaceDeletionRequest
+	(*DpaInterfaceDeletionResult)(nil),                                        // 760: forge.DpaInterfaceDeletionResult
+	(*SkuUpdateMetadataRequest)(nil),                                          // 761: forge.SkuUpdateMetadataRequest
+	(*PowerOptionRequest)(nil),                                                // 762: forge.PowerOptionRequest
+	(*PowerOptionUpdateRequest)(nil),                                          // 763: forge.PowerOptionUpdateRequest
+	(*PowerOptions)(nil),                                                      // 764: forge.PowerOptions
+	(*PowerOptionResponse)(nil),                                               // 765: forge.PowerOptionResponse
+	(*ComputeAllocationAttributes)(nil),                                       // 766: forge.ComputeAllocationAttributes
+	(*ComputeAllocation)(nil),                                                 // 767: forge.ComputeAllocation
+	(*CreateComputeAllocationRequest)(nil),                                    // 768: forge.CreateComputeAllocationRequest
+	(*CreateComputeAllocationResponse)(nil),                                   // 769: forge.CreateComputeAllocationResponse
+	(*FindComputeAllocationIdsRequest)(nil),                                   // 770: forge.FindComputeAllocationIdsRequest
+	(*FindComputeAllocationIdsResponse)(nil),                                  // 771: forge.FindComputeAllocationIdsResponse
+	(*FindComputeAllocationsByIdsRequest)(nil),                                // 772: forge.FindComputeAllocationsByIdsRequest
+	(*FindComputeAllocationsByIdsResponse)(nil),                               // 773: forge.FindComputeAllocationsByIdsResponse
+	(*UpdateComputeAllocationResponse)(nil),                                   // 774: forge.UpdateComputeAllocationResponse
+	(*UpdateComputeAllocationRequest)(nil),                                    // 775: forge.UpdateComputeAllocationRequest
+	(*DeleteComputeAllocationRequest)(nil),                                    // 776: forge.DeleteComputeAllocationRequest
+	(*DeleteComputeAllocationResponse)(nil),                                   // 777: forge.DeleteComputeAllocationResponse
+	(*InstanceTypeAllocationStats)(nil),                                       // 778: forge.InstanceTypeAllocationStats
+	(*GetRackRequest)(nil),                                                    // 779: forge.GetRackRequest
+	(*GetRackResponse)(nil),                                                   // 780: forge.GetRackResponse
+	(*RackList)(nil),                                                          // 781: forge.RackList
+	(*RackSearchFilter)(nil),                                                  // 782: forge.RackSearchFilter
+	(*RackIdList)(nil),                                                        // 783: forge.RackIdList
+	(*RacksByIdsRequest)(nil),                                                 // 784: forge.RacksByIdsRequest
+	(*Rack)(nil),                                                              // 785: forge.Rack
+	(*RackConfig)(nil),                                                        // 786: forge.RackConfig
+	(*RackStatus)(nil),                                                        // 787: forge.RackStatus
+	(*RackStateHistoriesRequest)(nil),                                         // 788: forge.RackStateHistoriesRequest
+	(*RackHealthHistoriesRequest)(nil),                                        // 789: forge.RackHealthHistoriesRequest
+	(*DeleteRackRequest)(nil),                                                 // 790: forge.DeleteRackRequest
+	(*AdminForceDeleteRackRequest)(nil),                                       // 791: forge.AdminForceDeleteRackRequest
+	(*AdminForceDeleteRackResponse)(nil),                                      // 792: forge.AdminForceDeleteRackResponse
+	(*RackCapabilityCompute)(nil),                                             // 793: forge.RackCapabilityCompute
+	(*RackCapabilitySwitch)(nil),                                              // 794: forge.RackCapabilitySwitch
+	(*RackCapabilityPowerShelf)(nil),                                          // 795: forge.RackCapabilityPowerShelf
+	(*RackCapabilitiesSet)(nil),                                               // 796: forge.RackCapabilitiesSet
+	(*RackProfile)(nil),                                                       // 797: forge.RackProfile
+	(*GetRackProfileRequest)(nil),                                             // 798: forge.GetRackProfileRequest
+	(*GetRackProfileResponse)(nil),                                            // 799: forge.GetRackProfileResponse
+	(*ConfiguredRackProfile)(nil),                                             // 800: forge.ConfiguredRackProfile
+	(*ListRackProfilesResponse)(nil),                                          // 801: forge.ListRackProfilesResponse
+	(*RackManagerForgeRequest)(nil),                                           // 802: forge.RackManagerForgeRequest
+	(*RackManagerForgeResponse)(nil),                                          // 803: forge.RackManagerForgeResponse
+	(*MachineNVLinkInfo)(nil),                                                 // 804: forge.MachineNVLinkInfo
+	(*UpdateMachineNvLinkInfoRequest)(nil),                                    // 805: forge.UpdateMachineNvLinkInfoRequest
+	(*MachineSpxStatusObservation)(nil),                                       // 806: forge.MachineSpxStatusObservation
+	(*MachineSpxAttachmentStatusObservation)(nil),                             // 807: forge.MachineSpxAttachmentStatusObservation
+	(*AstraConfig)(nil),                                                       // 808: forge.AstraConfig
+	(*AstraAttachment)(nil),                                                   // 809: forge.AstraAttachment
+	(*AstraConfigStatus)(nil),                                                 // 810: forge.AstraConfigStatus
+	(*AstraAttachmentStatus)(nil),                                             // 811: forge.AstraAttachmentStatus
+	(*AstraStatus)(nil),                                                       // 812: forge.AstraStatus
+	(*NVLinkGpu)(nil),                                                         // 813: forge.NVLinkGpu
+	(*MachineNVLinkStatusObservation)(nil),                                    // 814: forge.MachineNVLinkStatusObservation
+	(*MachineNVLinkGpuStatusObservation)(nil),                                 // 815: forge.MachineNVLinkGpuStatusObservation
+	(*NmxcBrowseRequest)(nil),                                                 // 816: forge.NmxcBrowseRequest
+	(*NmxcBrowseResponse)(nil),                                                // 817: forge.NmxcBrowseResponse
+	(*NVLinkPartition)(nil),                                                   // 818: forge.NVLinkPartition
+	(*NVLinkPartitionList)(nil),                                               // 819: forge.NVLinkPartitionList
+	(*NVLinkPartitionSearchConfig)(nil),                                       // 820: forge.NVLinkPartitionSearchConfig
+	(*NVLinkPartitionQuery)(nil),                                              // 821: forge.NVLinkPartitionQuery
+	(*NVLinkPartitionSearchFilter)(nil),                                       // 822: forge.NVLinkPartitionSearchFilter
+	(*NVLinkPartitionsByIdsRequest)(nil),                                      // 823: forge.NVLinkPartitionsByIdsRequest
+	(*NVLinkPartitionIdList)(nil),                                             // 824: forge.NVLinkPartitionIdList
+	(*NVLinkFabricSearchFilter)(nil),                                          // 825: forge.NVLinkFabricSearchFilter
+	(*NVLinkLogicalPartitionConfig)(nil),                                      // 826: forge.NVLinkLogicalPartitionConfig
+	(*NVLinkLogicalPartitionStatus)(nil),                                      // 827: forge.NVLinkLogicalPartitionStatus
+	(*NVLinkLogicalPartition)(nil),                                            // 828: forge.NVLinkLogicalPartition
+	(*NVLinkLogicalPartitionList)(nil),                                        // 829: forge.NVLinkLogicalPartitionList
+	(*NVLinkLogicalPartitionCreationRequest)(nil),                             // 830: forge.NVLinkLogicalPartitionCreationRequest
+	(*NVLinkLogicalPartitionDeletionRequest)(nil),                             // 831: forge.NVLinkLogicalPartitionDeletionRequest
+	(*NVLinkLogicalPartitionDeletionResult)(nil),                              // 832: forge.NVLinkLogicalPartitionDeletionResult
+	(*NVLinkLogicalPartitionSearchFilter)(nil),                                // 833: forge.NVLinkLogicalPartitionSearchFilter
+	(*NVLinkLogicalPartitionsByIdsRequest)(nil),                               // 834: forge.NVLinkLogicalPartitionsByIdsRequest
+	(*NVLinkLogicalPartitionIdList)(nil),                                      // 835: forge.NVLinkLogicalPartitionIdList
+	(*NVLinkLogicalPartitionUpdateRequest)(nil),                               // 836: forge.NVLinkLogicalPartitionUpdateRequest
+	(*NVLinkLogicalPartitionUpdateResult)(nil),                                // 837: forge.NVLinkLogicalPartitionUpdateResult
+	(*CreateBmcUserRequest)(nil),                                              // 838: forge.CreateBmcUserRequest
+	(*CreateBmcUserResponse)(nil),                                             // 839: forge.CreateBmcUserResponse
+	(*DeleteBmcUserRequest)(nil),                                              // 840: forge.DeleteBmcUserRequest
+	(*DeleteBmcUserResponse)(nil),                                             // 841: forge.DeleteBmcUserResponse
+	(*SetBmcRootPasswordRequest)(nil),                                         // 842: forge.SetBmcRootPasswordRequest
+	(*SetBmcRootPasswordResponse)(nil),                                        // 843: forge.SetBmcRootPasswordResponse
+	(*ProbeBmcVendorRequest)(nil),                                             // 844: forge.ProbeBmcVendorRequest
+	(*ProbeBmcVendorResponse)(nil),                                            // 845: forge.ProbeBmcVendorResponse
+	(*SetFirmwareUpdateTimeWindowRequest)(nil),                                // 846: forge.SetFirmwareUpdateTimeWindowRequest
+	(*SetFirmwareUpdateTimeWindowResponse)(nil),                               // 847: forge.SetFirmwareUpdateTimeWindowResponse
+	(*UpsertHostFirmwareConfigRequest)(nil),                                   // 848: forge.UpsertHostFirmwareConfigRequest
+	(*DeleteHostFirmwareConfigRequest)(nil),                                   // 849: forge.DeleteHostFirmwareConfigRequest
+	(*UpsertHostFirmwareComponentConfig)(nil),                                 // 850: forge.UpsertHostFirmwareComponentConfig
+	(*HostFirmwareComponentConfigResponse)(nil),                               // 851: forge.HostFirmwareComponentConfigResponse
+	(*HostFirmwareVersionConfig)(nil),                                         // 852: forge.HostFirmwareVersionConfig
+	(*HostFirmwareArtifact)(nil),                                              // 853: forge.HostFirmwareArtifact
+	(*HostFirmwareConfigResponse)(nil),                                        // 854: forge.HostFirmwareConfigResponse
+	(*ListHostFirmwareRequest)(nil),                                           // 855: forge.ListHostFirmwareRequest
+	(*ListHostFirmwareResponse)(nil),                                          // 856: forge.ListHostFirmwareResponse
+	(*AvailableHostFirmware)(nil),                                             // 857: forge.AvailableHostFirmware
+	(*TrimTableRequest)(nil),                                                  // 858: forge.TrimTableRequest
+	(*TrimTableResponse)(nil),                                                 // 859: forge.TrimTableResponse
+	(*NvlinkNmxcEndpoint)(nil),                                                // 860: forge.NvlinkNmxcEndpoint
+	(*NvlinkNmxcEndpointList)(nil),                                            // 861: forge.NvlinkNmxcEndpointList
+	(*DeleteNvlinkNmxcEndpointRequest)(nil),                                   // 862: forge.DeleteNvlinkNmxcEndpointRequest
+	(*CreateRemediationRequest)(nil),                                          // 863: forge.CreateRemediationRequest
+	(*CreateRemediationResponse)(nil),                                         // 864: forge.CreateRemediationResponse
+	(*RemediationIdList)(nil),                                                 // 865: forge.RemediationIdList
+	(*RemediationList)(nil),                                                   // 866: forge.RemediationList
+	(*Remediation)(nil),                                                       // 867: forge.Remediation
+	(*ApproveRemediationRequest)(nil),                                         // 868: forge.ApproveRemediationRequest
+	(*RevokeRemediationRequest)(nil),                                          // 869: forge.RevokeRemediationRequest
+	(*EnableRemediationRequest)(nil),                                          // 870: forge.EnableRemediationRequest
+	(*DisableRemediationRequest)(nil),                                         // 871: forge.DisableRemediationRequest
+	(*FindAppliedRemediationIdsRequest)(nil),                                  // 872: forge.FindAppliedRemediationIdsRequest
+	(*AppliedRemediationIdList)(nil),                                          // 873: forge.AppliedRemediationIdList
+	(*FindAppliedRemediationsRequest)(nil),                                    // 874: forge.FindAppliedRemediationsRequest
+	(*AppliedRemediation)(nil),                                                // 875: forge.AppliedRemediation
+	(*AppliedRemediationList)(nil),                                            // 876: forge.AppliedRemediationList
+	(*GetNextRemediationForMachineRequest)(nil),                               // 877: forge.GetNextRemediationForMachineRequest
+	(*GetNextRemediationForMachineResponse)(nil),                              // 878: forge.GetNextRemediationForMachineResponse
+	(*RemediationAppliedRequest)(nil),                                         // 879: forge.RemediationAppliedRequest
+	(*RemediationApplicationStatus)(nil),                                      // 880: forge.RemediationApplicationStatus
+	(*SetPrimaryDpuRequest)(nil),                                              // 881: forge.SetPrimaryDpuRequest
+	(*SetPrimaryInterfaceRequest)(nil),                                        // 882: forge.SetPrimaryInterfaceRequest
+	(*UsernamePassword)(nil),                                                  // 883: forge.UsernamePassword
+	(*SessionToken)(nil),                                                      // 884: forge.SessionToken
+	(*DpuExtensionServiceCredential)(nil),                                     // 885: forge.DpuExtensionServiceCredential
+	(*DpuExtensionServiceVersionInfo)(nil),                                    // 886: forge.DpuExtensionServiceVersionInfo
+	(*DpuExtensionService)(nil),                                               // 887: forge.DpuExtensionService
+	(*CreateDpuExtensionServiceRequest)(nil),                                  // 888: forge.CreateDpuExtensionServiceRequest
+	(*UpdateDpuExtensionServiceRequest)(nil),                                  // 889: forge.UpdateDpuExtensionServiceRequest
+	(*DeleteDpuExtensionServiceRequest)(nil),                                  // 890: forge.DeleteDpuExtensionServiceRequest
+	(*DeleteDpuExtensionServiceResponse)(nil),                                 // 891: forge.DeleteDpuExtensionServiceResponse
+	(*DpuExtensionServiceSearchFilter)(nil),                                   // 892: forge.DpuExtensionServiceSearchFilter
+	(*DpuExtensionServiceIdList)(nil),                                         // 893: forge.DpuExtensionServiceIdList
+	(*DpuExtensionServicesByIdsRequest)(nil),                                  // 894: forge.DpuExtensionServicesByIdsRequest
+	(*DpuExtensionServiceList)(nil),                                           // 895: forge.DpuExtensionServiceList
+	(*GetDpuExtensionServiceVersionsInfoRequest)(nil),                         // 896: forge.GetDpuExtensionServiceVersionsInfoRequest
+	(*DpuExtensionServiceVersionInfoList)(nil),                                // 897: forge.DpuExtensionServiceVersionInfoList
+	(*FindInstancesByDpuExtensionServiceRequest)(nil),                         // 898: forge.FindInstancesByDpuExtensionServiceRequest
+	(*FindInstancesByDpuExtensionServiceResponse)(nil),                        // 899: forge.FindInstancesByDpuExtensionServiceResponse
+	(*InstanceDpuExtensionServiceInfo)(nil),                                   // 900: forge.InstanceDpuExtensionServiceInfo
+	(*DpuExtensionServiceObservabilityConfigPrometheus)(nil),                  // 901: forge.DpuExtensionServiceObservabilityConfigPrometheus
+	(*DpuExtensionServiceObservabilityConfigLogging)(nil),                     // 902: forge.DpuExtensionServiceObservabilityConfigLogging
+	(*DpuExtensionServiceObservabilityConfig)(nil),                            // 903: forge.DpuExtensionServiceObservabilityConfig
+	(*DpuExtensionServiceObservability)(nil),                                  // 904: forge.DpuExtensionServiceObservability
+	(*ScoutStreamApiBoundMessage)(nil),                                        // 905: forge.ScoutStreamApiBoundMessage
+	(*ScoutStreamScoutBoundMessage)(nil),                                      // 906: forge.ScoutStreamScoutBoundMessage
+	(*ScoutStreamInitRequest)(nil),                                            // 907: forge.ScoutStreamInitRequest
+	(*ScoutStreamShowConnectionsRequest)(nil),                                 // 908: forge.ScoutStreamShowConnectionsRequest
+	(*ScoutStreamShowConnectionsResponse)(nil),                                // 909: forge.ScoutStreamShowConnectionsResponse
+	(*ScoutStreamDisconnectRequest)(nil),                                      // 910: forge.ScoutStreamDisconnectRequest
+	(*ScoutStreamDisconnectResponse)(nil),                                     // 911: forge.ScoutStreamDisconnectResponse
+	(*ScoutStreamAdminPingRequest)(nil),                                       // 912: forge.ScoutStreamAdminPingRequest
+	(*ScoutStreamAdminPingResponse)(nil),                                      // 913: forge.ScoutStreamAdminPingResponse
+	(*ScoutStreamAgentPingRequest)(nil),                                       // 914: forge.ScoutStreamAgentPingRequest
+	(*ScoutStreamAgentPingResponse)(nil),                                      // 915: forge.ScoutStreamAgentPingResponse
+	(*ScoutStreamConnectionInfo)(nil),                                         // 916: forge.ScoutStreamConnectionInfo
+	(*ScoutStreamError)(nil),                                                  // 917: forge.ScoutStreamError
+	(*PrefixFilterPolicyEntry)(nil),                                           // 918: forge.PrefixFilterPolicyEntry
+	(*RoutingProfile)(nil),                                                    // 919: forge.RoutingProfile
+	(*DomainLegacy)(nil),                                                      // 920: forge.DomainLegacy
+	(*DomainListLegacy)(nil),                                                  // 921: forge.DomainListLegacy
+	(*DomainDeletionLegacy)(nil),                                              // 922: forge.DomainDeletionLegacy
+	(*DomainDeletionResultLegacy)(nil),                                        // 923: forge.DomainDeletionResultLegacy
+	(*DomainSearchQueryLegacy)(nil),                                           // 924: forge.DomainSearchQueryLegacy
+	(*PxeDomain)(nil),                                                         // 925: forge.PxeDomain
+	(*MachinePositionQuery)(nil),                                              // 926: forge.MachinePositionQuery
+	(*MachinePositionInfoList)(nil),                                           // 927: forge.MachinePositionInfoList
+	(*MachinePositionInfo)(nil),                                               // 928: forge.MachinePositionInfo
+	(*ModifyDPFStateRequest)(nil),                                             // 929: forge.ModifyDPFStateRequest
+	(*DPFStateResponse)(nil),                                                  // 930: forge.DPFStateResponse
+	(*GetDPFStateRequest)(nil),                                                // 931: forge.GetDPFStateRequest
+	(*GetDPFHostSnapshotRequest)(nil),                                         // 932: forge.GetDPFHostSnapshotRequest
+	(*DPFHostSnapshotResponse)(nil),                                           // 933: forge.DPFHostSnapshotResponse
+	(*GetDPFServiceVersionsRequest)(nil),                                      // 934: forge.GetDPFServiceVersionsRequest
+	(*DPFServiceVersion)(nil),                                                 // 935: forge.DPFServiceVersion
+	(*DPFServiceVersionsResponse)(nil),                                        // 936: forge.DPFServiceVersionsResponse
+	(*ReleaseDPUServiceSyncHoldRequest)(nil),                                  // 937: forge.ReleaseDPUServiceSyncHoldRequest
+	(*DPUServiceSyncReleaseResult)(nil),                                       // 938: forge.DPUServiceSyncReleaseResult
+	(*ReleaseDPUServiceSyncHoldResponse)(nil),                                 // 939: forge.ReleaseDPUServiceSyncHoldResponse
+	(*FindPendingDPUServiceSyncIdsRequest)(nil),                               // 940: forge.FindPendingDPUServiceSyncIdsRequest
+	(*FindPendingDPUServiceSyncsByIdsRequest)(nil),                            // 941: forge.FindPendingDPUServiceSyncsByIdsRequest
+	(*ListDPUServiceSyncHistoryRequest)(nil),                                  // 942: forge.ListDPUServiceSyncHistoryRequest
+	(*PendingDPUServiceSync)(nil),                                             // 943: forge.PendingDPUServiceSync
+	(*ListPendingDPUServiceSyncsResponse)(nil),                                // 944: forge.ListPendingDPUServiceSyncsResponse
+	(*ComponentResult)(nil),                                                   // 945: forge.ComponentResult
+	(*SwitchIdList)(nil),                                                      // 946: forge.SwitchIdList
+	(*PowerShelfIdList)(nil),                                                  // 947: forge.PowerShelfIdList
+	(*MacAddressList)(nil),                                                    // 948: forge.MacAddressList
+	(*GetComponentInventoryRequest)(nil),                                      // 949: forge.GetComponentInventoryRequest
+	(*ComponentInventoryEntry)(nil),                                           // 950: forge.ComponentInventoryEntry
+	(*GetComponentInventoryResponse)(nil),                                     // 951: forge.GetComponentInventoryResponse
+	(*ComponentPowerControlRequest)(nil),                                      // 952: forge.ComponentPowerControlRequest
+	(*ComponentPowerControlResponse)(nil),                                     // 953: forge.ComponentPowerControlResponse
+	(*ComponentConfigureSwitchCertificateRequest)(nil),                        // 954: forge.ComponentConfigureSwitchCertificateRequest
+	(*ComponentConfigureSwitchCertificateResponse)(nil),                       // 955: forge.ComponentConfigureSwitchCertificateResponse
+	(*FirmwareUpdateStatus)(nil),                                              // 956: forge.FirmwareUpdateStatus
+	(*UpdateComputeTrayFirmwareTarget)(nil),                                   // 957: forge.UpdateComputeTrayFirmwareTarget
+	(*UpdateSwitchFirmwareTarget)(nil),                                        // 958: forge.UpdateSwitchFirmwareTarget
+	(*UpdatePowerShelfFirmwareTarget)(nil),                                    // 959: forge.UpdatePowerShelfFirmwareTarget
+	(*UpdateFirmwareObjectTarget)(nil),                                        // 960: forge.UpdateFirmwareObjectTarget
+	(*UpdateComponentFirmwareRequest)(nil),                                    // 961: forge.UpdateComponentFirmwareRequest
+	(*UpdateComponentFirmwareResponse)(nil),                                   // 962: forge.UpdateComponentFirmwareResponse
+	(*GetComponentFirmwareStatusRequest)(nil),                                 // 963: forge.GetComponentFirmwareStatusRequest
+	(*GetComponentFirmwareStatusResponse)(nil),                                // 964: forge.GetComponentFirmwareStatusResponse
+	(*ListComponentFirmwareVersionsRequest)(nil),                              // 965: forge.ListComponentFirmwareVersionsRequest
+	(*ComputeTrayFirmwareVersions)(nil),                                       // 966: forge.ComputeTrayFirmwareVersions
+	(*DeviceFirmwareVersions)(nil),                                            // 967: forge.DeviceFirmwareVersions
+	(*ListComponentFirmwareVersionsResponse)(nil),                             // 968: forge.ListComponentFirmwareVersionsResponse
+	(*SpxPartitionCreationRequest)(nil),                                       // 969: forge.SpxPartitionCreationRequest
+	(*SpxPartition)(nil),                                                      // 970: forge.SpxPartition
+	(*SpxPartitionIdList)(nil),                                                // 971: forge.SpxPartitionIdList
+	(*SpxPartitionDeletionRequest)(nil),                                       // 972: forge.SpxPartitionDeletionRequest
+	(*SpxPartitionDeletionResult)(nil),                                        // 973: forge.SpxPartitionDeletionResult
+	(*SpxPartitionSearchFilter)(nil),                                          // 974: forge.SpxPartitionSearchFilter
+	(*SpxPartitionList)(nil),                                                  // 975: forge.SpxPartitionList
+	(*SpxPartitionsByIdsRequest)(nil),                                         // 976: forge.SpxPartitionsByIdsRequest
+	(*AdminForceDeleteSwitchRequest)(nil),                                     // 977: forge.AdminForceDeleteSwitchRequest
+	(*AdminForceDeleteSwitchResponse)(nil),                                    // 978: forge.AdminForceDeleteSwitchResponse
+	(*AdminForceDeletePowerShelfRequest)(nil),                                 // 979: forge.AdminForceDeletePowerShelfRequest
+	(*AdminForceDeletePowerShelfResponse)(nil),                                // 980: forge.AdminForceDeletePowerShelfResponse
+	(*OperatingSystem)(nil),                                                   // 981: forge.OperatingSystem
+	(*CreateOperatingSystemRequest)(nil),                                      // 982: forge.CreateOperatingSystemRequest
+	(*IpxeTemplateParameters)(nil),                                            // 983: forge.IpxeTemplateParameters
+	(*IpxeTemplateArtifacts)(nil),                                             // 984: forge.IpxeTemplateArtifacts
+	(*UpdateOperatingSystemRequest)(nil),                                      // 985: forge.UpdateOperatingSystemRequest
+	(*DeleteOperatingSystemRequest)(nil),                                      // 986: forge.DeleteOperatingSystemRequest
+	(*DeleteOperatingSystemResponse)(nil),                                     // 987: forge.DeleteOperatingSystemResponse
+	(*OperatingSystemSearchFilter)(nil),                                       // 988: forge.OperatingSystemSearchFilter
+	(*OperatingSystemIdList)(nil),                                             // 989: forge.OperatingSystemIdList
+	(*OperatingSystemsByIdsRequest)(nil),                                      // 990: forge.OperatingSystemsByIdsRequest
+	(*OperatingSystemList)(nil),                                               // 991: forge.OperatingSystemList
+	(*GetOperatingSystemCachableIpxeTemplateArtifactsRequest)(nil),            // 992: forge.GetOperatingSystemCachableIpxeTemplateArtifactsRequest
+	(*IpxeTemplateArtifactList)(nil),                                          // 993: forge.IpxeTemplateArtifactList
+	(*IpxeTemplateArtifactUpdateRequest)(nil),                                 // 994: forge.IpxeTemplateArtifactUpdateRequest
+	(*UpdateOperatingSystemIpxeTemplateArtifactRequest)(nil),                  // 995: forge.UpdateOperatingSystemIpxeTemplateArtifactRequest
+	(*ReWrapSecretsRequest)(nil),                                              // 996: forge.ReWrapSecretsRequest
+	(*ReWrapSecretsResponse)(nil),                                             // 997: forge.ReWrapSecretsResponse
+	(*GetMachineBootInterfacesRequest)(nil),                                   // 998: forge.GetMachineBootInterfacesRequest
+	(*MachineBootInterface)(nil),                                              // 999: forge.MachineBootInterface
+	(*MachineInterfaceBootInterface)(nil),                                     // 1000: forge.MachineInterfaceBootInterface
+	(*PredictedBootInterface)(nil),                                            // 1001: forge.PredictedBootInterface
+	(*ExploredBootInterface)(nil),                                             // 1002: forge.ExploredBootInterface
+	(*RetainedBootInterface)(nil),                                             // 1003: forge.RetainedBootInterface
+	(*GetMachineBootInterfacesResponse)(nil),                                  // 1004: forge.GetMachineBootInterfacesResponse
+	(*GetContainerRegistryCredentialRequest)(nil),                             // 1005: forge.GetContainerRegistryCredentialRequest
+	(*GetContainerRegistryCredentialResponse)(nil),                            // 1006: forge.GetContainerRegistryCredentialResponse
+	(*SetContainerRegistryCredentialRequest)(nil),                             // 1007: forge.SetContainerRegistryCredentialRequest
+	(*SitePrefix)(nil),                                                        // 1008: forge.SitePrefix
+	(*SitePrefixConfig)(nil),                                                  // 1009: forge.SitePrefixConfig
+	(*SitePrefixStatus)(nil),                                                  // 1010: forge.SitePrefixStatus
+	(*SitePrefixQuotaUsage)(nil),                                              // 1011: forge.SitePrefixQuotaUsage
+	(*SitePrefixCreationRequest)(nil),                                         // 1012: forge.SitePrefixCreationRequest
+	(*SitePrefixUpdateRequest)(nil),                                           // 1013: forge.SitePrefixUpdateRequest
+	(*SitePrefixDeletionRequest)(nil),                                         // 1014: forge.SitePrefixDeletionRequest
+	(*SitePrefixDeletionResult)(nil),                                          // 1015: forge.SitePrefixDeletionResult
+	(*SitePrefixStateHistoriesRequest)(nil),                                   // 1016: forge.SitePrefixStateHistoriesRequest
+	(*SitePrefixSearchFilter)(nil),                                            // 1017: forge.SitePrefixSearchFilter
+	(*SitePrefixesByIdsRequest)(nil),                                          // 1018: forge.SitePrefixesByIdsRequest
+	(*SitePrefixIdList)(nil),                                                  // 1019: forge.SitePrefixIdList
+	(*SitePrefixList)(nil),                                                    // 1020: forge.SitePrefixList
+	(*InterfaceAddressConfig)(nil),                                            // 1021: forge.InterfaceAddressConfig
+	(*VpcReleaseInactiveVniRequest)(nil),                                      // 1022: forge.VpcReleaseInactiveVniRequest
+	(*VpcReleaseInactiveVniResult)(nil),                                       // 1023: forge.VpcReleaseInactiveVniResult
+	(*VpcRoutingStateRequest)(nil),                                            // 1024: forge.VpcRoutingStateRequest
+	(*VpcRoutingState)(nil),                                                   // 1025: forge.VpcRoutingState
+	(*VpcRetainedVniAllocation)(nil),                                          // 1026: forge.VpcRetainedVniAllocation
+	(*VpcChangeRoutingProfileRequest)(nil),                                    // 1027: forge.VpcChangeRoutingProfileRequest
+	(*PatchExpectedPowerShelfRequest)(nil),                                    // 1028: forge.PatchExpectedPowerShelfRequest
+	(*PatchExpectedSwitchRequest)(nil),                                        // 1029: forge.PatchExpectedSwitchRequest
+	(*PatchExpectedMachineRequest)(nil),                                       // 1030: forge.PatchExpectedMachineRequest
+	(*PatchExpectedMachinesRequest)(nil),                                      // 1031: forge.PatchExpectedMachinesRequest
+	nil,                                                                       // 1032: forge.RuntimeConfig.DpuNicFirmwareUpdateVersionEntry
+	(*DNSMessage_DNSQuestion)(nil),                                            // 1033: forge.DNSMessage.DNSQuestion
+	(*DNSMessage_DNSResponse)(nil),                                            // 1034: forge.DNSMessage.DNSResponse
+	(*DNSMessage_DNSResponse_DNSRR)(nil),                                      // 1035: forge.DNSMessage.DNSResponse.DNSRR
+	nil,                                                                       // 1036: forge.FabricManagerConfig.ConfigMapEntry
+	nil,                                                                       // 1037: forge.StateHistories.HistoriesEntry
+	nil,                                                                       // 1038: forge.MachineStateHistories.HistoriesEntry
+	nil,                                                                       // 1039: forge.HealthHistories.HistoriesEntry
+	(*MachineCredentialsUpdateRequest_Credentials)(nil),                       // 1040: forge.MachineCredentialsUpdateRequest.Credentials
+	(*ForgeAgentControlResponse_ForgeAgentControlExtraInfo)(nil),              // 1041: forge.ForgeAgentControlResponse.ForgeAgentControlExtraInfo
+	(*ForgeAgentControlResponse_Noop)(nil),                                    // 1042: forge.ForgeAgentControlResponse.Noop
+	(*ForgeAgentControlResponse_Reset)(nil),                                   // 1043: forge.ForgeAgentControlResponse.Reset
+	(*ForgeAgentControlResponse_Discovery)(nil),                               // 1044: forge.ForgeAgentControlResponse.Discovery
+	(*ForgeAgentControlResponse_Rebuild)(nil),                                 // 1045: forge.ForgeAgentControlResponse.Rebuild
+	(*ForgeAgentControlResponse_Retry)(nil),                                   // 1046: forge.ForgeAgentControlResponse.Retry
+	(*ForgeAgentControlResponse_Measure)(nil),                                 // 1047: forge.ForgeAgentControlResponse.Measure
+	(*ForgeAgentControlResponse_LogError)(nil),                                // 1048: forge.ForgeAgentControlResponse.LogError
+	(*ForgeAgentControlResponse_MachineValidation)(nil),                       // 1049: forge.ForgeAgentControlResponse.MachineValidation
+	(*ForgeAgentControlResponse_MachineValidationFilter)(nil),                 // 1050: forge.ForgeAgentControlResponse.MachineValidationFilter
+	(*ForgeAgentControlResponse_MlxAction)(nil),                               // 1051: forge.ForgeAgentControlResponse.MlxAction
+	(*ForgeAgentControlResponse_MlxDeviceAction)(nil),                         // 1052: forge.ForgeAgentControlResponse.MlxDeviceAction
+	(*ForgeAgentControlResponse_MlxDeviceNoop)(nil),                           // 1053: forge.ForgeAgentControlResponse.MlxDeviceNoop
+	(*ForgeAgentControlResponse_MlxDeviceLock)(nil),                           // 1054: forge.ForgeAgentControlResponse.MlxDeviceLock
+	(*ForgeAgentControlResponse_MlxDeviceUnlock)(nil),                         // 1055: forge.ForgeAgentControlResponse.MlxDeviceUnlock
+	(*ForgeAgentControlResponse_MlxDeviceApplyProfile)(nil),                   // 1056: forge.ForgeAgentControlResponse.MlxDeviceApplyProfile
+	(*ForgeAgentControlResponse_MlxDeviceApplyFirmware)(nil),                  // 1057: forge.ForgeAgentControlResponse.MlxDeviceApplyFirmware
+	(*ForgeAgentControlResponse_FirmwareUpgrade)(nil),                         // 1058: forge.ForgeAgentControlResponse.FirmwareUpgrade
+	(*ForgeAgentControlResponse_ForgeAgentControlExtraInfo_KeyValuePair)(nil), // 1059: forge.ForgeAgentControlResponse.ForgeAgentControlExtraInfo.KeyValuePair
+	(*MachineCleanupInfo_CleanupStepResult)(nil),                              // 1060: forge.MachineCleanupInfo.CleanupStepResult
+	(*DpuReprovisioningListResponse_DpuReprovisioningListItem)(nil),           // 1061: forge.DpuReprovisioningListResponse.DpuReprovisioningListItem
+	(*HostReprovisioningListResponse_HostReprovisioningListItem)(nil),         // 1062: forge.HostReprovisioningListResponse.HostReprovisioningListItem
+	(*MachineValidationTestUpdateRequest_Payload)(nil),                        // 1063: forge.MachineValidationTestUpdateRequest.Payload
+	nil,                               // 1064: forge.RedfishBrowseResponse.HeadersEntry
+	nil,                               // 1065: forge.RedfishActionResult.HeadersEntry
+	nil,                               // 1066: forge.UfmBrowseResponse.HeadersEntry
+	nil,                               // 1067: forge.DesiredFirmwareVersionEntry.ComponentVersionsEntry
+	nil,                               // 1068: forge.NmxcBrowseResponse.HeadersEntry
+	(*DPFStateResponse_DPFState)(nil), // 1069: forge.DPFStateResponse.DPFState
+	(*GetMachineBootInterfacesResponse_Reconciliation)(nil), // 1070: forge.GetMachineBootInterfacesResponse.Reconciliation
+	(*MachineId)(nil),                                    // 1071: common.MachineId
+	(*timestamppb.Timestamp)(nil),                        // 1072: google.protobuf.Timestamp
+	(*VpcId)(nil),                                        // 1073: common.VpcId
+	(*RouteTargets)(nil),                                 // 1074: common.RouteTargets
+	(*RouteTarget)(nil),                                  // 1075: common.RouteTarget
+	(*NVLinkLogicalPartitionId)(nil),                     // 1076: common.NVLinkLogicalPartitionId
+	(*VpcPrefixId)(nil),                                  // 1077: common.VpcPrefixId
+	(*SitePrefixId)(nil),                                 // 1078: common.SitePrefixId
+	(*VpcPeeringId)(nil),                                 // 1079: common.VpcPeeringId
+	(*IBPartitionId)(nil),                                // 1080: common.IBPartitionId
+	(*HealthReport)(nil),                                 // 1081: health.HealthReport
+	(*PowerShelfId)(nil),                                 // 1082: common.PowerShelfId
+	(*RackId)(nil),                                       // 1083: common.RackId
+	(*NVLinkDomainId)(nil),                               // 1084: common.NVLinkDomainId
+	(*UUID)(nil),                                         // 1085: common.UUID
+	(*SwitchId)(nil),                                     // 1086: common.SwitchId
+	(*RackProfileId)(nil),                                // 1087: common.RackProfileId
+	(*DomainId)(nil),                                     // 1088: common.DomainId
+	(*NetworkSegmentId)(nil),                             // 1089: common.NetworkSegmentId
+	(*NetworkPrefixId)(nil),                              // 1090: common.NetworkPrefixId
+	(*InstanceId)(nil),                                   // 1091: common.InstanceId
+	(*IpxeTemplateId)(nil),                               // 1092: common.IpxeTemplateId
+	(*OperatingSystemId)(nil),                            // 1093: common.OperatingSystemId
+	(*SpxPartitionId)(nil),                               // 1094: common.SpxPartitionId
+	(*MachineInterfaceId)(nil),                           // 1095: common.MachineInterfaceId
+	(*DiscoveryInfo)(nil),                                // 1096: machine_discovery.DiscoveryInfo
+	(*durationpb.Duration)(nil),                          // 1097: google.protobuf.Duration
+	(*StringList)(nil),                                   // 1098: common.StringList
+	(*Gpu)(nil),                                          // 1099: machine_discovery.Gpu
+	(*DeviceId)(nil),                                     // 1100: common.DeviceId
+	(*MachineValidationId)(nil),                          // 1101: common.MachineValidationId
+	(*Uint32List)(nil),                                   // 1102: common.Uint32List
+	(*DpaInterfaceId)(nil),                               // 1103: common.DpaInterfaceId
+	(*ComputeAllocationId)(nil),                          // 1104: common.ComputeAllocationId
+	(*RackHardwareType)(nil),                             // 1105: common.RackHardwareType
+	(*NVLinkPartitionId)(nil),                            // 1106: common.NVLinkPartitionId
+	(*RemediationId)(nil),                                // 1107: common.RemediationId
+	(*MlxDeviceLockdownResponse)(nil),                    // 1108: mlx_device.MlxDeviceLockdownResponse
+	(*MlxDeviceProfileSyncResponse)(nil),                 // 1109: mlx_device.MlxDeviceProfileSyncResponse
+	(*MlxDeviceProfileCompareResponse)(nil),              // 1110: mlx_device.MlxDeviceProfileCompareResponse
+	(*MlxDeviceInfoDeviceResponse)(nil),                  // 1111: mlx_device.MlxDeviceInfoDeviceResponse
+	(*MlxDeviceInfoReportResponse)(nil),                  // 1112: mlx_device.MlxDeviceInfoReportResponse
+	(*MlxDeviceRegistryListResponse)(nil),                // 1113: mlx_device.MlxDeviceRegistryListResponse
+	(*MlxDeviceRegistryShowResponse)(nil),                // 1114: mlx_device.MlxDeviceRegistryShowResponse
+	(*MlxDeviceConfigQueryResponse)(nil),                 // 1115: mlx_device.MlxDeviceConfigQueryResponse
+	(*MlxDeviceConfigSetResponse)(nil),                   // 1116: mlx_device.MlxDeviceConfigSetResponse
+	(*MlxDeviceConfigSyncResponse)(nil),                  // 1117: mlx_device.MlxDeviceConfigSyncResponse
+	(*MlxDeviceConfigCompareResponse)(nil),               // 1118: mlx_device.MlxDeviceConfigCompareResponse
+	(*MlxDeviceLockdownLockRequest)(nil),                 // 1119: mlx_device.MlxDeviceLockdownLockRequest
+	(*MlxDeviceLockdownUnlockRequest)(nil),               // 1120: mlx_device.MlxDeviceLockdownUnlockRequest
+	(*MlxDeviceLockdownStatusRequest)(nil),               // 1121: mlx_device.MlxDeviceLockdownStatusRequest
+	(*MlxDeviceProfileSyncRequest)(nil),                  // 1122: mlx_device.MlxDeviceProfileSyncRequest
+	(*MlxDeviceProfileCompareRequest)(nil),               // 1123: mlx_device.MlxDeviceProfileCompareRequest
+	(*MlxDeviceInfoDeviceRequest)(nil),                   // 1124: mlx_device.MlxDeviceInfoDeviceRequest
+	(*MlxDeviceInfoReportRequest)(nil),                   // 1125: mlx_device.MlxDeviceInfoReportRequest
+	(*MlxDeviceRegistryListRequest)(nil),                 // 1126: mlx_device.MlxDeviceRegistryListRequest
+	(*MlxDeviceRegistryShowRequest)(nil),                 // 1127: mlx_device.MlxDeviceRegistryShowRequest
+	(*MlxDeviceConfigQueryRequest)(nil),                  // 1128: mlx_device.MlxDeviceConfigQueryRequest
+	(*MlxDeviceConfigSetRequest)(nil),                    // 1129: mlx_device.MlxDeviceConfigSetRequest
+	(*MlxDeviceConfigSyncRequest)(nil),                   // 1130: mlx_device.MlxDeviceConfigSyncRequest
+	(*MlxDeviceConfigCompareRequest)(nil),                // 1131: mlx_device.MlxDeviceConfigCompareRequest
+	(*Domain)(nil),                                       // 1132: dns.Domain
+	(*MachineIdList)(nil),                                // 1133: common.MachineIdList
+	(*EndpointExplorationReport)(nil),                    // 1134: site_explorer.EndpointExplorationReport
+	(SystemPowerControl)(0),                              // 1135: common.SystemPowerControl
+	(*fieldmaskpb.FieldMask)(nil),                        // 1136: google.protobuf.FieldMask
+	(*SerializableMlxConfigProfile)(nil),                 // 1137: mlx_device.SerializableMlxConfigProfile
+	(*FirmwareFlasherProfile)(nil),                       // 1138: mlx_device.FirmwareFlasherProfile
+	(*ScoutFirmwareUpgradeTask)(nil),                     // 1139: scout_firmware_upgrade.ScoutFirmwareUpgradeTask
+	(*CreateDomainRequest)(nil),                          // 1140: dns.CreateDomainRequest
+	(*UpdateDomainRequest)(nil),                          // 1141: dns.UpdateDomainRequest
+	(*DomainDeletionRequest)(nil),                        // 1142: dns.DomainDeletionRequest
+	(*DomainSearchQuery)(nil),                            // 1143: dns.DomainSearchQuery
+	(*DnsResourceRecordLookupRequest)(nil),               // 1144: dns.DnsResourceRecordLookupRequest
+	(*GetAllDomainsRequest)(nil),                         // 1145: dns.GetAllDomainsRequest
+	(*DomainMetadataRequest)(nil),                        // 1146: dns.DomainMetadataRequest
+	(*emptypb.Empty)(nil),                                // 1147: google.protobuf.Empty
+	(*ExploredEndpointSearchFilter)(nil),                 // 1148: site_explorer.ExploredEndpointSearchFilter
+	(*ExploredEndpointsByIdsRequest)(nil),                // 1149: site_explorer.ExploredEndpointsByIdsRequest
+	(*ExploredManagedHostSearchFilter)(nil),              // 1150: site_explorer.ExploredManagedHostSearchFilter
+	(*ExploredManagedHostsByIdsRequest)(nil),             // 1151: site_explorer.ExploredManagedHostsByIdsRequest
+	(*ExploredMlxDeviceHostSearchFilter)(nil),            // 1152: site_explorer.ExploredMlxDeviceHostSearchFilter
+	(*ExploredMlxDevicesByIdsRequest)(nil),               // 1153: site_explorer.ExploredMlxDevicesByIdsRequest
+	(*CreateMeasurementBundleRequest)(nil),               // 1154: measured_boot.CreateMeasurementBundleRequest
+	(*DeleteMeasurementBundleRequest)(nil),               // 1155: measured_boot.DeleteMeasurementBundleRequest
+	(*RenameMeasurementBundleRequest)(nil),               // 1156: measured_boot.RenameMeasurementBundleRequest
+	(*UpdateMeasurementBundleRequest)(nil),               // 1157: measured_boot.UpdateMeasurementBundleRequest
+	(*ShowMeasurementBundleRequest)(nil),                 // 1158: measured_boot.ShowMeasurementBundleRequest
+	(*ShowMeasurementBundlesRequest)(nil),                // 1159: measured_boot.ShowMeasurementBundlesRequest
+	(*ListMeasurementBundlesRequest)(nil),                // 1160: measured_boot.ListMeasurementBundlesRequest
+	(*ListMeasurementBundleMachinesRequest)(nil),         // 1161: measured_boot.ListMeasurementBundleMachinesRequest
+	(*FindClosestBundleMatchRequest)(nil),                // 1162: measured_boot.FindClosestBundleMatchRequest
+	(*DeleteMeasurementJournalRequest)(nil),              // 1163: measured_boot.DeleteMeasurementJournalRequest
+	(*ShowMeasurementJournalRequest)(nil),                // 1164: measured_boot.ShowMeasurementJournalRequest
+	(*ShowMeasurementJournalsRequest)(nil),               // 1165: measured_boot.ShowMeasurementJournalsRequest
+	(*ListMeasurementJournalRequest)(nil),                // 1166: measured_boot.ListMeasurementJournalRequest
+	(*AttestCandidateMachineRequest)(nil),                // 1167: measured_boot.AttestCandidateMachineRequest
+	(*ShowCandidateMachineRequest)(nil),                  // 1168: measured_boot.ShowCandidateMachineRequest
+	(*ShowCandidateMachinesRequest)(nil),                 // 1169: measured_boot.ShowCandidateMachinesRequest
+	(*ListCandidateMachinesRequest)(nil),                 // 1170: measured_boot.ListCandidateMachinesRequest
+	(*CreateMeasurementSystemProfileRequest)(nil),        // 1171: measured_boot.CreateMeasurementSystemProfileRequest
+	(*DeleteMeasurementSystemProfileRequest)(nil),        // 1172: measured_boot.DeleteMeasurementSystemProfileRequest
+	(*RenameMeasurementSystemProfileRequest)(nil),        // 1173: measured_boot.RenameMeasurementSystemProfileRequest
+	(*ShowMeasurementSystemProfileRequest)(nil),          // 1174: measured_boot.ShowMeasurementSystemProfileRequest
+	(*ShowMeasurementSystemProfilesRequest)(nil),         // 1175: measured_boot.ShowMeasurementSystemProfilesRequest
+	(*ListMeasurementSystemProfilesRequest)(nil),         // 1176: measured_boot.ListMeasurementSystemProfilesRequest
+	(*ListMeasurementSystemProfileBundlesRequest)(nil),   // 1177: measured_boot.ListMeasurementSystemProfileBundlesRequest
+	(*ListMeasurementSystemProfileMachinesRequest)(nil),  // 1178: measured_boot.ListMeasurementSystemProfileMachinesRequest
+	(*CreateMeasurementReportRequest)(nil),               // 1179: measured_boot.CreateMeasurementReportRequest
+	(*DeleteMeasurementReportRequest)(nil),               // 1180: measured_boot.DeleteMeasurementReportRequest
+	(*PromoteMeasurementReportRequest)(nil),              // 1181: measured_boot.PromoteMeasurementReportRequest
+	(*RevokeMeasurementReportRequest)(nil),               // 1182: measured_boot.RevokeMeasurementReportRequest
+	(*ShowMeasurementReportForIdRequest)(nil),            // 1183: measured_boot.ShowMeasurementReportForIdRequest
+	(*ShowMeasurementReportsForMachineRequest)(nil),      // 1184: measured_boot.ShowMeasurementReportsForMachineRequest
+	(*ShowMeasurementReportsRequest)(nil),                // 1185: measured_boot.ShowMeasurementReportsRequest
+	(*ListMeasurementReportRequest)(nil),                 // 1186: measured_boot.ListMeasurementReportRequest
+	(*MatchMeasurementReportRequest)(nil),                // 1187: measured_boot.MatchMeasurementReportRequest
+	(*ImportSiteMeasurementsRequest)(nil),                // 1188: measured_boot.ImportSiteMeasurementsRequest
+	(*ExportSiteMeasurementsRequest)(nil),                // 1189: measured_boot.ExportSiteMeasurementsRequest
+	(*AddMeasurementTrustedMachineRequest)(nil),          // 1190: measured_boot.AddMeasurementTrustedMachineRequest
+	(*RemoveMeasurementTrustedMachineRequest)(nil),       // 1191: measured_boot.RemoveMeasurementTrustedMachineRequest
+	(*AddMeasurementTrustedProfileRequest)(nil),          // 1192: measured_boot.AddMeasurementTrustedProfileRequest
+	(*RemoveMeasurementTrustedProfileRequest)(nil),       // 1193: measured_boot.RemoveMeasurementTrustedProfileRequest
+	(*ListMeasurementTrustedMachinesRequest)(nil),        // 1194: measured_boot.ListMeasurementTrustedMachinesRequest
+	(*ListMeasurementTrustedProfilesRequest)(nil),        // 1195: measured_boot.ListMeasurementTrustedProfilesRequest
+	(*ListAttestationSummaryRequest)(nil),                // 1196: measured_boot.ListAttestationSummaryRequest
+	(*PublishMlxDeviceReportRequest)(nil),                // 1197: mlx_device.PublishMlxDeviceReportRequest
+	(*PublishMlxObservationReportRequest)(nil),           // 1198: mlx_device.PublishMlxObservationReportRequest
+	(*MlxAdminProfileSyncRequest)(nil),                   // 1199: mlx_device.MlxAdminProfileSyncRequest
+	(*MlxAdminProfileShowRequest)(nil),                   // 1200: mlx_device.MlxAdminProfileShowRequest
+	(*MlxAdminProfileCompareRequest)(nil),                // 1201: mlx_device.MlxAdminProfileCompareRequest
+	(*MlxAdminProfileListRequest)(nil),                   // 1202: mlx_device.MlxAdminProfileListRequest
+	(*MlxAdminLockdownLockRequest)(nil),                  // 1203: mlx_device.MlxAdminLockdownLockRequest
+	(*MlxAdminLockdownUnlockRequest)(nil),                // 1204: mlx_device.MlxAdminLockdownUnlockRequest
+	(*MlxAdminLockdownStatusRequest)(nil),                // 1205: mlx_device.MlxAdminLockdownStatusRequest
+	(*MlxAdminDeviceInfoRequest)(nil),                    // 1206: mlx_device.MlxAdminDeviceInfoRequest
+	(*MlxAdminDeviceReportRequest)(nil),                  // 1207: mlx_device.MlxAdminDeviceReportRequest
+	(*MlxAdminRegistryListRequest)(nil),                  // 1208: mlx_device.MlxAdminRegistryListRequest
+	(*MlxAdminRegistryShowRequest)(nil),                  // 1209: mlx_device.MlxAdminRegistryShowRequest
+	(*MlxAdminConfigQueryRequest)(nil),                   // 1210: mlx_device.MlxAdminConfigQueryRequest
+	(*MlxAdminConfigSetRequest)(nil),                     // 1211: mlx_device.MlxAdminConfigSetRequest
+	(*MlxAdminConfigSyncRequest)(nil),                    // 1212: mlx_device.MlxAdminConfigSyncRequest
+	(*MlxAdminConfigCompareRequest)(nil),                 // 1213: mlx_device.MlxAdminConfigCompareRequest
+	(*DomainDeletionResult)(nil),                         // 1214: dns.DomainDeletionResult
+	(*DomainList)(nil),                                   // 1215: dns.DomainList
+	(*DnsResourceRecordLookupResponse)(nil),              // 1216: dns.DnsResourceRecordLookupResponse
+	(*GetAllDomainsResponse)(nil),                        // 1217: dns.GetAllDomainsResponse
+	(*DomainMetadataResponse)(nil),                       // 1218: dns.DomainMetadataResponse
+	(*SiteExplorationReport)(nil),                        // 1219: site_explorer.SiteExplorationReport
+	(*SiteExplorerLastRunResponse)(nil),                  // 1220: site_explorer.SiteExplorerLastRunResponse
+	(*ExploredEndpoint)(nil),                             // 1221: site_explorer.ExploredEndpoint
+	(*ExploredEndpointIdList)(nil),                       // 1222: site_explorer.ExploredEndpointIdList
+	(*ExploredEndpointList)(nil),                         // 1223: site_explorer.ExploredEndpointList
+	(*ExploredManagedHostIdList)(nil),                    // 1224: site_explorer.ExploredManagedHostIdList
+	(*ExploredManagedHostList)(nil),                      // 1225: site_explorer.ExploredManagedHostList
+	(*ExploredMlxDeviceHostIdList)(nil),                  // 1226: site_explorer.ExploredMlxDeviceHostIdList
+	(*ExploredMlxDeviceList)(nil),                        // 1227: site_explorer.ExploredMlxDeviceList
+	(*CreateMeasurementBundleResponse)(nil),              // 1228: measured_boot.CreateMeasurementBundleResponse
+	(*DeleteMeasurementBundleResponse)(nil),              // 1229: measured_boot.DeleteMeasurementBundleResponse
+	(*RenameMeasurementBundleResponse)(nil),              // 1230: measured_boot.RenameMeasurementBundleResponse
+	(*UpdateMeasurementBundleResponse)(nil),              // 1231: measured_boot.UpdateMeasurementBundleResponse
+	(*ShowMeasurementBundleResponse)(nil),                // 1232: measured_boot.ShowMeasurementBundleResponse
+	(*ShowMeasurementBundlesResponse)(nil),               // 1233: measured_boot.ShowMeasurementBundlesResponse
+	(*ListMeasurementBundlesResponse)(nil),               // 1234: measured_boot.ListMeasurementBundlesResponse
+	(*ListMeasurementBundleMachinesResponse)(nil),        // 1235: measured_boot.ListMeasurementBundleMachinesResponse
+	(*DeleteMeasurementJournalResponse)(nil),             // 1236: measured_boot.DeleteMeasurementJournalResponse
+	(*ShowMeasurementJournalResponse)(nil),               // 1237: measured_boot.ShowMeasurementJournalResponse
+	(*ShowMeasurementJournalsResponse)(nil),              // 1238: measured_boot.ShowMeasurementJournalsResponse
+	(*ListMeasurementJournalResponse)(nil),               // 1239: measured_boot.ListMeasurementJournalResponse
+	(*AttestCandidateMachineResponse)(nil),               // 1240: measured_boot.AttestCandidateMachineResponse
+	(*ShowCandidateMachineResponse)(nil),                 // 1241: measured_boot.ShowCandidateMachineResponse
+	(*ShowCandidateMachinesResponse)(nil),                // 1242: measured_boot.ShowCandidateMachinesResponse
+	(*ListCandidateMachinesResponse)(nil),                // 1243: measured_boot.ListCandidateMachinesResponse
+	(*CreateMeasurementSystemProfileResponse)(nil),       // 1244: measured_boot.CreateMeasurementSystemProfileResponse
+	(*DeleteMeasurementSystemProfileResponse)(nil),       // 1245: measured_boot.DeleteMeasurementSystemProfileResponse
+	(*RenameMeasurementSystemProfileResponse)(nil),       // 1246: measured_boot.RenameMeasurementSystemProfileResponse
+	(*ShowMeasurementSystemProfileResponse)(nil),         // 1247: measured_boot.ShowMeasurementSystemProfileResponse
+	(*ShowMeasurementSystemProfilesResponse)(nil),        // 1248: measured_boot.ShowMeasurementSystemProfilesResponse
+	(*ListMeasurementSystemProfilesResponse)(nil),        // 1249: measured_boot.ListMeasurementSystemProfilesResponse
+	(*ListMeasurementSystemProfileBundlesResponse)(nil),  // 1250: measured_boot.ListMeasurementSystemProfileBundlesResponse
+	(*ListMeasurementSystemProfileMachinesResponse)(nil), // 1251: measured_boot.ListMeasurementSystemProfileMachinesResponse
+	(*CreateMeasurementReportResponse)(nil),              // 1252: measured_boot.CreateMeasurementReportResponse
+	(*DeleteMeasurementReportResponse)(nil),              // 1253: measured_boot.DeleteMeasurementReportResponse
+	(*PromoteMeasurementReportResponse)(nil),             // 1254: measured_boot.PromoteMeasurementReportResponse
+	(*RevokeMeasurementReportResponse)(nil),              // 1255: measured_boot.RevokeMeasurementReportResponse
+	(*ShowMeasurementReportForIdResponse)(nil),           // 1256: measured_boot.ShowMeasurementReportForIdResponse
+	(*ShowMeasurementReportsForMachineResponse)(nil),     // 1257: measured_boot.ShowMeasurementReportsForMachineResponse
+	(*ShowMeasurementReportsResponse)(nil),               // 1258: measured_boot.ShowMeasurementReportsResponse
+	(*ListMeasurementReportResponse)(nil),                // 1259: measured_boot.ListMeasurementReportResponse
+	(*MatchMeasurementReportResponse)(nil),               // 1260: measured_boot.MatchMeasurementReportResponse
+	(*ImportSiteMeasurementsResponse)(nil),               // 1261: measured_boot.ImportSiteMeasurementsResponse
+	(*ExportSiteMeasurementsResponse)(nil),               // 1262: measured_boot.ExportSiteMeasurementsResponse
+	(*AddMeasurementTrustedMachineResponse)(nil),         // 1263: measured_boot.AddMeasurementTrustedMachineResponse
+	(*RemoveMeasurementTrustedMachineResponse)(nil),      // 1264: measured_boot.RemoveMeasurementTrustedMachineResponse
+	(*AddMeasurementTrustedProfileResponse)(nil),         // 1265: measured_boot.AddMeasurementTrustedProfileResponse
+	(*RemoveMeasurementTrustedProfileResponse)(nil),      // 1266: measured_boot.RemoveMeasurementTrustedProfileResponse
+	(*ListMeasurementTrustedMachinesResponse)(nil),       // 1267: measured_boot.ListMeasurementTrustedMachinesResponse
+	(*ListMeasurementTrustedProfilesResponse)(nil),       // 1268: measured_boot.ListMeasurementTrustedProfilesResponse
+	(*ListAttestationSummaryResponse)(nil),               // 1269: measured_boot.ListAttestationSummaryResponse
+	(*LockdownStatus)(nil),                               // 1270: site_explorer.LockdownStatus
+	(*PublishMlxDeviceReportResponse)(nil),               // 1271: mlx_device.PublishMlxDeviceReportResponse
+	(*PublishMlxObservationReportResponse)(nil),          // 1272: mlx_device.PublishMlxObservationReportResponse
+	(*MlxAdminProfileSyncResponse)(nil),                  // 1273: mlx_device.MlxAdminProfileSyncResponse
+	(*MlxAdminProfileShowResponse)(nil),                  // 1274: mlx_device.MlxAdminProfileShowResponse
+	(*MlxAdminProfileCompareResponse)(nil),               // 1275: mlx_device.MlxAdminProfileCompareResponse
+	(*MlxAdminProfileListResponse)(nil),                  // 1276: mlx_device.MlxAdminProfileListResponse
+	(*MlxAdminLockdownLockResponse)(nil),                 // 1277: mlx_device.MlxAdminLockdownLockResponse
+	(*MlxAdminLockdownUnlockResponse)(nil),               // 1278: mlx_device.MlxAdminLockdownUnlockResponse
+	(*MlxAdminLockdownStatusResponse)(nil),               // 1279: mlx_device.MlxAdminLockdownStatusResponse
+	(*MlxAdminDeviceInfoResponse)(nil),                   // 1280: mlx_device.MlxAdminDeviceInfoResponse
+	(*MlxAdminDeviceReportResponse)(nil),                 // 1281: mlx_device.MlxAdminDeviceReportResponse
+	(*MlxAdminRegistryListResponse)(nil),                 // 1282: mlx_device.MlxAdminRegistryListResponse
+	(*MlxAdminRegistryShowResponse)(nil),                 // 1283: mlx_device.MlxAdminRegistryShowResponse
+	(*MlxAdminConfigQueryResponse)(nil),                  // 1284: mlx_device.MlxAdminConfigQueryResponse
+	(*MlxAdminConfigSetResponse)(nil),                    // 1285: mlx_device.MlxAdminConfigSetResponse
+	(*MlxAdminConfigSyncResponse)(nil),                   // 1286: mlx_device.MlxAdminConfigSyncResponse
+	(*MlxAdminConfigCompareResponse)(nil),                // 1287: mlx_device.MlxAdminConfigCompareResponse
 }
 var file_nico_nico_proto_depIdxs = []int32{
-	381,  // 0: forge.LifecycleStatus.state_reason:type_name -> forge.ControllerStateReason
-	383,  // 1: forge.LifecycleStatus.sla:type_name -> forge.StateSla
-	1066, // 2: forge.SpdmMachineAttestationStatus.machine_id:type_name -> common.MachineId
+	382,  // 0: forge.LifecycleStatus.state_reason:type_name -> forge.ControllerStateReason
+	384,  // 1: forge.LifecycleStatus.sla:type_name -> forge.StateSla
+	1071, // 2: forge.SpdmMachineAttestationStatus.machine_id:type_name -> common.MachineId
 	0,    // 3: forge.SpdmMachineAttestationStatus.attestation_status:type_name -> forge.SpdmAttestationStatus
-	1066, // 4: forge.SpdmMachineAttestationTriggerResponse.machine_id:type_name -> common.MachineId
-	1066, // 5: forge.SpdmAttestationDetails.machine_id:type_name -> common.MachineId
-	1067, // 6: forge.SpdmAttestationDetails.started_at:type_name -> google.protobuf.Timestamp
-	1067, // 7: forge.SpdmAttestationDetails.cancelled_at:type_name -> google.protobuf.Timestamp
-	1067, // 8: forge.SpdmAttestationDetails.completed_at:type_name -> google.protobuf.Timestamp
-	112,  // 9: forge.SpdmGetAttestationMachineResponse.attestations_details:type_name -> forge.SpdmAttestationDetails
-	1066, // 10: forge.SpdmMachineAttestationTriggerRequest.machine_id:type_name -> common.MachineId
-	1066, // 11: forge.SpdmListAttestationMachinesRequest.machine_id:type_name -> common.MachineId
+	1071, // 4: forge.SpdmMachineAttestationTriggerResponse.machine_id:type_name -> common.MachineId
+	1071, // 5: forge.SpdmAttestationDetails.machine_id:type_name -> common.MachineId
+	1072, // 6: forge.SpdmAttestationDetails.started_at:type_name -> google.protobuf.Timestamp
+	1072, // 7: forge.SpdmAttestationDetails.cancelled_at:type_name -> google.protobuf.Timestamp
+	1072, // 8: forge.SpdmAttestationDetails.completed_at:type_name -> google.protobuf.Timestamp
+	113,  // 9: forge.SpdmGetAttestationMachineResponse.attestations_details:type_name -> forge.SpdmAttestationDetails
+	1071, // 10: forge.SpdmMachineAttestationTriggerRequest.machine_id:type_name -> common.MachineId
+	1071, // 11: forge.SpdmListAttestationMachinesRequest.machine_id:type_name -> common.MachineId
 	1,    // 12: forge.SpdmListAttestationMachinesRequest.selector:type_name -> forge.SpdmListAttestationMachinesRequestSelector
-	110,  // 13: forge.SpdmListAttestationMachinesResponse.statuses:type_name -> forge.SpdmMachineAttestationStatus
-	1067, // 14: forge.TenantIdentitySigningKey.expire_at:type_name -> google.protobuf.Timestamp
-	121,  // 15: forge.SetTenantIdentityConfigRequest.config:type_name -> forge.TenantIdentityConfig
-	121,  // 16: forge.TenantIdentityConfigResponse.config:type_name -> forge.TenantIdentityConfig
-	1067, // 17: forge.TenantIdentityConfigResponse.created_at:type_name -> google.protobuf.Timestamp
-	1067, // 18: forge.TenantIdentityConfigResponse.updated_at:type_name -> google.protobuf.Timestamp
-	120,  // 19: forge.TenantIdentityConfigResponse.signing_keys:type_name -> forge.TenantIdentitySigningKey
-	125,  // 20: forge.TokenDelegationResponse.client_secret_basic:type_name -> forge.ClientSecretBasicResponse
-	1067, // 21: forge.TokenDelegationResponse.created_at:type_name -> google.protobuf.Timestamp
-	1067, // 22: forge.TokenDelegationResponse.updated_at:type_name -> google.protobuf.Timestamp
-	124,  // 23: forge.TokenDelegation.client_secret_basic:type_name -> forge.ClientSecretBasic
-	128,  // 24: forge.TokenDelegationRequest.config:type_name -> forge.TokenDelegation
-	131,  // 25: forge.ReencryptTenantIdentitySecretsResponse.failures:type_name -> forge.ReencryptTenantIdentityFailure
+	111,  // 13: forge.SpdmListAttestationMachinesResponse.statuses:type_name -> forge.SpdmMachineAttestationStatus
+	1072, // 14: forge.TenantIdentitySigningKey.expire_at:type_name -> google.protobuf.Timestamp
+	122,  // 15: forge.SetTenantIdentityConfigRequest.config:type_name -> forge.TenantIdentityConfig
+	122,  // 16: forge.TenantIdentityConfigResponse.config:type_name -> forge.TenantIdentityConfig
+	1072, // 17: forge.TenantIdentityConfigResponse.created_at:type_name -> google.protobuf.Timestamp
+	1072, // 18: forge.TenantIdentityConfigResponse.updated_at:type_name -> google.protobuf.Timestamp
+	121,  // 19: forge.TenantIdentityConfigResponse.signing_keys:type_name -> forge.TenantIdentitySigningKey
+	126,  // 20: forge.TokenDelegationResponse.client_secret_basic:type_name -> forge.ClientSecretBasicResponse
+	1072, // 21: forge.TokenDelegationResponse.created_at:type_name -> google.protobuf.Timestamp
+	1072, // 22: forge.TokenDelegationResponse.updated_at:type_name -> google.protobuf.Timestamp
+	125,  // 23: forge.TokenDelegation.client_secret_basic:type_name -> forge.ClientSecretBasic
+	129,  // 24: forge.TokenDelegationRequest.config:type_name -> forge.TokenDelegation
+	132,  // 25: forge.ReencryptTenantIdentitySecretsResponse.failures:type_name -> forge.ReencryptTenantIdentityFailure
 	2,    // 26: forge.JwksRequest.kind:type_name -> forge.JwksKind
 	3,    // 27: forge.MachineIngestionStateResponse.machine_ingestion_state:type_name -> forge.MachineIngestionState
-	139,  // 28: forge.TpmCaAddedCaStatus.id:type_name -> forge.TpmCaCertId
-	1066, // 29: forge.TpmEkCertStatus.machine_id:type_name -> common.MachineId
-	140,  // 30: forge.TpmEkCertStatusCollection.tpm_ek_cert_statuses:type_name -> forge.TpmEkCertStatus
-	143,  // 31: forge.TpmCaCertDetailCollection.tpm_ca_cert_details:type_name -> forge.TpmCaCertDetail
-	1066, // 32: forge.AttestQuoteRequest.machine_id:type_name -> common.MachineId
-	464,  // 33: forge.AttestQuoteResponse.machine_certificate:type_name -> forge.MachineCertificate
+	140,  // 28: forge.TpmCaAddedCaStatus.id:type_name -> forge.TpmCaCertId
+	1071, // 29: forge.TpmEkCertStatus.machine_id:type_name -> common.MachineId
+	141,  // 30: forge.TpmEkCertStatusCollection.tpm_ek_cert_statuses:type_name -> forge.TpmEkCertStatus
+	144,  // 31: forge.TpmCaCertDetailCollection.tpm_ca_cert_details:type_name -> forge.TpmCaCertDetail
+	1071, // 32: forge.AttestQuoteRequest.machine_id:type_name -> common.MachineId
+	465,  // 33: forge.AttestQuoteResponse.machine_certificate:type_name -> forge.MachineCertificate
 	4,    // 34: forge.CredentialCreationRequest.credential_type:type_name -> forge.CredentialType
 	4,    // 35: forge.CredentialDeletionRequest.credential_type:type_name -> forge.CredentialType
 	5,    // 36: forge.RotateCredentialRequest.credential_type:type_name -> forge.RotationCredentialType
 	5,    // 37: forge.RotateCredentialResult.credential_type:type_name -> forge.RotationCredentialType
-	1067, // 38: forge.RotateCredentialResult.started_at:type_name -> google.protobuf.Timestamp
+	1072, // 38: forge.RotateCredentialResult.started_at:type_name -> google.protobuf.Timestamp
 	5,    // 39: forge.CredentialRotationStatusRequest.credential_type:type_name -> forge.RotationCredentialType
-	1067, // 40: forge.DeviceCredentialRotationStatus.quarantined_until:type_name -> google.protobuf.Timestamp
-	1067, // 41: forge.DeviceCredentialRotationStatus.last_attempt_at:type_name -> google.protobuf.Timestamp
-	1067, // 42: forge.CredentialRotationStatusResult.started_at:type_name -> google.protobuf.Timestamp
-	155,  // 43: forge.CredentialRotationStatusResult.device:type_name -> forge.DeviceCredentialRotationStatus
+	1072, // 40: forge.DeviceCredentialRotationStatus.quarantined_until:type_name -> google.protobuf.Timestamp
+	1072, // 41: forge.DeviceCredentialRotationStatus.last_attempt_at:type_name -> google.protobuf.Timestamp
+	1072, // 42: forge.CredentialRotationStatusResult.started_at:type_name -> google.protobuf.Timestamp
+	156,  // 43: forge.CredentialRotationStatusResult.device:type_name -> forge.DeviceCredentialRotationStatus
 	6,    // 44: forge.BuildInfo.capabilities:type_name -> forge.BuildCapability
-	159,  // 45: forge.BuildInfo.runtime_config:type_name -> forge.RuntimeConfig
-	1027, // 46: forge.RuntimeConfig.dpu_nic_firmware_update_version:type_name -> forge.RuntimeConfig.DpuNicFirmwareUpdateVersionEntry
-	1028, // 47: forge.DNSMessage.question:type_name -> forge.DNSMessage.DNSQuestion
-	1029, // 48: forge.DNSMessage.response:type_name -> forge.DNSMessage.DNSResponse
-	1068, // 49: forge.VpcSearchQuery.id:type_name -> common.VpcId
-	286,  // 50: forge.VpcSearchFilter.label:type_name -> forge.Label
-	1068, // 51: forge.VpcIdList.vpc_ids:type_name -> common.VpcId
-	1068, // 52: forge.VpcsByIdsRequest.vpc_ids:type_name -> common.VpcId
-	917,  // 53: forge.PrefixFilterPolicyEntries.values:type_name -> forge.PrefixFilterPolicyEntry
-	1069, // 54: forge.VpcRoutingProfileOverrides.route_target_imports:type_name -> common.RouteTargets
-	1069, // 55: forge.VpcRoutingProfileOverrides.route_targets_on_exports:type_name -> common.RouteTargets
-	173,  // 56: forge.VpcRoutingProfileOverrides.accepted_leaks_from_underlay:type_name -> forge.PrefixFilterPolicyEntries
-	173,  // 57: forge.VpcRoutingProfileOverrides.allowed_anycast_prefixes:type_name -> forge.PrefixFilterPolicyEntries
-	1070, // 58: forge.VpcEffectiveRoutingProfile.route_target_imports:type_name -> common.RouteTarget
-	1070, // 59: forge.VpcEffectiveRoutingProfile.route_targets_on_exports:type_name -> common.RouteTarget
-	917,  // 60: forge.VpcEffectiveRoutingProfile.accepted_leaks_from_underlay:type_name -> forge.PrefixFilterPolicyEntry
-	917,  // 61: forge.VpcEffectiveRoutingProfile.allowed_anycast_prefixes:type_name -> forge.PrefixFilterPolicyEntry
+	160,  // 45: forge.BuildInfo.runtime_config:type_name -> forge.RuntimeConfig
+	1032, // 46: forge.RuntimeConfig.dpu_nic_firmware_update_version:type_name -> forge.RuntimeConfig.DpuNicFirmwareUpdateVersionEntry
+	1033, // 47: forge.DNSMessage.question:type_name -> forge.DNSMessage.DNSQuestion
+	1034, // 48: forge.DNSMessage.response:type_name -> forge.DNSMessage.DNSResponse
+	1073, // 49: forge.VpcSearchQuery.id:type_name -> common.VpcId
+	287,  // 50: forge.VpcSearchFilter.label:type_name -> forge.Label
+	1073, // 51: forge.VpcIdList.vpc_ids:type_name -> common.VpcId
+	1073, // 52: forge.VpcsByIdsRequest.vpc_ids:type_name -> common.VpcId
+	918,  // 53: forge.PrefixFilterPolicyEntries.values:type_name -> forge.PrefixFilterPolicyEntry
+	1074, // 54: forge.VpcRoutingProfileOverrides.route_target_imports:type_name -> common.RouteTargets
+	1074, // 55: forge.VpcRoutingProfileOverrides.route_targets_on_exports:type_name -> common.RouteTargets
+	174,  // 56: forge.VpcRoutingProfileOverrides.accepted_leaks_from_underlay:type_name -> forge.PrefixFilterPolicyEntries
+	174,  // 57: forge.VpcRoutingProfileOverrides.allowed_anycast_prefixes:type_name -> forge.PrefixFilterPolicyEntries
+	1075, // 58: forge.VpcEffectiveRoutingProfile.route_target_imports:type_name -> common.RouteTarget
+	1075, // 59: forge.VpcEffectiveRoutingProfile.route_targets_on_exports:type_name -> common.RouteTarget
+	918,  // 60: forge.VpcEffectiveRoutingProfile.accepted_leaks_from_underlay:type_name -> forge.PrefixFilterPolicyEntry
+	918,  // 61: forge.VpcEffectiveRoutingProfile.allowed_anycast_prefixes:type_name -> forge.PrefixFilterPolicyEntry
 	7,    // 62: forge.VpcConfig.network_virtualization_type:type_name -> forge.VpcVirtualizationType
-	1071, // 63: forge.VpcConfig.default_nvlink_logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
-	174,  // 64: forge.VpcConfig.routing_profile_overrides:type_name -> forge.VpcRoutingProfileOverrides
-	175,  // 65: forge.VpcStatus.effective_routing_profile:type_name -> forge.VpcEffectiveRoutingProfile
-	1068, // 66: forge.Vpc.id:type_name -> common.VpcId
-	1067, // 67: forge.Vpc.created:type_name -> google.protobuf.Timestamp
-	1067, // 68: forge.Vpc.updated:type_name -> google.protobuf.Timestamp
-	1067, // 69: forge.Vpc.deleted:type_name -> google.protobuf.Timestamp
-	287,  // 70: forge.Vpc.metadata:type_name -> forge.Metadata
-	177,  // 71: forge.Vpc.status:type_name -> forge.VpcStatus
-	176,  // 72: forge.Vpc.config:type_name -> forge.VpcConfig
+	1076, // 63: forge.VpcConfig.default_nvlink_logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
+	175,  // 64: forge.VpcConfig.routing_profile_overrides:type_name -> forge.VpcRoutingProfileOverrides
+	176,  // 65: forge.VpcStatus.effective_routing_profile:type_name -> forge.VpcEffectiveRoutingProfile
+	1073, // 66: forge.Vpc.id:type_name -> common.VpcId
+	1072, // 67: forge.Vpc.created:type_name -> google.protobuf.Timestamp
+	1072, // 68: forge.Vpc.updated:type_name -> google.protobuf.Timestamp
+	1072, // 69: forge.Vpc.deleted:type_name -> google.protobuf.Timestamp
+	288,  // 70: forge.Vpc.metadata:type_name -> forge.Metadata
+	178,  // 71: forge.Vpc.status:type_name -> forge.VpcStatus
+	177,  // 72: forge.Vpc.config:type_name -> forge.VpcConfig
 	7,    // 73: forge.VpcCreationRequest.network_virtualization_type:type_name -> forge.VpcVirtualizationType
-	1068, // 74: forge.VpcCreationRequest.id:type_name -> common.VpcId
-	287,  // 75: forge.VpcCreationRequest.metadata:type_name -> forge.Metadata
-	1071, // 76: forge.VpcCreationRequest.default_nvlink_logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
-	174,  // 77: forge.VpcCreationRequest.routing_profile_overrides:type_name -> forge.VpcRoutingProfileOverrides
-	1068, // 78: forge.VpcUpdateRequest.id:type_name -> common.VpcId
-	287,  // 79: forge.VpcUpdateRequest.metadata:type_name -> forge.Metadata
-	1071, // 80: forge.VpcUpdateRequest.default_nvlink_logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
-	174,  // 81: forge.VpcUpdateRequest.routing_profile_overrides:type_name -> forge.VpcRoutingProfileOverrides
-	178,  // 82: forge.VpcUpdateResult.vpc:type_name -> forge.Vpc
-	1068, // 83: forge.VpcUpdateVirtualizationRequest.id:type_name -> common.VpcId
+	1073, // 74: forge.VpcCreationRequest.id:type_name -> common.VpcId
+	288,  // 75: forge.VpcCreationRequest.metadata:type_name -> forge.Metadata
+	1076, // 76: forge.VpcCreationRequest.default_nvlink_logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
+	175,  // 77: forge.VpcCreationRequest.routing_profile_overrides:type_name -> forge.VpcRoutingProfileOverrides
+	1073, // 78: forge.VpcUpdateRequest.id:type_name -> common.VpcId
+	288,  // 79: forge.VpcUpdateRequest.metadata:type_name -> forge.Metadata
+	1076, // 80: forge.VpcUpdateRequest.default_nvlink_logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
+	175,  // 81: forge.VpcUpdateRequest.routing_profile_overrides:type_name -> forge.VpcRoutingProfileOverrides
+	179,  // 82: forge.VpcUpdateResult.vpc:type_name -> forge.Vpc
+	1073, // 83: forge.VpcUpdateVirtualizationRequest.id:type_name -> common.VpcId
 	7,    // 84: forge.VpcUpdateVirtualizationRequest.network_virtualization_type:type_name -> forge.VpcVirtualizationType
-	1068, // 85: forge.VpcDeletionRequest.id:type_name -> common.VpcId
-	178,  // 86: forge.VpcList.vpcs:type_name -> forge.Vpc
-	1072, // 87: forge.VpcPrefix.id:type_name -> common.VpcPrefixId
-	1068, // 88: forge.VpcPrefix.vpc_id:type_name -> common.VpcId
-	188,  // 89: forge.VpcPrefix.config:type_name -> forge.VpcPrefixConfig
-	189,  // 90: forge.VpcPrefix.status:type_name -> forge.VpcPrefixStatus
-	287,  // 91: forge.VpcPrefix.metadata:type_name -> forge.Metadata
-	1073, // 92: forge.VpcPrefix.site_prefix_id:type_name -> common.SitePrefixId
-	109,  // 93: forge.VpcPrefixStatus.lifecycle:type_name -> forge.LifecycleStatus
+	1073, // 85: forge.VpcDeletionRequest.id:type_name -> common.VpcId
+	179,  // 86: forge.VpcList.vpcs:type_name -> forge.Vpc
+	1077, // 87: forge.VpcPrefix.id:type_name -> common.VpcPrefixId
+	1073, // 88: forge.VpcPrefix.vpc_id:type_name -> common.VpcId
+	189,  // 89: forge.VpcPrefix.config:type_name -> forge.VpcPrefixConfig
+	190,  // 90: forge.VpcPrefix.status:type_name -> forge.VpcPrefixStatus
+	288,  // 91: forge.VpcPrefix.metadata:type_name -> forge.Metadata
+	1078, // 92: forge.VpcPrefix.site_prefix_id:type_name -> common.SitePrefixId
+	110,  // 93: forge.VpcPrefixStatus.lifecycle:type_name -> forge.LifecycleStatus
 	9,    // 94: forge.VpcPrefixStatus.tenant_state:type_name -> forge.TenantState
-	1072, // 95: forge.VpcPrefixCreationRequest.id:type_name -> common.VpcPrefixId
-	1068, // 96: forge.VpcPrefixCreationRequest.vpc_id:type_name -> common.VpcId
-	188,  // 97: forge.VpcPrefixCreationRequest.config:type_name -> forge.VpcPrefixConfig
-	287,  // 98: forge.VpcPrefixCreationRequest.metadata:type_name -> forge.Metadata
-	1073, // 99: forge.VpcPrefixCreationRequest.site_prefix_id:type_name -> common.SitePrefixId
-	1068, // 100: forge.VpcPrefixSearchQuery.vpc_id:type_name -> common.VpcId
-	1072, // 101: forge.VpcPrefixSearchQuery.tenant_prefix_id:type_name -> common.VpcPrefixId
+	1077, // 95: forge.VpcPrefixCreationRequest.id:type_name -> common.VpcPrefixId
+	1073, // 96: forge.VpcPrefixCreationRequest.vpc_id:type_name -> common.VpcId
+	189,  // 97: forge.VpcPrefixCreationRequest.config:type_name -> forge.VpcPrefixConfig
+	288,  // 98: forge.VpcPrefixCreationRequest.metadata:type_name -> forge.Metadata
+	1078, // 99: forge.VpcPrefixCreationRequest.site_prefix_id:type_name -> common.SitePrefixId
+	1073, // 100: forge.VpcPrefixSearchQuery.vpc_id:type_name -> common.VpcId
+	1077, // 101: forge.VpcPrefixSearchQuery.tenant_prefix_id:type_name -> common.VpcPrefixId
 	8,    // 102: forge.VpcPrefixSearchQuery.prefix_match_type:type_name -> forge.PrefixMatchType
 	11,   // 103: forge.VpcPrefixSearchQuery.deleted:type_name -> forge.DeletedFilter
-	1073, // 104: forge.VpcPrefixSearchQuery.site_prefix_id:type_name -> common.SitePrefixId
-	1072, // 105: forge.VpcPrefixGetRequest.vpc_prefix_ids:type_name -> common.VpcPrefixId
+	1078, // 104: forge.VpcPrefixSearchQuery.site_prefix_id:type_name -> common.SitePrefixId
+	1077, // 105: forge.VpcPrefixGetRequest.vpc_prefix_ids:type_name -> common.VpcPrefixId
 	11,   // 106: forge.VpcPrefixGetRequest.deleted:type_name -> forge.DeletedFilter
-	1072, // 107: forge.VpcPrefixIdList.vpc_prefix_ids:type_name -> common.VpcPrefixId
-	187,  // 108: forge.VpcPrefixList.vpc_prefixes:type_name -> forge.VpcPrefix
-	1072, // 109: forge.VpcPrefixUpdateRequest.id:type_name -> common.VpcPrefixId
-	188,  // 110: forge.VpcPrefixUpdateRequest.config:type_name -> forge.VpcPrefixConfig
-	287,  // 111: forge.VpcPrefixUpdateRequest.metadata:type_name -> forge.Metadata
-	1072, // 112: forge.VpcPrefixDeletionRequest.id:type_name -> common.VpcPrefixId
-	1072, // 113: forge.VpcPrefixStateHistoriesRequest.vpc_prefix_ids:type_name -> common.VpcPrefixId
-	1074, // 114: forge.VpcPeering.id:type_name -> common.VpcPeeringId
-	1068, // 115: forge.VpcPeering.vpc_id:type_name -> common.VpcId
-	1068, // 116: forge.VpcPeering.peer_vpc_id:type_name -> common.VpcId
-	1074, // 117: forge.VpcPeeringIdList.vpc_peering_ids:type_name -> common.VpcPeeringId
-	199,  // 118: forge.VpcPeeringList.vpc_peerings:type_name -> forge.VpcPeering
-	1068, // 119: forge.VpcPeeringCreationRequest.vpc_id:type_name -> common.VpcId
-	1068, // 120: forge.VpcPeeringCreationRequest.peer_vpc_id:type_name -> common.VpcId
-	1074, // 121: forge.VpcPeeringCreationRequest.id:type_name -> common.VpcPeeringId
-	1068, // 122: forge.VpcPeeringSearchFilter.vpc_id:type_name -> common.VpcId
-	1074, // 123: forge.VpcPeeringsByIdsRequest.vpc_peering_ids:type_name -> common.VpcPeeringId
-	1074, // 124: forge.VpcPeeringDeletionRequest.id:type_name -> common.VpcPeeringId
+	1077, // 107: forge.VpcPrefixIdList.vpc_prefix_ids:type_name -> common.VpcPrefixId
+	188,  // 108: forge.VpcPrefixList.vpc_prefixes:type_name -> forge.VpcPrefix
+	1077, // 109: forge.VpcPrefixUpdateRequest.id:type_name -> common.VpcPrefixId
+	189,  // 110: forge.VpcPrefixUpdateRequest.config:type_name -> forge.VpcPrefixConfig
+	288,  // 111: forge.VpcPrefixUpdateRequest.metadata:type_name -> forge.Metadata
+	1077, // 112: forge.VpcPrefixDeletionRequest.id:type_name -> common.VpcPrefixId
+	1077, // 113: forge.VpcPrefixStateHistoriesRequest.vpc_prefix_ids:type_name -> common.VpcPrefixId
+	1079, // 114: forge.VpcPeering.id:type_name -> common.VpcPeeringId
+	1073, // 115: forge.VpcPeering.vpc_id:type_name -> common.VpcId
+	1073, // 116: forge.VpcPeering.peer_vpc_id:type_name -> common.VpcId
+	1079, // 117: forge.VpcPeeringIdList.vpc_peering_ids:type_name -> common.VpcPeeringId
+	200,  // 118: forge.VpcPeeringList.vpc_peerings:type_name -> forge.VpcPeering
+	1073, // 119: forge.VpcPeeringCreationRequest.vpc_id:type_name -> common.VpcId
+	1073, // 120: forge.VpcPeeringCreationRequest.peer_vpc_id:type_name -> common.VpcId
+	1079, // 121: forge.VpcPeeringCreationRequest.id:type_name -> common.VpcPeeringId
+	1073, // 122: forge.VpcPeeringSearchFilter.vpc_id:type_name -> common.VpcId
+	1079, // 123: forge.VpcPeeringsByIdsRequest.vpc_peering_ids:type_name -> common.VpcPeeringId
+	1079, // 124: forge.VpcPeeringDeletionRequest.id:type_name -> common.VpcPeeringId
 	9,    // 125: forge.IBPartitionStatus.state:type_name -> forge.TenantState
-	381,  // 126: forge.IBPartitionStatus.state_reason:type_name -> forge.ControllerStateReason
-	383,  // 127: forge.IBPartitionStatus.state_sla:type_name -> forge.StateSla
-	1075, // 128: forge.IBPartition.id:type_name -> common.IBPartitionId
-	207,  // 129: forge.IBPartition.config:type_name -> forge.IBPartitionConfig
-	208,  // 130: forge.IBPartition.status:type_name -> forge.IBPartitionStatus
-	287,  // 131: forge.IBPartition.metadata:type_name -> forge.Metadata
-	209,  // 132: forge.IBPartitionList.ib_partitions:type_name -> forge.IBPartition
-	207,  // 133: forge.IBPartitionCreationRequest.config:type_name -> forge.IBPartitionConfig
-	1075, // 134: forge.IBPartitionCreationRequest.id:type_name -> common.IBPartitionId
-	287,  // 135: forge.IBPartitionCreationRequest.metadata:type_name -> forge.Metadata
-	1075, // 136: forge.IBPartitionUpdateRequest.id:type_name -> common.IBPartitionId
-	207,  // 137: forge.IBPartitionUpdateRequest.config:type_name -> forge.IBPartitionConfig
-	287,  // 138: forge.IBPartitionUpdateRequest.metadata:type_name -> forge.Metadata
-	1075, // 139: forge.IBPartitionDeletionRequest.id:type_name -> common.IBPartitionId
-	1075, // 140: forge.IBPartitionsByIdsRequest.ib_partition_ids:type_name -> common.IBPartitionId
-	1075, // 141: forge.IBPartitionIdList.ib_partition_ids:type_name -> common.IBPartitionId
-	381,  // 142: forge.PowerShelfStatus.state_reason:type_name -> forge.ControllerStateReason
-	383,  // 143: forge.PowerShelfStatus.state_sla:type_name -> forge.StateSla
-	1076, // 144: forge.PowerShelfStatus.health:type_name -> health.HealthReport
-	380,  // 145: forge.PowerShelfStatus.health_sources:type_name -> forge.HealthSourceOrigin
-	109,  // 146: forge.PowerShelfStatus.lifecycle:type_name -> forge.LifecycleStatus
-	1077, // 147: forge.PowerShelf.id:type_name -> common.PowerShelfId
-	218,  // 148: forge.PowerShelf.config:type_name -> forge.PowerShelfConfig
-	219,  // 149: forge.PowerShelf.status:type_name -> forge.PowerShelfStatus
-	1067, // 150: forge.PowerShelf.deleted:type_name -> google.protobuf.Timestamp
-	287,  // 151: forge.PowerShelf.metadata:type_name -> forge.Metadata
-	366,  // 152: forge.PowerShelf.bmc_info:type_name -> forge.BmcInfo
-	1078, // 153: forge.PowerShelf.rack_id:type_name -> common.RackId
-	1079, // 154: forge.PowerShelf.nvlink_domain_uuid:type_name -> common.NVLinkDomainId
-	220,  // 155: forge.PowerShelfList.power_shelves:type_name -> forge.PowerShelf
-	218,  // 156: forge.PowerShelfCreationRequest.config:type_name -> forge.PowerShelfConfig
-	1077, // 157: forge.PowerShelfCreationRequest.id:type_name -> common.PowerShelfId
-	1077, // 158: forge.DecommissionPowerShelfRequest.power_shelf_id:type_name -> common.PowerShelfId
-	1077, // 159: forge.PowerShelfDeletionRequest.id:type_name -> common.PowerShelfId
-	1077, // 160: forge.PowerShelfMaintenanceRequest.power_shelf_ids:type_name -> common.PowerShelfId
+	382,  // 126: forge.IBPartitionStatus.state_reason:type_name -> forge.ControllerStateReason
+	384,  // 127: forge.IBPartitionStatus.state_sla:type_name -> forge.StateSla
+	1080, // 128: forge.IBPartition.id:type_name -> common.IBPartitionId
+	208,  // 129: forge.IBPartition.config:type_name -> forge.IBPartitionConfig
+	209,  // 130: forge.IBPartition.status:type_name -> forge.IBPartitionStatus
+	288,  // 131: forge.IBPartition.metadata:type_name -> forge.Metadata
+	210,  // 132: forge.IBPartitionList.ib_partitions:type_name -> forge.IBPartition
+	208,  // 133: forge.IBPartitionCreationRequest.config:type_name -> forge.IBPartitionConfig
+	1080, // 134: forge.IBPartitionCreationRequest.id:type_name -> common.IBPartitionId
+	288,  // 135: forge.IBPartitionCreationRequest.metadata:type_name -> forge.Metadata
+	1080, // 136: forge.IBPartitionUpdateRequest.id:type_name -> common.IBPartitionId
+	208,  // 137: forge.IBPartitionUpdateRequest.config:type_name -> forge.IBPartitionConfig
+	288,  // 138: forge.IBPartitionUpdateRequest.metadata:type_name -> forge.Metadata
+	1080, // 139: forge.IBPartitionDeletionRequest.id:type_name -> common.IBPartitionId
+	1080, // 140: forge.IBPartitionsByIdsRequest.ib_partition_ids:type_name -> common.IBPartitionId
+	1080, // 141: forge.IBPartitionIdList.ib_partition_ids:type_name -> common.IBPartitionId
+	382,  // 142: forge.PowerShelfStatus.state_reason:type_name -> forge.ControllerStateReason
+	384,  // 143: forge.PowerShelfStatus.state_sla:type_name -> forge.StateSla
+	1081, // 144: forge.PowerShelfStatus.health:type_name -> health.HealthReport
+	381,  // 145: forge.PowerShelfStatus.health_sources:type_name -> forge.HealthSourceOrigin
+	110,  // 146: forge.PowerShelfStatus.lifecycle:type_name -> forge.LifecycleStatus
+	1082, // 147: forge.PowerShelf.id:type_name -> common.PowerShelfId
+	219,  // 148: forge.PowerShelf.config:type_name -> forge.PowerShelfConfig
+	220,  // 149: forge.PowerShelf.status:type_name -> forge.PowerShelfStatus
+	1072, // 150: forge.PowerShelf.deleted:type_name -> google.protobuf.Timestamp
+	288,  // 151: forge.PowerShelf.metadata:type_name -> forge.Metadata
+	367,  // 152: forge.PowerShelf.bmc_info:type_name -> forge.BmcInfo
+	1083, // 153: forge.PowerShelf.rack_id:type_name -> common.RackId
+	1084, // 154: forge.PowerShelf.nvlink_domain_uuid:type_name -> common.NVLinkDomainId
+	221,  // 155: forge.PowerShelfList.power_shelves:type_name -> forge.PowerShelf
+	219,  // 156: forge.PowerShelfCreationRequest.config:type_name -> forge.PowerShelfConfig
+	1082, // 157: forge.PowerShelfCreationRequest.id:type_name -> common.PowerShelfId
+	1082, // 158: forge.DecommissionPowerShelfRequest.power_shelf_id:type_name -> common.PowerShelfId
+	1082, // 159: forge.PowerShelfDeletionRequest.id:type_name -> common.PowerShelfId
+	1082, // 160: forge.PowerShelfMaintenanceRequest.power_shelf_ids:type_name -> common.PowerShelfId
 	10,   // 161: forge.PowerShelfMaintenanceRequest.operation:type_name -> forge.PowerShelfMaintenanceOperation
-	1077, // 162: forge.PowerShelfStateHistoriesRequest.power_shelf_ids:type_name -> common.PowerShelfId
-	1077, // 163: forge.PowerShelfHealthHistoriesRequest.power_shelf_ids:type_name -> common.PowerShelfId
-	1067, // 164: forge.PowerShelfHealthHistoriesRequest.start_time:type_name -> google.protobuf.Timestamp
-	1067, // 165: forge.PowerShelfHealthHistoriesRequest.end_time:type_name -> google.protobuf.Timestamp
-	1077, // 166: forge.PowerShelfQuery.power_shelf_id:type_name -> common.PowerShelfId
-	1078, // 167: forge.PowerShelfSearchFilter.rack_id:type_name -> common.RackId
+	1082, // 162: forge.PowerShelfStateHistoriesRequest.power_shelf_ids:type_name -> common.PowerShelfId
+	1082, // 163: forge.PowerShelfHealthHistoriesRequest.power_shelf_ids:type_name -> common.PowerShelfId
+	1072, // 164: forge.PowerShelfHealthHistoriesRequest.start_time:type_name -> google.protobuf.Timestamp
+	1072, // 165: forge.PowerShelfHealthHistoriesRequest.end_time:type_name -> google.protobuf.Timestamp
+	1082, // 166: forge.PowerShelfQuery.power_shelf_id:type_name -> common.PowerShelfId
+	1083, // 167: forge.PowerShelfSearchFilter.rack_id:type_name -> common.RackId
 	11,   // 168: forge.PowerShelfSearchFilter.deleted:type_name -> forge.DeletedFilter
-	1077, // 169: forge.PowerShelvesByIdsRequest.power_shelf_ids:type_name -> common.PowerShelfId
-	287,  // 170: forge.ExpectedPowerShelf.metadata:type_name -> forge.Metadata
-	1078, // 171: forge.ExpectedPowerShelf.rack_id:type_name -> common.RackId
-	1080, // 172: forge.ExpectedPowerShelf.expected_power_shelf_id:type_name -> common.UUID
-	1080, // 173: forge.ExpectedPowerShelfRequest.expected_power_shelf_id:type_name -> common.UUID
-	233,  // 174: forge.ExpectedPowerShelfList.expected_power_shelves:type_name -> forge.ExpectedPowerShelf
-	237,  // 175: forge.LinkedExpectedPowerShelfList.expected_power_shelves:type_name -> forge.LinkedExpectedPowerShelf
-	1077, // 176: forge.LinkedExpectedPowerShelf.power_shelf_id:type_name -> common.PowerShelfId
-	1080, // 177: forge.LinkedExpectedPowerShelf.expected_power_shelf_id:type_name -> common.UUID
-	1078, // 178: forge.LinkedExpectedPowerShelf.rack_id:type_name -> common.RackId
-	239,  // 179: forge.SwitchConfig.fabric_manager_config:type_name -> forge.FabricManagerConfig
-	1031, // 180: forge.FabricManagerConfig.config_map:type_name -> forge.FabricManagerConfig.ConfigMapEntry
+	1082, // 169: forge.PowerShelvesByIdsRequest.power_shelf_ids:type_name -> common.PowerShelfId
+	288,  // 170: forge.ExpectedPowerShelf.metadata:type_name -> forge.Metadata
+	1083, // 171: forge.ExpectedPowerShelf.rack_id:type_name -> common.RackId
+	1085, // 172: forge.ExpectedPowerShelf.expected_power_shelf_id:type_name -> common.UUID
+	1085, // 173: forge.ExpectedPowerShelfRequest.expected_power_shelf_id:type_name -> common.UUID
+	234,  // 174: forge.ExpectedPowerShelfList.expected_power_shelves:type_name -> forge.ExpectedPowerShelf
+	238,  // 175: forge.LinkedExpectedPowerShelfList.expected_power_shelves:type_name -> forge.LinkedExpectedPowerShelf
+	1082, // 176: forge.LinkedExpectedPowerShelf.power_shelf_id:type_name -> common.PowerShelfId
+	1085, // 177: forge.LinkedExpectedPowerShelf.expected_power_shelf_id:type_name -> common.UUID
+	1083, // 178: forge.LinkedExpectedPowerShelf.rack_id:type_name -> common.RackId
+	240,  // 179: forge.SwitchConfig.fabric_manager_config:type_name -> forge.FabricManagerConfig
+	1036, // 180: forge.FabricManagerConfig.config_map:type_name -> forge.FabricManagerConfig.ConfigMapEntry
 	12,   // 181: forge.FabricManagerStatus.fabric_manager_state:type_name -> forge.FabricManagerState
-	381,  // 182: forge.SwitchStatus.state_reason:type_name -> forge.ControllerStateReason
-	383,  // 183: forge.SwitchStatus.state_sla:type_name -> forge.StateSla
-	1076, // 184: forge.SwitchStatus.health:type_name -> health.HealthReport
-	380,  // 185: forge.SwitchStatus.health_sources:type_name -> forge.HealthSourceOrigin
-	109,  // 186: forge.SwitchStatus.lifecycle:type_name -> forge.LifecycleStatus
-	240,  // 187: forge.SwitchStatus.fabric_manager_status_details:type_name -> forge.FabricManagerStatus
-	1081, // 188: forge.Switch.id:type_name -> common.SwitchId
-	238,  // 189: forge.Switch.config:type_name -> forge.SwitchConfig
-	241,  // 190: forge.Switch.status:type_name -> forge.SwitchStatus
-	1067, // 191: forge.Switch.deleted:type_name -> google.protobuf.Timestamp
-	366,  // 192: forge.Switch.bmc_info:type_name -> forge.BmcInfo
-	287,  // 193: forge.Switch.metadata:type_name -> forge.Metadata
-	1078, // 194: forge.Switch.rack_id:type_name -> common.RackId
-	242,  // 195: forge.Switch.placement_in_rack:type_name -> forge.PlacementInRack
-	367,  // 196: forge.Switch.nvos_info:type_name -> forge.SwitchNvosInfo
-	1079, // 197: forge.Switch.nvlink_domain_uuid:type_name -> common.NVLinkDomainId
-	243,  // 198: forge.SwitchList.switches:type_name -> forge.Switch
-	238,  // 199: forge.SwitchCreationRequest.config:type_name -> forge.SwitchConfig
-	1080, // 200: forge.SwitchCreationRequest.id:type_name -> common.UUID
-	242,  // 201: forge.SwitchCreationRequest.placement_in_rack:type_name -> forge.PlacementInRack
-	1081, // 202: forge.SwitchDeletionRequest.id:type_name -> common.SwitchId
-	1081, // 203: forge.DecommissionSwitchRequest.switch_id:type_name -> common.SwitchId
-	1067, // 204: forge.StateHistoryRecord.time:type_name -> google.protobuf.Timestamp
-	250,  // 205: forge.StateHistoryRecords.records:type_name -> forge.StateHistoryRecord
-	1081, // 206: forge.SwitchStateHistoriesRequest.switch_ids:type_name -> common.SwitchId
-	1081, // 207: forge.SwitchHealthHistoriesRequest.switch_ids:type_name -> common.SwitchId
-	1067, // 208: forge.SwitchHealthHistoriesRequest.start_time:type_name -> google.protobuf.Timestamp
-	1067, // 209: forge.SwitchHealthHistoriesRequest.end_time:type_name -> google.protobuf.Timestamp
-	1032, // 210: forge.StateHistories.histories:type_name -> forge.StateHistories.HistoriesEntry
-	1081, // 211: forge.SwitchQuery.switch_id:type_name -> common.SwitchId
-	1078, // 212: forge.SwitchSearchFilter.rack_id:type_name -> common.RackId
+	382,  // 182: forge.SwitchStatus.state_reason:type_name -> forge.ControllerStateReason
+	384,  // 183: forge.SwitchStatus.state_sla:type_name -> forge.StateSla
+	1081, // 184: forge.SwitchStatus.health:type_name -> health.HealthReport
+	381,  // 185: forge.SwitchStatus.health_sources:type_name -> forge.HealthSourceOrigin
+	110,  // 186: forge.SwitchStatus.lifecycle:type_name -> forge.LifecycleStatus
+	241,  // 187: forge.SwitchStatus.fabric_manager_status_details:type_name -> forge.FabricManagerStatus
+	1086, // 188: forge.Switch.id:type_name -> common.SwitchId
+	239,  // 189: forge.Switch.config:type_name -> forge.SwitchConfig
+	242,  // 190: forge.Switch.status:type_name -> forge.SwitchStatus
+	1072, // 191: forge.Switch.deleted:type_name -> google.protobuf.Timestamp
+	367,  // 192: forge.Switch.bmc_info:type_name -> forge.BmcInfo
+	288,  // 193: forge.Switch.metadata:type_name -> forge.Metadata
+	1083, // 194: forge.Switch.rack_id:type_name -> common.RackId
+	243,  // 195: forge.Switch.placement_in_rack:type_name -> forge.PlacementInRack
+	368,  // 196: forge.Switch.nvos_info:type_name -> forge.SwitchNvosInfo
+	1084, // 197: forge.Switch.nvlink_domain_uuid:type_name -> common.NVLinkDomainId
+	244,  // 198: forge.SwitchList.switches:type_name -> forge.Switch
+	239,  // 199: forge.SwitchCreationRequest.config:type_name -> forge.SwitchConfig
+	1085, // 200: forge.SwitchCreationRequest.id:type_name -> common.UUID
+	243,  // 201: forge.SwitchCreationRequest.placement_in_rack:type_name -> forge.PlacementInRack
+	1086, // 202: forge.SwitchDeletionRequest.id:type_name -> common.SwitchId
+	1086, // 203: forge.DecommissionSwitchRequest.switch_id:type_name -> common.SwitchId
+	1072, // 204: forge.StateHistoryRecord.time:type_name -> google.protobuf.Timestamp
+	251,  // 205: forge.StateHistoryRecords.records:type_name -> forge.StateHistoryRecord
+	1086, // 206: forge.SwitchStateHistoriesRequest.switch_ids:type_name -> common.SwitchId
+	1086, // 207: forge.SwitchHealthHistoriesRequest.switch_ids:type_name -> common.SwitchId
+	1072, // 208: forge.SwitchHealthHistoriesRequest.start_time:type_name -> google.protobuf.Timestamp
+	1072, // 209: forge.SwitchHealthHistoriesRequest.end_time:type_name -> google.protobuf.Timestamp
+	1037, // 210: forge.StateHistories.histories:type_name -> forge.StateHistories.HistoriesEntry
+	1086, // 211: forge.SwitchQuery.switch_id:type_name -> common.SwitchId
+	1083, // 212: forge.SwitchSearchFilter.rack_id:type_name -> common.RackId
 	11,   // 213: forge.SwitchSearchFilter.deleted:type_name -> forge.DeletedFilter
-	1081, // 214: forge.SwitchesByIdsRequest.switch_ids:type_name -> common.SwitchId
-	287,  // 215: forge.ExpectedSwitch.metadata:type_name -> forge.Metadata
-	1078, // 216: forge.ExpectedSwitch.rack_id:type_name -> common.RackId
-	1080, // 217: forge.ExpectedSwitch.expected_switch_id:type_name -> common.UUID
-	1080, // 218: forge.ExpectedSwitchRequest.expected_switch_id:type_name -> common.UUID
-	258,  // 219: forge.ExpectedSwitchList.expected_switches:type_name -> forge.ExpectedSwitch
-	262,  // 220: forge.LinkedExpectedSwitchList.expected_switches:type_name -> forge.LinkedExpectedSwitch
-	1081, // 221: forge.LinkedExpectedSwitch.switch_id:type_name -> common.SwitchId
-	1080, // 222: forge.LinkedExpectedSwitch.expected_switch_id:type_name -> common.UUID
-	1078, // 223: forge.LinkedExpectedSwitch.rack_id:type_name -> common.RackId
-	1078, // 224: forge.ExpectedRack.rack_id:type_name -> common.RackId
-	1082, // 225: forge.ExpectedRack.rack_profile_id:type_name -> common.RackProfileId
-	287,  // 226: forge.ExpectedRack.metadata:type_name -> forge.Metadata
-	263,  // 227: forge.ExpectedRackList.expected_racks:type_name -> forge.ExpectedRack
-	1067, // 228: forge.NetworkSegmentStateHistory.time:type_name -> google.protobuf.Timestamp
-	1068, // 229: forge.NetworkSegmentConfig.vpc_id:type_name -> common.VpcId
-	1083, // 230: forge.NetworkSegmentConfig.subdomain_id:type_name -> common.DomainId
+	1086, // 214: forge.SwitchesByIdsRequest.switch_ids:type_name -> common.SwitchId
+	288,  // 215: forge.ExpectedSwitch.metadata:type_name -> forge.Metadata
+	1083, // 216: forge.ExpectedSwitch.rack_id:type_name -> common.RackId
+	1085, // 217: forge.ExpectedSwitch.expected_switch_id:type_name -> common.UUID
+	1085, // 218: forge.ExpectedSwitchRequest.expected_switch_id:type_name -> common.UUID
+	259,  // 219: forge.ExpectedSwitchList.expected_switches:type_name -> forge.ExpectedSwitch
+	263,  // 220: forge.LinkedExpectedSwitchList.expected_switches:type_name -> forge.LinkedExpectedSwitch
+	1086, // 221: forge.LinkedExpectedSwitch.switch_id:type_name -> common.SwitchId
+	1085, // 222: forge.LinkedExpectedSwitch.expected_switch_id:type_name -> common.UUID
+	1083, // 223: forge.LinkedExpectedSwitch.rack_id:type_name -> common.RackId
+	1083, // 224: forge.ExpectedRack.rack_id:type_name -> common.RackId
+	1087, // 225: forge.ExpectedRack.rack_profile_id:type_name -> common.RackProfileId
+	288,  // 226: forge.ExpectedRack.metadata:type_name -> forge.Metadata
+	264,  // 227: forge.ExpectedRackList.expected_racks:type_name -> forge.ExpectedRack
+	1072, // 228: forge.NetworkSegmentStateHistory.time:type_name -> google.protobuf.Timestamp
+	1073, // 229: forge.NetworkSegmentConfig.vpc_id:type_name -> common.VpcId
+	1088, // 230: forge.NetworkSegmentConfig.subdomain_id:type_name -> common.DomainId
 	13,   // 231: forge.NetworkSegmentConfig.segment_type:type_name -> forge.NetworkSegmentType
-	281,  // 232: forge.NetworkSegmentConfig.prefixes:type_name -> forge.NetworkPrefix
+	282,  // 232: forge.NetworkSegmentConfig.prefixes:type_name -> forge.NetworkPrefix
 	14,   // 233: forge.NetworkSegmentStatus.flags:type_name -> forge.NetworkSegmentFlag
-	109,  // 234: forge.NetworkSegmentStatus.lifecycle:type_name -> forge.LifecycleStatus
+	110,  // 234: forge.NetworkSegmentStatus.lifecycle:type_name -> forge.LifecycleStatus
 	9,    // 235: forge.NetworkSegmentStatus.tenant_state:type_name -> forge.TenantState
-	1084, // 236: forge.NetworkSegment.id:type_name -> common.NetworkSegmentId
-	1068, // 237: forge.NetworkSegment.vpc_id:type_name -> common.VpcId
-	1083, // 238: forge.NetworkSegment.subdomain_id:type_name -> common.DomainId
-	281,  // 239: forge.NetworkSegment.prefixes:type_name -> forge.NetworkPrefix
-	1067, // 240: forge.NetworkSegment.created:type_name -> google.protobuf.Timestamp
-	1067, // 241: forge.NetworkSegment.updated:type_name -> google.protobuf.Timestamp
-	1067, // 242: forge.NetworkSegment.deleted:type_name -> google.protobuf.Timestamp
+	1089, // 236: forge.NetworkSegment.id:type_name -> common.NetworkSegmentId
+	1073, // 237: forge.NetworkSegment.vpc_id:type_name -> common.VpcId
+	1088, // 238: forge.NetworkSegment.subdomain_id:type_name -> common.DomainId
+	282,  // 239: forge.NetworkSegment.prefixes:type_name -> forge.NetworkPrefix
+	1072, // 240: forge.NetworkSegment.created:type_name -> google.protobuf.Timestamp
+	1072, // 241: forge.NetworkSegment.updated:type_name -> google.protobuf.Timestamp
+	1072, // 242: forge.NetworkSegment.deleted:type_name -> google.protobuf.Timestamp
 	13,   // 243: forge.NetworkSegment.segment_type:type_name -> forge.NetworkSegmentType
 	14,   // 244: forge.NetworkSegment.flags:type_name -> forge.NetworkSegmentFlag
-	269,  // 245: forge.NetworkSegment.config:type_name -> forge.NetworkSegmentConfig
-	270,  // 246: forge.NetworkSegment.status:type_name -> forge.NetworkSegmentStatus
-	287,  // 247: forge.NetworkSegment.metadata:type_name -> forge.Metadata
+	270,  // 245: forge.NetworkSegment.config:type_name -> forge.NetworkSegmentConfig
+	271,  // 246: forge.NetworkSegment.status:type_name -> forge.NetworkSegmentStatus
+	288,  // 247: forge.NetworkSegment.metadata:type_name -> forge.Metadata
 	9,    // 248: forge.NetworkSegment.state:type_name -> forge.TenantState
-	268,  // 249: forge.NetworkSegment.history:type_name -> forge.NetworkSegmentStateHistory
-	381,  // 250: forge.NetworkSegment.state_reason:type_name -> forge.ControllerStateReason
-	383,  // 251: forge.NetworkSegment.state_sla:type_name -> forge.StateSla
-	1068, // 252: forge.NetworkSegmentCreationRequest.vpc_id:type_name -> common.VpcId
-	1083, // 253: forge.NetworkSegmentCreationRequest.subdomain_id:type_name -> common.DomainId
-	281,  // 254: forge.NetworkSegmentCreationRequest.prefixes:type_name -> forge.NetworkPrefix
+	269,  // 249: forge.NetworkSegment.history:type_name -> forge.NetworkSegmentStateHistory
+	382,  // 250: forge.NetworkSegment.state_reason:type_name -> forge.ControllerStateReason
+	384,  // 251: forge.NetworkSegment.state_sla:type_name -> forge.StateSla
+	1073, // 252: forge.NetworkSegmentCreationRequest.vpc_id:type_name -> common.VpcId
+	1088, // 253: forge.NetworkSegmentCreationRequest.subdomain_id:type_name -> common.DomainId
+	282,  // 254: forge.NetworkSegmentCreationRequest.prefixes:type_name -> forge.NetworkPrefix
 	13,   // 255: forge.NetworkSegmentCreationRequest.segment_type:type_name -> forge.NetworkSegmentType
-	1084, // 256: forge.NetworkSegmentCreationRequest.id:type_name -> common.NetworkSegmentId
-	1084, // 257: forge.NetworkSegmentDeletionRequest.id:type_name -> common.NetworkSegmentId
-	1084, // 258: forge.AttachNetworkSegmentToVpcRequest.network_segment_id:type_name -> common.NetworkSegmentId
-	1068, // 259: forge.AttachNetworkSegmentToVpcRequest.vpc_id:type_name -> common.VpcId
-	1084, // 260: forge.NetworkSegmentStateHistoriesRequest.network_segment_ids:type_name -> common.NetworkSegmentId
-	1084, // 261: forge.NetworkSegmentIdList.network_segments_ids:type_name -> common.NetworkSegmentId
-	1084, // 262: forge.NetworkSegmentsByIdsRequest.network_segments_ids:type_name -> common.NetworkSegmentId
-	1085, // 263: forge.NetworkPrefix.id:type_name -> common.NetworkPrefixId
-	93,   // 264: forge.InstancePowerRequest.operation:type_name -> forge.InstancePowerRequest.Operation
-	1086, // 265: forge.InstancePowerRequest.instance_id:type_name -> common.InstanceId
-	320,  // 266: forge.InstanceList.instances:type_name -> forge.Instance
-	286,  // 267: forge.Metadata.labels:type_name -> forge.Label
-	286,  // 268: forge.InstanceSearchFilter.label:type_name -> forge.Label
-	1086, // 269: forge.InstanceIdList.instance_ids:type_name -> common.InstanceId
-	1086, // 270: forge.InstancesByIdsRequest.instance_ids:type_name -> common.InstanceId
-	1066, // 271: forge.InstanceAllocationRequest.machine_id:type_name -> common.MachineId
-	300,  // 272: forge.InstanceAllocationRequest.config:type_name -> forge.InstanceConfig
-	1086, // 273: forge.InstanceAllocationRequest.instance_id:type_name -> common.InstanceId
-	287,  // 274: forge.InstanceAllocationRequest.metadata:type_name -> forge.Metadata
-	291,  // 275: forge.BatchInstanceAllocationRequest.instance_requests:type_name -> forge.InstanceAllocationRequest
-	320,  // 276: forge.BatchInstanceAllocationResponse.instances:type_name -> forge.Instance
+	1089, // 256: forge.NetworkSegmentCreationRequest.id:type_name -> common.NetworkSegmentId
+	1089, // 257: forge.NetworkSegmentDeletionRequest.id:type_name -> common.NetworkSegmentId
+	1089, // 258: forge.AttachNetworkSegmentToVpcRequest.network_segment_id:type_name -> common.NetworkSegmentId
+	1073, // 259: forge.AttachNetworkSegmentToVpcRequest.vpc_id:type_name -> common.VpcId
+	1089, // 260: forge.NetworkSegmentStateHistoriesRequest.network_segment_ids:type_name -> common.NetworkSegmentId
+	1089, // 261: forge.NetworkSegmentIdList.network_segments_ids:type_name -> common.NetworkSegmentId
+	1089, // 262: forge.NetworkSegmentsByIdsRequest.network_segments_ids:type_name -> common.NetworkSegmentId
+	1090, // 263: forge.NetworkPrefix.id:type_name -> common.NetworkPrefixId
+	94,   // 264: forge.InstancePowerRequest.operation:type_name -> forge.InstancePowerRequest.Operation
+	1091, // 265: forge.InstancePowerRequest.instance_id:type_name -> common.InstanceId
+	321,  // 266: forge.InstanceList.instances:type_name -> forge.Instance
+	287,  // 267: forge.Metadata.labels:type_name -> forge.Label
+	287,  // 268: forge.InstanceSearchFilter.label:type_name -> forge.Label
+	1091, // 269: forge.InstanceIdList.instance_ids:type_name -> common.InstanceId
+	1091, // 270: forge.InstancesByIdsRequest.instance_ids:type_name -> common.InstanceId
+	1071, // 271: forge.InstanceAllocationRequest.machine_id:type_name -> common.MachineId
+	301,  // 272: forge.InstanceAllocationRequest.config:type_name -> forge.InstanceConfig
+	1091, // 273: forge.InstanceAllocationRequest.instance_id:type_name -> common.InstanceId
+	288,  // 274: forge.InstanceAllocationRequest.metadata:type_name -> forge.Metadata
+	292,  // 275: forge.BatchInstanceAllocationRequest.instance_requests:type_name -> forge.InstanceAllocationRequest
+	321,  // 276: forge.BatchInstanceAllocationResponse.instances:type_name -> forge.Instance
 	15,   // 277: forge.IpxeTemplateArtifact.cache_strategy:type_name -> forge.IpxeTemplateArtifactCacheStrategy
-	1087, // 278: forge.IpxeTemplate.id:type_name -> common.IpxeTemplateId
+	1092, // 278: forge.IpxeTemplate.id:type_name -> common.IpxeTemplateId
 	16,   // 279: forge.IpxeTemplate.visibility:type_name -> forge.IpxeTemplateVisibility
-	299,  // 280: forge.InstanceOperatingSystemConfig.ipxe:type_name -> forge.InlineIpxe
-	1080, // 281: forge.InstanceOperatingSystemConfig.os_image_id:type_name -> common.UUID
-	1088, // 282: forge.InstanceOperatingSystemConfig.operating_system_id:type_name -> common.OperatingSystemId
-	297,  // 283: forge.InstanceConfig.tenant:type_name -> forge.TenantConfig
-	298,  // 284: forge.InstanceConfig.os:type_name -> forge.InstanceOperatingSystemConfig
-	301,  // 285: forge.InstanceConfig.network:type_name -> forge.InstanceNetworkConfig
-	303,  // 286: forge.InstanceConfig.infiniband:type_name -> forge.InstanceInfinibandConfig
-	305,  // 287: forge.InstanceConfig.dpu_extension_services:type_name -> forge.InstanceDpuExtensionServicesConfig
-	306,  // 288: forge.InstanceConfig.nvlink:type_name -> forge.InstanceNVLinkConfig
-	307,  // 289: forge.InstanceConfig.spxconfig:type_name -> forge.InstanceSpxConfig
-	322,  // 290: forge.InstanceNetworkConfig.interfaces:type_name -> forge.InstanceInterfaceConfig
-	302,  // 291: forge.InstanceNetworkConfig.auto_config:type_name -> forge.InstanceNetworkAutoConfig
-	1068, // 292: forge.InstanceNetworkAutoConfig.vpc_id:type_name -> common.VpcId
-	326,  // 293: forge.InstanceInfinibandConfig.ib_interfaces:type_name -> forge.InstanceIBInterfaceConfig
-	304,  // 294: forge.InstanceDpuExtensionServicesConfig.service_configs:type_name -> forge.InstanceDpuExtensionServiceConfig
-	331,  // 295: forge.InstanceNVLinkConfig.gpu_configs:type_name -> forge.InstanceNVLinkGpuConfig
-	308,  // 296: forge.InstanceSpxConfig.spx_attachments:type_name -> forge.InstanceSpxAttachment
-	1089, // 297: forge.InstanceSpxAttachment.spx_partition_id:type_name -> common.SpxPartitionId
+	300,  // 280: forge.InstanceOperatingSystemConfig.ipxe:type_name -> forge.InlineIpxe
+	1085, // 281: forge.InstanceOperatingSystemConfig.os_image_id:type_name -> common.UUID
+	1093, // 282: forge.InstanceOperatingSystemConfig.operating_system_id:type_name -> common.OperatingSystemId
+	298,  // 283: forge.InstanceConfig.tenant:type_name -> forge.TenantConfig
+	299,  // 284: forge.InstanceConfig.os:type_name -> forge.InstanceOperatingSystemConfig
+	302,  // 285: forge.InstanceConfig.network:type_name -> forge.InstanceNetworkConfig
+	304,  // 286: forge.InstanceConfig.infiniband:type_name -> forge.InstanceInfinibandConfig
+	306,  // 287: forge.InstanceConfig.dpu_extension_services:type_name -> forge.InstanceDpuExtensionServicesConfig
+	307,  // 288: forge.InstanceConfig.nvlink:type_name -> forge.InstanceNVLinkConfig
+	308,  // 289: forge.InstanceConfig.spxconfig:type_name -> forge.InstanceSpxConfig
+	323,  // 290: forge.InstanceNetworkConfig.interfaces:type_name -> forge.InstanceInterfaceConfig
+	303,  // 291: forge.InstanceNetworkConfig.auto_config:type_name -> forge.InstanceNetworkAutoConfig
+	1073, // 292: forge.InstanceNetworkAutoConfig.vpc_id:type_name -> common.VpcId
+	327,  // 293: forge.InstanceInfinibandConfig.ib_interfaces:type_name -> forge.InstanceIBInterfaceConfig
+	305,  // 294: forge.InstanceDpuExtensionServicesConfig.service_configs:type_name -> forge.InstanceDpuExtensionServiceConfig
+	332,  // 295: forge.InstanceNVLinkConfig.gpu_configs:type_name -> forge.InstanceNVLinkGpuConfig
+	309,  // 296: forge.InstanceSpxConfig.spx_attachments:type_name -> forge.InstanceSpxAttachment
+	1094, // 297: forge.InstanceSpxAttachment.spx_partition_id:type_name -> common.SpxPartitionId
 	17,   // 298: forge.InstanceSpxAttachment.attachment_type:type_name -> forge.SpxAttachmentType
-	1086, // 299: forge.InstanceOperatingSystemUpdateRequest.instance_id:type_name -> common.InstanceId
-	298,  // 300: forge.InstanceOperatingSystemUpdateRequest.os:type_name -> forge.InstanceOperatingSystemConfig
-	1086, // 301: forge.InstanceConfigUpdateRequest.instance_id:type_name -> common.InstanceId
-	300,  // 302: forge.InstanceConfigUpdateRequest.config:type_name -> forge.InstanceConfig
-	287,  // 303: forge.InstanceConfigUpdateRequest.metadata:type_name -> forge.Metadata
-	384,  // 304: forge.InstanceStatus.tenant:type_name -> forge.InstanceTenantStatus
-	314,  // 305: forge.InstanceStatus.network:type_name -> forge.InstanceNetworkStatus
-	315,  // 306: forge.InstanceStatus.infiniband:type_name -> forge.InstanceInfinibandStatus
-	318,  // 307: forge.InstanceStatus.dpu_extension_services:type_name -> forge.InstanceDpuExtensionServicesStatus
+	1091, // 299: forge.InstanceOperatingSystemUpdateRequest.instance_id:type_name -> common.InstanceId
+	299,  // 300: forge.InstanceOperatingSystemUpdateRequest.os:type_name -> forge.InstanceOperatingSystemConfig
+	1091, // 301: forge.InstanceConfigUpdateRequest.instance_id:type_name -> common.InstanceId
+	301,  // 302: forge.InstanceConfigUpdateRequest.config:type_name -> forge.InstanceConfig
+	288,  // 303: forge.InstanceConfigUpdateRequest.metadata:type_name -> forge.Metadata
+	385,  // 304: forge.InstanceStatus.tenant:type_name -> forge.InstanceTenantStatus
+	315,  // 305: forge.InstanceStatus.network:type_name -> forge.InstanceNetworkStatus
+	316,  // 306: forge.InstanceStatus.infiniband:type_name -> forge.InstanceInfinibandStatus
+	319,  // 307: forge.InstanceStatus.dpu_extension_services:type_name -> forge.InstanceDpuExtensionServicesStatus
 	26,   // 308: forge.InstanceStatus.configs_synced:type_name -> forge.SyncState
-	321,  // 309: forge.InstanceStatus.update:type_name -> forge.InstanceUpdateStatus
-	319,  // 310: forge.InstanceStatus.nvlink:type_name -> forge.InstanceNVLinkStatus
-	312,  // 311: forge.InstanceStatus.spx_status:type_name -> forge.InstanceSpxStatus
-	313,  // 312: forge.InstanceSpxStatus.attachment_statuses:type_name -> forge.InstanceSpxAttachmentStatus
+	322,  // 309: forge.InstanceStatus.update:type_name -> forge.InstanceUpdateStatus
+	320,  // 310: forge.InstanceStatus.nvlink:type_name -> forge.InstanceNVLinkStatus
+	313,  // 311: forge.InstanceStatus.spx_status:type_name -> forge.InstanceSpxStatus
+	314,  // 312: forge.InstanceSpxStatus.attachment_statuses:type_name -> forge.InstanceSpxAttachmentStatus
 	26,   // 313: forge.InstanceSpxStatus.configs_synced:type_name -> forge.SyncState
 	17,   // 314: forge.InstanceSpxAttachmentStatus.attachment_type:type_name -> forge.SpxAttachmentType
-	1089, // 315: forge.InstanceSpxAttachmentStatus.spx_partition_id:type_name -> common.SpxPartitionId
-	328,  // 316: forge.InstanceNetworkStatus.interfaces:type_name -> forge.InstanceInterfaceStatus
+	1094, // 315: forge.InstanceSpxAttachmentStatus.spx_partition_id:type_name -> common.SpxPartitionId
+	329,  // 316: forge.InstanceNetworkStatus.interfaces:type_name -> forge.InstanceInterfaceStatus
 	26,   // 317: forge.InstanceNetworkStatus.configs_synced:type_name -> forge.SyncState
-	329,  // 318: forge.InstanceInfinibandStatus.ib_interfaces:type_name -> forge.InstanceIBInterfaceStatus
+	330,  // 318: forge.InstanceInfinibandStatus.ib_interfaces:type_name -> forge.InstanceIBInterfaceStatus
 	26,   // 319: forge.InstanceInfinibandStatus.configs_synced:type_name -> forge.SyncState
-	1066, // 320: forge.DpuExtensionServiceStatus.dpu_machine_id:type_name -> common.MachineId
-	77,   // 321: forge.DpuExtensionServiceStatus.status:type_name -> forge.DpuExtensionServiceDeploymentStatus
-	481,  // 322: forge.DpuExtensionServiceStatus.components:type_name -> forge.DpuExtensionServiceComponent
-	77,   // 323: forge.InstanceDpuExtensionServiceStatus.deployment_status:type_name -> forge.DpuExtensionServiceDeploymentStatus
-	316,  // 324: forge.InstanceDpuExtensionServiceStatus.dpu_statuses:type_name -> forge.DpuExtensionServiceStatus
-	317,  // 325: forge.InstanceDpuExtensionServicesStatus.dpu_extension_services:type_name -> forge.InstanceDpuExtensionServiceStatus
+	1071, // 320: forge.DpuExtensionServiceStatus.dpu_machine_id:type_name -> common.MachineId
+	78,   // 321: forge.DpuExtensionServiceStatus.status:type_name -> forge.DpuExtensionServiceDeploymentStatus
+	482,  // 322: forge.DpuExtensionServiceStatus.components:type_name -> forge.DpuExtensionServiceComponent
+	78,   // 323: forge.InstanceDpuExtensionServiceStatus.deployment_status:type_name -> forge.DpuExtensionServiceDeploymentStatus
+	317,  // 324: forge.InstanceDpuExtensionServiceStatus.dpu_statuses:type_name -> forge.DpuExtensionServiceStatus
+	318,  // 325: forge.InstanceDpuExtensionServicesStatus.dpu_extension_services:type_name -> forge.InstanceDpuExtensionServiceStatus
 	26,   // 326: forge.InstanceDpuExtensionServicesStatus.configs_synced:type_name -> forge.SyncState
-	330,  // 327: forge.InstanceNVLinkStatus.gpu_statuses:type_name -> forge.InstanceNVLinkGpuStatus
+	331,  // 327: forge.InstanceNVLinkStatus.gpu_statuses:type_name -> forge.InstanceNVLinkGpuStatus
 	26,   // 328: forge.InstanceNVLinkStatus.configs_synced:type_name -> forge.SyncState
-	1086, // 329: forge.Instance.id:type_name -> common.InstanceId
-	1066, // 330: forge.Instance.machine_id:type_name -> common.MachineId
-	287,  // 331: forge.Instance.metadata:type_name -> forge.Metadata
-	300,  // 332: forge.Instance.config:type_name -> forge.InstanceConfig
-	311,  // 333: forge.Instance.status:type_name -> forge.InstanceStatus
-	94,   // 334: forge.InstanceUpdateStatus.module:type_name -> forge.InstanceUpdateStatus.Module
-	1067, // 335: forge.InstanceUpdateStatus.trigger_received_at:type_name -> google.protobuf.Timestamp
-	1067, // 336: forge.InstanceUpdateStatus.update_triggered_at:type_name -> google.protobuf.Timestamp
+	1091, // 329: forge.Instance.id:type_name -> common.InstanceId
+	1071, // 330: forge.Instance.machine_id:type_name -> common.MachineId
+	288,  // 331: forge.Instance.metadata:type_name -> forge.Metadata
+	301,  // 332: forge.Instance.config:type_name -> forge.InstanceConfig
+	312,  // 333: forge.Instance.status:type_name -> forge.InstanceStatus
+	95,   // 334: forge.InstanceUpdateStatus.module:type_name -> forge.InstanceUpdateStatus.Module
+	1072, // 335: forge.InstanceUpdateStatus.trigger_received_at:type_name -> google.protobuf.Timestamp
+	1072, // 336: forge.InstanceUpdateStatus.update_triggered_at:type_name -> google.protobuf.Timestamp
 	42,   // 337: forge.InstanceInterfaceConfig.function_type:type_name -> forge.InterfaceFunctionType
-	1084, // 338: forge.InstanceInterfaceConfig.network_segment_id:type_name -> common.NetworkSegmentId
-	1084, // 339: forge.InstanceInterfaceConfig.segment_id:type_name -> common.NetworkSegmentId
-	1072, // 340: forge.InstanceInterfaceConfig.vpc_prefix_id:type_name -> common.VpcPrefixId
-	323,  // 341: forge.InstanceInterfaceConfig.vpc:type_name -> forge.InstanceInterfaceVpcSelection
-	324,  // 342: forge.InstanceInterfaceConfig.ipv6_interface_config:type_name -> forge.InstanceInterfaceIpv6Config
-	325,  // 343: forge.InstanceInterfaceConfig.routing_profile:type_name -> forge.InstanceInterfaceRoutingProfile
-	1068, // 344: forge.InstanceInterfaceVpcSelection.vpc_id:type_name -> common.VpcId
+	1089, // 338: forge.InstanceInterfaceConfig.network_segment_id:type_name -> common.NetworkSegmentId
+	1089, // 339: forge.InstanceInterfaceConfig.segment_id:type_name -> common.NetworkSegmentId
+	1077, // 340: forge.InstanceInterfaceConfig.vpc_prefix_id:type_name -> common.VpcPrefixId
+	324,  // 341: forge.InstanceInterfaceConfig.vpc:type_name -> forge.InstanceInterfaceVpcSelection
+	325,  // 342: forge.InstanceInterfaceConfig.ipv6_interface_config:type_name -> forge.InstanceInterfaceIpv6Config
+	326,  // 343: forge.InstanceInterfaceConfig.routing_profile:type_name -> forge.InstanceInterfaceRoutingProfile
+	1073, // 344: forge.InstanceInterfaceVpcSelection.vpc_id:type_name -> common.VpcId
 	18,   // 345: forge.InstanceInterfaceVpcSelection.family_mode:type_name -> forge.InstanceInterfaceIpFamilyMode
-	1072, // 346: forge.InstanceInterfaceIpv6Config.vpc_prefix_id:type_name -> common.VpcPrefixId
-	917,  // 347: forge.InstanceInterfaceRoutingProfile.allowed_anycast_prefixes:type_name -> forge.PrefixFilterPolicyEntry
+	1077, // 346: forge.InstanceInterfaceIpv6Config.vpc_prefix_id:type_name -> common.VpcPrefixId
+	918,  // 347: forge.InstanceInterfaceRoutingProfile.allowed_anycast_prefixes:type_name -> forge.PrefixFilterPolicyEntry
 	42,   // 348: forge.InstanceIBInterfaceConfig.function_type:type_name -> forge.InterfaceFunctionType
-	1075, // 349: forge.InstanceIBInterfaceConfig.ib_partition_id:type_name -> common.IBPartitionId
-	1072, // 350: forge.InstanceInterfaceResolvedVpcPrefixes.ipv4_vpc_prefix_id:type_name -> common.VpcPrefixId
-	1072, // 351: forge.InstanceInterfaceResolvedVpcPrefixes.ipv6_vpc_prefix_id:type_name -> common.VpcPrefixId
-	1068, // 352: forge.InstanceInterfaceStatus.vpc_id:type_name -> common.VpcId
-	327,  // 353: forge.InstanceInterfaceStatus.resolved_vpc_prefixes:type_name -> forge.InstanceInterfaceResolvedVpcPrefixes
-	1079, // 354: forge.InstanceNVLinkGpuStatus.domain_id:type_name -> common.NVLinkDomainId
-	1071, // 355: forge.InstanceNVLinkGpuStatus.logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
-	1071, // 356: forge.InstanceNVLinkGpuConfig.logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
-	1086, // 357: forge.InstancePhoneHomeLastContactRequest.instance_id:type_name -> common.InstanceId
-	1067, // 358: forge.InstancePhoneHomeLastContactResponse.timestamp:type_name -> google.protobuf.Timestamp
+	1080, // 349: forge.InstanceIBInterfaceConfig.ib_partition_id:type_name -> common.IBPartitionId
+	1077, // 350: forge.InstanceInterfaceResolvedVpcPrefixes.ipv4_vpc_prefix_id:type_name -> common.VpcPrefixId
+	1077, // 351: forge.InstanceInterfaceResolvedVpcPrefixes.ipv6_vpc_prefix_id:type_name -> common.VpcPrefixId
+	1073, // 352: forge.InstanceInterfaceStatus.vpc_id:type_name -> common.VpcId
+	328,  // 353: forge.InstanceInterfaceStatus.resolved_vpc_prefixes:type_name -> forge.InstanceInterfaceResolvedVpcPrefixes
+	1084, // 354: forge.InstanceNVLinkGpuStatus.domain_id:type_name -> common.NVLinkDomainId
+	1076, // 355: forge.InstanceNVLinkGpuStatus.logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
+	1076, // 356: forge.InstanceNVLinkGpuConfig.logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
+	1091, // 357: forge.InstancePhoneHomeLastContactRequest.instance_id:type_name -> common.InstanceId
+	1072, // 358: forge.InstancePhoneHomeLastContactResponse.timestamp:type_name -> google.protobuf.Timestamp
 	19,   // 359: forge.Issue.category:type_name -> forge.IssueCategory
-	335,  // 360: forge.DeleteAttribution.initiated_by:type_name -> forge.DeleteInitiatedBy
-	1086, // 361: forge.InstanceReleaseRequest.id:type_name -> common.InstanceId
-	334,  // 362: forge.InstanceReleaseRequest.issue:type_name -> forge.Issue
-	336,  // 363: forge.InstanceReleaseRequest.delete_attribution:type_name -> forge.DeleteAttribution
-	337,  // 364: forge.BatchInstanceReleaseRequest.release_requests:type_name -> forge.InstanceReleaseRequest
-	1086, // 365: forge.InstanceReleaseOutcome.id:type_name -> common.InstanceId
+	336,  // 360: forge.DeleteAttribution.initiated_by:type_name -> forge.DeleteInitiatedBy
+	1091, // 361: forge.InstanceReleaseRequest.id:type_name -> common.InstanceId
+	335,  // 362: forge.InstanceReleaseRequest.issue:type_name -> forge.Issue
+	337,  // 363: forge.InstanceReleaseRequest.delete_attribution:type_name -> forge.DeleteAttribution
+	338,  // 364: forge.BatchInstanceReleaseRequest.release_requests:type_name -> forge.InstanceReleaseRequest
+	1091, // 365: forge.InstanceReleaseOutcome.id:type_name -> common.InstanceId
 	20,   // 366: forge.InstanceReleaseOutcome.status:type_name -> forge.InstanceReleaseStatusCode
-	340,  // 367: forge.BatchInstanceReleaseResponse.results:type_name -> forge.InstanceReleaseOutcome
-	1066, // 368: forge.MachinesByIdsRequest.machine_ids:type_name -> common.MachineId
-	1078, // 369: forge.MachineSearchConfig.rack_id:type_name -> common.RackId
-	1066, // 370: forge.MachineStateHistoriesRequest.machine_ids:type_name -> common.MachineId
-	1033, // 371: forge.MachineStateHistories.histories:type_name -> forge.MachineStateHistories.HistoriesEntry
-	385,  // 372: forge.MachineStateHistoryRecords.records:type_name -> forge.MachineEvent
-	1066, // 373: forge.MachineHealthHistoriesRequest.machine_ids:type_name -> common.MachineId
-	1067, // 374: forge.MachineHealthHistoriesRequest.start_time:type_name -> google.protobuf.Timestamp
-	1067, // 375: forge.MachineHealthHistoriesRequest.end_time:type_name -> google.protobuf.Timestamp
-	1034, // 376: forge.HealthHistories.histories:type_name -> forge.HealthHistories.HistoriesEntry
-	350,  // 377: forge.HealthHistoryRecords.records:type_name -> forge.HealthHistoryRecord
-	1076, // 378: forge.HealthHistoryRecord.health:type_name -> health.HealthReport
-	1067, // 379: forge.HealthHistoryRecord.time:type_name -> google.protobuf.Timestamp
-	502,  // 380: forge.TenantList.tenants:type_name -> forge.Tenant
-	386,  // 381: forge.InterfaceList.interfaces:type_name -> forge.MachineInterface
-	370,  // 382: forge.MachineList.machines:type_name -> forge.Machine
-	1090, // 383: forge.InterfaceDeleteQuery.id:type_name -> common.MachineInterfaceId
-	1090, // 384: forge.InterfaceSearchQuery.id:type_name -> common.MachineInterfaceId
-	1090, // 385: forge.AssignStaticAddressRequest.interface_id:type_name -> common.MachineInterfaceId
-	1090, // 386: forge.AssignStaticAddressResponse.interface_id:type_name -> common.MachineInterfaceId
+	341,  // 367: forge.BatchInstanceReleaseResponse.results:type_name -> forge.InstanceReleaseOutcome
+	1071, // 368: forge.MachinesByIdsRequest.machine_ids:type_name -> common.MachineId
+	1083, // 369: forge.MachineSearchConfig.rack_id:type_name -> common.RackId
+	1071, // 370: forge.MachineStateHistoriesRequest.machine_ids:type_name -> common.MachineId
+	1038, // 371: forge.MachineStateHistories.histories:type_name -> forge.MachineStateHistories.HistoriesEntry
+	386,  // 372: forge.MachineStateHistoryRecords.records:type_name -> forge.MachineEvent
+	1071, // 373: forge.MachineHealthHistoriesRequest.machine_ids:type_name -> common.MachineId
+	1072, // 374: forge.MachineHealthHistoriesRequest.start_time:type_name -> google.protobuf.Timestamp
+	1072, // 375: forge.MachineHealthHistoriesRequest.end_time:type_name -> google.protobuf.Timestamp
+	1039, // 376: forge.HealthHistories.histories:type_name -> forge.HealthHistories.HistoriesEntry
+	351,  // 377: forge.HealthHistoryRecords.records:type_name -> forge.HealthHistoryRecord
+	1081, // 378: forge.HealthHistoryRecord.health:type_name -> health.HealthReport
+	1072, // 379: forge.HealthHistoryRecord.time:type_name -> google.protobuf.Timestamp
+	503,  // 380: forge.TenantList.tenants:type_name -> forge.Tenant
+	387,  // 381: forge.InterfaceList.interfaces:type_name -> forge.MachineInterface
+	371,  // 382: forge.MachineList.machines:type_name -> forge.Machine
+	1095, // 383: forge.InterfaceDeleteQuery.id:type_name -> common.MachineInterfaceId
+	1095, // 384: forge.InterfaceSearchQuery.id:type_name -> common.MachineInterfaceId
+	1095, // 385: forge.AssignStaticAddressRequest.interface_id:type_name -> common.MachineInterfaceId
+	1095, // 386: forge.AssignStaticAddressResponse.interface_id:type_name -> common.MachineInterfaceId
 	21,   // 387: forge.AssignStaticAddressResponse.status:type_name -> forge.AssignStaticAddressStatus
-	1090, // 388: forge.RemoveStaticAddressRequest.interface_id:type_name -> common.MachineInterfaceId
-	1090, // 389: forge.RemoveStaticAddressResponse.interface_id:type_name -> common.MachineInterfaceId
+	1095, // 388: forge.RemoveStaticAddressRequest.interface_id:type_name -> common.MachineInterfaceId
+	1095, // 389: forge.RemoveStaticAddressResponse.interface_id:type_name -> common.MachineInterfaceId
 	22,   // 390: forge.RemoveStaticAddressResponse.status:type_name -> forge.RemoveStaticAddressStatus
-	1090, // 391: forge.FindInterfaceAddressesRequest.interface_id:type_name -> common.MachineInterfaceId
-	1090, // 392: forge.FindInterfaceAddressesResponse.interface_id:type_name -> common.MachineInterfaceId
-	364,  // 393: forge.FindInterfaceAddressesResponse.addresses:type_name -> forge.InterfaceAddress
-	1090, // 394: forge.BmcInfo.machine_interface_id:type_name -> common.MachineInterfaceId
-	1067, // 395: forge.MachineConfig.maintenance_start_time:type_name -> google.protobuf.Timestamp
-	371,  // 396: forge.MachineConfig.dpf:type_name -> forge.DpfMachineState
-	386,  // 397: forge.MachineStatus.interfaces:type_name -> forge.MachineInterface
-	1091, // 398: forge.MachineStatus.discovery_info:type_name -> machine_discovery.DiscoveryInfo
-	1067, // 399: forge.MachineStatus.last_reboot_time:type_name -> google.protobuf.Timestamp
-	1067, // 400: forge.MachineStatus.last_observation_time:type_name -> google.protobuf.Timestamp
-	1066, // 401: forge.MachineStatus.associated_host_machine_id:type_name -> common.MachineId
-	1066, // 402: forge.MachineStatus.associated_dpu_machine_ids:type_name -> common.MachineId
-	1067, // 403: forge.MachineStatus.last_reboot_requested_time:type_name -> google.protobuf.Timestamp
-	1076, // 404: forge.MachineStatus.health:type_name -> health.HealthReport
-	380,  // 405: forge.MachineStatus.health_sources:type_name -> forge.HealthSourceOrigin
-	387,  // 406: forge.MachineStatus.infiniband:type_name -> forge.InfinibandStatusObservation
-	676,  // 407: forge.MachineStatus.capabilities:type_name -> forge.MachineCapabilitiesSet
-	749,  // 408: forge.MachineStatus.hw_sku:type_name -> forge.SkuStatus
-	416,  // 409: forge.MachineStatus.quarantine:type_name -> forge.ManagedHostQuarantineState
-	803,  // 410: forge.MachineStatus.nvlink_info:type_name -> forge.MachineNVLinkInfo
-	813,  // 411: forge.MachineStatus.nvlink:type_name -> forge.MachineNVLinkStatusObservation
-	805,  // 412: forge.MachineStatus.spx:type_name -> forge.MachineSpxStatusObservation
-	372,  // 413: forge.MachineStatus.instance_network_restrictions:type_name -> forge.InstanceNetworkRestrictions
-	109,  // 414: forge.MachineStatus.lifecycle:type_name -> forge.LifecycleStatus
-	1066, // 415: forge.Machine.id:type_name -> common.MachineId
-	381,  // 416: forge.Machine.state_reason:type_name -> forge.ControllerStateReason
-	383,  // 417: forge.Machine.state_sla:type_name -> forge.StateSla
-	385,  // 418: forge.Machine.events:type_name -> forge.MachineEvent
-	386,  // 419: forge.Machine.interfaces:type_name -> forge.MachineInterface
-	1091, // 420: forge.Machine.discovery_info:type_name -> machine_discovery.DiscoveryInfo
+	1095, // 391: forge.FindInterfaceAddressesRequest.interface_id:type_name -> common.MachineInterfaceId
+	1095, // 392: forge.FindInterfaceAddressesResponse.interface_id:type_name -> common.MachineInterfaceId
+	365,  // 393: forge.FindInterfaceAddressesResponse.addresses:type_name -> forge.InterfaceAddress
+	1095, // 394: forge.BmcInfo.machine_interface_id:type_name -> common.MachineInterfaceId
+	1072, // 395: forge.MachineConfig.maintenance_start_time:type_name -> google.protobuf.Timestamp
+	372,  // 396: forge.MachineConfig.dpf:type_name -> forge.DpfMachineState
+	387,  // 397: forge.MachineStatus.interfaces:type_name -> forge.MachineInterface
+	1096, // 398: forge.MachineStatus.discovery_info:type_name -> machine_discovery.DiscoveryInfo
+	1072, // 399: forge.MachineStatus.last_reboot_time:type_name -> google.protobuf.Timestamp
+	1072, // 400: forge.MachineStatus.last_observation_time:type_name -> google.protobuf.Timestamp
+	1071, // 401: forge.MachineStatus.associated_host_machine_id:type_name -> common.MachineId
+	1071, // 402: forge.MachineStatus.associated_dpu_machine_ids:type_name -> common.MachineId
+	1072, // 403: forge.MachineStatus.last_reboot_requested_time:type_name -> google.protobuf.Timestamp
+	1081, // 404: forge.MachineStatus.health:type_name -> health.HealthReport
+	381,  // 405: forge.MachineStatus.health_sources:type_name -> forge.HealthSourceOrigin
+	388,  // 406: forge.MachineStatus.infiniband:type_name -> forge.InfinibandStatusObservation
+	677,  // 407: forge.MachineStatus.capabilities:type_name -> forge.MachineCapabilitiesSet
+	750,  // 408: forge.MachineStatus.hw_sku:type_name -> forge.SkuStatus
+	417,  // 409: forge.MachineStatus.quarantine:type_name -> forge.ManagedHostQuarantineState
+	804,  // 410: forge.MachineStatus.nvlink_info:type_name -> forge.MachineNVLinkInfo
+	814,  // 411: forge.MachineStatus.nvlink:type_name -> forge.MachineNVLinkStatusObservation
+	806,  // 412: forge.MachineStatus.spx:type_name -> forge.MachineSpxStatusObservation
+	373,  // 413: forge.MachineStatus.instance_network_restrictions:type_name -> forge.InstanceNetworkRestrictions
+	110,  // 414: forge.MachineStatus.lifecycle:type_name -> forge.LifecycleStatus
+	1071, // 415: forge.Machine.id:type_name -> common.MachineId
+	382,  // 416: forge.Machine.state_reason:type_name -> forge.ControllerStateReason
+	384,  // 417: forge.Machine.state_sla:type_name -> forge.StateSla
+	386,  // 418: forge.Machine.events:type_name -> forge.MachineEvent
+	387,  // 419: forge.Machine.interfaces:type_name -> forge.MachineInterface
+	1096, // 420: forge.Machine.discovery_info:type_name -> machine_discovery.DiscoveryInfo
 	23,   // 421: forge.Machine.machine_type:type_name -> forge.MachineType
-	366,  // 422: forge.Machine.bmc_info:type_name -> forge.BmcInfo
-	1067, // 423: forge.Machine.last_reboot_time:type_name -> google.protobuf.Timestamp
-	1067, // 424: forge.Machine.last_observation_time:type_name -> google.protobuf.Timestamp
-	1067, // 425: forge.Machine.maintenance_start_time:type_name -> google.protobuf.Timestamp
-	1066, // 426: forge.Machine.associated_host_machine_id:type_name -> common.MachineId
-	378,  // 427: forge.Machine.inventory:type_name -> forge.MachineComponentInventory
-	1067, // 428: forge.Machine.last_reboot_requested_time:type_name -> google.protobuf.Timestamp
-	1066, // 429: forge.Machine.associated_dpu_machine_ids:type_name -> common.MachineId
-	1076, // 430: forge.Machine.health:type_name -> health.HealthReport
-	380,  // 431: forge.Machine.health_sources:type_name -> forge.HealthSourceOrigin
-	387,  // 432: forge.Machine.ib_status:type_name -> forge.InfinibandStatusObservation
-	287,  // 433: forge.Machine.metadata:type_name -> forge.Metadata
-	372,  // 434: forge.Machine.instance_network_restrictions:type_name -> forge.InstanceNetworkRestrictions
-	676,  // 435: forge.Machine.capabilities:type_name -> forge.MachineCapabilitiesSet
-	749,  // 436: forge.Machine.hw_sku_status:type_name -> forge.SkuStatus
-	416,  // 437: forge.Machine.quarantine_state:type_name -> forge.ManagedHostQuarantineState
-	803,  // 438: forge.Machine.nvlink_info:type_name -> forge.MachineNVLinkInfo
-	813,  // 439: forge.Machine.nvlink_status_observation:type_name -> forge.MachineNVLinkStatusObservation
-	1078, // 440: forge.Machine.rack_id:type_name -> common.RackId
-	242,  // 441: forge.Machine.placement_in_rack:type_name -> forge.PlacementInRack
-	805,  // 442: forge.Machine.spx_status_observation:type_name -> forge.MachineSpxStatusObservation
-	371,  // 443: forge.Machine.dpf:type_name -> forge.DpfMachineState
-	368,  // 444: forge.Machine.config:type_name -> forge.MachineConfig
-	369,  // 445: forge.Machine.status:type_name -> forge.MachineStatus
+	367,  // 422: forge.Machine.bmc_info:type_name -> forge.BmcInfo
+	1072, // 423: forge.Machine.last_reboot_time:type_name -> google.protobuf.Timestamp
+	1072, // 424: forge.Machine.last_observation_time:type_name -> google.protobuf.Timestamp
+	1072, // 425: forge.Machine.maintenance_start_time:type_name -> google.protobuf.Timestamp
+	1071, // 426: forge.Machine.associated_host_machine_id:type_name -> common.MachineId
+	379,  // 427: forge.Machine.inventory:type_name -> forge.MachineComponentInventory
+	1072, // 428: forge.Machine.last_reboot_requested_time:type_name -> google.protobuf.Timestamp
+	1071, // 429: forge.Machine.associated_dpu_machine_ids:type_name -> common.MachineId
+	1081, // 430: forge.Machine.health:type_name -> health.HealthReport
+	381,  // 431: forge.Machine.health_sources:type_name -> forge.HealthSourceOrigin
+	388,  // 432: forge.Machine.ib_status:type_name -> forge.InfinibandStatusObservation
+	288,  // 433: forge.Machine.metadata:type_name -> forge.Metadata
+	373,  // 434: forge.Machine.instance_network_restrictions:type_name -> forge.InstanceNetworkRestrictions
+	677,  // 435: forge.Machine.capabilities:type_name -> forge.MachineCapabilitiesSet
+	750,  // 436: forge.Machine.hw_sku_status:type_name -> forge.SkuStatus
+	417,  // 437: forge.Machine.quarantine_state:type_name -> forge.ManagedHostQuarantineState
+	804,  // 438: forge.Machine.nvlink_info:type_name -> forge.MachineNVLinkInfo
+	814,  // 439: forge.Machine.nvlink_status_observation:type_name -> forge.MachineNVLinkStatusObservation
+	1083, // 440: forge.Machine.rack_id:type_name -> common.RackId
+	243,  // 441: forge.Machine.placement_in_rack:type_name -> forge.PlacementInRack
+	806,  // 442: forge.Machine.spx_status_observation:type_name -> forge.MachineSpxStatusObservation
+	372,  // 443: forge.Machine.dpf:type_name -> forge.DpfMachineState
+	369,  // 444: forge.Machine.config:type_name -> forge.MachineConfig
+	370,  // 445: forge.Machine.status:type_name -> forge.MachineStatus
 	24,   // 446: forge.InstanceNetworkRestrictions.network_segment_membership_type:type_name -> forge.InstanceNetworkSegmentMembershipType
-	1084, // 447: forge.InstanceNetworkRestrictions.network_segment_ids:type_name -> common.NetworkSegmentId
-	1066, // 448: forge.MachineMetadataUpdateRequest.machine_id:type_name -> common.MachineId
-	287,  // 449: forge.MachineMetadataUpdateRequest.metadata:type_name -> forge.Metadata
-	1078, // 450: forge.RackMetadataUpdateRequest.rack_id:type_name -> common.RackId
-	287,  // 451: forge.RackMetadataUpdateRequest.metadata:type_name -> forge.Metadata
-	1081, // 452: forge.SwitchMetadataUpdateRequest.switch_id:type_name -> common.SwitchId
-	287,  // 453: forge.SwitchMetadataUpdateRequest.metadata:type_name -> forge.Metadata
-	1077, // 454: forge.PowerShelfMetadataUpdateRequest.power_shelf_id:type_name -> common.PowerShelfId
-	287,  // 455: forge.PowerShelfMetadataUpdateRequest.metadata:type_name -> forge.Metadata
-	1066, // 456: forge.DpuAgentInventoryReport.machine_id:type_name -> common.MachineId
-	378,  // 457: forge.DpuAgentInventoryReport.inventory:type_name -> forge.MachineComponentInventory
-	379,  // 458: forge.MachineComponentInventory.components:type_name -> forge.MachineInventorySoftwareComponent
+	1089, // 447: forge.InstanceNetworkRestrictions.network_segment_ids:type_name -> common.NetworkSegmentId
+	1071, // 448: forge.MachineMetadataUpdateRequest.machine_id:type_name -> common.MachineId
+	288,  // 449: forge.MachineMetadataUpdateRequest.metadata:type_name -> forge.Metadata
+	1083, // 450: forge.RackMetadataUpdateRequest.rack_id:type_name -> common.RackId
+	288,  // 451: forge.RackMetadataUpdateRequest.metadata:type_name -> forge.Metadata
+	1086, // 452: forge.SwitchMetadataUpdateRequest.switch_id:type_name -> common.SwitchId
+	288,  // 453: forge.SwitchMetadataUpdateRequest.metadata:type_name -> forge.Metadata
+	1082, // 454: forge.PowerShelfMetadataUpdateRequest.power_shelf_id:type_name -> common.PowerShelfId
+	288,  // 455: forge.PowerShelfMetadataUpdateRequest.metadata:type_name -> forge.Metadata
+	1071, // 456: forge.DpuAgentInventoryReport.machine_id:type_name -> common.MachineId
+	379,  // 457: forge.DpuAgentInventoryReport.inventory:type_name -> forge.MachineComponentInventory
+	380,  // 458: forge.MachineComponentInventory.components:type_name -> forge.MachineInventorySoftwareComponent
 	43,   // 459: forge.HealthSourceOrigin.mode:type_name -> forge.HealthReportApplyMode
 	25,   // 460: forge.ControllerStateReason.outcome:type_name -> forge.ControllerStateOutcome
-	382,  // 461: forge.ControllerStateReason.source_ref:type_name -> forge.ControllerStateSourceReference
-	1092, // 462: forge.StateSla.sla:type_name -> google.protobuf.Duration
+	383,  // 461: forge.ControllerStateReason.source_ref:type_name -> forge.ControllerStateSourceReference
+	1097, // 462: forge.StateSla.sla:type_name -> google.protobuf.Duration
 	9,    // 463: forge.InstanceTenantStatus.state:type_name -> forge.TenantState
-	1067, // 464: forge.MachineEvent.time:type_name -> google.protobuf.Timestamp
-	1090, // 465: forge.MachineInterface.id:type_name -> common.MachineInterfaceId
-	1066, // 466: forge.MachineInterface.attached_dpu_machine_id:type_name -> common.MachineId
-	1066, // 467: forge.MachineInterface.machine_id:type_name -> common.MachineId
-	1084, // 468: forge.MachineInterface.segment_id:type_name -> common.NetworkSegmentId
-	1083, // 469: forge.MachineInterface.domain_id:type_name -> common.DomainId
-	1067, // 470: forge.MachineInterface.created:type_name -> google.protobuf.Timestamp
-	1067, // 471: forge.MachineInterface.last_dhcp:type_name -> google.protobuf.Timestamp
-	1077, // 472: forge.MachineInterface.power_shelf_id:type_name -> common.PowerShelfId
-	1081, // 473: forge.MachineInterface.switch_id:type_name -> common.SwitchId
+	1072, // 464: forge.MachineEvent.time:type_name -> google.protobuf.Timestamp
+	1095, // 465: forge.MachineInterface.id:type_name -> common.MachineInterfaceId
+	1071, // 466: forge.MachineInterface.attached_dpu_machine_id:type_name -> common.MachineId
+	1071, // 467: forge.MachineInterface.machine_id:type_name -> common.MachineId
+	1089, // 468: forge.MachineInterface.segment_id:type_name -> common.NetworkSegmentId
+	1088, // 469: forge.MachineInterface.domain_id:type_name -> common.DomainId
+	1072, // 470: forge.MachineInterface.created:type_name -> google.protobuf.Timestamp
+	1072, // 471: forge.MachineInterface.last_dhcp:type_name -> google.protobuf.Timestamp
+	1082, // 472: forge.MachineInterface.power_shelf_id:type_name -> common.PowerShelfId
+	1086, // 473: forge.MachineInterface.switch_id:type_name -> common.SwitchId
 	28,   // 474: forge.MachineInterface.association_type:type_name -> forge.InterfaceAssociationType
 	29,   // 475: forge.MachineInterface.interface_type:type_name -> forge.InterfaceType
-	388,  // 476: forge.InfinibandStatusObservation.ib_interfaces:type_name -> forge.MachineIbInterface
-	1067, // 477: forge.InfinibandStatusObservation.observed_at:type_name -> google.protobuf.Timestamp
-	1093, // 478: forge.MachineIbInterface.associated_pkeys:type_name -> common.StringList
-	1093, // 479: forge.MachineIbInterface.associated_partition_ids:type_name -> common.StringList
+	389,  // 476: forge.InfinibandStatusObservation.ib_interfaces:type_name -> forge.MachineIbInterface
+	1072, // 477: forge.InfinibandStatusObservation.observed_at:type_name -> google.protobuf.Timestamp
+	1098, // 478: forge.MachineIbInterface.associated_pkeys:type_name -> common.StringList
+	1098, // 479: forge.MachineIbInterface.associated_partition_ids:type_name -> common.StringList
 	30,   // 480: forge.DhcpDiscovery.address_family:type_name -> forge.AddressFamily
 	31,   // 481: forge.DhcpDiscovery.message_kind:type_name -> forge.MessageKind
 	32,   // 482: forge.ExpireDhcpLeaseResponse.status:type_name -> forge.ExpireDhcpLeaseStatus
-	1066, // 483: forge.DhcpRecord.machine_id:type_name -> common.MachineId
-	1090, // 484: forge.DhcpRecord.machine_interface_id:type_name -> common.MachineInterfaceId
-	1084, // 485: forge.DhcpRecord.segment_id:type_name -> common.NetworkSegmentId
-	1083, // 486: forge.DhcpRecord.subdomain_id:type_name -> common.DomainId
-	1067, // 487: forge.DhcpRecord.last_invalidation_time:type_name -> google.protobuf.Timestamp
-	271,  // 488: forge.NetworkSegmentList.network_segments:type_name -> forge.NetworkSegment
+	1071, // 483: forge.DhcpRecord.machine_id:type_name -> common.MachineId
+	1095, // 484: forge.DhcpRecord.machine_interface_id:type_name -> common.MachineInterfaceId
+	1089, // 485: forge.DhcpRecord.segment_id:type_name -> common.NetworkSegmentId
+	1088, // 486: forge.DhcpRecord.subdomain_id:type_name -> common.DomainId
+	1072, // 487: forge.DhcpRecord.last_invalidation_time:type_name -> google.protobuf.Timestamp
+	272,  // 488: forge.NetworkSegmentList.network_segments:type_name -> forge.NetworkSegment
 	33,   // 489: forge.SSHKeyValidationResponse.role:type_name -> forge.UserRoles
-	1081, // 490: forge.GetSwitchNvosCredentialsRequest.switch_id:type_name -> common.SwitchId
-	399,  // 491: forge.GetBmcCredentialsResponse.credentials:type_name -> forge.BmcCredentials
-	882,  // 492: forge.BmcCredentials.username_password:type_name -> forge.UsernamePassword
-	883,  // 493: forge.BmcCredentials.session_token:type_name -> forge.SessionToken
-	407,  // 494: forge.SshRequest.endpoint_request:type_name -> forge.BmcEndpointRequest
-	409,  // 495: forge.CopyBfbToDpuRshimRequest.ssh_request:type_name -> forge.SshRequest
-	1066, // 496: forge.UpdateMachineHardwareInfoRequest.machine_id:type_name -> common.MachineId
-	412,  // 497: forge.UpdateMachineHardwareInfoRequest.info:type_name -> forge.MachineHardwareInfo
+	1086, // 490: forge.GetSwitchNvosCredentialsRequest.switch_id:type_name -> common.SwitchId
+	400,  // 491: forge.GetBmcCredentialsResponse.credentials:type_name -> forge.BmcCredentials
+	883,  // 492: forge.BmcCredentials.username_password:type_name -> forge.UsernamePassword
+	884,  // 493: forge.BmcCredentials.session_token:type_name -> forge.SessionToken
+	408,  // 494: forge.SshRequest.endpoint_request:type_name -> forge.BmcEndpointRequest
+	410,  // 495: forge.CopyBfbToDpuRshimRequest.ssh_request:type_name -> forge.SshRequest
+	1071, // 496: forge.UpdateMachineHardwareInfoRequest.machine_id:type_name -> common.MachineId
+	413,  // 497: forge.UpdateMachineHardwareInfoRequest.info:type_name -> forge.MachineHardwareInfo
 	34,   // 498: forge.UpdateMachineHardwareInfoRequest.update_type:type_name -> forge.MachineHardwareInfoUpdateType
-	1094, // 499: forge.MachineHardwareInfo.gpus:type_name -> machine_discovery.Gpu
-	1066, // 500: forge.ManagedHostNetworkConfigRequest.dpu_machine_id:type_name -> common.MachineId
-	423,  // 501: forge.ManagedHostNetworkConfigResponse.managed_host_config:type_name -> forge.ManagedHostNetworkConfig
-	424,  // 502: forge.ManagedHostNetworkConfigResponse.admin_interface:type_name -> forge.FlatInterfaceConfig
-	424,  // 503: forge.ManagedHostNetworkConfigResponse.tenant_interfaces:type_name -> forge.FlatInterfaceConfig
-	1086, // 504: forge.ManagedHostNetworkConfigResponse.instance_id:type_name -> common.InstanceId
+	1099, // 499: forge.MachineHardwareInfo.gpus:type_name -> machine_discovery.Gpu
+	1071, // 500: forge.ManagedHostNetworkConfigRequest.dpu_machine_id:type_name -> common.MachineId
+	424,  // 501: forge.ManagedHostNetworkConfigResponse.managed_host_config:type_name -> forge.ManagedHostNetworkConfig
+	425,  // 502: forge.ManagedHostNetworkConfigResponse.admin_interface:type_name -> forge.FlatInterfaceConfig
+	425,  // 503: forge.ManagedHostNetworkConfigResponse.tenant_interfaces:type_name -> forge.FlatInterfaceConfig
+	1091, // 504: forge.ManagedHostNetworkConfigResponse.instance_id:type_name -> common.InstanceId
 	7,    // 505: forge.ManagedHostNetworkConfigResponse.network_virtualization_type:type_name -> forge.VpcVirtualizationType
 	36,   // 506: forge.ManagedHostNetworkConfigResponse.vpc_isolation_behavior:type_name -> forge.VpcIsolationBehaviorType
-	320,  // 507: forge.ManagedHostNetworkConfigResponse.instance:type_name -> forge.Instance
-	1070, // 508: forge.ManagedHostNetworkConfigResponse.common_internal_route_target:type_name -> common.RouteTarget
-	1070, // 509: forge.ManagedHostNetworkConfigResponse.additional_route_target_imports:type_name -> common.RouteTarget
-	727,  // 510: forge.ManagedHostNetworkConfigResponse.network_security_policy_overrides:type_name -> forge.ResolvedNetworkSecurityGroupRule
-	415,  // 511: forge.ManagedHostNetworkConfigResponse.dpu_extension_services:type_name -> forge.ManagedHostDpuExtensionServiceConfig
-	918,  // 512: forge.ManagedHostNetworkConfigResponse.routing_profile:type_name -> forge.RoutingProfile
-	807,  // 513: forge.ManagedHostNetworkConfigResponse.astra_config:type_name -> forge.AstraConfig
-	75,   // 514: forge.ManagedHostDpuExtensionServiceConfig.service_type:type_name -> forge.DpuExtensionServiceType
-	884,  // 515: forge.ManagedHostDpuExtensionServiceConfig.credential:type_name -> forge.DpuExtensionServiceCredential
-	903,  // 516: forge.ManagedHostDpuExtensionServiceConfig.observability:type_name -> forge.DpuExtensionServiceObservability
+	321,  // 507: forge.ManagedHostNetworkConfigResponse.instance:type_name -> forge.Instance
+	1075, // 508: forge.ManagedHostNetworkConfigResponse.common_internal_route_target:type_name -> common.RouteTarget
+	1075, // 509: forge.ManagedHostNetworkConfigResponse.additional_route_target_imports:type_name -> common.RouteTarget
+	728,  // 510: forge.ManagedHostNetworkConfigResponse.network_security_policy_overrides:type_name -> forge.ResolvedNetworkSecurityGroupRule
+	416,  // 511: forge.ManagedHostNetworkConfigResponse.dpu_extension_services:type_name -> forge.ManagedHostDpuExtensionServiceConfig
+	919,  // 512: forge.ManagedHostNetworkConfigResponse.routing_profile:type_name -> forge.RoutingProfile
+	808,  // 513: forge.ManagedHostNetworkConfigResponse.astra_config:type_name -> forge.AstraConfig
+	76,   // 514: forge.ManagedHostDpuExtensionServiceConfig.service_type:type_name -> forge.DpuExtensionServiceType
+	885,  // 515: forge.ManagedHostDpuExtensionServiceConfig.credential:type_name -> forge.DpuExtensionServiceCredential
+	904,  // 516: forge.ManagedHostDpuExtensionServiceConfig.observability:type_name -> forge.DpuExtensionServiceObservability
 	35,   // 517: forge.ManagedHostQuarantineState.mode:type_name -> forge.ManagedHostQuarantineMode
-	1066, // 518: forge.GetManagedHostQuarantineStateRequest.machine_id:type_name -> common.MachineId
-	416,  // 519: forge.GetManagedHostQuarantineStateResponse.quarantine_state:type_name -> forge.ManagedHostQuarantineState
-	1066, // 520: forge.SetManagedHostQuarantineStateRequest.machine_id:type_name -> common.MachineId
-	416,  // 521: forge.SetManagedHostQuarantineStateRequest.quarantine_state:type_name -> forge.ManagedHostQuarantineState
-	416,  // 522: forge.SetManagedHostQuarantineStateResponse.prior_quarantine_state:type_name -> forge.ManagedHostQuarantineState
-	1066, // 523: forge.ClearManagedHostQuarantineStateRequest.machine_id:type_name -> common.MachineId
-	416,  // 524: forge.ClearManagedHostQuarantineStateResponse.prior_quarantine_state:type_name -> forge.ManagedHostQuarantineState
-	416,  // 525: forge.ManagedHostNetworkConfig.quarantine_state:type_name -> forge.ManagedHostQuarantineState
+	1071, // 518: forge.GetManagedHostQuarantineStateRequest.machine_id:type_name -> common.MachineId
+	417,  // 519: forge.GetManagedHostQuarantineStateResponse.quarantine_state:type_name -> forge.ManagedHostQuarantineState
+	1071, // 520: forge.SetManagedHostQuarantineStateRequest.machine_id:type_name -> common.MachineId
+	417,  // 521: forge.SetManagedHostQuarantineStateRequest.quarantine_state:type_name -> forge.ManagedHostQuarantineState
+	417,  // 522: forge.SetManagedHostQuarantineStateResponse.prior_quarantine_state:type_name -> forge.ManagedHostQuarantineState
+	1071, // 523: forge.ClearManagedHostQuarantineStateRequest.machine_id:type_name -> common.MachineId
+	417,  // 524: forge.ClearManagedHostQuarantineStateResponse.prior_quarantine_state:type_name -> forge.ManagedHostQuarantineState
+	417,  // 525: forge.ManagedHostNetworkConfig.quarantine_state:type_name -> forge.ManagedHostQuarantineState
 	42,   // 526: forge.FlatInterfaceConfig.function_type:type_name -> forge.InterfaceFunctionType
-	426,  // 527: forge.FlatInterfaceConfig.ipv6_interface_config:type_name -> forge.FlatInterfaceIpv6Config
-	918,  // 528: forge.FlatInterfaceConfig.vpc_routing_profile:type_name -> forge.RoutingProfile
-	425,  // 529: forge.FlatInterfaceConfig.interface_routing_profile:type_name -> forge.FlatInterfaceRoutingProfile
-	1020, // 530: forge.FlatInterfaceConfig.addresses:type_name -> forge.InterfaceAddressConfig
-	427,  // 531: forge.FlatInterfaceConfig.network_security_group:type_name -> forge.FlatInterfaceNetworkSecurityGroupConfig
-	1080, // 532: forge.FlatInterfaceConfig.internal_uuid:type_name -> common.UUID
-	917,  // 533: forge.FlatInterfaceRoutingProfile.allowed_anycast_prefixes:type_name -> forge.PrefixFilterPolicyEntry
+	427,  // 527: forge.FlatInterfaceConfig.ipv6_interface_config:type_name -> forge.FlatInterfaceIpv6Config
+	919,  // 528: forge.FlatInterfaceConfig.vpc_routing_profile:type_name -> forge.RoutingProfile
+	426,  // 529: forge.FlatInterfaceConfig.interface_routing_profile:type_name -> forge.FlatInterfaceRoutingProfile
+	1021, // 530: forge.FlatInterfaceConfig.addresses:type_name -> forge.InterfaceAddressConfig
+	428,  // 531: forge.FlatInterfaceConfig.network_security_group:type_name -> forge.FlatInterfaceNetworkSecurityGroupConfig
+	1085, // 532: forge.FlatInterfaceConfig.internal_uuid:type_name -> common.UUID
+	918,  // 533: forge.FlatInterfaceRoutingProfile.allowed_anycast_prefixes:type_name -> forge.PrefixFilterPolicyEntry
 	60,   // 534: forge.FlatInterfaceNetworkSecurityGroupConfig.source:type_name -> forge.NetworkSecurityGroupSource
-	727,  // 535: forge.FlatInterfaceNetworkSecurityGroupConfig.rules:type_name -> forge.ResolvedNetworkSecurityGroupRule
-	478,  // 536: forge.ManagedHostNetworkStatusResponse.all:type_name -> forge.DpuNetworkStatus
-	1067, // 537: forge.DpuAgentUpgradeCheckRequest.binary_mtime:type_name -> google.protobuf.Timestamp
+	728,  // 535: forge.FlatInterfaceNetworkSecurityGroupConfig.rules:type_name -> forge.ResolvedNetworkSecurityGroupRule
+	479,  // 536: forge.ManagedHostNetworkStatusResponse.all:type_name -> forge.DpuNetworkStatus
+	1072, // 537: forge.DpuAgentUpgradeCheckRequest.binary_mtime:type_name -> google.protobuf.Timestamp
 	37,   // 538: forge.DpuAgentUpgradePolicyRequest.new_policy:type_name -> forge.AgentUpgradePolicy
 	37,   // 539: forge.DpuAgentUpgradePolicyResponse.active_policy:type_name -> forge.AgentUpgradePolicy
-	1066, // 540: forge.DecommissionManagedHostRequest.machine_id:type_name -> common.MachineId
-	407,  // 541: forge.LockdownRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	1066, // 542: forge.LockdownRequest.machine_id:type_name -> common.MachineId
+	1071, // 540: forge.DecommissionManagedHostRequest.machine_id:type_name -> common.MachineId
+	408,  // 541: forge.LockdownRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	1071, // 542: forge.LockdownRequest.machine_id:type_name -> common.MachineId
 	38,   // 543: forge.LockdownRequest.action:type_name -> forge.LockdownAction
-	407,  // 544: forge.LockdownStatusRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	1066, // 545: forge.LockdownStatusRequest.machine_id:type_name -> common.MachineId
-	407,  // 546: forge.MachineSetupStatusRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	407,  // 547: forge.MachineSetupRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	407,  // 548: forge.SetDpuFirstBootOrderRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	407,  // 549: forge.AdminRebootRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	407,  // 550: forge.AdminBmcResetRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	1095, // 551: forge.AdminBmcResetRequest.device_id:type_name -> common.DeviceId
-	95,   // 552: forge.AdminBmcResetRequest.reset_type:type_name -> forge.AdminBmcResetRequest.ResetType
-	407,  // 553: forge.EnableInfiniteBootRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	407,  // 554: forge.IsInfiniteBootEnabledRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	1066, // 555: forge.BMCMetaDataGetRequest.machine_id:type_name -> common.MachineId
+	408,  // 544: forge.LockdownStatusRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	1071, // 545: forge.LockdownStatusRequest.machine_id:type_name -> common.MachineId
+	408,  // 546: forge.MachineSetupStatusRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	408,  // 547: forge.MachineSetupRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	408,  // 548: forge.SetDpuFirstBootOrderRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	408,  // 549: forge.AdminRebootRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	408,  // 550: forge.AdminBmcResetRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	1100, // 551: forge.AdminBmcResetRequest.device_id:type_name -> common.DeviceId
+	96,   // 552: forge.AdminBmcResetRequest.reset_type:type_name -> forge.AdminBmcResetRequest.ResetType
+	408,  // 553: forge.EnableInfiniteBootRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	408,  // 554: forge.IsInfiniteBootEnabledRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	1071, // 555: forge.BMCMetaDataGetRequest.machine_id:type_name -> common.MachineId
 	33,   // 556: forge.BMCMetaDataGetRequest.role:type_name -> forge.UserRoles
 	39,   // 557: forge.BMCMetaDataGetRequest.request_type:type_name -> forge.BMCRequestType
-	407,  // 558: forge.BMCMetaDataGetRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	1066, // 559: forge.MachineCredentialsUpdateRequest.machine_id:type_name -> common.MachineId
-	1035, // 560: forge.MachineCredentialsUpdateRequest.credentials:type_name -> forge.MachineCredentialsUpdateRequest.Credentials
-	1066, // 561: forge.ForgeAgentControlRequest.machine_id:type_name -> common.MachineId
-	97,   // 562: forge.ForgeAgentControlResponse.legacy_action:type_name -> forge.ForgeAgentControlResponse.LegacyAction
-	1036, // 563: forge.ForgeAgentControlResponse.data:type_name -> forge.ForgeAgentControlResponse.ForgeAgentControlExtraInfo
-	1037, // 564: forge.ForgeAgentControlResponse.noop:type_name -> forge.ForgeAgentControlResponse.Noop
-	1038, // 565: forge.ForgeAgentControlResponse.reset:type_name -> forge.ForgeAgentControlResponse.Reset
-	1039, // 566: forge.ForgeAgentControlResponse.discovery:type_name -> forge.ForgeAgentControlResponse.Discovery
-	1040, // 567: forge.ForgeAgentControlResponse.rebuild:type_name -> forge.ForgeAgentControlResponse.Rebuild
-	1041, // 568: forge.ForgeAgentControlResponse.retry:type_name -> forge.ForgeAgentControlResponse.Retry
-	1042, // 569: forge.ForgeAgentControlResponse.measure:type_name -> forge.ForgeAgentControlResponse.Measure
-	1043, // 570: forge.ForgeAgentControlResponse.log_error:type_name -> forge.ForgeAgentControlResponse.LogError
-	1044, // 571: forge.ForgeAgentControlResponse.machine_validation:type_name -> forge.ForgeAgentControlResponse.MachineValidation
-	1046, // 572: forge.ForgeAgentControlResponse.mlx_action:type_name -> forge.ForgeAgentControlResponse.MlxAction
-	1053, // 573: forge.ForgeAgentControlResponse.firmware_upgrade:type_name -> forge.ForgeAgentControlResponse.FirmwareUpgrade
-	1090, // 574: forge.MachineDiscoveryInfo.machine_interface_id:type_name -> common.MachineInterfaceId
-	1091, // 575: forge.MachineDiscoveryInfo.info:type_name -> machine_discovery.DiscoveryInfo
+	408,  // 558: forge.BMCMetaDataGetRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	1071, // 559: forge.MachineCredentialsUpdateRequest.machine_id:type_name -> common.MachineId
+	1040, // 560: forge.MachineCredentialsUpdateRequest.credentials:type_name -> forge.MachineCredentialsUpdateRequest.Credentials
+	1071, // 561: forge.ForgeAgentControlRequest.machine_id:type_name -> common.MachineId
+	98,   // 562: forge.ForgeAgentControlResponse.legacy_action:type_name -> forge.ForgeAgentControlResponse.LegacyAction
+	1041, // 563: forge.ForgeAgentControlResponse.data:type_name -> forge.ForgeAgentControlResponse.ForgeAgentControlExtraInfo
+	1042, // 564: forge.ForgeAgentControlResponse.noop:type_name -> forge.ForgeAgentControlResponse.Noop
+	1043, // 565: forge.ForgeAgentControlResponse.reset:type_name -> forge.ForgeAgentControlResponse.Reset
+	1044, // 566: forge.ForgeAgentControlResponse.discovery:type_name -> forge.ForgeAgentControlResponse.Discovery
+	1045, // 567: forge.ForgeAgentControlResponse.rebuild:type_name -> forge.ForgeAgentControlResponse.Rebuild
+	1046, // 568: forge.ForgeAgentControlResponse.retry:type_name -> forge.ForgeAgentControlResponse.Retry
+	1047, // 569: forge.ForgeAgentControlResponse.measure:type_name -> forge.ForgeAgentControlResponse.Measure
+	1048, // 570: forge.ForgeAgentControlResponse.log_error:type_name -> forge.ForgeAgentControlResponse.LogError
+	1049, // 571: forge.ForgeAgentControlResponse.machine_validation:type_name -> forge.ForgeAgentControlResponse.MachineValidation
+	1051, // 572: forge.ForgeAgentControlResponse.mlx_action:type_name -> forge.ForgeAgentControlResponse.MlxAction
+	1058, // 573: forge.ForgeAgentControlResponse.firmware_upgrade:type_name -> forge.ForgeAgentControlResponse.FirmwareUpgrade
+	1095, // 574: forge.MachineDiscoveryInfo.machine_interface_id:type_name -> common.MachineInterfaceId
+	1096, // 575: forge.MachineDiscoveryInfo.info:type_name -> machine_discovery.DiscoveryInfo
 	40,   // 576: forge.MachineDiscoveryInfo.discovery_reporter:type_name -> forge.MachineDiscoveryReporter
-	1066, // 577: forge.MachineDiscoveryCompletedRequest.machine_id:type_name -> common.MachineId
-	1066, // 578: forge.MachineCleanupInfo.machine_id:type_name -> common.MachineId
-	1055, // 579: forge.MachineCleanupInfo.nvme:type_name -> forge.MachineCleanupInfo.CleanupStepResult
-	1055, // 580: forge.MachineCleanupInfo.ram:type_name -> forge.MachineCleanupInfo.CleanupStepResult
-	1055, // 581: forge.MachineCleanupInfo.mem_overwrite:type_name -> forge.MachineCleanupInfo.CleanupStepResult
-	1055, // 582: forge.MachineCleanupInfo.ib:type_name -> forge.MachineCleanupInfo.CleanupStepResult
-	1055, // 583: forge.MachineCleanupInfo.hdd:type_name -> forge.MachineCleanupInfo.CleanupStepResult
-	98,   // 584: forge.MachineCleanupInfo.result:type_name -> forge.MachineCleanupInfo.CleanupResult
-	464,  // 585: forge.MachineCertificateResult.machine_certificate:type_name -> forge.MachineCertificate
-	1066, // 586: forge.MachineDiscoveryResult.machine_id:type_name -> common.MachineId
-	464,  // 587: forge.MachineDiscoveryResult.machine_certificate:type_name -> forge.MachineCertificate
-	145,  // 588: forge.MachineDiscoveryResult.attest_key_challenge:type_name -> forge.AttestKeyBindChallenge
-	1090, // 589: forge.MachineDiscoveryResult.machine_interface_id:type_name -> common.MachineInterfaceId
-	1066, // 590: forge.ForgeScoutErrorReport.machine_id:type_name -> common.MachineId
-	1090, // 591: forge.ForgeScoutErrorReport.machine_interface_id:type_name -> common.MachineInterfaceId
+	1071, // 577: forge.MachineDiscoveryCompletedRequest.machine_id:type_name -> common.MachineId
+	1071, // 578: forge.MachineCleanupInfo.machine_id:type_name -> common.MachineId
+	1060, // 579: forge.MachineCleanupInfo.nvme:type_name -> forge.MachineCleanupInfo.CleanupStepResult
+	1060, // 580: forge.MachineCleanupInfo.ram:type_name -> forge.MachineCleanupInfo.CleanupStepResult
+	1060, // 581: forge.MachineCleanupInfo.mem_overwrite:type_name -> forge.MachineCleanupInfo.CleanupStepResult
+	1060, // 582: forge.MachineCleanupInfo.ib:type_name -> forge.MachineCleanupInfo.CleanupStepResult
+	1060, // 583: forge.MachineCleanupInfo.hdd:type_name -> forge.MachineCleanupInfo.CleanupStepResult
+	99,   // 584: forge.MachineCleanupInfo.result:type_name -> forge.MachineCleanupInfo.CleanupResult
+	465,  // 585: forge.MachineCertificateResult.machine_certificate:type_name -> forge.MachineCertificate
+	1071, // 586: forge.MachineDiscoveryResult.machine_id:type_name -> common.MachineId
+	465,  // 587: forge.MachineDiscoveryResult.machine_certificate:type_name -> forge.MachineCertificate
+	146,  // 588: forge.MachineDiscoveryResult.attest_key_challenge:type_name -> forge.AttestKeyBindChallenge
+	1095, // 589: forge.MachineDiscoveryResult.machine_interface_id:type_name -> common.MachineInterfaceId
+	1071, // 590: forge.ForgeScoutErrorReport.machine_id:type_name -> common.MachineId
+	1095, // 591: forge.ForgeScoutErrorReport.machine_interface_id:type_name -> common.MachineInterfaceId
 	27,   // 592: forge.PxeInstructionRequest.arch:type_name -> forge.MachineArchitecture
-	1090, // 593: forge.PxeInstructionRequest.interface_id:type_name -> common.MachineInterfaceId
-	386,  // 594: forge.CloudInitDiscoveryInstructions.machine_interface:type_name -> forge.MachineInterface
-	924,  // 595: forge.CloudInitDiscoveryInstructions.domain:type_name -> forge.PxeDomain
+	1095, // 593: forge.PxeInstructionRequest.interface_id:type_name -> common.MachineInterfaceId
+	387,  // 594: forge.CloudInitDiscoveryInstructions.machine_interface:type_name -> forge.MachineInterface
+	925,  // 595: forge.CloudInitDiscoveryInstructions.domain:type_name -> forge.PxeDomain
 	41,   // 596: forge.CloudInitDiscoveryInstructions.bootstrap_ca_source:type_name -> forge.BootstrapCaSource
-	92,   // 597: forge.CloudInitDiscoveryInstructions.dpu_nvconfig_profile:type_name -> forge.DpuNvConfigProfile
-	474,  // 598: forge.CloudInitInstructions.discovery_instructions:type_name -> forge.CloudInitDiscoveryInstructions
-	475,  // 599: forge.CloudInitInstructions.metadata:type_name -> forge.CloudInitMetaData
-	1066, // 600: forge.DpuNetworkStatus.dpu_machine_id:type_name -> common.MachineId
-	1067, // 601: forge.DpuNetworkStatus.observed_at:type_name -> google.protobuf.Timestamp
-	499,  // 602: forge.DpuNetworkStatus.interfaces:type_name -> forge.InstanceInterfaceStatusObservation
-	1086, // 603: forge.DpuNetworkStatus.instance_id:type_name -> common.InstanceId
-	1076, // 604: forge.DpuNetworkStatus.dpu_health:type_name -> health.HealthReport
-	500,  // 605: forge.DpuNetworkStatus.fabric_interfaces:type_name -> forge.FabricInterfaceData
-	479,  // 606: forge.DpuNetworkStatus.last_dhcp_requests:type_name -> forge.LastDhcpRequest
-	480,  // 607: forge.DpuNetworkStatus.dpu_extension_services:type_name -> forge.DpuExtensionServiceStatusObservation
-	809,  // 608: forge.DpuNetworkStatus.astra_config_status:type_name -> forge.AstraConfigStatus
-	1090, // 609: forge.LastDhcpRequest.host_interface_id:type_name -> common.MachineInterfaceId
-	75,   // 610: forge.DpuExtensionServiceStatusObservation.service_type:type_name -> forge.DpuExtensionServiceType
-	77,   // 611: forge.DpuExtensionServiceStatusObservation.state:type_name -> forge.DpuExtensionServiceDeploymentStatus
-	481,  // 612: forge.DpuExtensionServiceStatusObservation.components:type_name -> forge.DpuExtensionServiceComponent
-	1076, // 613: forge.OptionalHealthReport.report:type_name -> health.HealthReport
-	1076, // 614: forge.HealthReportEntry.report:type_name -> health.HealthReport
+	93,   // 597: forge.CloudInitDiscoveryInstructions.dpu_nvconfig_profile:type_name -> forge.DpuNvConfigProfile
+	475,  // 598: forge.CloudInitInstructions.discovery_instructions:type_name -> forge.CloudInitDiscoveryInstructions
+	476,  // 599: forge.CloudInitInstructions.metadata:type_name -> forge.CloudInitMetaData
+	1071, // 600: forge.DpuNetworkStatus.dpu_machine_id:type_name -> common.MachineId
+	1072, // 601: forge.DpuNetworkStatus.observed_at:type_name -> google.protobuf.Timestamp
+	500,  // 602: forge.DpuNetworkStatus.interfaces:type_name -> forge.InstanceInterfaceStatusObservation
+	1091, // 603: forge.DpuNetworkStatus.instance_id:type_name -> common.InstanceId
+	1081, // 604: forge.DpuNetworkStatus.dpu_health:type_name -> health.HealthReport
+	501,  // 605: forge.DpuNetworkStatus.fabric_interfaces:type_name -> forge.FabricInterfaceData
+	480,  // 606: forge.DpuNetworkStatus.last_dhcp_requests:type_name -> forge.LastDhcpRequest
+	481,  // 607: forge.DpuNetworkStatus.dpu_extension_services:type_name -> forge.DpuExtensionServiceStatusObservation
+	810,  // 608: forge.DpuNetworkStatus.astra_config_status:type_name -> forge.AstraConfigStatus
+	1095, // 609: forge.LastDhcpRequest.host_interface_id:type_name -> common.MachineInterfaceId
+	76,   // 610: forge.DpuExtensionServiceStatusObservation.service_type:type_name -> forge.DpuExtensionServiceType
+	78,   // 611: forge.DpuExtensionServiceStatusObservation.state:type_name -> forge.DpuExtensionServiceDeploymentStatus
+	482,  // 612: forge.DpuExtensionServiceStatusObservation.components:type_name -> forge.DpuExtensionServiceComponent
+	1081, // 613: forge.OptionalHealthReport.report:type_name -> health.HealthReport
+	1081, // 614: forge.HealthReportEntry.report:type_name -> health.HealthReport
 	43,   // 615: forge.HealthReportEntry.mode:type_name -> forge.HealthReportApplyMode
-	1066, // 616: forge.InsertMachineHealthReportRequest.machine_id:type_name -> common.MachineId
-	483,  // 617: forge.InsertMachineHealthReportRequest.health_report_entry:type_name -> forge.HealthReportEntry
-	1078, // 618: forge.InsertRackHealthReportRequest.rack_id:type_name -> common.RackId
-	483,  // 619: forge.InsertRackHealthReportRequest.health_report_entry:type_name -> forge.HealthReportEntry
-	1078, // 620: forge.RemoveRackHealthReportRequest.rack_id:type_name -> common.RackId
-	1078, // 621: forge.ListRackHealthReportsRequest.rack_id:type_name -> common.RackId
-	1081, // 622: forge.InsertSwitchHealthReportRequest.switch_id:type_name -> common.SwitchId
-	483,  // 623: forge.InsertSwitchHealthReportRequest.health_report_entry:type_name -> forge.HealthReportEntry
-	1081, // 624: forge.RemoveSwitchHealthReportRequest.switch_id:type_name -> common.SwitchId
-	1081, // 625: forge.ListSwitchHealthReportsRequest.switch_id:type_name -> common.SwitchId
-	1077, // 626: forge.InsertPowerShelfHealthReportRequest.power_shelf_id:type_name -> common.PowerShelfId
-	483,  // 627: forge.InsertPowerShelfHealthReportRequest.health_report_entry:type_name -> forge.HealthReportEntry
-	1077, // 628: forge.RemovePowerShelfHealthReportRequest.power_shelf_id:type_name -> common.PowerShelfId
-	1077, // 629: forge.ListPowerShelfHealthReportsRequest.power_shelf_id:type_name -> common.PowerShelfId
-	483,  // 630: forge.ListHealthReportResponse.health_report_entries:type_name -> forge.HealthReportEntry
-	1066, // 631: forge.RemoveMachineHealthReportRequest.machine_id:type_name -> common.MachineId
-	1079, // 632: forge.ListNVLinkDomainHealthReportsRequest.domain_id:type_name -> common.NVLinkDomainId
-	1079, // 633: forge.InsertNVLinkDomainHealthReportRequest.domain_id:type_name -> common.NVLinkDomainId
-	483,  // 634: forge.InsertNVLinkDomainHealthReportRequest.health_report_entry:type_name -> forge.HealthReportEntry
-	1079, // 635: forge.RemoveNVLinkDomainHealthReportRequest.domain_id:type_name -> common.NVLinkDomainId
+	1071, // 616: forge.InsertMachineHealthReportRequest.machine_id:type_name -> common.MachineId
+	484,  // 617: forge.InsertMachineHealthReportRequest.health_report_entry:type_name -> forge.HealthReportEntry
+	1083, // 618: forge.InsertRackHealthReportRequest.rack_id:type_name -> common.RackId
+	484,  // 619: forge.InsertRackHealthReportRequest.health_report_entry:type_name -> forge.HealthReportEntry
+	1083, // 620: forge.RemoveRackHealthReportRequest.rack_id:type_name -> common.RackId
+	1083, // 621: forge.ListRackHealthReportsRequest.rack_id:type_name -> common.RackId
+	1086, // 622: forge.InsertSwitchHealthReportRequest.switch_id:type_name -> common.SwitchId
+	484,  // 623: forge.InsertSwitchHealthReportRequest.health_report_entry:type_name -> forge.HealthReportEntry
+	1086, // 624: forge.RemoveSwitchHealthReportRequest.switch_id:type_name -> common.SwitchId
+	1086, // 625: forge.ListSwitchHealthReportsRequest.switch_id:type_name -> common.SwitchId
+	1082, // 626: forge.InsertPowerShelfHealthReportRequest.power_shelf_id:type_name -> common.PowerShelfId
+	484,  // 627: forge.InsertPowerShelfHealthReportRequest.health_report_entry:type_name -> forge.HealthReportEntry
+	1082, // 628: forge.RemovePowerShelfHealthReportRequest.power_shelf_id:type_name -> common.PowerShelfId
+	1082, // 629: forge.ListPowerShelfHealthReportsRequest.power_shelf_id:type_name -> common.PowerShelfId
+	484,  // 630: forge.ListHealthReportResponse.health_report_entries:type_name -> forge.HealthReportEntry
+	1071, // 631: forge.RemoveMachineHealthReportRequest.machine_id:type_name -> common.MachineId
+	1084, // 632: forge.ListNVLinkDomainHealthReportsRequest.domain_id:type_name -> common.NVLinkDomainId
+	1084, // 633: forge.InsertNVLinkDomainHealthReportRequest.domain_id:type_name -> common.NVLinkDomainId
+	484,  // 634: forge.InsertNVLinkDomainHealthReportRequest.health_report_entry:type_name -> forge.HealthReportEntry
+	1084, // 635: forge.RemoveNVLinkDomainHealthReportRequest.domain_id:type_name -> common.NVLinkDomainId
 	42,   // 636: forge.InstanceInterfaceStatusObservation.function_type:type_name -> forge.InterfaceFunctionType
-	721,  // 637: forge.InstanceInterfaceStatusObservation.network_security_group:type_name -> forge.NetworkSecurityGroupStatus
-	1080, // 638: forge.InstanceInterfaceStatusObservation.internal_uuid:type_name -> common.UUID
-	501,  // 639: forge.FabricInterfaceData.link_data:type_name -> forge.LinkData
-	287,  // 640: forge.Tenant.metadata:type_name -> forge.Metadata
-	287,  // 641: forge.CreateTenantRequest.metadata:type_name -> forge.Metadata
-	502,  // 642: forge.CreateTenantResponse.tenant:type_name -> forge.Tenant
-	287,  // 643: forge.UpdateTenantRequest.metadata:type_name -> forge.Metadata
-	502,  // 644: forge.UpdateTenantResponse.tenant:type_name -> forge.Tenant
-	502,  // 645: forge.FindTenantResponse.tenant:type_name -> forge.Tenant
-	510,  // 646: forge.TenantKeysetContent.public_keys:type_name -> forge.TenantPublicKey
-	509,  // 647: forge.TenantKeyset.keyset_identifier:type_name -> forge.TenantKeysetIdentifier
-	511,  // 648: forge.TenantKeyset.keyset_content:type_name -> forge.TenantKeysetContent
-	509,  // 649: forge.CreateTenantKeysetRequest.keyset_identifier:type_name -> forge.TenantKeysetIdentifier
-	511,  // 650: forge.CreateTenantKeysetRequest.keyset_content:type_name -> forge.TenantKeysetContent
-	512,  // 651: forge.CreateTenantKeysetResponse.keyset:type_name -> forge.TenantKeyset
-	512,  // 652: forge.TenantKeySetList.keyset:type_name -> forge.TenantKeyset
-	509,  // 653: forge.UpdateTenantKeysetRequest.keyset_identifier:type_name -> forge.TenantKeysetIdentifier
-	511,  // 654: forge.UpdateTenantKeysetRequest.keyset_content:type_name -> forge.TenantKeysetContent
-	509,  // 655: forge.DeleteTenantKeysetRequest.keyset_identifier:type_name -> forge.TenantKeysetIdentifier
-	509,  // 656: forge.TenantKeysetIdList.keyset_ids:type_name -> forge.TenantKeysetIdentifier
-	509,  // 657: forge.TenantKeysetsByIdsRequest.keyset_ids:type_name -> forge.TenantKeysetIdentifier
-	527,  // 658: forge.ResourcePools.pools:type_name -> forge.ResourcePool
+	722,  // 637: forge.InstanceInterfaceStatusObservation.network_security_group:type_name -> forge.NetworkSecurityGroupStatus
+	1085, // 638: forge.InstanceInterfaceStatusObservation.internal_uuid:type_name -> common.UUID
+	502,  // 639: forge.FabricInterfaceData.link_data:type_name -> forge.LinkData
+	288,  // 640: forge.Tenant.metadata:type_name -> forge.Metadata
+	288,  // 641: forge.CreateTenantRequest.metadata:type_name -> forge.Metadata
+	503,  // 642: forge.CreateTenantResponse.tenant:type_name -> forge.Tenant
+	288,  // 643: forge.UpdateTenantRequest.metadata:type_name -> forge.Metadata
+	503,  // 644: forge.UpdateTenantResponse.tenant:type_name -> forge.Tenant
+	503,  // 645: forge.FindTenantResponse.tenant:type_name -> forge.Tenant
+	511,  // 646: forge.TenantKeysetContent.public_keys:type_name -> forge.TenantPublicKey
+	510,  // 647: forge.TenantKeyset.keyset_identifier:type_name -> forge.TenantKeysetIdentifier
+	512,  // 648: forge.TenantKeyset.keyset_content:type_name -> forge.TenantKeysetContent
+	510,  // 649: forge.CreateTenantKeysetRequest.keyset_identifier:type_name -> forge.TenantKeysetIdentifier
+	512,  // 650: forge.CreateTenantKeysetRequest.keyset_content:type_name -> forge.TenantKeysetContent
+	513,  // 651: forge.CreateTenantKeysetResponse.keyset:type_name -> forge.TenantKeyset
+	513,  // 652: forge.TenantKeySetList.keyset:type_name -> forge.TenantKeyset
+	510,  // 653: forge.UpdateTenantKeysetRequest.keyset_identifier:type_name -> forge.TenantKeysetIdentifier
+	512,  // 654: forge.UpdateTenantKeysetRequest.keyset_content:type_name -> forge.TenantKeysetContent
+	510,  // 655: forge.DeleteTenantKeysetRequest.keyset_identifier:type_name -> forge.TenantKeysetIdentifier
+	510,  // 656: forge.TenantKeysetIdList.keyset_ids:type_name -> forge.TenantKeysetIdentifier
+	510,  // 657: forge.TenantKeysetsByIdsRequest.keyset_ids:type_name -> forge.TenantKeysetIdentifier
+	528,  // 658: forge.ResourcePools.pools:type_name -> forge.ResourcePool
 	45,   // 659: forge.MaintenanceRequest.operation:type_name -> forge.MaintenanceOperation
-	1066, // 660: forge.MaintenanceRequest.host_id:type_name -> common.MachineId
+	1071, // 660: forge.MaintenanceRequest.host_id:type_name -> common.MachineId
 	46,   // 661: forge.SetDynamicConfigRequest.setting:type_name -> forge.ConfigSetting
-	558,  // 662: forge.FindIpAddressResponse.matches:type_name -> forge.IpAddressMatch
-	1080, // 663: forge.IdentifyUuidRequest.uuid:type_name -> common.UUID
-	1080, // 664: forge.IdentifyUuidResponse.uuid:type_name -> common.UUID
+	559,  // 662: forge.FindIpAddressResponse.matches:type_name -> forge.IpAddressMatch
+	1085, // 663: forge.IdentifyUuidRequest.uuid:type_name -> common.UUID
+	1085, // 664: forge.IdentifyUuidResponse.uuid:type_name -> common.UUID
 	47,   // 665: forge.IdentifyUuidResponse.object_type:type_name -> forge.UuidType
 	48,   // 666: forge.IdentifyMacResponse.object_type:type_name -> forge.MacOwner
-	1066, // 667: forge.IdentifySerialResponse.machine_id:type_name -> common.MachineId
-	1066, // 668: forge.DpuReprovisioningRequest.dpu_id:type_name -> common.MachineId
-	99,   // 669: forge.DpuReprovisioningRequest.mode:type_name -> forge.DpuReprovisioningRequest.Mode
+	1071, // 667: forge.IdentifySerialResponse.machine_id:type_name -> common.MachineId
+	1071, // 668: forge.DpuReprovisioningRequest.dpu_id:type_name -> common.MachineId
+	100,  // 669: forge.DpuReprovisioningRequest.mode:type_name -> forge.DpuReprovisioningRequest.Mode
 	49,   // 670: forge.DpuReprovisioningRequest.initiator:type_name -> forge.UpdateInitiator
-	1066, // 671: forge.DpuReprovisioningRequest.machine_id:type_name -> common.MachineId
-	1056, // 672: forge.DpuReprovisioningListResponse.dpus:type_name -> forge.DpuReprovisioningListResponse.DpuReprovisioningListItem
-	1066, // 673: forge.HostReprovisioningRequest.machine_id:type_name -> common.MachineId
-	100,  // 674: forge.HostReprovisioningRequest.mode:type_name -> forge.HostReprovisioningRequest.Mode
+	1071, // 671: forge.DpuReprovisioningRequest.machine_id:type_name -> common.MachineId
+	1061, // 672: forge.DpuReprovisioningListResponse.dpus:type_name -> forge.DpuReprovisioningListResponse.DpuReprovisioningListItem
+	1071, // 673: forge.HostReprovisioningRequest.machine_id:type_name -> common.MachineId
+	101,  // 674: forge.HostReprovisioningRequest.mode:type_name -> forge.HostReprovisioningRequest.Mode
 	49,   // 675: forge.HostReprovisioningRequest.initiator:type_name -> forge.UpdateInitiator
-	101,  // 676: forge.BmcCredentialRotationRequest.mode:type_name -> forge.BmcCredentialRotationRequest.Mode
-	1095, // 677: forge.BmcCredentialRotationRequest.device_id:type_name -> common.DeviceId
-	102,  // 678: forge.UefiCredentialRotationRequest.mode:type_name -> forge.UefiCredentialRotationRequest.Mode
-	1066, // 679: forge.UefiCredentialRotationRequest.machine_id:type_name -> common.MachineId
-	103,  // 680: forge.NicLockdownCredentialRotationRequest.mode:type_name -> forge.NicLockdownCredentialRotationRequest.Mode
-	1066, // 681: forge.NicLockdownCredentialRotationRequest.machine_id:type_name -> common.MachineId
-	1057, // 682: forge.HostReprovisioningListResponse.hosts:type_name -> forge.HostReprovisioningListResponse.HostReprovisioningListItem
-	552,  // 683: forge.DpuInfoStatusObservation.os_operational_state:type_name -> forge.DpuOsOperationalState
-	553,  // 684: forge.DpuInfoStatusObservation.representors:type_name -> forge.DpuRepresentorStatus
-	1067, // 685: forge.DpuInfoStatusObservation.last_heartbeat:type_name -> google.protobuf.Timestamp
-	554,  // 686: forge.DpuInfo.observed_status:type_name -> forge.DpuInfoStatusObservation
-	555,  // 687: forge.GetDpuInfoListResponse.dpu_list:type_name -> forge.DpuInfo
+	102,  // 676: forge.BmcCredentialRotationRequest.mode:type_name -> forge.BmcCredentialRotationRequest.Mode
+	1100, // 677: forge.BmcCredentialRotationRequest.device_id:type_name -> common.DeviceId
+	103,  // 678: forge.UefiCredentialRotationRequest.mode:type_name -> forge.UefiCredentialRotationRequest.Mode
+	1071, // 679: forge.UefiCredentialRotationRequest.machine_id:type_name -> common.MachineId
+	104,  // 680: forge.NicLockdownCredentialRotationRequest.mode:type_name -> forge.NicLockdownCredentialRotationRequest.Mode
+	1071, // 681: forge.NicLockdownCredentialRotationRequest.machine_id:type_name -> common.MachineId
+	1062, // 682: forge.HostReprovisioningListResponse.hosts:type_name -> forge.HostReprovisioningListResponse.HostReprovisioningListItem
+	553,  // 683: forge.DpuInfoStatusObservation.os_operational_state:type_name -> forge.DpuOsOperationalState
+	554,  // 684: forge.DpuInfoStatusObservation.representors:type_name -> forge.DpuRepresentorStatus
+	1072, // 685: forge.DpuInfoStatusObservation.last_heartbeat:type_name -> google.protobuf.Timestamp
+	555,  // 686: forge.DpuInfo.observed_status:type_name -> forge.DpuInfoStatusObservation
+	556,  // 687: forge.GetDpuInfoListResponse.dpu_list:type_name -> forge.DpuInfo
 	50,   // 688: forge.IpAddressMatch.ip_type:type_name -> forge.IpType
-	1090, // 689: forge.MachineBootOverride.machine_interface_id:type_name -> common.MachineInterfaceId
-	1066, // 690: forge.ConnectedDevice.id:type_name -> common.MachineId
-	560,  // 691: forge.ConnectedDeviceList.connected_devices:type_name -> forge.ConnectedDevice
-	566,  // 692: forge.MachineIdBmcIpPairs.pairs:type_name -> forge.MachineIdBmcIp
-	1066, // 693: forge.MachineIdBmcIp.machine_id:type_name -> common.MachineId
-	560,  // 694: forge.NetworkDevice.devices:type_name -> forge.ConnectedDevice
-	567,  // 695: forge.NetworkTopologyData.network_devices:type_name -> forge.NetworkDevice
+	1095, // 689: forge.MachineBootOverride.machine_interface_id:type_name -> common.MachineInterfaceId
+	1071, // 690: forge.ConnectedDevice.id:type_name -> common.MachineId
+	561,  // 691: forge.ConnectedDeviceList.connected_devices:type_name -> forge.ConnectedDevice
+	567,  // 692: forge.MachineIdBmcIpPairs.pairs:type_name -> forge.MachineIdBmcIp
+	1071, // 693: forge.MachineIdBmcIp.machine_id:type_name -> common.MachineId
+	561,  // 694: forge.NetworkDevice.devices:type_name -> forge.ConnectedDevice
+	568,  // 695: forge.NetworkTopologyData.network_devices:type_name -> forge.NetworkDevice
 	51,   // 696: forge.RouteServers.source_type:type_name -> forge.RouteServerSourceType
-	573,  // 697: forge.RouteServerEntries.route_servers:type_name -> forge.RouteServer
+	574,  // 697: forge.RouteServerEntries.route_servers:type_name -> forge.RouteServer
 	51,   // 698: forge.RouteServer.source_type:type_name -> forge.RouteServerSourceType
-	1066, // 699: forge.SetHostUefiPasswordRequest.host_id:type_name -> common.MachineId
-	1066, // 700: forge.ClearHostUefiPasswordRequest.host_id:type_name -> common.MachineId
-	1066, // 701: forge.SetDpuUefiPasswordRequest.dpu_id:type_name -> common.MachineId
-	1080, // 702: forge.OsImageAttributes.id:type_name -> common.UUID
-	580,  // 703: forge.OsImage.attributes:type_name -> forge.OsImageAttributes
+	1071, // 699: forge.SetHostUefiPasswordRequest.host_id:type_name -> common.MachineId
+	1071, // 700: forge.ClearHostUefiPasswordRequest.host_id:type_name -> common.MachineId
+	1071, // 701: forge.SetDpuUefiPasswordRequest.dpu_id:type_name -> common.MachineId
+	1085, // 702: forge.OsImageAttributes.id:type_name -> common.UUID
+	581,  // 703: forge.OsImage.attributes:type_name -> forge.OsImageAttributes
 	52,   // 704: forge.OsImage.status:type_name -> forge.OsImageStatus
-	581,  // 705: forge.ListOsImageResponse.images:type_name -> forge.OsImage
-	1080, // 706: forge.DeleteOsImageRequest.id:type_name -> common.UUID
-	1087, // 707: forge.GetIpxeTemplateRequest.id:type_name -> common.IpxeTemplateId
-	296,  // 708: forge.IpxeTemplateList.templates:type_name -> forge.IpxeTemplate
+	582,  // 705: forge.ListOsImageResponse.images:type_name -> forge.OsImage
+	1085, // 706: forge.DeleteOsImageRequest.id:type_name -> common.UUID
+	1092, // 707: forge.GetIpxeTemplateRequest.id:type_name -> common.IpxeTemplateId
+	297,  // 708: forge.IpxeTemplateList.templates:type_name -> forge.IpxeTemplate
 	13,   // 709: forge.ExpectedHostNic.network_segment_type:type_name -> forge.NetworkSegmentType
-	86,   // 710: forge.ExpectedHostNic.role:type_name -> forge.ExpectedInterfaceRole
-	87,   // 711: forge.ExpectedHostNic.ip_allocation:type_name -> forge.ExpectedInterfaceIpAllocation
-	287,  // 712: forge.ExpectedMachine.metadata:type_name -> forge.Metadata
-	1080, // 713: forge.ExpectedMachine.id:type_name -> common.UUID
-	589,  // 714: forge.ExpectedMachine.host_nics:type_name -> forge.ExpectedHostNic
-	1078, // 715: forge.ExpectedMachine.rack_id:type_name -> common.RackId
+	87,   // 710: forge.ExpectedHostNic.role:type_name -> forge.ExpectedInterfaceRole
+	88,   // 711: forge.ExpectedHostNic.ip_allocation:type_name -> forge.ExpectedInterfaceIpAllocation
+	288,  // 712: forge.ExpectedMachine.metadata:type_name -> forge.Metadata
+	1085, // 713: forge.ExpectedMachine.id:type_name -> common.UUID
+	590,  // 714: forge.ExpectedMachine.host_nics:type_name -> forge.ExpectedHostNic
+	1083, // 715: forge.ExpectedMachine.rack_id:type_name -> common.RackId
 	53,   // 716: forge.ExpectedMachine.dpu_mode:type_name -> forge.DpuMode
-	590,  // 717: forge.ExpectedMachine.host_lifecycle_profile:type_name -> forge.HostLifecycleProfile
+	591,  // 717: forge.ExpectedMachine.host_lifecycle_profile:type_name -> forge.HostLifecycleProfile
 	54,   // 718: forge.ExpectedMachine.bmc_ip_allocation:type_name -> forge.BmcIpAllocationType
-	1080, // 719: forge.ExpectedMachineRequest.id:type_name -> common.UUID
-	591,  // 720: forge.ExpectedMachineList.expected_machines:type_name -> forge.ExpectedMachine
-	595,  // 721: forge.LinkedExpectedMachineList.expected_machines:type_name -> forge.LinkedExpectedMachine
-	1066, // 722: forge.LinkedExpectedMachine.machine_id:type_name -> common.MachineId
-	1080, // 723: forge.LinkedExpectedMachine.expected_machine_id:type_name -> common.UUID
-	597,  // 724: forge.UnexpectedMachineList.unexpected_machines:type_name -> forge.UnexpectedMachine
-	1066, // 725: forge.UnexpectedMachine.machine_id:type_name -> common.MachineId
-	593,  // 726: forge.BatchExpectedMachineOperationRequest.expected_machines:type_name -> forge.ExpectedMachineList
-	1080, // 727: forge.ExpectedMachineOperationResult.id:type_name -> common.UUID
-	591,  // 728: forge.ExpectedMachineOperationResult.expected_machine:type_name -> forge.ExpectedMachine
-	599,  // 729: forge.BatchExpectedMachineOperationResponse.results:type_name -> forge.ExpectedMachineOperationResult
-	1066, // 730: forge.MachineRebootCompletedRequest.machine_id:type_name -> common.MachineId
-	1066, // 731: forge.ScoutFirmwareUpgradeStatusRequest.machine_id:type_name -> common.MachineId
-	1066, // 732: forge.MachineValidationCompletedRequest.machine_id:type_name -> common.MachineId
-	1096, // 733: forge.MachineValidationCompletedRequest.validation_id:type_name -> common.MachineValidationId
-	1067, // 734: forge.MachineValidationResult.start_time:type_name -> google.protobuf.Timestamp
-	1067, // 735: forge.MachineValidationResult.end_time:type_name -> google.protobuf.Timestamp
-	1096, // 736: forge.MachineValidationResult.validation_id:type_name -> common.MachineValidationId
-	606,  // 737: forge.MachineValidationResultPostRequest.result:type_name -> forge.MachineValidationResult
-	606,  // 738: forge.MachineValidationResultList.results:type_name -> forge.MachineValidationResult
-	1066, // 739: forge.MachineValidationGetRequest.machine_id:type_name -> common.MachineId
-	1096, // 740: forge.MachineValidationGetRequest.validation_id:type_name -> common.MachineValidationId
+	1085, // 719: forge.ExpectedMachineRequest.id:type_name -> common.UUID
+	592,  // 720: forge.ExpectedMachineList.expected_machines:type_name -> forge.ExpectedMachine
+	596,  // 721: forge.LinkedExpectedMachineList.expected_machines:type_name -> forge.LinkedExpectedMachine
+	1071, // 722: forge.LinkedExpectedMachine.machine_id:type_name -> common.MachineId
+	1085, // 723: forge.LinkedExpectedMachine.expected_machine_id:type_name -> common.UUID
+	598,  // 724: forge.UnexpectedMachineList.unexpected_machines:type_name -> forge.UnexpectedMachine
+	1071, // 725: forge.UnexpectedMachine.machine_id:type_name -> common.MachineId
+	594,  // 726: forge.BatchExpectedMachineOperationRequest.expected_machines:type_name -> forge.ExpectedMachineList
+	1085, // 727: forge.ExpectedMachineOperationResult.id:type_name -> common.UUID
+	592,  // 728: forge.ExpectedMachineOperationResult.expected_machine:type_name -> forge.ExpectedMachine
+	600,  // 729: forge.BatchExpectedMachineOperationResponse.results:type_name -> forge.ExpectedMachineOperationResult
+	1071, // 730: forge.MachineRebootCompletedRequest.machine_id:type_name -> common.MachineId
+	1071, // 731: forge.ScoutFirmwareUpgradeStatusRequest.machine_id:type_name -> common.MachineId
+	1071, // 732: forge.MachineValidationCompletedRequest.machine_id:type_name -> common.MachineId
+	1101, // 733: forge.MachineValidationCompletedRequest.validation_id:type_name -> common.MachineValidationId
+	1072, // 734: forge.MachineValidationResult.start_time:type_name -> google.protobuf.Timestamp
+	1072, // 735: forge.MachineValidationResult.end_time:type_name -> google.protobuf.Timestamp
+	1101, // 736: forge.MachineValidationResult.validation_id:type_name -> common.MachineValidationId
+	607,  // 737: forge.MachineValidationResultPostRequest.result:type_name -> forge.MachineValidationResult
+	607,  // 738: forge.MachineValidationResultList.results:type_name -> forge.MachineValidationResult
+	1071, // 739: forge.MachineValidationGetRequest.machine_id:type_name -> common.MachineId
+	1101, // 740: forge.MachineValidationGetRequest.validation_id:type_name -> common.MachineValidationId
 	55,   // 741: forge.MachineValidationStatus.started:type_name -> forge.MachineValidationStarted
 	56,   // 742: forge.MachineValidationStatus.in_progress:type_name -> forge.MachineValidationInProgress
 	57,   // 743: forge.MachineValidationStatus.completed:type_name -> forge.MachineValidationCompleted
-	1096, // 744: forge.MachineValidationRun.validation_id:type_name -> common.MachineValidationId
-	1066, // 745: forge.MachineValidationRun.machine_id:type_name -> common.MachineId
-	1067, // 746: forge.MachineValidationRun.start_time:type_name -> google.protobuf.Timestamp
-	1067, // 747: forge.MachineValidationRun.end_time:type_name -> google.protobuf.Timestamp
-	610,  // 748: forge.MachineValidationRun.status:type_name -> forge.MachineValidationStatus
-	1092, // 749: forge.MachineValidationRun.duration_to_complete:type_name -> google.protobuf.Duration
-	1067, // 750: forge.MachineValidationRun.last_heartbeat_at:type_name -> google.protobuf.Timestamp
-	1066, // 751: forge.MachineSetAutoUpdateRequest.machine_id:type_name -> common.MachineId
-	104,  // 752: forge.MachineSetAutoUpdateRequest.action:type_name -> forge.MachineSetAutoUpdateRequest.SetAutoupdateAction
-	1067, // 753: forge.MachineValidationExternalConfig.timestamp:type_name -> google.protobuf.Timestamp
-	615,  // 754: forge.GetMachineValidationExternalConfigResponse.config:type_name -> forge.MachineValidationExternalConfig
-	615,  // 755: forge.GetMachineValidationExternalConfigsResponse.configs:type_name -> forge.MachineValidationExternalConfig
-	1066, // 756: forge.MachineValidationOnDemandRequest.machine_id:type_name -> common.MachineId
-	105,  // 757: forge.MachineValidationOnDemandRequest.action:type_name -> forge.MachineValidationOnDemandRequest.Action
-	1096, // 758: forge.MachineValidationOnDemandResponse.validation_id:type_name -> common.MachineValidationId
-	611,  // 759: forge.MachineValidationOnDemandResponse.run:type_name -> forge.MachineValidationRun
-	623,  // 760: forge.MaintenanceActivityConfig.firmware_upgrade:type_name -> forge.FirmwareUpgradeActivity
-	625,  // 761: forge.MaintenanceActivityConfig.configure_nmx_cluster:type_name -> forge.ConfigureNmxClusterActivity
-	626,  // 762: forge.MaintenanceActivityConfig.power_sequence:type_name -> forge.PowerSequenceActivity
-	624,  // 763: forge.MaintenanceActivityConfig.nvos_update:type_name -> forge.NvosUpdateActivity
-	627,  // 764: forge.RackMaintenanceScope.activities:type_name -> forge.MaintenanceActivityConfig
-	1078, // 765: forge.RackMaintenanceOnDemandRequest.rack_id:type_name -> common.RackId
-	628,  // 766: forge.RackMaintenanceOnDemandRequest.scope:type_name -> forge.RackMaintenanceScope
-	1078, // 767: forge.RackMaintenanceTerminateRequest.rack_id:type_name -> common.RackId
-	407,  // 768: forge.AdminPowerControlRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	106,  // 769: forge.AdminPowerControlRequest.action:type_name -> forge.AdminPowerControlRequest.SystemPowerControl
-	1066, // 770: forge.AdminChassisResetRequest.machine_id:type_name -> common.MachineId
-	106,  // 771: forge.AdminChassisResetRequest.action:type_name -> forge.AdminPowerControlRequest.SystemPowerControl
-	1066, // 772: forge.GetRedfishJobStateRequest.machine_id:type_name -> common.MachineId
-	107,  // 773: forge.GetRedfishJobStateResponse.job_state:type_name -> forge.GetRedfishJobStateResponse.RedfishJobState
-	611,  // 774: forge.MachineValidationRunList.runs:type_name -> forge.MachineValidationRun
-	1066, // 775: forge.MachineValidationRunListGetRequest.machine_id:type_name -> common.MachineId
-	1096, // 776: forge.MachineValidationRunItemSearchFilter.validation_id:type_name -> common.MachineValidationId
-	1080, // 777: forge.MachineValidationRunItemIdList.run_item_ids:type_name -> common.UUID
-	1080, // 778: forge.MachineValidationRunItemsByIdsRequest.run_item_ids:type_name -> common.UUID
-	645,  // 779: forge.MachineValidationRunItemList.run_items:type_name -> forge.MachineValidationRunItem
-	1080, // 780: forge.MachineValidationRunItem.run_item_id:type_name -> common.UUID
-	1096, // 781: forge.MachineValidationRunItem.validation_id:type_name -> common.MachineValidationId
-	1092, // 782: forge.MachineValidationRunItem.timeout:type_name -> google.protobuf.Duration
-	1067, // 783: forge.MachineValidationRunItem.started_at:type_name -> google.protobuf.Timestamp
-	1067, // 784: forge.MachineValidationRunItem.ended_at:type_name -> google.protobuf.Timestamp
-	1067, // 785: forge.MachineValidationRunItem.last_heartbeat_at:type_name -> google.protobuf.Timestamp
-	1080, // 786: forge.MachineValidationRunItem.current_attempt_id:type_name -> common.UUID
-	660,  // 787: forge.MachineValidationRunItem.plugin:type_name -> forge.MachineValidationPlugin
-	1080, // 788: forge.MachineValidationAttemptGetRequest.attempt_id:type_name -> common.UUID
-	1080, // 789: forge.MachineValidationAttempt.attempt_id:type_name -> common.UUID
-	1080, // 790: forge.MachineValidationAttempt.run_item_id:type_name -> common.UUID
-	1067, // 791: forge.MachineValidationAttempt.started_at:type_name -> google.protobuf.Timestamp
-	1067, // 792: forge.MachineValidationAttempt.ended_at:type_name -> google.protobuf.Timestamp
-	1067, // 793: forge.MachineValidationAttempt.last_heartbeat_at:type_name -> google.protobuf.Timestamp
-	1096, // 794: forge.MachineValidationHeartbeatRequest.validation_id:type_name -> common.MachineValidationId
-	1080, // 795: forge.MachineValidationHeartbeatRequest.run_item_id:type_name -> common.UUID
-	1080, // 796: forge.MachineValidationHeartbeatRequest.attempt_id:type_name -> common.UUID
-	1058, // 797: forge.MachineValidationTestUpdateRequest.payload:type_name -> forge.MachineValidationTestUpdateRequest.Payload
-	660,  // 798: forge.MachineValidationTestAddRequest.plugin:type_name -> forge.MachineValidationPlugin
-	659,  // 799: forge.MachineValidationTestsGetResponse.tests:type_name -> forge.MachineValidationTest
-	660,  // 800: forge.MachineValidationTest.plugin:type_name -> forge.MachineValidationPlugin
-	1096, // 801: forge.MachineValidationRunRequest.validation_id:type_name -> common.MachineValidationId
-	1092, // 802: forge.MachineValidationRunRequest.duration_to_complete:type_name -> google.protobuf.Duration
-	659,  // 803: forge.MachineValidationRunRequest.selected_tests:type_name -> forge.MachineValidationTest
+	1101, // 744: forge.MachineValidationRun.validation_id:type_name -> common.MachineValidationId
+	1071, // 745: forge.MachineValidationRun.machine_id:type_name -> common.MachineId
+	1072, // 746: forge.MachineValidationRun.start_time:type_name -> google.protobuf.Timestamp
+	1072, // 747: forge.MachineValidationRun.end_time:type_name -> google.protobuf.Timestamp
+	611,  // 748: forge.MachineValidationRun.status:type_name -> forge.MachineValidationStatus
+	1097, // 749: forge.MachineValidationRun.duration_to_complete:type_name -> google.protobuf.Duration
+	1072, // 750: forge.MachineValidationRun.last_heartbeat_at:type_name -> google.protobuf.Timestamp
+	1071, // 751: forge.MachineSetAutoUpdateRequest.machine_id:type_name -> common.MachineId
+	105,  // 752: forge.MachineSetAutoUpdateRequest.action:type_name -> forge.MachineSetAutoUpdateRequest.SetAutoupdateAction
+	1072, // 753: forge.MachineValidationExternalConfig.timestamp:type_name -> google.protobuf.Timestamp
+	616,  // 754: forge.GetMachineValidationExternalConfigResponse.config:type_name -> forge.MachineValidationExternalConfig
+	616,  // 755: forge.GetMachineValidationExternalConfigsResponse.configs:type_name -> forge.MachineValidationExternalConfig
+	1071, // 756: forge.MachineValidationOnDemandRequest.machine_id:type_name -> common.MachineId
+	106,  // 757: forge.MachineValidationOnDemandRequest.action:type_name -> forge.MachineValidationOnDemandRequest.Action
+	1101, // 758: forge.MachineValidationOnDemandResponse.validation_id:type_name -> common.MachineValidationId
+	612,  // 759: forge.MachineValidationOnDemandResponse.run:type_name -> forge.MachineValidationRun
+	624,  // 760: forge.MaintenanceActivityConfig.firmware_upgrade:type_name -> forge.FirmwareUpgradeActivity
+	626,  // 761: forge.MaintenanceActivityConfig.configure_nmx_cluster:type_name -> forge.ConfigureNmxClusterActivity
+	627,  // 762: forge.MaintenanceActivityConfig.power_sequence:type_name -> forge.PowerSequenceActivity
+	625,  // 763: forge.MaintenanceActivityConfig.nvos_update:type_name -> forge.NvosUpdateActivity
+	628,  // 764: forge.RackMaintenanceScope.activities:type_name -> forge.MaintenanceActivityConfig
+	1083, // 765: forge.RackMaintenanceOnDemandRequest.rack_id:type_name -> common.RackId
+	629,  // 766: forge.RackMaintenanceOnDemandRequest.scope:type_name -> forge.RackMaintenanceScope
+	1083, // 767: forge.RackMaintenanceTerminateRequest.rack_id:type_name -> common.RackId
+	408,  // 768: forge.AdminPowerControlRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	107,  // 769: forge.AdminPowerControlRequest.action:type_name -> forge.AdminPowerControlRequest.SystemPowerControl
+	1071, // 770: forge.AdminChassisResetRequest.machine_id:type_name -> common.MachineId
+	107,  // 771: forge.AdminChassisResetRequest.action:type_name -> forge.AdminPowerControlRequest.SystemPowerControl
+	1071, // 772: forge.GetRedfishJobStateRequest.machine_id:type_name -> common.MachineId
+	108,  // 773: forge.GetRedfishJobStateResponse.job_state:type_name -> forge.GetRedfishJobStateResponse.RedfishJobState
+	612,  // 774: forge.MachineValidationRunList.runs:type_name -> forge.MachineValidationRun
+	1071, // 775: forge.MachineValidationRunListGetRequest.machine_id:type_name -> common.MachineId
+	1101, // 776: forge.MachineValidationRunItemSearchFilter.validation_id:type_name -> common.MachineValidationId
+	1085, // 777: forge.MachineValidationRunItemIdList.run_item_ids:type_name -> common.UUID
+	1085, // 778: forge.MachineValidationRunItemsByIdsRequest.run_item_ids:type_name -> common.UUID
+	646,  // 779: forge.MachineValidationRunItemList.run_items:type_name -> forge.MachineValidationRunItem
+	1085, // 780: forge.MachineValidationRunItem.run_item_id:type_name -> common.UUID
+	1101, // 781: forge.MachineValidationRunItem.validation_id:type_name -> common.MachineValidationId
+	1097, // 782: forge.MachineValidationRunItem.timeout:type_name -> google.protobuf.Duration
+	1072, // 783: forge.MachineValidationRunItem.started_at:type_name -> google.protobuf.Timestamp
+	1072, // 784: forge.MachineValidationRunItem.ended_at:type_name -> google.protobuf.Timestamp
+	1072, // 785: forge.MachineValidationRunItem.last_heartbeat_at:type_name -> google.protobuf.Timestamp
+	1085, // 786: forge.MachineValidationRunItem.current_attempt_id:type_name -> common.UUID
+	661,  // 787: forge.MachineValidationRunItem.plugin:type_name -> forge.MachineValidationPlugin
+	1085, // 788: forge.MachineValidationAttemptGetRequest.attempt_id:type_name -> common.UUID
+	1085, // 789: forge.MachineValidationAttempt.attempt_id:type_name -> common.UUID
+	1085, // 790: forge.MachineValidationAttempt.run_item_id:type_name -> common.UUID
+	1072, // 791: forge.MachineValidationAttempt.started_at:type_name -> google.protobuf.Timestamp
+	1072, // 792: forge.MachineValidationAttempt.ended_at:type_name -> google.protobuf.Timestamp
+	1072, // 793: forge.MachineValidationAttempt.last_heartbeat_at:type_name -> google.protobuf.Timestamp
+	1101, // 794: forge.MachineValidationHeartbeatRequest.validation_id:type_name -> common.MachineValidationId
+	1085, // 795: forge.MachineValidationHeartbeatRequest.run_item_id:type_name -> common.UUID
+	1085, // 796: forge.MachineValidationHeartbeatRequest.attempt_id:type_name -> common.UUID
+	1063, // 797: forge.MachineValidationTestUpdateRequest.payload:type_name -> forge.MachineValidationTestUpdateRequest.Payload
+	661,  // 798: forge.MachineValidationTestAddRequest.plugin:type_name -> forge.MachineValidationPlugin
+	660,  // 799: forge.MachineValidationTestsGetResponse.tests:type_name -> forge.MachineValidationTest
+	661,  // 800: forge.MachineValidationTest.plugin:type_name -> forge.MachineValidationPlugin
+	1101, // 801: forge.MachineValidationRunRequest.validation_id:type_name -> common.MachineValidationId
+	1097, // 802: forge.MachineValidationRunRequest.duration_to_complete:type_name -> google.protobuf.Duration
+	660,  // 803: forge.MachineValidationRunRequest.selected_tests:type_name -> forge.MachineValidationTest
 	58,   // 804: forge.MachineCapabilityAttributesGpu.device_type:type_name -> forge.MachineCapabilityDeviceType
 	58,   // 805: forge.MachineCapabilityAttributesNetwork.device_type:type_name -> forge.MachineCapabilityDeviceType
-	669,  // 806: forge.MachineCapabilitiesSet.cpu:type_name -> forge.MachineCapabilityAttributesCpu
-	670,  // 807: forge.MachineCapabilitiesSet.gpu:type_name -> forge.MachineCapabilityAttributesGpu
-	671,  // 808: forge.MachineCapabilitiesSet.memory:type_name -> forge.MachineCapabilityAttributesMemory
-	672,  // 809: forge.MachineCapabilitiesSet.storage:type_name -> forge.MachineCapabilityAttributesStorage
-	673,  // 810: forge.MachineCapabilitiesSet.network:type_name -> forge.MachineCapabilityAttributesNetwork
-	674,  // 811: forge.MachineCapabilitiesSet.infiniband:type_name -> forge.MachineCapabilityAttributesInfiniband
-	675,  // 812: forge.MachineCapabilitiesSet.dpu:type_name -> forge.MachineCapabilityAttributesDpu
-	679,  // 813: forge.InstanceTypeAttributes.desired_capabilities:type_name -> forge.InstanceTypeMachineCapabilityFilterAttributes
-	677,  // 814: forge.InstanceType.attributes:type_name -> forge.InstanceTypeAttributes
-	287,  // 815: forge.InstanceType.metadata:type_name -> forge.Metadata
-	777,  // 816: forge.InstanceType.allocation_stats:type_name -> forge.InstanceTypeAllocationStats
+	670,  // 806: forge.MachineCapabilitiesSet.cpu:type_name -> forge.MachineCapabilityAttributesCpu
+	671,  // 807: forge.MachineCapabilitiesSet.gpu:type_name -> forge.MachineCapabilityAttributesGpu
+	672,  // 808: forge.MachineCapabilitiesSet.memory:type_name -> forge.MachineCapabilityAttributesMemory
+	673,  // 809: forge.MachineCapabilitiesSet.storage:type_name -> forge.MachineCapabilityAttributesStorage
+	674,  // 810: forge.MachineCapabilitiesSet.network:type_name -> forge.MachineCapabilityAttributesNetwork
+	675,  // 811: forge.MachineCapabilitiesSet.infiniband:type_name -> forge.MachineCapabilityAttributesInfiniband
+	676,  // 812: forge.MachineCapabilitiesSet.dpu:type_name -> forge.MachineCapabilityAttributesDpu
+	680,  // 813: forge.InstanceTypeAttributes.desired_capabilities:type_name -> forge.InstanceTypeMachineCapabilityFilterAttributes
+	678,  // 814: forge.InstanceType.attributes:type_name -> forge.InstanceTypeAttributes
+	288,  // 815: forge.InstanceType.metadata:type_name -> forge.Metadata
+	778,  // 816: forge.InstanceType.allocation_stats:type_name -> forge.InstanceTypeAllocationStats
 	59,   // 817: forge.InstanceTypeMachineCapabilityFilterAttributes.capability_type:type_name -> forge.MachineCapabilityType
-	1097, // 818: forge.InstanceTypeMachineCapabilityFilterAttributes.inactive_devices:type_name -> common.Uint32List
+	1102, // 818: forge.InstanceTypeMachineCapabilityFilterAttributes.inactive_devices:type_name -> common.Uint32List
 	58,   // 819: forge.InstanceTypeMachineCapabilityFilterAttributes.device_type:type_name -> forge.MachineCapabilityDeviceType
-	287,  // 820: forge.CreateInstanceTypeRequest.metadata:type_name -> forge.Metadata
-	677,  // 821: forge.CreateInstanceTypeRequest.instance_type_attributes:type_name -> forge.InstanceTypeAttributes
-	678,  // 822: forge.CreateInstanceTypeResponse.instance_type:type_name -> forge.InstanceType
-	678,  // 823: forge.FindInstanceTypesByIdsResponse.instance_types:type_name -> forge.InstanceType
-	678,  // 824: forge.UpdateInstanceTypeResponse.instance_type:type_name -> forge.InstanceType
-	287,  // 825: forge.UpdateInstanceTypeRequest.metadata:type_name -> forge.Metadata
-	677,  // 826: forge.UpdateInstanceTypeRequest.instance_type_attributes:type_name -> forge.InstanceTypeAttributes
-	1059, // 827: forge.RedfishBrowseResponse.headers:type_name -> forge.RedfishBrowseResponse.HeadersEntry
-	698,  // 828: forge.RedfishListActionsResponse.actions:type_name -> forge.RedfishAction
-	1067, // 829: forge.RedfishAction.approver_dates:type_name -> google.protobuf.Timestamp
-	1067, // 830: forge.RedfishAction.applied_at:type_name -> google.protobuf.Timestamp
-	699,  // 831: forge.RedfishAction.results:type_name -> forge.OptionalRedfishActionResult
-	700,  // 832: forge.OptionalRedfishActionResult.result:type_name -> forge.RedfishActionResult
-	1060, // 833: forge.RedfishActionResult.headers:type_name -> forge.RedfishActionResult.HeadersEntry
-	1067, // 834: forge.RedfishActionResult.completed_at:type_name -> google.protobuf.Timestamp
-	1061, // 835: forge.UfmBrowseResponse.headers:type_name -> forge.UfmBrowseResponse.HeadersEntry
-	726,  // 836: forge.NetworkSecurityGroupAttributes.rules:type_name -> forge.NetworkSecurityGroupRuleAttributes
-	287,  // 837: forge.NetworkSecurityGroup.metadata:type_name -> forge.Metadata
-	709,  // 838: forge.NetworkSecurityGroup.attributes:type_name -> forge.NetworkSecurityGroupAttributes
-	287,  // 839: forge.CreateNetworkSecurityGroupRequest.metadata:type_name -> forge.Metadata
-	709,  // 840: forge.CreateNetworkSecurityGroupRequest.network_security_group_attributes:type_name -> forge.NetworkSecurityGroupAttributes
-	710,  // 841: forge.CreateNetworkSecurityGroupResponse.network_security_group:type_name -> forge.NetworkSecurityGroup
-	710,  // 842: forge.FindNetworkSecurityGroupsByIdsResponse.network_security_groups:type_name -> forge.NetworkSecurityGroup
-	710,  // 843: forge.UpdateNetworkSecurityGroupResponse.network_security_group:type_name -> forge.NetworkSecurityGroup
-	287,  // 844: forge.UpdateNetworkSecurityGroupRequest.metadata:type_name -> forge.Metadata
-	709,  // 845: forge.UpdateNetworkSecurityGroupRequest.network_security_group_attributes:type_name -> forge.NetworkSecurityGroupAttributes
+	288,  // 820: forge.CreateInstanceTypeRequest.metadata:type_name -> forge.Metadata
+	678,  // 821: forge.CreateInstanceTypeRequest.instance_type_attributes:type_name -> forge.InstanceTypeAttributes
+	679,  // 822: forge.CreateInstanceTypeResponse.instance_type:type_name -> forge.InstanceType
+	679,  // 823: forge.FindInstanceTypesByIdsResponse.instance_types:type_name -> forge.InstanceType
+	679,  // 824: forge.UpdateInstanceTypeResponse.instance_type:type_name -> forge.InstanceType
+	288,  // 825: forge.UpdateInstanceTypeRequest.metadata:type_name -> forge.Metadata
+	678,  // 826: forge.UpdateInstanceTypeRequest.instance_type_attributes:type_name -> forge.InstanceTypeAttributes
+	1064, // 827: forge.RedfishBrowseResponse.headers:type_name -> forge.RedfishBrowseResponse.HeadersEntry
+	699,  // 828: forge.RedfishListActionsResponse.actions:type_name -> forge.RedfishAction
+	1072, // 829: forge.RedfishAction.approver_dates:type_name -> google.protobuf.Timestamp
+	1072, // 830: forge.RedfishAction.applied_at:type_name -> google.protobuf.Timestamp
+	700,  // 831: forge.RedfishAction.results:type_name -> forge.OptionalRedfishActionResult
+	701,  // 832: forge.OptionalRedfishActionResult.result:type_name -> forge.RedfishActionResult
+	1065, // 833: forge.RedfishActionResult.headers:type_name -> forge.RedfishActionResult.HeadersEntry
+	1072, // 834: forge.RedfishActionResult.completed_at:type_name -> google.protobuf.Timestamp
+	1066, // 835: forge.UfmBrowseResponse.headers:type_name -> forge.UfmBrowseResponse.HeadersEntry
+	727,  // 836: forge.NetworkSecurityGroupAttributes.rules:type_name -> forge.NetworkSecurityGroupRuleAttributes
+	288,  // 837: forge.NetworkSecurityGroup.metadata:type_name -> forge.Metadata
+	710,  // 838: forge.NetworkSecurityGroup.attributes:type_name -> forge.NetworkSecurityGroupAttributes
+	288,  // 839: forge.CreateNetworkSecurityGroupRequest.metadata:type_name -> forge.Metadata
+	710,  // 840: forge.CreateNetworkSecurityGroupRequest.network_security_group_attributes:type_name -> forge.NetworkSecurityGroupAttributes
+	711,  // 841: forge.CreateNetworkSecurityGroupResponse.network_security_group:type_name -> forge.NetworkSecurityGroup
+	711,  // 842: forge.FindNetworkSecurityGroupsByIdsResponse.network_security_groups:type_name -> forge.NetworkSecurityGroup
+	711,  // 843: forge.UpdateNetworkSecurityGroupResponse.network_security_group:type_name -> forge.NetworkSecurityGroup
+	288,  // 844: forge.UpdateNetworkSecurityGroupRequest.metadata:type_name -> forge.Metadata
+	710,  // 845: forge.UpdateNetworkSecurityGroupRequest.network_security_group_attributes:type_name -> forge.NetworkSecurityGroupAttributes
 	60,   // 846: forge.NetworkSecurityGroupStatus.source:type_name -> forge.NetworkSecurityGroupSource
 	61,   // 847: forge.NetworkSecurityGroupPropagationObjectStatus.status:type_name -> forge.NetworkSecurityGroupPropagationStatus
-	722,  // 848: forge.GetNetworkSecurityGroupPropagationStatusResponse.vpcs:type_name -> forge.NetworkSecurityGroupPropagationObjectStatus
-	722,  // 849: forge.GetNetworkSecurityGroupPropagationStatusResponse.instances:type_name -> forge.NetworkSecurityGroupPropagationObjectStatus
-	724,  // 850: forge.GetNetworkSecurityGroupPropagationStatusRequest.network_security_group_ids:type_name -> forge.NetworkSecurityGroupIdList
+	723,  // 848: forge.GetNetworkSecurityGroupPropagationStatusResponse.vpcs:type_name -> forge.NetworkSecurityGroupPropagationObjectStatus
+	723,  // 849: forge.GetNetworkSecurityGroupPropagationStatusResponse.instances:type_name -> forge.NetworkSecurityGroupPropagationObjectStatus
+	725,  // 850: forge.GetNetworkSecurityGroupPropagationStatusRequest.network_security_group_ids:type_name -> forge.NetworkSecurityGroupIdList
 	62,   // 851: forge.NetworkSecurityGroupRuleAttributes.direction:type_name -> forge.NetworkSecurityGroupRuleDirection
 	63,   // 852: forge.NetworkSecurityGroupRuleAttributes.protocol:type_name -> forge.NetworkSecurityGroupRuleProtocol
 	64,   // 853: forge.NetworkSecurityGroupRuleAttributes.action:type_name -> forge.NetworkSecurityGroupRuleAction
-	726,  // 854: forge.ResolvedNetworkSecurityGroupRule.rule:type_name -> forge.NetworkSecurityGroupRuleAttributes
-	729,  // 855: forge.GetNetworkSecurityGroupAttachmentsResponse.attachments:type_name -> forge.NetworkSecurityGroupAttachments
-	733,  // 856: forge.GetDesiredFirmwareVersionsResponse.entries:type_name -> forge.DesiredFirmwareVersionEntry
-	1062, // 857: forge.DesiredFirmwareVersionEntry.component_versions:type_name -> forge.DesiredFirmwareVersionEntry.ComponentVersionsEntry
-	734,  // 858: forge.SkuComponents.chassis:type_name -> forge.SkuComponentChassis
-	735,  // 859: forge.SkuComponents.cpus:type_name -> forge.SkuComponentCpu
-	736,  // 860: forge.SkuComponents.gpus:type_name -> forge.SkuComponentGpu
-	737,  // 861: forge.SkuComponents.ethernet_devices:type_name -> forge.SkuComponentEthernetDevices
-	738,  // 862: forge.SkuComponents.infiniband_devices:type_name -> forge.SkuComponentInfinibandDevices
-	739,  // 863: forge.SkuComponents.storage:type_name -> forge.SkuComponentStorage
-	741,  // 864: forge.SkuComponents.memory:type_name -> forge.SkuComponentMemory
-	742,  // 865: forge.SkuComponents.tpm:type_name -> forge.SkuComponentTpm
-	1067, // 866: forge.Sku.created:type_name -> google.protobuf.Timestamp
-	743,  // 867: forge.Sku.components:type_name -> forge.SkuComponents
-	1066, // 868: forge.Sku.associated_machine_ids:type_name -> common.MachineId
-	1066, // 869: forge.SkuMachinePair.machine_id:type_name -> common.MachineId
-	1066, // 870: forge.RemoveSkuRequest.machine_id:type_name -> common.MachineId
-	744,  // 871: forge.SkuList.skus:type_name -> forge.Sku
-	1067, // 872: forge.SkuStatus.verify_request_time:type_name -> google.protobuf.Timestamp
-	1067, // 873: forge.SkuStatus.last_match_attempt:type_name -> google.protobuf.Timestamp
-	1067, // 874: forge.SkuStatus.last_generate_attempt:type_name -> google.protobuf.Timestamp
-	1098, // 875: forge.DpaInterface.id:type_name -> common.DpaInterfaceId
-	1066, // 876: forge.DpaInterface.machine_id:type_name -> common.MachineId
-	1067, // 877: forge.DpaInterface.created:type_name -> google.protobuf.Timestamp
-	1067, // 878: forge.DpaInterface.updated:type_name -> google.protobuf.Timestamp
-	1067, // 879: forge.DpaInterface.deleted:type_name -> google.protobuf.Timestamp
-	250,  // 880: forge.DpaInterface.history:type_name -> forge.StateHistoryRecord
-	1067, // 881: forge.DpaInterface.last_hb_time:type_name -> google.protobuf.Timestamp
+	727,  // 854: forge.ResolvedNetworkSecurityGroupRule.rule:type_name -> forge.NetworkSecurityGroupRuleAttributes
+	730,  // 855: forge.GetNetworkSecurityGroupAttachmentsResponse.attachments:type_name -> forge.NetworkSecurityGroupAttachments
+	734,  // 856: forge.GetDesiredFirmwareVersionsResponse.entries:type_name -> forge.DesiredFirmwareVersionEntry
+	1067, // 857: forge.DesiredFirmwareVersionEntry.component_versions:type_name -> forge.DesiredFirmwareVersionEntry.ComponentVersionsEntry
+	735,  // 858: forge.SkuComponents.chassis:type_name -> forge.SkuComponentChassis
+	736,  // 859: forge.SkuComponents.cpus:type_name -> forge.SkuComponentCpu
+	737,  // 860: forge.SkuComponents.gpus:type_name -> forge.SkuComponentGpu
+	738,  // 861: forge.SkuComponents.ethernet_devices:type_name -> forge.SkuComponentEthernetDevices
+	739,  // 862: forge.SkuComponents.infiniband_devices:type_name -> forge.SkuComponentInfinibandDevices
+	740,  // 863: forge.SkuComponents.storage:type_name -> forge.SkuComponentStorage
+	742,  // 864: forge.SkuComponents.memory:type_name -> forge.SkuComponentMemory
+	743,  // 865: forge.SkuComponents.tpm:type_name -> forge.SkuComponentTpm
+	1072, // 866: forge.Sku.created:type_name -> google.protobuf.Timestamp
+	744,  // 867: forge.Sku.components:type_name -> forge.SkuComponents
+	1071, // 868: forge.Sku.associated_machine_ids:type_name -> common.MachineId
+	1071, // 869: forge.SkuMachinePair.machine_id:type_name -> common.MachineId
+	1071, // 870: forge.RemoveSkuRequest.machine_id:type_name -> common.MachineId
+	745,  // 871: forge.SkuList.skus:type_name -> forge.Sku
+	1072, // 872: forge.SkuStatus.verify_request_time:type_name -> google.protobuf.Timestamp
+	1072, // 873: forge.SkuStatus.last_match_attempt:type_name -> google.protobuf.Timestamp
+	1072, // 874: forge.SkuStatus.last_generate_attempt:type_name -> google.protobuf.Timestamp
+	1103, // 875: forge.DpaInterface.id:type_name -> common.DpaInterfaceId
+	1071, // 876: forge.DpaInterface.machine_id:type_name -> common.MachineId
+	1072, // 877: forge.DpaInterface.created:type_name -> google.protobuf.Timestamp
+	1072, // 878: forge.DpaInterface.updated:type_name -> google.protobuf.Timestamp
+	1072, // 879: forge.DpaInterface.deleted:type_name -> google.protobuf.Timestamp
+	251,  // 880: forge.DpaInterface.history:type_name -> forge.StateHistoryRecord
+	1072, // 881: forge.DpaInterface.last_hb_time:type_name -> google.protobuf.Timestamp
 	65,   // 882: forge.DpaInterface.interface_type:type_name -> forge.DpaInterfaceType
-	1066, // 883: forge.DpaInterfaceCreationRequest.machine_id:type_name -> common.MachineId
+	1071, // 883: forge.DpaInterfaceCreationRequest.machine_id:type_name -> common.MachineId
 	65,   // 884: forge.DpaInterfaceCreationRequest.interface_type:type_name -> forge.DpaInterfaceType
-	1098, // 885: forge.DpaInterfaceIdList.ids:type_name -> common.DpaInterfaceId
-	1098, // 886: forge.DpaInterfacesByIdsRequest.ids:type_name -> common.DpaInterfaceId
-	752,  // 887: forge.DpaInterfaceList.interfaces:type_name -> forge.DpaInterface
-	1098, // 888: forge.DpaNetworkObservationSetRequest.id:type_name -> common.DpaInterfaceId
-	1098, // 889: forge.DpaInterfaceDeletionRequest.id:type_name -> common.DpaInterfaceId
-	1066, // 890: forge.PowerOptionRequest.machine_id:type_name -> common.MachineId
-	1066, // 891: forge.PowerOptionUpdateRequest.machine_id:type_name -> common.MachineId
+	1103, // 885: forge.DpaInterfaceIdList.ids:type_name -> common.DpaInterfaceId
+	1103, // 886: forge.DpaInterfacesByIdsRequest.ids:type_name -> common.DpaInterfaceId
+	753,  // 887: forge.DpaInterfaceList.interfaces:type_name -> forge.DpaInterface
+	1103, // 888: forge.DpaNetworkObservationSetRequest.id:type_name -> common.DpaInterfaceId
+	1103, // 889: forge.DpaInterfaceDeletionRequest.id:type_name -> common.DpaInterfaceId
+	1071, // 890: forge.PowerOptionRequest.machine_id:type_name -> common.MachineId
+	1071, // 891: forge.PowerOptionUpdateRequest.machine_id:type_name -> common.MachineId
 	66,   // 892: forge.PowerOptionUpdateRequest.power_state:type_name -> forge.PowerState
 	66,   // 893: forge.PowerOptions.desired_state:type_name -> forge.PowerState
-	1067, // 894: forge.PowerOptions.desired_state_updated_at:type_name -> google.protobuf.Timestamp
+	1072, // 894: forge.PowerOptions.desired_state_updated_at:type_name -> google.protobuf.Timestamp
 	66,   // 895: forge.PowerOptions.actual_state:type_name -> forge.PowerState
-	1067, // 896: forge.PowerOptions.actual_state_updated_at:type_name -> google.protobuf.Timestamp
-	1066, // 897: forge.PowerOptions.host_id:type_name -> common.MachineId
-	1067, // 898: forge.PowerOptions.next_power_state_fetch_at:type_name -> google.protobuf.Timestamp
-	1067, // 899: forge.PowerOptions.tried_triggering_on_at:type_name -> google.protobuf.Timestamp
-	1067, // 900: forge.PowerOptions.wait_until_time_before_performing_next_power_action:type_name -> google.protobuf.Timestamp
-	763,  // 901: forge.PowerOptionResponse.response:type_name -> forge.PowerOptions
-	1099, // 902: forge.ComputeAllocation.id:type_name -> common.ComputeAllocationId
-	765,  // 903: forge.ComputeAllocation.attributes:type_name -> forge.ComputeAllocationAttributes
-	287,  // 904: forge.ComputeAllocation.metadata:type_name -> forge.Metadata
-	1099, // 905: forge.CreateComputeAllocationRequest.id:type_name -> common.ComputeAllocationId
-	287,  // 906: forge.CreateComputeAllocationRequest.metadata:type_name -> forge.Metadata
-	765,  // 907: forge.CreateComputeAllocationRequest.attributes:type_name -> forge.ComputeAllocationAttributes
-	766,  // 908: forge.CreateComputeAllocationResponse.allocation:type_name -> forge.ComputeAllocation
-	1099, // 909: forge.FindComputeAllocationIdsResponse.ids:type_name -> common.ComputeAllocationId
-	1099, // 910: forge.FindComputeAllocationsByIdsRequest.ids:type_name -> common.ComputeAllocationId
-	766,  // 911: forge.FindComputeAllocationsByIdsResponse.allocations:type_name -> forge.ComputeAllocation
-	766,  // 912: forge.UpdateComputeAllocationResponse.allocation:type_name -> forge.ComputeAllocation
-	1099, // 913: forge.UpdateComputeAllocationRequest.id:type_name -> common.ComputeAllocationId
-	287,  // 914: forge.UpdateComputeAllocationRequest.metadata:type_name -> forge.Metadata
-	765,  // 915: forge.UpdateComputeAllocationRequest.attributes:type_name -> forge.ComputeAllocationAttributes
-	1099, // 916: forge.DeleteComputeAllocationRequest.id:type_name -> common.ComputeAllocationId
-	784,  // 917: forge.GetRackResponse.rack:type_name -> forge.Rack
-	784,  // 918: forge.RackList.racks:type_name -> forge.Rack
-	286,  // 919: forge.RackSearchFilter.label:type_name -> forge.Label
-	1078, // 920: forge.RackIdList.rack_ids:type_name -> common.RackId
-	1078, // 921: forge.RacksByIdsRequest.rack_ids:type_name -> common.RackId
-	1078, // 922: forge.Rack.id:type_name -> common.RackId
-	1067, // 923: forge.Rack.created:type_name -> google.protobuf.Timestamp
-	1067, // 924: forge.Rack.updated:type_name -> google.protobuf.Timestamp
-	1067, // 925: forge.Rack.deleted:type_name -> google.protobuf.Timestamp
-	287,  // 926: forge.Rack.metadata:type_name -> forge.Metadata
-	785,  // 927: forge.Rack.config:type_name -> forge.RackConfig
-	786,  // 928: forge.Rack.status:type_name -> forge.RackStatus
-	1076, // 929: forge.RackStatus.health:type_name -> health.HealthReport
-	380,  // 930: forge.RackStatus.health_sources:type_name -> forge.HealthSourceOrigin
-	109,  // 931: forge.RackStatus.lifecycle:type_name -> forge.LifecycleStatus
-	1078, // 932: forge.RackStateHistoriesRequest.rack_ids:type_name -> common.RackId
-	1078, // 933: forge.RackHealthHistoriesRequest.rack_ids:type_name -> common.RackId
-	1067, // 934: forge.RackHealthHistoriesRequest.start_time:type_name -> google.protobuf.Timestamp
-	1067, // 935: forge.RackHealthHistoriesRequest.end_time:type_name -> google.protobuf.Timestamp
-	1078, // 936: forge.AdminForceDeleteRackRequest.rack_id:type_name -> common.RackId
-	792,  // 937: forge.RackCapabilitiesSet.compute:type_name -> forge.RackCapabilityCompute
-	793,  // 938: forge.RackCapabilitiesSet.switch:type_name -> forge.RackCapabilitySwitch
-	794,  // 939: forge.RackCapabilitiesSet.power_shelf:type_name -> forge.RackCapabilityPowerShelf
-	1100, // 940: forge.RackProfile.rack_hardware_type:type_name -> common.RackHardwareType
+	1072, // 896: forge.PowerOptions.actual_state_updated_at:type_name -> google.protobuf.Timestamp
+	1071, // 897: forge.PowerOptions.host_id:type_name -> common.MachineId
+	1072, // 898: forge.PowerOptions.next_power_state_fetch_at:type_name -> google.protobuf.Timestamp
+	1072, // 899: forge.PowerOptions.tried_triggering_on_at:type_name -> google.protobuf.Timestamp
+	1072, // 900: forge.PowerOptions.wait_until_time_before_performing_next_power_action:type_name -> google.protobuf.Timestamp
+	764,  // 901: forge.PowerOptionResponse.response:type_name -> forge.PowerOptions
+	1104, // 902: forge.ComputeAllocation.id:type_name -> common.ComputeAllocationId
+	766,  // 903: forge.ComputeAllocation.attributes:type_name -> forge.ComputeAllocationAttributes
+	288,  // 904: forge.ComputeAllocation.metadata:type_name -> forge.Metadata
+	1104, // 905: forge.CreateComputeAllocationRequest.id:type_name -> common.ComputeAllocationId
+	288,  // 906: forge.CreateComputeAllocationRequest.metadata:type_name -> forge.Metadata
+	766,  // 907: forge.CreateComputeAllocationRequest.attributes:type_name -> forge.ComputeAllocationAttributes
+	767,  // 908: forge.CreateComputeAllocationResponse.allocation:type_name -> forge.ComputeAllocation
+	1104, // 909: forge.FindComputeAllocationIdsResponse.ids:type_name -> common.ComputeAllocationId
+	1104, // 910: forge.FindComputeAllocationsByIdsRequest.ids:type_name -> common.ComputeAllocationId
+	767,  // 911: forge.FindComputeAllocationsByIdsResponse.allocations:type_name -> forge.ComputeAllocation
+	767,  // 912: forge.UpdateComputeAllocationResponse.allocation:type_name -> forge.ComputeAllocation
+	1104, // 913: forge.UpdateComputeAllocationRequest.id:type_name -> common.ComputeAllocationId
+	288,  // 914: forge.UpdateComputeAllocationRequest.metadata:type_name -> forge.Metadata
+	766,  // 915: forge.UpdateComputeAllocationRequest.attributes:type_name -> forge.ComputeAllocationAttributes
+	1104, // 916: forge.DeleteComputeAllocationRequest.id:type_name -> common.ComputeAllocationId
+	785,  // 917: forge.GetRackResponse.rack:type_name -> forge.Rack
+	785,  // 918: forge.RackList.racks:type_name -> forge.Rack
+	287,  // 919: forge.RackSearchFilter.label:type_name -> forge.Label
+	1083, // 920: forge.RackIdList.rack_ids:type_name -> common.RackId
+	1083, // 921: forge.RacksByIdsRequest.rack_ids:type_name -> common.RackId
+	1083, // 922: forge.Rack.id:type_name -> common.RackId
+	1072, // 923: forge.Rack.created:type_name -> google.protobuf.Timestamp
+	1072, // 924: forge.Rack.updated:type_name -> google.protobuf.Timestamp
+	1072, // 925: forge.Rack.deleted:type_name -> google.protobuf.Timestamp
+	288,  // 926: forge.Rack.metadata:type_name -> forge.Metadata
+	786,  // 927: forge.Rack.config:type_name -> forge.RackConfig
+	787,  // 928: forge.Rack.status:type_name -> forge.RackStatus
+	1081, // 929: forge.RackStatus.health:type_name -> health.HealthReport
+	381,  // 930: forge.RackStatus.health_sources:type_name -> forge.HealthSourceOrigin
+	110,  // 931: forge.RackStatus.lifecycle:type_name -> forge.LifecycleStatus
+	1083, // 932: forge.RackStateHistoriesRequest.rack_ids:type_name -> common.RackId
+	1083, // 933: forge.RackHealthHistoriesRequest.rack_ids:type_name -> common.RackId
+	1072, // 934: forge.RackHealthHistoriesRequest.start_time:type_name -> google.protobuf.Timestamp
+	1072, // 935: forge.RackHealthHistoriesRequest.end_time:type_name -> google.protobuf.Timestamp
+	1083, // 936: forge.AdminForceDeleteRackRequest.rack_id:type_name -> common.RackId
+	793,  // 937: forge.RackCapabilitiesSet.compute:type_name -> forge.RackCapabilityCompute
+	794,  // 938: forge.RackCapabilitiesSet.switch:type_name -> forge.RackCapabilitySwitch
+	795,  // 939: forge.RackCapabilitiesSet.power_shelf:type_name -> forge.RackCapabilityPowerShelf
+	1105, // 940: forge.RackProfile.rack_hardware_type:type_name -> common.RackHardwareType
 	67,   // 941: forge.RackProfile.rack_hardware_topology:type_name -> forge.RackHardwareTopology
 	69,   // 942: forge.RackProfile.rack_hardware_class:type_name -> forge.RackHardwareClass
-	795,  // 943: forge.RackProfile.capabilities:type_name -> forge.RackCapabilitiesSet
+	796,  // 943: forge.RackProfile.capabilities:type_name -> forge.RackCapabilitiesSet
 	68,   // 944: forge.RackProfile.product_family:type_name -> forge.RackProductFamily
-	1078, // 945: forge.GetRackProfileRequest.rack_id:type_name -> common.RackId
-	1078, // 946: forge.GetRackProfileResponse.rack_id:type_name -> common.RackId
-	1082, // 947: forge.GetRackProfileResponse.rack_profile_id:type_name -> common.RackProfileId
-	796,  // 948: forge.GetRackProfileResponse.profile:type_name -> forge.RackProfile
-	1082, // 949: forge.ConfiguredRackProfile.rack_profile_id:type_name -> common.RackProfileId
-	796,  // 950: forge.ConfiguredRackProfile.profile:type_name -> forge.RackProfile
-	799,  // 951: forge.ListRackProfilesResponse.rack_profiles:type_name -> forge.ConfiguredRackProfile
+	1083, // 945: forge.GetRackProfileRequest.rack_id:type_name -> common.RackId
+	1083, // 946: forge.GetRackProfileResponse.rack_id:type_name -> common.RackId
+	1087, // 947: forge.GetRackProfileResponse.rack_profile_id:type_name -> common.RackProfileId
+	797,  // 948: forge.GetRackProfileResponse.profile:type_name -> forge.RackProfile
+	1087, // 949: forge.ConfiguredRackProfile.rack_profile_id:type_name -> common.RackProfileId
+	797,  // 950: forge.ConfiguredRackProfile.profile:type_name -> forge.RackProfile
+	800,  // 951: forge.ListRackProfilesResponse.rack_profiles:type_name -> forge.ConfiguredRackProfile
 	70,   // 952: forge.RackManagerForgeRequest.cmd:type_name -> forge.RackManagerForgeCmd
-	1079, // 953: forge.MachineNVLinkInfo.domain_uuid:type_name -> common.NVLinkDomainId
-	812,  // 954: forge.MachineNVLinkInfo.gpus:type_name -> forge.NVLinkGpu
-	1066, // 955: forge.UpdateMachineNvLinkInfoRequest.machine_id:type_name -> common.MachineId
-	803,  // 956: forge.UpdateMachineNvLinkInfoRequest.nvlink_info:type_name -> forge.MachineNVLinkInfo
-	806,  // 957: forge.MachineSpxStatusObservation.attachment_status:type_name -> forge.MachineSpxAttachmentStatusObservation
-	1067, // 958: forge.MachineSpxStatusObservation.observed_at:type_name -> google.protobuf.Timestamp
-	1089, // 959: forge.MachineSpxAttachmentStatusObservation.partition_id:type_name -> common.SpxPartitionId
+	1084, // 953: forge.MachineNVLinkInfo.domain_uuid:type_name -> common.NVLinkDomainId
+	813,  // 954: forge.MachineNVLinkInfo.gpus:type_name -> forge.NVLinkGpu
+	1071, // 955: forge.UpdateMachineNvLinkInfoRequest.machine_id:type_name -> common.MachineId
+	804,  // 956: forge.UpdateMachineNvLinkInfoRequest.nvlink_info:type_name -> forge.MachineNVLinkInfo
+	807,  // 957: forge.MachineSpxStatusObservation.attachment_status:type_name -> forge.MachineSpxAttachmentStatusObservation
+	1072, // 958: forge.MachineSpxStatusObservation.observed_at:type_name -> google.protobuf.Timestamp
+	1094, // 959: forge.MachineSpxAttachmentStatusObservation.partition_id:type_name -> common.SpxPartitionId
 	17,   // 960: forge.MachineSpxAttachmentStatusObservation.attachment_type:type_name -> forge.SpxAttachmentType
-	1067, // 961: forge.MachineSpxAttachmentStatusObservation.observed_at:type_name -> google.protobuf.Timestamp
-	808,  // 962: forge.AstraConfig.astra_attachments:type_name -> forge.AstraAttachment
+	1072, // 961: forge.MachineSpxAttachmentStatusObservation.observed_at:type_name -> google.protobuf.Timestamp
+	809,  // 962: forge.AstraConfig.astra_attachments:type_name -> forge.AstraAttachment
 	17,   // 963: forge.AstraAttachment.attachment_type:type_name -> forge.SpxAttachmentType
-	810,  // 964: forge.AstraConfigStatus.astra_attachments_status:type_name -> forge.AstraAttachmentStatus
+	811,  // 964: forge.AstraConfigStatus.astra_attachments_status:type_name -> forge.AstraAttachmentStatus
 	17,   // 965: forge.AstraAttachmentStatus.attachment_type:type_name -> forge.SpxAttachmentType
-	811,  // 966: forge.AstraAttachmentStatus.status:type_name -> forge.AstraStatus
+	812,  // 966: forge.AstraAttachmentStatus.status:type_name -> forge.AstraStatus
 	71,   // 967: forge.AstraStatus.phase:type_name -> forge.AstraPhase
-	814,  // 968: forge.MachineNVLinkStatusObservation.gpu_status:type_name -> forge.MachineNVLinkGpuStatusObservation
-	1101, // 969: forge.MachineNVLinkGpuStatusObservation.partition_id:type_name -> common.NVLinkPartitionId
-	1071, // 970: forge.MachineNVLinkGpuStatusObservation.logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
-	1079, // 971: forge.MachineNVLinkGpuStatusObservation.domain_id:type_name -> common.NVLinkDomainId
+	815,  // 968: forge.MachineNVLinkStatusObservation.gpu_status:type_name -> forge.MachineNVLinkGpuStatusObservation
+	1106, // 969: forge.MachineNVLinkGpuStatusObservation.partition_id:type_name -> common.NVLinkPartitionId
+	1076, // 970: forge.MachineNVLinkGpuStatusObservation.logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
+	1084, // 971: forge.MachineNVLinkGpuStatusObservation.domain_id:type_name -> common.NVLinkDomainId
 	72,   // 972: forge.NmxcBrowseRequest.operation:type_name -> forge.NmxcBrowseOperation
-	1078, // 973: forge.NmxcBrowseRequest.rack_id:type_name -> common.RackId
-	1063, // 974: forge.NmxcBrowseResponse.headers:type_name -> forge.NmxcBrowseResponse.HeadersEntry
-	1101, // 975: forge.NVLinkPartition.id:type_name -> common.NVLinkPartitionId
-	1079, // 976: forge.NVLinkPartition.domain_uuid:type_name -> common.NVLinkDomainId
-	1071, // 977: forge.NVLinkPartition.logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
-	817,  // 978: forge.NVLinkPartitionList.partitions:type_name -> forge.NVLinkPartition
-	1080, // 979: forge.NVLinkPartitionQuery.id:type_name -> common.UUID
-	819,  // 980: forge.NVLinkPartitionQuery.search_config:type_name -> forge.NVLinkPartitionSearchConfig
-	1101, // 981: forge.NVLinkPartitionsByIdsRequest.partition_ids:type_name -> common.NVLinkPartitionId
-	1101, // 982: forge.NVLinkPartitionIdList.partition_ids:type_name -> common.NVLinkPartitionId
-	287,  // 983: forge.NVLinkLogicalPartitionConfig.metadata:type_name -> forge.Metadata
+	1083, // 973: forge.NmxcBrowseRequest.rack_id:type_name -> common.RackId
+	1068, // 974: forge.NmxcBrowseResponse.headers:type_name -> forge.NmxcBrowseResponse.HeadersEntry
+	1106, // 975: forge.NVLinkPartition.id:type_name -> common.NVLinkPartitionId
+	1084, // 976: forge.NVLinkPartition.domain_uuid:type_name -> common.NVLinkDomainId
+	1076, // 977: forge.NVLinkPartition.logical_partition_id:type_name -> common.NVLinkLogicalPartitionId
+	818,  // 978: forge.NVLinkPartitionList.partitions:type_name -> forge.NVLinkPartition
+	1085, // 979: forge.NVLinkPartitionQuery.id:type_name -> common.UUID
+	820,  // 980: forge.NVLinkPartitionQuery.search_config:type_name -> forge.NVLinkPartitionSearchConfig
+	1106, // 981: forge.NVLinkPartitionsByIdsRequest.partition_ids:type_name -> common.NVLinkPartitionId
+	1106, // 982: forge.NVLinkPartitionIdList.partition_ids:type_name -> common.NVLinkPartitionId
+	288,  // 983: forge.NVLinkLogicalPartitionConfig.metadata:type_name -> forge.Metadata
 	9,    // 984: forge.NVLinkLogicalPartitionStatus.state:type_name -> forge.TenantState
-	1071, // 985: forge.NVLinkLogicalPartition.id:type_name -> common.NVLinkLogicalPartitionId
-	825,  // 986: forge.NVLinkLogicalPartition.config:type_name -> forge.NVLinkLogicalPartitionConfig
-	826,  // 987: forge.NVLinkLogicalPartition.status:type_name -> forge.NVLinkLogicalPartitionStatus
-	1067, // 988: forge.NVLinkLogicalPartition.created:type_name -> google.protobuf.Timestamp
-	827,  // 989: forge.NVLinkLogicalPartitionList.partitions:type_name -> forge.NVLinkLogicalPartition
-	825,  // 990: forge.NVLinkLogicalPartitionCreationRequest.config:type_name -> forge.NVLinkLogicalPartitionConfig
-	1071, // 991: forge.NVLinkLogicalPartitionCreationRequest.id:type_name -> common.NVLinkLogicalPartitionId
-	1071, // 992: forge.NVLinkLogicalPartitionDeletionRequest.id:type_name -> common.NVLinkLogicalPartitionId
-	1071, // 993: forge.NVLinkLogicalPartitionsByIdsRequest.partition_ids:type_name -> common.NVLinkLogicalPartitionId
-	1071, // 994: forge.NVLinkLogicalPartitionIdList.partition_ids:type_name -> common.NVLinkLogicalPartitionId
-	1071, // 995: forge.NVLinkLogicalPartitionUpdateRequest.id:type_name -> common.NVLinkLogicalPartitionId
-	825,  // 996: forge.NVLinkLogicalPartitionUpdateRequest.config:type_name -> forge.NVLinkLogicalPartitionConfig
-	407,  // 997: forge.CreateBmcUserRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	407,  // 998: forge.DeleteBmcUserRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	407,  // 999: forge.SetBmcRootPasswordRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	407,  // 1000: forge.ProbeBmcVendorRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
-	1066, // 1001: forge.SetFirmwareUpdateTimeWindowRequest.machine_ids:type_name -> common.MachineId
-	1067, // 1002: forge.SetFirmwareUpdateTimeWindowRequest.start_timestamp:type_name -> google.protobuf.Timestamp
-	1067, // 1003: forge.SetFirmwareUpdateTimeWindowRequest.end_timestamp:type_name -> google.protobuf.Timestamp
-	849,  // 1004: forge.UpsertHostFirmwareConfigRequest.components:type_name -> forge.UpsertHostFirmwareComponentConfig
+	1076, // 985: forge.NVLinkLogicalPartition.id:type_name -> common.NVLinkLogicalPartitionId
+	826,  // 986: forge.NVLinkLogicalPartition.config:type_name -> forge.NVLinkLogicalPartitionConfig
+	827,  // 987: forge.NVLinkLogicalPartition.status:type_name -> forge.NVLinkLogicalPartitionStatus
+	1072, // 988: forge.NVLinkLogicalPartition.created:type_name -> google.protobuf.Timestamp
+	828,  // 989: forge.NVLinkLogicalPartitionList.partitions:type_name -> forge.NVLinkLogicalPartition
+	826,  // 990: forge.NVLinkLogicalPartitionCreationRequest.config:type_name -> forge.NVLinkLogicalPartitionConfig
+	1076, // 991: forge.NVLinkLogicalPartitionCreationRequest.id:type_name -> common.NVLinkLogicalPartitionId
+	1076, // 992: forge.NVLinkLogicalPartitionDeletionRequest.id:type_name -> common.NVLinkLogicalPartitionId
+	1076, // 993: forge.NVLinkLogicalPartitionsByIdsRequest.partition_ids:type_name -> common.NVLinkLogicalPartitionId
+	1076, // 994: forge.NVLinkLogicalPartitionIdList.partition_ids:type_name -> common.NVLinkLogicalPartitionId
+	1076, // 995: forge.NVLinkLogicalPartitionUpdateRequest.id:type_name -> common.NVLinkLogicalPartitionId
+	826,  // 996: forge.NVLinkLogicalPartitionUpdateRequest.config:type_name -> forge.NVLinkLogicalPartitionConfig
+	408,  // 997: forge.CreateBmcUserRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	408,  // 998: forge.DeleteBmcUserRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	408,  // 999: forge.SetBmcRootPasswordRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	408,  // 1000: forge.ProbeBmcVendorRequest.bmc_endpoint_request:type_name -> forge.BmcEndpointRequest
+	1071, // 1001: forge.SetFirmwareUpdateTimeWindowRequest.machine_ids:type_name -> common.MachineId
+	1072, // 1002: forge.SetFirmwareUpdateTimeWindowRequest.start_timestamp:type_name -> google.protobuf.Timestamp
+	1072, // 1003: forge.SetFirmwareUpdateTimeWindowRequest.end_timestamp:type_name -> google.protobuf.Timestamp
+	850,  // 1004: forge.UpsertHostFirmwareConfigRequest.components:type_name -> forge.UpsertHostFirmwareComponentConfig
 	73,   // 1005: forge.UpsertHostFirmwareConfigRequest.ordering:type_name -> forge.HostFirmwareComponentType
 	73,   // 1006: forge.UpsertHostFirmwareComponentConfig.type:type_name -> forge.HostFirmwareComponentType
-	851,  // 1007: forge.UpsertHostFirmwareComponentConfig.firmware:type_name -> forge.HostFirmwareVersionConfig
+	852,  // 1007: forge.UpsertHostFirmwareComponentConfig.firmware:type_name -> forge.HostFirmwareVersionConfig
 	73,   // 1008: forge.HostFirmwareComponentConfigResponse.type:type_name -> forge.HostFirmwareComponentType
-	851,  // 1009: forge.HostFirmwareComponentConfigResponse.firmware:type_name -> forge.HostFirmwareVersionConfig
-	852,  // 1010: forge.HostFirmwareVersionConfig.artifacts:type_name -> forge.HostFirmwareArtifact
-	850,  // 1011: forge.HostFirmwareConfigResponse.components:type_name -> forge.HostFirmwareComponentConfigResponse
+	852,  // 1009: forge.HostFirmwareComponentConfigResponse.firmware:type_name -> forge.HostFirmwareVersionConfig
+	853,  // 1010: forge.HostFirmwareVersionConfig.artifacts:type_name -> forge.HostFirmwareArtifact
+	851,  // 1011: forge.HostFirmwareConfigResponse.components:type_name -> forge.HostFirmwareComponentConfigResponse
 	73,   // 1012: forge.HostFirmwareConfigResponse.ordering:type_name -> forge.HostFirmwareComponentType
-	1067, // 1013: forge.HostFirmwareConfigResponse.created_at:type_name -> google.protobuf.Timestamp
-	1067, // 1014: forge.HostFirmwareConfigResponse.updated_at:type_name -> google.protobuf.Timestamp
-	856,  // 1015: forge.ListHostFirmwareResponse.available:type_name -> forge.AvailableHostFirmware
+	1072, // 1013: forge.HostFirmwareConfigResponse.created_at:type_name -> google.protobuf.Timestamp
+	1072, // 1014: forge.HostFirmwareConfigResponse.updated_at:type_name -> google.protobuf.Timestamp
+	857,  // 1015: forge.ListHostFirmwareResponse.available:type_name -> forge.AvailableHostFirmware
 	74,   // 1016: forge.TrimTableRequest.target:type_name -> forge.TrimTableTarget
-	859,  // 1017: forge.NvlinkNmxcEndpointList.entries:type_name -> forge.NvlinkNmxcEndpoint
-	287,  // 1018: forge.CreateRemediationRequest.metadata:type_name -> forge.Metadata
-	1102, // 1019: forge.CreateRemediationResponse.remediation_id:type_name -> common.RemediationId
-	1102, // 1020: forge.RemediationIdList.remediation_ids:type_name -> common.RemediationId
-	866,  // 1021: forge.RemediationList.remediations:type_name -> forge.Remediation
-	1102, // 1022: forge.Remediation.id:type_name -> common.RemediationId
-	287,  // 1023: forge.Remediation.metadata:type_name -> forge.Metadata
-	1067, // 1024: forge.Remediation.creation_time:type_name -> google.protobuf.Timestamp
-	1102, // 1025: forge.ApproveRemediationRequest.remediation_id:type_name -> common.RemediationId
-	1102, // 1026: forge.RevokeRemediationRequest.remediation_id:type_name -> common.RemediationId
-	1102, // 1027: forge.EnableRemediationRequest.remediation_id:type_name -> common.RemediationId
-	1102, // 1028: forge.DisableRemediationRequest.remediation_id:type_name -> common.RemediationId
-	1102, // 1029: forge.FindAppliedRemediationIdsRequest.remediation_id:type_name -> common.RemediationId
-	1066, // 1030: forge.FindAppliedRemediationIdsRequest.dpu_machine_id:type_name -> common.MachineId
-	1102, // 1031: forge.AppliedRemediationIdList.remediation_ids:type_name -> common.RemediationId
-	1066, // 1032: forge.AppliedRemediationIdList.dpu_machine_ids:type_name -> common.MachineId
-	1102, // 1033: forge.FindAppliedRemediationsRequest.remediation_id:type_name -> common.RemediationId
-	1066, // 1034: forge.FindAppliedRemediationsRequest.dpu_machine_id:type_name -> common.MachineId
-	1102, // 1035: forge.AppliedRemediation.remediation_id:type_name -> common.RemediationId
-	1066, // 1036: forge.AppliedRemediation.dpu_machine_id:type_name -> common.MachineId
-	1067, // 1037: forge.AppliedRemediation.applied_time:type_name -> google.protobuf.Timestamp
-	287,  // 1038: forge.AppliedRemediation.metadata:type_name -> forge.Metadata
-	874,  // 1039: forge.AppliedRemediationList.applied_remediations:type_name -> forge.AppliedRemediation
-	1066, // 1040: forge.GetNextRemediationForMachineRequest.dpu_machine_id:type_name -> common.MachineId
-	1102, // 1041: forge.GetNextRemediationForMachineResponse.remediation_id:type_name -> common.RemediationId
-	1102, // 1042: forge.RemediationAppliedRequest.remediation_id:type_name -> common.RemediationId
-	1066, // 1043: forge.RemediationAppliedRequest.dpu_machine_id:type_name -> common.MachineId
-	879,  // 1044: forge.RemediationAppliedRequest.status:type_name -> forge.RemediationApplicationStatus
-	287,  // 1045: forge.RemediationApplicationStatus.metadata:type_name -> forge.Metadata
-	1066, // 1046: forge.SetPrimaryDpuRequest.host_machine_id:type_name -> common.MachineId
-	1066, // 1047: forge.SetPrimaryDpuRequest.dpu_machine_id:type_name -> common.MachineId
-	1066, // 1048: forge.SetPrimaryInterfaceRequest.host_machine_id:type_name -> common.MachineId
-	1090, // 1049: forge.SetPrimaryInterfaceRequest.interface_id:type_name -> common.MachineInterfaceId
-	882,  // 1050: forge.DpuExtensionServiceCredential.username_password:type_name -> forge.UsernamePassword
-	903,  // 1051: forge.DpuExtensionServiceVersionInfo.observability:type_name -> forge.DpuExtensionServiceObservability
-	75,   // 1052: forge.DpuExtensionService.service_type:type_name -> forge.DpuExtensionServiceType
-	885,  // 1053: forge.DpuExtensionService.latest_version_info:type_name -> forge.DpuExtensionServiceVersionInfo
-	109,  // 1054: forge.DpuExtensionService.lifecycle_status:type_name -> forge.LifecycleStatus
-	75,   // 1055: forge.CreateDpuExtensionServiceRequest.service_type:type_name -> forge.DpuExtensionServiceType
-	884,  // 1056: forge.CreateDpuExtensionServiceRequest.credential:type_name -> forge.DpuExtensionServiceCredential
-	903,  // 1057: forge.CreateDpuExtensionServiceRequest.observability:type_name -> forge.DpuExtensionServiceObservability
-	884,  // 1058: forge.UpdateDpuExtensionServiceRequest.credential:type_name -> forge.DpuExtensionServiceCredential
-	903,  // 1059: forge.UpdateDpuExtensionServiceRequest.observability:type_name -> forge.DpuExtensionServiceObservability
-	75,   // 1060: forge.DpuExtensionServiceSearchFilter.service_type:type_name -> forge.DpuExtensionServiceType
-	886,  // 1061: forge.DpuExtensionServiceList.services:type_name -> forge.DpuExtensionService
-	885,  // 1062: forge.DpuExtensionServiceVersionInfoList.version_infos:type_name -> forge.DpuExtensionServiceVersionInfo
-	899,  // 1063: forge.FindInstancesByDpuExtensionServiceResponse.instances:type_name -> forge.InstanceDpuExtensionServiceInfo
-	900,  // 1064: forge.DpuExtensionServiceObservabilityConfig.prometheus:type_name -> forge.DpuExtensionServiceObservabilityConfigPrometheus
-	901,  // 1065: forge.DpuExtensionServiceObservabilityConfig.logging:type_name -> forge.DpuExtensionServiceObservabilityConfigLogging
-	902,  // 1066: forge.DpuExtensionServiceObservability.configs:type_name -> forge.DpuExtensionServiceObservabilityConfig
-	1080, // 1067: forge.ScoutStreamApiBoundMessage.flow_uuid:type_name -> common.UUID
-	906,  // 1068: forge.ScoutStreamApiBoundMessage.init:type_name -> forge.ScoutStreamInitRequest
-	1103, // 1069: forge.ScoutStreamApiBoundMessage.mlx_device_lockdown_response:type_name -> mlx_device.MlxDeviceLockdownResponse
-	1104, // 1070: forge.ScoutStreamApiBoundMessage.mlx_device_profile_sync_response:type_name -> mlx_device.MlxDeviceProfileSyncResponse
-	1105, // 1071: forge.ScoutStreamApiBoundMessage.mlx_device_profile_compare_response:type_name -> mlx_device.MlxDeviceProfileCompareResponse
-	1106, // 1072: forge.ScoutStreamApiBoundMessage.mlx_device_info_device_response:type_name -> mlx_device.MlxDeviceInfoDeviceResponse
-	1107, // 1073: forge.ScoutStreamApiBoundMessage.mlx_device_info_report_response:type_name -> mlx_device.MlxDeviceInfoReportResponse
-	1108, // 1074: forge.ScoutStreamApiBoundMessage.mlx_device_registry_list_response:type_name -> mlx_device.MlxDeviceRegistryListResponse
-	1109, // 1075: forge.ScoutStreamApiBoundMessage.mlx_device_registry_show_response:type_name -> mlx_device.MlxDeviceRegistryShowResponse
-	1110, // 1076: forge.ScoutStreamApiBoundMessage.mlx_device_config_query_response:type_name -> mlx_device.MlxDeviceConfigQueryResponse
-	1111, // 1077: forge.ScoutStreamApiBoundMessage.mlx_device_config_set_response:type_name -> mlx_device.MlxDeviceConfigSetResponse
-	1112, // 1078: forge.ScoutStreamApiBoundMessage.mlx_device_config_sync_response:type_name -> mlx_device.MlxDeviceConfigSyncResponse
-	1113, // 1079: forge.ScoutStreamApiBoundMessage.mlx_device_config_compare_response:type_name -> mlx_device.MlxDeviceConfigCompareResponse
-	914,  // 1080: forge.ScoutStreamApiBoundMessage.scout_stream_agent_ping_response:type_name -> forge.ScoutStreamAgentPingResponse
-	1080, // 1081: forge.ScoutStreamScoutBoundMessage.flow_uuid:type_name -> common.UUID
-	1114, // 1082: forge.ScoutStreamScoutBoundMessage.mlx_device_lockdown_lock_request:type_name -> mlx_device.MlxDeviceLockdownLockRequest
-	1115, // 1083: forge.ScoutStreamScoutBoundMessage.mlx_device_lockdown_unlock_request:type_name -> mlx_device.MlxDeviceLockdownUnlockRequest
-	1116, // 1084: forge.ScoutStreamScoutBoundMessage.mlx_device_lockdown_status_request:type_name -> mlx_device.MlxDeviceLockdownStatusRequest
-	1117, // 1085: forge.ScoutStreamScoutBoundMessage.mlx_device_profile_sync_request:type_name -> mlx_device.MlxDeviceProfileSyncRequest
-	1118, // 1086: forge.ScoutStreamScoutBoundMessage.mlx_device_profile_compare_request:type_name -> mlx_device.MlxDeviceProfileCompareRequest
-	1119, // 1087: forge.ScoutStreamScoutBoundMessage.mlx_device_info_device_request:type_name -> mlx_device.MlxDeviceInfoDeviceRequest
-	1120, // 1088: forge.ScoutStreamScoutBoundMessage.mlx_device_info_report_request:type_name -> mlx_device.MlxDeviceInfoReportRequest
-	1121, // 1089: forge.ScoutStreamScoutBoundMessage.mlx_device_registry_list_request:type_name -> mlx_device.MlxDeviceRegistryListRequest
-	1122, // 1090: forge.ScoutStreamScoutBoundMessage.mlx_device_registry_show_request:type_name -> mlx_device.MlxDeviceRegistryShowRequest
-	1123, // 1091: forge.ScoutStreamScoutBoundMessage.mlx_device_config_query_request:type_name -> mlx_device.MlxDeviceConfigQueryRequest
-	1124, // 1092: forge.ScoutStreamScoutBoundMessage.mlx_device_config_set_request:type_name -> mlx_device.MlxDeviceConfigSetRequest
-	1125, // 1093: forge.ScoutStreamScoutBoundMessage.mlx_device_config_sync_request:type_name -> mlx_device.MlxDeviceConfigSyncRequest
-	1126, // 1094: forge.ScoutStreamScoutBoundMessage.mlx_device_config_compare_request:type_name -> mlx_device.MlxDeviceConfigCompareRequest
-	913,  // 1095: forge.ScoutStreamScoutBoundMessage.scout_stream_agent_ping_request:type_name -> forge.ScoutStreamAgentPingRequest
-	1066, // 1096: forge.ScoutStreamInitRequest.machine_id:type_name -> common.MachineId
-	915,  // 1097: forge.ScoutStreamShowConnectionsResponse.scout_stream_connections:type_name -> forge.ScoutStreamConnectionInfo
-	1066, // 1098: forge.ScoutStreamDisconnectRequest.machine_id:type_name -> common.MachineId
-	1066, // 1099: forge.ScoutStreamDisconnectResponse.machine_id:type_name -> common.MachineId
-	1066, // 1100: forge.ScoutStreamAdminPingRequest.machine_id:type_name -> common.MachineId
-	916,  // 1101: forge.ScoutStreamAgentPingResponse.error:type_name -> forge.ScoutStreamError
-	1066, // 1102: forge.ScoutStreamConnectionInfo.machine_id:type_name -> common.MachineId
-	78,   // 1103: forge.ScoutStreamError.status:type_name -> forge.ScoutStreamErrorStatus
-	1070, // 1104: forge.RoutingProfile.route_target_imports:type_name -> common.RouteTarget
-	1070, // 1105: forge.RoutingProfile.route_targets_on_exports:type_name -> common.RouteTarget
-	917,  // 1106: forge.RoutingProfile.accepted_leaks_from_underlay:type_name -> forge.PrefixFilterPolicyEntry
-	917,  // 1107: forge.RoutingProfile.allowed_anycast_prefixes:type_name -> forge.PrefixFilterPolicyEntry
-	1083, // 1108: forge.DomainLegacy.id:type_name -> common.DomainId
-	1067, // 1109: forge.DomainLegacy.created:type_name -> google.protobuf.Timestamp
-	1067, // 1110: forge.DomainLegacy.updated:type_name -> google.protobuf.Timestamp
-	1067, // 1111: forge.DomainLegacy.deleted:type_name -> google.protobuf.Timestamp
-	919,  // 1112: forge.DomainListLegacy.domains:type_name -> forge.DomainLegacy
-	1083, // 1113: forge.DomainDeletionLegacy.id:type_name -> common.DomainId
-	1083, // 1114: forge.DomainSearchQueryLegacy.id:type_name -> common.DomainId
-	1127, // 1115: forge.PxeDomain.new_domain:type_name -> dns.Domain
-	919,  // 1116: forge.PxeDomain.legacy_domain:type_name -> forge.DomainLegacy
-	1066, // 1117: forge.MachinePositionQuery.machine_ids:type_name -> common.MachineId
-	927,  // 1118: forge.MachinePositionInfoList.machine_position_info:type_name -> forge.MachinePositionInfo
-	1066, // 1119: forge.MachinePositionInfo.machine_id:type_name -> common.MachineId
-	1081, // 1120: forge.MachinePositionInfo.switch_id:type_name -> common.SwitchId
-	1077, // 1121: forge.MachinePositionInfo.power_shelf_id:type_name -> common.PowerShelfId
-	1066, // 1122: forge.ModifyDPFStateRequest.machine_id:type_name -> common.MachineId
-	1064, // 1123: forge.DPFStateResponse.dpf_states:type_name -> forge.DPFStateResponse.DPFState
-	1066, // 1124: forge.GetDPFStateRequest.machine_ids:type_name -> common.MachineId
-	1066, // 1125: forge.GetDPFHostSnapshotRequest.host_machine_id:type_name -> common.MachineId
-	934,  // 1126: forge.DPFServiceVersionsResponse.services:type_name -> forge.DPFServiceVersion
-	1128, // 1127: forge.ReleaseDPUServiceSyncHoldRequest.machine_ids:type_name -> common.MachineIdList
-	289,  // 1128: forge.ReleaseDPUServiceSyncHoldRequest.instance_ids:type_name -> forge.InstanceIdList
-	1066, // 1129: forge.DPUServiceSyncReleaseResult.machine_id:type_name -> common.MachineId
-	79,   // 1130: forge.DPUServiceSyncReleaseResult.status:type_name -> forge.DPUServiceSyncReleaseStatus
-	937,  // 1131: forge.ReleaseDPUServiceSyncHoldResponse.results:type_name -> forge.DPUServiceSyncReleaseResult
-	1066, // 1132: forge.FindPendingDPUServiceSyncsByIdsRequest.machine_ids:type_name -> common.MachineId
-	1066, // 1133: forge.ListDPUServiceSyncHistoryRequest.machine_id:type_name -> common.MachineId
-	1066, // 1134: forge.PendingDPUServiceSync.machine_id:type_name -> common.MachineId
-	1067, // 1135: forge.PendingDPUServiceSync.requested_at:type_name -> google.protobuf.Timestamp
-	1086, // 1136: forge.PendingDPUServiceSync.instance_id:type_name -> common.InstanceId
-	1067, // 1137: forge.PendingDPUServiceSync.completed_at:type_name -> google.protobuf.Timestamp
-	49,   // 1138: forge.PendingDPUServiceSync.completed_by:type_name -> forge.UpdateInitiator
-	942,  // 1139: forge.ListPendingDPUServiceSyncsResponse.pending:type_name -> forge.PendingDPUServiceSync
-	80,   // 1140: forge.ComponentResult.status:type_name -> forge.ComponentManagerStatusCode
-	1081, // 1141: forge.SwitchIdList.ids:type_name -> common.SwitchId
-	1077, // 1142: forge.PowerShelfIdList.ids:type_name -> common.PowerShelfId
-	1128, // 1143: forge.GetComponentInventoryRequest.machine_ids:type_name -> common.MachineIdList
-	945,  // 1144: forge.GetComponentInventoryRequest.switch_ids:type_name -> forge.SwitchIdList
-	946,  // 1145: forge.GetComponentInventoryRequest.power_shelf_ids:type_name -> forge.PowerShelfIdList
-	947,  // 1146: forge.GetComponentInventoryRequest.compute_bmc_macs:type_name -> forge.MacAddressList
-	947,  // 1147: forge.GetComponentInventoryRequest.switch_bmc_macs:type_name -> forge.MacAddressList
-	947,  // 1148: forge.GetComponentInventoryRequest.power_shelf_pmc_macs:type_name -> forge.MacAddressList
-	944,  // 1149: forge.ComponentInventoryEntry.result:type_name -> forge.ComponentResult
-	1129, // 1150: forge.ComponentInventoryEntry.report:type_name -> site_explorer.EndpointExplorationReport
-	949,  // 1151: forge.GetComponentInventoryResponse.entries:type_name -> forge.ComponentInventoryEntry
-	1128, // 1152: forge.ComponentPowerControlRequest.machine_ids:type_name -> common.MachineIdList
-	945,  // 1153: forge.ComponentPowerControlRequest.switch_ids:type_name -> forge.SwitchIdList
-	946,  // 1154: forge.ComponentPowerControlRequest.power_shelf_ids:type_name -> forge.PowerShelfIdList
-	947,  // 1155: forge.ComponentPowerControlRequest.compute_bmc_macs:type_name -> forge.MacAddressList
-	947,  // 1156: forge.ComponentPowerControlRequest.switch_bmc_macs:type_name -> forge.MacAddressList
-	947,  // 1157: forge.ComponentPowerControlRequest.power_shelf_pmc_macs:type_name -> forge.MacAddressList
-	1130, // 1158: forge.ComponentPowerControlRequest.action:type_name -> common.SystemPowerControl
-	944,  // 1159: forge.ComponentPowerControlResponse.results:type_name -> forge.ComponentResult
-	945,  // 1160: forge.ComponentConfigureSwitchCertificateRequest.switch_ids:type_name -> forge.SwitchIdList
-	944,  // 1161: forge.ComponentConfigureSwitchCertificateResponse.results:type_name -> forge.ComponentResult
-	944,  // 1162: forge.FirmwareUpdateStatus.result:type_name -> forge.ComponentResult
-	81,   // 1163: forge.FirmwareUpdateStatus.state:type_name -> forge.FirmwareUpdateState
-	1067, // 1164: forge.FirmwareUpdateStatus.updated_at:type_name -> google.protobuf.Timestamp
-	1128, // 1165: forge.UpdateComputeTrayFirmwareTarget.machine_ids:type_name -> common.MachineIdList
-	84,   // 1166: forge.UpdateComputeTrayFirmwareTarget.components:type_name -> forge.ComputeTrayComponent
-	947,  // 1167: forge.UpdateComputeTrayFirmwareTarget.bmc_macs:type_name -> forge.MacAddressList
-	945,  // 1168: forge.UpdateSwitchFirmwareTarget.switch_ids:type_name -> forge.SwitchIdList
-	82,   // 1169: forge.UpdateSwitchFirmwareTarget.components:type_name -> forge.NvSwitchComponent
-	947,  // 1170: forge.UpdateSwitchFirmwareTarget.bmc_macs:type_name -> forge.MacAddressList
-	946,  // 1171: forge.UpdatePowerShelfFirmwareTarget.power_shelf_ids:type_name -> forge.PowerShelfIdList
-	83,   // 1172: forge.UpdatePowerShelfFirmwareTarget.components:type_name -> forge.PowerShelfComponent
-	947,  // 1173: forge.UpdatePowerShelfFirmwareTarget.pmc_macs:type_name -> forge.MacAddressList
-	782,  // 1174: forge.UpdateFirmwareObjectTarget.rack_ids:type_name -> forge.RackIdList
-	956,  // 1175: forge.UpdateComponentFirmwareRequest.compute_trays:type_name -> forge.UpdateComputeTrayFirmwareTarget
-	957,  // 1176: forge.UpdateComponentFirmwareRequest.switches:type_name -> forge.UpdateSwitchFirmwareTarget
-	958,  // 1177: forge.UpdateComponentFirmwareRequest.power_shelves:type_name -> forge.UpdatePowerShelfFirmwareTarget
-	959,  // 1178: forge.UpdateComponentFirmwareRequest.racks:type_name -> forge.UpdateFirmwareObjectTarget
-	944,  // 1179: forge.UpdateComponentFirmwareResponse.results:type_name -> forge.ComponentResult
-	1128, // 1180: forge.GetComponentFirmwareStatusRequest.machine_ids:type_name -> common.MachineIdList
-	945,  // 1181: forge.GetComponentFirmwareStatusRequest.switch_ids:type_name -> forge.SwitchIdList
-	946,  // 1182: forge.GetComponentFirmwareStatusRequest.power_shelf_ids:type_name -> forge.PowerShelfIdList
-	782,  // 1183: forge.GetComponentFirmwareStatusRequest.rack_ids:type_name -> forge.RackIdList
-	947,  // 1184: forge.GetComponentFirmwareStatusRequest.compute_bmc_macs:type_name -> forge.MacAddressList
-	947,  // 1185: forge.GetComponentFirmwareStatusRequest.switch_bmc_macs:type_name -> forge.MacAddressList
-	947,  // 1186: forge.GetComponentFirmwareStatusRequest.power_shelf_pmc_macs:type_name -> forge.MacAddressList
-	955,  // 1187: forge.GetComponentFirmwareStatusResponse.statuses:type_name -> forge.FirmwareUpdateStatus
-	1128, // 1188: forge.ListComponentFirmwareVersionsRequest.machine_ids:type_name -> common.MachineIdList
-	945,  // 1189: forge.ListComponentFirmwareVersionsRequest.switch_ids:type_name -> forge.SwitchIdList
-	946,  // 1190: forge.ListComponentFirmwareVersionsRequest.power_shelf_ids:type_name -> forge.PowerShelfIdList
-	782,  // 1191: forge.ListComponentFirmwareVersionsRequest.rack_ids:type_name -> forge.RackIdList
-	947,  // 1192: forge.ListComponentFirmwareVersionsRequest.compute_bmc_macs:type_name -> forge.MacAddressList
-	947,  // 1193: forge.ListComponentFirmwareVersionsRequest.switch_bmc_macs:type_name -> forge.MacAddressList
-	947,  // 1194: forge.ListComponentFirmwareVersionsRequest.power_shelf_pmc_macs:type_name -> forge.MacAddressList
-	84,   // 1195: forge.ComputeTrayFirmwareVersions.component:type_name -> forge.ComputeTrayComponent
-	944,  // 1196: forge.DeviceFirmwareVersions.result:type_name -> forge.ComponentResult
-	965,  // 1197: forge.DeviceFirmwareVersions.compute_fw_versions:type_name -> forge.ComputeTrayFirmwareVersions
-	966,  // 1198: forge.ListComponentFirmwareVersionsResponse.devices:type_name -> forge.DeviceFirmwareVersions
-	287,  // 1199: forge.SpxPartitionCreationRequest.metadata:type_name -> forge.Metadata
-	1089, // 1200: forge.SpxPartitionCreationRequest.id:type_name -> common.SpxPartitionId
-	287,  // 1201: forge.SpxPartition.metadata:type_name -> forge.Metadata
-	1089, // 1202: forge.SpxPartition.id:type_name -> common.SpxPartitionId
-	1089, // 1203: forge.SpxPartitionIdList.spx_partition_ids:type_name -> common.SpxPartitionId
-	1089, // 1204: forge.SpxPartitionDeletionRequest.id:type_name -> common.SpxPartitionId
-	286,  // 1205: forge.SpxPartitionSearchFilter.label:type_name -> forge.Label
-	969,  // 1206: forge.SpxPartitionList.spx_partitions:type_name -> forge.SpxPartition
-	1089, // 1207: forge.SpxPartitionsByIdsRequest.spx_partition_ids:type_name -> common.SpxPartitionId
-	1081, // 1208: forge.AdminForceDeleteSwitchRequest.switch_id:type_name -> common.SwitchId
-	1077, // 1209: forge.AdminForceDeletePowerShelfRequest.power_shelf_id:type_name -> common.PowerShelfId
-	1088, // 1210: forge.OperatingSystem.id:type_name -> common.OperatingSystemId
-	85,   // 1211: forge.OperatingSystem.type:type_name -> forge.OperatingSystemType
-	9,    // 1212: forge.OperatingSystem.status:type_name -> forge.TenantState
-	1087, // 1213: forge.OperatingSystem.ipxe_template_id:type_name -> common.IpxeTemplateId
-	294,  // 1214: forge.OperatingSystem.ipxe_template_parameters:type_name -> forge.IpxeTemplateParameter
-	295,  // 1215: forge.OperatingSystem.ipxe_template_artifacts:type_name -> forge.IpxeTemplateArtifact
-	1088, // 1216: forge.CreateOperatingSystemRequest.id:type_name -> common.OperatingSystemId
-	1087, // 1217: forge.CreateOperatingSystemRequest.ipxe_template_id:type_name -> common.IpxeTemplateId
-	294,  // 1218: forge.CreateOperatingSystemRequest.ipxe_template_parameters:type_name -> forge.IpxeTemplateParameter
-	295,  // 1219: forge.CreateOperatingSystemRequest.ipxe_template_artifacts:type_name -> forge.IpxeTemplateArtifact
-	294,  // 1220: forge.IpxeTemplateParameters.items:type_name -> forge.IpxeTemplateParameter
-	295,  // 1221: forge.IpxeTemplateArtifacts.items:type_name -> forge.IpxeTemplateArtifact
-	1088, // 1222: forge.UpdateOperatingSystemRequest.id:type_name -> common.OperatingSystemId
-	1087, // 1223: forge.UpdateOperatingSystemRequest.ipxe_template_id:type_name -> common.IpxeTemplateId
-	982,  // 1224: forge.UpdateOperatingSystemRequest.ipxe_template_parameters:type_name -> forge.IpxeTemplateParameters
-	983,  // 1225: forge.UpdateOperatingSystemRequest.ipxe_template_artifacts:type_name -> forge.IpxeTemplateArtifacts
-	1088, // 1226: forge.DeleteOperatingSystemRequest.id:type_name -> common.OperatingSystemId
-	1088, // 1227: forge.OperatingSystemIdList.ids:type_name -> common.OperatingSystemId
-	1088, // 1228: forge.OperatingSystemsByIdsRequest.ids:type_name -> common.OperatingSystemId
-	980,  // 1229: forge.OperatingSystemList.operating_systems:type_name -> forge.OperatingSystem
-	1088, // 1230: forge.GetOperatingSystemCachableIpxeTemplateArtifactsRequest.id:type_name -> common.OperatingSystemId
-	295,  // 1231: forge.IpxeTemplateArtifactList.artifacts:type_name -> forge.IpxeTemplateArtifact
-	1088, // 1232: forge.UpdateOperatingSystemIpxeTemplateArtifactRequest.id:type_name -> common.OperatingSystemId
-	993,  // 1233: forge.UpdateOperatingSystemIpxeTemplateArtifactRequest.updates:type_name -> forge.IpxeTemplateArtifactUpdateRequest
-	1066, // 1234: forge.GetMachineBootInterfacesRequest.machine_id:type_name -> common.MachineId
-	1090, // 1235: forge.MachineInterfaceBootInterface.interface_id:type_name -> common.MachineInterfaceId
-	1067, // 1236: forge.RetainedBootInterface.recorded_at:type_name -> google.protobuf.Timestamp
-	1066, // 1237: forge.GetMachineBootInterfacesResponse.machine_id:type_name -> common.MachineId
-	999,  // 1238: forge.GetMachineBootInterfacesResponse.machine_interfaces:type_name -> forge.MachineInterfaceBootInterface
-	1000, // 1239: forge.GetMachineBootInterfacesResponse.predicted_interfaces:type_name -> forge.PredictedBootInterface
-	1001, // 1240: forge.GetMachineBootInterfacesResponse.explored_endpoints:type_name -> forge.ExploredBootInterface
-	1002, // 1241: forge.GetMachineBootInterfacesResponse.retained_interfaces:type_name -> forge.RetainedBootInterface
-	998,  // 1242: forge.GetMachineBootInterfacesResponse.default_boot_interface:type_name -> forge.MachineBootInterface
-	998,  // 1243: forge.GetMachineBootInterfacesResponse.predicted_boot_interface:type_name -> forge.MachineBootInterface
-	1065, // 1244: forge.GetMachineBootInterfacesResponse.reconciliation:type_name -> forge.GetMachineBootInterfacesResponse.Reconciliation
-	1073, // 1245: forge.SitePrefix.id:type_name -> common.SitePrefixId
-	1008, // 1246: forge.SitePrefix.config:type_name -> forge.SitePrefixConfig
-	1009, // 1247: forge.SitePrefix.status:type_name -> forge.SitePrefixStatus
-	287,  // 1248: forge.SitePrefix.metadata:type_name -> forge.Metadata
-	1067, // 1249: forge.SitePrefix.created_at:type_name -> google.protobuf.Timestamp
-	1067, // 1250: forge.SitePrefix.updated_at:type_name -> google.protobuf.Timestamp
-	90,   // 1251: forge.SitePrefixConfig.routing_scope:type_name -> forge.SitePrefixRoutingScope
-	89,   // 1252: forge.SitePrefixStatus.authority:type_name -> forge.SitePrefixAuthority
-	91,   // 1253: forge.SitePrefixStatus.lifecycle_state:type_name -> forge.SitePrefixLifecycleState
-	1010, // 1254: forge.SitePrefixStatus.quota:type_name -> forge.SitePrefixQuotaUsage
-	1073, // 1255: forge.SitePrefixCreationRequest.id:type_name -> common.SitePrefixId
-	287,  // 1256: forge.SitePrefixCreationRequest.metadata:type_name -> forge.Metadata
-	1073, // 1257: forge.SitePrefixUpdateRequest.id:type_name -> common.SitePrefixId
-	287,  // 1258: forge.SitePrefixUpdateRequest.metadata:type_name -> forge.Metadata
-	1073, // 1259: forge.SitePrefixDeletionRequest.id:type_name -> common.SitePrefixId
-	1007, // 1260: forge.SitePrefixDeletionResult.site_prefix:type_name -> forge.SitePrefix
-	1073, // 1261: forge.SitePrefixStateHistoriesRequest.site_prefix_ids:type_name -> common.SitePrefixId
-	89,   // 1262: forge.SitePrefixSearchFilter.authority:type_name -> forge.SitePrefixAuthority
-	90,   // 1263: forge.SitePrefixSearchFilter.routing_scope:type_name -> forge.SitePrefixRoutingScope
-	91,   // 1264: forge.SitePrefixSearchFilter.lifecycle_state:type_name -> forge.SitePrefixLifecycleState
-	8,    // 1265: forge.SitePrefixSearchFilter.prefix_match_type:type_name -> forge.PrefixMatchType
-	1073, // 1266: forge.SitePrefixesByIdsRequest.site_prefix_ids:type_name -> common.SitePrefixId
-	1073, // 1267: forge.SitePrefixIdList.site_prefix_ids:type_name -> common.SitePrefixId
-	1007, // 1268: forge.SitePrefixList.site_prefixes:type_name -> forge.SitePrefix
-	30,   // 1269: forge.InterfaceAddressConfig.address_family:type_name -> forge.AddressFamily
-	1068, // 1270: forge.VpcReleaseInactiveVniRequest.id:type_name -> common.VpcId
-	178,  // 1271: forge.VpcReleaseInactiveVniResult.vpc:type_name -> forge.Vpc
-	1068, // 1272: forge.VpcRoutingStateRequest.id:type_name -> common.VpcId
-	1068, // 1273: forge.VpcRoutingState.id:type_name -> common.VpcId
-	1025, // 1274: forge.VpcRoutingState.retained_allocation:type_name -> forge.VpcRetainedVniAllocation
-	1068, // 1275: forge.VpcChangeRoutingProfileRequest.id:type_name -> common.VpcId
-	1030, // 1276: forge.DNSMessage.DNSResponse.rrs:type_name -> forge.DNSMessage.DNSResponse.DNSRR
-	251,  // 1277: forge.StateHistories.HistoriesEntry.value:type_name -> forge.StateHistoryRecords
-	346,  // 1278: forge.MachineStateHistories.HistoriesEntry.value:type_name -> forge.MachineStateHistoryRecords
-	349,  // 1279: forge.HealthHistories.HistoriesEntry.value:type_name -> forge.HealthHistoryRecords
-	96,   // 1280: forge.MachineCredentialsUpdateRequest.Credentials.credential_purpose:type_name -> forge.MachineCredentialsUpdateRequest.CredentialPurpose
-	1054, // 1281: forge.ForgeAgentControlResponse.ForgeAgentControlExtraInfo.pair:type_name -> forge.ForgeAgentControlResponse.ForgeAgentControlExtraInfo.KeyValuePair
-	1096, // 1282: forge.ForgeAgentControlResponse.MachineValidation.validation_id:type_name -> common.MachineValidationId
-	1045, // 1283: forge.ForgeAgentControlResponse.MachineValidation.filter:type_name -> forge.ForgeAgentControlResponse.MachineValidationFilter
-	1093, // 1284: forge.ForgeAgentControlResponse.MachineValidationFilter.contexts:type_name -> common.StringList
-	1047, // 1285: forge.ForgeAgentControlResponse.MlxAction.device_actions:type_name -> forge.ForgeAgentControlResponse.MlxDeviceAction
-	1048, // 1286: forge.ForgeAgentControlResponse.MlxDeviceAction.noop:type_name -> forge.ForgeAgentControlResponse.MlxDeviceNoop
-	1049, // 1287: forge.ForgeAgentControlResponse.MlxDeviceAction.lock:type_name -> forge.ForgeAgentControlResponse.MlxDeviceLock
-	1050, // 1288: forge.ForgeAgentControlResponse.MlxDeviceAction.unlock:type_name -> forge.ForgeAgentControlResponse.MlxDeviceUnlock
-	1051, // 1289: forge.ForgeAgentControlResponse.MlxDeviceAction.apply_profile:type_name -> forge.ForgeAgentControlResponse.MlxDeviceApplyProfile
-	1052, // 1290: forge.ForgeAgentControlResponse.MlxDeviceAction.apply_firmware:type_name -> forge.ForgeAgentControlResponse.MlxDeviceApplyFirmware
-	1131, // 1291: forge.ForgeAgentControlResponse.MlxDeviceApplyProfile.serialized_profile:type_name -> mlx_device.SerializableMlxConfigProfile
-	1132, // 1292: forge.ForgeAgentControlResponse.MlxDeviceApplyFirmware.profile:type_name -> mlx_device.FirmwareFlasherProfile
-	1133, // 1293: forge.ForgeAgentControlResponse.FirmwareUpgrade.task:type_name -> scout_firmware_upgrade.ScoutFirmwareUpgradeTask
-	98,   // 1294: forge.MachineCleanupInfo.CleanupStepResult.result:type_name -> forge.MachineCleanupInfo.CleanupResult
-	1066, // 1295: forge.DpuReprovisioningListResponse.DpuReprovisioningListItem.id:type_name -> common.MachineId
-	1067, // 1296: forge.DpuReprovisioningListResponse.DpuReprovisioningListItem.requested_at:type_name -> google.protobuf.Timestamp
-	1067, // 1297: forge.DpuReprovisioningListResponse.DpuReprovisioningListItem.initiated_at:type_name -> google.protobuf.Timestamp
-	1066, // 1298: forge.HostReprovisioningListResponse.HostReprovisioningListItem.id:type_name -> common.MachineId
-	1067, // 1299: forge.HostReprovisioningListResponse.HostReprovisioningListItem.requested_at:type_name -> google.protobuf.Timestamp
-	1067, // 1300: forge.HostReprovisioningListResponse.HostReprovisioningListItem.initiated_at:type_name -> google.protobuf.Timestamp
-	660,  // 1301: forge.MachineValidationTestUpdateRequest.Payload.plugin:type_name -> forge.MachineValidationPlugin
-	1066, // 1302: forge.DPFStateResponse.DPFState.machine_id:type_name -> common.MachineId
-	998,  // 1303: forge.GetMachineBootInterfacesResponse.Reconciliation.desired_boot_interface:type_name -> forge.MachineBootInterface
-	1067, // 1304: forge.GetMachineBootInterfacesResponse.Reconciliation.observed_at:type_name -> google.protobuf.Timestamp
-	108,  // 1305: forge.GetMachineBootInterfacesResponse.Reconciliation.reconciliation_state:type_name -> forge.GetMachineBootInterfacesResponse.Reconciliation.State
-	88,   // 1306: forge.GetMachineBootInterfacesResponse.Reconciliation.selection_source:type_name -> forge.BootInterfaceSelectionSource
-	1067, // 1307: forge.GetMachineBootInterfacesResponse.Reconciliation.selection_updated_at:type_name -> google.protobuf.Timestamp
-	157,  // 1308: forge.Forge.Version:input_type -> forge.VersionRequest
-	1134, // 1309: forge.Forge.CreateDomain:input_type -> dns.CreateDomainRequest
-	1135, // 1310: forge.Forge.UpdateDomain:input_type -> dns.UpdateDomainRequest
-	1136, // 1311: forge.Forge.DeleteDomain:input_type -> dns.DomainDeletionRequest
-	1137, // 1312: forge.Forge.FindDomain:input_type -> dns.DomainSearchQuery
-	919,  // 1313: forge.Forge.CreateDomainLegacy:input_type -> forge.DomainLegacy
-	919,  // 1314: forge.Forge.UpdateDomainLegacy:input_type -> forge.DomainLegacy
-	921,  // 1315: forge.Forge.DeleteDomainLegacy:input_type -> forge.DomainDeletionLegacy
-	923,  // 1316: forge.Forge.FindDomainLegacy:input_type -> forge.DomainSearchQueryLegacy
-	179,  // 1317: forge.Forge.CreateVpc:input_type -> forge.VpcCreationRequest
-	180,  // 1318: forge.Forge.UpdateVpc:input_type -> forge.VpcUpdateRequest
-	1026, // 1319: forge.Forge.ChangeVpcRoutingProfile:input_type -> forge.VpcChangeRoutingProfileRequest
-	1021, // 1320: forge.Forge.ReleaseVpcInactiveVni:input_type -> forge.VpcReleaseInactiveVniRequest
-	182,  // 1321: forge.Forge.UpdateVpcVirtualization:input_type -> forge.VpcUpdateVirtualizationRequest
-	184,  // 1322: forge.Forge.DeleteVpc:input_type -> forge.VpcDeletionRequest
-	169,  // 1323: forge.Forge.FindVpcIds:input_type -> forge.VpcSearchFilter
-	171,  // 1324: forge.Forge.FindVpcsByIds:input_type -> forge.VpcsByIdsRequest
-	1023, // 1325: forge.Forge.GetVpcRoutingState:input_type -> forge.VpcRoutingStateRequest
-	968,  // 1326: forge.Forge.CreateSpxPartition:input_type -> forge.SpxPartitionCreationRequest
-	971,  // 1327: forge.Forge.DeleteSpxPartition:input_type -> forge.SpxPartitionDeletionRequest
-	973,  // 1328: forge.Forge.FindSpxPartitionIds:input_type -> forge.SpxPartitionSearchFilter
-	975,  // 1329: forge.Forge.FindSpxPartitionsByIds:input_type -> forge.SpxPartitionsByIdsRequest
-	190,  // 1330: forge.Forge.CreateVpcPrefix:input_type -> forge.VpcPrefixCreationRequest
-	191,  // 1331: forge.Forge.SearchVpcPrefixes:input_type -> forge.VpcPrefixSearchQuery
-	192,  // 1332: forge.Forge.GetVpcPrefixes:input_type -> forge.VpcPrefixGetRequest
-	195,  // 1333: forge.Forge.UpdateVpcPrefix:input_type -> forge.VpcPrefixUpdateRequest
-	196,  // 1334: forge.Forge.DeleteVpcPrefix:input_type -> forge.VpcPrefixDeletionRequest
-	1011, // 1335: forge.Forge.CreateSitePrefix:input_type -> forge.SitePrefixCreationRequest
-	1012, // 1336: forge.Forge.UpdateSitePrefix:input_type -> forge.SitePrefixUpdateRequest
-	1013, // 1337: forge.Forge.DeleteSitePrefix:input_type -> forge.SitePrefixDeletionRequest
-	1016, // 1338: forge.Forge.FindSitePrefixIds:input_type -> forge.SitePrefixSearchFilter
-	1017, // 1339: forge.Forge.FindSitePrefixesByIds:input_type -> forge.SitePrefixesByIdsRequest
-	202,  // 1340: forge.Forge.CreateVpcPeering:input_type -> forge.VpcPeeringCreationRequest
-	203,  // 1341: forge.Forge.FindVpcPeeringIds:input_type -> forge.VpcPeeringSearchFilter
-	204,  // 1342: forge.Forge.FindVpcPeeringsByIds:input_type -> forge.VpcPeeringsByIdsRequest
-	205,  // 1343: forge.Forge.DeleteVpcPeering:input_type -> forge.VpcPeeringDeletionRequest
-	278,  // 1344: forge.Forge.FindNetworkSegmentIds:input_type -> forge.NetworkSegmentSearchFilter
-	280,  // 1345: forge.Forge.FindNetworkSegmentsByIds:input_type -> forge.NetworkSegmentsByIdsRequest
-	272,  // 1346: forge.Forge.CreateNetworkSegment:input_type -> forge.NetworkSegmentCreationRequest
-	274,  // 1347: forge.Forge.AttachNetworkSegmentToVpc:input_type -> forge.AttachNetworkSegmentToVpcRequest
-	273,  // 1348: forge.Forge.DeleteNetworkSegment:input_type -> forge.NetworkSegmentDeletionRequest
-	168,  // 1349: forge.Forge.NetworkSegmentsForVpc:input_type -> forge.VpcSearchQuery
-	215,  // 1350: forge.Forge.FindIBPartitionIds:input_type -> forge.IBPartitionSearchFilter
-	216,  // 1351: forge.Forge.FindIBPartitionsByIds:input_type -> forge.IBPartitionsByIdsRequest
-	211,  // 1352: forge.Forge.CreateIBPartition:input_type -> forge.IBPartitionCreationRequest
-	212,  // 1353: forge.Forge.UpdateIBPartition:input_type -> forge.IBPartitionUpdateRequest
-	213,  // 1354: forge.Forge.DeleteIBPartition:input_type -> forge.IBPartitionDeletionRequest
-	172,  // 1355: forge.Forge.IBPartitionsForTenant:input_type -> forge.TenantSearchQuery
-	230,  // 1356: forge.Forge.FindPowerShelves:input_type -> forge.PowerShelfQuery
-	231,  // 1357: forge.Forge.FindPowerShelfIds:input_type -> forge.PowerShelfSearchFilter
-	232,  // 1358: forge.Forge.FindPowerShelvesByIds:input_type -> forge.PowerShelvesByIdsRequest
-	223,  // 1359: forge.Forge.DecommissionPowerShelf:input_type -> forge.DecommissionPowerShelfRequest
-	225,  // 1360: forge.Forge.DeletePowerShelf:input_type -> forge.PowerShelfDeletionRequest
-	978,  // 1361: forge.Forge.AdminForceDeletePowerShelf:input_type -> forge.AdminForceDeletePowerShelfRequest
-	227,  // 1362: forge.Forge.SetPowerShelfMaintenance:input_type -> forge.PowerShelfMaintenanceRequest
-	255,  // 1363: forge.Forge.FindSwitches:input_type -> forge.SwitchQuery
-	256,  // 1364: forge.Forge.FindSwitchIds:input_type -> forge.SwitchSearchFilter
-	257,  // 1365: forge.Forge.FindSwitchesByIds:input_type -> forge.SwitchesByIdsRequest
-	246,  // 1366: forge.Forge.DeleteSwitch:input_type -> forge.SwitchDeletionRequest
-	248,  // 1367: forge.Forge.DecommissionSwitch:input_type -> forge.DecommissionSwitchRequest
-	976,  // 1368: forge.Forge.AdminForceDeleteSwitch:input_type -> forge.AdminForceDeleteSwitchRequest
-	266,  // 1369: forge.Forge.FindIBFabricIds:input_type -> forge.IBFabricSearchFilter
-	291,  // 1370: forge.Forge.AllocateInstance:input_type -> forge.InstanceAllocationRequest
-	292,  // 1371: forge.Forge.AllocateInstances:input_type -> forge.BatchInstanceAllocationRequest
-	337,  // 1372: forge.Forge.ReleaseInstance:input_type -> forge.InstanceReleaseRequest
-	339,  // 1373: forge.Forge.ReleaseInstances:input_type -> forge.BatchInstanceReleaseRequest
-	309,  // 1374: forge.Forge.UpdateInstanceOperatingSystem:input_type -> forge.InstanceOperatingSystemUpdateRequest
-	310,  // 1375: forge.Forge.UpdateInstanceConfig:input_type -> forge.InstanceConfigUpdateRequest
-	288,  // 1376: forge.Forge.FindInstanceIds:input_type -> forge.InstanceSearchFilter
-	290,  // 1377: forge.Forge.FindInstancesByIds:input_type -> forge.InstancesByIdsRequest
-	1066, // 1378: forge.Forge.FindInstanceByMachineID:input_type -> common.MachineId
-	413,  // 1379: forge.Forge.GetManagedHostNetworkConfig:input_type -> forge.ManagedHostNetworkConfigRequest
-	478,  // 1380: forge.Forge.RecordDpuNetworkStatus:input_type -> forge.DpuNetworkStatus
-	1066, // 1381: forge.Forge.ListMachineHealthReports:input_type -> common.MachineId
-	484,  // 1382: forge.Forge.InsertMachineHealthReport:input_type -> forge.InsertMachineHealthReportRequest
-	495,  // 1383: forge.Forge.RemoveMachineHealthReport:input_type -> forge.RemoveMachineHealthReportRequest
-	487,  // 1384: forge.Forge.ListRackHealthReports:input_type -> forge.ListRackHealthReportsRequest
-	485,  // 1385: forge.Forge.InsertRackHealthReport:input_type -> forge.InsertRackHealthReportRequest
-	486,  // 1386: forge.Forge.RemoveRackHealthReport:input_type -> forge.RemoveRackHealthReportRequest
-	490,  // 1387: forge.Forge.ListSwitchHealthReports:input_type -> forge.ListSwitchHealthReportsRequest
-	488,  // 1388: forge.Forge.InsertSwitchHealthReport:input_type -> forge.InsertSwitchHealthReportRequest
-	489,  // 1389: forge.Forge.RemoveSwitchHealthReport:input_type -> forge.RemoveSwitchHealthReportRequest
-	493,  // 1390: forge.Forge.ListPowerShelfHealthReports:input_type -> forge.ListPowerShelfHealthReportsRequest
-	491,  // 1391: forge.Forge.InsertPowerShelfHealthReport:input_type -> forge.InsertPowerShelfHealthReportRequest
-	492,  // 1392: forge.Forge.RemovePowerShelfHealthReport:input_type -> forge.RemovePowerShelfHealthReportRequest
-	496,  // 1393: forge.Forge.ListNVLinkDomainHealthReports:input_type -> forge.ListNVLinkDomainHealthReportsRequest
-	497,  // 1394: forge.Forge.InsertNVLinkDomainHealthReport:input_type -> forge.InsertNVLinkDomainHealthReportRequest
-	498,  // 1395: forge.Forge.RemoveNVLinkDomainHealthReport:input_type -> forge.RemoveNVLinkDomainHealthReportRequest
-	1066, // 1396: forge.Forge.ListHealthReportOverrides:input_type -> common.MachineId
-	484,  // 1397: forge.Forge.InsertHealthReportOverride:input_type -> forge.InsertMachineHealthReportRequest
-	495,  // 1398: forge.Forge.RemoveHealthReportOverride:input_type -> forge.RemoveMachineHealthReportRequest
-	430,  // 1399: forge.Forge.DpuAgentUpgradeCheck:input_type -> forge.DpuAgentUpgradeCheckRequest
-	432,  // 1400: forge.Forge.DpuAgentUpgradePolicyAction:input_type -> forge.DpuAgentUpgradePolicyRequest
-	1138, // 1401: forge.Forge.LookupRecord:input_type -> dns.DnsResourceRecordLookupRequest
-	1139, // 1402: forge.Forge.GetAllDomains:input_type -> dns.GetAllDomainsRequest
-	1140, // 1403: forge.Forge.GetAllDomainMetadata:input_type -> dns.DomainMetadataRequest
-	283,  // 1404: forge.Forge.InvokeInstancePower:input_type -> forge.InstancePowerRequest
-	459,  // 1405: forge.Forge.ForgeAgentControl:input_type -> forge.ForgeAgentControlRequest
-	461,  // 1406: forge.Forge.DiscoverMachine:input_type -> forge.MachineDiscoveryInfo
-	465,  // 1407: forge.Forge.RenewMachineCertificate:input_type -> forge.MachineCertificateRenewRequest
-	462,  // 1408: forge.Forge.DiscoveryCompleted:input_type -> forge.MachineDiscoveryCompletedRequest
-	463,  // 1409: forge.Forge.CleanupMachineCompleted:input_type -> forge.MachineCleanupInfo
-	470,  // 1410: forge.Forge.ReportForgeScoutError:input_type -> forge.ForgeScoutErrorReport
-	389,  // 1411: forge.Forge.DiscoverDhcp:input_type -> forge.DhcpDiscovery
-	390,  // 1412: forge.Forge.ExpireDhcpLease:input_type -> forge.ExpireDhcpLeaseRequest
-	359,  // 1413: forge.Forge.AssignStaticAddress:input_type -> forge.AssignStaticAddressRequest
-	361,  // 1414: forge.Forge.RemoveStaticAddress:input_type -> forge.RemoveStaticAddressRequest
-	363,  // 1415: forge.Forge.FindInterfaceAddresses:input_type -> forge.FindInterfaceAddressesRequest
-	358,  // 1416: forge.Forge.FindInterfaces:input_type -> forge.InterfaceSearchQuery
-	357,  // 1417: forge.Forge.DeleteInterface:input_type -> forge.InterfaceDeleteQuery
-	534,  // 1418: forge.Forge.FindIpAddress:input_type -> forge.FindIpAddressRequest
-	343,  // 1419: forge.Forge.FindMachineIds:input_type -> forge.MachineSearchConfig
-	342,  // 1420: forge.Forge.FindMachinesByIds:input_type -> forge.MachinesByIdsRequest
-	344,  // 1421: forge.Forge.FindMachineStateHistories:input_type -> forge.MachineStateHistoriesRequest
-	347,  // 1422: forge.Forge.FindMachineHealthHistories:input_type -> forge.MachineHealthHistoriesRequest
-	228,  // 1423: forge.Forge.FindPowerShelfStateHistories:input_type -> forge.PowerShelfStateHistoriesRequest
-	229,  // 1424: forge.Forge.FindPowerShelfHealthHistories:input_type -> forge.PowerShelfHealthHistoriesRequest
-	787,  // 1425: forge.Forge.FindRackStateHistories:input_type -> forge.RackStateHistoriesRequest
-	788,  // 1426: forge.Forge.FindRackHealthHistories:input_type -> forge.RackHealthHistoriesRequest
-	252,  // 1427: forge.Forge.FindSwitchStateHistories:input_type -> forge.SwitchStateHistoriesRequest
-	253,  // 1428: forge.Forge.FindSwitchHealthHistories:input_type -> forge.SwitchHealthHistoriesRequest
-	276,  // 1429: forge.Forge.FindNetworkSegmentStateHistories:input_type -> forge.NetworkSegmentStateHistoriesRequest
-	198,  // 1430: forge.Forge.FindVpcPrefixStateHistories:input_type -> forge.VpcPrefixStateHistoriesRequest
-	1015, // 1431: forge.Forge.FindSitePrefixStateHistories:input_type -> forge.SitePrefixStateHistoriesRequest
-	352,  // 1432: forge.Forge.FindTenantOrganizationIds:input_type -> forge.TenantSearchFilter
-	351,  // 1433: forge.Forge.FindTenantsByOrganizationIds:input_type -> forge.TenantByOrganizationIdsRequest
-	1128, // 1434: forge.Forge.FindConnectedDevicesByDpuMachineIds:input_type -> common.MachineIdList
-	562,  // 1435: forge.Forge.FindMachineIdsByBmcIps:input_type -> forge.BmcIpList
-	563,  // 1436: forge.Forge.FindMacAddressByBmcIp:input_type -> forge.BmcIp
-	538,  // 1437: forge.Forge.FindBmcIps:input_type -> forge.FindBmcIpsRequest
-	536,  // 1438: forge.Forge.IdentifyUuid:input_type -> forge.IdentifyUuidRequest
-	539,  // 1439: forge.Forge.IdentifyMac:input_type -> forge.IdentifyMacRequest
-	541,  // 1440: forge.Forge.IdentifySerial:input_type -> forge.IdentifySerialRequest
-	455,  // 1441: forge.Forge.GetBMCMetaData:input_type -> forge.BMCMetaDataGetRequest
-	457,  // 1442: forge.Forge.UpdateMachineCredentials:input_type -> forge.MachineCredentialsUpdateRequest
-	472,  // 1443: forge.Forge.GetPxeInstructions:input_type -> forge.PxeInstructionRequest
-	476,  // 1444: forge.Forge.GetCloudInitInstructions:input_type -> forge.CloudInitInstructionsRequest
-	160,  // 1445: forge.Forge.Echo:input_type -> forge.EchoRequest
-	503,  // 1446: forge.Forge.CreateTenant:input_type -> forge.CreateTenantRequest
-	507,  // 1447: forge.Forge.FindTenant:input_type -> forge.FindTenantRequest
-	505,  // 1448: forge.Forge.UpdateTenant:input_type -> forge.UpdateTenantRequest
-	513,  // 1449: forge.Forge.CreateTenantKeyset:input_type -> forge.CreateTenantKeysetRequest
-	520,  // 1450: forge.Forge.FindTenantKeysetIds:input_type -> forge.TenantKeysetSearchFilter
-	522,  // 1451: forge.Forge.FindTenantKeysetsByIds:input_type -> forge.TenantKeysetsByIdsRequest
-	516,  // 1452: forge.Forge.UpdateTenantKeyset:input_type -> forge.UpdateTenantKeysetRequest
-	518,  // 1453: forge.Forge.DeleteTenantKeyset:input_type -> forge.DeleteTenantKeysetRequest
-	523,  // 1454: forge.Forge.ValidateTenantPublicKey:input_type -> forge.ValidateTenantPublicKeyRequest
-	396,  // 1455: forge.Forge.GetBmcCredentials:input_type -> forge.GetBmcCredentialsRequest
-	397,  // 1456: forge.Forge.GetSwitchNvosCredentials:input_type -> forge.GetSwitchNvosCredentialsRequest
-	428,  // 1457: forge.Forge.GetAllManagedHostNetworkStatus:input_type -> forge.ManagedHostNetworkStatusRequest
-	400,  // 1458: forge.Forge.GetSiteExplorationReport:input_type -> forge.GetSiteExplorationRequest
-	1141, // 1459: forge.Forge.GetSiteExplorerLastRun:input_type -> google.protobuf.Empty
-	401,  // 1460: forge.Forge.ClearSiteExplorationError:input_type -> forge.ClearSiteExplorationErrorRequest
-	407,  // 1461: forge.Forge.IsBmcInManagedHost:input_type -> forge.BmcEndpointRequest
-	407,  // 1462: forge.Forge.BmcCredentialStatus:input_type -> forge.BmcEndpointRequest
-	407,  // 1463: forge.Forge.Explore:input_type -> forge.BmcEndpointRequest
-	402,  // 1464: forge.Forge.ReExploreEndpoint:input_type -> forge.ReExploreEndpointRequest
-	403,  // 1465: forge.Forge.RefreshEndpointReport:input_type -> forge.RefreshEndpointReportRequest
-	404,  // 1466: forge.Forge.DeleteExploredEndpoint:input_type -> forge.DeleteExploredEndpointRequest
-	405,  // 1467: forge.Forge.PauseExploredEndpointRemediation:input_type -> forge.PauseExploredEndpointRemediationRequest
-	1142, // 1468: forge.Forge.FindExploredEndpointIds:input_type -> site_explorer.ExploredEndpointSearchFilter
-	1143, // 1469: forge.Forge.FindExploredEndpointsByIds:input_type -> site_explorer.ExploredEndpointsByIdsRequest
-	1144, // 1470: forge.Forge.FindExploredManagedHostIds:input_type -> site_explorer.ExploredManagedHostSearchFilter
-	1145, // 1471: forge.Forge.FindExploredManagedHostsByIds:input_type -> site_explorer.ExploredManagedHostsByIdsRequest
-	1146, // 1472: forge.Forge.FindExploredMlxDeviceHostIds:input_type -> site_explorer.ExploredMlxDeviceHostSearchFilter
-	1147, // 1473: forge.Forge.FindExploredMlxDevicesByIds:input_type -> site_explorer.ExploredMlxDevicesByIdsRequest
-	411,  // 1474: forge.Forge.UpdateMachineHardwareInfo:input_type -> forge.UpdateMachineHardwareInfoRequest
-	434,  // 1475: forge.Forge.AdminForceDeleteMachine:input_type -> forge.AdminForceDeleteMachineRequest
-	435,  // 1476: forge.Forge.DecommissionManagedHost:input_type -> forge.DecommissionManagedHostRequest
-	525,  // 1477: forge.Forge.AdminListResourcePools:input_type -> forge.ListResourcePoolsRequest
-	528,  // 1478: forge.Forge.AdminGrowResourcePool:input_type -> forge.GrowResourcePoolRequest
-	373,  // 1479: forge.Forge.UpdateMachineMetadata:input_type -> forge.MachineMetadataUpdateRequest
-	374,  // 1480: forge.Forge.UpdateRackMetadata:input_type -> forge.RackMetadataUpdateRequest
-	375,  // 1481: forge.Forge.UpdateSwitchMetadata:input_type -> forge.SwitchMetadataUpdateRequest
-	376,  // 1482: forge.Forge.UpdatePowerShelfMetadata:input_type -> forge.PowerShelfMetadataUpdateRequest
-	804,  // 1483: forge.Forge.UpdateMachineNvLinkInfo:input_type -> forge.UpdateMachineNvLinkInfoRequest
-	532,  // 1484: forge.Forge.SetMaintenance:input_type -> forge.MaintenanceRequest
-	533,  // 1485: forge.Forge.SetDynamicConfig:input_type -> forge.SetDynamicConfigRequest
-	543,  // 1486: forge.Forge.TriggerDpuReprovisioning:input_type -> forge.DpuReprovisioningRequest
-	544,  // 1487: forge.Forge.ListDpuWaitingForReprovisioning:input_type -> forge.DpuReprovisioningListRequest
-	546,  // 1488: forge.Forge.TriggerHostReprovisioning:input_type -> forge.HostReprovisioningRequest
-	550,  // 1489: forge.Forge.ListHostsWaitingForReprovisioning:input_type -> forge.HostReprovisioningListRequest
-	547,  // 1490: forge.Forge.TriggerBmcCredentialRotation:input_type -> forge.BmcCredentialRotationRequest
-	548,  // 1491: forge.Forge.TriggerUefiCredentialRotation:input_type -> forge.UefiCredentialRotationRequest
-	549,  // 1492: forge.Forge.TriggerNicLockdownCredentialRotation:input_type -> forge.NicLockdownCredentialRotationRequest
-	1066, // 1493: forge.Forge.MarkManualFirmwareUpgradeComplete:input_type -> common.MachineId
-	603,  // 1494: forge.Forge.ReportScoutFirmwareUpgradeStatus:input_type -> forge.ScoutFirmwareUpgradeStatusRequest
-	556,  // 1495: forge.Forge.GetDpuInfoList:input_type -> forge.GetDpuInfoListRequest
-	1090, // 1496: forge.Forge.GetMachineBootOverride:input_type -> common.MachineInterfaceId
-	559,  // 1497: forge.Forge.SetMachineBootOverride:input_type -> forge.MachineBootOverride
-	1090, // 1498: forge.Forge.ClearMachineBootOverride:input_type -> common.MachineInterfaceId
-	997,  // 1499: forge.Forge.GetMachineBootInterfaces:input_type -> forge.GetMachineBootInterfacesRequest
-	568,  // 1500: forge.Forge.GetNetworkTopology:input_type -> forge.NetworkTopologyRequest
-	569,  // 1501: forge.Forge.FindNetworkDevicesByDeviceIds:input_type -> forge.NetworkDeviceIdList
-	148,  // 1502: forge.Forge.CreateCredential:input_type -> forge.CredentialCreationRequest
-	149,  // 1503: forge.Forge.DeleteCredential:input_type -> forge.CredentialDeletionRequest
-	152,  // 1504: forge.Forge.RotateCredential:input_type -> forge.RotateCredentialRequest
-	154,  // 1505: forge.Forge.GetCredentialRotationStatus:input_type -> forge.CredentialRotationStatusRequest
-	1004, // 1506: forge.Forge.GetContainerRegistryCredential:input_type -> forge.GetContainerRegistryCredentialRequest
-	1006, // 1507: forge.Forge.SetContainerRegistryCredential:input_type -> forge.SetContainerRegistryCredentialRequest
-	1141, // 1508: forge.Forge.GetRouteServers:input_type -> google.protobuf.Empty
-	571,  // 1509: forge.Forge.AddRouteServers:input_type -> forge.RouteServers
-	571,  // 1510: forge.Forge.RemoveRouteServers:input_type -> forge.RouteServers
-	571,  // 1511: forge.Forge.ReplaceRouteServers:input_type -> forge.RouteServers
-	377,  // 1512: forge.Forge.UpdateAgentReportedInventory:input_type -> forge.DpuAgentInventoryReport
-	332,  // 1513: forge.Forge.UpdateInstancePhoneHomeLastContact:input_type -> forge.InstancePhoneHomeLastContactRequest
-	574,  // 1514: forge.Forge.SetHostUefiPassword:input_type -> forge.SetHostUefiPasswordRequest
-	576,  // 1515: forge.Forge.ClearHostUefiPassword:input_type -> forge.ClearHostUefiPasswordRequest
-	578,  // 1516: forge.Forge.SetDpuUefiPassword:input_type -> forge.SetDpuUefiPasswordRequest
-	591,  // 1517: forge.Forge.AddExpectedMachine:input_type -> forge.ExpectedMachine
-	592,  // 1518: forge.Forge.DeleteExpectedMachine:input_type -> forge.ExpectedMachineRequest
-	591,  // 1519: forge.Forge.UpdateExpectedMachine:input_type -> forge.ExpectedMachine
-	592,  // 1520: forge.Forge.GetExpectedMachine:input_type -> forge.ExpectedMachineRequest
-	1141, // 1521: forge.Forge.GetAllExpectedMachines:input_type -> google.protobuf.Empty
-	593,  // 1522: forge.Forge.ReplaceAllExpectedMachines:input_type -> forge.ExpectedMachineList
-	1141, // 1523: forge.Forge.DeleteAllExpectedMachines:input_type -> google.protobuf.Empty
-	1141, // 1524: forge.Forge.GetAllExpectedMachinesLinked:input_type -> google.protobuf.Empty
-	1141, // 1525: forge.Forge.GetAllUnexpectedMachines:input_type -> google.protobuf.Empty
-	598,  // 1526: forge.Forge.CreateExpectedMachines:input_type -> forge.BatchExpectedMachineOperationRequest
-	598,  // 1527: forge.Forge.UpdateExpectedMachines:input_type -> forge.BatchExpectedMachineOperationRequest
-	233,  // 1528: forge.Forge.AddExpectedPowerShelf:input_type -> forge.ExpectedPowerShelf
-	234,  // 1529: forge.Forge.DeleteExpectedPowerShelf:input_type -> forge.ExpectedPowerShelfRequest
-	233,  // 1530: forge.Forge.UpdateExpectedPowerShelf:input_type -> forge.ExpectedPowerShelf
-	234,  // 1531: forge.Forge.GetExpectedPowerShelf:input_type -> forge.ExpectedPowerShelfRequest
-	1141, // 1532: forge.Forge.GetAllExpectedPowerShelves:input_type -> google.protobuf.Empty
-	235,  // 1533: forge.Forge.ReplaceAllExpectedPowerShelves:input_type -> forge.ExpectedPowerShelfList
-	1141, // 1534: forge.Forge.DeleteAllExpectedPowerShelves:input_type -> google.protobuf.Empty
-	1141, // 1535: forge.Forge.GetAllExpectedPowerShelvesLinked:input_type -> google.protobuf.Empty
-	258,  // 1536: forge.Forge.AddExpectedSwitch:input_type -> forge.ExpectedSwitch
-	259,  // 1537: forge.Forge.DeleteExpectedSwitch:input_type -> forge.ExpectedSwitchRequest
-	258,  // 1538: forge.Forge.UpdateExpectedSwitch:input_type -> forge.ExpectedSwitch
-	259,  // 1539: forge.Forge.GetExpectedSwitch:input_type -> forge.ExpectedSwitchRequest
-	1141, // 1540: forge.Forge.GetAllExpectedSwitches:input_type -> google.protobuf.Empty
-	260,  // 1541: forge.Forge.ReplaceAllExpectedSwitches:input_type -> forge.ExpectedSwitchList
-	1141, // 1542: forge.Forge.DeleteAllExpectedSwitches:input_type -> google.protobuf.Empty
-	1141, // 1543: forge.Forge.GetAllExpectedSwitchesLinked:input_type -> google.protobuf.Empty
-	263,  // 1544: forge.Forge.AddExpectedRack:input_type -> forge.ExpectedRack
-	264,  // 1545: forge.Forge.DeleteExpectedRack:input_type -> forge.ExpectedRackRequest
-	263,  // 1546: forge.Forge.UpdateExpectedRack:input_type -> forge.ExpectedRack
-	264,  // 1547: forge.Forge.GetExpectedRack:input_type -> forge.ExpectedRackRequest
-	1141, // 1548: forge.Forge.GetAllExpectedRacks:input_type -> google.protobuf.Empty
-	265,  // 1549: forge.Forge.ReplaceAllExpectedRacks:input_type -> forge.ExpectedRackList
-	1141, // 1550: forge.Forge.DeleteAllExpectedRacks:input_type -> google.protobuf.Empty
-	146,  // 1551: forge.Forge.AttestQuote:input_type -> forge.AttestQuoteRequest
-	680,  // 1552: forge.Forge.CreateInstanceType:input_type -> forge.CreateInstanceTypeRequest
-	682,  // 1553: forge.Forge.FindInstanceTypeIds:input_type -> forge.FindInstanceTypeIdsRequest
-	684,  // 1554: forge.Forge.FindInstanceTypesByIds:input_type -> forge.FindInstanceTypesByIdsRequest
-	689,  // 1555: forge.Forge.UpdateInstanceType:input_type -> forge.UpdateInstanceTypeRequest
-	686,  // 1556: forge.Forge.DeleteInstanceType:input_type -> forge.DeleteInstanceTypeRequest
-	690,  // 1557: forge.Forge.AssociateMachinesWithInstanceType:input_type -> forge.AssociateMachinesWithInstanceTypeRequest
-	692,  // 1558: forge.Forge.RemoveMachineInstanceTypeAssociation:input_type -> forge.RemoveMachineInstanceTypeAssociationRequest
-	1148, // 1559: forge.Forge.CreateMeasurementBundle:input_type -> measured_boot.CreateMeasurementBundleRequest
-	1149, // 1560: forge.Forge.DeleteMeasurementBundle:input_type -> measured_boot.DeleteMeasurementBundleRequest
-	1150, // 1561: forge.Forge.RenameMeasurementBundle:input_type -> measured_boot.RenameMeasurementBundleRequest
-	1151, // 1562: forge.Forge.UpdateMeasurementBundle:input_type -> measured_boot.UpdateMeasurementBundleRequest
-	1152, // 1563: forge.Forge.ShowMeasurementBundle:input_type -> measured_boot.ShowMeasurementBundleRequest
-	1153, // 1564: forge.Forge.ShowMeasurementBundles:input_type -> measured_boot.ShowMeasurementBundlesRequest
-	1154, // 1565: forge.Forge.ListMeasurementBundles:input_type -> measured_boot.ListMeasurementBundlesRequest
-	1155, // 1566: forge.Forge.ListMeasurementBundleMachines:input_type -> measured_boot.ListMeasurementBundleMachinesRequest
-	1156, // 1567: forge.Forge.FindClosestBundleMatch:input_type -> measured_boot.FindClosestBundleMatchRequest
-	1157, // 1568: forge.Forge.DeleteMeasurementJournal:input_type -> measured_boot.DeleteMeasurementJournalRequest
-	1158, // 1569: forge.Forge.ShowMeasurementJournal:input_type -> measured_boot.ShowMeasurementJournalRequest
-	1159, // 1570: forge.Forge.ShowMeasurementJournals:input_type -> measured_boot.ShowMeasurementJournalsRequest
-	1160, // 1571: forge.Forge.ListMeasurementJournal:input_type -> measured_boot.ListMeasurementJournalRequest
-	1161, // 1572: forge.Forge.AttestCandidateMachine:input_type -> measured_boot.AttestCandidateMachineRequest
-	1162, // 1573: forge.Forge.ShowCandidateMachine:input_type -> measured_boot.ShowCandidateMachineRequest
-	1163, // 1574: forge.Forge.ShowCandidateMachines:input_type -> measured_boot.ShowCandidateMachinesRequest
-	1164, // 1575: forge.Forge.ListCandidateMachines:input_type -> measured_boot.ListCandidateMachinesRequest
-	1165, // 1576: forge.Forge.CreateMeasurementSystemProfile:input_type -> measured_boot.CreateMeasurementSystemProfileRequest
-	1166, // 1577: forge.Forge.DeleteMeasurementSystemProfile:input_type -> measured_boot.DeleteMeasurementSystemProfileRequest
-	1167, // 1578: forge.Forge.RenameMeasurementSystemProfile:input_type -> measured_boot.RenameMeasurementSystemProfileRequest
-	1168, // 1579: forge.Forge.ShowMeasurementSystemProfile:input_type -> measured_boot.ShowMeasurementSystemProfileRequest
-	1169, // 1580: forge.Forge.ShowMeasurementSystemProfiles:input_type -> measured_boot.ShowMeasurementSystemProfilesRequest
-	1170, // 1581: forge.Forge.ListMeasurementSystemProfiles:input_type -> measured_boot.ListMeasurementSystemProfilesRequest
-	1171, // 1582: forge.Forge.ListMeasurementSystemProfileBundles:input_type -> measured_boot.ListMeasurementSystemProfileBundlesRequest
-	1172, // 1583: forge.Forge.ListMeasurementSystemProfileMachines:input_type -> measured_boot.ListMeasurementSystemProfileMachinesRequest
-	1173, // 1584: forge.Forge.CreateMeasurementReport:input_type -> measured_boot.CreateMeasurementReportRequest
-	1174, // 1585: forge.Forge.DeleteMeasurementReport:input_type -> measured_boot.DeleteMeasurementReportRequest
-	1175, // 1586: forge.Forge.PromoteMeasurementReport:input_type -> measured_boot.PromoteMeasurementReportRequest
-	1176, // 1587: forge.Forge.RevokeMeasurementReport:input_type -> measured_boot.RevokeMeasurementReportRequest
-	1177, // 1588: forge.Forge.ShowMeasurementReportForId:input_type -> measured_boot.ShowMeasurementReportForIdRequest
-	1178, // 1589: forge.Forge.ShowMeasurementReportsForMachine:input_type -> measured_boot.ShowMeasurementReportsForMachineRequest
-	1179, // 1590: forge.Forge.ShowMeasurementReports:input_type -> measured_boot.ShowMeasurementReportsRequest
-	1180, // 1591: forge.Forge.ListMeasurementReport:input_type -> measured_boot.ListMeasurementReportRequest
-	1181, // 1592: forge.Forge.MatchMeasurementReport:input_type -> measured_boot.MatchMeasurementReportRequest
-	1182, // 1593: forge.Forge.ImportSiteMeasurements:input_type -> measured_boot.ImportSiteMeasurementsRequest
-	1183, // 1594: forge.Forge.ExportSiteMeasurements:input_type -> measured_boot.ExportSiteMeasurementsRequest
-	1184, // 1595: forge.Forge.AddMeasurementTrustedMachine:input_type -> measured_boot.AddMeasurementTrustedMachineRequest
-	1185, // 1596: forge.Forge.RemoveMeasurementTrustedMachine:input_type -> measured_boot.RemoveMeasurementTrustedMachineRequest
-	1186, // 1597: forge.Forge.AddMeasurementTrustedProfile:input_type -> measured_boot.AddMeasurementTrustedProfileRequest
-	1187, // 1598: forge.Forge.RemoveMeasurementTrustedProfile:input_type -> measured_boot.RemoveMeasurementTrustedProfileRequest
-	1188, // 1599: forge.Forge.ListMeasurementTrustedMachines:input_type -> measured_boot.ListMeasurementTrustedMachinesRequest
-	1189, // 1600: forge.Forge.ListMeasurementTrustedProfiles:input_type -> measured_boot.ListMeasurementTrustedProfilesRequest
-	1190, // 1601: forge.Forge.ListAttestationSummary:input_type -> measured_boot.ListAttestationSummaryRequest
-	711,  // 1602: forge.Forge.CreateNetworkSecurityGroup:input_type -> forge.CreateNetworkSecurityGroupRequest
-	713,  // 1603: forge.Forge.FindNetworkSecurityGroupIds:input_type -> forge.FindNetworkSecurityGroupIdsRequest
-	715,  // 1604: forge.Forge.FindNetworkSecurityGroupsByIds:input_type -> forge.FindNetworkSecurityGroupsByIdsRequest
-	718,  // 1605: forge.Forge.UpdateNetworkSecurityGroup:input_type -> forge.UpdateNetworkSecurityGroupRequest
-	719,  // 1606: forge.Forge.DeleteNetworkSecurityGroup:input_type -> forge.DeleteNetworkSecurityGroupRequest
-	725,  // 1607: forge.Forge.GetNetworkSecurityGroupPropagationStatus:input_type -> forge.GetNetworkSecurityGroupPropagationStatusRequest
-	728,  // 1608: forge.Forge.GetNetworkSecurityGroupAttachments:input_type -> forge.GetNetworkSecurityGroupAttachmentsRequest
-	580,  // 1609: forge.Forge.CreateOsImage:input_type -> forge.OsImageAttributes
-	584,  // 1610: forge.Forge.DeleteOsImage:input_type -> forge.DeleteOsImageRequest
-	582,  // 1611: forge.Forge.ListOsImage:input_type -> forge.ListOsImageRequest
-	1080, // 1612: forge.Forge.GetOsImage:input_type -> common.UUID
-	580,  // 1613: forge.Forge.UpdateOsImage:input_type -> forge.OsImageAttributes
-	586,  // 1614: forge.Forge.GetIpxeTemplate:input_type -> forge.GetIpxeTemplateRequest
-	587,  // 1615: forge.Forge.ListIpxeTemplates:input_type -> forge.ListIpxeTemplatesRequest
-	602,  // 1616: forge.Forge.RebootCompleted:input_type -> forge.MachineRebootCompletedRequest
-	607,  // 1617: forge.Forge.PersistValidationResult:input_type -> forge.MachineValidationResultPostRequest
-	609,  // 1618: forge.Forge.GetMachineValidationResults:input_type -> forge.MachineValidationGetRequest
-	604,  // 1619: forge.Forge.MachineValidationCompleted:input_type -> forge.MachineValidationCompletedRequest
-	612,  // 1620: forge.Forge.MachineSetAutoUpdate:input_type -> forge.MachineSetAutoUpdateRequest
-	614,  // 1621: forge.Forge.GetMachineValidationExternalConfig:input_type -> forge.GetMachineValidationExternalConfigRequest
-	617,  // 1622: forge.Forge.GetMachineValidationExternalConfigs:input_type -> forge.GetMachineValidationExternalConfigsRequest
-	619,  // 1623: forge.Forge.AddUpdateMachineValidationExternalConfig:input_type -> forge.AddUpdateMachineValidationExternalConfigRequest
-	640,  // 1624: forge.Forge.GetMachineValidationRuns:input_type -> forge.MachineValidationRunListGetRequest
-	641,  // 1625: forge.Forge.FindMachineValidationRunItemIds:input_type -> forge.MachineValidationRunItemSearchFilter
-	643,  // 1626: forge.Forge.FindMachineValidationRunItemsByIds:input_type -> forge.MachineValidationRunItemsByIdsRequest
-	646,  // 1627: forge.Forge.GetMachineValidationAttempt:input_type -> forge.MachineValidationAttemptGetRequest
-	648,  // 1628: forge.Forge.HeartbeatMachineValidationRun:input_type -> forge.MachineValidationHeartbeatRequest
-	620,  // 1629: forge.Forge.RemoveMachineValidationExternalConfig:input_type -> forge.RemoveMachineValidationExternalConfigRequest
-	652,  // 1630: forge.Forge.GetMachineValidationTests:input_type -> forge.MachineValidationTestsGetRequest
-	654,  // 1631: forge.Forge.AddMachineValidationTest:input_type -> forge.MachineValidationTestAddRequest
-	653,  // 1632: forge.Forge.UpdateMachineValidationTest:input_type -> forge.MachineValidationTestUpdateRequest
-	657,  // 1633: forge.Forge.MachineValidationTestVerfied:input_type -> forge.MachineValidationTestVerfiedRequest
-	664,  // 1634: forge.Forge.MachineValidationTestNextVersion:input_type -> forge.MachineValidationTestNextVersionRequest
-	665,  // 1635: forge.Forge.MachineValidationTestEnableDisableTest:input_type -> forge.MachineValidationTestEnableDisableTestRequest
-	661,  // 1636: forge.Forge.MachineValidationTestApproveFullHost:input_type -> forge.MachineValidationTestFullHostApprovalRequest
-	667,  // 1637: forge.Forge.UpdateMachineValidationRun:input_type -> forge.MachineValidationRunRequest
-	449,  // 1638: forge.Forge.AdminBmcReset:input_type -> forge.AdminBmcResetRequest
-	633,  // 1639: forge.Forge.AdminPowerControl:input_type -> forge.AdminPowerControlRequest
-	635,  // 1640: forge.Forge.AdminChassisReset:input_type -> forge.AdminChassisResetRequest
-	407,  // 1641: forge.Forge.DisableSecureBoot:input_type -> forge.BmcEndpointRequest
-	439,  // 1642: forge.Forge.Lockdown:input_type -> forge.LockdownRequest
-	441,  // 1643: forge.Forge.LockdownStatus:input_type -> forge.LockdownStatusRequest
-	443,  // 1644: forge.Forge.MachineSetup:input_type -> forge.MachineSetupRequest
-	445,  // 1645: forge.Forge.SetDpuFirstBootOrder:input_type -> forge.SetDpuFirstBootOrderRequest
-	837,  // 1646: forge.Forge.CreateBmcUser:input_type -> forge.CreateBmcUserRequest
-	839,  // 1647: forge.Forge.DeleteBmcUser:input_type -> forge.DeleteBmcUserRequest
-	841,  // 1648: forge.Forge.SetBmcRootPassword:input_type -> forge.SetBmcRootPasswordRequest
-	843,  // 1649: forge.Forge.ProbeBmcVendor:input_type -> forge.ProbeBmcVendorRequest
-	451,  // 1650: forge.Forge.EnableInfiniteBoot:input_type -> forge.EnableInfiniteBootRequest
-	453,  // 1651: forge.Forge.IsInfiniteBootEnabled:input_type -> forge.IsInfiniteBootEnabledRequest
-	621,  // 1652: forge.Forge.OnDemandMachineValidation:input_type -> forge.MachineValidationOnDemandRequest
-	629,  // 1653: forge.Forge.OnDemandRackMaintenance:input_type -> forge.RackMaintenanceOnDemandRequest
-	631,  // 1654: forge.Forge.TerminateRackMaintenance:input_type -> forge.RackMaintenanceTerminateRequest
-	142,  // 1655: forge.Forge.TpmAddCaCert:input_type -> forge.TpmCaCert
-	1141, // 1656: forge.Forge.TpmShowCaCerts:input_type -> google.protobuf.Empty
-	1141, // 1657: forge.Forge.TpmShowUnmatchedEkCerts:input_type -> google.protobuf.Empty
-	139,  // 1658: forge.Forge.TpmDeleteCaCert:input_type -> forge.TpmCaCertId
-	694,  // 1659: forge.Forge.RedfishBrowse:input_type -> forge.RedfishBrowseRequest
-	696,  // 1660: forge.Forge.RedfishListActions:input_type -> forge.RedfishListActionsRequest
-	701,  // 1661: forge.Forge.RedfishCreateAction:input_type -> forge.RedfishCreateActionRequest
-	703,  // 1662: forge.Forge.RedfishApproveAction:input_type -> forge.RedfishActionID
-	703,  // 1663: forge.Forge.RedfishApplyAction:input_type -> forge.RedfishActionID
-	703,  // 1664: forge.Forge.RedfishCancelAction:input_type -> forge.RedfishActionID
-	707,  // 1665: forge.Forge.UfmBrowse:input_type -> forge.UfmBrowseRequest
-	731,  // 1666: forge.Forge.GetDesiredFirmwareVersions:input_type -> forge.GetDesiredFirmwareVersionsRequest
-	847,  // 1667: forge.Forge.UpsertHostFirmwareConfig:input_type -> forge.UpsertHostFirmwareConfigRequest
-	848,  // 1668: forge.Forge.DeleteHostFirmwareConfig:input_type -> forge.DeleteHostFirmwareConfigRequest
-	747,  // 1669: forge.Forge.CreateSku:input_type -> forge.SkuList
-	1066, // 1670: forge.Forge.GenerateSkuFromMachine:input_type -> common.MachineId
-	1066, // 1671: forge.Forge.VerifySkuForMachine:input_type -> common.MachineId
-	745,  // 1672: forge.Forge.AssignSkuToMachine:input_type -> forge.SkuMachinePair
-	746,  // 1673: forge.Forge.RemoveSkuAssociation:input_type -> forge.RemoveSkuRequest
-	748,  // 1674: forge.Forge.DeleteSku:input_type -> forge.SkuIdList
-	1141, // 1675: forge.Forge.GetAllSkuIds:input_type -> google.protobuf.Empty
-	750,  // 1676: forge.Forge.FindSkusByIds:input_type -> forge.SkusByIdsRequest
-	760,  // 1677: forge.Forge.UpdateSkuMetadata:input_type -> forge.SkuUpdateMetadataRequest
-	744,  // 1678: forge.Forge.ReplaceSku:input_type -> forge.Sku
-	417,  // 1679: forge.Forge.GetManagedHostQuarantineState:input_type -> forge.GetManagedHostQuarantineStateRequest
-	419,  // 1680: forge.Forge.SetManagedHostQuarantineState:input_type -> forge.SetManagedHostQuarantineStateRequest
-	421,  // 1681: forge.Forge.ClearManagedHostQuarantineState:input_type -> forge.ClearManagedHostQuarantineStateRequest
-	1066, // 1682: forge.Forge.ResetHostReprovisioning:input_type -> common.MachineId
-	410,  // 1683: forge.Forge.CopyBfbToDpuRshim:input_type -> forge.CopyBfbToDpuRshimRequest
-	1141, // 1684: forge.Forge.GetAllDpaInterfaceIds:input_type -> google.protobuf.Empty
-	755,  // 1685: forge.Forge.FindDpaInterfacesByIds:input_type -> forge.DpaInterfacesByIdsRequest
-	753,  // 1686: forge.Forge.CreateDpaInterface:input_type -> forge.DpaInterfaceCreationRequest
-	753,  // 1687: forge.Forge.EnsureDpaInterface:input_type -> forge.DpaInterfaceCreationRequest
-	758,  // 1688: forge.Forge.DeleteDpaInterface:input_type -> forge.DpaInterfaceDeletionRequest
-	761,  // 1689: forge.Forge.GetPowerOptions:input_type -> forge.PowerOptionRequest
-	762,  // 1690: forge.Forge.UpdatePowerOption:input_type -> forge.PowerOptionUpdateRequest
-	407,  // 1691: forge.Forge.AllowIngestionAndPowerOn:input_type -> forge.BmcEndpointRequest
-	407,  // 1692: forge.Forge.DetermineMachineIngestionState:input_type -> forge.BmcEndpointRequest
-	781,  // 1693: forge.Forge.FindRackIds:input_type -> forge.RackSearchFilter
-	783,  // 1694: forge.Forge.FindRacksByIds:input_type -> forge.RacksByIdsRequest
-	778,  // 1695: forge.Forge.GetRack:input_type -> forge.GetRackRequest
-	789,  // 1696: forge.Forge.DeleteRack:input_type -> forge.DeleteRackRequest
-	790,  // 1697: forge.Forge.AdminForceDeleteRack:input_type -> forge.AdminForceDeleteRackRequest
-	797,  // 1698: forge.Forge.GetRackProfile:input_type -> forge.GetRackProfileRequest
-	1141, // 1699: forge.Forge.ListRackProfiles:input_type -> google.protobuf.Empty
-	767,  // 1700: forge.Forge.CreateComputeAllocation:input_type -> forge.CreateComputeAllocationRequest
-	769,  // 1701: forge.Forge.FindComputeAllocationIds:input_type -> forge.FindComputeAllocationIdsRequest
-	771,  // 1702: forge.Forge.FindComputeAllocationsByIds:input_type -> forge.FindComputeAllocationsByIdsRequest
-	774,  // 1703: forge.Forge.UpdateComputeAllocation:input_type -> forge.UpdateComputeAllocationRequest
-	775,  // 1704: forge.Forge.DeleteComputeAllocation:input_type -> forge.DeleteComputeAllocationRequest
-	845,  // 1705: forge.Forge.SetFirmwareUpdateTimeWindow:input_type -> forge.SetFirmwareUpdateTimeWindowRequest
-	854,  // 1706: forge.Forge.ListHostFirmware:input_type -> forge.ListHostFirmwareRequest
-	1191, // 1707: forge.Forge.PublishMlxDeviceReport:input_type -> mlx_device.PublishMlxDeviceReportRequest
-	1192, // 1708: forge.Forge.PublishMlxObservationReport:input_type -> mlx_device.PublishMlxObservationReportRequest
-	857,  // 1709: forge.Forge.TrimTable:input_type -> forge.TrimTableRequest
-	1141, // 1710: forge.Forge.ListNvlinkNmxcEndpoints:input_type -> google.protobuf.Empty
-	859,  // 1711: forge.Forge.CreateNvlinkNmxcEndpoint:input_type -> forge.NvlinkNmxcEndpoint
-	859,  // 1712: forge.Forge.UpdateNvlinkNmxcEndpoint:input_type -> forge.NvlinkNmxcEndpoint
-	861,  // 1713: forge.Forge.DeleteNvlinkNmxcEndpoint:input_type -> forge.DeleteNvlinkNmxcEndpointRequest
-	862,  // 1714: forge.Forge.CreateRemediation:input_type -> forge.CreateRemediationRequest
-	867,  // 1715: forge.Forge.ApproveRemediation:input_type -> forge.ApproveRemediationRequest
-	868,  // 1716: forge.Forge.RevokeRemediation:input_type -> forge.RevokeRemediationRequest
-	869,  // 1717: forge.Forge.EnableRemediation:input_type -> forge.EnableRemediationRequest
-	870,  // 1718: forge.Forge.DisableRemediation:input_type -> forge.DisableRemediationRequest
-	1141, // 1719: forge.Forge.FindRemediationIds:input_type -> google.protobuf.Empty
-	864,  // 1720: forge.Forge.FindRemediationsByIds:input_type -> forge.RemediationIdList
-	871,  // 1721: forge.Forge.FindAppliedRemediationIds:input_type -> forge.FindAppliedRemediationIdsRequest
-	873,  // 1722: forge.Forge.FindAppliedRemediations:input_type -> forge.FindAppliedRemediationsRequest
-	876,  // 1723: forge.Forge.GetNextRemediationForMachine:input_type -> forge.GetNextRemediationForMachineRequest
-	878,  // 1724: forge.Forge.RemediationApplied:input_type -> forge.RemediationAppliedRequest
-	880,  // 1725: forge.Forge.SetPrimaryDpu:input_type -> forge.SetPrimaryDpuRequest
-	881,  // 1726: forge.Forge.SetPrimaryInterface:input_type -> forge.SetPrimaryInterfaceRequest
-	887,  // 1727: forge.Forge.CreateDpuExtensionService:input_type -> forge.CreateDpuExtensionServiceRequest
-	888,  // 1728: forge.Forge.UpdateDpuExtensionService:input_type -> forge.UpdateDpuExtensionServiceRequest
-	889,  // 1729: forge.Forge.DeleteDpuExtensionService:input_type -> forge.DeleteDpuExtensionServiceRequest
-	891,  // 1730: forge.Forge.FindDpuExtensionServiceIds:input_type -> forge.DpuExtensionServiceSearchFilter
-	893,  // 1731: forge.Forge.FindDpuExtensionServicesByIds:input_type -> forge.DpuExtensionServicesByIdsRequest
-	895,  // 1732: forge.Forge.GetDpuExtensionServiceVersionsInfo:input_type -> forge.GetDpuExtensionServiceVersionsInfoRequest
-	897,  // 1733: forge.Forge.FindInstancesByDpuExtensionService:input_type -> forge.FindInstancesByDpuExtensionServiceRequest
-	114,  // 1734: forge.Forge.TriggerMachineAttestation:input_type -> forge.SpdmMachineAttestationTriggerRequest
-	1066, // 1735: forge.Forge.CancelMachineAttestation:input_type -> common.MachineId
-	115,  // 1736: forge.Forge.ListAttestationMachines:input_type -> forge.SpdmListAttestationMachinesRequest
-	1066, // 1737: forge.Forge.GetAttestationMachine:input_type -> common.MachineId
-	117,  // 1738: forge.Forge.SignMachineIdentity:input_type -> forge.MachineIdentityRequest
-	119,  // 1739: forge.Forge.GetTenantIdentityConfiguration:input_type -> forge.GetTenantIdentityConfigRequest
-	122,  // 1740: forge.Forge.SetTenantIdentityConfiguration:input_type -> forge.SetTenantIdentityConfigRequest
-	119,  // 1741: forge.Forge.DeleteTenantIdentityConfiguration:input_type -> forge.GetTenantIdentityConfigRequest
-	127,  // 1742: forge.Forge.GetTokenDelegation:input_type -> forge.GetTokenDelegationRequest
-	129,  // 1743: forge.Forge.SetTokenDelegation:input_type -> forge.TokenDelegationRequest
-	127,  // 1744: forge.Forge.DeleteTokenDelegation:input_type -> forge.GetTokenDelegationRequest
-	130,  // 1745: forge.Forge.ReencryptTenantIdentitySecrets:input_type -> forge.ReencryptTenantIdentitySecretsRequest
-	135,  // 1746: forge.Forge.GetJWKS:input_type -> forge.JwksRequest
-	136,  // 1747: forge.Forge.GetOpenIDConfiguration:input_type -> forge.OpenIdConfigRequest
-	904,  // 1748: forge.Forge.ScoutStream:input_type -> forge.ScoutStreamApiBoundMessage
-	907,  // 1749: forge.Forge.ScoutStreamShowConnections:input_type -> forge.ScoutStreamShowConnectionsRequest
-	909,  // 1750: forge.Forge.ScoutStreamDisconnect:input_type -> forge.ScoutStreamDisconnectRequest
-	911,  // 1751: forge.Forge.ScoutStreamPing:input_type -> forge.ScoutStreamAdminPingRequest
-	1193, // 1752: forge.Forge.MlxAdminProfileSync:input_type -> mlx_device.MlxAdminProfileSyncRequest
-	1194, // 1753: forge.Forge.MlxAdminProfileShow:input_type -> mlx_device.MlxAdminProfileShowRequest
-	1195, // 1754: forge.Forge.MlxAdminProfileCompare:input_type -> mlx_device.MlxAdminProfileCompareRequest
-	1196, // 1755: forge.Forge.MlxAdminProfileList:input_type -> mlx_device.MlxAdminProfileListRequest
-	1197, // 1756: forge.Forge.MlxAdminLockdownLock:input_type -> mlx_device.MlxAdminLockdownLockRequest
-	1198, // 1757: forge.Forge.MlxAdminLockdownUnlock:input_type -> mlx_device.MlxAdminLockdownUnlockRequest
-	1199, // 1758: forge.Forge.MlxAdminLockdownStatus:input_type -> mlx_device.MlxAdminLockdownStatusRequest
-	1200, // 1759: forge.Forge.MlxAdminShowDevice:input_type -> mlx_device.MlxAdminDeviceInfoRequest
-	1201, // 1760: forge.Forge.MlxAdminShowMachine:input_type -> mlx_device.MlxAdminDeviceReportRequest
-	1202, // 1761: forge.Forge.MlxAdminRegistryList:input_type -> mlx_device.MlxAdminRegistryListRequest
-	1203, // 1762: forge.Forge.MlxAdminRegistryShow:input_type -> mlx_device.MlxAdminRegistryShowRequest
-	1204, // 1763: forge.Forge.MlxAdminConfigQuery:input_type -> mlx_device.MlxAdminConfigQueryRequest
-	1205, // 1764: forge.Forge.MlxAdminConfigSet:input_type -> mlx_device.MlxAdminConfigSetRequest
-	1206, // 1765: forge.Forge.MlxAdminConfigSync:input_type -> mlx_device.MlxAdminConfigSyncRequest
-	1207, // 1766: forge.Forge.MlxAdminConfigCompare:input_type -> mlx_device.MlxAdminConfigCompareRequest
-	821,  // 1767: forge.Forge.FindNVLinkPartitionIds:input_type -> forge.NVLinkPartitionSearchFilter
-	822,  // 1768: forge.Forge.FindNVLinkPartitionsByIds:input_type -> forge.NVLinkPartitionsByIdsRequest
-	172,  // 1769: forge.Forge.NVLinkPartitionsForTenant:input_type -> forge.TenantSearchQuery
-	832,  // 1770: forge.Forge.FindNVLinkLogicalPartitionIds:input_type -> forge.NVLinkLogicalPartitionSearchFilter
-	833,  // 1771: forge.Forge.FindNVLinkLogicalPartitionsByIds:input_type -> forge.NVLinkLogicalPartitionsByIdsRequest
-	829,  // 1772: forge.Forge.CreateNVLinkLogicalPartition:input_type -> forge.NVLinkLogicalPartitionCreationRequest
-	835,  // 1773: forge.Forge.UpdateNVLinkLogicalPartition:input_type -> forge.NVLinkLogicalPartitionUpdateRequest
-	830,  // 1774: forge.Forge.DeleteNVLinkLogicalPartition:input_type -> forge.NVLinkLogicalPartitionDeletionRequest
-	172,  // 1775: forge.Forge.NVLinkLogicalPartitionsForTenant:input_type -> forge.TenantSearchQuery
-	925,  // 1776: forge.Forge.GetMachinePositionInfo:input_type -> forge.MachinePositionQuery
-	815,  // 1777: forge.Forge.NmxcBrowse:input_type -> forge.NmxcBrowseRequest
-	928,  // 1778: forge.Forge.ModifyDPFState:input_type -> forge.ModifyDPFStateRequest
-	930,  // 1779: forge.Forge.GetDPFState:input_type -> forge.GetDPFStateRequest
-	931,  // 1780: forge.Forge.GetDPFHostSnapshot:input_type -> forge.GetDPFHostSnapshotRequest
-	933,  // 1781: forge.Forge.GetDPFServiceVersions:input_type -> forge.GetDPFServiceVersionsRequest
-	939,  // 1782: forge.Forge.FindPendingDPUServiceSyncIds:input_type -> forge.FindPendingDPUServiceSyncIdsRequest
-	940,  // 1783: forge.Forge.FindPendingDPUServiceSyncsByIds:input_type -> forge.FindPendingDPUServiceSyncsByIdsRequest
-	941,  // 1784: forge.Forge.ListDPUServiceSyncHistory:input_type -> forge.ListDPUServiceSyncHistoryRequest
-	936,  // 1785: forge.Forge.ReleaseDPUServiceSyncHold:input_type -> forge.ReleaseDPUServiceSyncHoldRequest
-	951,  // 1786: forge.Forge.ComponentPowerControl:input_type -> forge.ComponentPowerControlRequest
-	953,  // 1787: forge.Forge.ComponentConfigureSwitchCertificate:input_type -> forge.ComponentConfigureSwitchCertificateRequest
-	948,  // 1788: forge.Forge.GetComponentInventory:input_type -> forge.GetComponentInventoryRequest
-	960,  // 1789: forge.Forge.UpdateComponentFirmware:input_type -> forge.UpdateComponentFirmwareRequest
-	962,  // 1790: forge.Forge.GetComponentFirmwareStatus:input_type -> forge.GetComponentFirmwareStatusRequest
-	964,  // 1791: forge.Forge.ListComponentFirmwareVersions:input_type -> forge.ListComponentFirmwareVersionsRequest
-	981,  // 1792: forge.Forge.CreateOperatingSystem:input_type -> forge.CreateOperatingSystemRequest
-	1088, // 1793: forge.Forge.GetOperatingSystem:input_type -> common.OperatingSystemId
-	984,  // 1794: forge.Forge.UpdateOperatingSystem:input_type -> forge.UpdateOperatingSystemRequest
-	985,  // 1795: forge.Forge.DeleteOperatingSystem:input_type -> forge.DeleteOperatingSystemRequest
-	987,  // 1796: forge.Forge.FindOperatingSystemIds:input_type -> forge.OperatingSystemSearchFilter
-	989,  // 1797: forge.Forge.FindOperatingSystemsByIds:input_type -> forge.OperatingSystemsByIdsRequest
-	991,  // 1798: forge.Forge.GetOperatingSystemCachableIpxeTemplateArtifacts:input_type -> forge.GetOperatingSystemCachableIpxeTemplateArtifactsRequest
-	994,  // 1799: forge.Forge.UpdateOperatingSystemCachableIpxeTemplateArtifacts:input_type -> forge.UpdateOperatingSystemIpxeTemplateArtifactRequest
-	995,  // 1800: forge.Forge.ReWrapSecrets:input_type -> forge.ReWrapSecretsRequest
-	158,  // 1801: forge.Forge.Version:output_type -> forge.BuildInfo
-	1127, // 1802: forge.Forge.CreateDomain:output_type -> dns.Domain
-	1127, // 1803: forge.Forge.UpdateDomain:output_type -> dns.Domain
-	1208, // 1804: forge.Forge.DeleteDomain:output_type -> dns.DomainDeletionResult
-	1209, // 1805: forge.Forge.FindDomain:output_type -> dns.DomainList
-	919,  // 1806: forge.Forge.CreateDomainLegacy:output_type -> forge.DomainLegacy
-	919,  // 1807: forge.Forge.UpdateDomainLegacy:output_type -> forge.DomainLegacy
-	922,  // 1808: forge.Forge.DeleteDomainLegacy:output_type -> forge.DomainDeletionResultLegacy
-	920,  // 1809: forge.Forge.FindDomainLegacy:output_type -> forge.DomainListLegacy
-	178,  // 1810: forge.Forge.CreateVpc:output_type -> forge.Vpc
-	181,  // 1811: forge.Forge.UpdateVpc:output_type -> forge.VpcUpdateResult
-	1024, // 1812: forge.Forge.ChangeVpcRoutingProfile:output_type -> forge.VpcRoutingState
-	1022, // 1813: forge.Forge.ReleaseVpcInactiveVni:output_type -> forge.VpcReleaseInactiveVniResult
-	183,  // 1814: forge.Forge.UpdateVpcVirtualization:output_type -> forge.VpcUpdateVirtualizationResult
-	185,  // 1815: forge.Forge.DeleteVpc:output_type -> forge.VpcDeletionResult
-	170,  // 1816: forge.Forge.FindVpcIds:output_type -> forge.VpcIdList
-	186,  // 1817: forge.Forge.FindVpcsByIds:output_type -> forge.VpcList
-	1024, // 1818: forge.Forge.GetVpcRoutingState:output_type -> forge.VpcRoutingState
-	969,  // 1819: forge.Forge.CreateSpxPartition:output_type -> forge.SpxPartition
-	972,  // 1820: forge.Forge.DeleteSpxPartition:output_type -> forge.SpxPartitionDeletionResult
-	970,  // 1821: forge.Forge.FindSpxPartitionIds:output_type -> forge.SpxPartitionIdList
-	974,  // 1822: forge.Forge.FindSpxPartitionsByIds:output_type -> forge.SpxPartitionList
-	187,  // 1823: forge.Forge.CreateVpcPrefix:output_type -> forge.VpcPrefix
-	193,  // 1824: forge.Forge.SearchVpcPrefixes:output_type -> forge.VpcPrefixIdList
-	194,  // 1825: forge.Forge.GetVpcPrefixes:output_type -> forge.VpcPrefixList
-	187,  // 1826: forge.Forge.UpdateVpcPrefix:output_type -> forge.VpcPrefix
-	197,  // 1827: forge.Forge.DeleteVpcPrefix:output_type -> forge.VpcPrefixDeletionResult
-	1007, // 1828: forge.Forge.CreateSitePrefix:output_type -> forge.SitePrefix
-	1007, // 1829: forge.Forge.UpdateSitePrefix:output_type -> forge.SitePrefix
-	1014, // 1830: forge.Forge.DeleteSitePrefix:output_type -> forge.SitePrefixDeletionResult
-	1018, // 1831: forge.Forge.FindSitePrefixIds:output_type -> forge.SitePrefixIdList
-	1019, // 1832: forge.Forge.FindSitePrefixesByIds:output_type -> forge.SitePrefixList
-	199,  // 1833: forge.Forge.CreateVpcPeering:output_type -> forge.VpcPeering
-	200,  // 1834: forge.Forge.FindVpcPeeringIds:output_type -> forge.VpcPeeringIdList
-	201,  // 1835: forge.Forge.FindVpcPeeringsByIds:output_type -> forge.VpcPeeringList
-	206,  // 1836: forge.Forge.DeleteVpcPeering:output_type -> forge.VpcPeeringDeletionResult
-	279,  // 1837: forge.Forge.FindNetworkSegmentIds:output_type -> forge.NetworkSegmentIdList
-	393,  // 1838: forge.Forge.FindNetworkSegmentsByIds:output_type -> forge.NetworkSegmentList
-	271,  // 1839: forge.Forge.CreateNetworkSegment:output_type -> forge.NetworkSegment
-	271,  // 1840: forge.Forge.AttachNetworkSegmentToVpc:output_type -> forge.NetworkSegment
-	275,  // 1841: forge.Forge.DeleteNetworkSegment:output_type -> forge.NetworkSegmentDeletionResult
-	393,  // 1842: forge.Forge.NetworkSegmentsForVpc:output_type -> forge.NetworkSegmentList
-	217,  // 1843: forge.Forge.FindIBPartitionIds:output_type -> forge.IBPartitionIdList
-	210,  // 1844: forge.Forge.FindIBPartitionsByIds:output_type -> forge.IBPartitionList
-	209,  // 1845: forge.Forge.CreateIBPartition:output_type -> forge.IBPartition
-	209,  // 1846: forge.Forge.UpdateIBPartition:output_type -> forge.IBPartition
-	214,  // 1847: forge.Forge.DeleteIBPartition:output_type -> forge.IBPartitionDeletionResult
-	210,  // 1848: forge.Forge.IBPartitionsForTenant:output_type -> forge.IBPartitionList
-	221,  // 1849: forge.Forge.FindPowerShelves:output_type -> forge.PowerShelfList
-	946,  // 1850: forge.Forge.FindPowerShelfIds:output_type -> forge.PowerShelfIdList
-	221,  // 1851: forge.Forge.FindPowerShelvesByIds:output_type -> forge.PowerShelfList
-	224,  // 1852: forge.Forge.DecommissionPowerShelf:output_type -> forge.DecommissionPowerShelfResponse
-	226,  // 1853: forge.Forge.DeletePowerShelf:output_type -> forge.PowerShelfDeletionResult
-	979,  // 1854: forge.Forge.AdminForceDeletePowerShelf:output_type -> forge.AdminForceDeletePowerShelfResponse
-	1141, // 1855: forge.Forge.SetPowerShelfMaintenance:output_type -> google.protobuf.Empty
-	244,  // 1856: forge.Forge.FindSwitches:output_type -> forge.SwitchList
-	945,  // 1857: forge.Forge.FindSwitchIds:output_type -> forge.SwitchIdList
-	244,  // 1858: forge.Forge.FindSwitchesByIds:output_type -> forge.SwitchList
-	247,  // 1859: forge.Forge.DeleteSwitch:output_type -> forge.SwitchDeletionResult
-	249,  // 1860: forge.Forge.DecommissionSwitch:output_type -> forge.DecommissionSwitchResponse
-	977,  // 1861: forge.Forge.AdminForceDeleteSwitch:output_type -> forge.AdminForceDeleteSwitchResponse
-	267,  // 1862: forge.Forge.FindIBFabricIds:output_type -> forge.IBFabricIdList
-	320,  // 1863: forge.Forge.AllocateInstance:output_type -> forge.Instance
-	293,  // 1864: forge.Forge.AllocateInstances:output_type -> forge.BatchInstanceAllocationResponse
-	338,  // 1865: forge.Forge.ReleaseInstance:output_type -> forge.InstanceReleaseResult
-	341,  // 1866: forge.Forge.ReleaseInstances:output_type -> forge.BatchInstanceReleaseResponse
-	320,  // 1867: forge.Forge.UpdateInstanceOperatingSystem:output_type -> forge.Instance
-	320,  // 1868: forge.Forge.UpdateInstanceConfig:output_type -> forge.Instance
-	289,  // 1869: forge.Forge.FindInstanceIds:output_type -> forge.InstanceIdList
-	285,  // 1870: forge.Forge.FindInstancesByIds:output_type -> forge.InstanceList
-	285,  // 1871: forge.Forge.FindInstanceByMachineID:output_type -> forge.InstanceList
-	414,  // 1872: forge.Forge.GetManagedHostNetworkConfig:output_type -> forge.ManagedHostNetworkConfigResponse
-	1141, // 1873: forge.Forge.RecordDpuNetworkStatus:output_type -> google.protobuf.Empty
-	494,  // 1874: forge.Forge.ListMachineHealthReports:output_type -> forge.ListHealthReportResponse
-	1141, // 1875: forge.Forge.InsertMachineHealthReport:output_type -> google.protobuf.Empty
-	1141, // 1876: forge.Forge.RemoveMachineHealthReport:output_type -> google.protobuf.Empty
-	494,  // 1877: forge.Forge.ListRackHealthReports:output_type -> forge.ListHealthReportResponse
-	1141, // 1878: forge.Forge.InsertRackHealthReport:output_type -> google.protobuf.Empty
-	1141, // 1879: forge.Forge.RemoveRackHealthReport:output_type -> google.protobuf.Empty
-	494,  // 1880: forge.Forge.ListSwitchHealthReports:output_type -> forge.ListHealthReportResponse
-	1141, // 1881: forge.Forge.InsertSwitchHealthReport:output_type -> google.protobuf.Empty
-	1141, // 1882: forge.Forge.RemoveSwitchHealthReport:output_type -> google.protobuf.Empty
-	494,  // 1883: forge.Forge.ListPowerShelfHealthReports:output_type -> forge.ListHealthReportResponse
-	1141, // 1884: forge.Forge.InsertPowerShelfHealthReport:output_type -> google.protobuf.Empty
-	1141, // 1885: forge.Forge.RemovePowerShelfHealthReport:output_type -> google.protobuf.Empty
-	494,  // 1886: forge.Forge.ListNVLinkDomainHealthReports:output_type -> forge.ListHealthReportResponse
-	1141, // 1887: forge.Forge.InsertNVLinkDomainHealthReport:output_type -> google.protobuf.Empty
-	1141, // 1888: forge.Forge.RemoveNVLinkDomainHealthReport:output_type -> google.protobuf.Empty
-	494,  // 1889: forge.Forge.ListHealthReportOverrides:output_type -> forge.ListHealthReportResponse
-	1141, // 1890: forge.Forge.InsertHealthReportOverride:output_type -> google.protobuf.Empty
-	1141, // 1891: forge.Forge.RemoveHealthReportOverride:output_type -> google.protobuf.Empty
-	431,  // 1892: forge.Forge.DpuAgentUpgradeCheck:output_type -> forge.DpuAgentUpgradeCheckResponse
-	433,  // 1893: forge.Forge.DpuAgentUpgradePolicyAction:output_type -> forge.DpuAgentUpgradePolicyResponse
-	1210, // 1894: forge.Forge.LookupRecord:output_type -> dns.DnsResourceRecordLookupResponse
-	1211, // 1895: forge.Forge.GetAllDomains:output_type -> dns.GetAllDomainsResponse
-	1212, // 1896: forge.Forge.GetAllDomainMetadata:output_type -> dns.DomainMetadataResponse
-	284,  // 1897: forge.Forge.InvokeInstancePower:output_type -> forge.InstancePowerResult
-	460,  // 1898: forge.Forge.ForgeAgentControl:output_type -> forge.ForgeAgentControlResponse
-	467,  // 1899: forge.Forge.DiscoverMachine:output_type -> forge.MachineDiscoveryResult
-	466,  // 1900: forge.Forge.RenewMachineCertificate:output_type -> forge.MachineCertificateResult
-	468,  // 1901: forge.Forge.DiscoveryCompleted:output_type -> forge.MachineDiscoveryCompletedResponse
-	469,  // 1902: forge.Forge.CleanupMachineCompleted:output_type -> forge.MachineCleanupResult
-	471,  // 1903: forge.Forge.ReportForgeScoutError:output_type -> forge.ForgeScoutErrorReportResult
-	392,  // 1904: forge.Forge.DiscoverDhcp:output_type -> forge.DhcpRecord
-	391,  // 1905: forge.Forge.ExpireDhcpLease:output_type -> forge.ExpireDhcpLeaseResponse
-	360,  // 1906: forge.Forge.AssignStaticAddress:output_type -> forge.AssignStaticAddressResponse
-	362,  // 1907: forge.Forge.RemoveStaticAddress:output_type -> forge.RemoveStaticAddressResponse
-	365,  // 1908: forge.Forge.FindInterfaceAddresses:output_type -> forge.FindInterfaceAddressesResponse
-	355,  // 1909: forge.Forge.FindInterfaces:output_type -> forge.InterfaceList
-	1141, // 1910: forge.Forge.DeleteInterface:output_type -> google.protobuf.Empty
-	535,  // 1911: forge.Forge.FindIpAddress:output_type -> forge.FindIpAddressResponse
-	1128, // 1912: forge.Forge.FindMachineIds:output_type -> common.MachineIdList
-	356,  // 1913: forge.Forge.FindMachinesByIds:output_type -> forge.MachineList
-	345,  // 1914: forge.Forge.FindMachineStateHistories:output_type -> forge.MachineStateHistories
-	348,  // 1915: forge.Forge.FindMachineHealthHistories:output_type -> forge.HealthHistories
-	254,  // 1916: forge.Forge.FindPowerShelfStateHistories:output_type -> forge.StateHistories
-	348,  // 1917: forge.Forge.FindPowerShelfHealthHistories:output_type -> forge.HealthHistories
-	254,  // 1918: forge.Forge.FindRackStateHistories:output_type -> forge.StateHistories
-	348,  // 1919: forge.Forge.FindRackHealthHistories:output_type -> forge.HealthHistories
-	254,  // 1920: forge.Forge.FindSwitchStateHistories:output_type -> forge.StateHistories
-	348,  // 1921: forge.Forge.FindSwitchHealthHistories:output_type -> forge.HealthHistories
-	254,  // 1922: forge.Forge.FindNetworkSegmentStateHistories:output_type -> forge.StateHistories
-	254,  // 1923: forge.Forge.FindVpcPrefixStateHistories:output_type -> forge.StateHistories
-	254,  // 1924: forge.Forge.FindSitePrefixStateHistories:output_type -> forge.StateHistories
-	354,  // 1925: forge.Forge.FindTenantOrganizationIds:output_type -> forge.TenantOrganizationIdList
-	353,  // 1926: forge.Forge.FindTenantsByOrganizationIds:output_type -> forge.TenantList
-	561,  // 1927: forge.Forge.FindConnectedDevicesByDpuMachineIds:output_type -> forge.ConnectedDeviceList
-	565,  // 1928: forge.Forge.FindMachineIdsByBmcIps:output_type -> forge.MachineIdBmcIpPairs
-	564,  // 1929: forge.Forge.FindMacAddressByBmcIp:output_type -> forge.MacAddressBmcIp
-	562,  // 1930: forge.Forge.FindBmcIps:output_type -> forge.BmcIpList
-	537,  // 1931: forge.Forge.IdentifyUuid:output_type -> forge.IdentifyUuidResponse
-	540,  // 1932: forge.Forge.IdentifyMac:output_type -> forge.IdentifyMacResponse
-	542,  // 1933: forge.Forge.IdentifySerial:output_type -> forge.IdentifySerialResponse
-	456,  // 1934: forge.Forge.GetBMCMetaData:output_type -> forge.BMCMetaDataGetResponse
-	458,  // 1935: forge.Forge.UpdateMachineCredentials:output_type -> forge.MachineCredentialsUpdateResponse
-	473,  // 1936: forge.Forge.GetPxeInstructions:output_type -> forge.PxeInstructions
-	477,  // 1937: forge.Forge.GetCloudInitInstructions:output_type -> forge.CloudInitInstructions
-	161,  // 1938: forge.Forge.Echo:output_type -> forge.EchoResponse
-	504,  // 1939: forge.Forge.CreateTenant:output_type -> forge.CreateTenantResponse
-	508,  // 1940: forge.Forge.FindTenant:output_type -> forge.FindTenantResponse
-	506,  // 1941: forge.Forge.UpdateTenant:output_type -> forge.UpdateTenantResponse
-	514,  // 1942: forge.Forge.CreateTenantKeyset:output_type -> forge.CreateTenantKeysetResponse
-	521,  // 1943: forge.Forge.FindTenantKeysetIds:output_type -> forge.TenantKeysetIdList
-	515,  // 1944: forge.Forge.FindTenantKeysetsByIds:output_type -> forge.TenantKeySetList
-	517,  // 1945: forge.Forge.UpdateTenantKeyset:output_type -> forge.UpdateTenantKeysetResponse
-	519,  // 1946: forge.Forge.DeleteTenantKeyset:output_type -> forge.DeleteTenantKeysetResponse
-	524,  // 1947: forge.Forge.ValidateTenantPublicKey:output_type -> forge.ValidateTenantPublicKeyResponse
-	398,  // 1948: forge.Forge.GetBmcCredentials:output_type -> forge.GetBmcCredentialsResponse
-	398,  // 1949: forge.Forge.GetSwitchNvosCredentials:output_type -> forge.GetBmcCredentialsResponse
-	429,  // 1950: forge.Forge.GetAllManagedHostNetworkStatus:output_type -> forge.ManagedHostNetworkStatusResponse
-	1213, // 1951: forge.Forge.GetSiteExplorationReport:output_type -> site_explorer.SiteExplorationReport
-	1214, // 1952: forge.Forge.GetSiteExplorerLastRun:output_type -> site_explorer.SiteExplorerLastRunResponse
-	1141, // 1953: forge.Forge.ClearSiteExplorationError:output_type -> google.protobuf.Empty
-	650,  // 1954: forge.Forge.IsBmcInManagedHost:output_type -> forge.IsBmcInManagedHostResponse
-	651,  // 1955: forge.Forge.BmcCredentialStatus:output_type -> forge.BmcCredentialStatusResponse
-	1129, // 1956: forge.Forge.Explore:output_type -> site_explorer.EndpointExplorationReport
-	1141, // 1957: forge.Forge.ReExploreEndpoint:output_type -> google.protobuf.Empty
-	1215, // 1958: forge.Forge.RefreshEndpointReport:output_type -> site_explorer.ExploredEndpoint
-	406,  // 1959: forge.Forge.DeleteExploredEndpoint:output_type -> forge.DeleteExploredEndpointResponse
-	1141, // 1960: forge.Forge.PauseExploredEndpointRemediation:output_type -> google.protobuf.Empty
-	1216, // 1961: forge.Forge.FindExploredEndpointIds:output_type -> site_explorer.ExploredEndpointIdList
-	1217, // 1962: forge.Forge.FindExploredEndpointsByIds:output_type -> site_explorer.ExploredEndpointList
-	1218, // 1963: forge.Forge.FindExploredManagedHostIds:output_type -> site_explorer.ExploredManagedHostIdList
-	1219, // 1964: forge.Forge.FindExploredManagedHostsByIds:output_type -> site_explorer.ExploredManagedHostList
-	1220, // 1965: forge.Forge.FindExploredMlxDeviceHostIds:output_type -> site_explorer.ExploredMlxDeviceHostIdList
-	1221, // 1966: forge.Forge.FindExploredMlxDevicesByIds:output_type -> site_explorer.ExploredMlxDeviceList
-	1141, // 1967: forge.Forge.UpdateMachineHardwareInfo:output_type -> google.protobuf.Empty
-	437,  // 1968: forge.Forge.AdminForceDeleteMachine:output_type -> forge.AdminForceDeleteMachineResponse
-	436,  // 1969: forge.Forge.DecommissionManagedHost:output_type -> forge.DecommissionManagedHostResponse
-	526,  // 1970: forge.Forge.AdminListResourcePools:output_type -> forge.ResourcePools
-	529,  // 1971: forge.Forge.AdminGrowResourcePool:output_type -> forge.GrowResourcePoolResponse
-	1141, // 1972: forge.Forge.UpdateMachineMetadata:output_type -> google.protobuf.Empty
-	1141, // 1973: forge.Forge.UpdateRackMetadata:output_type -> google.protobuf.Empty
-	1141, // 1974: forge.Forge.UpdateSwitchMetadata:output_type -> google.protobuf.Empty
-	1141, // 1975: forge.Forge.UpdatePowerShelfMetadata:output_type -> google.protobuf.Empty
-	1141, // 1976: forge.Forge.UpdateMachineNvLinkInfo:output_type -> google.protobuf.Empty
-	1141, // 1977: forge.Forge.SetMaintenance:output_type -> google.protobuf.Empty
-	1141, // 1978: forge.Forge.SetDynamicConfig:output_type -> google.protobuf.Empty
-	1141, // 1979: forge.Forge.TriggerDpuReprovisioning:output_type -> google.protobuf.Empty
-	545,  // 1980: forge.Forge.ListDpuWaitingForReprovisioning:output_type -> forge.DpuReprovisioningListResponse
-	1141, // 1981: forge.Forge.TriggerHostReprovisioning:output_type -> google.protobuf.Empty
-	551,  // 1982: forge.Forge.ListHostsWaitingForReprovisioning:output_type -> forge.HostReprovisioningListResponse
-	1141, // 1983: forge.Forge.TriggerBmcCredentialRotation:output_type -> google.protobuf.Empty
-	1141, // 1984: forge.Forge.TriggerUefiCredentialRotation:output_type -> google.protobuf.Empty
-	1141, // 1985: forge.Forge.TriggerNicLockdownCredentialRotation:output_type -> google.protobuf.Empty
-	1141, // 1986: forge.Forge.MarkManualFirmwareUpgradeComplete:output_type -> google.protobuf.Empty
-	1141, // 1987: forge.Forge.ReportScoutFirmwareUpgradeStatus:output_type -> google.protobuf.Empty
-	557,  // 1988: forge.Forge.GetDpuInfoList:output_type -> forge.GetDpuInfoListResponse
-	559,  // 1989: forge.Forge.GetMachineBootOverride:output_type -> forge.MachineBootOverride
-	1141, // 1990: forge.Forge.SetMachineBootOverride:output_type -> google.protobuf.Empty
-	1141, // 1991: forge.Forge.ClearMachineBootOverride:output_type -> google.protobuf.Empty
-	1003, // 1992: forge.Forge.GetMachineBootInterfaces:output_type -> forge.GetMachineBootInterfacesResponse
-	570,  // 1993: forge.Forge.GetNetworkTopology:output_type -> forge.NetworkTopologyData
-	570,  // 1994: forge.Forge.FindNetworkDevicesByDeviceIds:output_type -> forge.NetworkTopologyData
-	150,  // 1995: forge.Forge.CreateCredential:output_type -> forge.CredentialCreationResult
-	151,  // 1996: forge.Forge.DeleteCredential:output_type -> forge.CredentialDeletionResult
-	153,  // 1997: forge.Forge.RotateCredential:output_type -> forge.RotateCredentialResult
-	156,  // 1998: forge.Forge.GetCredentialRotationStatus:output_type -> forge.CredentialRotationStatusResult
-	1005, // 1999: forge.Forge.GetContainerRegistryCredential:output_type -> forge.GetContainerRegistryCredentialResponse
-	1141, // 2000: forge.Forge.SetContainerRegistryCredential:output_type -> google.protobuf.Empty
-	572,  // 2001: forge.Forge.GetRouteServers:output_type -> forge.RouteServerEntries
-	1141, // 2002: forge.Forge.AddRouteServers:output_type -> google.protobuf.Empty
-	1141, // 2003: forge.Forge.RemoveRouteServers:output_type -> google.protobuf.Empty
-	1141, // 2004: forge.Forge.ReplaceRouteServers:output_type -> google.protobuf.Empty
-	1141, // 2005: forge.Forge.UpdateAgentReportedInventory:output_type -> google.protobuf.Empty
-	333,  // 2006: forge.Forge.UpdateInstancePhoneHomeLastContact:output_type -> forge.InstancePhoneHomeLastContactResponse
-	575,  // 2007: forge.Forge.SetHostUefiPassword:output_type -> forge.SetHostUefiPasswordResponse
-	577,  // 2008: forge.Forge.ClearHostUefiPassword:output_type -> forge.ClearHostUefiPasswordResponse
-	579,  // 2009: forge.Forge.SetDpuUefiPassword:output_type -> forge.SetDpuUefiPasswordResponse
-	1141, // 2010: forge.Forge.AddExpectedMachine:output_type -> google.protobuf.Empty
-	1141, // 2011: forge.Forge.DeleteExpectedMachine:output_type -> google.protobuf.Empty
-	1141, // 2012: forge.Forge.UpdateExpectedMachine:output_type -> google.protobuf.Empty
-	591,  // 2013: forge.Forge.GetExpectedMachine:output_type -> forge.ExpectedMachine
-	593,  // 2014: forge.Forge.GetAllExpectedMachines:output_type -> forge.ExpectedMachineList
-	1141, // 2015: forge.Forge.ReplaceAllExpectedMachines:output_type -> google.protobuf.Empty
-	1141, // 2016: forge.Forge.DeleteAllExpectedMachines:output_type -> google.protobuf.Empty
-	594,  // 2017: forge.Forge.GetAllExpectedMachinesLinked:output_type -> forge.LinkedExpectedMachineList
-	596,  // 2018: forge.Forge.GetAllUnexpectedMachines:output_type -> forge.UnexpectedMachineList
-	600,  // 2019: forge.Forge.CreateExpectedMachines:output_type -> forge.BatchExpectedMachineOperationResponse
-	600,  // 2020: forge.Forge.UpdateExpectedMachines:output_type -> forge.BatchExpectedMachineOperationResponse
-	1141, // 2021: forge.Forge.AddExpectedPowerShelf:output_type -> google.protobuf.Empty
-	1141, // 2022: forge.Forge.DeleteExpectedPowerShelf:output_type -> google.protobuf.Empty
-	1141, // 2023: forge.Forge.UpdateExpectedPowerShelf:output_type -> google.protobuf.Empty
-	233,  // 2024: forge.Forge.GetExpectedPowerShelf:output_type -> forge.ExpectedPowerShelf
-	235,  // 2025: forge.Forge.GetAllExpectedPowerShelves:output_type -> forge.ExpectedPowerShelfList
-	1141, // 2026: forge.Forge.ReplaceAllExpectedPowerShelves:output_type -> google.protobuf.Empty
-	1141, // 2027: forge.Forge.DeleteAllExpectedPowerShelves:output_type -> google.protobuf.Empty
-	236,  // 2028: forge.Forge.GetAllExpectedPowerShelvesLinked:output_type -> forge.LinkedExpectedPowerShelfList
-	1141, // 2029: forge.Forge.AddExpectedSwitch:output_type -> google.protobuf.Empty
-	1141, // 2030: forge.Forge.DeleteExpectedSwitch:output_type -> google.protobuf.Empty
-	1141, // 2031: forge.Forge.UpdateExpectedSwitch:output_type -> google.protobuf.Empty
-	258,  // 2032: forge.Forge.GetExpectedSwitch:output_type -> forge.ExpectedSwitch
-	260,  // 2033: forge.Forge.GetAllExpectedSwitches:output_type -> forge.ExpectedSwitchList
-	1141, // 2034: forge.Forge.ReplaceAllExpectedSwitches:output_type -> google.protobuf.Empty
-	1141, // 2035: forge.Forge.DeleteAllExpectedSwitches:output_type -> google.protobuf.Empty
-	261,  // 2036: forge.Forge.GetAllExpectedSwitchesLinked:output_type -> forge.LinkedExpectedSwitchList
-	1141, // 2037: forge.Forge.AddExpectedRack:output_type -> google.protobuf.Empty
-	1141, // 2038: forge.Forge.DeleteExpectedRack:output_type -> google.protobuf.Empty
-	1141, // 2039: forge.Forge.UpdateExpectedRack:output_type -> google.protobuf.Empty
-	263,  // 2040: forge.Forge.GetExpectedRack:output_type -> forge.ExpectedRack
-	265,  // 2041: forge.Forge.GetAllExpectedRacks:output_type -> forge.ExpectedRackList
-	1141, // 2042: forge.Forge.ReplaceAllExpectedRacks:output_type -> google.protobuf.Empty
-	1141, // 2043: forge.Forge.DeleteAllExpectedRacks:output_type -> google.protobuf.Empty
-	147,  // 2044: forge.Forge.AttestQuote:output_type -> forge.AttestQuoteResponse
-	681,  // 2045: forge.Forge.CreateInstanceType:output_type -> forge.CreateInstanceTypeResponse
-	683,  // 2046: forge.Forge.FindInstanceTypeIds:output_type -> forge.FindInstanceTypeIdsResponse
-	685,  // 2047: forge.Forge.FindInstanceTypesByIds:output_type -> forge.FindInstanceTypesByIdsResponse
-	688,  // 2048: forge.Forge.UpdateInstanceType:output_type -> forge.UpdateInstanceTypeResponse
-	687,  // 2049: forge.Forge.DeleteInstanceType:output_type -> forge.DeleteInstanceTypeResponse
-	691,  // 2050: forge.Forge.AssociateMachinesWithInstanceType:output_type -> forge.AssociateMachinesWithInstanceTypeResponse
-	693,  // 2051: forge.Forge.RemoveMachineInstanceTypeAssociation:output_type -> forge.RemoveMachineInstanceTypeAssociationResponse
-	1222, // 2052: forge.Forge.CreateMeasurementBundle:output_type -> measured_boot.CreateMeasurementBundleResponse
-	1223, // 2053: forge.Forge.DeleteMeasurementBundle:output_type -> measured_boot.DeleteMeasurementBundleResponse
-	1224, // 2054: forge.Forge.RenameMeasurementBundle:output_type -> measured_boot.RenameMeasurementBundleResponse
-	1225, // 2055: forge.Forge.UpdateMeasurementBundle:output_type -> measured_boot.UpdateMeasurementBundleResponse
-	1226, // 2056: forge.Forge.ShowMeasurementBundle:output_type -> measured_boot.ShowMeasurementBundleResponse
-	1227, // 2057: forge.Forge.ShowMeasurementBundles:output_type -> measured_boot.ShowMeasurementBundlesResponse
-	1228, // 2058: forge.Forge.ListMeasurementBundles:output_type -> measured_boot.ListMeasurementBundlesResponse
-	1229, // 2059: forge.Forge.ListMeasurementBundleMachines:output_type -> measured_boot.ListMeasurementBundleMachinesResponse
-	1226, // 2060: forge.Forge.FindClosestBundleMatch:output_type -> measured_boot.ShowMeasurementBundleResponse
-	1230, // 2061: forge.Forge.DeleteMeasurementJournal:output_type -> measured_boot.DeleteMeasurementJournalResponse
-	1231, // 2062: forge.Forge.ShowMeasurementJournal:output_type -> measured_boot.ShowMeasurementJournalResponse
-	1232, // 2063: forge.Forge.ShowMeasurementJournals:output_type -> measured_boot.ShowMeasurementJournalsResponse
-	1233, // 2064: forge.Forge.ListMeasurementJournal:output_type -> measured_boot.ListMeasurementJournalResponse
-	1234, // 2065: forge.Forge.AttestCandidateMachine:output_type -> measured_boot.AttestCandidateMachineResponse
-	1235, // 2066: forge.Forge.ShowCandidateMachine:output_type -> measured_boot.ShowCandidateMachineResponse
-	1236, // 2067: forge.Forge.ShowCandidateMachines:output_type -> measured_boot.ShowCandidateMachinesResponse
-	1237, // 2068: forge.Forge.ListCandidateMachines:output_type -> measured_boot.ListCandidateMachinesResponse
-	1238, // 2069: forge.Forge.CreateMeasurementSystemProfile:output_type -> measured_boot.CreateMeasurementSystemProfileResponse
-	1239, // 2070: forge.Forge.DeleteMeasurementSystemProfile:output_type -> measured_boot.DeleteMeasurementSystemProfileResponse
-	1240, // 2071: forge.Forge.RenameMeasurementSystemProfile:output_type -> measured_boot.RenameMeasurementSystemProfileResponse
-	1241, // 2072: forge.Forge.ShowMeasurementSystemProfile:output_type -> measured_boot.ShowMeasurementSystemProfileResponse
-	1242, // 2073: forge.Forge.ShowMeasurementSystemProfiles:output_type -> measured_boot.ShowMeasurementSystemProfilesResponse
-	1243, // 2074: forge.Forge.ListMeasurementSystemProfiles:output_type -> measured_boot.ListMeasurementSystemProfilesResponse
-	1244, // 2075: forge.Forge.ListMeasurementSystemProfileBundles:output_type -> measured_boot.ListMeasurementSystemProfileBundlesResponse
-	1245, // 2076: forge.Forge.ListMeasurementSystemProfileMachines:output_type -> measured_boot.ListMeasurementSystemProfileMachinesResponse
-	1246, // 2077: forge.Forge.CreateMeasurementReport:output_type -> measured_boot.CreateMeasurementReportResponse
-	1247, // 2078: forge.Forge.DeleteMeasurementReport:output_type -> measured_boot.DeleteMeasurementReportResponse
-	1248, // 2079: forge.Forge.PromoteMeasurementReport:output_type -> measured_boot.PromoteMeasurementReportResponse
-	1249, // 2080: forge.Forge.RevokeMeasurementReport:output_type -> measured_boot.RevokeMeasurementReportResponse
-	1250, // 2081: forge.Forge.ShowMeasurementReportForId:output_type -> measured_boot.ShowMeasurementReportForIdResponse
-	1251, // 2082: forge.Forge.ShowMeasurementReportsForMachine:output_type -> measured_boot.ShowMeasurementReportsForMachineResponse
-	1252, // 2083: forge.Forge.ShowMeasurementReports:output_type -> measured_boot.ShowMeasurementReportsResponse
-	1253, // 2084: forge.Forge.ListMeasurementReport:output_type -> measured_boot.ListMeasurementReportResponse
-	1254, // 2085: forge.Forge.MatchMeasurementReport:output_type -> measured_boot.MatchMeasurementReportResponse
-	1255, // 2086: forge.Forge.ImportSiteMeasurements:output_type -> measured_boot.ImportSiteMeasurementsResponse
-	1256, // 2087: forge.Forge.ExportSiteMeasurements:output_type -> measured_boot.ExportSiteMeasurementsResponse
-	1257, // 2088: forge.Forge.AddMeasurementTrustedMachine:output_type -> measured_boot.AddMeasurementTrustedMachineResponse
-	1258, // 2089: forge.Forge.RemoveMeasurementTrustedMachine:output_type -> measured_boot.RemoveMeasurementTrustedMachineResponse
-	1259, // 2090: forge.Forge.AddMeasurementTrustedProfile:output_type -> measured_boot.AddMeasurementTrustedProfileResponse
-	1260, // 2091: forge.Forge.RemoveMeasurementTrustedProfile:output_type -> measured_boot.RemoveMeasurementTrustedProfileResponse
-	1261, // 2092: forge.Forge.ListMeasurementTrustedMachines:output_type -> measured_boot.ListMeasurementTrustedMachinesResponse
-	1262, // 2093: forge.Forge.ListMeasurementTrustedProfiles:output_type -> measured_boot.ListMeasurementTrustedProfilesResponse
-	1263, // 2094: forge.Forge.ListAttestationSummary:output_type -> measured_boot.ListAttestationSummaryResponse
-	712,  // 2095: forge.Forge.CreateNetworkSecurityGroup:output_type -> forge.CreateNetworkSecurityGroupResponse
-	714,  // 2096: forge.Forge.FindNetworkSecurityGroupIds:output_type -> forge.FindNetworkSecurityGroupIdsResponse
-	716,  // 2097: forge.Forge.FindNetworkSecurityGroupsByIds:output_type -> forge.FindNetworkSecurityGroupsByIdsResponse
-	717,  // 2098: forge.Forge.UpdateNetworkSecurityGroup:output_type -> forge.UpdateNetworkSecurityGroupResponse
-	720,  // 2099: forge.Forge.DeleteNetworkSecurityGroup:output_type -> forge.DeleteNetworkSecurityGroupResponse
-	723,  // 2100: forge.Forge.GetNetworkSecurityGroupPropagationStatus:output_type -> forge.GetNetworkSecurityGroupPropagationStatusResponse
-	730,  // 2101: forge.Forge.GetNetworkSecurityGroupAttachments:output_type -> forge.GetNetworkSecurityGroupAttachmentsResponse
-	581,  // 2102: forge.Forge.CreateOsImage:output_type -> forge.OsImage
-	585,  // 2103: forge.Forge.DeleteOsImage:output_type -> forge.DeleteOsImageResponse
-	583,  // 2104: forge.Forge.ListOsImage:output_type -> forge.ListOsImageResponse
-	581,  // 2105: forge.Forge.GetOsImage:output_type -> forge.OsImage
-	581,  // 2106: forge.Forge.UpdateOsImage:output_type -> forge.OsImage
-	296,  // 2107: forge.Forge.GetIpxeTemplate:output_type -> forge.IpxeTemplate
-	588,  // 2108: forge.Forge.ListIpxeTemplates:output_type -> forge.IpxeTemplateList
-	601,  // 2109: forge.Forge.RebootCompleted:output_type -> forge.MachineRebootCompletedResponse
-	1141, // 2110: forge.Forge.PersistValidationResult:output_type -> google.protobuf.Empty
-	608,  // 2111: forge.Forge.GetMachineValidationResults:output_type -> forge.MachineValidationResultList
-	605,  // 2112: forge.Forge.MachineValidationCompleted:output_type -> forge.MachineValidationCompletedResponse
-	613,  // 2113: forge.Forge.MachineSetAutoUpdate:output_type -> forge.MachineSetAutoUpdateResponse
-	616,  // 2114: forge.Forge.GetMachineValidationExternalConfig:output_type -> forge.GetMachineValidationExternalConfigResponse
-	618,  // 2115: forge.Forge.GetMachineValidationExternalConfigs:output_type -> forge.GetMachineValidationExternalConfigsResponse
-	1141, // 2116: forge.Forge.AddUpdateMachineValidationExternalConfig:output_type -> google.protobuf.Empty
-	639,  // 2117: forge.Forge.GetMachineValidationRuns:output_type -> forge.MachineValidationRunList
-	642,  // 2118: forge.Forge.FindMachineValidationRunItemIds:output_type -> forge.MachineValidationRunItemIdList
-	644,  // 2119: forge.Forge.FindMachineValidationRunItemsByIds:output_type -> forge.MachineValidationRunItemList
-	647,  // 2120: forge.Forge.GetMachineValidationAttempt:output_type -> forge.MachineValidationAttempt
-	649,  // 2121: forge.Forge.HeartbeatMachineValidationRun:output_type -> forge.MachineValidationHeartbeatResponse
-	1141, // 2122: forge.Forge.RemoveMachineValidationExternalConfig:output_type -> google.protobuf.Empty
-	656,  // 2123: forge.Forge.GetMachineValidationTests:output_type -> forge.MachineValidationTestsGetResponse
-	655,  // 2124: forge.Forge.AddMachineValidationTest:output_type -> forge.MachineValidationTestAddUpdateResponse
-	655,  // 2125: forge.Forge.UpdateMachineValidationTest:output_type -> forge.MachineValidationTestAddUpdateResponse
-	658,  // 2126: forge.Forge.MachineValidationTestVerfied:output_type -> forge.MachineValidationTestVerfiedResponse
-	663,  // 2127: forge.Forge.MachineValidationTestNextVersion:output_type -> forge.MachineValidationTestNextVersionResponse
-	666,  // 2128: forge.Forge.MachineValidationTestEnableDisableTest:output_type -> forge.MachineValidationTestEnableDisableTestResponse
-	662,  // 2129: forge.Forge.MachineValidationTestApproveFullHost:output_type -> forge.MachineValidationTestFullHostApprovalResponse
-	668,  // 2130: forge.Forge.UpdateMachineValidationRun:output_type -> forge.MachineValidationRunResponse
-	450,  // 2131: forge.Forge.AdminBmcReset:output_type -> forge.AdminBmcResetResponse
-	634,  // 2132: forge.Forge.AdminPowerControl:output_type -> forge.AdminPowerControlResponse
-	636,  // 2133: forge.Forge.AdminChassisReset:output_type -> forge.AdminChassisResetResponse
-	438,  // 2134: forge.Forge.DisableSecureBoot:output_type -> forge.DisableSecureBootResponse
-	440,  // 2135: forge.Forge.Lockdown:output_type -> forge.LockdownResponse
-	1264, // 2136: forge.Forge.LockdownStatus:output_type -> site_explorer.LockdownStatus
-	444,  // 2137: forge.Forge.MachineSetup:output_type -> forge.MachineSetupResponse
-	446,  // 2138: forge.Forge.SetDpuFirstBootOrder:output_type -> forge.SetDpuFirstBootOrderResponse
-	838,  // 2139: forge.Forge.CreateBmcUser:output_type -> forge.CreateBmcUserResponse
-	840,  // 2140: forge.Forge.DeleteBmcUser:output_type -> forge.DeleteBmcUserResponse
-	842,  // 2141: forge.Forge.SetBmcRootPassword:output_type -> forge.SetBmcRootPasswordResponse
-	844,  // 2142: forge.Forge.ProbeBmcVendor:output_type -> forge.ProbeBmcVendorResponse
-	452,  // 2143: forge.Forge.EnableInfiniteBoot:output_type -> forge.EnableInfiniteBootResponse
-	454,  // 2144: forge.Forge.IsInfiniteBootEnabled:output_type -> forge.IsInfiniteBootEnabledResponse
-	622,  // 2145: forge.Forge.OnDemandMachineValidation:output_type -> forge.MachineValidationOnDemandResponse
-	630,  // 2146: forge.Forge.OnDemandRackMaintenance:output_type -> forge.RackMaintenanceOnDemandResponse
-	632,  // 2147: forge.Forge.TerminateRackMaintenance:output_type -> forge.RackMaintenanceTerminateResponse
-	138,  // 2148: forge.Forge.TpmAddCaCert:output_type -> forge.TpmCaAddedCaStatus
-	144,  // 2149: forge.Forge.TpmShowCaCerts:output_type -> forge.TpmCaCertDetailCollection
-	141,  // 2150: forge.Forge.TpmShowUnmatchedEkCerts:output_type -> forge.TpmEkCertStatusCollection
-	1141, // 2151: forge.Forge.TpmDeleteCaCert:output_type -> google.protobuf.Empty
-	695,  // 2152: forge.Forge.RedfishBrowse:output_type -> forge.RedfishBrowseResponse
-	697,  // 2153: forge.Forge.RedfishListActions:output_type -> forge.RedfishListActionsResponse
-	702,  // 2154: forge.Forge.RedfishCreateAction:output_type -> forge.RedfishCreateActionResponse
-	704,  // 2155: forge.Forge.RedfishApproveAction:output_type -> forge.RedfishApproveActionResponse
-	705,  // 2156: forge.Forge.RedfishApplyAction:output_type -> forge.RedfishApplyActionResponse
-	706,  // 2157: forge.Forge.RedfishCancelAction:output_type -> forge.RedfishCancelActionResponse
-	708,  // 2158: forge.Forge.UfmBrowse:output_type -> forge.UfmBrowseResponse
-	732,  // 2159: forge.Forge.GetDesiredFirmwareVersions:output_type -> forge.GetDesiredFirmwareVersionsResponse
-	853,  // 2160: forge.Forge.UpsertHostFirmwareConfig:output_type -> forge.HostFirmwareConfigResponse
-	1141, // 2161: forge.Forge.DeleteHostFirmwareConfig:output_type -> google.protobuf.Empty
-	748,  // 2162: forge.Forge.CreateSku:output_type -> forge.SkuIdList
-	744,  // 2163: forge.Forge.GenerateSkuFromMachine:output_type -> forge.Sku
-	1141, // 2164: forge.Forge.VerifySkuForMachine:output_type -> google.protobuf.Empty
-	1141, // 2165: forge.Forge.AssignSkuToMachine:output_type -> google.protobuf.Empty
-	1141, // 2166: forge.Forge.RemoveSkuAssociation:output_type -> google.protobuf.Empty
-	1141, // 2167: forge.Forge.DeleteSku:output_type -> google.protobuf.Empty
-	748,  // 2168: forge.Forge.GetAllSkuIds:output_type -> forge.SkuIdList
-	747,  // 2169: forge.Forge.FindSkusByIds:output_type -> forge.SkuList
-	1141, // 2170: forge.Forge.UpdateSkuMetadata:output_type -> google.protobuf.Empty
-	744,  // 2171: forge.Forge.ReplaceSku:output_type -> forge.Sku
-	418,  // 2172: forge.Forge.GetManagedHostQuarantineState:output_type -> forge.GetManagedHostQuarantineStateResponse
-	420,  // 2173: forge.Forge.SetManagedHostQuarantineState:output_type -> forge.SetManagedHostQuarantineStateResponse
-	422,  // 2174: forge.Forge.ClearManagedHostQuarantineState:output_type -> forge.ClearManagedHostQuarantineStateResponse
-	1141, // 2175: forge.Forge.ResetHostReprovisioning:output_type -> google.protobuf.Empty
-	1141, // 2176: forge.Forge.CopyBfbToDpuRshim:output_type -> google.protobuf.Empty
-	754,  // 2177: forge.Forge.GetAllDpaInterfaceIds:output_type -> forge.DpaInterfaceIdList
-	756,  // 2178: forge.Forge.FindDpaInterfacesByIds:output_type -> forge.DpaInterfaceList
-	752,  // 2179: forge.Forge.CreateDpaInterface:output_type -> forge.DpaInterface
-	752,  // 2180: forge.Forge.EnsureDpaInterface:output_type -> forge.DpaInterface
-	759,  // 2181: forge.Forge.DeleteDpaInterface:output_type -> forge.DpaInterfaceDeletionResult
-	764,  // 2182: forge.Forge.GetPowerOptions:output_type -> forge.PowerOptionResponse
-	764,  // 2183: forge.Forge.UpdatePowerOption:output_type -> forge.PowerOptionResponse
-	1141, // 2184: forge.Forge.AllowIngestionAndPowerOn:output_type -> google.protobuf.Empty
-	137,  // 2185: forge.Forge.DetermineMachineIngestionState:output_type -> forge.MachineIngestionStateResponse
-	782,  // 2186: forge.Forge.FindRackIds:output_type -> forge.RackIdList
-	780,  // 2187: forge.Forge.FindRacksByIds:output_type -> forge.RackList
-	779,  // 2188: forge.Forge.GetRack:output_type -> forge.GetRackResponse
-	1141, // 2189: forge.Forge.DeleteRack:output_type -> google.protobuf.Empty
-	791,  // 2190: forge.Forge.AdminForceDeleteRack:output_type -> forge.AdminForceDeleteRackResponse
-	798,  // 2191: forge.Forge.GetRackProfile:output_type -> forge.GetRackProfileResponse
-	800,  // 2192: forge.Forge.ListRackProfiles:output_type -> forge.ListRackProfilesResponse
-	768,  // 2193: forge.Forge.CreateComputeAllocation:output_type -> forge.CreateComputeAllocationResponse
-	770,  // 2194: forge.Forge.FindComputeAllocationIds:output_type -> forge.FindComputeAllocationIdsResponse
-	772,  // 2195: forge.Forge.FindComputeAllocationsByIds:output_type -> forge.FindComputeAllocationsByIdsResponse
-	773,  // 2196: forge.Forge.UpdateComputeAllocation:output_type -> forge.UpdateComputeAllocationResponse
-	776,  // 2197: forge.Forge.DeleteComputeAllocation:output_type -> forge.DeleteComputeAllocationResponse
-	846,  // 2198: forge.Forge.SetFirmwareUpdateTimeWindow:output_type -> forge.SetFirmwareUpdateTimeWindowResponse
-	855,  // 2199: forge.Forge.ListHostFirmware:output_type -> forge.ListHostFirmwareResponse
-	1265, // 2200: forge.Forge.PublishMlxDeviceReport:output_type -> mlx_device.PublishMlxDeviceReportResponse
-	1266, // 2201: forge.Forge.PublishMlxObservationReport:output_type -> mlx_device.PublishMlxObservationReportResponse
-	858,  // 2202: forge.Forge.TrimTable:output_type -> forge.TrimTableResponse
-	860,  // 2203: forge.Forge.ListNvlinkNmxcEndpoints:output_type -> forge.NvlinkNmxcEndpointList
-	859,  // 2204: forge.Forge.CreateNvlinkNmxcEndpoint:output_type -> forge.NvlinkNmxcEndpoint
-	859,  // 2205: forge.Forge.UpdateNvlinkNmxcEndpoint:output_type -> forge.NvlinkNmxcEndpoint
-	1141, // 2206: forge.Forge.DeleteNvlinkNmxcEndpoint:output_type -> google.protobuf.Empty
-	863,  // 2207: forge.Forge.CreateRemediation:output_type -> forge.CreateRemediationResponse
-	1141, // 2208: forge.Forge.ApproveRemediation:output_type -> google.protobuf.Empty
-	1141, // 2209: forge.Forge.RevokeRemediation:output_type -> google.protobuf.Empty
-	1141, // 2210: forge.Forge.EnableRemediation:output_type -> google.protobuf.Empty
-	1141, // 2211: forge.Forge.DisableRemediation:output_type -> google.protobuf.Empty
-	864,  // 2212: forge.Forge.FindRemediationIds:output_type -> forge.RemediationIdList
-	865,  // 2213: forge.Forge.FindRemediationsByIds:output_type -> forge.RemediationList
-	872,  // 2214: forge.Forge.FindAppliedRemediationIds:output_type -> forge.AppliedRemediationIdList
-	875,  // 2215: forge.Forge.FindAppliedRemediations:output_type -> forge.AppliedRemediationList
-	877,  // 2216: forge.Forge.GetNextRemediationForMachine:output_type -> forge.GetNextRemediationForMachineResponse
-	1141, // 2217: forge.Forge.RemediationApplied:output_type -> google.protobuf.Empty
-	1141, // 2218: forge.Forge.SetPrimaryDpu:output_type -> google.protobuf.Empty
-	1141, // 2219: forge.Forge.SetPrimaryInterface:output_type -> google.protobuf.Empty
-	886,  // 2220: forge.Forge.CreateDpuExtensionService:output_type -> forge.DpuExtensionService
-	886,  // 2221: forge.Forge.UpdateDpuExtensionService:output_type -> forge.DpuExtensionService
-	890,  // 2222: forge.Forge.DeleteDpuExtensionService:output_type -> forge.DeleteDpuExtensionServiceResponse
-	892,  // 2223: forge.Forge.FindDpuExtensionServiceIds:output_type -> forge.DpuExtensionServiceIdList
-	894,  // 2224: forge.Forge.FindDpuExtensionServicesByIds:output_type -> forge.DpuExtensionServiceList
-	896,  // 2225: forge.Forge.GetDpuExtensionServiceVersionsInfo:output_type -> forge.DpuExtensionServiceVersionInfoList
-	898,  // 2226: forge.Forge.FindInstancesByDpuExtensionService:output_type -> forge.FindInstancesByDpuExtensionServiceResponse
-	111,  // 2227: forge.Forge.TriggerMachineAttestation:output_type -> forge.SpdmMachineAttestationTriggerResponse
-	1141, // 2228: forge.Forge.CancelMachineAttestation:output_type -> google.protobuf.Empty
-	116,  // 2229: forge.Forge.ListAttestationMachines:output_type -> forge.SpdmListAttestationMachinesResponse
-	113,  // 2230: forge.Forge.GetAttestationMachine:output_type -> forge.SpdmGetAttestationMachineResponse
-	118,  // 2231: forge.Forge.SignMachineIdentity:output_type -> forge.MachineIdentityResponse
-	123,  // 2232: forge.Forge.GetTenantIdentityConfiguration:output_type -> forge.TenantIdentityConfigResponse
-	123,  // 2233: forge.Forge.SetTenantIdentityConfiguration:output_type -> forge.TenantIdentityConfigResponse
-	1141, // 2234: forge.Forge.DeleteTenantIdentityConfiguration:output_type -> google.protobuf.Empty
-	126,  // 2235: forge.Forge.GetTokenDelegation:output_type -> forge.TokenDelegationResponse
-	126,  // 2236: forge.Forge.SetTokenDelegation:output_type -> forge.TokenDelegationResponse
-	1141, // 2237: forge.Forge.DeleteTokenDelegation:output_type -> google.protobuf.Empty
-	132,  // 2238: forge.Forge.ReencryptTenantIdentitySecrets:output_type -> forge.ReencryptTenantIdentitySecretsResponse
-	133,  // 2239: forge.Forge.GetJWKS:output_type -> forge.Jwks
-	134,  // 2240: forge.Forge.GetOpenIDConfiguration:output_type -> forge.OpenIdConfiguration
-	905,  // 2241: forge.Forge.ScoutStream:output_type -> forge.ScoutStreamScoutBoundMessage
-	908,  // 2242: forge.Forge.ScoutStreamShowConnections:output_type -> forge.ScoutStreamShowConnectionsResponse
-	910,  // 2243: forge.Forge.ScoutStreamDisconnect:output_type -> forge.ScoutStreamDisconnectResponse
-	912,  // 2244: forge.Forge.ScoutStreamPing:output_type -> forge.ScoutStreamAdminPingResponse
-	1267, // 2245: forge.Forge.MlxAdminProfileSync:output_type -> mlx_device.MlxAdminProfileSyncResponse
-	1268, // 2246: forge.Forge.MlxAdminProfileShow:output_type -> mlx_device.MlxAdminProfileShowResponse
-	1269, // 2247: forge.Forge.MlxAdminProfileCompare:output_type -> mlx_device.MlxAdminProfileCompareResponse
-	1270, // 2248: forge.Forge.MlxAdminProfileList:output_type -> mlx_device.MlxAdminProfileListResponse
-	1271, // 2249: forge.Forge.MlxAdminLockdownLock:output_type -> mlx_device.MlxAdminLockdownLockResponse
-	1272, // 2250: forge.Forge.MlxAdminLockdownUnlock:output_type -> mlx_device.MlxAdminLockdownUnlockResponse
-	1273, // 2251: forge.Forge.MlxAdminLockdownStatus:output_type -> mlx_device.MlxAdminLockdownStatusResponse
-	1274, // 2252: forge.Forge.MlxAdminShowDevice:output_type -> mlx_device.MlxAdminDeviceInfoResponse
-	1275, // 2253: forge.Forge.MlxAdminShowMachine:output_type -> mlx_device.MlxAdminDeviceReportResponse
-	1276, // 2254: forge.Forge.MlxAdminRegistryList:output_type -> mlx_device.MlxAdminRegistryListResponse
-	1277, // 2255: forge.Forge.MlxAdminRegistryShow:output_type -> mlx_device.MlxAdminRegistryShowResponse
-	1278, // 2256: forge.Forge.MlxAdminConfigQuery:output_type -> mlx_device.MlxAdminConfigQueryResponse
-	1279, // 2257: forge.Forge.MlxAdminConfigSet:output_type -> mlx_device.MlxAdminConfigSetResponse
-	1280, // 2258: forge.Forge.MlxAdminConfigSync:output_type -> mlx_device.MlxAdminConfigSyncResponse
-	1281, // 2259: forge.Forge.MlxAdminConfigCompare:output_type -> mlx_device.MlxAdminConfigCompareResponse
-	823,  // 2260: forge.Forge.FindNVLinkPartitionIds:output_type -> forge.NVLinkPartitionIdList
-	818,  // 2261: forge.Forge.FindNVLinkPartitionsByIds:output_type -> forge.NVLinkPartitionList
-	818,  // 2262: forge.Forge.NVLinkPartitionsForTenant:output_type -> forge.NVLinkPartitionList
-	834,  // 2263: forge.Forge.FindNVLinkLogicalPartitionIds:output_type -> forge.NVLinkLogicalPartitionIdList
-	828,  // 2264: forge.Forge.FindNVLinkLogicalPartitionsByIds:output_type -> forge.NVLinkLogicalPartitionList
-	827,  // 2265: forge.Forge.CreateNVLinkLogicalPartition:output_type -> forge.NVLinkLogicalPartition
-	836,  // 2266: forge.Forge.UpdateNVLinkLogicalPartition:output_type -> forge.NVLinkLogicalPartitionUpdateResult
-	831,  // 2267: forge.Forge.DeleteNVLinkLogicalPartition:output_type -> forge.NVLinkLogicalPartitionDeletionResult
-	828,  // 2268: forge.Forge.NVLinkLogicalPartitionsForTenant:output_type -> forge.NVLinkLogicalPartitionList
-	926,  // 2269: forge.Forge.GetMachinePositionInfo:output_type -> forge.MachinePositionInfoList
-	816,  // 2270: forge.Forge.NmxcBrowse:output_type -> forge.NmxcBrowseResponse
-	1141, // 2271: forge.Forge.ModifyDPFState:output_type -> google.protobuf.Empty
-	929,  // 2272: forge.Forge.GetDPFState:output_type -> forge.DPFStateResponse
-	932,  // 2273: forge.Forge.GetDPFHostSnapshot:output_type -> forge.DPFHostSnapshotResponse
-	935,  // 2274: forge.Forge.GetDPFServiceVersions:output_type -> forge.DPFServiceVersionsResponse
-	1128, // 2275: forge.Forge.FindPendingDPUServiceSyncIds:output_type -> common.MachineIdList
-	943,  // 2276: forge.Forge.FindPendingDPUServiceSyncsByIds:output_type -> forge.ListPendingDPUServiceSyncsResponse
-	943,  // 2277: forge.Forge.ListDPUServiceSyncHistory:output_type -> forge.ListPendingDPUServiceSyncsResponse
-	938,  // 2278: forge.Forge.ReleaseDPUServiceSyncHold:output_type -> forge.ReleaseDPUServiceSyncHoldResponse
-	952,  // 2279: forge.Forge.ComponentPowerControl:output_type -> forge.ComponentPowerControlResponse
-	954,  // 2280: forge.Forge.ComponentConfigureSwitchCertificate:output_type -> forge.ComponentConfigureSwitchCertificateResponse
-	950,  // 2281: forge.Forge.GetComponentInventory:output_type -> forge.GetComponentInventoryResponse
-	961,  // 2282: forge.Forge.UpdateComponentFirmware:output_type -> forge.UpdateComponentFirmwareResponse
-	963,  // 2283: forge.Forge.GetComponentFirmwareStatus:output_type -> forge.GetComponentFirmwareStatusResponse
-	967,  // 2284: forge.Forge.ListComponentFirmwareVersions:output_type -> forge.ListComponentFirmwareVersionsResponse
-	980,  // 2285: forge.Forge.CreateOperatingSystem:output_type -> forge.OperatingSystem
-	980,  // 2286: forge.Forge.GetOperatingSystem:output_type -> forge.OperatingSystem
-	980,  // 2287: forge.Forge.UpdateOperatingSystem:output_type -> forge.OperatingSystem
-	986,  // 2288: forge.Forge.DeleteOperatingSystem:output_type -> forge.DeleteOperatingSystemResponse
-	988,  // 2289: forge.Forge.FindOperatingSystemIds:output_type -> forge.OperatingSystemIdList
-	990,  // 2290: forge.Forge.FindOperatingSystemsByIds:output_type -> forge.OperatingSystemList
-	992,  // 2291: forge.Forge.GetOperatingSystemCachableIpxeTemplateArtifacts:output_type -> forge.IpxeTemplateArtifactList
-	992,  // 2292: forge.Forge.UpdateOperatingSystemCachableIpxeTemplateArtifacts:output_type -> forge.IpxeTemplateArtifactList
-	996,  // 2293: forge.Forge.ReWrapSecrets:output_type -> forge.ReWrapSecretsResponse
-	1801, // [1801:2294] is the sub-list for method output_type
-	1308, // [1308:1801] is the sub-list for method input_type
-	1308, // [1308:1308] is the sub-list for extension type_name
-	1308, // [1308:1308] is the sub-list for extension extendee
-	0,    // [0:1308] is the sub-list for field type_name
+	860,  // 1017: forge.NvlinkNmxcEndpointList.entries:type_name -> forge.NvlinkNmxcEndpoint
+	288,  // 1018: forge.CreateRemediationRequest.metadata:type_name -> forge.Metadata
+	1107, // 1019: forge.CreateRemediationResponse.remediation_id:type_name -> common.RemediationId
+	1107, // 1020: forge.RemediationIdList.remediation_ids:type_name -> common.RemediationId
+	867,  // 1021: forge.RemediationList.remediations:type_name -> forge.Remediation
+	1107, // 1022: forge.Remediation.id:type_name -> common.RemediationId
+	288,  // 1023: forge.Remediation.metadata:type_name -> forge.Metadata
+	1072, // 1024: forge.Remediation.creation_time:type_name -> google.protobuf.Timestamp
+	1107, // 1025: forge.ApproveRemediationRequest.remediation_id:type_name -> common.RemediationId
+	1107, // 1026: forge.RevokeRemediationRequest.remediation_id:type_name -> common.RemediationId
+	1107, // 1027: forge.EnableRemediationRequest.remediation_id:type_name -> common.RemediationId
+	1107, // 1028: forge.DisableRemediationRequest.remediation_id:type_name -> common.RemediationId
+	1107, // 1029: forge.FindAppliedRemediationIdsRequest.remediation_id:type_name -> common.RemediationId
+	1071, // 1030: forge.FindAppliedRemediationIdsRequest.dpu_machine_id:type_name -> common.MachineId
+	1107, // 1031: forge.AppliedRemediationIdList.remediation_ids:type_name -> common.RemediationId
+	1071, // 1032: forge.AppliedRemediationIdList.dpu_machine_ids:type_name -> common.MachineId
+	1107, // 1033: forge.FindAppliedRemediationsRequest.remediation_id:type_name -> common.RemediationId
+	1071, // 1034: forge.FindAppliedRemediationsRequest.dpu_machine_id:type_name -> common.MachineId
+	1107, // 1035: forge.AppliedRemediation.remediation_id:type_name -> common.RemediationId
+	1071, // 1036: forge.AppliedRemediation.dpu_machine_id:type_name -> common.MachineId
+	1072, // 1037: forge.AppliedRemediation.applied_time:type_name -> google.protobuf.Timestamp
+	288,  // 1038: forge.AppliedRemediation.metadata:type_name -> forge.Metadata
+	875,  // 1039: forge.AppliedRemediationList.applied_remediations:type_name -> forge.AppliedRemediation
+	1071, // 1040: forge.GetNextRemediationForMachineRequest.dpu_machine_id:type_name -> common.MachineId
+	1107, // 1041: forge.GetNextRemediationForMachineResponse.remediation_id:type_name -> common.RemediationId
+	1107, // 1042: forge.RemediationAppliedRequest.remediation_id:type_name -> common.RemediationId
+	1071, // 1043: forge.RemediationAppliedRequest.dpu_machine_id:type_name -> common.MachineId
+	880,  // 1044: forge.RemediationAppliedRequest.status:type_name -> forge.RemediationApplicationStatus
+	288,  // 1045: forge.RemediationApplicationStatus.metadata:type_name -> forge.Metadata
+	1071, // 1046: forge.SetPrimaryDpuRequest.host_machine_id:type_name -> common.MachineId
+	1071, // 1047: forge.SetPrimaryDpuRequest.dpu_machine_id:type_name -> common.MachineId
+	1071, // 1048: forge.SetPrimaryInterfaceRequest.host_machine_id:type_name -> common.MachineId
+	1095, // 1049: forge.SetPrimaryInterfaceRequest.interface_id:type_name -> common.MachineInterfaceId
+	883,  // 1050: forge.DpuExtensionServiceCredential.username_password:type_name -> forge.UsernamePassword
+	904,  // 1051: forge.DpuExtensionServiceVersionInfo.observability:type_name -> forge.DpuExtensionServiceObservability
+	76,   // 1052: forge.DpuExtensionService.service_type:type_name -> forge.DpuExtensionServiceType
+	886,  // 1053: forge.DpuExtensionService.latest_version_info:type_name -> forge.DpuExtensionServiceVersionInfo
+	110,  // 1054: forge.DpuExtensionService.lifecycle_status:type_name -> forge.LifecycleStatus
+	75,   // 1055: forge.DpuExtensionService.dpu_target:type_name -> forge.DpuExtensionServiceDpuTarget
+	76,   // 1056: forge.CreateDpuExtensionServiceRequest.service_type:type_name -> forge.DpuExtensionServiceType
+	885,  // 1057: forge.CreateDpuExtensionServiceRequest.credential:type_name -> forge.DpuExtensionServiceCredential
+	904,  // 1058: forge.CreateDpuExtensionServiceRequest.observability:type_name -> forge.DpuExtensionServiceObservability
+	75,   // 1059: forge.CreateDpuExtensionServiceRequest.dpu_target:type_name -> forge.DpuExtensionServiceDpuTarget
+	885,  // 1060: forge.UpdateDpuExtensionServiceRequest.credential:type_name -> forge.DpuExtensionServiceCredential
+	904,  // 1061: forge.UpdateDpuExtensionServiceRequest.observability:type_name -> forge.DpuExtensionServiceObservability
+	76,   // 1062: forge.DpuExtensionServiceSearchFilter.service_type:type_name -> forge.DpuExtensionServiceType
+	887,  // 1063: forge.DpuExtensionServiceList.services:type_name -> forge.DpuExtensionService
+	886,  // 1064: forge.DpuExtensionServiceVersionInfoList.version_infos:type_name -> forge.DpuExtensionServiceVersionInfo
+	900,  // 1065: forge.FindInstancesByDpuExtensionServiceResponse.instances:type_name -> forge.InstanceDpuExtensionServiceInfo
+	901,  // 1066: forge.DpuExtensionServiceObservabilityConfig.prometheus:type_name -> forge.DpuExtensionServiceObservabilityConfigPrometheus
+	902,  // 1067: forge.DpuExtensionServiceObservabilityConfig.logging:type_name -> forge.DpuExtensionServiceObservabilityConfigLogging
+	903,  // 1068: forge.DpuExtensionServiceObservability.configs:type_name -> forge.DpuExtensionServiceObservabilityConfig
+	1085, // 1069: forge.ScoutStreamApiBoundMessage.flow_uuid:type_name -> common.UUID
+	907,  // 1070: forge.ScoutStreamApiBoundMessage.init:type_name -> forge.ScoutStreamInitRequest
+	1108, // 1071: forge.ScoutStreamApiBoundMessage.mlx_device_lockdown_response:type_name -> mlx_device.MlxDeviceLockdownResponse
+	1109, // 1072: forge.ScoutStreamApiBoundMessage.mlx_device_profile_sync_response:type_name -> mlx_device.MlxDeviceProfileSyncResponse
+	1110, // 1073: forge.ScoutStreamApiBoundMessage.mlx_device_profile_compare_response:type_name -> mlx_device.MlxDeviceProfileCompareResponse
+	1111, // 1074: forge.ScoutStreamApiBoundMessage.mlx_device_info_device_response:type_name -> mlx_device.MlxDeviceInfoDeviceResponse
+	1112, // 1075: forge.ScoutStreamApiBoundMessage.mlx_device_info_report_response:type_name -> mlx_device.MlxDeviceInfoReportResponse
+	1113, // 1076: forge.ScoutStreamApiBoundMessage.mlx_device_registry_list_response:type_name -> mlx_device.MlxDeviceRegistryListResponse
+	1114, // 1077: forge.ScoutStreamApiBoundMessage.mlx_device_registry_show_response:type_name -> mlx_device.MlxDeviceRegistryShowResponse
+	1115, // 1078: forge.ScoutStreamApiBoundMessage.mlx_device_config_query_response:type_name -> mlx_device.MlxDeviceConfigQueryResponse
+	1116, // 1079: forge.ScoutStreamApiBoundMessage.mlx_device_config_set_response:type_name -> mlx_device.MlxDeviceConfigSetResponse
+	1117, // 1080: forge.ScoutStreamApiBoundMessage.mlx_device_config_sync_response:type_name -> mlx_device.MlxDeviceConfigSyncResponse
+	1118, // 1081: forge.ScoutStreamApiBoundMessage.mlx_device_config_compare_response:type_name -> mlx_device.MlxDeviceConfigCompareResponse
+	915,  // 1082: forge.ScoutStreamApiBoundMessage.scout_stream_agent_ping_response:type_name -> forge.ScoutStreamAgentPingResponse
+	1085, // 1083: forge.ScoutStreamScoutBoundMessage.flow_uuid:type_name -> common.UUID
+	1119, // 1084: forge.ScoutStreamScoutBoundMessage.mlx_device_lockdown_lock_request:type_name -> mlx_device.MlxDeviceLockdownLockRequest
+	1120, // 1085: forge.ScoutStreamScoutBoundMessage.mlx_device_lockdown_unlock_request:type_name -> mlx_device.MlxDeviceLockdownUnlockRequest
+	1121, // 1086: forge.ScoutStreamScoutBoundMessage.mlx_device_lockdown_status_request:type_name -> mlx_device.MlxDeviceLockdownStatusRequest
+	1122, // 1087: forge.ScoutStreamScoutBoundMessage.mlx_device_profile_sync_request:type_name -> mlx_device.MlxDeviceProfileSyncRequest
+	1123, // 1088: forge.ScoutStreamScoutBoundMessage.mlx_device_profile_compare_request:type_name -> mlx_device.MlxDeviceProfileCompareRequest
+	1124, // 1089: forge.ScoutStreamScoutBoundMessage.mlx_device_info_device_request:type_name -> mlx_device.MlxDeviceInfoDeviceRequest
+	1125, // 1090: forge.ScoutStreamScoutBoundMessage.mlx_device_info_report_request:type_name -> mlx_device.MlxDeviceInfoReportRequest
+	1126, // 1091: forge.ScoutStreamScoutBoundMessage.mlx_device_registry_list_request:type_name -> mlx_device.MlxDeviceRegistryListRequest
+	1127, // 1092: forge.ScoutStreamScoutBoundMessage.mlx_device_registry_show_request:type_name -> mlx_device.MlxDeviceRegistryShowRequest
+	1128, // 1093: forge.ScoutStreamScoutBoundMessage.mlx_device_config_query_request:type_name -> mlx_device.MlxDeviceConfigQueryRequest
+	1129, // 1094: forge.ScoutStreamScoutBoundMessage.mlx_device_config_set_request:type_name -> mlx_device.MlxDeviceConfigSetRequest
+	1130, // 1095: forge.ScoutStreamScoutBoundMessage.mlx_device_config_sync_request:type_name -> mlx_device.MlxDeviceConfigSyncRequest
+	1131, // 1096: forge.ScoutStreamScoutBoundMessage.mlx_device_config_compare_request:type_name -> mlx_device.MlxDeviceConfigCompareRequest
+	914,  // 1097: forge.ScoutStreamScoutBoundMessage.scout_stream_agent_ping_request:type_name -> forge.ScoutStreamAgentPingRequest
+	1071, // 1098: forge.ScoutStreamInitRequest.machine_id:type_name -> common.MachineId
+	916,  // 1099: forge.ScoutStreamShowConnectionsResponse.scout_stream_connections:type_name -> forge.ScoutStreamConnectionInfo
+	1071, // 1100: forge.ScoutStreamDisconnectRequest.machine_id:type_name -> common.MachineId
+	1071, // 1101: forge.ScoutStreamDisconnectResponse.machine_id:type_name -> common.MachineId
+	1071, // 1102: forge.ScoutStreamAdminPingRequest.machine_id:type_name -> common.MachineId
+	917,  // 1103: forge.ScoutStreamAgentPingResponse.error:type_name -> forge.ScoutStreamError
+	1071, // 1104: forge.ScoutStreamConnectionInfo.machine_id:type_name -> common.MachineId
+	79,   // 1105: forge.ScoutStreamError.status:type_name -> forge.ScoutStreamErrorStatus
+	1075, // 1106: forge.RoutingProfile.route_target_imports:type_name -> common.RouteTarget
+	1075, // 1107: forge.RoutingProfile.route_targets_on_exports:type_name -> common.RouteTarget
+	918,  // 1108: forge.RoutingProfile.accepted_leaks_from_underlay:type_name -> forge.PrefixFilterPolicyEntry
+	918,  // 1109: forge.RoutingProfile.allowed_anycast_prefixes:type_name -> forge.PrefixFilterPolicyEntry
+	1088, // 1110: forge.DomainLegacy.id:type_name -> common.DomainId
+	1072, // 1111: forge.DomainLegacy.created:type_name -> google.protobuf.Timestamp
+	1072, // 1112: forge.DomainLegacy.updated:type_name -> google.protobuf.Timestamp
+	1072, // 1113: forge.DomainLegacy.deleted:type_name -> google.protobuf.Timestamp
+	920,  // 1114: forge.DomainListLegacy.domains:type_name -> forge.DomainLegacy
+	1088, // 1115: forge.DomainDeletionLegacy.id:type_name -> common.DomainId
+	1088, // 1116: forge.DomainSearchQueryLegacy.id:type_name -> common.DomainId
+	1132, // 1117: forge.PxeDomain.new_domain:type_name -> dns.Domain
+	920,  // 1118: forge.PxeDomain.legacy_domain:type_name -> forge.DomainLegacy
+	1071, // 1119: forge.MachinePositionQuery.machine_ids:type_name -> common.MachineId
+	928,  // 1120: forge.MachinePositionInfoList.machine_position_info:type_name -> forge.MachinePositionInfo
+	1071, // 1121: forge.MachinePositionInfo.machine_id:type_name -> common.MachineId
+	1086, // 1122: forge.MachinePositionInfo.switch_id:type_name -> common.SwitchId
+	1082, // 1123: forge.MachinePositionInfo.power_shelf_id:type_name -> common.PowerShelfId
+	1071, // 1124: forge.ModifyDPFStateRequest.machine_id:type_name -> common.MachineId
+	1069, // 1125: forge.DPFStateResponse.dpf_states:type_name -> forge.DPFStateResponse.DPFState
+	1071, // 1126: forge.GetDPFStateRequest.machine_ids:type_name -> common.MachineId
+	1071, // 1127: forge.GetDPFHostSnapshotRequest.host_machine_id:type_name -> common.MachineId
+	935,  // 1128: forge.DPFServiceVersionsResponse.services:type_name -> forge.DPFServiceVersion
+	1133, // 1129: forge.ReleaseDPUServiceSyncHoldRequest.machine_ids:type_name -> common.MachineIdList
+	290,  // 1130: forge.ReleaseDPUServiceSyncHoldRequest.instance_ids:type_name -> forge.InstanceIdList
+	1071, // 1131: forge.DPUServiceSyncReleaseResult.machine_id:type_name -> common.MachineId
+	80,   // 1132: forge.DPUServiceSyncReleaseResult.status:type_name -> forge.DPUServiceSyncReleaseStatus
+	938,  // 1133: forge.ReleaseDPUServiceSyncHoldResponse.results:type_name -> forge.DPUServiceSyncReleaseResult
+	1071, // 1134: forge.FindPendingDPUServiceSyncsByIdsRequest.machine_ids:type_name -> common.MachineId
+	1071, // 1135: forge.ListDPUServiceSyncHistoryRequest.machine_id:type_name -> common.MachineId
+	1071, // 1136: forge.PendingDPUServiceSync.machine_id:type_name -> common.MachineId
+	1072, // 1137: forge.PendingDPUServiceSync.requested_at:type_name -> google.protobuf.Timestamp
+	1091, // 1138: forge.PendingDPUServiceSync.instance_id:type_name -> common.InstanceId
+	1072, // 1139: forge.PendingDPUServiceSync.completed_at:type_name -> google.protobuf.Timestamp
+	49,   // 1140: forge.PendingDPUServiceSync.completed_by:type_name -> forge.UpdateInitiator
+	943,  // 1141: forge.ListPendingDPUServiceSyncsResponse.pending:type_name -> forge.PendingDPUServiceSync
+	81,   // 1142: forge.ComponentResult.status:type_name -> forge.ComponentManagerStatusCode
+	1086, // 1143: forge.SwitchIdList.ids:type_name -> common.SwitchId
+	1082, // 1144: forge.PowerShelfIdList.ids:type_name -> common.PowerShelfId
+	1133, // 1145: forge.GetComponentInventoryRequest.machine_ids:type_name -> common.MachineIdList
+	946,  // 1146: forge.GetComponentInventoryRequest.switch_ids:type_name -> forge.SwitchIdList
+	947,  // 1147: forge.GetComponentInventoryRequest.power_shelf_ids:type_name -> forge.PowerShelfIdList
+	948,  // 1148: forge.GetComponentInventoryRequest.compute_bmc_macs:type_name -> forge.MacAddressList
+	948,  // 1149: forge.GetComponentInventoryRequest.switch_bmc_macs:type_name -> forge.MacAddressList
+	948,  // 1150: forge.GetComponentInventoryRequest.power_shelf_pmc_macs:type_name -> forge.MacAddressList
+	945,  // 1151: forge.ComponentInventoryEntry.result:type_name -> forge.ComponentResult
+	1134, // 1152: forge.ComponentInventoryEntry.report:type_name -> site_explorer.EndpointExplorationReport
+	950,  // 1153: forge.GetComponentInventoryResponse.entries:type_name -> forge.ComponentInventoryEntry
+	1133, // 1154: forge.ComponentPowerControlRequest.machine_ids:type_name -> common.MachineIdList
+	946,  // 1155: forge.ComponentPowerControlRequest.switch_ids:type_name -> forge.SwitchIdList
+	947,  // 1156: forge.ComponentPowerControlRequest.power_shelf_ids:type_name -> forge.PowerShelfIdList
+	948,  // 1157: forge.ComponentPowerControlRequest.compute_bmc_macs:type_name -> forge.MacAddressList
+	948,  // 1158: forge.ComponentPowerControlRequest.switch_bmc_macs:type_name -> forge.MacAddressList
+	948,  // 1159: forge.ComponentPowerControlRequest.power_shelf_pmc_macs:type_name -> forge.MacAddressList
+	1135, // 1160: forge.ComponentPowerControlRequest.action:type_name -> common.SystemPowerControl
+	945,  // 1161: forge.ComponentPowerControlResponse.results:type_name -> forge.ComponentResult
+	946,  // 1162: forge.ComponentConfigureSwitchCertificateRequest.switch_ids:type_name -> forge.SwitchIdList
+	945,  // 1163: forge.ComponentConfigureSwitchCertificateResponse.results:type_name -> forge.ComponentResult
+	945,  // 1164: forge.FirmwareUpdateStatus.result:type_name -> forge.ComponentResult
+	82,   // 1165: forge.FirmwareUpdateStatus.state:type_name -> forge.FirmwareUpdateState
+	1072, // 1166: forge.FirmwareUpdateStatus.updated_at:type_name -> google.protobuf.Timestamp
+	1133, // 1167: forge.UpdateComputeTrayFirmwareTarget.machine_ids:type_name -> common.MachineIdList
+	85,   // 1168: forge.UpdateComputeTrayFirmwareTarget.components:type_name -> forge.ComputeTrayComponent
+	948,  // 1169: forge.UpdateComputeTrayFirmwareTarget.bmc_macs:type_name -> forge.MacAddressList
+	946,  // 1170: forge.UpdateSwitchFirmwareTarget.switch_ids:type_name -> forge.SwitchIdList
+	83,   // 1171: forge.UpdateSwitchFirmwareTarget.components:type_name -> forge.NvSwitchComponent
+	948,  // 1172: forge.UpdateSwitchFirmwareTarget.bmc_macs:type_name -> forge.MacAddressList
+	947,  // 1173: forge.UpdatePowerShelfFirmwareTarget.power_shelf_ids:type_name -> forge.PowerShelfIdList
+	84,   // 1174: forge.UpdatePowerShelfFirmwareTarget.components:type_name -> forge.PowerShelfComponent
+	948,  // 1175: forge.UpdatePowerShelfFirmwareTarget.pmc_macs:type_name -> forge.MacAddressList
+	783,  // 1176: forge.UpdateFirmwareObjectTarget.rack_ids:type_name -> forge.RackIdList
+	957,  // 1177: forge.UpdateComponentFirmwareRequest.compute_trays:type_name -> forge.UpdateComputeTrayFirmwareTarget
+	958,  // 1178: forge.UpdateComponentFirmwareRequest.switches:type_name -> forge.UpdateSwitchFirmwareTarget
+	959,  // 1179: forge.UpdateComponentFirmwareRequest.power_shelves:type_name -> forge.UpdatePowerShelfFirmwareTarget
+	960,  // 1180: forge.UpdateComponentFirmwareRequest.racks:type_name -> forge.UpdateFirmwareObjectTarget
+	945,  // 1181: forge.UpdateComponentFirmwareResponse.results:type_name -> forge.ComponentResult
+	1133, // 1182: forge.GetComponentFirmwareStatusRequest.machine_ids:type_name -> common.MachineIdList
+	946,  // 1183: forge.GetComponentFirmwareStatusRequest.switch_ids:type_name -> forge.SwitchIdList
+	947,  // 1184: forge.GetComponentFirmwareStatusRequest.power_shelf_ids:type_name -> forge.PowerShelfIdList
+	783,  // 1185: forge.GetComponentFirmwareStatusRequest.rack_ids:type_name -> forge.RackIdList
+	948,  // 1186: forge.GetComponentFirmwareStatusRequest.compute_bmc_macs:type_name -> forge.MacAddressList
+	948,  // 1187: forge.GetComponentFirmwareStatusRequest.switch_bmc_macs:type_name -> forge.MacAddressList
+	948,  // 1188: forge.GetComponentFirmwareStatusRequest.power_shelf_pmc_macs:type_name -> forge.MacAddressList
+	956,  // 1189: forge.GetComponentFirmwareStatusResponse.statuses:type_name -> forge.FirmwareUpdateStatus
+	1133, // 1190: forge.ListComponentFirmwareVersionsRequest.machine_ids:type_name -> common.MachineIdList
+	946,  // 1191: forge.ListComponentFirmwareVersionsRequest.switch_ids:type_name -> forge.SwitchIdList
+	947,  // 1192: forge.ListComponentFirmwareVersionsRequest.power_shelf_ids:type_name -> forge.PowerShelfIdList
+	783,  // 1193: forge.ListComponentFirmwareVersionsRequest.rack_ids:type_name -> forge.RackIdList
+	948,  // 1194: forge.ListComponentFirmwareVersionsRequest.compute_bmc_macs:type_name -> forge.MacAddressList
+	948,  // 1195: forge.ListComponentFirmwareVersionsRequest.switch_bmc_macs:type_name -> forge.MacAddressList
+	948,  // 1196: forge.ListComponentFirmwareVersionsRequest.power_shelf_pmc_macs:type_name -> forge.MacAddressList
+	85,   // 1197: forge.ComputeTrayFirmwareVersions.component:type_name -> forge.ComputeTrayComponent
+	945,  // 1198: forge.DeviceFirmwareVersions.result:type_name -> forge.ComponentResult
+	966,  // 1199: forge.DeviceFirmwareVersions.compute_fw_versions:type_name -> forge.ComputeTrayFirmwareVersions
+	967,  // 1200: forge.ListComponentFirmwareVersionsResponse.devices:type_name -> forge.DeviceFirmwareVersions
+	288,  // 1201: forge.SpxPartitionCreationRequest.metadata:type_name -> forge.Metadata
+	1094, // 1202: forge.SpxPartitionCreationRequest.id:type_name -> common.SpxPartitionId
+	288,  // 1203: forge.SpxPartition.metadata:type_name -> forge.Metadata
+	1094, // 1204: forge.SpxPartition.id:type_name -> common.SpxPartitionId
+	1094, // 1205: forge.SpxPartitionIdList.spx_partition_ids:type_name -> common.SpxPartitionId
+	1094, // 1206: forge.SpxPartitionDeletionRequest.id:type_name -> common.SpxPartitionId
+	287,  // 1207: forge.SpxPartitionSearchFilter.label:type_name -> forge.Label
+	970,  // 1208: forge.SpxPartitionList.spx_partitions:type_name -> forge.SpxPartition
+	1094, // 1209: forge.SpxPartitionsByIdsRequest.spx_partition_ids:type_name -> common.SpxPartitionId
+	1086, // 1210: forge.AdminForceDeleteSwitchRequest.switch_id:type_name -> common.SwitchId
+	1082, // 1211: forge.AdminForceDeletePowerShelfRequest.power_shelf_id:type_name -> common.PowerShelfId
+	1093, // 1212: forge.OperatingSystem.id:type_name -> common.OperatingSystemId
+	86,   // 1213: forge.OperatingSystem.type:type_name -> forge.OperatingSystemType
+	9,    // 1214: forge.OperatingSystem.status:type_name -> forge.TenantState
+	1092, // 1215: forge.OperatingSystem.ipxe_template_id:type_name -> common.IpxeTemplateId
+	295,  // 1216: forge.OperatingSystem.ipxe_template_parameters:type_name -> forge.IpxeTemplateParameter
+	296,  // 1217: forge.OperatingSystem.ipxe_template_artifacts:type_name -> forge.IpxeTemplateArtifact
+	1093, // 1218: forge.CreateOperatingSystemRequest.id:type_name -> common.OperatingSystemId
+	1092, // 1219: forge.CreateOperatingSystemRequest.ipxe_template_id:type_name -> common.IpxeTemplateId
+	295,  // 1220: forge.CreateOperatingSystemRequest.ipxe_template_parameters:type_name -> forge.IpxeTemplateParameter
+	296,  // 1221: forge.CreateOperatingSystemRequest.ipxe_template_artifacts:type_name -> forge.IpxeTemplateArtifact
+	295,  // 1222: forge.IpxeTemplateParameters.items:type_name -> forge.IpxeTemplateParameter
+	296,  // 1223: forge.IpxeTemplateArtifacts.items:type_name -> forge.IpxeTemplateArtifact
+	1093, // 1224: forge.UpdateOperatingSystemRequest.id:type_name -> common.OperatingSystemId
+	1092, // 1225: forge.UpdateOperatingSystemRequest.ipxe_template_id:type_name -> common.IpxeTemplateId
+	983,  // 1226: forge.UpdateOperatingSystemRequest.ipxe_template_parameters:type_name -> forge.IpxeTemplateParameters
+	984,  // 1227: forge.UpdateOperatingSystemRequest.ipxe_template_artifacts:type_name -> forge.IpxeTemplateArtifacts
+	1093, // 1228: forge.DeleteOperatingSystemRequest.id:type_name -> common.OperatingSystemId
+	1093, // 1229: forge.OperatingSystemIdList.ids:type_name -> common.OperatingSystemId
+	1093, // 1230: forge.OperatingSystemsByIdsRequest.ids:type_name -> common.OperatingSystemId
+	981,  // 1231: forge.OperatingSystemList.operating_systems:type_name -> forge.OperatingSystem
+	1093, // 1232: forge.GetOperatingSystemCachableIpxeTemplateArtifactsRequest.id:type_name -> common.OperatingSystemId
+	296,  // 1233: forge.IpxeTemplateArtifactList.artifacts:type_name -> forge.IpxeTemplateArtifact
+	1093, // 1234: forge.UpdateOperatingSystemIpxeTemplateArtifactRequest.id:type_name -> common.OperatingSystemId
+	994,  // 1235: forge.UpdateOperatingSystemIpxeTemplateArtifactRequest.updates:type_name -> forge.IpxeTemplateArtifactUpdateRequest
+	1071, // 1236: forge.GetMachineBootInterfacesRequest.machine_id:type_name -> common.MachineId
+	1095, // 1237: forge.MachineInterfaceBootInterface.interface_id:type_name -> common.MachineInterfaceId
+	1072, // 1238: forge.RetainedBootInterface.recorded_at:type_name -> google.protobuf.Timestamp
+	1071, // 1239: forge.GetMachineBootInterfacesResponse.machine_id:type_name -> common.MachineId
+	1000, // 1240: forge.GetMachineBootInterfacesResponse.machine_interfaces:type_name -> forge.MachineInterfaceBootInterface
+	1001, // 1241: forge.GetMachineBootInterfacesResponse.predicted_interfaces:type_name -> forge.PredictedBootInterface
+	1002, // 1242: forge.GetMachineBootInterfacesResponse.explored_endpoints:type_name -> forge.ExploredBootInterface
+	1003, // 1243: forge.GetMachineBootInterfacesResponse.retained_interfaces:type_name -> forge.RetainedBootInterface
+	999,  // 1244: forge.GetMachineBootInterfacesResponse.default_boot_interface:type_name -> forge.MachineBootInterface
+	999,  // 1245: forge.GetMachineBootInterfacesResponse.predicted_boot_interface:type_name -> forge.MachineBootInterface
+	1070, // 1246: forge.GetMachineBootInterfacesResponse.reconciliation:type_name -> forge.GetMachineBootInterfacesResponse.Reconciliation
+	1078, // 1247: forge.SitePrefix.id:type_name -> common.SitePrefixId
+	1009, // 1248: forge.SitePrefix.config:type_name -> forge.SitePrefixConfig
+	1010, // 1249: forge.SitePrefix.status:type_name -> forge.SitePrefixStatus
+	288,  // 1250: forge.SitePrefix.metadata:type_name -> forge.Metadata
+	1072, // 1251: forge.SitePrefix.created_at:type_name -> google.protobuf.Timestamp
+	1072, // 1252: forge.SitePrefix.updated_at:type_name -> google.protobuf.Timestamp
+	91,   // 1253: forge.SitePrefixConfig.routing_scope:type_name -> forge.SitePrefixRoutingScope
+	90,   // 1254: forge.SitePrefixStatus.authority:type_name -> forge.SitePrefixAuthority
+	92,   // 1255: forge.SitePrefixStatus.lifecycle_state:type_name -> forge.SitePrefixLifecycleState
+	1011, // 1256: forge.SitePrefixStatus.quota:type_name -> forge.SitePrefixQuotaUsage
+	1078, // 1257: forge.SitePrefixCreationRequest.id:type_name -> common.SitePrefixId
+	288,  // 1258: forge.SitePrefixCreationRequest.metadata:type_name -> forge.Metadata
+	1078, // 1259: forge.SitePrefixUpdateRequest.id:type_name -> common.SitePrefixId
+	288,  // 1260: forge.SitePrefixUpdateRequest.metadata:type_name -> forge.Metadata
+	1078, // 1261: forge.SitePrefixDeletionRequest.id:type_name -> common.SitePrefixId
+	1008, // 1262: forge.SitePrefixDeletionResult.site_prefix:type_name -> forge.SitePrefix
+	1078, // 1263: forge.SitePrefixStateHistoriesRequest.site_prefix_ids:type_name -> common.SitePrefixId
+	90,   // 1264: forge.SitePrefixSearchFilter.authority:type_name -> forge.SitePrefixAuthority
+	91,   // 1265: forge.SitePrefixSearchFilter.routing_scope:type_name -> forge.SitePrefixRoutingScope
+	92,   // 1266: forge.SitePrefixSearchFilter.lifecycle_state:type_name -> forge.SitePrefixLifecycleState
+	8,    // 1267: forge.SitePrefixSearchFilter.prefix_match_type:type_name -> forge.PrefixMatchType
+	1078, // 1268: forge.SitePrefixesByIdsRequest.site_prefix_ids:type_name -> common.SitePrefixId
+	1078, // 1269: forge.SitePrefixIdList.site_prefix_ids:type_name -> common.SitePrefixId
+	1008, // 1270: forge.SitePrefixList.site_prefixes:type_name -> forge.SitePrefix
+	30,   // 1271: forge.InterfaceAddressConfig.address_family:type_name -> forge.AddressFamily
+	1073, // 1272: forge.VpcReleaseInactiveVniRequest.id:type_name -> common.VpcId
+	179,  // 1273: forge.VpcReleaseInactiveVniResult.vpc:type_name -> forge.Vpc
+	1073, // 1274: forge.VpcRoutingStateRequest.id:type_name -> common.VpcId
+	1073, // 1275: forge.VpcRoutingState.id:type_name -> common.VpcId
+	1026, // 1276: forge.VpcRoutingState.retained_allocation:type_name -> forge.VpcRetainedVniAllocation
+	1073, // 1277: forge.VpcChangeRoutingProfileRequest.id:type_name -> common.VpcId
+	234,  // 1278: forge.PatchExpectedPowerShelfRequest.expected_power_shelf:type_name -> forge.ExpectedPowerShelf
+	1136, // 1279: forge.PatchExpectedPowerShelfRequest.update_mask:type_name -> google.protobuf.FieldMask
+	259,  // 1280: forge.PatchExpectedSwitchRequest.expected_switch:type_name -> forge.ExpectedSwitch
+	1136, // 1281: forge.PatchExpectedSwitchRequest.update_mask:type_name -> google.protobuf.FieldMask
+	592,  // 1282: forge.PatchExpectedMachineRequest.expected_machine:type_name -> forge.ExpectedMachine
+	1136, // 1283: forge.PatchExpectedMachineRequest.update_mask:type_name -> google.protobuf.FieldMask
+	1030, // 1284: forge.PatchExpectedMachinesRequest.patches:type_name -> forge.PatchExpectedMachineRequest
+	1035, // 1285: forge.DNSMessage.DNSResponse.rrs:type_name -> forge.DNSMessage.DNSResponse.DNSRR
+	252,  // 1286: forge.StateHistories.HistoriesEntry.value:type_name -> forge.StateHistoryRecords
+	347,  // 1287: forge.MachineStateHistories.HistoriesEntry.value:type_name -> forge.MachineStateHistoryRecords
+	350,  // 1288: forge.HealthHistories.HistoriesEntry.value:type_name -> forge.HealthHistoryRecords
+	97,   // 1289: forge.MachineCredentialsUpdateRequest.Credentials.credential_purpose:type_name -> forge.MachineCredentialsUpdateRequest.CredentialPurpose
+	1059, // 1290: forge.ForgeAgentControlResponse.ForgeAgentControlExtraInfo.pair:type_name -> forge.ForgeAgentControlResponse.ForgeAgentControlExtraInfo.KeyValuePair
+	1101, // 1291: forge.ForgeAgentControlResponse.MachineValidation.validation_id:type_name -> common.MachineValidationId
+	1050, // 1292: forge.ForgeAgentControlResponse.MachineValidation.filter:type_name -> forge.ForgeAgentControlResponse.MachineValidationFilter
+	1098, // 1293: forge.ForgeAgentControlResponse.MachineValidationFilter.contexts:type_name -> common.StringList
+	1052, // 1294: forge.ForgeAgentControlResponse.MlxAction.device_actions:type_name -> forge.ForgeAgentControlResponse.MlxDeviceAction
+	1053, // 1295: forge.ForgeAgentControlResponse.MlxDeviceAction.noop:type_name -> forge.ForgeAgentControlResponse.MlxDeviceNoop
+	1054, // 1296: forge.ForgeAgentControlResponse.MlxDeviceAction.lock:type_name -> forge.ForgeAgentControlResponse.MlxDeviceLock
+	1055, // 1297: forge.ForgeAgentControlResponse.MlxDeviceAction.unlock:type_name -> forge.ForgeAgentControlResponse.MlxDeviceUnlock
+	1056, // 1298: forge.ForgeAgentControlResponse.MlxDeviceAction.apply_profile:type_name -> forge.ForgeAgentControlResponse.MlxDeviceApplyProfile
+	1057, // 1299: forge.ForgeAgentControlResponse.MlxDeviceAction.apply_firmware:type_name -> forge.ForgeAgentControlResponse.MlxDeviceApplyFirmware
+	1137, // 1300: forge.ForgeAgentControlResponse.MlxDeviceApplyProfile.serialized_profile:type_name -> mlx_device.SerializableMlxConfigProfile
+	1138, // 1301: forge.ForgeAgentControlResponse.MlxDeviceApplyFirmware.profile:type_name -> mlx_device.FirmwareFlasherProfile
+	1139, // 1302: forge.ForgeAgentControlResponse.FirmwareUpgrade.task:type_name -> scout_firmware_upgrade.ScoutFirmwareUpgradeTask
+	99,   // 1303: forge.MachineCleanupInfo.CleanupStepResult.result:type_name -> forge.MachineCleanupInfo.CleanupResult
+	1071, // 1304: forge.DpuReprovisioningListResponse.DpuReprovisioningListItem.id:type_name -> common.MachineId
+	1072, // 1305: forge.DpuReprovisioningListResponse.DpuReprovisioningListItem.requested_at:type_name -> google.protobuf.Timestamp
+	1072, // 1306: forge.DpuReprovisioningListResponse.DpuReprovisioningListItem.initiated_at:type_name -> google.protobuf.Timestamp
+	1071, // 1307: forge.HostReprovisioningListResponse.HostReprovisioningListItem.id:type_name -> common.MachineId
+	1072, // 1308: forge.HostReprovisioningListResponse.HostReprovisioningListItem.requested_at:type_name -> google.protobuf.Timestamp
+	1072, // 1309: forge.HostReprovisioningListResponse.HostReprovisioningListItem.initiated_at:type_name -> google.protobuf.Timestamp
+	661,  // 1310: forge.MachineValidationTestUpdateRequest.Payload.plugin:type_name -> forge.MachineValidationPlugin
+	1071, // 1311: forge.DPFStateResponse.DPFState.machine_id:type_name -> common.MachineId
+	999,  // 1312: forge.GetMachineBootInterfacesResponse.Reconciliation.desired_boot_interface:type_name -> forge.MachineBootInterface
+	1072, // 1313: forge.GetMachineBootInterfacesResponse.Reconciliation.observed_at:type_name -> google.protobuf.Timestamp
+	109,  // 1314: forge.GetMachineBootInterfacesResponse.Reconciliation.reconciliation_state:type_name -> forge.GetMachineBootInterfacesResponse.Reconciliation.State
+	89,   // 1315: forge.GetMachineBootInterfacesResponse.Reconciliation.selection_source:type_name -> forge.BootInterfaceSelectionSource
+	1072, // 1316: forge.GetMachineBootInterfacesResponse.Reconciliation.selection_updated_at:type_name -> google.protobuf.Timestamp
+	158,  // 1317: forge.Forge.Version:input_type -> forge.VersionRequest
+	1140, // 1318: forge.Forge.CreateDomain:input_type -> dns.CreateDomainRequest
+	1141, // 1319: forge.Forge.UpdateDomain:input_type -> dns.UpdateDomainRequest
+	1142, // 1320: forge.Forge.DeleteDomain:input_type -> dns.DomainDeletionRequest
+	1143, // 1321: forge.Forge.FindDomain:input_type -> dns.DomainSearchQuery
+	920,  // 1322: forge.Forge.CreateDomainLegacy:input_type -> forge.DomainLegacy
+	920,  // 1323: forge.Forge.UpdateDomainLegacy:input_type -> forge.DomainLegacy
+	922,  // 1324: forge.Forge.DeleteDomainLegacy:input_type -> forge.DomainDeletionLegacy
+	924,  // 1325: forge.Forge.FindDomainLegacy:input_type -> forge.DomainSearchQueryLegacy
+	180,  // 1326: forge.Forge.CreateVpc:input_type -> forge.VpcCreationRequest
+	181,  // 1327: forge.Forge.UpdateVpc:input_type -> forge.VpcUpdateRequest
+	1027, // 1328: forge.Forge.ChangeVpcRoutingProfile:input_type -> forge.VpcChangeRoutingProfileRequest
+	1022, // 1329: forge.Forge.ReleaseVpcInactiveVni:input_type -> forge.VpcReleaseInactiveVniRequest
+	183,  // 1330: forge.Forge.UpdateVpcVirtualization:input_type -> forge.VpcUpdateVirtualizationRequest
+	185,  // 1331: forge.Forge.DeleteVpc:input_type -> forge.VpcDeletionRequest
+	170,  // 1332: forge.Forge.FindVpcIds:input_type -> forge.VpcSearchFilter
+	172,  // 1333: forge.Forge.FindVpcsByIds:input_type -> forge.VpcsByIdsRequest
+	1024, // 1334: forge.Forge.GetVpcRoutingState:input_type -> forge.VpcRoutingStateRequest
+	969,  // 1335: forge.Forge.CreateSpxPartition:input_type -> forge.SpxPartitionCreationRequest
+	972,  // 1336: forge.Forge.DeleteSpxPartition:input_type -> forge.SpxPartitionDeletionRequest
+	974,  // 1337: forge.Forge.FindSpxPartitionIds:input_type -> forge.SpxPartitionSearchFilter
+	976,  // 1338: forge.Forge.FindSpxPartitionsByIds:input_type -> forge.SpxPartitionsByIdsRequest
+	191,  // 1339: forge.Forge.CreateVpcPrefix:input_type -> forge.VpcPrefixCreationRequest
+	192,  // 1340: forge.Forge.SearchVpcPrefixes:input_type -> forge.VpcPrefixSearchQuery
+	193,  // 1341: forge.Forge.GetVpcPrefixes:input_type -> forge.VpcPrefixGetRequest
+	196,  // 1342: forge.Forge.UpdateVpcPrefix:input_type -> forge.VpcPrefixUpdateRequest
+	197,  // 1343: forge.Forge.DeleteVpcPrefix:input_type -> forge.VpcPrefixDeletionRequest
+	1012, // 1344: forge.Forge.CreateSitePrefix:input_type -> forge.SitePrefixCreationRequest
+	1013, // 1345: forge.Forge.UpdateSitePrefix:input_type -> forge.SitePrefixUpdateRequest
+	1014, // 1346: forge.Forge.DeleteSitePrefix:input_type -> forge.SitePrefixDeletionRequest
+	1017, // 1347: forge.Forge.FindSitePrefixIds:input_type -> forge.SitePrefixSearchFilter
+	1018, // 1348: forge.Forge.FindSitePrefixesByIds:input_type -> forge.SitePrefixesByIdsRequest
+	203,  // 1349: forge.Forge.CreateVpcPeering:input_type -> forge.VpcPeeringCreationRequest
+	204,  // 1350: forge.Forge.FindVpcPeeringIds:input_type -> forge.VpcPeeringSearchFilter
+	205,  // 1351: forge.Forge.FindVpcPeeringsByIds:input_type -> forge.VpcPeeringsByIdsRequest
+	206,  // 1352: forge.Forge.DeleteVpcPeering:input_type -> forge.VpcPeeringDeletionRequest
+	279,  // 1353: forge.Forge.FindNetworkSegmentIds:input_type -> forge.NetworkSegmentSearchFilter
+	281,  // 1354: forge.Forge.FindNetworkSegmentsByIds:input_type -> forge.NetworkSegmentsByIdsRequest
+	273,  // 1355: forge.Forge.CreateNetworkSegment:input_type -> forge.NetworkSegmentCreationRequest
+	275,  // 1356: forge.Forge.AttachNetworkSegmentToVpc:input_type -> forge.AttachNetworkSegmentToVpcRequest
+	274,  // 1357: forge.Forge.DeleteNetworkSegment:input_type -> forge.NetworkSegmentDeletionRequest
+	169,  // 1358: forge.Forge.NetworkSegmentsForVpc:input_type -> forge.VpcSearchQuery
+	216,  // 1359: forge.Forge.FindIBPartitionIds:input_type -> forge.IBPartitionSearchFilter
+	217,  // 1360: forge.Forge.FindIBPartitionsByIds:input_type -> forge.IBPartitionsByIdsRequest
+	212,  // 1361: forge.Forge.CreateIBPartition:input_type -> forge.IBPartitionCreationRequest
+	213,  // 1362: forge.Forge.UpdateIBPartition:input_type -> forge.IBPartitionUpdateRequest
+	214,  // 1363: forge.Forge.DeleteIBPartition:input_type -> forge.IBPartitionDeletionRequest
+	173,  // 1364: forge.Forge.IBPartitionsForTenant:input_type -> forge.TenantSearchQuery
+	231,  // 1365: forge.Forge.FindPowerShelves:input_type -> forge.PowerShelfQuery
+	232,  // 1366: forge.Forge.FindPowerShelfIds:input_type -> forge.PowerShelfSearchFilter
+	233,  // 1367: forge.Forge.FindPowerShelvesByIds:input_type -> forge.PowerShelvesByIdsRequest
+	224,  // 1368: forge.Forge.DecommissionPowerShelf:input_type -> forge.DecommissionPowerShelfRequest
+	226,  // 1369: forge.Forge.DeletePowerShelf:input_type -> forge.PowerShelfDeletionRequest
+	979,  // 1370: forge.Forge.AdminForceDeletePowerShelf:input_type -> forge.AdminForceDeletePowerShelfRequest
+	228,  // 1371: forge.Forge.SetPowerShelfMaintenance:input_type -> forge.PowerShelfMaintenanceRequest
+	256,  // 1372: forge.Forge.FindSwitches:input_type -> forge.SwitchQuery
+	257,  // 1373: forge.Forge.FindSwitchIds:input_type -> forge.SwitchSearchFilter
+	258,  // 1374: forge.Forge.FindSwitchesByIds:input_type -> forge.SwitchesByIdsRequest
+	247,  // 1375: forge.Forge.DeleteSwitch:input_type -> forge.SwitchDeletionRequest
+	249,  // 1376: forge.Forge.DecommissionSwitch:input_type -> forge.DecommissionSwitchRequest
+	977,  // 1377: forge.Forge.AdminForceDeleteSwitch:input_type -> forge.AdminForceDeleteSwitchRequest
+	267,  // 1378: forge.Forge.FindIBFabricIds:input_type -> forge.IBFabricSearchFilter
+	292,  // 1379: forge.Forge.AllocateInstance:input_type -> forge.InstanceAllocationRequest
+	293,  // 1380: forge.Forge.AllocateInstances:input_type -> forge.BatchInstanceAllocationRequest
+	338,  // 1381: forge.Forge.ReleaseInstance:input_type -> forge.InstanceReleaseRequest
+	340,  // 1382: forge.Forge.ReleaseInstances:input_type -> forge.BatchInstanceReleaseRequest
+	310,  // 1383: forge.Forge.UpdateInstanceOperatingSystem:input_type -> forge.InstanceOperatingSystemUpdateRequest
+	311,  // 1384: forge.Forge.UpdateInstanceConfig:input_type -> forge.InstanceConfigUpdateRequest
+	289,  // 1385: forge.Forge.FindInstanceIds:input_type -> forge.InstanceSearchFilter
+	291,  // 1386: forge.Forge.FindInstancesByIds:input_type -> forge.InstancesByIdsRequest
+	1071, // 1387: forge.Forge.FindInstanceByMachineID:input_type -> common.MachineId
+	414,  // 1388: forge.Forge.GetManagedHostNetworkConfig:input_type -> forge.ManagedHostNetworkConfigRequest
+	479,  // 1389: forge.Forge.RecordDpuNetworkStatus:input_type -> forge.DpuNetworkStatus
+	1071, // 1390: forge.Forge.ListMachineHealthReports:input_type -> common.MachineId
+	485,  // 1391: forge.Forge.InsertMachineHealthReport:input_type -> forge.InsertMachineHealthReportRequest
+	496,  // 1392: forge.Forge.RemoveMachineHealthReport:input_type -> forge.RemoveMachineHealthReportRequest
+	488,  // 1393: forge.Forge.ListRackHealthReports:input_type -> forge.ListRackHealthReportsRequest
+	486,  // 1394: forge.Forge.InsertRackHealthReport:input_type -> forge.InsertRackHealthReportRequest
+	487,  // 1395: forge.Forge.RemoveRackHealthReport:input_type -> forge.RemoveRackHealthReportRequest
+	491,  // 1396: forge.Forge.ListSwitchHealthReports:input_type -> forge.ListSwitchHealthReportsRequest
+	489,  // 1397: forge.Forge.InsertSwitchHealthReport:input_type -> forge.InsertSwitchHealthReportRequest
+	490,  // 1398: forge.Forge.RemoveSwitchHealthReport:input_type -> forge.RemoveSwitchHealthReportRequest
+	494,  // 1399: forge.Forge.ListPowerShelfHealthReports:input_type -> forge.ListPowerShelfHealthReportsRequest
+	492,  // 1400: forge.Forge.InsertPowerShelfHealthReport:input_type -> forge.InsertPowerShelfHealthReportRequest
+	493,  // 1401: forge.Forge.RemovePowerShelfHealthReport:input_type -> forge.RemovePowerShelfHealthReportRequest
+	497,  // 1402: forge.Forge.ListNVLinkDomainHealthReports:input_type -> forge.ListNVLinkDomainHealthReportsRequest
+	498,  // 1403: forge.Forge.InsertNVLinkDomainHealthReport:input_type -> forge.InsertNVLinkDomainHealthReportRequest
+	499,  // 1404: forge.Forge.RemoveNVLinkDomainHealthReport:input_type -> forge.RemoveNVLinkDomainHealthReportRequest
+	1071, // 1405: forge.Forge.ListHealthReportOverrides:input_type -> common.MachineId
+	485,  // 1406: forge.Forge.InsertHealthReportOverride:input_type -> forge.InsertMachineHealthReportRequest
+	496,  // 1407: forge.Forge.RemoveHealthReportOverride:input_type -> forge.RemoveMachineHealthReportRequest
+	431,  // 1408: forge.Forge.DpuAgentUpgradeCheck:input_type -> forge.DpuAgentUpgradeCheckRequest
+	433,  // 1409: forge.Forge.DpuAgentUpgradePolicyAction:input_type -> forge.DpuAgentUpgradePolicyRequest
+	1144, // 1410: forge.Forge.LookupRecord:input_type -> dns.DnsResourceRecordLookupRequest
+	1145, // 1411: forge.Forge.GetAllDomains:input_type -> dns.GetAllDomainsRequest
+	1146, // 1412: forge.Forge.GetAllDomainMetadata:input_type -> dns.DomainMetadataRequest
+	284,  // 1413: forge.Forge.InvokeInstancePower:input_type -> forge.InstancePowerRequest
+	460,  // 1414: forge.Forge.ForgeAgentControl:input_type -> forge.ForgeAgentControlRequest
+	462,  // 1415: forge.Forge.DiscoverMachine:input_type -> forge.MachineDiscoveryInfo
+	466,  // 1416: forge.Forge.RenewMachineCertificate:input_type -> forge.MachineCertificateRenewRequest
+	463,  // 1417: forge.Forge.DiscoveryCompleted:input_type -> forge.MachineDiscoveryCompletedRequest
+	464,  // 1418: forge.Forge.CleanupMachineCompleted:input_type -> forge.MachineCleanupInfo
+	471,  // 1419: forge.Forge.ReportForgeScoutError:input_type -> forge.ForgeScoutErrorReport
+	390,  // 1420: forge.Forge.DiscoverDhcp:input_type -> forge.DhcpDiscovery
+	391,  // 1421: forge.Forge.ExpireDhcpLease:input_type -> forge.ExpireDhcpLeaseRequest
+	360,  // 1422: forge.Forge.AssignStaticAddress:input_type -> forge.AssignStaticAddressRequest
+	362,  // 1423: forge.Forge.RemoveStaticAddress:input_type -> forge.RemoveStaticAddressRequest
+	364,  // 1424: forge.Forge.FindInterfaceAddresses:input_type -> forge.FindInterfaceAddressesRequest
+	359,  // 1425: forge.Forge.FindInterfaces:input_type -> forge.InterfaceSearchQuery
+	358,  // 1426: forge.Forge.DeleteInterface:input_type -> forge.InterfaceDeleteQuery
+	535,  // 1427: forge.Forge.FindIpAddress:input_type -> forge.FindIpAddressRequest
+	344,  // 1428: forge.Forge.FindMachineIds:input_type -> forge.MachineSearchConfig
+	343,  // 1429: forge.Forge.FindMachinesByIds:input_type -> forge.MachinesByIdsRequest
+	345,  // 1430: forge.Forge.FindMachineStateHistories:input_type -> forge.MachineStateHistoriesRequest
+	348,  // 1431: forge.Forge.FindMachineHealthHistories:input_type -> forge.MachineHealthHistoriesRequest
+	229,  // 1432: forge.Forge.FindPowerShelfStateHistories:input_type -> forge.PowerShelfStateHistoriesRequest
+	230,  // 1433: forge.Forge.FindPowerShelfHealthHistories:input_type -> forge.PowerShelfHealthHistoriesRequest
+	788,  // 1434: forge.Forge.FindRackStateHistories:input_type -> forge.RackStateHistoriesRequest
+	789,  // 1435: forge.Forge.FindRackHealthHistories:input_type -> forge.RackHealthHistoriesRequest
+	253,  // 1436: forge.Forge.FindSwitchStateHistories:input_type -> forge.SwitchStateHistoriesRequest
+	254,  // 1437: forge.Forge.FindSwitchHealthHistories:input_type -> forge.SwitchHealthHistoriesRequest
+	277,  // 1438: forge.Forge.FindNetworkSegmentStateHistories:input_type -> forge.NetworkSegmentStateHistoriesRequest
+	199,  // 1439: forge.Forge.FindVpcPrefixStateHistories:input_type -> forge.VpcPrefixStateHistoriesRequest
+	1016, // 1440: forge.Forge.FindSitePrefixStateHistories:input_type -> forge.SitePrefixStateHistoriesRequest
+	353,  // 1441: forge.Forge.FindTenantOrganizationIds:input_type -> forge.TenantSearchFilter
+	352,  // 1442: forge.Forge.FindTenantsByOrganizationIds:input_type -> forge.TenantByOrganizationIdsRequest
+	1133, // 1443: forge.Forge.FindConnectedDevicesByDpuMachineIds:input_type -> common.MachineIdList
+	563,  // 1444: forge.Forge.FindMachineIdsByBmcIps:input_type -> forge.BmcIpList
+	564,  // 1445: forge.Forge.FindMacAddressByBmcIp:input_type -> forge.BmcIp
+	539,  // 1446: forge.Forge.FindBmcIps:input_type -> forge.FindBmcIpsRequest
+	537,  // 1447: forge.Forge.IdentifyUuid:input_type -> forge.IdentifyUuidRequest
+	540,  // 1448: forge.Forge.IdentifyMac:input_type -> forge.IdentifyMacRequest
+	542,  // 1449: forge.Forge.IdentifySerial:input_type -> forge.IdentifySerialRequest
+	456,  // 1450: forge.Forge.GetBMCMetaData:input_type -> forge.BMCMetaDataGetRequest
+	458,  // 1451: forge.Forge.UpdateMachineCredentials:input_type -> forge.MachineCredentialsUpdateRequest
+	473,  // 1452: forge.Forge.GetPxeInstructions:input_type -> forge.PxeInstructionRequest
+	477,  // 1453: forge.Forge.GetCloudInitInstructions:input_type -> forge.CloudInitInstructionsRequest
+	161,  // 1454: forge.Forge.Echo:input_type -> forge.EchoRequest
+	504,  // 1455: forge.Forge.CreateTenant:input_type -> forge.CreateTenantRequest
+	508,  // 1456: forge.Forge.FindTenant:input_type -> forge.FindTenantRequest
+	506,  // 1457: forge.Forge.UpdateTenant:input_type -> forge.UpdateTenantRequest
+	514,  // 1458: forge.Forge.CreateTenantKeyset:input_type -> forge.CreateTenantKeysetRequest
+	521,  // 1459: forge.Forge.FindTenantKeysetIds:input_type -> forge.TenantKeysetSearchFilter
+	523,  // 1460: forge.Forge.FindTenantKeysetsByIds:input_type -> forge.TenantKeysetsByIdsRequest
+	517,  // 1461: forge.Forge.UpdateTenantKeyset:input_type -> forge.UpdateTenantKeysetRequest
+	519,  // 1462: forge.Forge.DeleteTenantKeyset:input_type -> forge.DeleteTenantKeysetRequest
+	524,  // 1463: forge.Forge.ValidateTenantPublicKey:input_type -> forge.ValidateTenantPublicKeyRequest
+	397,  // 1464: forge.Forge.GetBmcCredentials:input_type -> forge.GetBmcCredentialsRequest
+	398,  // 1465: forge.Forge.GetSwitchNvosCredentials:input_type -> forge.GetSwitchNvosCredentialsRequest
+	429,  // 1466: forge.Forge.GetAllManagedHostNetworkStatus:input_type -> forge.ManagedHostNetworkStatusRequest
+	401,  // 1467: forge.Forge.GetSiteExplorationReport:input_type -> forge.GetSiteExplorationRequest
+	1147, // 1468: forge.Forge.GetSiteExplorerLastRun:input_type -> google.protobuf.Empty
+	402,  // 1469: forge.Forge.ClearSiteExplorationError:input_type -> forge.ClearSiteExplorationErrorRequest
+	408,  // 1470: forge.Forge.IsBmcInManagedHost:input_type -> forge.BmcEndpointRequest
+	408,  // 1471: forge.Forge.BmcCredentialStatus:input_type -> forge.BmcEndpointRequest
+	408,  // 1472: forge.Forge.Explore:input_type -> forge.BmcEndpointRequest
+	403,  // 1473: forge.Forge.ReExploreEndpoint:input_type -> forge.ReExploreEndpointRequest
+	404,  // 1474: forge.Forge.RefreshEndpointReport:input_type -> forge.RefreshEndpointReportRequest
+	405,  // 1475: forge.Forge.DeleteExploredEndpoint:input_type -> forge.DeleteExploredEndpointRequest
+	406,  // 1476: forge.Forge.PauseExploredEndpointRemediation:input_type -> forge.PauseExploredEndpointRemediationRequest
+	1148, // 1477: forge.Forge.FindExploredEndpointIds:input_type -> site_explorer.ExploredEndpointSearchFilter
+	1149, // 1478: forge.Forge.FindExploredEndpointsByIds:input_type -> site_explorer.ExploredEndpointsByIdsRequest
+	1150, // 1479: forge.Forge.FindExploredManagedHostIds:input_type -> site_explorer.ExploredManagedHostSearchFilter
+	1151, // 1480: forge.Forge.FindExploredManagedHostsByIds:input_type -> site_explorer.ExploredManagedHostsByIdsRequest
+	1152, // 1481: forge.Forge.FindExploredMlxDeviceHostIds:input_type -> site_explorer.ExploredMlxDeviceHostSearchFilter
+	1153, // 1482: forge.Forge.FindExploredMlxDevicesByIds:input_type -> site_explorer.ExploredMlxDevicesByIdsRequest
+	412,  // 1483: forge.Forge.UpdateMachineHardwareInfo:input_type -> forge.UpdateMachineHardwareInfoRequest
+	435,  // 1484: forge.Forge.AdminForceDeleteMachine:input_type -> forge.AdminForceDeleteMachineRequest
+	436,  // 1485: forge.Forge.DecommissionManagedHost:input_type -> forge.DecommissionManagedHostRequest
+	526,  // 1486: forge.Forge.AdminListResourcePools:input_type -> forge.ListResourcePoolsRequest
+	529,  // 1487: forge.Forge.AdminGrowResourcePool:input_type -> forge.GrowResourcePoolRequest
+	374,  // 1488: forge.Forge.UpdateMachineMetadata:input_type -> forge.MachineMetadataUpdateRequest
+	375,  // 1489: forge.Forge.UpdateRackMetadata:input_type -> forge.RackMetadataUpdateRequest
+	376,  // 1490: forge.Forge.UpdateSwitchMetadata:input_type -> forge.SwitchMetadataUpdateRequest
+	377,  // 1491: forge.Forge.UpdatePowerShelfMetadata:input_type -> forge.PowerShelfMetadataUpdateRequest
+	805,  // 1492: forge.Forge.UpdateMachineNvLinkInfo:input_type -> forge.UpdateMachineNvLinkInfoRequest
+	533,  // 1493: forge.Forge.SetMaintenance:input_type -> forge.MaintenanceRequest
+	534,  // 1494: forge.Forge.SetDynamicConfig:input_type -> forge.SetDynamicConfigRequest
+	544,  // 1495: forge.Forge.TriggerDpuReprovisioning:input_type -> forge.DpuReprovisioningRequest
+	545,  // 1496: forge.Forge.ListDpuWaitingForReprovisioning:input_type -> forge.DpuReprovisioningListRequest
+	547,  // 1497: forge.Forge.TriggerHostReprovisioning:input_type -> forge.HostReprovisioningRequest
+	551,  // 1498: forge.Forge.ListHostsWaitingForReprovisioning:input_type -> forge.HostReprovisioningListRequest
+	548,  // 1499: forge.Forge.TriggerBmcCredentialRotation:input_type -> forge.BmcCredentialRotationRequest
+	549,  // 1500: forge.Forge.TriggerUefiCredentialRotation:input_type -> forge.UefiCredentialRotationRequest
+	550,  // 1501: forge.Forge.TriggerNicLockdownCredentialRotation:input_type -> forge.NicLockdownCredentialRotationRequest
+	1071, // 1502: forge.Forge.MarkManualFirmwareUpgradeComplete:input_type -> common.MachineId
+	604,  // 1503: forge.Forge.ReportScoutFirmwareUpgradeStatus:input_type -> forge.ScoutFirmwareUpgradeStatusRequest
+	557,  // 1504: forge.Forge.GetDpuInfoList:input_type -> forge.GetDpuInfoListRequest
+	1095, // 1505: forge.Forge.GetMachineBootOverride:input_type -> common.MachineInterfaceId
+	560,  // 1506: forge.Forge.SetMachineBootOverride:input_type -> forge.MachineBootOverride
+	1095, // 1507: forge.Forge.ClearMachineBootOverride:input_type -> common.MachineInterfaceId
+	998,  // 1508: forge.Forge.GetMachineBootInterfaces:input_type -> forge.GetMachineBootInterfacesRequest
+	569,  // 1509: forge.Forge.GetNetworkTopology:input_type -> forge.NetworkTopologyRequest
+	570,  // 1510: forge.Forge.FindNetworkDevicesByDeviceIds:input_type -> forge.NetworkDeviceIdList
+	149,  // 1511: forge.Forge.CreateCredential:input_type -> forge.CredentialCreationRequest
+	150,  // 1512: forge.Forge.DeleteCredential:input_type -> forge.CredentialDeletionRequest
+	153,  // 1513: forge.Forge.RotateCredential:input_type -> forge.RotateCredentialRequest
+	155,  // 1514: forge.Forge.GetCredentialRotationStatus:input_type -> forge.CredentialRotationStatusRequest
+	1005, // 1515: forge.Forge.GetContainerRegistryCredential:input_type -> forge.GetContainerRegistryCredentialRequest
+	1007, // 1516: forge.Forge.SetContainerRegistryCredential:input_type -> forge.SetContainerRegistryCredentialRequest
+	1147, // 1517: forge.Forge.GetRouteServers:input_type -> google.protobuf.Empty
+	572,  // 1518: forge.Forge.AddRouteServers:input_type -> forge.RouteServers
+	572,  // 1519: forge.Forge.RemoveRouteServers:input_type -> forge.RouteServers
+	572,  // 1520: forge.Forge.ReplaceRouteServers:input_type -> forge.RouteServers
+	378,  // 1521: forge.Forge.UpdateAgentReportedInventory:input_type -> forge.DpuAgentInventoryReport
+	333,  // 1522: forge.Forge.UpdateInstancePhoneHomeLastContact:input_type -> forge.InstancePhoneHomeLastContactRequest
+	575,  // 1523: forge.Forge.SetHostUefiPassword:input_type -> forge.SetHostUefiPasswordRequest
+	577,  // 1524: forge.Forge.ClearHostUefiPassword:input_type -> forge.ClearHostUefiPasswordRequest
+	579,  // 1525: forge.Forge.SetDpuUefiPassword:input_type -> forge.SetDpuUefiPasswordRequest
+	592,  // 1526: forge.Forge.AddExpectedMachine:input_type -> forge.ExpectedMachine
+	593,  // 1527: forge.Forge.DeleteExpectedMachine:input_type -> forge.ExpectedMachineRequest
+	592,  // 1528: forge.Forge.UpdateExpectedMachine:input_type -> forge.ExpectedMachine
+	1030, // 1529: forge.Forge.PatchExpectedMachine:input_type -> forge.PatchExpectedMachineRequest
+	593,  // 1530: forge.Forge.GetExpectedMachine:input_type -> forge.ExpectedMachineRequest
+	1147, // 1531: forge.Forge.GetAllExpectedMachines:input_type -> google.protobuf.Empty
+	594,  // 1532: forge.Forge.ReplaceAllExpectedMachines:input_type -> forge.ExpectedMachineList
+	1147, // 1533: forge.Forge.DeleteAllExpectedMachines:input_type -> google.protobuf.Empty
+	1147, // 1534: forge.Forge.GetAllExpectedMachinesLinked:input_type -> google.protobuf.Empty
+	1147, // 1535: forge.Forge.GetAllUnexpectedMachines:input_type -> google.protobuf.Empty
+	599,  // 1536: forge.Forge.CreateExpectedMachines:input_type -> forge.BatchExpectedMachineOperationRequest
+	599,  // 1537: forge.Forge.UpdateExpectedMachines:input_type -> forge.BatchExpectedMachineOperationRequest
+	1031, // 1538: forge.Forge.PatchExpectedMachines:input_type -> forge.PatchExpectedMachinesRequest
+	234,  // 1539: forge.Forge.AddExpectedPowerShelf:input_type -> forge.ExpectedPowerShelf
+	235,  // 1540: forge.Forge.DeleteExpectedPowerShelf:input_type -> forge.ExpectedPowerShelfRequest
+	234,  // 1541: forge.Forge.UpdateExpectedPowerShelf:input_type -> forge.ExpectedPowerShelf
+	1028, // 1542: forge.Forge.PatchExpectedPowerShelf:input_type -> forge.PatchExpectedPowerShelfRequest
+	235,  // 1543: forge.Forge.GetExpectedPowerShelf:input_type -> forge.ExpectedPowerShelfRequest
+	1147, // 1544: forge.Forge.GetAllExpectedPowerShelves:input_type -> google.protobuf.Empty
+	236,  // 1545: forge.Forge.ReplaceAllExpectedPowerShelves:input_type -> forge.ExpectedPowerShelfList
+	1147, // 1546: forge.Forge.DeleteAllExpectedPowerShelves:input_type -> google.protobuf.Empty
+	1147, // 1547: forge.Forge.GetAllExpectedPowerShelvesLinked:input_type -> google.protobuf.Empty
+	259,  // 1548: forge.Forge.AddExpectedSwitch:input_type -> forge.ExpectedSwitch
+	260,  // 1549: forge.Forge.DeleteExpectedSwitch:input_type -> forge.ExpectedSwitchRequest
+	259,  // 1550: forge.Forge.UpdateExpectedSwitch:input_type -> forge.ExpectedSwitch
+	1029, // 1551: forge.Forge.PatchExpectedSwitch:input_type -> forge.PatchExpectedSwitchRequest
+	260,  // 1552: forge.Forge.GetExpectedSwitch:input_type -> forge.ExpectedSwitchRequest
+	1147, // 1553: forge.Forge.GetAllExpectedSwitches:input_type -> google.protobuf.Empty
+	261,  // 1554: forge.Forge.ReplaceAllExpectedSwitches:input_type -> forge.ExpectedSwitchList
+	1147, // 1555: forge.Forge.DeleteAllExpectedSwitches:input_type -> google.protobuf.Empty
+	1147, // 1556: forge.Forge.GetAllExpectedSwitchesLinked:input_type -> google.protobuf.Empty
+	264,  // 1557: forge.Forge.AddExpectedRack:input_type -> forge.ExpectedRack
+	265,  // 1558: forge.Forge.DeleteExpectedRack:input_type -> forge.ExpectedRackRequest
+	264,  // 1559: forge.Forge.UpdateExpectedRack:input_type -> forge.ExpectedRack
+	265,  // 1560: forge.Forge.GetExpectedRack:input_type -> forge.ExpectedRackRequest
+	1147, // 1561: forge.Forge.GetAllExpectedRacks:input_type -> google.protobuf.Empty
+	266,  // 1562: forge.Forge.ReplaceAllExpectedRacks:input_type -> forge.ExpectedRackList
+	1147, // 1563: forge.Forge.DeleteAllExpectedRacks:input_type -> google.protobuf.Empty
+	147,  // 1564: forge.Forge.AttestQuote:input_type -> forge.AttestQuoteRequest
+	681,  // 1565: forge.Forge.CreateInstanceType:input_type -> forge.CreateInstanceTypeRequest
+	683,  // 1566: forge.Forge.FindInstanceTypeIds:input_type -> forge.FindInstanceTypeIdsRequest
+	685,  // 1567: forge.Forge.FindInstanceTypesByIds:input_type -> forge.FindInstanceTypesByIdsRequest
+	690,  // 1568: forge.Forge.UpdateInstanceType:input_type -> forge.UpdateInstanceTypeRequest
+	687,  // 1569: forge.Forge.DeleteInstanceType:input_type -> forge.DeleteInstanceTypeRequest
+	691,  // 1570: forge.Forge.AssociateMachinesWithInstanceType:input_type -> forge.AssociateMachinesWithInstanceTypeRequest
+	693,  // 1571: forge.Forge.RemoveMachineInstanceTypeAssociation:input_type -> forge.RemoveMachineInstanceTypeAssociationRequest
+	1154, // 1572: forge.Forge.CreateMeasurementBundle:input_type -> measured_boot.CreateMeasurementBundleRequest
+	1155, // 1573: forge.Forge.DeleteMeasurementBundle:input_type -> measured_boot.DeleteMeasurementBundleRequest
+	1156, // 1574: forge.Forge.RenameMeasurementBundle:input_type -> measured_boot.RenameMeasurementBundleRequest
+	1157, // 1575: forge.Forge.UpdateMeasurementBundle:input_type -> measured_boot.UpdateMeasurementBundleRequest
+	1158, // 1576: forge.Forge.ShowMeasurementBundle:input_type -> measured_boot.ShowMeasurementBundleRequest
+	1159, // 1577: forge.Forge.ShowMeasurementBundles:input_type -> measured_boot.ShowMeasurementBundlesRequest
+	1160, // 1578: forge.Forge.ListMeasurementBundles:input_type -> measured_boot.ListMeasurementBundlesRequest
+	1161, // 1579: forge.Forge.ListMeasurementBundleMachines:input_type -> measured_boot.ListMeasurementBundleMachinesRequest
+	1162, // 1580: forge.Forge.FindClosestBundleMatch:input_type -> measured_boot.FindClosestBundleMatchRequest
+	1163, // 1581: forge.Forge.DeleteMeasurementJournal:input_type -> measured_boot.DeleteMeasurementJournalRequest
+	1164, // 1582: forge.Forge.ShowMeasurementJournal:input_type -> measured_boot.ShowMeasurementJournalRequest
+	1165, // 1583: forge.Forge.ShowMeasurementJournals:input_type -> measured_boot.ShowMeasurementJournalsRequest
+	1166, // 1584: forge.Forge.ListMeasurementJournal:input_type -> measured_boot.ListMeasurementJournalRequest
+	1167, // 1585: forge.Forge.AttestCandidateMachine:input_type -> measured_boot.AttestCandidateMachineRequest
+	1168, // 1586: forge.Forge.ShowCandidateMachine:input_type -> measured_boot.ShowCandidateMachineRequest
+	1169, // 1587: forge.Forge.ShowCandidateMachines:input_type -> measured_boot.ShowCandidateMachinesRequest
+	1170, // 1588: forge.Forge.ListCandidateMachines:input_type -> measured_boot.ListCandidateMachinesRequest
+	1171, // 1589: forge.Forge.CreateMeasurementSystemProfile:input_type -> measured_boot.CreateMeasurementSystemProfileRequest
+	1172, // 1590: forge.Forge.DeleteMeasurementSystemProfile:input_type -> measured_boot.DeleteMeasurementSystemProfileRequest
+	1173, // 1591: forge.Forge.RenameMeasurementSystemProfile:input_type -> measured_boot.RenameMeasurementSystemProfileRequest
+	1174, // 1592: forge.Forge.ShowMeasurementSystemProfile:input_type -> measured_boot.ShowMeasurementSystemProfileRequest
+	1175, // 1593: forge.Forge.ShowMeasurementSystemProfiles:input_type -> measured_boot.ShowMeasurementSystemProfilesRequest
+	1176, // 1594: forge.Forge.ListMeasurementSystemProfiles:input_type -> measured_boot.ListMeasurementSystemProfilesRequest
+	1177, // 1595: forge.Forge.ListMeasurementSystemProfileBundles:input_type -> measured_boot.ListMeasurementSystemProfileBundlesRequest
+	1178, // 1596: forge.Forge.ListMeasurementSystemProfileMachines:input_type -> measured_boot.ListMeasurementSystemProfileMachinesRequest
+	1179, // 1597: forge.Forge.CreateMeasurementReport:input_type -> measured_boot.CreateMeasurementReportRequest
+	1180, // 1598: forge.Forge.DeleteMeasurementReport:input_type -> measured_boot.DeleteMeasurementReportRequest
+	1181, // 1599: forge.Forge.PromoteMeasurementReport:input_type -> measured_boot.PromoteMeasurementReportRequest
+	1182, // 1600: forge.Forge.RevokeMeasurementReport:input_type -> measured_boot.RevokeMeasurementReportRequest
+	1183, // 1601: forge.Forge.ShowMeasurementReportForId:input_type -> measured_boot.ShowMeasurementReportForIdRequest
+	1184, // 1602: forge.Forge.ShowMeasurementReportsForMachine:input_type -> measured_boot.ShowMeasurementReportsForMachineRequest
+	1185, // 1603: forge.Forge.ShowMeasurementReports:input_type -> measured_boot.ShowMeasurementReportsRequest
+	1186, // 1604: forge.Forge.ListMeasurementReport:input_type -> measured_boot.ListMeasurementReportRequest
+	1187, // 1605: forge.Forge.MatchMeasurementReport:input_type -> measured_boot.MatchMeasurementReportRequest
+	1188, // 1606: forge.Forge.ImportSiteMeasurements:input_type -> measured_boot.ImportSiteMeasurementsRequest
+	1189, // 1607: forge.Forge.ExportSiteMeasurements:input_type -> measured_boot.ExportSiteMeasurementsRequest
+	1190, // 1608: forge.Forge.AddMeasurementTrustedMachine:input_type -> measured_boot.AddMeasurementTrustedMachineRequest
+	1191, // 1609: forge.Forge.RemoveMeasurementTrustedMachine:input_type -> measured_boot.RemoveMeasurementTrustedMachineRequest
+	1192, // 1610: forge.Forge.AddMeasurementTrustedProfile:input_type -> measured_boot.AddMeasurementTrustedProfileRequest
+	1193, // 1611: forge.Forge.RemoveMeasurementTrustedProfile:input_type -> measured_boot.RemoveMeasurementTrustedProfileRequest
+	1194, // 1612: forge.Forge.ListMeasurementTrustedMachines:input_type -> measured_boot.ListMeasurementTrustedMachinesRequest
+	1195, // 1613: forge.Forge.ListMeasurementTrustedProfiles:input_type -> measured_boot.ListMeasurementTrustedProfilesRequest
+	1196, // 1614: forge.Forge.ListAttestationSummary:input_type -> measured_boot.ListAttestationSummaryRequest
+	712,  // 1615: forge.Forge.CreateNetworkSecurityGroup:input_type -> forge.CreateNetworkSecurityGroupRequest
+	714,  // 1616: forge.Forge.FindNetworkSecurityGroupIds:input_type -> forge.FindNetworkSecurityGroupIdsRequest
+	716,  // 1617: forge.Forge.FindNetworkSecurityGroupsByIds:input_type -> forge.FindNetworkSecurityGroupsByIdsRequest
+	719,  // 1618: forge.Forge.UpdateNetworkSecurityGroup:input_type -> forge.UpdateNetworkSecurityGroupRequest
+	720,  // 1619: forge.Forge.DeleteNetworkSecurityGroup:input_type -> forge.DeleteNetworkSecurityGroupRequest
+	726,  // 1620: forge.Forge.GetNetworkSecurityGroupPropagationStatus:input_type -> forge.GetNetworkSecurityGroupPropagationStatusRequest
+	729,  // 1621: forge.Forge.GetNetworkSecurityGroupAttachments:input_type -> forge.GetNetworkSecurityGroupAttachmentsRequest
+	581,  // 1622: forge.Forge.CreateOsImage:input_type -> forge.OsImageAttributes
+	585,  // 1623: forge.Forge.DeleteOsImage:input_type -> forge.DeleteOsImageRequest
+	583,  // 1624: forge.Forge.ListOsImage:input_type -> forge.ListOsImageRequest
+	1085, // 1625: forge.Forge.GetOsImage:input_type -> common.UUID
+	581,  // 1626: forge.Forge.UpdateOsImage:input_type -> forge.OsImageAttributes
+	587,  // 1627: forge.Forge.GetIpxeTemplate:input_type -> forge.GetIpxeTemplateRequest
+	588,  // 1628: forge.Forge.ListIpxeTemplates:input_type -> forge.ListIpxeTemplatesRequest
+	603,  // 1629: forge.Forge.RebootCompleted:input_type -> forge.MachineRebootCompletedRequest
+	608,  // 1630: forge.Forge.PersistValidationResult:input_type -> forge.MachineValidationResultPostRequest
+	610,  // 1631: forge.Forge.GetMachineValidationResults:input_type -> forge.MachineValidationGetRequest
+	605,  // 1632: forge.Forge.MachineValidationCompleted:input_type -> forge.MachineValidationCompletedRequest
+	613,  // 1633: forge.Forge.MachineSetAutoUpdate:input_type -> forge.MachineSetAutoUpdateRequest
+	615,  // 1634: forge.Forge.GetMachineValidationExternalConfig:input_type -> forge.GetMachineValidationExternalConfigRequest
+	618,  // 1635: forge.Forge.GetMachineValidationExternalConfigs:input_type -> forge.GetMachineValidationExternalConfigsRequest
+	620,  // 1636: forge.Forge.AddUpdateMachineValidationExternalConfig:input_type -> forge.AddUpdateMachineValidationExternalConfigRequest
+	641,  // 1637: forge.Forge.GetMachineValidationRuns:input_type -> forge.MachineValidationRunListGetRequest
+	642,  // 1638: forge.Forge.FindMachineValidationRunItemIds:input_type -> forge.MachineValidationRunItemSearchFilter
+	644,  // 1639: forge.Forge.FindMachineValidationRunItemsByIds:input_type -> forge.MachineValidationRunItemsByIdsRequest
+	647,  // 1640: forge.Forge.GetMachineValidationAttempt:input_type -> forge.MachineValidationAttemptGetRequest
+	649,  // 1641: forge.Forge.HeartbeatMachineValidationRun:input_type -> forge.MachineValidationHeartbeatRequest
+	621,  // 1642: forge.Forge.RemoveMachineValidationExternalConfig:input_type -> forge.RemoveMachineValidationExternalConfigRequest
+	653,  // 1643: forge.Forge.GetMachineValidationTests:input_type -> forge.MachineValidationTestsGetRequest
+	655,  // 1644: forge.Forge.AddMachineValidationTest:input_type -> forge.MachineValidationTestAddRequest
+	654,  // 1645: forge.Forge.UpdateMachineValidationTest:input_type -> forge.MachineValidationTestUpdateRequest
+	658,  // 1646: forge.Forge.MachineValidationTestVerfied:input_type -> forge.MachineValidationTestVerfiedRequest
+	665,  // 1647: forge.Forge.MachineValidationTestNextVersion:input_type -> forge.MachineValidationTestNextVersionRequest
+	666,  // 1648: forge.Forge.MachineValidationTestEnableDisableTest:input_type -> forge.MachineValidationTestEnableDisableTestRequest
+	662,  // 1649: forge.Forge.MachineValidationTestApproveFullHost:input_type -> forge.MachineValidationTestFullHostApprovalRequest
+	668,  // 1650: forge.Forge.UpdateMachineValidationRun:input_type -> forge.MachineValidationRunRequest
+	450,  // 1651: forge.Forge.AdminBmcReset:input_type -> forge.AdminBmcResetRequest
+	634,  // 1652: forge.Forge.AdminPowerControl:input_type -> forge.AdminPowerControlRequest
+	636,  // 1653: forge.Forge.AdminChassisReset:input_type -> forge.AdminChassisResetRequest
+	408,  // 1654: forge.Forge.DisableSecureBoot:input_type -> forge.BmcEndpointRequest
+	440,  // 1655: forge.Forge.Lockdown:input_type -> forge.LockdownRequest
+	442,  // 1656: forge.Forge.LockdownStatus:input_type -> forge.LockdownStatusRequest
+	444,  // 1657: forge.Forge.MachineSetup:input_type -> forge.MachineSetupRequest
+	446,  // 1658: forge.Forge.SetDpuFirstBootOrder:input_type -> forge.SetDpuFirstBootOrderRequest
+	838,  // 1659: forge.Forge.CreateBmcUser:input_type -> forge.CreateBmcUserRequest
+	840,  // 1660: forge.Forge.DeleteBmcUser:input_type -> forge.DeleteBmcUserRequest
+	842,  // 1661: forge.Forge.SetBmcRootPassword:input_type -> forge.SetBmcRootPasswordRequest
+	844,  // 1662: forge.Forge.ProbeBmcVendor:input_type -> forge.ProbeBmcVendorRequest
+	452,  // 1663: forge.Forge.EnableInfiniteBoot:input_type -> forge.EnableInfiniteBootRequest
+	454,  // 1664: forge.Forge.IsInfiniteBootEnabled:input_type -> forge.IsInfiniteBootEnabledRequest
+	622,  // 1665: forge.Forge.OnDemandMachineValidation:input_type -> forge.MachineValidationOnDemandRequest
+	630,  // 1666: forge.Forge.OnDemandRackMaintenance:input_type -> forge.RackMaintenanceOnDemandRequest
+	632,  // 1667: forge.Forge.TerminateRackMaintenance:input_type -> forge.RackMaintenanceTerminateRequest
+	143,  // 1668: forge.Forge.TpmAddCaCert:input_type -> forge.TpmCaCert
+	1147, // 1669: forge.Forge.TpmShowCaCerts:input_type -> google.protobuf.Empty
+	1147, // 1670: forge.Forge.TpmShowUnmatchedEkCerts:input_type -> google.protobuf.Empty
+	140,  // 1671: forge.Forge.TpmDeleteCaCert:input_type -> forge.TpmCaCertId
+	695,  // 1672: forge.Forge.RedfishBrowse:input_type -> forge.RedfishBrowseRequest
+	697,  // 1673: forge.Forge.RedfishListActions:input_type -> forge.RedfishListActionsRequest
+	702,  // 1674: forge.Forge.RedfishCreateAction:input_type -> forge.RedfishCreateActionRequest
+	704,  // 1675: forge.Forge.RedfishApproveAction:input_type -> forge.RedfishActionID
+	704,  // 1676: forge.Forge.RedfishApplyAction:input_type -> forge.RedfishActionID
+	704,  // 1677: forge.Forge.RedfishCancelAction:input_type -> forge.RedfishActionID
+	708,  // 1678: forge.Forge.UfmBrowse:input_type -> forge.UfmBrowseRequest
+	732,  // 1679: forge.Forge.GetDesiredFirmwareVersions:input_type -> forge.GetDesiredFirmwareVersionsRequest
+	848,  // 1680: forge.Forge.UpsertHostFirmwareConfig:input_type -> forge.UpsertHostFirmwareConfigRequest
+	849,  // 1681: forge.Forge.DeleteHostFirmwareConfig:input_type -> forge.DeleteHostFirmwareConfigRequest
+	748,  // 1682: forge.Forge.CreateSku:input_type -> forge.SkuList
+	1071, // 1683: forge.Forge.GenerateSkuFromMachine:input_type -> common.MachineId
+	1071, // 1684: forge.Forge.VerifySkuForMachine:input_type -> common.MachineId
+	746,  // 1685: forge.Forge.AssignSkuToMachine:input_type -> forge.SkuMachinePair
+	747,  // 1686: forge.Forge.RemoveSkuAssociation:input_type -> forge.RemoveSkuRequest
+	749,  // 1687: forge.Forge.DeleteSku:input_type -> forge.SkuIdList
+	1147, // 1688: forge.Forge.GetAllSkuIds:input_type -> google.protobuf.Empty
+	751,  // 1689: forge.Forge.FindSkusByIds:input_type -> forge.SkusByIdsRequest
+	761,  // 1690: forge.Forge.UpdateSkuMetadata:input_type -> forge.SkuUpdateMetadataRequest
+	745,  // 1691: forge.Forge.ReplaceSku:input_type -> forge.Sku
+	418,  // 1692: forge.Forge.GetManagedHostQuarantineState:input_type -> forge.GetManagedHostQuarantineStateRequest
+	420,  // 1693: forge.Forge.SetManagedHostQuarantineState:input_type -> forge.SetManagedHostQuarantineStateRequest
+	422,  // 1694: forge.Forge.ClearManagedHostQuarantineState:input_type -> forge.ClearManagedHostQuarantineStateRequest
+	1071, // 1695: forge.Forge.ResetHostReprovisioning:input_type -> common.MachineId
+	411,  // 1696: forge.Forge.CopyBfbToDpuRshim:input_type -> forge.CopyBfbToDpuRshimRequest
+	1147, // 1697: forge.Forge.GetAllDpaInterfaceIds:input_type -> google.protobuf.Empty
+	756,  // 1698: forge.Forge.FindDpaInterfacesByIds:input_type -> forge.DpaInterfacesByIdsRequest
+	754,  // 1699: forge.Forge.CreateDpaInterface:input_type -> forge.DpaInterfaceCreationRequest
+	754,  // 1700: forge.Forge.EnsureDpaInterface:input_type -> forge.DpaInterfaceCreationRequest
+	759,  // 1701: forge.Forge.DeleteDpaInterface:input_type -> forge.DpaInterfaceDeletionRequest
+	762,  // 1702: forge.Forge.GetPowerOptions:input_type -> forge.PowerOptionRequest
+	763,  // 1703: forge.Forge.UpdatePowerOption:input_type -> forge.PowerOptionUpdateRequest
+	408,  // 1704: forge.Forge.AllowIngestionAndPowerOn:input_type -> forge.BmcEndpointRequest
+	408,  // 1705: forge.Forge.DetermineMachineIngestionState:input_type -> forge.BmcEndpointRequest
+	782,  // 1706: forge.Forge.FindRackIds:input_type -> forge.RackSearchFilter
+	784,  // 1707: forge.Forge.FindRacksByIds:input_type -> forge.RacksByIdsRequest
+	779,  // 1708: forge.Forge.GetRack:input_type -> forge.GetRackRequest
+	790,  // 1709: forge.Forge.DeleteRack:input_type -> forge.DeleteRackRequest
+	791,  // 1710: forge.Forge.AdminForceDeleteRack:input_type -> forge.AdminForceDeleteRackRequest
+	798,  // 1711: forge.Forge.GetRackProfile:input_type -> forge.GetRackProfileRequest
+	1147, // 1712: forge.Forge.ListRackProfiles:input_type -> google.protobuf.Empty
+	768,  // 1713: forge.Forge.CreateComputeAllocation:input_type -> forge.CreateComputeAllocationRequest
+	770,  // 1714: forge.Forge.FindComputeAllocationIds:input_type -> forge.FindComputeAllocationIdsRequest
+	772,  // 1715: forge.Forge.FindComputeAllocationsByIds:input_type -> forge.FindComputeAllocationsByIdsRequest
+	775,  // 1716: forge.Forge.UpdateComputeAllocation:input_type -> forge.UpdateComputeAllocationRequest
+	776,  // 1717: forge.Forge.DeleteComputeAllocation:input_type -> forge.DeleteComputeAllocationRequest
+	846,  // 1718: forge.Forge.SetFirmwareUpdateTimeWindow:input_type -> forge.SetFirmwareUpdateTimeWindowRequest
+	855,  // 1719: forge.Forge.ListHostFirmware:input_type -> forge.ListHostFirmwareRequest
+	1197, // 1720: forge.Forge.PublishMlxDeviceReport:input_type -> mlx_device.PublishMlxDeviceReportRequest
+	1198, // 1721: forge.Forge.PublishMlxObservationReport:input_type -> mlx_device.PublishMlxObservationReportRequest
+	858,  // 1722: forge.Forge.TrimTable:input_type -> forge.TrimTableRequest
+	1147, // 1723: forge.Forge.ListNvlinkNmxcEndpoints:input_type -> google.protobuf.Empty
+	860,  // 1724: forge.Forge.CreateNvlinkNmxcEndpoint:input_type -> forge.NvlinkNmxcEndpoint
+	860,  // 1725: forge.Forge.UpdateNvlinkNmxcEndpoint:input_type -> forge.NvlinkNmxcEndpoint
+	862,  // 1726: forge.Forge.DeleteNvlinkNmxcEndpoint:input_type -> forge.DeleteNvlinkNmxcEndpointRequest
+	863,  // 1727: forge.Forge.CreateRemediation:input_type -> forge.CreateRemediationRequest
+	868,  // 1728: forge.Forge.ApproveRemediation:input_type -> forge.ApproveRemediationRequest
+	869,  // 1729: forge.Forge.RevokeRemediation:input_type -> forge.RevokeRemediationRequest
+	870,  // 1730: forge.Forge.EnableRemediation:input_type -> forge.EnableRemediationRequest
+	871,  // 1731: forge.Forge.DisableRemediation:input_type -> forge.DisableRemediationRequest
+	1147, // 1732: forge.Forge.FindRemediationIds:input_type -> google.protobuf.Empty
+	865,  // 1733: forge.Forge.FindRemediationsByIds:input_type -> forge.RemediationIdList
+	872,  // 1734: forge.Forge.FindAppliedRemediationIds:input_type -> forge.FindAppliedRemediationIdsRequest
+	874,  // 1735: forge.Forge.FindAppliedRemediations:input_type -> forge.FindAppliedRemediationsRequest
+	877,  // 1736: forge.Forge.GetNextRemediationForMachine:input_type -> forge.GetNextRemediationForMachineRequest
+	879,  // 1737: forge.Forge.RemediationApplied:input_type -> forge.RemediationAppliedRequest
+	881,  // 1738: forge.Forge.SetPrimaryDpu:input_type -> forge.SetPrimaryDpuRequest
+	882,  // 1739: forge.Forge.SetPrimaryInterface:input_type -> forge.SetPrimaryInterfaceRequest
+	888,  // 1740: forge.Forge.CreateDpuExtensionService:input_type -> forge.CreateDpuExtensionServiceRequest
+	889,  // 1741: forge.Forge.UpdateDpuExtensionService:input_type -> forge.UpdateDpuExtensionServiceRequest
+	890,  // 1742: forge.Forge.DeleteDpuExtensionService:input_type -> forge.DeleteDpuExtensionServiceRequest
+	892,  // 1743: forge.Forge.FindDpuExtensionServiceIds:input_type -> forge.DpuExtensionServiceSearchFilter
+	894,  // 1744: forge.Forge.FindDpuExtensionServicesByIds:input_type -> forge.DpuExtensionServicesByIdsRequest
+	896,  // 1745: forge.Forge.GetDpuExtensionServiceVersionsInfo:input_type -> forge.GetDpuExtensionServiceVersionsInfoRequest
+	898,  // 1746: forge.Forge.FindInstancesByDpuExtensionService:input_type -> forge.FindInstancesByDpuExtensionServiceRequest
+	115,  // 1747: forge.Forge.TriggerMachineAttestation:input_type -> forge.SpdmMachineAttestationTriggerRequest
+	1071, // 1748: forge.Forge.CancelMachineAttestation:input_type -> common.MachineId
+	116,  // 1749: forge.Forge.ListAttestationMachines:input_type -> forge.SpdmListAttestationMachinesRequest
+	1071, // 1750: forge.Forge.GetAttestationMachine:input_type -> common.MachineId
+	118,  // 1751: forge.Forge.SignMachineIdentity:input_type -> forge.MachineIdentityRequest
+	120,  // 1752: forge.Forge.GetTenantIdentityConfiguration:input_type -> forge.GetTenantIdentityConfigRequest
+	123,  // 1753: forge.Forge.SetTenantIdentityConfiguration:input_type -> forge.SetTenantIdentityConfigRequest
+	120,  // 1754: forge.Forge.DeleteTenantIdentityConfiguration:input_type -> forge.GetTenantIdentityConfigRequest
+	128,  // 1755: forge.Forge.GetTokenDelegation:input_type -> forge.GetTokenDelegationRequest
+	130,  // 1756: forge.Forge.SetTokenDelegation:input_type -> forge.TokenDelegationRequest
+	128,  // 1757: forge.Forge.DeleteTokenDelegation:input_type -> forge.GetTokenDelegationRequest
+	131,  // 1758: forge.Forge.ReencryptTenantIdentitySecrets:input_type -> forge.ReencryptTenantIdentitySecretsRequest
+	136,  // 1759: forge.Forge.GetJWKS:input_type -> forge.JwksRequest
+	137,  // 1760: forge.Forge.GetOpenIDConfiguration:input_type -> forge.OpenIdConfigRequest
+	905,  // 1761: forge.Forge.ScoutStream:input_type -> forge.ScoutStreamApiBoundMessage
+	908,  // 1762: forge.Forge.ScoutStreamShowConnections:input_type -> forge.ScoutStreamShowConnectionsRequest
+	910,  // 1763: forge.Forge.ScoutStreamDisconnect:input_type -> forge.ScoutStreamDisconnectRequest
+	912,  // 1764: forge.Forge.ScoutStreamPing:input_type -> forge.ScoutStreamAdminPingRequest
+	1199, // 1765: forge.Forge.MlxAdminProfileSync:input_type -> mlx_device.MlxAdminProfileSyncRequest
+	1200, // 1766: forge.Forge.MlxAdminProfileShow:input_type -> mlx_device.MlxAdminProfileShowRequest
+	1201, // 1767: forge.Forge.MlxAdminProfileCompare:input_type -> mlx_device.MlxAdminProfileCompareRequest
+	1202, // 1768: forge.Forge.MlxAdminProfileList:input_type -> mlx_device.MlxAdminProfileListRequest
+	1203, // 1769: forge.Forge.MlxAdminLockdownLock:input_type -> mlx_device.MlxAdminLockdownLockRequest
+	1204, // 1770: forge.Forge.MlxAdminLockdownUnlock:input_type -> mlx_device.MlxAdminLockdownUnlockRequest
+	1205, // 1771: forge.Forge.MlxAdminLockdownStatus:input_type -> mlx_device.MlxAdminLockdownStatusRequest
+	1206, // 1772: forge.Forge.MlxAdminShowDevice:input_type -> mlx_device.MlxAdminDeviceInfoRequest
+	1207, // 1773: forge.Forge.MlxAdminShowMachine:input_type -> mlx_device.MlxAdminDeviceReportRequest
+	1208, // 1774: forge.Forge.MlxAdminRegistryList:input_type -> mlx_device.MlxAdminRegistryListRequest
+	1209, // 1775: forge.Forge.MlxAdminRegistryShow:input_type -> mlx_device.MlxAdminRegistryShowRequest
+	1210, // 1776: forge.Forge.MlxAdminConfigQuery:input_type -> mlx_device.MlxAdminConfigQueryRequest
+	1211, // 1777: forge.Forge.MlxAdminConfigSet:input_type -> mlx_device.MlxAdminConfigSetRequest
+	1212, // 1778: forge.Forge.MlxAdminConfigSync:input_type -> mlx_device.MlxAdminConfigSyncRequest
+	1213, // 1779: forge.Forge.MlxAdminConfigCompare:input_type -> mlx_device.MlxAdminConfigCompareRequest
+	822,  // 1780: forge.Forge.FindNVLinkPartitionIds:input_type -> forge.NVLinkPartitionSearchFilter
+	823,  // 1781: forge.Forge.FindNVLinkPartitionsByIds:input_type -> forge.NVLinkPartitionsByIdsRequest
+	173,  // 1782: forge.Forge.NVLinkPartitionsForTenant:input_type -> forge.TenantSearchQuery
+	833,  // 1783: forge.Forge.FindNVLinkLogicalPartitionIds:input_type -> forge.NVLinkLogicalPartitionSearchFilter
+	834,  // 1784: forge.Forge.FindNVLinkLogicalPartitionsByIds:input_type -> forge.NVLinkLogicalPartitionsByIdsRequest
+	830,  // 1785: forge.Forge.CreateNVLinkLogicalPartition:input_type -> forge.NVLinkLogicalPartitionCreationRequest
+	836,  // 1786: forge.Forge.UpdateNVLinkLogicalPartition:input_type -> forge.NVLinkLogicalPartitionUpdateRequest
+	831,  // 1787: forge.Forge.DeleteNVLinkLogicalPartition:input_type -> forge.NVLinkLogicalPartitionDeletionRequest
+	173,  // 1788: forge.Forge.NVLinkLogicalPartitionsForTenant:input_type -> forge.TenantSearchQuery
+	926,  // 1789: forge.Forge.GetMachinePositionInfo:input_type -> forge.MachinePositionQuery
+	816,  // 1790: forge.Forge.NmxcBrowse:input_type -> forge.NmxcBrowseRequest
+	929,  // 1791: forge.Forge.ModifyDPFState:input_type -> forge.ModifyDPFStateRequest
+	931,  // 1792: forge.Forge.GetDPFState:input_type -> forge.GetDPFStateRequest
+	932,  // 1793: forge.Forge.GetDPFHostSnapshot:input_type -> forge.GetDPFHostSnapshotRequest
+	934,  // 1794: forge.Forge.GetDPFServiceVersions:input_type -> forge.GetDPFServiceVersionsRequest
+	940,  // 1795: forge.Forge.FindPendingDPUServiceSyncIds:input_type -> forge.FindPendingDPUServiceSyncIdsRequest
+	941,  // 1796: forge.Forge.FindPendingDPUServiceSyncsByIds:input_type -> forge.FindPendingDPUServiceSyncsByIdsRequest
+	942,  // 1797: forge.Forge.ListDPUServiceSyncHistory:input_type -> forge.ListDPUServiceSyncHistoryRequest
+	937,  // 1798: forge.Forge.ReleaseDPUServiceSyncHold:input_type -> forge.ReleaseDPUServiceSyncHoldRequest
+	952,  // 1799: forge.Forge.ComponentPowerControl:input_type -> forge.ComponentPowerControlRequest
+	954,  // 1800: forge.Forge.ComponentConfigureSwitchCertificate:input_type -> forge.ComponentConfigureSwitchCertificateRequest
+	949,  // 1801: forge.Forge.GetComponentInventory:input_type -> forge.GetComponentInventoryRequest
+	961,  // 1802: forge.Forge.UpdateComponentFirmware:input_type -> forge.UpdateComponentFirmwareRequest
+	963,  // 1803: forge.Forge.GetComponentFirmwareStatus:input_type -> forge.GetComponentFirmwareStatusRequest
+	965,  // 1804: forge.Forge.ListComponentFirmwareVersions:input_type -> forge.ListComponentFirmwareVersionsRequest
+	982,  // 1805: forge.Forge.CreateOperatingSystem:input_type -> forge.CreateOperatingSystemRequest
+	1093, // 1806: forge.Forge.GetOperatingSystem:input_type -> common.OperatingSystemId
+	985,  // 1807: forge.Forge.UpdateOperatingSystem:input_type -> forge.UpdateOperatingSystemRequest
+	986,  // 1808: forge.Forge.DeleteOperatingSystem:input_type -> forge.DeleteOperatingSystemRequest
+	988,  // 1809: forge.Forge.FindOperatingSystemIds:input_type -> forge.OperatingSystemSearchFilter
+	990,  // 1810: forge.Forge.FindOperatingSystemsByIds:input_type -> forge.OperatingSystemsByIdsRequest
+	992,  // 1811: forge.Forge.GetOperatingSystemCachableIpxeTemplateArtifacts:input_type -> forge.GetOperatingSystemCachableIpxeTemplateArtifactsRequest
+	995,  // 1812: forge.Forge.UpdateOperatingSystemCachableIpxeTemplateArtifacts:input_type -> forge.UpdateOperatingSystemIpxeTemplateArtifactRequest
+	996,  // 1813: forge.Forge.ReWrapSecrets:input_type -> forge.ReWrapSecretsRequest
+	159,  // 1814: forge.Forge.Version:output_type -> forge.BuildInfo
+	1132, // 1815: forge.Forge.CreateDomain:output_type -> dns.Domain
+	1132, // 1816: forge.Forge.UpdateDomain:output_type -> dns.Domain
+	1214, // 1817: forge.Forge.DeleteDomain:output_type -> dns.DomainDeletionResult
+	1215, // 1818: forge.Forge.FindDomain:output_type -> dns.DomainList
+	920,  // 1819: forge.Forge.CreateDomainLegacy:output_type -> forge.DomainLegacy
+	920,  // 1820: forge.Forge.UpdateDomainLegacy:output_type -> forge.DomainLegacy
+	923,  // 1821: forge.Forge.DeleteDomainLegacy:output_type -> forge.DomainDeletionResultLegacy
+	921,  // 1822: forge.Forge.FindDomainLegacy:output_type -> forge.DomainListLegacy
+	179,  // 1823: forge.Forge.CreateVpc:output_type -> forge.Vpc
+	182,  // 1824: forge.Forge.UpdateVpc:output_type -> forge.VpcUpdateResult
+	1025, // 1825: forge.Forge.ChangeVpcRoutingProfile:output_type -> forge.VpcRoutingState
+	1023, // 1826: forge.Forge.ReleaseVpcInactiveVni:output_type -> forge.VpcReleaseInactiveVniResult
+	184,  // 1827: forge.Forge.UpdateVpcVirtualization:output_type -> forge.VpcUpdateVirtualizationResult
+	186,  // 1828: forge.Forge.DeleteVpc:output_type -> forge.VpcDeletionResult
+	171,  // 1829: forge.Forge.FindVpcIds:output_type -> forge.VpcIdList
+	187,  // 1830: forge.Forge.FindVpcsByIds:output_type -> forge.VpcList
+	1025, // 1831: forge.Forge.GetVpcRoutingState:output_type -> forge.VpcRoutingState
+	970,  // 1832: forge.Forge.CreateSpxPartition:output_type -> forge.SpxPartition
+	973,  // 1833: forge.Forge.DeleteSpxPartition:output_type -> forge.SpxPartitionDeletionResult
+	971,  // 1834: forge.Forge.FindSpxPartitionIds:output_type -> forge.SpxPartitionIdList
+	975,  // 1835: forge.Forge.FindSpxPartitionsByIds:output_type -> forge.SpxPartitionList
+	188,  // 1836: forge.Forge.CreateVpcPrefix:output_type -> forge.VpcPrefix
+	194,  // 1837: forge.Forge.SearchVpcPrefixes:output_type -> forge.VpcPrefixIdList
+	195,  // 1838: forge.Forge.GetVpcPrefixes:output_type -> forge.VpcPrefixList
+	188,  // 1839: forge.Forge.UpdateVpcPrefix:output_type -> forge.VpcPrefix
+	198,  // 1840: forge.Forge.DeleteVpcPrefix:output_type -> forge.VpcPrefixDeletionResult
+	1008, // 1841: forge.Forge.CreateSitePrefix:output_type -> forge.SitePrefix
+	1008, // 1842: forge.Forge.UpdateSitePrefix:output_type -> forge.SitePrefix
+	1015, // 1843: forge.Forge.DeleteSitePrefix:output_type -> forge.SitePrefixDeletionResult
+	1019, // 1844: forge.Forge.FindSitePrefixIds:output_type -> forge.SitePrefixIdList
+	1020, // 1845: forge.Forge.FindSitePrefixesByIds:output_type -> forge.SitePrefixList
+	200,  // 1846: forge.Forge.CreateVpcPeering:output_type -> forge.VpcPeering
+	201,  // 1847: forge.Forge.FindVpcPeeringIds:output_type -> forge.VpcPeeringIdList
+	202,  // 1848: forge.Forge.FindVpcPeeringsByIds:output_type -> forge.VpcPeeringList
+	207,  // 1849: forge.Forge.DeleteVpcPeering:output_type -> forge.VpcPeeringDeletionResult
+	280,  // 1850: forge.Forge.FindNetworkSegmentIds:output_type -> forge.NetworkSegmentIdList
+	394,  // 1851: forge.Forge.FindNetworkSegmentsByIds:output_type -> forge.NetworkSegmentList
+	272,  // 1852: forge.Forge.CreateNetworkSegment:output_type -> forge.NetworkSegment
+	272,  // 1853: forge.Forge.AttachNetworkSegmentToVpc:output_type -> forge.NetworkSegment
+	276,  // 1854: forge.Forge.DeleteNetworkSegment:output_type -> forge.NetworkSegmentDeletionResult
+	394,  // 1855: forge.Forge.NetworkSegmentsForVpc:output_type -> forge.NetworkSegmentList
+	218,  // 1856: forge.Forge.FindIBPartitionIds:output_type -> forge.IBPartitionIdList
+	211,  // 1857: forge.Forge.FindIBPartitionsByIds:output_type -> forge.IBPartitionList
+	210,  // 1858: forge.Forge.CreateIBPartition:output_type -> forge.IBPartition
+	210,  // 1859: forge.Forge.UpdateIBPartition:output_type -> forge.IBPartition
+	215,  // 1860: forge.Forge.DeleteIBPartition:output_type -> forge.IBPartitionDeletionResult
+	211,  // 1861: forge.Forge.IBPartitionsForTenant:output_type -> forge.IBPartitionList
+	222,  // 1862: forge.Forge.FindPowerShelves:output_type -> forge.PowerShelfList
+	947,  // 1863: forge.Forge.FindPowerShelfIds:output_type -> forge.PowerShelfIdList
+	222,  // 1864: forge.Forge.FindPowerShelvesByIds:output_type -> forge.PowerShelfList
+	225,  // 1865: forge.Forge.DecommissionPowerShelf:output_type -> forge.DecommissionPowerShelfResponse
+	227,  // 1866: forge.Forge.DeletePowerShelf:output_type -> forge.PowerShelfDeletionResult
+	980,  // 1867: forge.Forge.AdminForceDeletePowerShelf:output_type -> forge.AdminForceDeletePowerShelfResponse
+	1147, // 1868: forge.Forge.SetPowerShelfMaintenance:output_type -> google.protobuf.Empty
+	245,  // 1869: forge.Forge.FindSwitches:output_type -> forge.SwitchList
+	946,  // 1870: forge.Forge.FindSwitchIds:output_type -> forge.SwitchIdList
+	245,  // 1871: forge.Forge.FindSwitchesByIds:output_type -> forge.SwitchList
+	248,  // 1872: forge.Forge.DeleteSwitch:output_type -> forge.SwitchDeletionResult
+	250,  // 1873: forge.Forge.DecommissionSwitch:output_type -> forge.DecommissionSwitchResponse
+	978,  // 1874: forge.Forge.AdminForceDeleteSwitch:output_type -> forge.AdminForceDeleteSwitchResponse
+	268,  // 1875: forge.Forge.FindIBFabricIds:output_type -> forge.IBFabricIdList
+	321,  // 1876: forge.Forge.AllocateInstance:output_type -> forge.Instance
+	294,  // 1877: forge.Forge.AllocateInstances:output_type -> forge.BatchInstanceAllocationResponse
+	339,  // 1878: forge.Forge.ReleaseInstance:output_type -> forge.InstanceReleaseResult
+	342,  // 1879: forge.Forge.ReleaseInstances:output_type -> forge.BatchInstanceReleaseResponse
+	321,  // 1880: forge.Forge.UpdateInstanceOperatingSystem:output_type -> forge.Instance
+	321,  // 1881: forge.Forge.UpdateInstanceConfig:output_type -> forge.Instance
+	290,  // 1882: forge.Forge.FindInstanceIds:output_type -> forge.InstanceIdList
+	286,  // 1883: forge.Forge.FindInstancesByIds:output_type -> forge.InstanceList
+	286,  // 1884: forge.Forge.FindInstanceByMachineID:output_type -> forge.InstanceList
+	415,  // 1885: forge.Forge.GetManagedHostNetworkConfig:output_type -> forge.ManagedHostNetworkConfigResponse
+	1147, // 1886: forge.Forge.RecordDpuNetworkStatus:output_type -> google.protobuf.Empty
+	495,  // 1887: forge.Forge.ListMachineHealthReports:output_type -> forge.ListHealthReportResponse
+	1147, // 1888: forge.Forge.InsertMachineHealthReport:output_type -> google.protobuf.Empty
+	1147, // 1889: forge.Forge.RemoveMachineHealthReport:output_type -> google.protobuf.Empty
+	495,  // 1890: forge.Forge.ListRackHealthReports:output_type -> forge.ListHealthReportResponse
+	1147, // 1891: forge.Forge.InsertRackHealthReport:output_type -> google.protobuf.Empty
+	1147, // 1892: forge.Forge.RemoveRackHealthReport:output_type -> google.protobuf.Empty
+	495,  // 1893: forge.Forge.ListSwitchHealthReports:output_type -> forge.ListHealthReportResponse
+	1147, // 1894: forge.Forge.InsertSwitchHealthReport:output_type -> google.protobuf.Empty
+	1147, // 1895: forge.Forge.RemoveSwitchHealthReport:output_type -> google.protobuf.Empty
+	495,  // 1896: forge.Forge.ListPowerShelfHealthReports:output_type -> forge.ListHealthReportResponse
+	1147, // 1897: forge.Forge.InsertPowerShelfHealthReport:output_type -> google.protobuf.Empty
+	1147, // 1898: forge.Forge.RemovePowerShelfHealthReport:output_type -> google.protobuf.Empty
+	495,  // 1899: forge.Forge.ListNVLinkDomainHealthReports:output_type -> forge.ListHealthReportResponse
+	1147, // 1900: forge.Forge.InsertNVLinkDomainHealthReport:output_type -> google.protobuf.Empty
+	1147, // 1901: forge.Forge.RemoveNVLinkDomainHealthReport:output_type -> google.protobuf.Empty
+	495,  // 1902: forge.Forge.ListHealthReportOverrides:output_type -> forge.ListHealthReportResponse
+	1147, // 1903: forge.Forge.InsertHealthReportOverride:output_type -> google.protobuf.Empty
+	1147, // 1904: forge.Forge.RemoveHealthReportOverride:output_type -> google.protobuf.Empty
+	432,  // 1905: forge.Forge.DpuAgentUpgradeCheck:output_type -> forge.DpuAgentUpgradeCheckResponse
+	434,  // 1906: forge.Forge.DpuAgentUpgradePolicyAction:output_type -> forge.DpuAgentUpgradePolicyResponse
+	1216, // 1907: forge.Forge.LookupRecord:output_type -> dns.DnsResourceRecordLookupResponse
+	1217, // 1908: forge.Forge.GetAllDomains:output_type -> dns.GetAllDomainsResponse
+	1218, // 1909: forge.Forge.GetAllDomainMetadata:output_type -> dns.DomainMetadataResponse
+	285,  // 1910: forge.Forge.InvokeInstancePower:output_type -> forge.InstancePowerResult
+	461,  // 1911: forge.Forge.ForgeAgentControl:output_type -> forge.ForgeAgentControlResponse
+	468,  // 1912: forge.Forge.DiscoverMachine:output_type -> forge.MachineDiscoveryResult
+	467,  // 1913: forge.Forge.RenewMachineCertificate:output_type -> forge.MachineCertificateResult
+	469,  // 1914: forge.Forge.DiscoveryCompleted:output_type -> forge.MachineDiscoveryCompletedResponse
+	470,  // 1915: forge.Forge.CleanupMachineCompleted:output_type -> forge.MachineCleanupResult
+	472,  // 1916: forge.Forge.ReportForgeScoutError:output_type -> forge.ForgeScoutErrorReportResult
+	393,  // 1917: forge.Forge.DiscoverDhcp:output_type -> forge.DhcpRecord
+	392,  // 1918: forge.Forge.ExpireDhcpLease:output_type -> forge.ExpireDhcpLeaseResponse
+	361,  // 1919: forge.Forge.AssignStaticAddress:output_type -> forge.AssignStaticAddressResponse
+	363,  // 1920: forge.Forge.RemoveStaticAddress:output_type -> forge.RemoveStaticAddressResponse
+	366,  // 1921: forge.Forge.FindInterfaceAddresses:output_type -> forge.FindInterfaceAddressesResponse
+	356,  // 1922: forge.Forge.FindInterfaces:output_type -> forge.InterfaceList
+	1147, // 1923: forge.Forge.DeleteInterface:output_type -> google.protobuf.Empty
+	536,  // 1924: forge.Forge.FindIpAddress:output_type -> forge.FindIpAddressResponse
+	1133, // 1925: forge.Forge.FindMachineIds:output_type -> common.MachineIdList
+	357,  // 1926: forge.Forge.FindMachinesByIds:output_type -> forge.MachineList
+	346,  // 1927: forge.Forge.FindMachineStateHistories:output_type -> forge.MachineStateHistories
+	349,  // 1928: forge.Forge.FindMachineHealthHistories:output_type -> forge.HealthHistories
+	255,  // 1929: forge.Forge.FindPowerShelfStateHistories:output_type -> forge.StateHistories
+	349,  // 1930: forge.Forge.FindPowerShelfHealthHistories:output_type -> forge.HealthHistories
+	255,  // 1931: forge.Forge.FindRackStateHistories:output_type -> forge.StateHistories
+	349,  // 1932: forge.Forge.FindRackHealthHistories:output_type -> forge.HealthHistories
+	255,  // 1933: forge.Forge.FindSwitchStateHistories:output_type -> forge.StateHistories
+	349,  // 1934: forge.Forge.FindSwitchHealthHistories:output_type -> forge.HealthHistories
+	255,  // 1935: forge.Forge.FindNetworkSegmentStateHistories:output_type -> forge.StateHistories
+	255,  // 1936: forge.Forge.FindVpcPrefixStateHistories:output_type -> forge.StateHistories
+	255,  // 1937: forge.Forge.FindSitePrefixStateHistories:output_type -> forge.StateHistories
+	355,  // 1938: forge.Forge.FindTenantOrganizationIds:output_type -> forge.TenantOrganizationIdList
+	354,  // 1939: forge.Forge.FindTenantsByOrganizationIds:output_type -> forge.TenantList
+	562,  // 1940: forge.Forge.FindConnectedDevicesByDpuMachineIds:output_type -> forge.ConnectedDeviceList
+	566,  // 1941: forge.Forge.FindMachineIdsByBmcIps:output_type -> forge.MachineIdBmcIpPairs
+	565,  // 1942: forge.Forge.FindMacAddressByBmcIp:output_type -> forge.MacAddressBmcIp
+	563,  // 1943: forge.Forge.FindBmcIps:output_type -> forge.BmcIpList
+	538,  // 1944: forge.Forge.IdentifyUuid:output_type -> forge.IdentifyUuidResponse
+	541,  // 1945: forge.Forge.IdentifyMac:output_type -> forge.IdentifyMacResponse
+	543,  // 1946: forge.Forge.IdentifySerial:output_type -> forge.IdentifySerialResponse
+	457,  // 1947: forge.Forge.GetBMCMetaData:output_type -> forge.BMCMetaDataGetResponse
+	459,  // 1948: forge.Forge.UpdateMachineCredentials:output_type -> forge.MachineCredentialsUpdateResponse
+	474,  // 1949: forge.Forge.GetPxeInstructions:output_type -> forge.PxeInstructions
+	478,  // 1950: forge.Forge.GetCloudInitInstructions:output_type -> forge.CloudInitInstructions
+	162,  // 1951: forge.Forge.Echo:output_type -> forge.EchoResponse
+	505,  // 1952: forge.Forge.CreateTenant:output_type -> forge.CreateTenantResponse
+	509,  // 1953: forge.Forge.FindTenant:output_type -> forge.FindTenantResponse
+	507,  // 1954: forge.Forge.UpdateTenant:output_type -> forge.UpdateTenantResponse
+	515,  // 1955: forge.Forge.CreateTenantKeyset:output_type -> forge.CreateTenantKeysetResponse
+	522,  // 1956: forge.Forge.FindTenantKeysetIds:output_type -> forge.TenantKeysetIdList
+	516,  // 1957: forge.Forge.FindTenantKeysetsByIds:output_type -> forge.TenantKeySetList
+	518,  // 1958: forge.Forge.UpdateTenantKeyset:output_type -> forge.UpdateTenantKeysetResponse
+	520,  // 1959: forge.Forge.DeleteTenantKeyset:output_type -> forge.DeleteTenantKeysetResponse
+	525,  // 1960: forge.Forge.ValidateTenantPublicKey:output_type -> forge.ValidateTenantPublicKeyResponse
+	399,  // 1961: forge.Forge.GetBmcCredentials:output_type -> forge.GetBmcCredentialsResponse
+	399,  // 1962: forge.Forge.GetSwitchNvosCredentials:output_type -> forge.GetBmcCredentialsResponse
+	430,  // 1963: forge.Forge.GetAllManagedHostNetworkStatus:output_type -> forge.ManagedHostNetworkStatusResponse
+	1219, // 1964: forge.Forge.GetSiteExplorationReport:output_type -> site_explorer.SiteExplorationReport
+	1220, // 1965: forge.Forge.GetSiteExplorerLastRun:output_type -> site_explorer.SiteExplorerLastRunResponse
+	1147, // 1966: forge.Forge.ClearSiteExplorationError:output_type -> google.protobuf.Empty
+	651,  // 1967: forge.Forge.IsBmcInManagedHost:output_type -> forge.IsBmcInManagedHostResponse
+	652,  // 1968: forge.Forge.BmcCredentialStatus:output_type -> forge.BmcCredentialStatusResponse
+	1134, // 1969: forge.Forge.Explore:output_type -> site_explorer.EndpointExplorationReport
+	1147, // 1970: forge.Forge.ReExploreEndpoint:output_type -> google.protobuf.Empty
+	1221, // 1971: forge.Forge.RefreshEndpointReport:output_type -> site_explorer.ExploredEndpoint
+	407,  // 1972: forge.Forge.DeleteExploredEndpoint:output_type -> forge.DeleteExploredEndpointResponse
+	1147, // 1973: forge.Forge.PauseExploredEndpointRemediation:output_type -> google.protobuf.Empty
+	1222, // 1974: forge.Forge.FindExploredEndpointIds:output_type -> site_explorer.ExploredEndpointIdList
+	1223, // 1975: forge.Forge.FindExploredEndpointsByIds:output_type -> site_explorer.ExploredEndpointList
+	1224, // 1976: forge.Forge.FindExploredManagedHostIds:output_type -> site_explorer.ExploredManagedHostIdList
+	1225, // 1977: forge.Forge.FindExploredManagedHostsByIds:output_type -> site_explorer.ExploredManagedHostList
+	1226, // 1978: forge.Forge.FindExploredMlxDeviceHostIds:output_type -> site_explorer.ExploredMlxDeviceHostIdList
+	1227, // 1979: forge.Forge.FindExploredMlxDevicesByIds:output_type -> site_explorer.ExploredMlxDeviceList
+	1147, // 1980: forge.Forge.UpdateMachineHardwareInfo:output_type -> google.protobuf.Empty
+	438,  // 1981: forge.Forge.AdminForceDeleteMachine:output_type -> forge.AdminForceDeleteMachineResponse
+	437,  // 1982: forge.Forge.DecommissionManagedHost:output_type -> forge.DecommissionManagedHostResponse
+	527,  // 1983: forge.Forge.AdminListResourcePools:output_type -> forge.ResourcePools
+	530,  // 1984: forge.Forge.AdminGrowResourcePool:output_type -> forge.GrowResourcePoolResponse
+	1147, // 1985: forge.Forge.UpdateMachineMetadata:output_type -> google.protobuf.Empty
+	1147, // 1986: forge.Forge.UpdateRackMetadata:output_type -> google.protobuf.Empty
+	1147, // 1987: forge.Forge.UpdateSwitchMetadata:output_type -> google.protobuf.Empty
+	1147, // 1988: forge.Forge.UpdatePowerShelfMetadata:output_type -> google.protobuf.Empty
+	1147, // 1989: forge.Forge.UpdateMachineNvLinkInfo:output_type -> google.protobuf.Empty
+	1147, // 1990: forge.Forge.SetMaintenance:output_type -> google.protobuf.Empty
+	1147, // 1991: forge.Forge.SetDynamicConfig:output_type -> google.protobuf.Empty
+	1147, // 1992: forge.Forge.TriggerDpuReprovisioning:output_type -> google.protobuf.Empty
+	546,  // 1993: forge.Forge.ListDpuWaitingForReprovisioning:output_type -> forge.DpuReprovisioningListResponse
+	1147, // 1994: forge.Forge.TriggerHostReprovisioning:output_type -> google.protobuf.Empty
+	552,  // 1995: forge.Forge.ListHostsWaitingForReprovisioning:output_type -> forge.HostReprovisioningListResponse
+	1147, // 1996: forge.Forge.TriggerBmcCredentialRotation:output_type -> google.protobuf.Empty
+	1147, // 1997: forge.Forge.TriggerUefiCredentialRotation:output_type -> google.protobuf.Empty
+	1147, // 1998: forge.Forge.TriggerNicLockdownCredentialRotation:output_type -> google.protobuf.Empty
+	1147, // 1999: forge.Forge.MarkManualFirmwareUpgradeComplete:output_type -> google.protobuf.Empty
+	1147, // 2000: forge.Forge.ReportScoutFirmwareUpgradeStatus:output_type -> google.protobuf.Empty
+	558,  // 2001: forge.Forge.GetDpuInfoList:output_type -> forge.GetDpuInfoListResponse
+	560,  // 2002: forge.Forge.GetMachineBootOverride:output_type -> forge.MachineBootOverride
+	1147, // 2003: forge.Forge.SetMachineBootOverride:output_type -> google.protobuf.Empty
+	1147, // 2004: forge.Forge.ClearMachineBootOverride:output_type -> google.protobuf.Empty
+	1004, // 2005: forge.Forge.GetMachineBootInterfaces:output_type -> forge.GetMachineBootInterfacesResponse
+	571,  // 2006: forge.Forge.GetNetworkTopology:output_type -> forge.NetworkTopologyData
+	571,  // 2007: forge.Forge.FindNetworkDevicesByDeviceIds:output_type -> forge.NetworkTopologyData
+	151,  // 2008: forge.Forge.CreateCredential:output_type -> forge.CredentialCreationResult
+	152,  // 2009: forge.Forge.DeleteCredential:output_type -> forge.CredentialDeletionResult
+	154,  // 2010: forge.Forge.RotateCredential:output_type -> forge.RotateCredentialResult
+	157,  // 2011: forge.Forge.GetCredentialRotationStatus:output_type -> forge.CredentialRotationStatusResult
+	1006, // 2012: forge.Forge.GetContainerRegistryCredential:output_type -> forge.GetContainerRegistryCredentialResponse
+	1147, // 2013: forge.Forge.SetContainerRegistryCredential:output_type -> google.protobuf.Empty
+	573,  // 2014: forge.Forge.GetRouteServers:output_type -> forge.RouteServerEntries
+	1147, // 2015: forge.Forge.AddRouteServers:output_type -> google.protobuf.Empty
+	1147, // 2016: forge.Forge.RemoveRouteServers:output_type -> google.protobuf.Empty
+	1147, // 2017: forge.Forge.ReplaceRouteServers:output_type -> google.protobuf.Empty
+	1147, // 2018: forge.Forge.UpdateAgentReportedInventory:output_type -> google.protobuf.Empty
+	334,  // 2019: forge.Forge.UpdateInstancePhoneHomeLastContact:output_type -> forge.InstancePhoneHomeLastContactResponse
+	576,  // 2020: forge.Forge.SetHostUefiPassword:output_type -> forge.SetHostUefiPasswordResponse
+	578,  // 2021: forge.Forge.ClearHostUefiPassword:output_type -> forge.ClearHostUefiPasswordResponse
+	580,  // 2022: forge.Forge.SetDpuUefiPassword:output_type -> forge.SetDpuUefiPasswordResponse
+	1147, // 2023: forge.Forge.AddExpectedMachine:output_type -> google.protobuf.Empty
+	1147, // 2024: forge.Forge.DeleteExpectedMachine:output_type -> google.protobuf.Empty
+	1147, // 2025: forge.Forge.UpdateExpectedMachine:output_type -> google.protobuf.Empty
+	1147, // 2026: forge.Forge.PatchExpectedMachine:output_type -> google.protobuf.Empty
+	592,  // 2027: forge.Forge.GetExpectedMachine:output_type -> forge.ExpectedMachine
+	594,  // 2028: forge.Forge.GetAllExpectedMachines:output_type -> forge.ExpectedMachineList
+	1147, // 2029: forge.Forge.ReplaceAllExpectedMachines:output_type -> google.protobuf.Empty
+	1147, // 2030: forge.Forge.DeleteAllExpectedMachines:output_type -> google.protobuf.Empty
+	595,  // 2031: forge.Forge.GetAllExpectedMachinesLinked:output_type -> forge.LinkedExpectedMachineList
+	597,  // 2032: forge.Forge.GetAllUnexpectedMachines:output_type -> forge.UnexpectedMachineList
+	601,  // 2033: forge.Forge.CreateExpectedMachines:output_type -> forge.BatchExpectedMachineOperationResponse
+	601,  // 2034: forge.Forge.UpdateExpectedMachines:output_type -> forge.BatchExpectedMachineOperationResponse
+	1147, // 2035: forge.Forge.PatchExpectedMachines:output_type -> google.protobuf.Empty
+	1147, // 2036: forge.Forge.AddExpectedPowerShelf:output_type -> google.protobuf.Empty
+	1147, // 2037: forge.Forge.DeleteExpectedPowerShelf:output_type -> google.protobuf.Empty
+	1147, // 2038: forge.Forge.UpdateExpectedPowerShelf:output_type -> google.protobuf.Empty
+	1147, // 2039: forge.Forge.PatchExpectedPowerShelf:output_type -> google.protobuf.Empty
+	234,  // 2040: forge.Forge.GetExpectedPowerShelf:output_type -> forge.ExpectedPowerShelf
+	236,  // 2041: forge.Forge.GetAllExpectedPowerShelves:output_type -> forge.ExpectedPowerShelfList
+	1147, // 2042: forge.Forge.ReplaceAllExpectedPowerShelves:output_type -> google.protobuf.Empty
+	1147, // 2043: forge.Forge.DeleteAllExpectedPowerShelves:output_type -> google.protobuf.Empty
+	237,  // 2044: forge.Forge.GetAllExpectedPowerShelvesLinked:output_type -> forge.LinkedExpectedPowerShelfList
+	1147, // 2045: forge.Forge.AddExpectedSwitch:output_type -> google.protobuf.Empty
+	1147, // 2046: forge.Forge.DeleteExpectedSwitch:output_type -> google.protobuf.Empty
+	1147, // 2047: forge.Forge.UpdateExpectedSwitch:output_type -> google.protobuf.Empty
+	1147, // 2048: forge.Forge.PatchExpectedSwitch:output_type -> google.protobuf.Empty
+	259,  // 2049: forge.Forge.GetExpectedSwitch:output_type -> forge.ExpectedSwitch
+	261,  // 2050: forge.Forge.GetAllExpectedSwitches:output_type -> forge.ExpectedSwitchList
+	1147, // 2051: forge.Forge.ReplaceAllExpectedSwitches:output_type -> google.protobuf.Empty
+	1147, // 2052: forge.Forge.DeleteAllExpectedSwitches:output_type -> google.protobuf.Empty
+	262,  // 2053: forge.Forge.GetAllExpectedSwitchesLinked:output_type -> forge.LinkedExpectedSwitchList
+	1147, // 2054: forge.Forge.AddExpectedRack:output_type -> google.protobuf.Empty
+	1147, // 2055: forge.Forge.DeleteExpectedRack:output_type -> google.protobuf.Empty
+	1147, // 2056: forge.Forge.UpdateExpectedRack:output_type -> google.protobuf.Empty
+	264,  // 2057: forge.Forge.GetExpectedRack:output_type -> forge.ExpectedRack
+	266,  // 2058: forge.Forge.GetAllExpectedRacks:output_type -> forge.ExpectedRackList
+	1147, // 2059: forge.Forge.ReplaceAllExpectedRacks:output_type -> google.protobuf.Empty
+	1147, // 2060: forge.Forge.DeleteAllExpectedRacks:output_type -> google.protobuf.Empty
+	148,  // 2061: forge.Forge.AttestQuote:output_type -> forge.AttestQuoteResponse
+	682,  // 2062: forge.Forge.CreateInstanceType:output_type -> forge.CreateInstanceTypeResponse
+	684,  // 2063: forge.Forge.FindInstanceTypeIds:output_type -> forge.FindInstanceTypeIdsResponse
+	686,  // 2064: forge.Forge.FindInstanceTypesByIds:output_type -> forge.FindInstanceTypesByIdsResponse
+	689,  // 2065: forge.Forge.UpdateInstanceType:output_type -> forge.UpdateInstanceTypeResponse
+	688,  // 2066: forge.Forge.DeleteInstanceType:output_type -> forge.DeleteInstanceTypeResponse
+	692,  // 2067: forge.Forge.AssociateMachinesWithInstanceType:output_type -> forge.AssociateMachinesWithInstanceTypeResponse
+	694,  // 2068: forge.Forge.RemoveMachineInstanceTypeAssociation:output_type -> forge.RemoveMachineInstanceTypeAssociationResponse
+	1228, // 2069: forge.Forge.CreateMeasurementBundle:output_type -> measured_boot.CreateMeasurementBundleResponse
+	1229, // 2070: forge.Forge.DeleteMeasurementBundle:output_type -> measured_boot.DeleteMeasurementBundleResponse
+	1230, // 2071: forge.Forge.RenameMeasurementBundle:output_type -> measured_boot.RenameMeasurementBundleResponse
+	1231, // 2072: forge.Forge.UpdateMeasurementBundle:output_type -> measured_boot.UpdateMeasurementBundleResponse
+	1232, // 2073: forge.Forge.ShowMeasurementBundle:output_type -> measured_boot.ShowMeasurementBundleResponse
+	1233, // 2074: forge.Forge.ShowMeasurementBundles:output_type -> measured_boot.ShowMeasurementBundlesResponse
+	1234, // 2075: forge.Forge.ListMeasurementBundles:output_type -> measured_boot.ListMeasurementBundlesResponse
+	1235, // 2076: forge.Forge.ListMeasurementBundleMachines:output_type -> measured_boot.ListMeasurementBundleMachinesResponse
+	1232, // 2077: forge.Forge.FindClosestBundleMatch:output_type -> measured_boot.ShowMeasurementBundleResponse
+	1236, // 2078: forge.Forge.DeleteMeasurementJournal:output_type -> measured_boot.DeleteMeasurementJournalResponse
+	1237, // 2079: forge.Forge.ShowMeasurementJournal:output_type -> measured_boot.ShowMeasurementJournalResponse
+	1238, // 2080: forge.Forge.ShowMeasurementJournals:output_type -> measured_boot.ShowMeasurementJournalsResponse
+	1239, // 2081: forge.Forge.ListMeasurementJournal:output_type -> measured_boot.ListMeasurementJournalResponse
+	1240, // 2082: forge.Forge.AttestCandidateMachine:output_type -> measured_boot.AttestCandidateMachineResponse
+	1241, // 2083: forge.Forge.ShowCandidateMachine:output_type -> measured_boot.ShowCandidateMachineResponse
+	1242, // 2084: forge.Forge.ShowCandidateMachines:output_type -> measured_boot.ShowCandidateMachinesResponse
+	1243, // 2085: forge.Forge.ListCandidateMachines:output_type -> measured_boot.ListCandidateMachinesResponse
+	1244, // 2086: forge.Forge.CreateMeasurementSystemProfile:output_type -> measured_boot.CreateMeasurementSystemProfileResponse
+	1245, // 2087: forge.Forge.DeleteMeasurementSystemProfile:output_type -> measured_boot.DeleteMeasurementSystemProfileResponse
+	1246, // 2088: forge.Forge.RenameMeasurementSystemProfile:output_type -> measured_boot.RenameMeasurementSystemProfileResponse
+	1247, // 2089: forge.Forge.ShowMeasurementSystemProfile:output_type -> measured_boot.ShowMeasurementSystemProfileResponse
+	1248, // 2090: forge.Forge.ShowMeasurementSystemProfiles:output_type -> measured_boot.ShowMeasurementSystemProfilesResponse
+	1249, // 2091: forge.Forge.ListMeasurementSystemProfiles:output_type -> measured_boot.ListMeasurementSystemProfilesResponse
+	1250, // 2092: forge.Forge.ListMeasurementSystemProfileBundles:output_type -> measured_boot.ListMeasurementSystemProfileBundlesResponse
+	1251, // 2093: forge.Forge.ListMeasurementSystemProfileMachines:output_type -> measured_boot.ListMeasurementSystemProfileMachinesResponse
+	1252, // 2094: forge.Forge.CreateMeasurementReport:output_type -> measured_boot.CreateMeasurementReportResponse
+	1253, // 2095: forge.Forge.DeleteMeasurementReport:output_type -> measured_boot.DeleteMeasurementReportResponse
+	1254, // 2096: forge.Forge.PromoteMeasurementReport:output_type -> measured_boot.PromoteMeasurementReportResponse
+	1255, // 2097: forge.Forge.RevokeMeasurementReport:output_type -> measured_boot.RevokeMeasurementReportResponse
+	1256, // 2098: forge.Forge.ShowMeasurementReportForId:output_type -> measured_boot.ShowMeasurementReportForIdResponse
+	1257, // 2099: forge.Forge.ShowMeasurementReportsForMachine:output_type -> measured_boot.ShowMeasurementReportsForMachineResponse
+	1258, // 2100: forge.Forge.ShowMeasurementReports:output_type -> measured_boot.ShowMeasurementReportsResponse
+	1259, // 2101: forge.Forge.ListMeasurementReport:output_type -> measured_boot.ListMeasurementReportResponse
+	1260, // 2102: forge.Forge.MatchMeasurementReport:output_type -> measured_boot.MatchMeasurementReportResponse
+	1261, // 2103: forge.Forge.ImportSiteMeasurements:output_type -> measured_boot.ImportSiteMeasurementsResponse
+	1262, // 2104: forge.Forge.ExportSiteMeasurements:output_type -> measured_boot.ExportSiteMeasurementsResponse
+	1263, // 2105: forge.Forge.AddMeasurementTrustedMachine:output_type -> measured_boot.AddMeasurementTrustedMachineResponse
+	1264, // 2106: forge.Forge.RemoveMeasurementTrustedMachine:output_type -> measured_boot.RemoveMeasurementTrustedMachineResponse
+	1265, // 2107: forge.Forge.AddMeasurementTrustedProfile:output_type -> measured_boot.AddMeasurementTrustedProfileResponse
+	1266, // 2108: forge.Forge.RemoveMeasurementTrustedProfile:output_type -> measured_boot.RemoveMeasurementTrustedProfileResponse
+	1267, // 2109: forge.Forge.ListMeasurementTrustedMachines:output_type -> measured_boot.ListMeasurementTrustedMachinesResponse
+	1268, // 2110: forge.Forge.ListMeasurementTrustedProfiles:output_type -> measured_boot.ListMeasurementTrustedProfilesResponse
+	1269, // 2111: forge.Forge.ListAttestationSummary:output_type -> measured_boot.ListAttestationSummaryResponse
+	713,  // 2112: forge.Forge.CreateNetworkSecurityGroup:output_type -> forge.CreateNetworkSecurityGroupResponse
+	715,  // 2113: forge.Forge.FindNetworkSecurityGroupIds:output_type -> forge.FindNetworkSecurityGroupIdsResponse
+	717,  // 2114: forge.Forge.FindNetworkSecurityGroupsByIds:output_type -> forge.FindNetworkSecurityGroupsByIdsResponse
+	718,  // 2115: forge.Forge.UpdateNetworkSecurityGroup:output_type -> forge.UpdateNetworkSecurityGroupResponse
+	721,  // 2116: forge.Forge.DeleteNetworkSecurityGroup:output_type -> forge.DeleteNetworkSecurityGroupResponse
+	724,  // 2117: forge.Forge.GetNetworkSecurityGroupPropagationStatus:output_type -> forge.GetNetworkSecurityGroupPropagationStatusResponse
+	731,  // 2118: forge.Forge.GetNetworkSecurityGroupAttachments:output_type -> forge.GetNetworkSecurityGroupAttachmentsResponse
+	582,  // 2119: forge.Forge.CreateOsImage:output_type -> forge.OsImage
+	586,  // 2120: forge.Forge.DeleteOsImage:output_type -> forge.DeleteOsImageResponse
+	584,  // 2121: forge.Forge.ListOsImage:output_type -> forge.ListOsImageResponse
+	582,  // 2122: forge.Forge.GetOsImage:output_type -> forge.OsImage
+	582,  // 2123: forge.Forge.UpdateOsImage:output_type -> forge.OsImage
+	297,  // 2124: forge.Forge.GetIpxeTemplate:output_type -> forge.IpxeTemplate
+	589,  // 2125: forge.Forge.ListIpxeTemplates:output_type -> forge.IpxeTemplateList
+	602,  // 2126: forge.Forge.RebootCompleted:output_type -> forge.MachineRebootCompletedResponse
+	1147, // 2127: forge.Forge.PersistValidationResult:output_type -> google.protobuf.Empty
+	609,  // 2128: forge.Forge.GetMachineValidationResults:output_type -> forge.MachineValidationResultList
+	606,  // 2129: forge.Forge.MachineValidationCompleted:output_type -> forge.MachineValidationCompletedResponse
+	614,  // 2130: forge.Forge.MachineSetAutoUpdate:output_type -> forge.MachineSetAutoUpdateResponse
+	617,  // 2131: forge.Forge.GetMachineValidationExternalConfig:output_type -> forge.GetMachineValidationExternalConfigResponse
+	619,  // 2132: forge.Forge.GetMachineValidationExternalConfigs:output_type -> forge.GetMachineValidationExternalConfigsResponse
+	1147, // 2133: forge.Forge.AddUpdateMachineValidationExternalConfig:output_type -> google.protobuf.Empty
+	640,  // 2134: forge.Forge.GetMachineValidationRuns:output_type -> forge.MachineValidationRunList
+	643,  // 2135: forge.Forge.FindMachineValidationRunItemIds:output_type -> forge.MachineValidationRunItemIdList
+	645,  // 2136: forge.Forge.FindMachineValidationRunItemsByIds:output_type -> forge.MachineValidationRunItemList
+	648,  // 2137: forge.Forge.GetMachineValidationAttempt:output_type -> forge.MachineValidationAttempt
+	650,  // 2138: forge.Forge.HeartbeatMachineValidationRun:output_type -> forge.MachineValidationHeartbeatResponse
+	1147, // 2139: forge.Forge.RemoveMachineValidationExternalConfig:output_type -> google.protobuf.Empty
+	657,  // 2140: forge.Forge.GetMachineValidationTests:output_type -> forge.MachineValidationTestsGetResponse
+	656,  // 2141: forge.Forge.AddMachineValidationTest:output_type -> forge.MachineValidationTestAddUpdateResponse
+	656,  // 2142: forge.Forge.UpdateMachineValidationTest:output_type -> forge.MachineValidationTestAddUpdateResponse
+	659,  // 2143: forge.Forge.MachineValidationTestVerfied:output_type -> forge.MachineValidationTestVerfiedResponse
+	664,  // 2144: forge.Forge.MachineValidationTestNextVersion:output_type -> forge.MachineValidationTestNextVersionResponse
+	667,  // 2145: forge.Forge.MachineValidationTestEnableDisableTest:output_type -> forge.MachineValidationTestEnableDisableTestResponse
+	663,  // 2146: forge.Forge.MachineValidationTestApproveFullHost:output_type -> forge.MachineValidationTestFullHostApprovalResponse
+	669,  // 2147: forge.Forge.UpdateMachineValidationRun:output_type -> forge.MachineValidationRunResponse
+	451,  // 2148: forge.Forge.AdminBmcReset:output_type -> forge.AdminBmcResetResponse
+	635,  // 2149: forge.Forge.AdminPowerControl:output_type -> forge.AdminPowerControlResponse
+	637,  // 2150: forge.Forge.AdminChassisReset:output_type -> forge.AdminChassisResetResponse
+	439,  // 2151: forge.Forge.DisableSecureBoot:output_type -> forge.DisableSecureBootResponse
+	441,  // 2152: forge.Forge.Lockdown:output_type -> forge.LockdownResponse
+	1270, // 2153: forge.Forge.LockdownStatus:output_type -> site_explorer.LockdownStatus
+	445,  // 2154: forge.Forge.MachineSetup:output_type -> forge.MachineSetupResponse
+	447,  // 2155: forge.Forge.SetDpuFirstBootOrder:output_type -> forge.SetDpuFirstBootOrderResponse
+	839,  // 2156: forge.Forge.CreateBmcUser:output_type -> forge.CreateBmcUserResponse
+	841,  // 2157: forge.Forge.DeleteBmcUser:output_type -> forge.DeleteBmcUserResponse
+	843,  // 2158: forge.Forge.SetBmcRootPassword:output_type -> forge.SetBmcRootPasswordResponse
+	845,  // 2159: forge.Forge.ProbeBmcVendor:output_type -> forge.ProbeBmcVendorResponse
+	453,  // 2160: forge.Forge.EnableInfiniteBoot:output_type -> forge.EnableInfiniteBootResponse
+	455,  // 2161: forge.Forge.IsInfiniteBootEnabled:output_type -> forge.IsInfiniteBootEnabledResponse
+	623,  // 2162: forge.Forge.OnDemandMachineValidation:output_type -> forge.MachineValidationOnDemandResponse
+	631,  // 2163: forge.Forge.OnDemandRackMaintenance:output_type -> forge.RackMaintenanceOnDemandResponse
+	633,  // 2164: forge.Forge.TerminateRackMaintenance:output_type -> forge.RackMaintenanceTerminateResponse
+	139,  // 2165: forge.Forge.TpmAddCaCert:output_type -> forge.TpmCaAddedCaStatus
+	145,  // 2166: forge.Forge.TpmShowCaCerts:output_type -> forge.TpmCaCertDetailCollection
+	142,  // 2167: forge.Forge.TpmShowUnmatchedEkCerts:output_type -> forge.TpmEkCertStatusCollection
+	1147, // 2168: forge.Forge.TpmDeleteCaCert:output_type -> google.protobuf.Empty
+	696,  // 2169: forge.Forge.RedfishBrowse:output_type -> forge.RedfishBrowseResponse
+	698,  // 2170: forge.Forge.RedfishListActions:output_type -> forge.RedfishListActionsResponse
+	703,  // 2171: forge.Forge.RedfishCreateAction:output_type -> forge.RedfishCreateActionResponse
+	705,  // 2172: forge.Forge.RedfishApproveAction:output_type -> forge.RedfishApproveActionResponse
+	706,  // 2173: forge.Forge.RedfishApplyAction:output_type -> forge.RedfishApplyActionResponse
+	707,  // 2174: forge.Forge.RedfishCancelAction:output_type -> forge.RedfishCancelActionResponse
+	709,  // 2175: forge.Forge.UfmBrowse:output_type -> forge.UfmBrowseResponse
+	733,  // 2176: forge.Forge.GetDesiredFirmwareVersions:output_type -> forge.GetDesiredFirmwareVersionsResponse
+	854,  // 2177: forge.Forge.UpsertHostFirmwareConfig:output_type -> forge.HostFirmwareConfigResponse
+	1147, // 2178: forge.Forge.DeleteHostFirmwareConfig:output_type -> google.protobuf.Empty
+	749,  // 2179: forge.Forge.CreateSku:output_type -> forge.SkuIdList
+	745,  // 2180: forge.Forge.GenerateSkuFromMachine:output_type -> forge.Sku
+	1147, // 2181: forge.Forge.VerifySkuForMachine:output_type -> google.protobuf.Empty
+	1147, // 2182: forge.Forge.AssignSkuToMachine:output_type -> google.protobuf.Empty
+	1147, // 2183: forge.Forge.RemoveSkuAssociation:output_type -> google.protobuf.Empty
+	1147, // 2184: forge.Forge.DeleteSku:output_type -> google.protobuf.Empty
+	749,  // 2185: forge.Forge.GetAllSkuIds:output_type -> forge.SkuIdList
+	748,  // 2186: forge.Forge.FindSkusByIds:output_type -> forge.SkuList
+	1147, // 2187: forge.Forge.UpdateSkuMetadata:output_type -> google.protobuf.Empty
+	745,  // 2188: forge.Forge.ReplaceSku:output_type -> forge.Sku
+	419,  // 2189: forge.Forge.GetManagedHostQuarantineState:output_type -> forge.GetManagedHostQuarantineStateResponse
+	421,  // 2190: forge.Forge.SetManagedHostQuarantineState:output_type -> forge.SetManagedHostQuarantineStateResponse
+	423,  // 2191: forge.Forge.ClearManagedHostQuarantineState:output_type -> forge.ClearManagedHostQuarantineStateResponse
+	1147, // 2192: forge.Forge.ResetHostReprovisioning:output_type -> google.protobuf.Empty
+	1147, // 2193: forge.Forge.CopyBfbToDpuRshim:output_type -> google.protobuf.Empty
+	755,  // 2194: forge.Forge.GetAllDpaInterfaceIds:output_type -> forge.DpaInterfaceIdList
+	757,  // 2195: forge.Forge.FindDpaInterfacesByIds:output_type -> forge.DpaInterfaceList
+	753,  // 2196: forge.Forge.CreateDpaInterface:output_type -> forge.DpaInterface
+	753,  // 2197: forge.Forge.EnsureDpaInterface:output_type -> forge.DpaInterface
+	760,  // 2198: forge.Forge.DeleteDpaInterface:output_type -> forge.DpaInterfaceDeletionResult
+	765,  // 2199: forge.Forge.GetPowerOptions:output_type -> forge.PowerOptionResponse
+	765,  // 2200: forge.Forge.UpdatePowerOption:output_type -> forge.PowerOptionResponse
+	1147, // 2201: forge.Forge.AllowIngestionAndPowerOn:output_type -> google.protobuf.Empty
+	138,  // 2202: forge.Forge.DetermineMachineIngestionState:output_type -> forge.MachineIngestionStateResponse
+	783,  // 2203: forge.Forge.FindRackIds:output_type -> forge.RackIdList
+	781,  // 2204: forge.Forge.FindRacksByIds:output_type -> forge.RackList
+	780,  // 2205: forge.Forge.GetRack:output_type -> forge.GetRackResponse
+	1147, // 2206: forge.Forge.DeleteRack:output_type -> google.protobuf.Empty
+	792,  // 2207: forge.Forge.AdminForceDeleteRack:output_type -> forge.AdminForceDeleteRackResponse
+	799,  // 2208: forge.Forge.GetRackProfile:output_type -> forge.GetRackProfileResponse
+	801,  // 2209: forge.Forge.ListRackProfiles:output_type -> forge.ListRackProfilesResponse
+	769,  // 2210: forge.Forge.CreateComputeAllocation:output_type -> forge.CreateComputeAllocationResponse
+	771,  // 2211: forge.Forge.FindComputeAllocationIds:output_type -> forge.FindComputeAllocationIdsResponse
+	773,  // 2212: forge.Forge.FindComputeAllocationsByIds:output_type -> forge.FindComputeAllocationsByIdsResponse
+	774,  // 2213: forge.Forge.UpdateComputeAllocation:output_type -> forge.UpdateComputeAllocationResponse
+	777,  // 2214: forge.Forge.DeleteComputeAllocation:output_type -> forge.DeleteComputeAllocationResponse
+	847,  // 2215: forge.Forge.SetFirmwareUpdateTimeWindow:output_type -> forge.SetFirmwareUpdateTimeWindowResponse
+	856,  // 2216: forge.Forge.ListHostFirmware:output_type -> forge.ListHostFirmwareResponse
+	1271, // 2217: forge.Forge.PublishMlxDeviceReport:output_type -> mlx_device.PublishMlxDeviceReportResponse
+	1272, // 2218: forge.Forge.PublishMlxObservationReport:output_type -> mlx_device.PublishMlxObservationReportResponse
+	859,  // 2219: forge.Forge.TrimTable:output_type -> forge.TrimTableResponse
+	861,  // 2220: forge.Forge.ListNvlinkNmxcEndpoints:output_type -> forge.NvlinkNmxcEndpointList
+	860,  // 2221: forge.Forge.CreateNvlinkNmxcEndpoint:output_type -> forge.NvlinkNmxcEndpoint
+	860,  // 2222: forge.Forge.UpdateNvlinkNmxcEndpoint:output_type -> forge.NvlinkNmxcEndpoint
+	1147, // 2223: forge.Forge.DeleteNvlinkNmxcEndpoint:output_type -> google.protobuf.Empty
+	864,  // 2224: forge.Forge.CreateRemediation:output_type -> forge.CreateRemediationResponse
+	1147, // 2225: forge.Forge.ApproveRemediation:output_type -> google.protobuf.Empty
+	1147, // 2226: forge.Forge.RevokeRemediation:output_type -> google.protobuf.Empty
+	1147, // 2227: forge.Forge.EnableRemediation:output_type -> google.protobuf.Empty
+	1147, // 2228: forge.Forge.DisableRemediation:output_type -> google.protobuf.Empty
+	865,  // 2229: forge.Forge.FindRemediationIds:output_type -> forge.RemediationIdList
+	866,  // 2230: forge.Forge.FindRemediationsByIds:output_type -> forge.RemediationList
+	873,  // 2231: forge.Forge.FindAppliedRemediationIds:output_type -> forge.AppliedRemediationIdList
+	876,  // 2232: forge.Forge.FindAppliedRemediations:output_type -> forge.AppliedRemediationList
+	878,  // 2233: forge.Forge.GetNextRemediationForMachine:output_type -> forge.GetNextRemediationForMachineResponse
+	1147, // 2234: forge.Forge.RemediationApplied:output_type -> google.protobuf.Empty
+	1147, // 2235: forge.Forge.SetPrimaryDpu:output_type -> google.protobuf.Empty
+	1147, // 2236: forge.Forge.SetPrimaryInterface:output_type -> google.protobuf.Empty
+	887,  // 2237: forge.Forge.CreateDpuExtensionService:output_type -> forge.DpuExtensionService
+	887,  // 2238: forge.Forge.UpdateDpuExtensionService:output_type -> forge.DpuExtensionService
+	891,  // 2239: forge.Forge.DeleteDpuExtensionService:output_type -> forge.DeleteDpuExtensionServiceResponse
+	893,  // 2240: forge.Forge.FindDpuExtensionServiceIds:output_type -> forge.DpuExtensionServiceIdList
+	895,  // 2241: forge.Forge.FindDpuExtensionServicesByIds:output_type -> forge.DpuExtensionServiceList
+	897,  // 2242: forge.Forge.GetDpuExtensionServiceVersionsInfo:output_type -> forge.DpuExtensionServiceVersionInfoList
+	899,  // 2243: forge.Forge.FindInstancesByDpuExtensionService:output_type -> forge.FindInstancesByDpuExtensionServiceResponse
+	112,  // 2244: forge.Forge.TriggerMachineAttestation:output_type -> forge.SpdmMachineAttestationTriggerResponse
+	1147, // 2245: forge.Forge.CancelMachineAttestation:output_type -> google.protobuf.Empty
+	117,  // 2246: forge.Forge.ListAttestationMachines:output_type -> forge.SpdmListAttestationMachinesResponse
+	114,  // 2247: forge.Forge.GetAttestationMachine:output_type -> forge.SpdmGetAttestationMachineResponse
+	119,  // 2248: forge.Forge.SignMachineIdentity:output_type -> forge.MachineIdentityResponse
+	124,  // 2249: forge.Forge.GetTenantIdentityConfiguration:output_type -> forge.TenantIdentityConfigResponse
+	124,  // 2250: forge.Forge.SetTenantIdentityConfiguration:output_type -> forge.TenantIdentityConfigResponse
+	1147, // 2251: forge.Forge.DeleteTenantIdentityConfiguration:output_type -> google.protobuf.Empty
+	127,  // 2252: forge.Forge.GetTokenDelegation:output_type -> forge.TokenDelegationResponse
+	127,  // 2253: forge.Forge.SetTokenDelegation:output_type -> forge.TokenDelegationResponse
+	1147, // 2254: forge.Forge.DeleteTokenDelegation:output_type -> google.protobuf.Empty
+	133,  // 2255: forge.Forge.ReencryptTenantIdentitySecrets:output_type -> forge.ReencryptTenantIdentitySecretsResponse
+	134,  // 2256: forge.Forge.GetJWKS:output_type -> forge.Jwks
+	135,  // 2257: forge.Forge.GetOpenIDConfiguration:output_type -> forge.OpenIdConfiguration
+	906,  // 2258: forge.Forge.ScoutStream:output_type -> forge.ScoutStreamScoutBoundMessage
+	909,  // 2259: forge.Forge.ScoutStreamShowConnections:output_type -> forge.ScoutStreamShowConnectionsResponse
+	911,  // 2260: forge.Forge.ScoutStreamDisconnect:output_type -> forge.ScoutStreamDisconnectResponse
+	913,  // 2261: forge.Forge.ScoutStreamPing:output_type -> forge.ScoutStreamAdminPingResponse
+	1273, // 2262: forge.Forge.MlxAdminProfileSync:output_type -> mlx_device.MlxAdminProfileSyncResponse
+	1274, // 2263: forge.Forge.MlxAdminProfileShow:output_type -> mlx_device.MlxAdminProfileShowResponse
+	1275, // 2264: forge.Forge.MlxAdminProfileCompare:output_type -> mlx_device.MlxAdminProfileCompareResponse
+	1276, // 2265: forge.Forge.MlxAdminProfileList:output_type -> mlx_device.MlxAdminProfileListResponse
+	1277, // 2266: forge.Forge.MlxAdminLockdownLock:output_type -> mlx_device.MlxAdminLockdownLockResponse
+	1278, // 2267: forge.Forge.MlxAdminLockdownUnlock:output_type -> mlx_device.MlxAdminLockdownUnlockResponse
+	1279, // 2268: forge.Forge.MlxAdminLockdownStatus:output_type -> mlx_device.MlxAdminLockdownStatusResponse
+	1280, // 2269: forge.Forge.MlxAdminShowDevice:output_type -> mlx_device.MlxAdminDeviceInfoResponse
+	1281, // 2270: forge.Forge.MlxAdminShowMachine:output_type -> mlx_device.MlxAdminDeviceReportResponse
+	1282, // 2271: forge.Forge.MlxAdminRegistryList:output_type -> mlx_device.MlxAdminRegistryListResponse
+	1283, // 2272: forge.Forge.MlxAdminRegistryShow:output_type -> mlx_device.MlxAdminRegistryShowResponse
+	1284, // 2273: forge.Forge.MlxAdminConfigQuery:output_type -> mlx_device.MlxAdminConfigQueryResponse
+	1285, // 2274: forge.Forge.MlxAdminConfigSet:output_type -> mlx_device.MlxAdminConfigSetResponse
+	1286, // 2275: forge.Forge.MlxAdminConfigSync:output_type -> mlx_device.MlxAdminConfigSyncResponse
+	1287, // 2276: forge.Forge.MlxAdminConfigCompare:output_type -> mlx_device.MlxAdminConfigCompareResponse
+	824,  // 2277: forge.Forge.FindNVLinkPartitionIds:output_type -> forge.NVLinkPartitionIdList
+	819,  // 2278: forge.Forge.FindNVLinkPartitionsByIds:output_type -> forge.NVLinkPartitionList
+	819,  // 2279: forge.Forge.NVLinkPartitionsForTenant:output_type -> forge.NVLinkPartitionList
+	835,  // 2280: forge.Forge.FindNVLinkLogicalPartitionIds:output_type -> forge.NVLinkLogicalPartitionIdList
+	829,  // 2281: forge.Forge.FindNVLinkLogicalPartitionsByIds:output_type -> forge.NVLinkLogicalPartitionList
+	828,  // 2282: forge.Forge.CreateNVLinkLogicalPartition:output_type -> forge.NVLinkLogicalPartition
+	837,  // 2283: forge.Forge.UpdateNVLinkLogicalPartition:output_type -> forge.NVLinkLogicalPartitionUpdateResult
+	832,  // 2284: forge.Forge.DeleteNVLinkLogicalPartition:output_type -> forge.NVLinkLogicalPartitionDeletionResult
+	829,  // 2285: forge.Forge.NVLinkLogicalPartitionsForTenant:output_type -> forge.NVLinkLogicalPartitionList
+	927,  // 2286: forge.Forge.GetMachinePositionInfo:output_type -> forge.MachinePositionInfoList
+	817,  // 2287: forge.Forge.NmxcBrowse:output_type -> forge.NmxcBrowseResponse
+	1147, // 2288: forge.Forge.ModifyDPFState:output_type -> google.protobuf.Empty
+	930,  // 2289: forge.Forge.GetDPFState:output_type -> forge.DPFStateResponse
+	933,  // 2290: forge.Forge.GetDPFHostSnapshot:output_type -> forge.DPFHostSnapshotResponse
+	936,  // 2291: forge.Forge.GetDPFServiceVersions:output_type -> forge.DPFServiceVersionsResponse
+	1133, // 2292: forge.Forge.FindPendingDPUServiceSyncIds:output_type -> common.MachineIdList
+	944,  // 2293: forge.Forge.FindPendingDPUServiceSyncsByIds:output_type -> forge.ListPendingDPUServiceSyncsResponse
+	944,  // 2294: forge.Forge.ListDPUServiceSyncHistory:output_type -> forge.ListPendingDPUServiceSyncsResponse
+	939,  // 2295: forge.Forge.ReleaseDPUServiceSyncHold:output_type -> forge.ReleaseDPUServiceSyncHoldResponse
+	953,  // 2296: forge.Forge.ComponentPowerControl:output_type -> forge.ComponentPowerControlResponse
+	955,  // 2297: forge.Forge.ComponentConfigureSwitchCertificate:output_type -> forge.ComponentConfigureSwitchCertificateResponse
+	951,  // 2298: forge.Forge.GetComponentInventory:output_type -> forge.GetComponentInventoryResponse
+	962,  // 2299: forge.Forge.UpdateComponentFirmware:output_type -> forge.UpdateComponentFirmwareResponse
+	964,  // 2300: forge.Forge.GetComponentFirmwareStatus:output_type -> forge.GetComponentFirmwareStatusResponse
+	968,  // 2301: forge.Forge.ListComponentFirmwareVersions:output_type -> forge.ListComponentFirmwareVersionsResponse
+	981,  // 2302: forge.Forge.CreateOperatingSystem:output_type -> forge.OperatingSystem
+	981,  // 2303: forge.Forge.GetOperatingSystem:output_type -> forge.OperatingSystem
+	981,  // 2304: forge.Forge.UpdateOperatingSystem:output_type -> forge.OperatingSystem
+	987,  // 2305: forge.Forge.DeleteOperatingSystem:output_type -> forge.DeleteOperatingSystemResponse
+	989,  // 2306: forge.Forge.FindOperatingSystemIds:output_type -> forge.OperatingSystemIdList
+	991,  // 2307: forge.Forge.FindOperatingSystemsByIds:output_type -> forge.OperatingSystemList
+	993,  // 2308: forge.Forge.GetOperatingSystemCachableIpxeTemplateArtifacts:output_type -> forge.IpxeTemplateArtifactList
+	993,  // 2309: forge.Forge.UpdateOperatingSystemCachableIpxeTemplateArtifacts:output_type -> forge.IpxeTemplateArtifactList
+	997,  // 2310: forge.Forge.ReWrapSecrets:output_type -> forge.ReWrapSecretsResponse
+	1814, // [1814:2311] is the sub-list for method output_type
+	1317, // [1317:1814] is the sub-list for method input_type
+	1317, // [1317:1317] is the sub-list for extension type_name
+	1317, // [1317:1317] is the sub-list for extension extendee
+	0,    // [0:1317] is the sub-list for field type_name
 }
 
 func init() { file_nico_nico_proto_init() }
@@ -76932,29 +77344,29 @@ func file_nico_nico_proto_init() {
 	file_nico_nico_proto_msgTypes[912].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[915].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[917].OneofWrappers = []any{}
-	file_nico_nico_proto_msgTypes[919].OneofWrappers = []any{}
-	file_nico_nico_proto_msgTypes[921].OneofWrappers = []any{}
-	file_nico_nico_proto_msgTypes[936].OneofWrappers = []any{}
-	file_nico_nico_proto_msgTypes[938].OneofWrappers = []any{
+	file_nico_nico_proto_msgTypes[923].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[925].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[940].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[942].OneofWrappers = []any{
 		(*ForgeAgentControlResponse_MlxDeviceAction_Noop)(nil),
 		(*ForgeAgentControlResponse_MlxDeviceAction_Lock)(nil),
 		(*ForgeAgentControlResponse_MlxDeviceAction_Unlock)(nil),
 		(*ForgeAgentControlResponse_MlxDeviceAction_ApplyProfile)(nil),
 		(*ForgeAgentControlResponse_MlxDeviceAction_ApplyFirmware)(nil),
 	}
-	file_nico_nico_proto_msgTypes[942].OneofWrappers = []any{}
-	file_nico_nico_proto_msgTypes[943].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[946].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[947].OneofWrappers = []any{}
-	file_nico_nico_proto_msgTypes[948].OneofWrappers = []any{}
-	file_nico_nico_proto_msgTypes[949].OneofWrappers = []any{}
-	file_nico_nico_proto_msgTypes[956].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[951].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[952].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[953].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[960].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nico_nico_proto_rawDesc), len(file_nico_nico_proto_rawDesc)),
-			NumEnums:      109,
-			NumMessages:   957,
+			NumEnums:      110,
+			NumMessages:   961,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

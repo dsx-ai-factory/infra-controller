@@ -29,6 +29,7 @@ mod dhcp_wrapper;
 mod dhcp_wrapper_udp;
 mod discovery_info;
 mod dpu_machine;
+mod expected_inventory;
 mod host_machine;
 pub mod lifecycle_timings;
 mod machine_a_tron;
@@ -60,6 +61,7 @@ pub use device_simulator::{
 };
 pub use dhcp_wrapper::{DhcpClient, UdpDhcpService};
 pub use dpu_machine::DpuMachineHandle;
+pub use expected_inventory::ExpectedInventorySummary;
 pub use machine_a_tron::MachineATron;
 pub use mock_ssh_server::{
     Credentials as MockSshCredentials, MockSshServerHandle, PromptBehavior,

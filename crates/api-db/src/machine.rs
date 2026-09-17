@@ -3138,6 +3138,10 @@ pub async fn get_lockdown_ikm_credential_rotation_requested(
         })
 }
 
+/// `update_dpu_asns` backfills missing DPU ASNs. If an assignment no longer
+/// applies, its unused reservation is rolled back and the batch continues.
+/// Successful assignments commit together; allocation or database errors roll
+/// back the batch.
 pub async fn update_dpu_asns(
     db_pool: &Pool<Postgres>,
     common_pools: &CommonPools,
@@ -3154,7 +3158,6 @@ pub async fn update_dpu_asns(
         );
         return Ok(());
     }
-    // Get all DPU IP addresses except the requester DPU machine
     let query = "SELECT id FROM machines WHERE starts_with(id, $1) AND asn IS NULL";
 
     let dpu_ids: Vec<MachineId> = sqlx::query_as(query)
@@ -3168,9 +3171,10 @@ pub async fn update_dpu_asns(
     }
 
     for dpu_machine_id in dpu_ids.iter() {
+        let mut assignment_txn = Transaction::begin_inner(txn.as_pgconn()).await?;
         let asn: i64 = crate::resource_pool::allocate(
             &common_pools.ethernet.pool_fnn_asn,
-            &mut txn,
+            assignment_txn.as_pgconn(),
             resource_pool::OwnerType::Machine,
             &dpu_machine_id.to_string(),
             None,
@@ -3179,12 +3183,21 @@ pub async fn update_dpu_asns(
 
         let query = "UPDATE machines set asn=$1 WHERE id=$2 and asn is null";
 
-        sqlx::query(query)
+        let rows_affected = sqlx::query(query)
             .bind(asn)
             .bind(dpu_machine_id)
-            .execute(txn.as_pgconn())
+            .execute(assignment_txn.as_pgconn())
             .await
-            .map_err(|e| DatabaseError::query(query, e))?;
+            .map_err(|e| DatabaseError::query(query, e))?
+            .rows_affected();
+
+        if rows_affected == 0 {
+            // Another writer assigned the ASN or removed the DPU after our
+            // scan. We no longer need the reservation made in this savepoint.
+            assignment_txn.rollback().await?;
+        } else {
+            assignment_txn.commit().await?;
+        }
     }
 
     txn.commit().await?;
@@ -4347,6 +4360,71 @@ mod test {
         Ok(())
     }
 
+    #[crate::sqlx_test]
+    async fn concurrent_asn_backfills_leave_one_reservation(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let common_pools = common_pools(&pool, None).await?;
+        let dpu_id =
+            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &dpu_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        let mut machine_lock = pool.begin().await?;
+        sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
+            .bind(dpu_id)
+            .fetch_one(machine_lock.as_mut())
+            .await?;
+
+        let release_machine = async {
+            // Both backfills must reserve an ASN and reach the machine update
+            // before either can assign it. The losing reservation must be freed.
+            wait_until_blocked_on(&pool, "UPDATE machines set asn=", 2).await;
+            machine_lock.commit().await
+        };
+        let (first, second, released) =
+            tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                tokio::join!(
+                    super::update_dpu_asns(&pool, &common_pools),
+                    super::update_dpu_asns(&pool, &common_pools),
+                    release_machine,
+                )
+            })
+            .await
+            .expect("both ASN backfills must finish after the machine lock is released");
+        first?;
+        second?;
+        released?;
+
+        let assigned: i64 = sqlx::query_scalar("SELECT asn FROM machines WHERE id = $1")
+            .bind(dpu_id)
+            .fetch_one(&pool)
+            .await?;
+        let reserved: Vec<i64> = sqlx::query_scalar(
+            "SELECT value::bigint FROM resource_pool WHERE name = $1 AND state = $2",
+        )
+        .bind(FNN_ASN)
+        .bind(sqlx::types::Json(
+            model::resource_pool::ResourcePoolEntryState::Allocated {
+                owner: dpu_id.to_string(),
+                owner_type: model::resource_pool::OwnerType::Machine.to_string(),
+            },
+        ))
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(reserved, vec![assigned]);
+        Ok(())
+    }
+
     fn integer_pool() -> ResourcePoolDef {
         ResourcePoolDef {
             ranges: vec![Range {
@@ -4397,7 +4475,7 @@ mod test {
         Ok(crate::resource_pool::create_common_pools(pool.clone(), HashSet::new()).await?)
     }
 
-    async fn wait_until_blocked_on(pool: &sqlx::PgPool, relation: &str) {
+    async fn wait_until_blocked_on(pool: &sqlx::PgPool, relation: &str, expected_count: i64) {
         for _ in 0..600 {
             let waiting: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity
@@ -4409,12 +4487,12 @@ mod test {
             .fetch_one(pool)
             .await
             .unwrap();
-            if waiting > 0 {
+            if waiting >= expected_count {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        panic!("query never blocked on {relation}");
+        panic!("expected {expected_count} queries blocked on {relation}");
     }
 
     /// The machine snapshot reports the BMC IP from the *live* `machine_interface_addresses`
@@ -4965,7 +5043,7 @@ mod test {
         let backfill = tokio::spawn(async move {
             super::update_dpu_loopback_ips_v6(&backfill_pool, &backfill_common_pools).await
         });
-        wait_until_blocked_on(&pool, "resource_pool").await;
+        wait_until_blocked_on(&pool, "resource_pool", 1).await;
 
         let mut txn = pool.begin().await?;
         let (mut network_config, version) =

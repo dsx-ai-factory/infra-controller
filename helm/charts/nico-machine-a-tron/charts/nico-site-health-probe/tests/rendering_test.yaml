@@ -1,0 +1,224 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: nico-site-health-probe rendering
+templates:
+  - templates/deployment.yaml
+  - templates/certificate.yaml
+  - templates/configmap.yaml
+  - templates/service-monitor.yaml
+values:
+  - ../values.yaml
+set:
+  global:
+    spiffe:
+      trustDomain: nico.local
+    certificate:
+      duration: 720h
+      renewBefore: 240h
+      privateKey:
+        algorithm: ECDSA
+        size: 384
+      issuerRef:
+        kind: ClusterIssuer
+        name: vault-nico-issuer
+        group: cert-manager.io
+tests:
+  - it: renders a hardened single-replica deployment by default
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+      - equal:
+          path: spec.template.spec.enableServiceLinks
+          value: false
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+
+  - it: pins the SPIFFE identity nico-api RBAC grants
+    template: templates/certificate.yaml
+    asserts:
+      - contains:
+          path: spec.uris
+          content: spiffe://nico.local/nico-system/sa/nico-site-health-probe
+
+  - it: renders the grpc probe config with SPIFFE cert paths
+    template: templates/configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'target: "nico-api\.nico-system\.svc\.cluster\.local:1079"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'cert: /var/run/secrets/spiffe\.io/tls\.crt'
+
+  - it: keeps REST probes disabled by default and mounts no keycloak secret
+    template: templates/deployment.yaml
+    asserts:
+      # Only the config + SPIFFE cert volumes render by default.
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+
+  - it: requires the keycloak secret name when a REST probe is enabled
+    template: templates/deployment.yaml
+    set:
+      probes:
+        restMachines:
+          enabled: true
+          target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+          interval: 10s
+          timeout: 5s
+          org: testorg
+          auth:
+            tokenUrl: "https://kc/token"
+            clientId: probe
+            existingSecret:
+              name: ""
+              key: client-secret
+    asserts:
+      - failedTemplate:
+          errorPattern: existingSecret.name is required
+
+  - it: renders the rest_instances config with its keycloak path and REST CA
+    template: templates/configmap.yaml
+    set:
+      restCa:
+        existingSecret:
+          name: rest-ca-bundle
+          key: ca.crt
+      probes:
+        restInstances:
+          enabled: true
+          target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+          interval: 10s
+          timeout: 5s
+          org: testorg
+          auth:
+            tokenUrl: "https://kc/token"
+            clientId: probe
+            existingSecret:
+              name: keycloak-probe
+              key: client-secret
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'client_secret_path: /var/secrets/keycloak-instances/client-secret'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'ca: "/var/secrets/rest-ca/ca\.crt"'
+
+  - it: mounts the keycloak-instances and rest-ca volumes when enabled
+    template: templates/deployment.yaml
+    set:
+      restCa:
+        existingSecret:
+          name: rest-ca-bundle
+          key: ca.crt
+      probes:
+        restInstances:
+          enabled: true
+          target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+          interval: 10s
+          timeout: 5s
+          org: testorg
+          auth:
+            tokenUrl: "https://kc/token"
+            clientId: probe
+            existingSecret:
+              name: keycloak-probe
+              key: client-secret
+    asserts:
+      # config + spiffe-tls + keycloak-instances + rest-ca
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 4
+
+  - it: does not render a ServiceMonitor by default
+    template: templates/service-monitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a ServiceMonitor when enabled
+    template: templates/service-monitor.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.endpoints[0].port
+          value: metrics
+
+  - it: REST-only deployment renders no Certificate and no SPIFFE volume
+    templates:
+      - templates/certificate.yaml
+      - templates/deployment.yaml
+    set:
+      probes:
+        grpcMachines:
+          enabled: false
+        restMachines:
+          enabled: true
+          target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+          interval: 10s
+          timeout: 5s
+          org: testorg
+          auth:
+            tokenUrl: "https://kc/token"
+            clientId: probe
+            existingSecret:
+              name: kc-secret
+              key: client-secret
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/certificate.yaml
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+        template: templates/deployment.yaml
+        # config + keycloak-machines; no spiffe-tls volume
+
+  - it: gRPC-only deployment keeps the Certificate and mounts no keycloak secret
+    templates:
+      - templates/certificate.yaml
+      - templates/deployment.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/certificate.yaml
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+        template: templates/deployment.yaml
+        # config + spiffe-tls; no keycloak volumes
+
+  - it: honors the parent chart's global namespace override
+    template: templates/deployment.yaml
+    set:
+      global:
+        namespaceOverride: nico-system
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: nico-system
+
+  - it: defaults to the release namespace without a global override
+    template: templates/deployment.yaml
+    release:
+      namespace: some-release-ns
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: some-release-ns

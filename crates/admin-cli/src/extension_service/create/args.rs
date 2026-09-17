@@ -18,7 +18,7 @@
 use ::rpc::forge::dpu_extension_service_credential::Type;
 use clap::Parser;
 
-use super::super::common::ExtensionServiceType;
+use super::super::common::{DpuTarget, ExtensionServiceType};
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
 #[derive(Parser, Debug, Clone)]
@@ -28,6 +28,11 @@ EXAMPLES:
 Create a Kubernetes-pod extension service:
     $ nico-admin-cli extension-service create --name my-service --type kubernetes-pod \
     --data '{\"image\":\"my-registry/my-service:1.0\"}'
+
+Create a DPF Helm chart on all DPUs used by instance networking:
+    $ nico-admin-cli extension-service create --name my-helm-service --type dpf-helm-chart \
+    --dpu-target all-active --data \
+    '{\"repoURL\":\"oci://registry.example.com/charts\",\"chartName\":\"my-service\",\"chartVersion\":\"1.2.3\",\"security.privileged\":false}'
 
 Create with an explicit service ID and a description:
     $ nico-admin-cli extension-service create --id 12345678-1234-5678-90ab-cdef01234567 \
@@ -58,6 +63,14 @@ pub(crate) struct Args {
     #[clap(short = 't', long = "type", help = "Extension service type")]
     service_type: ExtensionServiceType,
 
+    #[clap(
+        long,
+        value_enum,
+        required_if_eq("service_type", "dpf-helm-chart"),
+        help = "Immutable Helm placement policy: primary = primary DPU, all-active = DPUs used by instance networking, all = all attached DPUs. Required for dpf-helm-chart and unsupported for kubernetes-pod"
+    )]
+    dpu_target: Option<DpuTarget>,
+
     #[clap(long, help = "Extension service description (optional)")]
     description: Option<String>,
 
@@ -87,6 +100,12 @@ impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
     type Error = CarbideCliError;
 
     fn try_from(args: Args) -> CarbideCliResult<Self> {
+        if args.service_type == ExtensionServiceType::KubernetesPod && args.dpu_target.is_some() {
+            return Err(CarbideCliError::GenericError(
+                "--dpu-target is unsupported for kubernetes-pod".to_string(),
+            ));
+        }
+
         let credential =
             if args.username.is_some() || args.password.is_some() || args.registry_url.is_some() {
                 if args.username.is_none() || args.password.is_none() || args.registry_url.is_none()
@@ -116,6 +135,13 @@ impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
             };
 
         Ok(Self {
+            dpu_target: args.dpu_target.map(|target| match target {
+                DpuTarget::Primary => ::rpc::forge::DpuExtensionServiceDpuTarget::Primary as i32,
+                DpuTarget::AllActive => {
+                    ::rpc::forge::DpuExtensionServiceDpuTarget::AllActive as i32
+                }
+                DpuTarget::All => ::rpc::forge::DpuExtensionServiceDpuTarget::All as i32,
+            }),
             service_id: args.service_id,
             service_name: args.service_name,
             service_type: args.service_type as i32,
@@ -123,9 +149,11 @@ impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
             data: args.data,
             description: args.description,
             credential,
-            observability: Some(::rpc::forge::DpuExtensionServiceObservability {
-                configs: observability,
-            }),
+            observability: (!observability.is_empty()).then_some(
+                ::rpc::forge::DpuExtensionServiceObservability {
+                    configs: observability,
+                },
+            ),
         })
     }
 }

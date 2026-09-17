@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{{/*
+The SPIFFE client cert exists only for the nico-api gRPC probe. Gating it on
+that probe keeps REST-only deployments independent of the core cert issuer —
+otherwise the pod would wait forever on a TLS secret no issuer will mint.
+*/}}
+{{- if .Values.probes.grpcMachines.enabled }}
+{{- $name := include "nico-site-health-probe.name" . }}
+{{- $namespace := include "nico-site-health-probe.namespace" . }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $name }}-certificate
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "nico-site-health-probe.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $name }}-tls
+  duration: {{ .Values.global.certificate.duration }}
+  renewBefore: {{ .Values.global.certificate.renewBefore }}
+  commonName: {{ printf "%s.%s.svc.cluster.local" $name $namespace }}
+  dnsNames:
+    - {{ printf "%s.%s.svc.cluster.local" $name $namespace }}
+  uris:
+    # The identity nico-api's internal RBAC grants read access to. The
+    # namespace segment is pinned to the accepted /nico-system/sa/ base, not
+    # the deploy namespace (same convention as the parent machine-a-tron cert).
+    - {{ printf "spiffe://%s/%s/sa/%s" .Values.global.spiffe.trustDomain .Values.certificate.identityNamespace .Values.certificate.spiffeServiceName }}
+  privateKey:
+    algorithm: {{ .Values.global.certificate.privateKey.algorithm }}
+    size: {{ .Values.global.certificate.privateKey.size }}
+  issuerRef:
+    kind: {{ .Values.global.certificate.issuerRef.kind }}
+    name: {{ .Values.global.certificate.issuerRef.name }}
+    group: {{ .Values.global.certificate.issuerRef.group }}
+{{- end }}

@@ -226,6 +226,7 @@ rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
 [rack_profiles.NVL72.firmware_object]
 url = "https://firmware.example.com/objects/nvl72.json"
 fetch_timeout = "30s"
+access_token_credential = "nvl72-artifacts"
 
 [rack_profiles.NVL72.rack_capabilities.compute]
 vendor = "NVIDIA"
@@ -241,16 +242,22 @@ count = 8
 ```
 
 `firmware_object` supplies the SOT JSON for automatic rack firmware and switch
-NVOS image updates. When `firmware_object` is configured for a profile with
-switches, the document must include an NVOS image whose firmware type matches
+NVOS image updates and for automatic compute-tray firmware updates during
+pre-ingestion. When `firmware_object` is configured for a profile with switches,
+the document must include an NVOS image whose firmware type matches
 `rack_hardware_class`. NICo requests `prod` when `rack_hardware_class` is
 omitted. RMS records an asynchronous update failure when the document does not
 contain the required image. If `firmware_object` is omitted, NICo skips both
-automatic update phases. An explicit maintenance request can supply a firmware
-object instead. If no firmware object is available while a switch in the
-maintenance scope is already waiting for an NVOS update, the rack transitions
-to `Error` instead of skipping the NVOS phase.
-`fetch_timeout` defaults to `30s`.
+automatic rack maintenance phases and the compute-tray pre-ingestion update. An
+explicit maintenance request can supply a firmware object instead. If no
+firmware object is available while a switch in the maintenance scope is already
+waiting for an NVOS update, the rack transitions to `Error` instead of skipping
+the NVOS phase. `fetch_timeout` defaults to `30s`.
+
+`access_token_credential` optionally names a credential that contains a
+firmware artifact access token. NICo reads the secret when compute-tray
+pre-ingestion starts. When the field is omitted, NICo sends the RMS no-auth
+sentinel.
 
 Example: GB300 rack with Lenovo compute trays and Delta power shelves:
 
