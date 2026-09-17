@@ -61,7 +61,7 @@ impl RuntimeConfig {
                 "Could not extract FORGE_CLIENT_KEY_PATH from environment".to_string()
             })?,
             bind_address: env::var("PXE_BIND_ADDRESS")
-                .unwrap_or_else(|_| "0.0.0.0".to_string())
+                .unwrap_or_else(|_| "::".to_string())
                 .parse()
                 .map_err(|_| "not a parsable bind address for runtime config?".to_string())?,
             bind_port: env::var("PXE_BIND_PORT")
@@ -225,7 +225,7 @@ mod tests {
                     forge_root_ca_path: "/certs/root.pem".to_string(),
                     server_cert_path: "/certs/client.pem".to_string(),
                     server_key_path: "/certs/client.key".to_string(),
-                    bind_address: "0.0.0.0".parse().unwrap(),
+                    bind_address: "::".parse().unwrap(),
                     bind_port: 8080,
                     template_directory: "/opt/carbide/pxe/templates".to_string(),
                 }),
@@ -246,7 +246,7 @@ mod tests {
                     forge_root_ca_path: "/certs/root.pem".to_string(),
                     server_cert_path: "/certs/client.pem".to_string(),
                     server_key_path: "/certs/client.key".to_string(),
-                    bind_address: "0.0.0.0".parse().unwrap(),
+                    bind_address: "::".parse().unwrap(),
                     bind_port: 8080,
                     template_directory: "/opt/carbide/pxe/templates".to_string(),
                 }),

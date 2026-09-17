@@ -134,6 +134,7 @@ controls the YAML→JSON name mapping.
 {{- if not $apiUrl -}}
 {{- $apiUrl = printf "https://%s.%s.svc.cluster.local:1079" $apiSvc $ns -}}
 {{- end -}}
+{{- $metricsEndpoint := default "[::]:1089" $hp.nicoMetricsEndpoint -}}
 {{- $libPath := default "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so" $k.hookLibraryPath -}}
 {{- $extraHooks := default (list) $k.additionalHooksLibraries -}}
 {{- $ic := default (dict) $k.interfacesConfig -}}
@@ -225,8 +226,8 @@ controls the YAML→JSON name mapping.
         "parameters": {
           "nico-api-url": {{ $apiUrl | quote }},
           "carbide-api-url": {{ $apiUrl | quote }},
-          "nico-metrics-endpoint": {{ default "[::]:1089" $hp.nicoMetricsEndpoint | quote }},
-          "carbide-metrics-endpoint": {{ default "[::]:1089" $hp.nicoMetricsEndpoint | quote }},
+          "nico-metrics-endpoint": {{ $metricsEndpoint | quote }},
+          "carbide-metrics-endpoint": {{ $metricsEndpoint | quote }},
           "nico-nameservers": {{ $hp.nameservers | quote }},
           "carbide-nameservers": {{ $hp.nameservers | quote }},
           "nico-ntpserver": {{ $hp.ntpServer | quote }},

@@ -1727,6 +1727,30 @@ jobs:
           lint: 'true'
           template: 'true'
 
+      - name: Validate IPv6 Prometheus scrape configuration
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml
+          # Use upstream promtool with Kubernetes discovery, matching kube-prometheus-stack 59.1.0.
+          prometheus_version=2.52.0
+          prometheus_archive="prometheus-${prometheus_version}.linux-amd64.tar.gz"
+          curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${prometheus_version}/${prometheus_archive}" \
+            -o "${RUNNER_TEMP}/${prometheus_archive}"
+          printf '%s  %s\n' '7f31c5d6474bbff3e514e627e0b7a7fbbd4e5cea3f315fd0b76cad50be4c1ba3' "${RUNNER_TEMP}/${prometheus_archive}" \
+            | sha256sum --check --status
+          tar -xzf "${RUNNER_TEMP}/${prometheus_archive}" -C "${RUNNER_TEMP}" \
+            "prometheus-${prometheus_version}.linux-amd64/promtool"
+          /usr/bin/python3 - <<'PYCONFIG' | "${RUNNER_TEMP}/prometheus-${prometheus_version}.linux-amd64/promtool" check config /dev/stdin
+          import yaml
+          with open("helm-prereqs/observability/values-nico-ipv6-scraping.yaml") as stream:
+              values = yaml.safe_load(stream)
+          print(yaml.safe_dump({"scrape_configs": values["prometheus"]["prometheusSpec"]["additionalScrapeConfigs"]}))
+          PYCONFIG
+
+      - name: Check Core VIP preflight
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
+
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
@@ -1734,6 +1758,7 @@ jobs:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
           charts: >-
+            bluefield/charts/nico-otelcol
             helm
             helm/charts/nico-api
             helm/charts/nico-bmc-proxy

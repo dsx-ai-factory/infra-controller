@@ -2450,7 +2450,8 @@ impl Default for NvueRestPaths {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetricsConfig {
-    /// Metrics listener.
+    /// Metrics listener (default `[::]:9009`).
+    /// The default listener falls back to IPv4 when IPv6 socket setup is unavailable.
     pub endpoint: String,
     /// Prefix for all metrics, defaults to carbide_hardware_health
     pub prefix: String,
@@ -2477,7 +2478,7 @@ impl Default for RateLimitConfig {
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            endpoint: "0.0.0.0:9009".to_string(),
+            endpoint: "[::]:9009".to_string(),
             prefix: "carbide_hardware_health".to_string(),
             enable_bmc_latency_metrics: false,
             bmc_latency_attributes: default_bmc_latency_attributes(),
@@ -4118,7 +4119,7 @@ reload_interval = "30s"
         assert_eq!(config.shards_count, 1);
         assert_eq!(config.cache_size, 100);
         assert_eq!(config.bmc_request_concurrency.get(), 4);
-        assert_eq!(config.metrics.endpoint, "0.0.0.0:9009");
+        assert_eq!(config.metrics.endpoint, "[::]:9009");
         assert!(!config.metrics.enable_bmc_latency_metrics);
         assert_eq!(
             config.metrics.bmc_latency_attributes,

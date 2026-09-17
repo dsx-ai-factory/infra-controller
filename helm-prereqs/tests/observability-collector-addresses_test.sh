@@ -59,7 +59,8 @@ for role in agent gateway; do
             assert_config '.receivers.otlp.protocols.grpc.tls.cert_file' /etc/otel/tls/tls.crt
             assert_config '.receivers.otlp.protocols.grpc.tls.key_file' /etc/otel/tls/tls.key
             assert_config '.receivers.otlp.protocols.grpc.tls.client_ca_file' /etc/otel/tls/ca.crt
-            assert_config '.exporters."prometheus/site".endpoint' "${pod_address}:9999"
+            # Metrics accept either pod address while OTLP retains its primary-address bind.
+            assert_config '.exporters."prometheus/site".endpoint' ':9999'
             assert_config '.receivers."prometheus/local-telemetry".config.scrape_configs[0].static_configs[0].targets[]' "${pod_address}:8888"
             expected_ports=$'443\n9999'
             ;;
