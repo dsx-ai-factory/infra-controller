@@ -268,3 +268,9 @@ API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `vni` response property's max was i
 API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `vni` response property's max was increased from `65535.00` to `16777215.00` for the response status `200`
 API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the `routingProfile` response property's minLength was decreased from `3` to `1` for the response status `200`
+API GET /v2/org/{org}/nico/dpu the `items/bmcInfo/oneOf[subschema #1: MachineBMCInfo]/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the `bmcInfo/oneOf[subschema #1: MachineBMCInfo]/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/machine the `items/metadata/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the `metadata/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `metadata/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/bmcInfo/ip` response's property type/format changed from `string, null`/`ipv4` to `string, null`/`` for status `200`

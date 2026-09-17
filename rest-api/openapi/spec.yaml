@@ -27012,7 +27012,7 @@ components:
       type: object
       description: Describes BMC information of a Machine
       examples:
-        - ip: 10.217.133.5
+        - ip: '2001:db8::5'
           mac: 'C8:4B:D6:7A:C9:8A'
           version: '1'
           firmwareRevision: '6.00'
@@ -27021,8 +27021,7 @@ components:
           type:
             - string
             - 'null'
-          description: 'IP address of the Machine BMC'
-          format: ipv4
+          description: 'IPv4 or IPv6 address of the Machine BMC'
         mac:
           type:
             - string
