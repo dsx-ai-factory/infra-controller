@@ -33,6 +33,7 @@ use mac_address::MacAddress;
 #[cfg(test)]
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::Digest;
 
 use super::DpuModel;
 use super::bmc_info::BmcInfo;
@@ -136,6 +137,42 @@ pub struct ComponentIntegrityEntry {
     pub id: String,
     pub component_integrity_type: String,
     pub component_integrity_enabled: bool,
+}
+
+/// The `ComponentIntegrityType` of a member that speaks SPDM. A `TPM` member is
+/// never attested.
+const SPDM_INTEGRITY_TYPE: &str = "SPDM";
+
+/// The SPDM-capable attesters one endpoint reported, and a digest identifying
+/// the set. Hardware of one class carrying different attesters has different
+/// digests, which is the drift pattern matching alone cannot show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttesterSet {
+    pub digest: String,
+    pub ids: Vec<String>,
+}
+
+impl AttesterSet {
+    /// Selects the SPDM members and digests their IDs.
+    ///
+    /// Membership is scoped by type alone. `ComponentIntegrityEnabled` is
+    /// read-write, so filtering on it would put configuration inside the
+    /// identity: switching SPDM off on one GPU would read as hardware drift.
+    /// Measurements are left out for the same reason, since they move with
+    /// every firmware update.
+    fn of(entries: &[ComponentIntegrityEntry]) -> Self {
+        let ids: Vec<String> = entries
+            .iter()
+            .filter(|entry| entry.component_integrity_type == SPDM_INTEGRITY_TYPE)
+            .map(|entry| entry.id.clone())
+            .sorted()
+            .collect();
+
+        Self {
+            digest: hex::encode(sha2::Sha256::digest(ids.join("\n").as_bytes())),
+            ids,
+        }
+    }
 }
 
 /// Data that we gathered about a particular endpoint during site exploration
@@ -949,6 +986,17 @@ impl EndpointExplorationReport {
             revision_id: None,
             remediation_error: None,
         }
+    }
+
+    /// The SPDM-capable attesters this report recorded, or `None` when the BMC
+    /// reported no `ComponentIntegrity` collection at all.
+    ///
+    /// A collection reported empty, or one holding no SPDM member, is a set
+    /// like any other: a tray reporting none where its peers report eight is
+    /// drift worth seeing, so it gets a digest rather than being read as
+    /// nothing observed.
+    pub fn attester_set(&self) -> Option<AttesterSet> {
+        self.component_integrities.as_deref().map(AttesterSet::of)
     }
 
     pub fn bluefield_operating_mode(&self) -> Option<BlueFieldOperatingMode> {
@@ -2973,6 +3021,79 @@ mod tests {
                     }]),
                 ),
             }
+        );
+    }
+
+    /// The digest names which attesters a class carries, so it has to move with
+    /// membership and with nothing else. Enablement is read-write and a `TPM`
+    /// member is never attested, so neither belongs in the identity.
+    #[test]
+    fn the_attester_digest_follows_spdm_membership_alone() {
+        fn member(id: &str, integrity_type: &str) -> ComponentIntegrityEntry {
+            ComponentIntegrityEntry {
+                id: id.to_string(),
+                component_integrity_type: integrity_type.to_string(),
+                component_integrity_enabled: true,
+            }
+        }
+
+        fn set(members: Vec<ComponentIntegrityEntry>) -> AttesterSet {
+            EndpointExplorationReport {
+                component_integrities: Some(members),
+                ..Default::default()
+            }
+            .attester_set()
+            .expect("a reported collection yields a set")
+        }
+
+        let two_gpus = set(vec![
+            member("HGX_ERoT_GPU_0", "SPDM"),
+            member("HGX_ERoT_GPU_1", "SPDM"),
+        ]);
+
+        assert_eq!(
+            set(vec![
+                member("HGX_ERoT_GPU_1", "SPDM"),
+                member("HGX_ERoT_GPU_0", "SPDM"),
+            ]),
+            two_gpus,
+            "the order a BMC happens to list its members in is not part of the set"
+        );
+        assert_eq!(
+            set(vec![
+                member("HGX_ERoT_GPU_0", "SPDM"),
+                ComponentIntegrityEntry {
+                    component_integrity_enabled: false,
+                    ..member("HGX_ERoT_GPU_1", "SPDM")
+                },
+            ]),
+            two_gpus,
+            "switching SPDM off on one GPU is a configuration change, not hardware drift"
+        );
+        assert_eq!(
+            set(vec![
+                member("HGX_ERoT_GPU_0", "SPDM"),
+                member("HGX_ERoT_GPU_1", "SPDM"),
+                member("TPM_0", "TPM"),
+            ]),
+            two_gpus,
+            "a TPM member is never attested, so it is not one of the attesters"
+        );
+        assert_ne!(
+            set(vec![member("HGX_ERoT_GPU_0", "SPDM")]).digest,
+            two_gpus.digest,
+            "a tray reporting one root of trust fewer has to read as a different set"
+        );
+
+        assert_eq!(
+            EndpointExplorationReport::default().attester_set(),
+            None,
+            "a BMC that reported no collection has no set, which is not an empty one"
+        );
+        assert_eq!(
+            set(vec![member("TPM_0", "TPM")]),
+            set(Vec::new()),
+            "a collection holding nothing that speaks SPDM is an observed empty set"
         );
     }
 

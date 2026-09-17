@@ -420,6 +420,18 @@ pub async fn hardware_class_recorded(
         .map_err(|e| DatabaseError::new("explored_endpoints hardware_class_recorded", e))
 }
 
+/// The digest of the attester set a report carries, which is what the
+/// endpoint's own column holds.
+///
+/// A report recording no `ComponentIntegrity` collection clears the column,
+/// since the row mirrors the last exploration and a kept digest would count
+/// the endpoint under a set its BMC no longer reports. An exploration that
+/// failed outright keeps its previous report, and with it its digest, through
+/// [`try_update_last_exploration_error`].
+fn attester_digest(report: &EndpointExplorationReport) -> Option<String> {
+    report.attester_set().map(|set| set.digest)
+}
+
 /// Replaces an endpoint's report if its version still matches.
 ///
 /// An applied write advances the report version, stores the supplied
@@ -434,14 +446,16 @@ pub async fn try_update(
     txn: &mut PgConnection,
 ) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
+    let attester_digest = attester_digest(exploration_report);
     let query = "
-UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false, hardware_class=$4
-WHERE address=$5 AND version=$6";
+UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false, hardware_class=$4, attester_digest=$5
+WHERE address=$6 AND version=$7";
     let query_result = sqlx::query(query)
         .bind(new_version)
         .bind(sqlx::types::Json(exploration_report))
         .bind(waiting_for_explorer_refresh)
         .bind(exploration_report.hardware_class.as_deref())
+        .bind(attester_digest)
         .bind(address)
         .bind(old_version)
         .execute(txn)
@@ -880,8 +894,8 @@ pub async fn insert(
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
     let query = "
-        INSERT INTO explored_endpoints (address, exploration_report, version, exploration_requested, preingestion_state, pause_ingestion_and_poweron, hardware_class)
-        VALUES ($1, $2::json, $3, false, '{\"state\":\"initial\"}', $4, $5)
+        INSERT INTO explored_endpoints (address, exploration_report, version, exploration_requested, preingestion_state, pause_ingestion_and_poweron, hardware_class, attester_digest)
+        VALUES ($1, $2::json, $3, false, '{\"state\":\"initial\"}', $4, $5, $6)
         ON CONFLICT DO NOTHING";
     sqlx::query(query)
         .bind(address)
@@ -889,6 +903,7 @@ pub async fn insert(
         .bind(ConfigVersion::initial())
         .bind(pause_ingestion_and_poweron)
         .bind(exploration_report.hardware_class.as_deref())
+        .bind(attester_digest(exploration_report))
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -1325,6 +1340,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(read_hardware_class(&mut txn, unclassified).await, None);
+    }
+
+    /// The column counts endpoints per variant of a class, so it has to follow
+    /// the report on both write paths. A BMC that stops reporting a collection
+    /// clears it: keeping the old digest would count the endpoint under a set
+    /// it no longer reports.
+    #[crate::sqlx_test]
+    async fn the_attester_digest_follows_the_report(pool: sqlx::PgPool) {
+        fn report_with_attesters(ids: Option<&[&str]>) -> EndpointExplorationReport {
+            EndpointExplorationReport {
+                component_integrities: ids.map(|ids| {
+                    ids.iter()
+                        .map(|id| model::site_explorer::ComponentIntegrityEntry {
+                            id: (*id).to_string(),
+                            component_integrity_type: "SPDM".to_string(),
+                            component_integrity_enabled: true,
+                        })
+                        .collect()
+                }),
+                ..Default::default()
+            }
+        }
+
+        async fn read_attester_digest(txn: &mut PgConnection, address: IpAddr) -> Option<String> {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT attester_digest FROM explored_endpoints WHERE address = $1",
+            )
+            .bind(address)
+            .fetch_one(txn)
+            .await
+            .expect("read attester_digest")
+        }
+
+        let mut txn = pool.begin().await.unwrap();
+        let address: IpAddr = "10.0.6.1".parse().unwrap();
+        let eight_gpus = report_with_attesters(Some(&[
+            "HGX_ERoT_GPU_0",
+            "HGX_ERoT_GPU_1",
+            "HGX_ERoT_GPU_2",
+            "HGX_ERoT_GPU_3",
+        ]));
+
+        insert(address, &eight_gpus, false, &mut txn).await.unwrap();
+        assert_eq!(
+            read_attester_digest(&mut txn, address).await,
+            eight_gpus.attester_set().map(|set| set.digest),
+        );
+
+        let version = read_version(&mut txn, address).await;
+        assert_eq!(
+            try_update(
+                address,
+                version,
+                &report_with_attesters(None),
+                false,
+                &mut txn,
+            )
+            .await
+            .unwrap(),
+            ConditionalWrite::Applied(()),
+        );
+        assert_eq!(read_attester_digest(&mut txn, address).await, None);
     }
 
     /// An operator reads this to decide what to profile, so every class the
