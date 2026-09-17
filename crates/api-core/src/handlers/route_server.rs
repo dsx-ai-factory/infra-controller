@@ -32,7 +32,9 @@ pub(crate) async fn get(
 ) -> Result<tonic::Response<rpc::RouteServerEntries>, Status> {
     log_request_data(&request);
 
-    let route_servers = db::route_servers::get(&api.database_connection).await?;
+    let route_servers = db::route_servers::get(&api.database_connection)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(rpc::RouteServerEntries {
         route_servers: route_servers.into_iter().map(Into::into).collect(),
@@ -55,9 +57,11 @@ pub(crate) async fn add(
         .try_into()
         .map_err(|_| CarbideError::InvalidArgument("source_type".to_string()))?;
 
-    let mut txn = api.txn_begin().await?;
-    db::route_servers::add(&mut txn, &route_servers, source_type.into()).await?;
-    txn.commit().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    db::route_servers::add(&mut txn, &route_servers, source_type.into())
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }
@@ -77,8 +81,10 @@ pub(crate) async fn remove(
         .try_into()
         .map_err(|_| CarbideError::InvalidArgument("source_type".to_string()))?;
 
-    let mut txn = api.txn_begin().await?;
-    let deleted = db::route_servers::remove(&mut txn, &route_servers, source_type.into()).await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    let deleted = db::route_servers::remove(&mut txn, &route_servers, source_type.into())
+        .await
+        .map_err(crate::CarbideError::from)?;
     if !route_servers.is_empty() && deleted == 0 {
         return Err(Status::not_found(
             "no route servers found matching the given addresses for the requested \
@@ -86,7 +92,7 @@ pub(crate) async fn remove(
              source_type config_file",
         ));
     }
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }
@@ -108,9 +114,11 @@ pub(crate) async fn replace(
         .try_into()
         .map_err(|_| CarbideError::InvalidArgument("source_type".to_string()))?;
 
-    let mut txn = api.txn_begin().await?;
-    db::route_servers::replace(&mut txn, &route_servers, source_type.into()).await?;
-    txn.commit().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    db::route_servers::replace(&mut txn, &route_servers, source_type.into())
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }

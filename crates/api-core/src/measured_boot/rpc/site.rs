@@ -73,7 +73,7 @@ pub(crate) async fn handle_import_site_measurements(
     api: &Api,
     req: ImportSiteMeasurementsRequest,
 ) -> Result<ImportSiteMeasurementsResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Convert the site model from the SiteModelPb (and
     // make sure its good).
@@ -98,7 +98,7 @@ pub(crate) async fn handle_import_site_measurements(
             result: ImportSiteResult::Success.into(),
         });
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(result?)
 }
 
@@ -125,7 +125,7 @@ pub(crate) async fn handle_add_measurement_trusted_machine(
     api: &Api,
     req: AddMeasurementTrustedMachineRequest,
 ) -> Result<AddMeasurementTrustedMachineResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let approval_type = req.approval_type();
     let approval_record = insert_into_approved_machines(
         &mut txn,
@@ -141,7 +141,7 @@ pub(crate) async fn handle_add_measurement_trusted_machine(
         message: format!("failed to insert trusted machine approval: {e}"),
     })?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(AddMeasurementTrustedMachineResponse {
         approval_record: Some(approval_record.into()),
     })
@@ -153,7 +153,7 @@ pub(crate) async fn handle_remove_measurement_trusted_machine(
     api: &Api,
     req: RemoveMeasurementTrustedMachineRequest,
 ) -> Result<RemoveMeasurementTrustedMachineResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let approval_record: MeasurementApprovedMachineRecord = match req.selector {
         // Remove by approval ID.
@@ -195,7 +195,7 @@ pub(crate) async fn handle_remove_measurement_trusted_machine(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(RemoveMeasurementTrustedMachineResponse {
         approval_record: Some(approval_record.into()),
     })
@@ -226,7 +226,7 @@ pub(crate) async fn handle_add_measurement_trusted_profile(
     api: &Api,
     req: AddMeasurementTrustedProfileRequest,
 ) -> Result<AddMeasurementTrustedProfileResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let approval_type = req.approval_type();
     let profile_id = req
         .profile_id
@@ -252,7 +252,7 @@ pub(crate) async fn handle_add_measurement_trusted_profile(
         message: format!("failed to insert trusted profile approval: {e}"),
     })?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(AddMeasurementTrustedProfileResponse {
         approval_record: Some(approval_record.into()),
     })
@@ -264,7 +264,7 @@ pub(crate) async fn handle_remove_measurement_trusted_profile(
     api: &Api,
     req: RemoveMeasurementTrustedProfileRequest,
 ) -> Result<RemoveMeasurementTrustedProfileResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let approval_record: MeasurementApprovedProfileRecord = match req.selector {
         // Remove by approval ID.
         Some(remove_measurement_trusted_profile_request::Selector::ApprovalId(approval_uuid)) => {
@@ -301,7 +301,7 @@ pub(crate) async fn handle_remove_measurement_trusted_profile(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(RemoveMeasurementTrustedProfileResponse {
         approval_record: Some(approval_record.into()),
     })

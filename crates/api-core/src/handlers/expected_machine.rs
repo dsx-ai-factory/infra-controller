@@ -78,10 +78,12 @@ pub(crate) async fn add(
 
     let machine = parse_expected_machine_for_insert(request.into_inner(), None)?;
 
-    let mut txn = api.txn_begin().await?;
-    db::expected_machine::create(&mut txn, machine).await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    db::expected_machine::create(&mut txn, machine)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }
@@ -235,13 +237,13 @@ pub(crate) async fn delete(
         .try_into()
         .map_err(|e| CarbideError::InvalidArgument(format!("{}", e)))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     db::expected_machine::delete(&mut txn, &req)
         .await
         .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }
@@ -275,7 +277,7 @@ pub(crate) async fn update(
         .bmc_mac_address
         .parse::<MacAddress>()
         .map_err(CarbideError::from)?;
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let existing = db::expected_machine::find_for_update(
         &mut txn,
         &ExpectedMachineRequest {
@@ -283,7 +285,8 @@ pub(crate) async fn update(
             bmc_mac_address: Some(parsed_mac),
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     ensure_bmc_mac_unchanged(existing.as_ref(), parsed_mac)?;
     preserve_omitted_rpc_role_and_allocation(&mut request, existing.as_ref());
     let overrides = LegacyHostBmcOverrides::try_from(&request)?;
@@ -308,7 +311,7 @@ pub(crate) async fn update(
         .await
         .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     for outcome in preallocations {
         emit(StaticAddressPreallocationCompleted::from(outcome));
@@ -329,8 +332,10 @@ pub(crate) async fn replace_all(
     log_request_data(&request);
     let request = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
-    let previous = db::expected_machine::find_all_for_replace(&mut txn).await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    let previous = db::expected_machine::find_all_for_replace(&mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let mut replacements = request.expected_machines;
     for replacement in &mut replacements {
         let existing = find_previous_expected_machine(&previous, replacement);
@@ -361,11 +366,15 @@ pub(crate) async fn replace_all(
         parsed_replacements.push(parsed);
     }
 
-    db::expected_machine::clear(&mut txn).await?;
+    db::expected_machine::clear(&mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     for expected_machine in parsed_replacements {
-        db::expected_machine::create(&mut txn, expected_machine).await?;
+        db::expected_machine::create(&mut txn, expected_machine)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }
@@ -378,7 +387,9 @@ pub(crate) async fn get_all(
     log_request_data(&request);
 
     let expected_machine_list: Vec<ExpectedMachine> =
-        db::expected_machine::find_all(&api.database_connection).await?;
+        db::expected_machine::find_all(&api.database_connection)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(rpc::ExpectedMachineList {
         expected_machines: expected_machine_list.into_iter().map(Into::into).collect(),
@@ -392,7 +403,9 @@ pub(crate) async fn get_linked(
 ) -> Result<tonic::Response<rpc::LinkedExpectedMachineList>, tonic::Status> {
     log_request_data(&request);
 
-    let out = db::expected_machine::find_all_linked(&api.database_connection).await?;
+    let out = db::expected_machine::find_all_linked(&api.database_connection)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let list = rpc::LinkedExpectedMachineList {
         expected_machines: out.into_iter().map(|m| m.into()).collect(),
     };
@@ -412,7 +425,9 @@ pub(crate) async fn get_all_unexpected_machines(
 ) -> Result<tonic::Response<rpc::UnexpectedMachineList>, tonic::Status> {
     log_request_data(&request);
 
-    let out = db::expected_machine::find_all_unexpected(&api.database_connection).await?;
+    let out = db::expected_machine::find_all_unexpected(&api.database_connection)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let list = rpc::UnexpectedMachineList {
         unexpected_machines: out.into_iter().map(Into::into).collect(),
     };
@@ -426,11 +441,13 @@ pub(crate) async fn delete_all(
 ) -> Result<tonic::Response<()>, tonic::Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    db::expected_machine::clear(&mut txn).await?;
+    db::expected_machine::clear(&mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }

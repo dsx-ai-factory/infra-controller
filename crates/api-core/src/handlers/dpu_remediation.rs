@@ -56,16 +56,17 @@ pub(crate) async fn create(
     crate::api::log_request_data(&request);
     let authored_by = external_user_name(&request)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let response = Ok(db::dpu_remediation::persist_remediation(
         NewRemediation::rpc_try_from((request.into_inner(), authored_by))?,
         &mut txn,
     )
     .await
     .map(rpc::CreateRemediationResponse::from)
-    .map(Response::new)?);
+    .map(Response::new)
+    .map_err(crate::CarbideError::from)?);
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     response
 }
@@ -77,15 +78,16 @@ pub(crate) async fn approve(
     crate::api::log_request_data(&request);
     let approved_by = external_user_name(&request)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     db::dpu_remediation::persist_approve_remediation(
         ApproveRemediation::rpc_try_from((request.into_inner(), approved_by))?,
         &mut txn,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -97,15 +99,16 @@ pub(crate) async fn revoke(
     crate::api::log_request_data(&request);
     let revoked_by = external_user_name(&request)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     db::dpu_remediation::persist_revoke_remediation(
         RevokeRemediation::rpc_try_from((request.into_inner(), revoked_by))?,
         &mut txn,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -117,15 +120,16 @@ pub(crate) async fn enable(
     crate::api::log_request_data(&request);
     let enabled_by = external_user_name(&request)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     db::dpu_remediation::persist_enable_remediation(
         EnableRemediation::rpc_try_from((request.into_inner(), enabled_by))?,
         &mut txn,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -137,15 +141,16 @@ pub(crate) async fn disable(
     crate::api::log_request_data(&request);
     let disabled_by = external_user_name(&request)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     db::dpu_remediation::persist_disable_remediation(
         DisableRemediation::rpc_try_from((request.into_inner(), disabled_by))?,
         &mut txn,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -155,12 +160,14 @@ pub(crate) async fn find_remediation_ids(
     request: Request<()>,
 ) -> Result<Response<rpc::RemediationIdList>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let remediation_ids = db::dpu_remediation::find_remediation_ids(&mut txn).await?;
+    let remediation_ids = db::dpu_remediation::find_remediation_ids(&mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let response = rpc::RemediationIdList { remediation_ids };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(response))
 }
@@ -170,7 +177,7 @@ pub(crate) async fn find_remediations_by_ids(
     request: Request<rpc::RemediationIdList>,
 ) -> Result<Response<rpc::RemediationList>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let remediation_ids = request.into_inner().remediation_ids;
 
@@ -186,8 +193,9 @@ pub(crate) async fn find_remediations_by_ids(
         );
     }
 
-    let db_remediations =
-        db::dpu_remediation::find_remediations_by_ids(&mut txn, &remediation_ids).await?;
+    let db_remediations = db::dpu_remediation::find_remediations_by_ids(&mut txn, &remediation_ids)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let response = Response::new(rpc::RemediationList {
         remediations: db_remediations
@@ -196,7 +204,7 @@ pub(crate) async fn find_remediations_by_ids(
             .collect::<Vec<_>>(),
     });
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(response)
 }
@@ -206,7 +214,7 @@ pub(crate) async fn find_applied_remediation_ids(
     request: Request<rpc::FindAppliedRemediationIdsRequest>,
 ) -> Result<Response<rpc::AppliedRemediationIdList>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let request = request.into_inner();
 
@@ -232,14 +240,16 @@ pub(crate) async fn find_applied_remediation_ids(
     }?;
 
     let (remediation_ids, dpu_machine_ids) =
-        db::dpu_remediation::find_applied_remediation_ids(&mut txn, id_query_args).await?;
+        db::dpu_remediation::find_applied_remediation_ids(&mut txn, id_query_args)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     let response = rpc::AppliedRemediationIdList {
         remediation_ids,
         dpu_machine_ids,
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(response))
 }
@@ -249,7 +259,7 @@ pub(crate) async fn find_applied_remediations(
     request: Request<rpc::FindAppliedRemediationsRequest>,
 ) -> Result<Response<rpc::AppliedRemediationList>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let request = request.into_inner();
 
@@ -266,7 +276,8 @@ pub(crate) async fn find_applied_remediations(
             remediation_id,
             &machine_id,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .into_iter()
         .map(|x| x.into())
         .collect();
@@ -275,7 +286,7 @@ pub(crate) async fn find_applied_remediations(
         applied_remediations,
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(response))
 }
@@ -285,7 +296,7 @@ pub(crate) async fn get_next_remediation_for_machine(
     request: Request<rpc::GetNextRemediationForMachineRequest>,
 ) -> Result<Response<rpc::GetNextRemediationForMachineResponse>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let request = request.into_inner();
     let machine_id = request
@@ -293,7 +304,9 @@ pub(crate) async fn get_next_remediation_for_machine(
         .ok_or(CarbideError::MissingArgument("machine id"))?;
 
     let remediation_to_apply =
-        db::dpu_remediation::find_next_remediation_for_machine(&mut txn, machine_id).await?;
+        db::dpu_remediation::find_next_remediation_for_machine(&mut txn, machine_id)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     let remediation_id = remediation_to_apply.as_ref().map(|r| r.id);
     let remediation_script = remediation_to_apply.map(|r| r.script);
@@ -303,7 +316,7 @@ pub(crate) async fn get_next_remediation_for_machine(
         remediation_script,
     });
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(response)
 }
@@ -313,7 +326,7 @@ pub(crate) async fn remediation_applied(
     request: Request<rpc::RemediationAppliedRequest>,
 ) -> Result<Response<()>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let request = request.into_inner();
     let remediation_id = request
@@ -327,9 +340,11 @@ pub(crate) async fn remediation_applied(
         .ok_or(CarbideError::MissingArgument("status"))?
         .try_into()?;
 
-    db::dpu_remediation::remediation_applied(&mut txn, machine_id, remediation_id, status).await?;
+    db::dpu_remediation::remediation_applied(&mut txn, machine_id, remediation_id, status)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }

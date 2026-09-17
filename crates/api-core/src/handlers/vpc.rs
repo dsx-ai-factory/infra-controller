@@ -45,13 +45,14 @@ pub(crate) async fn create(
     log_request_data(&request);
     let vpc_creation_request = request.get_ref();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Grab the tenant details and a row-lock if found so we can coordinate around the tenant record.
     // Missing tenants remain supported for non-FNN VPCs; FNN creation rejects them below after
     // resolving the requested virtualization type.
-    let tenant =
-        db::tenant::find(&vpc_creation_request.tenant_organization_id, true, &mut txn).await?;
+    let tenant = db::tenant::find(&vpc_creation_request.tenant_organization_id, true, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     if let Some(ref nsg_id) = vpc_creation_request.network_security_group_id {
         let id = nsg_id.parse::<NetworkSecurityGroupId>().map_err(|e| {
@@ -75,7 +76,8 @@ pub(crate) async fn create(
             ),
             true,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .pop()
         .is_none()
         {
@@ -155,11 +157,13 @@ pub(crate) async fn create(
 
     new_vpc.routing_profile_type = resolved_profile_type;
 
-    let vpc = db::vpc::persist(new_vpc, VpcStatus { vni }, &mut txn).await?;
+    let vpc = db::vpc::persist(new_vpc, VpcStatus { vni }, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let rpc_out = vpc_to_rpc(vpc, api.runtime_config.fnn.as_ref());
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc_out))
 }
@@ -182,12 +186,13 @@ pub(crate) async fn update(
             error => Status::from(error),
         })?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let observed_vpc = db::vpc::find_by(
         &mut txn,
         ObjectColumnFilter::One(vpc::IdColumn, &vpc_update.id),
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop()
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "Vpc",
@@ -200,7 +205,9 @@ pub(crate) async fn update(
         VpcPolicyUpdate::from_request(api, &observed_vpc, &vpc_update, candidate_nsg.as_ref())?;
     let overlap_locked = observed_policy.needs_overlap_check();
     if overlap_locked {
-        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
 
     // Unchanged NSG attachments need no NSG lock. Assignment takes that
@@ -224,7 +231,8 @@ pub(crate) async fn update(
         ObjectColumnFilter::One(vpc::IdColumn, &vpc_update.id),
         db::vpc::VpcRowLock::Mutation,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop()
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "Vpc",
@@ -257,16 +265,19 @@ pub(crate) async fn update(
     if (!overlap_locked && policy.needs_overlap_check())
         || (!nsg_locked && policy.nsg_changed && candidate_nsg.is_some())
     {
-        txn.rollback().await?;
-        txn = api.txn_begin().await?;
-        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        txn.rollback().await.map_err(crate::CarbideError::from)?;
+        txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
         candidate_nsg = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, true).await?;
         current_vpc = db::vpc::find_by_with_lock(
             &mut txn,
             ObjectColumnFilter::One(vpc::IdColumn, &vpc_update.id),
             db::vpc::VpcRowLock::Mutation,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .pop()
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "Vpc",
@@ -288,8 +299,10 @@ pub(crate) async fn update(
         .await?;
     }
     vpc_update.if_version_match = Some(current_vpc.version);
-    let vpc = db::vpc::update(&vpc_update, &mut txn).await?;
-    txn.commit().await?;
+    let vpc = db::vpc::update(&vpc_update, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::VpcUpdateResult {
         vpc: Some(vpc_to_rpc(vpc, api.runtime_config.fnn.as_ref())),
@@ -401,10 +414,11 @@ pub(crate) async fn change_routing_profile(
     log_request_data(&request);
     let change =
         ChangeVpcRoutingProfile::try_from(request.into_inner()).map_err(CarbideError::from)?;
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let observed_vpc =
         db::vpc::find_by(&mut txn, ObjectColumnFilter::One(vpc::IdColumn, &change.id))
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .pop();
     let candidate = observed_vpc.as_ref().map(|vpc| {
         let mut candidate = vpc.clone();
@@ -437,14 +451,17 @@ pub(crate) async fn change_routing_profile(
         _ => false,
     };
     if needs_overlap_check {
-        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
     let vpc = db::vpc::find_by_with_lock(
         txn.as_mut(),
         ObjectColumnFilter::One(vpc::IdColumn, &change.id),
         db::vpc::VpcRowLock::Mutation,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop()
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "Vpc",
@@ -486,7 +503,9 @@ pub(crate) async fn change_routing_profile(
                 kind: "routing_profile",
                 id: source_name.to_string(),
             })?;
-    let tenant = db::tenant::find(&vpc.config.tenant_organization_id, true, &mut txn).await?;
+    let tenant = db::tenant::find(&vpc.config.tenant_organization_id, true, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     // Authorize only the destination. Checking the source's entitlement could
     // prevent correcting an already overly permissive VPC.
     let destination = resolve_vpc_routing(
@@ -524,7 +543,10 @@ pub(crate) async fn change_routing_profile(
         )
         .into());
     }
-    if !db::resource_pool::pool_has_rows(&mut txn, destination_pool.name()).await? {
+    if !db::resource_pool::pool_has_rows(&mut txn, destination_pool.name())
+        .await
+        .map_err(crate::CarbideError::from)?
+    {
         return Err(CarbideError::FailedPrecondition(format!(
             "destination pool `{}` has no materialized values",
             destination_pool.name(),
@@ -536,7 +558,8 @@ pub(crate) async fn change_routing_profile(
         &api.common_pools.ethernet.pool_vpc_vni,
         &api.common_pools.ethernet.pool_external_vpc_vni,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     {
         return Err(CarbideError::FailedPrecondition(format!(
             "internal and external VNI pools overlap at VNI `{vni}`",
@@ -578,7 +601,9 @@ pub(crate) async fn change_routing_profile(
     // A pool can contain values that inspection supports but cleanup cannot
     // release. Reject them here, rolling back any newly allocated value.
     validate_transition_vni(destination_vni)?;
-    let updated = db::vpc::change_routing_profile(&change, &mut txn, destination_vni).await?;
+    let updated = db::vpc::change_routing_profile(&change, &mut txn, destination_vni)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let state = vpc_routing_state(
         updated,
         VpcVniAllocations {
@@ -587,7 +612,7 @@ pub(crate) async fn change_routing_profile(
             inactive: Some((allocations.active_pool, allocations.active_vni)),
         },
     )?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(Response::new(state))
 }
 
@@ -698,13 +723,14 @@ pub(crate) async fn release_inactive_vni(
         .into());
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let mut vpc = db::vpc::find_by_with_lock(
         txn.as_mut(),
         ObjectColumnFilter::One(vpc::IdColumn, &vpc_id),
         db::vpc::VpcRowLock::Mutation,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop()
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "Vpc",
@@ -728,9 +754,11 @@ pub(crate) async fn release_inactive_vni(
                     "released VPC VNI cannot be represented by the RPC API".to_string(),
                 )
             })?;
-    vpc.version = db::vpc::increment_vpc_version(&mut txn, vpc_id, expected_version).await?;
+    vpc.version = db::vpc::increment_vpc_version(&mut txn, vpc_id, expected_version)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::VpcReleaseInactiveVniResult {
         vpc: Some(vpc_to_rpc(vpc, api.runtime_config.fnn.as_ref())),
@@ -837,14 +865,15 @@ pub(crate) async fn update_virtualization(
 ) -> Result<Response<rpc::VpcUpdateVirtualizationResult>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let mut updater = UpdateVpcVirtualization::try_from(request.into_inner())?;
     let observed_vpc = db::vpc::find_by(
         &mut txn,
         ObjectColumnFilter::One(vpc::IdColumn, &updater.id),
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop();
     let needs_overlap_check = observed_vpc.as_ref().is_some_and(|vpc| {
         super::vpc_peering::vpc_type_change_expands_receivers(
@@ -854,7 +883,9 @@ pub(crate) async fn update_virtualization(
         )
     });
     if needs_overlap_check {
-        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
 
     // Serialize this transition with VpcPrefix creation. A tenant-managed
@@ -865,7 +896,8 @@ pub(crate) async fn update_virtualization(
         ObjectColumnFilter::One(db::vpc::IdColumn, &updater.id),
         db::vpc::VpcRowLock::Mutation,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop()
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "vpc",
@@ -892,15 +924,18 @@ pub(crate) async fn update_virtualization(
     {
         // The type changed while we waited. Drop the VPC lock before taking
         // the overlap lock; the final read and transition stay together.
-        txn.rollback().await?;
-        txn = api.txn_begin().await?;
-        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        txn.rollback().await.map_err(crate::CarbideError::from)?;
+        txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
         current_vpc = db::vpc::find_by_with_lock(
             &mut txn,
             ObjectColumnFilter::One(vpc::IdColumn, &updater.id),
             db::vpc::VpcRowLock::Mutation,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .pop()
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "vpc",
@@ -926,7 +961,9 @@ pub(crate) async fn update_virtualization(
             .map_err(|error| CarbideError::FailedPrecondition(error.to_string()))?;
     }
     if updater.network_virtualization_type != VpcVirtualizationType::Fnn
-        && db::vpc_prefix::has_tenant_managed_site_prefix(&mut txn, current_vpc.id).await?
+        && db::vpc_prefix::has_tenant_managed_site_prefix(&mut txn, current_vpc.id)
+            .await
+            .map_err(crate::CarbideError::from)?
     {
         return Err(CarbideError::FailedPrecondition(
             "a VPC with tenant-managed SitePrefix address space must remain FNN".to_string(),
@@ -943,7 +980,8 @@ pub(crate) async fn update_virtualization(
             instance_type_id: None,
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     if !instances.is_empty() {
         return Err(CarbideError::internal(format!(
@@ -954,19 +992,23 @@ pub(crate) async fn update_virtualization(
     }
     let previous_sources =
         if check_retained_overlap && !api.runtime_config.tenant_prefix_overlap_enabled {
-            let mut receivers = db::vpc_peering::get_vpc_peer_ids(&mut txn, updater.id).await?;
+            let mut receivers = db::vpc_peering::get_vpc_peer_ids(&mut txn, updater.id)
+                .await
+                .map_err(crate::CarbideError::from)?;
             receivers.push(updater.id);
             super::vpc_peering::receiver_sources_before_change(api, &mut txn, &receivers).await?
         } else {
             vec![]
         };
-    db::vpc::update_virtualization(&updater, &mut txn).await?;
+    db::vpc::update_virtualization(&updater, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     if check_retained_overlap {
         super::vpc_peering::validate_vpc_type_change(api, &mut txn, updater.id, &previous_sources)
             .await?;
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::VpcUpdateVirtualizationResult {}))
 }
@@ -977,7 +1019,7 @@ pub(crate) async fn delete(
 ) -> Result<Response<rpc::VpcDeletionResult>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // TODO: This needs to validate that nothing references the VPC anymore
     // (like NetworkSegments)
@@ -991,7 +1033,8 @@ pub(crate) async fn delete(
         ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_id),
         db::vpc::VpcRowLock::Mutation,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop()
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "vpc",
@@ -1013,7 +1056,8 @@ pub(crate) async fn delete(
             &owner_id,
         )
         .await
-        .map_err(db::DatabaseError::from)?
+        .map_err(db::DatabaseError::from)
+        .map_err(crate::CarbideError::from)?
         {
             if owned_allocation.is_some() || Some(vni) != vpc.status.vni {
                 return Err(CarbideError::FailedPrecondition(format!(
@@ -1024,7 +1068,11 @@ pub(crate) async fn delete(
         }
     }
 
-    if db::vpc::try_delete(&mut txn, vpc_id).await?.is_none() {
+    if db::vpc::try_delete(&mut txn, vpc_id)
+        .await
+        .map_err(crate::CarbideError::from)?
+        .is_none()
+    {
         // Release an allocation only when this transaction deleted the VPC.
         return Err(CarbideError::NotFoundError {
             kind: "vpc",
@@ -1035,13 +1083,17 @@ pub(crate) async fn delete(
 
     if let Some((pool, vni)) = owned_allocation {
         // The ownership lookup above keeps the allocation locked until commit.
-        db::resource_pool::release(pool, &mut txn, vni).await?;
+        db::resource_pool::release(pool, &mut txn, vni)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
 
     // Delete associated VPC peerings
-    db::vpc_peering::delete_by_vpc_id(&mut txn, vpc_id).await?;
+    db::vpc_peering::delete_by_vpc_id(&mut txn, vpc_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::VpcDeletionResult {}))
 }
@@ -1054,7 +1106,9 @@ pub(crate) async fn find_ids(
 
     let filter: model::vpc::VpcSearchFilter = request.into_inner().into();
 
-    let vpc_ids = db::vpc::find_ids(&api.database_connection, filter).await?;
+    let vpc_ids = db::vpc::find_ids(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::VpcIdList { vpc_ids }))
 }
@@ -1092,7 +1146,8 @@ pub(crate) async fn find_by_ids(
                 .map(|vpc| vpc_to_rpc(vpc, api.runtime_config.fnn.as_ref()))
                 .collect(),
         })
-        .map(Response::new)?;
+        .map(Response::new)
+        .map_err(crate::CarbideError::from)?;
 
     Ok(result)
 }
@@ -1107,7 +1162,7 @@ pub(crate) async fn get_routing_state(
         .id
         .ok_or(CarbideError::MissingArgument("id"))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     // Keep the VPC lock until both allocation reads finish. Otherwise cleanup
     // could commit between reads and pair an old version with newer ownership.
     let vpc = db::vpc::find_by_with_lock(
@@ -1115,7 +1170,8 @@ pub(crate) async fn get_routing_state(
         ObjectColumnFilter::One(vpc::IdColumn, &vpc_id),
         db::vpc::VpcRowLock::Mutation,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop()
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "Vpc",
@@ -1123,7 +1179,7 @@ pub(crate) async fn get_routing_state(
     })?;
     let allocations = find_vpc_vni_allocations(api, &mut txn, &vpc).await?;
     let state = vpc_routing_state(vpc, allocations)?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(Response::new(state))
 }
 

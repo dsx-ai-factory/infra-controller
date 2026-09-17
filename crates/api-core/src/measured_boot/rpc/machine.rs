@@ -40,7 +40,7 @@ pub(crate) async fn handle_attest_candidate_machine(
     api: &Api,
     req: AttestCandidateMachineRequest,
 ) -> Result<AttestCandidateMachineResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let report = db::measured_boot::report::new(
         &mut txn,
         MachineId::from_str(&req.machine_id).map_err(|_| {
@@ -53,7 +53,7 @@ pub(crate) async fn handle_attest_candidate_machine(
         message: format!("failed saving measurements: {e}"),
     })?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(AttestCandidateMachineResponse {
         report: Some(report.into()),
     })
@@ -64,7 +64,7 @@ pub(crate) async fn handle_show_candidate_machine(
     api: &Api,
     req: ShowCandidateMachineRequest,
 ) -> Result<ShowCandidateMachineResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let machine = match req.selector {
         // Show a machine with the given ID.
         Some(show_candidate_machine_request::Selector::MachineId(machine_uuid)) => {
@@ -83,7 +83,7 @@ pub(crate) async fn handle_show_candidate_machine(
         None => return Err(CarbideError::InvalidArgument("selector required".to_string()).into()),
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(ShowCandidateMachineResponse {
         machine: Some(machine.into()),

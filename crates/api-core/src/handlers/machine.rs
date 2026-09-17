@@ -80,8 +80,9 @@ pub(crate) async fn find_machine_ids(
 
     let search_config = request.into_inner().try_into()?;
 
-    let machine_ids =
-        db::machine::find_machine_ids(&api.database_connection, search_config).await?;
+    let machine_ids = db::machine::find_machine_ids(&api.database_connection, search_config)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(::rpc::common::MachineIdList {
         machine_ids: machine_ids.into_iter().collect(),
@@ -98,7 +99,8 @@ pub(crate) async fn find_machine_ids_by_bmc_ips(
         &api.database_connection,
         request.into_inner().bmc_ips,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let rpc_pairs = rpc::MachineIdBmcIpPairs {
         pairs: pairs
             .into_iter()
@@ -119,7 +121,7 @@ pub(crate) async fn find_machines_by_ids(
     log_request_data(&request);
     let request = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let machine_ids = request.machine_ids;
 
@@ -144,9 +146,10 @@ pub(crate) async fn find_machines_by_ids(
             host_health_config: api.runtime_config.host_health,
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let sla_config = model::machine::slas::MachineSlaConfig::new(
         api.runtime_config
@@ -180,14 +183,15 @@ pub(crate) async fn find_machine_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let results = db::state_history::find_by_object_ids(
         &mut txn,
         db::state_history::StateHistoryTableId::Machine,
         &machine_ids,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let mut response = rpc::MachineStateHistories::default();
     for (machine_id, records) in results {
@@ -199,7 +203,7 @@ pub(crate) async fn find_machine_state_histories(
         );
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(response))
 }
@@ -229,11 +233,13 @@ pub(crate) async fn machine_set_auto_update(
 
     let request = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let machine_id: MachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
     let Some(_machine) =
-        db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default()).await?
+        db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default())
+            .await
+            .map_err(crate::CarbideError::from)?
     else {
         return Err(CarbideError::NotFoundError {
             kind: "machine",
@@ -247,9 +253,11 @@ pub(crate) async fn machine_set_auto_update(
         rpc::machine_set_auto_update_request::SetAutoupdateAction::Disable => Some(false),
         rpc::machine_set_auto_update_request::SetAutoupdateAction::Clear => None,
     };
-    db::machine::set_firmware_autoupdate(&mut txn, &machine_id, state).await?;
+    db::machine::set_firmware_autoupdate(&mut txn, &machine_id, state)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::MachineSetAutoUpdateResponse {}))
 }
@@ -289,9 +297,11 @@ pub(crate) async fn update_machine_metadata(
         None => machine.version,
     };
 
-    db::machine::update_metadata(&mut txn, &machine_id, expected_version, metadata).await?;
+    db::machine::update_metadata(&mut txn, &machine_id, expected_version, metadata)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }
@@ -573,9 +583,12 @@ pub(crate) async fn admin_force_delete_machine(
     response.initial_lockdown_state = "".to_string();
     response.machine_unlocked = false;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let machine = match db::machine::find_by_query(&mut txn, query).await? {
+    let machine = match db::machine::find_by_query(&mut txn, query)
+        .await
+        .map_err(crate::CarbideError::from)?
+    {
         Some(machine) => machine,
         None => {
             // If the machine was already deleted, then there is nothing to do
@@ -619,8 +632,9 @@ pub(crate) async fn admin_force_delete_machine(
     let dpu_machines;
     match machine.id.host_or_dpu_id() {
         HostOrDpuId::Dpu(dpu_machine_id) => {
-            if let Some(host) =
-                db::machine::find_host_by_dpu_machine_id(&mut txn, &dpu_machine_id).await?
+            if let Some(host) = db::machine::find_host_by_dpu_machine_id(&mut txn, &dpu_machine_id)
+                .await
+                .map_err(crate::CarbideError::from)?
             {
                 tracing::info!(
                     host_machine_id = %host.id,
@@ -630,7 +644,9 @@ pub(crate) async fn admin_force_delete_machine(
                 // Get all DPUs attached to this host, in case there are more than one.
                 let host_machine_id = host.id;
                 dpu_machines =
-                    db::machine::find_dpus_by_host_machine_id(&mut txn, &host_machine_id).await?;
+                    db::machine::find_dpus_by_host_machine_id(&mut txn, &host_machine_id)
+                        .await
+                        .map_err(crate::CarbideError::from)?;
                 host_machine = Some(host);
             } else {
                 host_machine = None;
@@ -640,8 +656,9 @@ pub(crate) async fn admin_force_delete_machine(
             }
         }
         HostOrDpuId::Host(host_machine_id) => {
-            dpu_machines =
-                db::machine::find_dpus_by_host_machine_id(&mut txn, &host_machine_id).await?;
+            dpu_machines = db::machine::find_dpus_by_host_machine_id(&mut txn, &host_machine_id)
+                .await
+                .map_err(crate::CarbideError::from)?;
             tracing::info!(
                 dpu_machine_ids = ?dpu_machines.iter().map(|m| &m.id).collect::<Vec<_>>(),
                 "Found DPU machines",
@@ -707,8 +724,11 @@ pub(crate) async fn admin_force_delete_machine(
             &ManagedHostState::ForceDeletion,
             None,
         )
-        .await?;
-        let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
+        let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id)
+            .await
+            .map_err(crate::CarbideError::from)?;
         if let Some(instance_id) = &instance_id {
             response.instance_id = instance_id.to_string();
         }
@@ -723,7 +743,8 @@ pub(crate) async fn admin_force_delete_machine(
             &ManagedHostState::ForceDeletion,
             None,
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
     }
 
     if let Some(instance_id) = instance_id {
@@ -739,7 +760,7 @@ pub(crate) async fn admin_force_delete_machine(
 
     // Commit the transaction to make the the ForceDeletion state visible to other consumers, and to
     // avoid holding a long-running transaction while we issue redfish calls.
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Note: The following deletion steps are all ordered in an idempotent fashion
     if let Some(instance_id) = instance_id {
@@ -946,11 +967,13 @@ pub(crate) async fn get_dpu_info_list(
 ) -> Result<Response<rpc::GetDpuInfoListResponse>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let dpu_list = db::machine::find_dpu_infos(&mut txn).await?;
+    let dpu_list = db::machine::find_dpu_infos(&mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let response = rpc::GetDpuInfoListResponse {
         dpu_list: dpu_list.into_iter().map(rpc::DpuInfo::from).collect(),
@@ -1026,14 +1049,15 @@ pub(crate) async fn get_machine_position_info(
         )
         .into());
     }
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Translate the machine IDs to BMC IPs.
     // Note: Machines without linked BMC interfaces will be silently omitted from the result,
     // consistent with how find_machines_by_ids handles missing machines.
     let pairs =
         db::machine_topology::find_machine_bmc_pairs_by_machine_id(&mut txn, request.machine_ids)
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     // Find the explored endpoints for those BMC IPs
     let explored_endpoints = db::explored_endpoints::find_by_ips(
@@ -1059,8 +1083,9 @@ pub(crate) async fn get_machine_position_info(
             })
             .collect(),
     )
-    .await?;
-    txn.commit().await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Redo the explored endpoints into a hashmap based on the IP address
     let as_hashmap = explored_endpoints
@@ -1104,11 +1129,13 @@ pub(crate) async fn update_machine_nv_link_info(
 
     let nvlink_info = MachineNvLinkInfo::try_from(nvlink_info).map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    db::machine::update_nvlink_info(&mut txn, &machine_id, nvlink_info).await?;
+    db::machine::update_nvlink_info(&mut txn, &machine_id, nvlink_info)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }

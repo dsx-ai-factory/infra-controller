@@ -78,12 +78,13 @@ pub(crate) async fn create(
     }
 
     // Start a new transaction for a db write.
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Write a new instance type to the DB and get back
     // our new InstanceType.
-    let instance_type =
-        instance_type::create(&mut txn, &id, &metadata, &desired_capabilities).await?;
+    let instance_type = instance_type::create(&mut txn, &id, &metadata, &desired_capabilities)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     // Prepare the response to send back
     let rpc_out = rpc::CreateInstanceTypeResponse {
@@ -91,7 +92,7 @@ pub(crate) async fn create(
     };
 
     //  Commit our txn if nothing has gone wrong so far.
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back.
     Ok(Response::new(rpc_out))
@@ -103,15 +104,17 @@ pub(crate) async fn find_ids(
 ) -> Result<Response<rpc::FindInstanceTypeIdsResponse>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let instance_type_ids = instance_type::find_ids(&mut txn, false).await?;
+    let instance_type_ids = instance_type::find_ids(&mut txn, false)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let rpc_out = rpc::FindInstanceTypeIdsResponse {
         instance_type_ids: instance_type_ids.iter().map(|i| i.to_string()).collect(),
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc_out))
 }
@@ -149,10 +152,12 @@ pub(crate) async fn find_by_ids(
     }
 
     // Prepare our txn to grab the instance types from the DB
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Make our DB query for the IDs to get our instance types
-    let instance_types = instance_type::find_by_ids(&mut txn, &instance_type_ids, false).await?;
+    let instance_types = instance_type::find_by_ids(&mut txn, &instance_type_ids, false)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let rpc_instance_types = if !req.include_allocation_stats {
         instance_types
@@ -162,7 +167,9 @@ pub(crate) async fn find_by_ids(
     } else {
         // Get the machine and instance details for the instance types
         let instance_type_association_details =
-            instance_type::get_association_details(&mut txn, &instance_type_ids).await?;
+            instance_type::get_association_details(&mut txn, &instance_type_ids)
+                .await
+                .map_err(crate::CarbideError::from)?;
 
         // Get the sum of the active allocations for the instance type.
         let total_allocations = compute_allocation::sum_allocations(
@@ -178,7 +185,8 @@ pub(crate) async fn find_by_ids(
                 .as_ref(),
             false,
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
 
         let mut rpc_instance_types = Vec::<rpc::InstanceType>::new();
 
@@ -243,7 +251,7 @@ pub(crate) async fn find_by_ids(
     };
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back
     Ok(Response::new(rpc_out))
@@ -288,7 +296,7 @@ pub(crate) async fn update(
     }
 
     // Start a new transaction for a db write.
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Look up the instance type.  We'll need to check the current
     // version. We could probably do everything with a single query
@@ -297,7 +305,9 @@ pub(crate) async fn update(
     // because their instance type wasn't found or because the version
     // didn't match.  We'll need to also bump the version, anyway.
     let mut current_instance_type =
-        instance_type::find_by_ids(&mut txn, std::slice::from_ref(&id), true).await?;
+        instance_type::find_by_ids(&mut txn, std::slice::from_ref(&id), true)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     // If we found more than one, the DB is corrupt.
     if current_instance_type.len() > 1 {
@@ -339,7 +349,9 @@ pub(crate) async fn update(
     // should not be updated.  This is another one that could be a subquery, but
     // we want the caller to know the actual reason for failure.
     let existing_associated_machines =
-        db::machine::find_ids_by_instance_type_id(&mut txn, &id, true).await?;
+        db::machine::find_ids_by_instance_type_id(&mut txn, &id, true)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     // Forge-cloud allows users to change metadata changes (name, description, and label),
     // so we'll need to allow the same here.
@@ -363,7 +375,8 @@ pub(crate) async fn update(
         &desired_capabilities,
         current_instance_type.version,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Prepare the response to send back
     let rpc_out = rpc::UpdateInstanceTypeResponse {
@@ -371,7 +384,7 @@ pub(crate) async fn update(
     };
 
     // Commit our txn if nothing has gone wrong so far.
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back.
     Ok(Response::new(rpc_out))
@@ -392,7 +405,7 @@ pub(crate) async fn delete(
         })?;
 
     // Prepare our txn to delete from the DB
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Look for any related machines.  Forge-Cloud provides users with
     // the behavior of removing all machine associations to an InstanceType for machines
@@ -402,7 +415,9 @@ pub(crate) async fn delete(
     //  This will also grab a row lock on the requested machines so we can
     // coordinate with the instance allocation handler.
     let existing_associated_machines =
-        db::machine::find_ids_by_instance_type_id(&mut txn, &id, true).await?;
+        db::machine::find_ids_by_instance_type_id(&mut txn, &id, true)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     // Check that there are no associated instances for the machines.
     let instances = instance::find_by_machine_ids(
@@ -412,7 +427,8 @@ pub(crate) async fn delete(
             .map(|v| &v.0)
             .collect::<Vec<_>>(),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     if !instances.is_empty() {
         return Err(CarbideError::FailedPrecondition(format!(
@@ -429,16 +445,19 @@ pub(crate) async fn delete(
             .map(|v| (&v.0, &v.1))
             .collect::<Vec<_>>(),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Make our DB query to soft delete the instance type
-    instance_type::soft_delete(&mut txn, &id).await?;
+    instance_type::soft_delete(&mut txn, &id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     // Prepare the response message
     let rpc_out = rpc::DeleteInstanceTypeResponse {};
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back
     Ok(Response::new(rpc_out))
@@ -475,11 +494,13 @@ pub(crate) async fn associate_machines(
         })?;
 
     // Prepare our txn to associate machines with the instance type
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Query the DB to make sure the instance type is valid/active.
     let instance_types =
-        instance_type::find_by_ids(&mut txn, std::slice::from_ref(&instance_type_id), true).await?;
+        instance_type::find_by_ids(&mut txn, std::slice::from_ref(&instance_type_id), true)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     if instance_types.is_empty() {
         return Err(CarbideError::NotFoundError {
@@ -507,7 +528,9 @@ pub(crate) async fn associate_machines(
 
     // Query the DB to make sure the instance type is valid/active.
     let instance_types =
-        instance_type::find_by_ids(&mut txn, std::slice::from_ref(&instance_type_id), true).await?;
+        instance_type::find_by_ids(&mut txn, std::slice::from_ref(&instance_type_id), true)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     if instance_types.len() > 1 {
         return Err(CarbideError::Internal {
@@ -535,14 +558,17 @@ pub(crate) async fn associate_machines(
             ..MachineSearchConfig::default()
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Check that there are no associated instances for the machines.
     // I expected machine.has_instance() to handle this, but the data
     // that drives that doesn't seem to get persisted until sometime in
     // the future after an instance is created in the DB.
     let instances =
-        instance::find_by_machine_ids(&mut txn, &machine_ids.iter().collect::<Vec<_>>()).await?;
+        instance::find_by_machine_ids(&mut txn, &machine_ids.iter().collect::<Vec<_>>())
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     if !instances.is_empty() {
         return Err(CarbideError::FailedPrecondition(
@@ -579,7 +605,8 @@ pub(crate) async fn associate_machines(
         &instance_type_id,
         &machine_versions,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     if ids.len() != machine_versions.len() {
         tracing::error!(
@@ -593,7 +620,7 @@ pub(crate) async fn associate_machines(
     let rpc_out = rpc::AssociateMachinesWithInstanceTypeResponse {};
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back
     Ok(Response::new(rpc_out))
@@ -612,7 +639,7 @@ pub(crate) async fn remove_machine_association(
         .map_err(|e| CarbideError::from(RpcDataConversionError::InvalidMachineId(e.to_string())))?;
 
     // Prepare our txn to associate machines with the instance type
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Grab a row lock on the requested machine so we can
     // coordinate with the instance allocation handler and
@@ -625,7 +652,8 @@ pub(crate) async fn remove_machine_association(
             ..MachineSearchConfig::default()
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let Some(machine) = machines.pop() else {
         return Err(CarbideError::NotFoundError {
@@ -636,7 +664,9 @@ pub(crate) async fn remove_machine_association(
     };
 
     // Check that there are no associated instances for the machines.
-    let instances = instance::find_by_machine_ids(&mut txn, &[&machine_id]).await?;
+    let instances = instance::find_by_machine_ids(&mut txn, &[&machine_id])
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     if let Some(instance) = instances.first()
         && instance.deleted.is_none()
@@ -652,7 +682,9 @@ pub(crate) async fn remove_machine_association(
         // Query the DB for the instance type so that we can use a row-level lock for coordination.
         // We need this so that ComputeAllocation additions and updates that increase allocations can't exceed the number
         // of machines associated with a type.
-        instance_type::find_by_ids(&mut txn, std::slice::from_ref(instance_type_id), true).await?;
+        instance_type::find_by_ids(&mut txn, std::slice::from_ref(instance_type_id), true)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
         // Check that removing the machine from the instance-type won't cause the number of machines associated with the instance-type
         // to drop below the total number of allocations for the instance-type.
@@ -663,7 +695,8 @@ pub(crate) async fn remove_machine_association(
             &mut txn,
             std::slice::from_ref(instance_type_id),
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .get(instance_type_id)
         .ok_or_else(|| CarbideError::Internal {
             message: format!(
@@ -681,7 +714,8 @@ pub(crate) async fn remove_machine_association(
             None,
             false,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .get(instance_type_id)
         .copied();
 
@@ -720,14 +754,15 @@ pub(crate) async fn remove_machine_association(
             &mut txn,
             &[(&machine.id, &machine.version)],
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
     }
 
     // Prepare the response message
     let rpc_out = rpc::RemoveMachineInstanceTypeAssociationResponse {};
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Send our response back
     Ok(Response::new(rpc_out))

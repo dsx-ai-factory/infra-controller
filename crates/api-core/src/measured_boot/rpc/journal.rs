@@ -43,7 +43,7 @@ pub(crate) async fn handle_delete_measurement_journal(
     api: &Api,
     req: DeleteMeasurementJournalRequest,
 ) -> Result<DeleteMeasurementJournalResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let journal = db::measured_boot::journal::delete_where_id(
         &mut txn,
         req.journal_id
@@ -58,7 +58,7 @@ pub(crate) async fn handle_delete_measurement_journal(
         id: "unknown".into(),
     })?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(DeleteMeasurementJournalResponse {
         journal: Some(journal.into()),
     })
@@ -70,7 +70,7 @@ pub(crate) async fn handle_show_measurement_journal(
     api: &Api,
     req: ShowMeasurementJournalRequest,
 ) -> Result<ShowMeasurementJournalResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let journal = match req.selector {
         Some(selector) => match selector {
             show_measurement_journal_request::Selector::JournalId(journal_id) => {
@@ -105,7 +105,7 @@ pub(crate) async fn handle_show_measurement_journal(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(ShowMeasurementJournalResponse {
         journal: Some(journal.into()),
@@ -136,7 +136,7 @@ pub(crate) async fn handle_list_measurement_journal(
     api: &Api,
     req: ListMeasurementJournalRequest,
 ) -> Result<ListMeasurementJournalResponse, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let journals: Vec<MeasurementJournalRecordPb> = match &req.selector {
         Some(list_measurement_journal_request::Selector::MachineId(machine_id)) => {
@@ -164,7 +164,7 @@ pub(crate) async fn handle_list_measurement_journal(
             .collect(),
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(ListMeasurementJournalResponse { journals })
 }

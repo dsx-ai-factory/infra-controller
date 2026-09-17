@@ -184,7 +184,9 @@ pub(crate) async fn get_configuration(
                 tenant_identity_config::find(&org_id, txn.as_mut()).await
             })
         })
-        .await??;
+        .await
+        .map_err(crate::CarbideError::from)?
+        .map_err(crate::CarbideError::from)?;
 
     let cfg = match cfg {
         Some(c) => c,
@@ -249,7 +251,9 @@ pub(crate) async fn delete_configuration(
                 Ok::<_, db::DatabaseError>(deleted)
             })
         })
-        .await??;
+        .await
+        .map_err(crate::CarbideError::from)?
+        .map_err(crate::CarbideError::from)?;
 
     if !deleted {
         return Err(CarbideError::NotFoundError {
@@ -307,7 +311,9 @@ pub(crate) async fn set_configuration(
                 async move { tenant_identity_config::find(&org_id_for_find, txn.as_mut()).await },
             )
         })
-        .await??;
+        .await
+        .map_err(crate::CarbideError::from)?
+        .map_err(crate::CarbideError::from)?;
 
     validate_identity_overlap_for_rotation(&config)
         .map_err(|e: IdentityConfigValidationError| CarbideError::InvalidArgument(e.0))?;
@@ -359,7 +365,9 @@ pub(crate) async fn set_configuration(
                 Ok(cfg)
             })
         })
-        .await??;
+        .await
+        .map_err(crate::CarbideError::from)?
+        .map_err(crate::CarbideError::from)?;
 
     let signing_keys = tenant_identity_signing_keys_response(&cfg)?;
 
@@ -413,7 +421,9 @@ pub(crate) async fn get_token_delegation(
         .with_txn(|txn| {
             Box::pin(async move { tenant_identity_config::find(&org_id, txn.as_mut()).await })
         })
-        .await??;
+        .await
+        .map_err(crate::CarbideError::from)?
+        .map_err(crate::CarbideError::from)?;
 
     let cfg = match cfg {
         Some(c) => c,
@@ -481,7 +491,9 @@ pub(crate) async fn set_token_delegation(
                 async move { tenant_identity_config::find(&org_id_for_find, txn.as_mut()).await },
             )
         })
-        .await??
+        .await
+        .map_err(crate::CarbideError::from)?
+        .map_err(crate::CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "tenant_identity_config",
             id: org_id.as_str().to_string(),
@@ -522,7 +534,9 @@ pub(crate) async fn set_token_delegation(
                 Ok(cfg)
             })
         })
-        .await??;
+        .await
+        .map_err(crate::CarbideError::from)?
+        .map_err(crate::CarbideError::from)?;
 
     let cfg = tenant_identity_with_decrypted_token_delegation(&api.credential_manager, cfg).await?;
     Ok(Response::new(cfg.try_into().map_err(CarbideError::from)?))
@@ -562,7 +576,9 @@ pub(crate) async fn delete_token_delegation(
                 Ok::<_, db::DatabaseError>(())
             })
         })
-        .await??;
+        .await
+        .map_err(crate::CarbideError::from)?
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -837,7 +853,8 @@ pub(crate) async fn reencrypt_tenant_identity_secrets(
     let org_ids = {
         let mut db = api.db_reader();
         tenant_identity_config::list_organization_ids_for_reencrypt(org_filter.as_ref(), &mut db)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
     };
 
     let mut response = ReencryptTenantIdentitySecretsResponse {
@@ -853,7 +870,10 @@ pub(crate) async fn reencrypt_tenant_identity_secrets(
 
     for org_id in org_ids {
         let mut db = api.db_reader();
-        let Some(row) = tenant_identity_config::find(&org_id, &mut db).await? else {
+        let Some(row) = tenant_identity_config::find(&org_id, &mut db)
+            .await
+            .map_err(crate::CarbideError::from)?
+        else {
             return Err(CarbideError::NotFoundError {
                 kind: "tenant_identity_config",
                 id: org_id.as_str().to_string(),
@@ -907,7 +927,9 @@ pub(crate) async fn reencrypt_tenant_identity_secrets(
                             Ok::<(), db::DatabaseError>(())
                         })
                     })
-                    .await??;
+                    .await
+                    .map_err(crate::CarbideError::from)?
+                    .map_err(crate::CarbideError::from)?;
             }
         } else {
             response.rows_skipped_all_on_target += 1;

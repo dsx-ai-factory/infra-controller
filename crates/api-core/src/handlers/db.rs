@@ -26,13 +26,15 @@ pub(crate) async fn trim_table(
 ) -> Result<Response<rpc::TrimTableResponse>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let target: model::trim_table::TrimTableTarget = request.get_ref().target().into();
     let total_deleted =
-        db::trim_table::trim_table(&mut txn, target, request.get_ref().keep_entries).await?;
+        db::trim_table::trim_table(&mut txn, target, request.get_ref().keep_entries)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::TrimTableResponse {
         total_deleted: total_deleted.to_string(),

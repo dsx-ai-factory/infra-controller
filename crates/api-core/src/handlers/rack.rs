@@ -93,7 +93,9 @@ pub(crate) async fn find_ids(
 
     let filter: model::rack::RackSearchFilter = request.into_inner().into();
 
-    let rack_ids = db::rack::find_ids(&api.database_connection, filter).await?;
+    let rack_ids = db::rack::find_ids(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::RackIdList { rack_ids }))
 }
@@ -118,13 +120,14 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let racks = db::rack::find_by(
         &mut txn,
         ObjectColumnFilter::List(db::rack::IdColumn, &rack_ids),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let mut result = Vec::with_capacity(racks.len());
     for rack in racks {
@@ -156,7 +159,7 @@ pub(crate) async fn find_rack_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let results = db::state_history::find_by_object_ids(
         &mut txn,
@@ -176,7 +179,7 @@ pub(crate) async fn find_rack_state_histories(
         );
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(response))
 }
@@ -230,7 +233,8 @@ pub(crate) async fn delete_rack(
         }
         .boxed()
     })
-    .await??;
+    .await
+    .map_err(crate::CarbideError::from)??;
     Ok(Response::new(()))
 }
 
@@ -280,7 +284,7 @@ pub(crate) async fn admin_force_delete_rack(
         .rack_id
         .ok_or_else(|| CarbideError::InvalidArgument("rack_id is required".to_string()))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let rack_list = db_rack::find_by(
         &mut txn,
@@ -301,7 +305,7 @@ pub(crate) async fn admin_force_delete_rack(
         .await
         .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     delete_rack_maintenance_access_token_after_force_delete(
         api.credential_manager.as_ref(),
@@ -378,7 +382,7 @@ pub(crate) async fn insert_rack_health_report(
     };
     let mode: HealthReportApplyMode = mode.into();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let rack = db_rack::find_by(
         &mut txn,
@@ -405,9 +409,11 @@ pub(crate) async fn insert_rack_health_report(
         Err(e) => return Err(e.into()),
     }
 
-    db_rack::insert_health_report(&mut txn, &rack.id, mode, &report).await?;
+    db_rack::insert_health_report(&mut txn, &rack.id, mode, &report)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     if let Some(handle) = api.bms_client.get() {
         handle.update_rack_leak_state(&rack.id, &report).await;
@@ -425,7 +431,7 @@ pub(crate) async fn remove_rack_health_report(
     let rpc::RemoveRackHealthReportRequest { rack_id, source } = request.into_inner();
     let rack_id = rack_id.ok_or_else(|| CarbideError::MissingArgument("rack_id"))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let rack = db_rack::find_by(
         &mut txn,
@@ -440,7 +446,7 @@ pub(crate) async fn remove_rack_health_report(
     })?;
 
     remove_rack_override_by_source(&rack, &mut txn, source).await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -558,7 +564,7 @@ pub(crate) async fn update_rack_metadata(
     };
     metadata.validate(true).map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let rack = db_rack::find_by(
         &mut txn,
@@ -577,9 +583,11 @@ pub(crate) async fn update_rack_metadata(
         None => rack.version,
     };
 
-    db_rack::update_metadata(&mut txn, &rack_id, expected_version, metadata).await?;
+    db_rack::update_metadata(&mut txn, &rack_id, expected_version, metadata)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }
@@ -652,7 +660,7 @@ pub(crate) async fn terminate_rack_maintenance(
         .rack_id
         .ok_or_else(|| CarbideError::InvalidArgument("rack_id is required".into()))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     if !db_rack::lock_for_update(txn.as_mut(), &rack_id)
         .await
         .map_err(CarbideError::from)?
@@ -690,7 +698,7 @@ pub(crate) async fn terminate_rack_maintenance(
             .await
             .map_err(CarbideError::from)?;
     }
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // The database request is durable before external credential cleanup. The
     // rack controller will still terminate if the credential store is unavailable.

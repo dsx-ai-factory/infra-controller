@@ -53,8 +53,10 @@ pub(crate) async fn create(
     let peer_vpc_id =
         peer_vpc_id.ok_or_else(|| CarbideError::MissingArgument("peer_vpc_id cannot be null"))?;
 
-    let mut txn = api.txn_begin().await?;
-    ::db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    ::db::tenant_prefix_overlap::lock_checks(&mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let checks_required = super::tenant_prefix_overlap::checks_required(api, &mut txn).await?;
 
     // Check this VPC peering is permitted under current site vpc_peering_policy
@@ -63,8 +65,9 @@ pub(crate) async fn create(
             return Err(CarbideError::internal("VPC peering feature disabled".to_string()).into());
         }
         Some(VpcPeeringPolicy::Exclusive) => {
-            let vpcs1 =
-                vpc::find_by(&mut txn, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id)).await?;
+            let vpcs1 = vpc::find_by(&mut txn, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id))
+                .await
+                .map_err(crate::CarbideError::from)?;
             let vpc1 = vpcs1.first().ok_or_else(|| CarbideError::NotFoundError {
                 kind: "VPC",
                 id: vpc_id.to_string(),
@@ -73,7 +76,8 @@ pub(crate) async fn create(
                 &mut txn,
                 ObjectColumnFilter::One(vpc::IdColumn, &peer_vpc_id),
             )
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
             let vpc2 = vpcs2.first().ok_or_else(|| CarbideError::NotFoundError {
                 kind: "VPC",
                 id: peer_vpc_id.to_string(),
@@ -97,7 +101,9 @@ pub(crate) async fn create(
     } else {
         vec![]
     };
-    let vpc_peering = db::create(&mut txn, vpc_id, peer_vpc_id, id).await?;
+    let vpc_peering = db::create(&mut txn, vpc_id, peer_vpc_id, id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     if checks_required {
         // Only these two receivers gain a source. Peers do not re-export
@@ -113,7 +119,7 @@ pub(crate) async fn create(
         .await?;
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(vpc_peering.into()))
 }
@@ -282,11 +288,13 @@ pub(crate) async fn find_ids(
 
     let rpc::VpcPeeringSearchFilter { vpc_id } = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let vpc_peering_ids = db::find_ids(&mut txn, vpc_id).await?;
+    let vpc_peering_ids = db::find_ids(&mut txn, vpc_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(rpc::VpcPeeringIdList {
         vpc_peering_ids,
@@ -301,11 +309,13 @@ pub(crate) async fn find_by_ids(
 
     let rpc::VpcPeeringsByIdsRequest { vpc_peering_ids } = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let vpc_peerings = db::find_by_ids(&mut txn, vpc_peering_ids).await?;
+    let vpc_peerings = db::find_by_ids(&mut txn, vpc_peering_ids)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let vpc_peerings = vpc_peerings.into_iter().map(Into::into).collect();
 
@@ -322,11 +332,13 @@ pub(crate) async fn delete(
 
     let id = id.ok_or_else(|| CarbideError::MissingArgument("id cannot be null"))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let _ = db::delete(&mut txn, id).await?;
+    let _ = db::delete(&mut txn, id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(rpc::VpcPeeringDeletionResult {}))
 }

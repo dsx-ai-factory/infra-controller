@@ -232,7 +232,7 @@ pub(crate) async fn create(
                     });
                 }
             }
-            return Err(e.into());
+            return Err(CarbideError::from(e).into());
         }
     };
 
@@ -294,11 +294,12 @@ pub(crate) async fn update(
         && (req.service_name.as_deref().is_some_and(|s| !s.is_empty())
             || req.description.is_some());
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // We lock the extension service for update so that no other request can update the service
-    let current_service_res =
-        extension_service::find_by_ids(&mut txn, &[service_id], false, true).await?;
+    let current_service_res = extension_service::find_by_ids(&mut txn, &[service_id], false, true)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let current_service = match current_service_res.len() {
         0 => {
             return Err(CarbideError::NotFoundError {
@@ -336,11 +337,13 @@ pub(crate) async fn update(
             req.service_name.as_deref(),
             req.description.as_deref(),
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-        let latest_version_row =
-            extension_service::find_version_info(&mut txn, service_id, None).await?;
-        txn.commit().await?;
+        let latest_version_row = extension_service::find_version_info(&mut txn, service_id, None)
+            .await
+            .map_err(crate::CarbideError::from)?;
+        txn.commit().await.map_err(crate::CarbideError::from)?;
 
         (updated_service, latest_version_row)
     } else {
@@ -348,7 +351,7 @@ pub(crate) async fn update(
             ExtensionServiceType::DpfHelmChart => {
                 let result =
                     update_dpf_helm_chart(&mut txn, service_id, current_service, &req).await?;
-                txn.commit().await?;
+                txn.commit().await.map_err(crate::CarbideError::from)?;
                 result
             }
             ExtensionServiceType::KubernetesPod => {
@@ -391,8 +394,9 @@ async fn update_dpf_helm_chart(
 
     validate_extension_service_data_size(&req.data)?;
     let parsed_data = parse_dpf_helm_chart_data(&req.data)?;
-    let existing_v1 =
-        extension_service::find_version_info_of_known_service(txn, service_id, None).await?;
+    let existing_v1 = extension_service::find_version_info_of_known_service(txn, service_id, None)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let parsed_existing = parse_dpf_helm_chart_data(&existing_v1.data)?;
     if parsed_data == parsed_existing {
         return Err(CarbideError::InvalidArgument(
@@ -416,7 +420,8 @@ async fn update_dpf_helm_chart(
         current_service.version_ctr,
         controller_state_version_change,
     )
-    .await?)
+    .await
+    .map_err(crate::CarbideError::from)?)
 }
 
 /// Creates a new Kubernetes Pod service version after validating any Vault
@@ -428,8 +433,10 @@ async fn update_kubernetes_pod(
     current_service: &ExtensionService,
     req: rpc::UpdateDpuExtensionServiceRequest,
 ) -> Result<(ExtensionService, ExtensionServiceVersionInfo), Status> {
-    let latest_version = extension_service::find_version_info(&mut txn, service_id, None).await?;
-    txn.commit().await?;
+    let latest_version = extension_service::find_version_info(&mut txn, service_id, None)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     validate_extension_service_data_size(&req.data)?;
     validate_pod_spec_file(&req.data)?;
@@ -537,7 +544,7 @@ async fn update_kubernetes_pod(
                     });
                 }
             }
-            Err(error.into())
+            Err(CarbideError::from(error).into())
         }
     }
 }
@@ -548,8 +555,9 @@ async fn updated_extension_service_response(
     updated_service: ExtensionService,
     latest_version: ExtensionServiceVersionInfo,
 ) -> Result<Response<rpc::DpuExtensionService>, Status> {
-    let versions =
-        extension_service::find_all_versions(&api.database_connection, service_id).await?;
+    let versions = extension_service::find_all_versions(&api.database_connection, service_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let lifecycle_status = ::rpc::model::extension_service::lifecycle_status(
         updated_service.status.controller_state.value,
         updated_service.status.controller_state.version,
@@ -594,7 +602,7 @@ pub(crate) async fn delete(
         ))
     })?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Parse versions from strings to ConfigVersion
     let versions: Vec<config_version::ConfigVersion> = req
@@ -614,8 +622,9 @@ pub(crate) async fn delete(
     // Include a soft-deleted DPF Helm service so a retry can acknowledge an
     // already accepted deletion while its external finalization is pending.
     // The Kubernetes Pod deletion path still rejects soft-deleted services.
-    let current_service_res =
-        extension_service::find_by_ids(&mut txn, &[service_id], true, true).await?;
+    let current_service_res = extension_service::find_by_ids(&mut txn, &[service_id], true, true)
+        .await
+        .map_err(crate::CarbideError::from)?;
     match current_service_res.len() {
         0 => {
             return Err(CarbideError::NotFoundError {
@@ -637,13 +646,13 @@ pub(crate) async fn delete(
     match &current_service.service_type {
         ExtensionServiceType::DpfHelmChart => {
             delete_dpf_helm_chart(&mut txn, service_id, current_service, &versions).await?;
-            txn.commit().await?;
+            txn.commit().await.map_err(crate::CarbideError::from)?;
         }
         ExtensionServiceType::KubernetesPod => {
             let credential_versions =
                 delete_kubernetes_pod(&mut txn, service_id, current_service, &versions).await?;
 
-            txn.commit().await?;
+            txn.commit().await.map_err(crate::CarbideError::from)?;
 
             // Delete credentials from Vault for the deleted versions that had credentials
             // Note: This happens after the transaction commit, so it's best-effort cleanup
@@ -705,10 +714,14 @@ async fn delete_dpf_helm_chart(
     let controller_state = service.status.controller_state.value;
     let version: ConfigVersion =
         extension_service::find_version_info_of_known_service(txn, service_id, None)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .version;
 
-    if extension_service::is_service_in_use(txn, service_id, &[version], true).await? {
+    if extension_service::is_service_in_use(txn, service_id, &[version], true)
+        .await
+        .map_err(crate::CarbideError::from)?
+    {
         return Err(CarbideError::FailedPrecondition(
             "extension service is in use by instances; detach before deleting".into(),
         )
@@ -722,7 +735,8 @@ async fn delete_dpf_helm_chart(
         &controller_state,
         service.status.controller_state.version,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     Ok(())
 }
@@ -743,7 +757,10 @@ async fn delete_kubernetes_pod(
     }
 
     // A soft-deleted, terminating instance counts as in use.
-    if extension_service::is_service_in_use(txn, service_id, versions, true).await? {
+    if extension_service::is_service_in_use(txn, service_id, versions, true)
+        .await
+        .map_err(crate::CarbideError::from)?
+    {
         return Err(CarbideError::FailedPrecondition(
             "one or more extension service version is in use by instances; detach it, or wait for \
              instance deletion to complete, before deleting"
@@ -753,14 +770,18 @@ async fn delete_kubernetes_pod(
     }
 
     let credential_versions =
-        extension_service::find_versions_with_credentials(txn, service_id, versions).await?;
+        extension_service::find_versions_with_credentials(txn, service_id, versions)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
-    let deleted_versions =
-        extension_service::soft_delete_versions(txn, service_id, versions).await?;
+    let deleted_versions = extension_service::soft_delete_versions(txn, service_id, versions)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     if !deleted_versions.is_empty() {
         if extension_service::find_all_versions(&mut *txn, service_id)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .is_empty()
         {
             extension_service::soft_delete_service(
@@ -768,9 +789,12 @@ async fn delete_kubernetes_pod(
                 service_id,
                 service.status.controller_state.version,
             )
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
         } else {
-            extension_service::set_updated_timestamp(txn, service_id).await?;
+            extension_service::set_updated_timestamp(txn, service_id)
+                .await
+                .map_err(crate::CarbideError::from)?;
         }
     }
 
@@ -811,7 +835,7 @@ pub(crate) async fn find_ids(
         }
     };
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let ids = extension_service::find_ids(
         &mut txn,
@@ -821,9 +845,10 @@ pub(crate) async fn find_ids(
         false,
         false,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::DpuExtensionServiceIdList {
         service_ids: ids.into_iter().map(|id| id.to_string()).collect(),
@@ -850,13 +875,13 @@ pub(crate) async fn find_by_ids(
         ids.push(id);
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let snapshots = extension_service::find_snapshots_by_ids(&mut txn, &ids)
         .await
-        .map_err(Status::from)?;
+        .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let services_resp = snapshots
         .into_iter()
@@ -892,7 +917,7 @@ pub(crate) async fn get_versions_info(
         })?
         .none_if_empty();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let service_id = req.service_id.parse::<ExtensionServiceId>().map_err(|e| {
         CarbideError::from(RpcDataConversionError::InvalidUuid(
@@ -905,9 +930,9 @@ pub(crate) async fn get_versions_info(
     let versions_opt = versions.as_deref();
     let versions = extension_service::find_versions_info(&mut txn, &service_id, versions_opt)
         .await
-        .map_err(Status::from)?;
+        .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::DpuExtensionServiceVersionInfoList {
         version_infos: versions.into_iter().map(|version| version.into()).collect(),
@@ -947,11 +972,13 @@ pub(crate) async fn find_instances_by_extension_service(
         })
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Verify extension service exists
     let extension_service_res =
-        extension_service::find_by_ids(&mut txn, &[service_id], false, false).await?;
+        extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+            .await
+            .map_err(crate::CarbideError::from)?;
     match extension_service_res.len() {
         0 => {
             return Err(CarbideError::NotFoundError {
@@ -971,7 +998,9 @@ pub(crate) async fn find_instances_by_extension_service(
 
     // Find instances that have this extension service (and optionally a specific version)
     // in its db extension services config
-    let instances = instance::find_by_extension_service(&mut txn, service_id, version).await?;
+    let instances = instance::find_by_extension_service(&mut txn, service_id, version)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let mut instance_infos: Vec<rpc::InstanceDpuExtensionServiceInfo> = Vec::new();
 
     for instance in instances {
@@ -1001,7 +1030,7 @@ pub(crate) async fn find_instances_by_extension_service(
         }
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(
         rpc::FindInstancesByDpuExtensionServiceResponse {

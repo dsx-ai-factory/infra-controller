@@ -31,18 +31,19 @@ pub(crate) async fn list_machine_health_reports(
     api: &Api,
     machine_id: Request<MachineId>,
 ) -> Result<Response<rpc::ListHealthReportResponse>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let machine_id: MachineId = convert_and_log_machine_id(Some(&machine_id.into_inner()))?;
 
     let machine = db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default())
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
         })?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::ListHealthReportResponse {
         health_report_entries: machine
@@ -120,9 +121,10 @@ pub(crate) async fn insert_machine_health_report(
         return Err(CarbideError::InvalidArgument("mode".to_string()).into());
     };
     let mode: HealthReportApplyMode = mode.into();
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let machine = db::machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default())
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
@@ -143,9 +145,11 @@ pub(crate) async fn insert_machine_health_report(
         Err(e) => return Err(e.into()),
     }
 
-    db::machine::insert_health_report(&mut txn, &machine_id, mode, &report, false).await?;
+    db::machine::insert_health_report(&mut txn, &machine_id, mode, &report, false)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -154,13 +158,13 @@ pub(crate) async fn remove_machine_health_report(
     api: &Api,
     request: Request<rpc::RemoveMachineHealthReportRequest>,
 ) -> Result<Response<()>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let rpc::RemoveMachineHealthReportRequest { machine_id, source } = request.into_inner();
     let machine_id = convert_and_log_machine_id(machine_id.as_ref())?;
 
     remove_by_source(&mut txn, machine_id, source).await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -203,11 +207,12 @@ where
         .transpose()
         .map_err(|_| CarbideError::InvalidArgument("invalid end_time timestamp".to_string()))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let results =
         db::health_history::find_by_object_ids(&mut txn, table_id, &ids, start_time, end_time)
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     let mut response = rpc::HealthHistories::default();
     for (object_id, records) in results {
@@ -219,7 +224,7 @@ where
         );
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(response))
 }

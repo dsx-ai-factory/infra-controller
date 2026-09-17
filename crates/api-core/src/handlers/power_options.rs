@@ -33,14 +33,15 @@ pub(crate) async fn get_power_options(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let power_options = if req.machine_id.is_empty() {
         db::power_options::get_all(&mut txn).await
     } else {
         db::power_options::get_by_ids(&req.machine_id, &mut txn).await
-    }?;
+    }
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::PowerOptionResponse {
         response: power_options
@@ -63,9 +64,11 @@ pub(crate) async fn update_power_option(
 
     log_machine_id(&machine_id);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let current_power_state = db::power_options::get_by_ids(&[machine_id], &mut txn).await?;
+    let current_power_state = db::power_options::get_by_ids(&[machine_id], &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     // This should never happen until machine is not forced-deleted or does not exist.
     let Some(current_power_options) = current_power_state.first() else {
@@ -85,7 +88,8 @@ pub(crate) async fn update_power_option(
                 host_health_config: api.runtime_config.host_health,
             },
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or(CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
@@ -124,9 +128,10 @@ pub(crate) async fn update_power_option(
         &current_power_options.desired_power_state_version,
         &mut txn,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::PowerOptionResponse {
         response: vec![updated_value.into()],
@@ -186,7 +191,8 @@ pub(crate) async fn determine_machine_ingestion_state(
     // now check if we have an entry in explored_managed_hosts
     let explored_managed_hosts =
         db::explored_managed_host::find_by_ips(txn.as_mut(), vec![explored_endpoint.address])
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     if !explored_managed_hosts.is_empty() {
         let machine_created = db::machine::find_id_by_bmc_ip(&mut txn, &explored_endpoint.address)
@@ -220,7 +226,7 @@ pub(crate) async fn allow_ingestion_and_power_on(
     )?)
     .map_err(CarbideError::MacAddressParseError)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let explored_endpoint = match find_explored_endpoint(&mut txn, &mac_address).await? {
         FindExploredEndpoint::Found(explored_endpoint) => *explored_endpoint,
@@ -248,9 +254,10 @@ pub(crate) async fn allow_ingestion_and_power_on(
         false,
         &mut txn,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }

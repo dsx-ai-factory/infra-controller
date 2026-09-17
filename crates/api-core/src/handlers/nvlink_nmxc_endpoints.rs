@@ -26,9 +26,11 @@ pub(crate) async fn list_nvlink_nmxc_endpoints(
     request: Request<()>,
 ) -> Result<Response<rpc::NvlinkNmxcEndpointList>, Status> {
     log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
-    let rows = db::nvlink_nmxc_endpoints::find_all(&mut txn).await?;
-    txn.commit().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    let rows = db::nvlink_nmxc_endpoints::find_all(&mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(Response::new(rpc::NvlinkNmxcEndpointList {
         entries: rows.into_iter().map(Into::into).collect(),
     }))
@@ -46,11 +48,11 @@ pub(crate) async fn create_nvlink_nmxc_endpoint(
     if inner.endpoint.is_empty() {
         return Err(Status::invalid_argument("endpoint must not be empty"));
     }
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let row = db::nvlink_nmxc_endpoints::create(&mut txn, &inner.chassis_serial, &inner.endpoint)
         .await
         .map_err(CarbideError::from)?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(Response::new(row.into()))
 }
 
@@ -66,10 +68,12 @@ pub(crate) async fn update_nvlink_nmxc_endpoint(
     if inner.endpoint.is_empty() {
         return Err(Status::invalid_argument("endpoint must not be empty"));
     }
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let updated =
-        db::nvlink_nmxc_endpoints::update(&mut txn, &inner.chassis_serial, &inner.endpoint).await?;
-    txn.commit().await?;
+        db::nvlink_nmxc_endpoints::update(&mut txn, &inner.chassis_serial, &inner.endpoint)
+            .await
+            .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     let Some(row) = updated else {
         return Err(Status::not_found(
             "nvlink_nmxc_endpoints: no row for chassis_serial",
@@ -87,9 +91,11 @@ pub(crate) async fn delete_nvlink_nmxc_endpoint(
     if inner.chassis_serial.is_empty() {
         return Err(Status::invalid_argument("chassis_serial must not be empty"));
     }
-    let mut txn = api.txn_begin().await?;
-    let deleted = db::nvlink_nmxc_endpoints::delete(&mut txn, &inner.chassis_serial).await?;
-    txn.commit().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    let deleted = db::nvlink_nmxc_endpoints::delete(&mut txn, &inner.chassis_serial)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     if !deleted {
         return Err(Status::not_found(
             "nvlink_nmxc_endpoints: no row for chassis_serial",

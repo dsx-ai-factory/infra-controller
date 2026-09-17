@@ -97,7 +97,8 @@ pub(crate) async fn cleanup_machine_completed(
                 source: failure_source,
             },
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
     } else {
         // Cleanup succeeded or was skipped (field not present means scout skipped it)
         if cleanup_info.nvme.is_none() {
@@ -113,10 +114,12 @@ pub(crate) async fn cleanup_machine_completed(
             );
         }
         // Update cleanup time on success
-        db::machine::update_cleanup_time(&machine, &mut txn).await?;
+        db::machine::update_cleanup_time(&machine, &mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // State handler should mark Machine as Adopted and reboot host for bios/bmc lockdown.
     // Wake it up
@@ -180,13 +183,16 @@ pub(crate) async fn forge_agent_control(
     let dpu_machine_id = carbide_uuid::machine::DpuMachineId::try_from(machine.id);
     let host_machine = if let Ok(dpu_machine_id) = &dpu_machine_id {
         db::machine::find_host_by_dpu_machine_id(&mut txn, dpu_machine_id)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .ok_or(CarbideError::NotFoundError {
                 kind: "machine",
                 id: machine_id.to_string(),
             })?
     } else {
-        db::machine::update_scout_contact_time(&machine_id, &mut txn).await?;
+        db::machine::update_scout_contact_time(&machine_id, &mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
         machine
             .clone()
             .try_into()
@@ -229,7 +235,9 @@ pub(crate) async fn forge_agent_control(
                 );
                 if *is_enabled {
                     if let Some(machine_validation) =
-                        db::machine_validation::mark_in_progress_if_active(&mut txn, id).await?
+                        db::machine_validation::mark_in_progress_if_active(&mut txn, id)
+                            .await
+                            .map_err(crate::CarbideError::from)?
                     {
                         (
                             Action::MachineValidation(fac::MachineValidation {
@@ -332,7 +340,7 @@ pub(crate) async fn forge_agent_control(
                 instance_state: InstanceState::WaitingForDpaToBeReady,
             } => {
                 // Commit the transaction now, to avoid holding across an unrelated await point
-                txn.commit().await?;
+                txn.commit().await.map_err(crate::CarbideError::from)?;
                 match crate::handlers::svpc::process_scout_req(
                     api,
                     machine_id.try_into().map_err(CarbideError::from)?,
@@ -355,7 +363,7 @@ pub(crate) async fn forge_agent_control(
             // the DPA state machine so scout runs the tenant-free
             // RotateKeyUnlocking -> RotateKeyLocking cycle for each card.
             ManagedHostState::RotatingNicLockdown => {
-                txn.commit().await?;
+                txn.commit().await.map_err(crate::CarbideError::from)?;
                 match crate::handlers::svpc::process_scout_req(
                     api,
                     machine_id.try_into().map_err(CarbideError::from)?,
@@ -380,7 +388,7 @@ pub(crate) async fn forge_agent_control(
                         deconfiguring_state: DeconfiguringHostState::WaitForSuperNicLockdown,
                     },
             } => {
-                txn.commit().await?;
+                txn.commit().await.map_err(crate::CarbideError::from)?;
                 match crate::handlers::svpc::process_scout_req(
                     api,
                     machine_id.try_into().map_err(CarbideError::from)?,
@@ -457,7 +465,7 @@ pub(crate) async fn forge_agent_control(
     );
 
     if let Some(txn) = maybe_pending_txn {
-        txn.commit().await?;
+        txn.commit().await.map_err(crate::CarbideError::from)?;
     }
 
     Ok(Response::new(
@@ -530,9 +538,11 @@ pub(crate) async fn reboot_completed(
 
     record_reboot_duration_metric(&api.metric_emitter, &machine);
 
-    db::machine::update_reboot_time(&machine, &mut txn).await?;
+    db::machine::update_reboot_time(&machine, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // Wake up the state handler for the machine
     // Don't do it for DPUs - state handlers only run on hosts

@@ -260,8 +260,10 @@ pub(crate) async fn create(
         return Err(CarbideError::InvalidArgument(msg).into());
     }
 
-    let mut txn = api.txn_begin().await?;
-    ::db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    ::db::tenant_prefix_overlap::lock_checks(txn.as_mut())
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     // Resolve and lock the exact SitePrefix before locking the VPC. The shared
     // row lock permits concurrent child creation but conflicts with retirement
@@ -269,7 +271,8 @@ pub(crate) async fn create(
     let selected_site_prefix = if let Some(site_prefix_id) = new_prefix.site_prefix_id {
         Some(
             ::db::site_prefix::find_by_id_for_vpc_prefix_attachment(&mut txn, site_prefix_id)
-                .await?
+                .await
+                .map_err(crate::CarbideError::from)?
                 .ok_or_else(|| CarbideError::NotFoundError {
                     kind: "site prefix",
                     id: site_prefix_id.to_string(),
@@ -279,20 +282,24 @@ pub(crate) async fn create(
         // Reconciliation uses the corresponding exclusive namespace lock.
         // Take the shared form before reading so a concurrent first operator
         // root cannot be missed when there is not yet a row to lock.
-        ::db::site_prefix::lock_operator_managed_site_prefix_attachments(&mut txn).await?;
+        ::db::site_prefix::lock_operator_managed_site_prefix_attachments(&mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
         let mut candidates =
             ::db::site_prefix::find_legacy_operator_managed_for_vpc_prefix_attachment(
                 &mut txn,
                 new_prefix.config.prefix,
             )
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
         match candidates.len() {
             0 => {
                 let vpc = ::db::vpc::find_by(
                     &mut txn,
                     ObjectColumnFilter::One(::db::vpc::IdColumn, &new_prefix.vpc_id),
                 )
-                .await?
+                .await
+                .map_err(crate::CarbideError::from)?
                 .pop()
                 .ok_or_else(|| CarbideError::NotFoundError {
                     kind: "vpc",
@@ -302,14 +309,16 @@ pub(crate) async fn create(
                     &vpc.config.tenant_organization_id,
                     &mut txn,
                 )
-                .await?;
+                .await
+                .map_err(crate::CarbideError::from)?;
                 let tenant_managed =
                     ::db::site_prefix::find_containing_tenant_managed_for_vpc_prefix_attachment(
                         &mut txn,
                         new_prefix.config.prefix,
                         &vpc.config.tenant_organization_id,
                     )
-                    .await?;
+                    .await
+                    .map_err(crate::CarbideError::from)?;
                 if !tenant_managed.is_empty() {
                     return Err(CarbideError::FailedPrecondition(format!(
                         "the VPC prefix {} is contained by a tenant-managed SitePrefix; specify site_prefix_id explicitly",
@@ -338,7 +347,8 @@ pub(crate) async fn create(
         ObjectColumnFilter::One(::db::vpc::IdColumn, &new_prefix.vpc_id),
         ::db::vpc::VpcRowLock::Mutation,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let vpc = vpcs.first().ok_or_else(|| CarbideError::NotFoundError {
         kind: "vpc",
         id: new_prefix.vpc_id.to_string(),
@@ -369,7 +379,9 @@ pub(crate) async fn create(
     }
     let expected_vpc_version = vpc.version;
 
-    let conflicting_vpc_prefixes = db::probe(new_prefix.config.prefix, &mut txn).await?;
+    let conflicting_vpc_prefixes = db::probe(new_prefix.config.prefix, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     validate_vpc_prefix_overlaps(
         api,
         &mut txn,
@@ -388,7 +400,9 @@ pub(crate) async fn create(
     )
     .await?;
 
-    let segment_prefixes = db::probe_segment_prefixes(new_prefix.config.prefix, &mut txn).await?;
+    let segment_prefixes = db::probe_segment_prefixes(new_prefix.config.prefix, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let segment_prefixes = adoptable_segment_prefixes(segment_prefixes, new_prefix.vpc_id)?;
 
     // Check that the network segment prefixes we found can actually fit into
@@ -412,7 +426,9 @@ pub(crate) async fn create(
         .validate(true)
         .map_err(CarbideError::from)?;
 
-    let vpc_prefix = db::persist(new_prefix, expected_vpc_version, &mut txn).await?;
+    let vpc_prefix = db::persist(new_prefix, expected_vpc_version, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let vpc_prefix_id = vpc_prefix.id;
     let vpc_prefix_network = vpc_prefix.config.prefix;
 
@@ -424,7 +440,8 @@ pub(crate) async fn create(
             &vpc_prefix_id,
             &vpc_prefix_network,
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
     }
 
     // Reload through the normal read path so create responses include computed utilization stats.
@@ -433,13 +450,14 @@ pub(crate) async fn create(
         ObjectColumnFilter::One(db::IdColumn, &vpc_prefix_id),
         model::DeletedFilter::Exclude,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop()
     .ok_or_else(|| {
         CarbideError::internal(format!("created VPC prefix {vpc_prefix_id} was not found"))
     })?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(vpc_prefix.into()))
 }
@@ -492,7 +510,7 @@ pub(crate) async fn search(
         })
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let vpc_prefix_ids = db::search(
         &mut txn,
@@ -504,9 +522,10 @@ pub(crate) async fn search(
             deleted_filter: model::DeletedFilter::from(deleted),
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(rpc::VpcPrefixIdList {
         vpc_prefix_ids,
@@ -531,16 +550,17 @@ pub(crate) async fn get(
         return Err(CarbideError::InvalidArgument(msg).into());
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let vpc_prefixes = db::get_by_id(
         &mut txn,
         ObjectColumnFilter::List(db::IdColumn, vpc_prefix_ids.as_slice()),
         model::DeletedFilter::from(deleted),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let vpc_prefixes: Vec<_> = vpc_prefixes.into_iter().map(rpc::VpcPrefix::from).collect();
     Ok(tonic::Response::new(rpc::VpcPrefixList { vpc_prefixes }))
@@ -568,13 +588,14 @@ pub(crate) async fn find_state_histories(
     }
 
     // Fetch state-history rows through the generic state-history DB API.
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let results = ::db::state_history::find_by_object_ids(
         &mut txn,
         ::db::state_history::StateHistoryTableId::VpcPrefix,
         &vpc_prefix_ids,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Re-key the DB records into the generic RPC response shape.
     let mut response = rpc::StateHistories::default();
@@ -587,7 +608,7 @@ pub(crate) async fn find_state_histories(
         );
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(tonic::Response::new(response))
 }
 
@@ -599,16 +620,18 @@ pub(crate) async fn update(
 
     let update_prefix = vpc_prefix::UpdateVpcPrefix::try_from(request.into_inner())?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     update_prefix
         .metadata
         .validate(true)
         .map_err(CarbideError::from)?;
 
-    let updated = db::update(&update_prefix, &mut txn).await?;
+    let updated = db::update(&update_prefix, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(updated.into()))
 }
@@ -621,7 +644,7 @@ pub(crate) async fn delete(
 
     let delete_prefix = vpc_prefix::DeleteVpcPrefix::try_from(request.into_inner())?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Load the active prefix so repeat deletes preserve current NotFound
     // behavior unless the DB layer deliberately makes soft-delete idempotent.
@@ -630,7 +653,8 @@ pub(crate) async fn delete(
         ObjectColumnFilter::One(db::IdColumn, &delete_prefix.id),
         model::DeletedFilter::Exclude,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let vpc_prefix = vpc_prefixes
         .first()
         .ok_or_else(|| CarbideError::NotFoundError {
@@ -643,7 +667,8 @@ pub(crate) async fn delete(
         ObjectColumnFilter::One(::db::vpc::IdColumn, &vpc_prefix.vpc_id),
         ::db::vpc::VpcRowLock::Mutation,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let vpc = vpcs.first().ok_or_else(|| CarbideError::NotFoundError {
         kind: "vpc",
         id: vpc_prefix.vpc_id.to_string(),
@@ -651,9 +676,11 @@ pub(crate) async fn delete(
 
     // Mark the prefix deleted and let the lifecycle controller wait for any
     // network-prefix references to drain before hard-deleting the row.
-    db::mark_as_deleted(&delete_prefix, vpc.version, &mut txn).await?;
+    db::mark_as_deleted(&delete_prefix, vpc.version, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(rpc::VpcPrefixDeletionResult {}))
 }

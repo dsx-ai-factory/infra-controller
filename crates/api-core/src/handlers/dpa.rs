@@ -34,15 +34,16 @@ pub(crate) async fn create(
     }
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let new_dpa =
         db::dpa_interface::persist(NewDpaInterface::try_from(request.into_inner())?, &mut txn)
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     let dpa_out: rpc::forge::DpaInterface = new_dpa.into();
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(dpa_out))
 }
@@ -98,9 +99,11 @@ pub(crate) async fn delete(
     ))?;
 
     // Prepare our txn to grab the NetworkSecurityGroups from the DB
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let dpa_ifs_int = db::dpa_interface::find_by_ids(&mut txn, &[id], false).await?;
+    let dpa_ifs_int = db::dpa_interface::find_by_ids(&mut txn, &[id], false)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let dpa_if_int = match dpa_ifs_int.len() {
         1 => dpa_ifs_int[0].clone(),
@@ -112,9 +115,11 @@ pub(crate) async fn delete(
         }
     };
 
-    db::dpa_interface::delete(dpa_if_int, &mut txn).await?;
+    db::dpa_interface::delete(dpa_if_int, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(::rpc::forge::DpaInterfaceDeletionResult {}))
 }
@@ -125,7 +130,9 @@ pub(crate) async fn get_all_ids(
 ) -> Result<Response<::rpc::forge::DpaInterfaceIdList>, Status> {
     log_request_data(&request);
 
-    let ids = db::dpa_interface::find_ids(&api.database_connection).await?;
+    let ids = db::dpa_interface::find_ids(&api.database_connection)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(::rpc::forge::DpaInterfaceIdList { ids }))
 }
@@ -155,7 +162,8 @@ pub(crate) async fn find_dpa_interfaces_by_ids(
 
     let dpa_ifs_int =
         db::dpa_interface::find_by_ids(&api.database_connection, &req.ids, req.include_history)
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     let rpc_dpa_ifs = dpa_ifs_int
         .into_iter()

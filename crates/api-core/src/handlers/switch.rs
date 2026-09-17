@@ -157,7 +157,9 @@ pub(crate) async fn find_ids(
 
     let filter: model::switch::SwitchSearchFilter = request.into_inner().into();
 
-    let switch_ids = db_switch::find_ids(&api.database_connection, filter).await?;
+    let switch_ids = db_switch::find_ids(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::SwitchIdList { ids: switch_ids }))
 }
@@ -182,13 +184,14 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let switch_list = db_switch::find_by(
         &mut txn,
         ObjectColumnFilter::List(db_switch::IdColumn, &switch_ids),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     let endpoint_info_map: std::collections::HashMap<_, _> =
         db_switch::find_switch_endpoints_by_ids(&mut txn, &switch_ids)
@@ -245,7 +248,7 @@ pub(crate) async fn find_switch_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let results = db::state_history::find_by_object_ids(
         &mut txn,
@@ -265,7 +268,7 @@ pub(crate) async fn find_switch_state_histories(
         );
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(response))
 }
@@ -293,9 +296,10 @@ pub(crate) async fn decommission_switch(
         .into());
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let switch = db::switch::find_by_id(&mut txn, &switch_id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "switch",
             id: switch_id.to_string(),
@@ -309,8 +313,9 @@ pub(crate) async fn decommission_switch(
     }
 
     if let Some(rack_id) = switch.rack_id.as_ref() {
-        let assigned_hosts =
-            db::managed_host::find_assigned_hosts_in_rack(&mut txn, rack_id).await?;
+        let assigned_hosts = db::managed_host::find_assigned_hosts_in_rack(&mut txn, rack_id)
+            .await
+            .map_err(crate::CarbideError::from)?;
         if !assigned_hosts.is_empty() {
             let assignments = assigned_hosts
                 .iter()
@@ -324,8 +329,10 @@ pub(crate) async fn decommission_switch(
         }
     }
 
-    db_switch::set_decommission_requested(&mut txn, switch_id).await?;
-    txn.commit().await?;
+    db_switch::set_decommission_requested(&mut txn, switch_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::DecommissionSwitchResponse {}))
 }
@@ -414,7 +421,7 @@ pub(crate) async fn admin_force_delete_switch(
         .switch_id
         .ok_or_else(|| CarbideError::InvalidArgument("switch_id is required".to_string()))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Verify the switch exists.
     let switch_list = db_switch::find_by(
@@ -478,7 +485,7 @@ pub(crate) async fn admin_force_delete_switch(
         .await
         .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::AdminForceDeleteSwitchResponse {
         switch_id: switch_id.to_string(),
@@ -506,7 +513,7 @@ pub(crate) async fn update_switch_metadata(
     };
     metadata.validate(true).map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let switches = db_switch::find_by(
         &mut txn,
@@ -528,9 +535,11 @@ pub(crate) async fn update_switch_metadata(
         None => switch.version,
     };
 
-    db_switch::update_metadata(&mut txn, &switch_id, expected_version, metadata).await?;
+    db_switch::update_metadata(&mut txn, &switch_id, expected_version, metadata)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }
@@ -603,7 +612,7 @@ pub(crate) async fn insert_switch_health_report(
     };
     let mode: HealthReportApplyMode = mode.into();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let switch = db_switch::find_by_id(&mut txn, &switch_id)
         .await
@@ -626,9 +635,11 @@ pub(crate) async fn insert_switch_health_report(
         Err(e) => return Err(e.into()),
     }
 
-    db_switch::insert_health_report(&mut txn, &switch_id, mode, &report).await?;
+    db_switch::insert_health_report(&mut txn, &switch_id, mode, &report)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -642,7 +653,7 @@ pub(crate) async fn remove_switch_health_report(
     let rpc::RemoveSwitchHealthReportRequest { switch_id, source } = request.into_inner();
     let switch_id = switch_id.ok_or_else(|| CarbideError::MissingArgument("switch_id"))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let switch = db_switch::find_by_id(&mut txn, &switch_id)
         .await
@@ -653,7 +664,7 @@ pub(crate) async fn remove_switch_health_report(
         })?;
 
     remove_switch_health_report_by_source(&switch, &mut txn, source).await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }

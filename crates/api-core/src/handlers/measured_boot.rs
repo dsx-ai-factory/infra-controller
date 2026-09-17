@@ -50,7 +50,9 @@ pub(super) async fn create_attest_key_bind_challenge(
     let (cli_cred_blob, cli_secret) =
         attest::measured_boot::cli_make_cred(ek_pub_rsa, &attest_key_info.ak_name, &secret_bytes)?;
 
-    secret_ak_pub::insert(txn, &Vec::from(secret_bytes), &attest_key_info.ak_pub).await?;
+    secret_ak_pub::insert(txn, &Vec::from(secret_bytes), &attest_key_info.ak_pub)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(rpc_forge::AttestKeyBindChallenge {
         cred_blob: cli_cred_blob,

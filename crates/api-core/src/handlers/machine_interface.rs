@@ -35,14 +35,22 @@ pub(crate) async fn find_interfaces(
 ) -> Result<Response<rpc::InterfaceList>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let rpc::InterfaceSearchQuery { id, ip } = request.into_inner();
 
     let interfaces: Vec<rpc::MachineInterface> = match (id, ip) {
-        (Some(id), _) => vec![db::machine_interface::find_one(&mut txn, id).await?.into()],
+        (Some(id), _) => vec![
+            db::machine_interface::find_one(&mut txn, id)
+                .await
+                .map_err(crate::CarbideError::from)?
+                .into(),
+        ],
         (None, Some(ip)) => match IpAddr::from_str(ip.as_ref()) {
-            Ok(ip) => match db::machine_interface::find_by_ip(&mut txn, ip).await? {
+            Ok(ip) => match db::machine_interface::find_by_ip(&mut txn, ip)
+                .await
+                .map_err(crate::CarbideError::from)?
+            {
                 Some(interface) => vec![interface.into()],
                 None => {
                     return Err(CarbideError::internal(format!(
@@ -63,11 +71,11 @@ pub(crate) async fn find_interfaces(
                 .into_iter()
                 .map(|i| i.into())
                 .collect_vec(),
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(CarbideError::from(error).into()),
         },
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::InterfaceList { interfaces }))
 }
@@ -78,7 +86,7 @@ pub(crate) async fn delete_interface(
 ) -> Result<Response<()>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let rpc::InterfaceDeleteQuery { id, mac_address } = request.into_inner();
 
@@ -97,14 +105,15 @@ pub(crate) async fn delete_interface(
                 }
                 .into());
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(CarbideError::from(e).into()),
         },
         (None, Some(mac_address)) => {
             let mac = MacAddress::from_str(&mac_address).map_err(|e| {
                 CarbideError::InvalidArgument(format!("invalid MAC address {mac_address:?}: {e}"))
             })?;
-            let mut interfaces =
-                db::machine_interface::find_by_mac_address(txn.as_pgconn(), mac).await?;
+            let mut interfaces = db::machine_interface::find_by_mac_address(txn.as_pgconn(), mac)
+                .await
+                .map_err(crate::CarbideError::from)?;
             if interfaces.is_empty() {
                 return Err(CarbideError::NotFoundError {
                     kind: "Machine Interface",
@@ -178,7 +187,8 @@ pub(crate) async fn delete_interface(
                 txn.as_pgconn(),
                 &address.to_string(),
             )
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
             if let Some(machine_id) = machine_id {
                 return Err(CarbideError::InvalidArgument(format!(
@@ -190,10 +200,12 @@ pub(crate) async fn delete_interface(
     }
 
     for interface in &interfaces {
-        db::machine_interface::delete(&interface.id, &mut txn).await?;
+        db::machine_interface::delete(&interface.id, &mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -213,7 +225,8 @@ pub(crate) async fn find_mac_address_by_bmc_ip(
             .parse()
             .map_err(|e| CarbideError::InvalidArgument(format!("invalid IP address: {e}")))?,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine_interface",
         id: bmc_ip.clone(),
@@ -243,12 +256,15 @@ pub(crate) async fn find_bmc_ips(
                     CarbideError::InvalidArgument(format!("invalid MAC address: {e}"))
                 })?,
             )
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
         }
         Some(LookupBy::Serial(serial)) => {
             // Get the machine ID for this serial
             let machine_ids =
-                db::machine_topology::find_by_serial(&api.database_connection, &serial).await?;
+                db::machine_topology::find_by_serial(&api.database_connection, &serial)
+                    .await
+                    .map_err(crate::CarbideError::from)?;
             if machine_ids.len() > 1 {
                 tracing::warn!(
                     serial,
@@ -273,7 +289,9 @@ pub(crate) async fn find_bmc_ips(
                     }
                     .boxed()
                 })
-                .await??
+                .await
+                .map_err(crate::CarbideError::from)?
+                .map_err(crate::CarbideError::from)?
                 .into_iter()
                 .find_map(|(_, ip)| ip)
             else {

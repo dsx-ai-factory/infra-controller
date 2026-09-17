@@ -133,9 +133,10 @@ pub(crate) async fn discover_machine(
     // lock. The main transaction locks and verifies only the same interface;
     // it does not re-evaluate overlay ownership after authentication.
     let direct_interface_id = if let Some(remote_ip) = secure_remote_ip {
-        let mut source_txn = api.txn_begin().await?;
-        let direct_interface =
-            db::machine_interface::find_by_ip(source_txn.as_pgconn(), remote_ip).await?;
+        let mut source_txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+        let direct_interface = db::machine_interface::find_by_ip(source_txn.as_pgconn(), remote_ip)
+            .await
+            .map_err(crate::CarbideError::from)?;
         let direct_interface_id = if let Some(interface) = direct_interface {
             match find_overlay_address_owner(source_txn.as_pgconn(), remote_ip).await? {
                 OverlayAddressOwnerLookup::NotFound => Some(interface.id),
@@ -156,13 +157,16 @@ pub(crate) async fn discover_machine(
         } else {
             None
         };
-        source_txn.commit().await?;
+        source_txn
+            .commit()
+            .await
+            .map_err(crate::CarbideError::from)?;
         direct_interface_id
     } else {
         None
     };
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Advisory-lock the admin segments before any machine-interface row
     // writes in this transaction (`associate_interface_with_dpu_machine`,
@@ -170,7 +174,9 @@ pub(crate) async fn discover_machine(
     // whole transaction holds locks in the allocator order (segment advisory
     // lock first, then interface rows) all the way to the reconcile pass --
     // which re-acquires the same locks as a no-op.
-    db::machine_interface::lock_all_admin_segments(&mut txn).await?;
+    db::machine_interface::lock_all_admin_segments(&mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     tracing::debug!(
         remote_ip_address = ?remote_ip,
@@ -183,7 +189,9 @@ pub(crate) async fn discover_machine(
     // config.allow_insecure_discovery lets the caller pass a machine_interface_id.
     let caller_interface = if let Some(remote_ip) = secure_remote_ip {
         if let Some(expected_interface_id) = direct_interface_id {
-            match db::machine_interface::find_optional_for_update_by_ip(&mut txn, remote_ip).await?
+            match db::machine_interface::find_optional_for_update_by_ip(&mut txn, remote_ip)
+                .await
+                .map_err(crate::CarbideError::from)?
             {
                 Some(interface) if interface.id == expected_interface_id => interface,
                 _ => {
@@ -210,7 +218,7 @@ pub(crate) async fn discover_machine(
                 machine_interface_id,
                 remote_ip,
             )
-            .await?
+            .await.map_err(crate::CarbideError::from)?
             .ok_or_else(|| {
                 tracing::error!(
                     %machine_interface_id,
@@ -226,7 +234,9 @@ pub(crate) async fn discover_machine(
                 "machine_interface_id is required for insecure discovery".to_string(),
             )
         })?;
-        let interface = db::machine_interface::find_one(&mut txn, interface_id).await?;
+        let interface = db::machine_interface::find_one(&mut txn, interface_id)
+            .await
+            .map_err(crate::CarbideError::from)?;
         tracing::warn!(
             machine_interface_id = %interface_id,
             "Allowing insecure discovery: trusting caller-provided machine_interface_id. This is for integration tests only and must not be done in production."
@@ -324,7 +334,8 @@ pub(crate) async fn discover_machine(
                     ..MachineSearchConfig::default()
                 },
             )
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .ok_or_else(|| {
                 CarbideError::InvalidArgument(format!(
                     "machine id {stable_machine_id} was not discovered by site-explorer"
@@ -339,7 +350,8 @@ pub(crate) async fn discover_machine(
                 &stable_machine_id,
                 &caller_interface,
             )
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
             // Update the record only when create_machine is enabled.
             // Site-explorer will update if machine is created by site-explorer.
@@ -348,7 +360,8 @@ pub(crate) async fn discover_machine(
                 &stable_machine_id,
                 &mut txn,
             )
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
             machine
         } else {
             db::machine::find_one(
@@ -359,7 +372,8 @@ pub(crate) async fn discover_machine(
                     ..MachineSearchConfig::default()
                 },
             )
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .ok_or_else(|| {
                 CarbideError::InvalidArgument(format!("machine id {stable_machine_id} not found"))
             })?
@@ -374,14 +388,18 @@ pub(crate) async fn discover_machine(
 
         if network_config.loopback_ip.is_none() {
             let loopback_ip =
-                db::machine::allocate_loopback_ip(&api.common_pools, &mut txn, &owner_id).await?;
+                db::machine::allocate_loopback_ip(&api.common_pools, &mut txn, &owner_id)
+                    .await
+                    .map_err(crate::CarbideError::from)?;
             network_config.loopback_ip = Some(loopback_ip);
             network_config_changed = true;
         }
 
         if network_config.loopback_ip_v6.is_none()
             && let Some(loopback_ip_v6) =
-                db::machine::allocate_loopback_ip_v6(&api.common_pools, &mut txn, &owner_id).await?
+                db::machine::allocate_loopback_ip_v6(&api.common_pools, &mut txn, &owner_id)
+                    .await
+                    .map_err(crate::CarbideError::from)?
         {
             network_config.loopback_ip_v6 = Some(loopback_ip_v6);
             network_config_changed = true;
@@ -395,7 +413,8 @@ pub(crate) async fn discover_machine(
                     network_config_version,
                     &network_config,
                 )
-                .await?
+                .await
+                .map_err(crate::CarbideError::from)?
         {
             // Discovery uses the same rejection for missing and changed targets.
             // Both cases abort discovery and roll back the allocations above.
@@ -421,7 +440,8 @@ pub(crate) async fn discover_machine(
             current_host_machine_id,
             &stable_host_machine_id,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .into()
     };
 
@@ -431,7 +451,8 @@ pub(crate) async fn discover_machine(
         &hardware_info,
         api.runtime_config.bom_validation.enabled,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id.machine_id_subtype() {
         // Create Host proactively.
@@ -444,7 +465,8 @@ pub(crate) async fn discover_machine(
                 &machine_id,
                 api.runtime_config.retained_boot_interface_window,
             )
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
         let host_machine_id = if let Some(host_machine_id) = machine_interface.machine_id {
             host_machine_id
@@ -459,7 +481,8 @@ pub(crate) async fn discover_machine(
                 &mut txn,
                 std::slice::from_ref(&predicted_machine_id),
             )
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .get(&predicted_machine_id)
             .is_some_and(|interfaces| {
                 interfaces
@@ -472,7 +495,8 @@ pub(crate) async fn discover_machine(
                     false,
                     &mut txn,
                 )
-                .await?;
+                .await
+                .map_err(crate::CarbideError::from)?;
             }
 
             let mi_id = machine_interface.id;
@@ -482,7 +506,8 @@ pub(crate) async fn discover_machine(
                 &predicted_machine_id,
                 &machine_interface,
             )
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
             // Update host and DPUs state correctly.
             let host_machine_id =
@@ -497,7 +522,8 @@ pub(crate) async fn discover_machine(
                     },
                 },
             )
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
             tracing::info!(
                 machine_interface_id = ?mi_id,
@@ -512,11 +538,13 @@ pub(crate) async fn discover_machine(
         // or reattaches a DPU-backed host interface.
         let active_config_changed =
             db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &host_machine_id)
-                .await?;
+                .await
+                .map_err(crate::CarbideError::from)?;
         if active_config_changed {
             let (network_config, network_config_version) =
                 db::machine::get_network_config(&mut txn, &host_machine_id)
-                    .await?
+                    .await
+                    .map_err(crate::CarbideError::from)?
                     .take();
             if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
                 db::machine::try_update_network_config(
@@ -525,7 +553,8 @@ pub(crate) async fn discover_machine(
                     network_config_version,
                     &network_config,
                 )
-                .await?
+                .await
+                .map_err(crate::CarbideError::from)?
             {
                 return Err(CarbideError::FailedPrecondition(format!(
                     "network configuration for machine {host_machine_id} changed or is no longer available"
@@ -572,7 +601,9 @@ pub(crate) async fn discover_machine(
     };
 
     if let Some(nvlink_info) = nvlink_info {
-        db::machine::update_nvlink_info(&mut txn, &machine_id, nvlink_info).await?;
+        db::machine::update_nvlink_info(&mut txn, &machine_id, nvlink_info)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
 
     if discovery_reporter == rpc::MachineDiscoveryReporter::Scout
@@ -586,10 +617,11 @@ pub(crate) async fn discover_machine(
             scout_version,
             &mut txn,
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     drop(admin_admission);
 
     // Authentication, stable ID resolution, and discovery writes are complete. A scout update
@@ -669,7 +701,9 @@ pub(crate) async fn discover_machine(
             )
             .boxed()
         })
-        .await??;
+        .await
+        .map_err(crate::CarbideError::from)?
+        .map_err(crate::CarbideError::from)?;
     }
 
     response
@@ -694,11 +728,13 @@ pub(crate) async fn discovery_completed(
     let (machine, mut txn) = api
         .load_machine(&machine_id, MachineSearchConfig::default())
         .await?;
-    db::machine::update_discovery_time(&machine.id, &mut txn).await?;
+    db::machine::update_discovery_time(&machine.id, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let discovery_result = "Success".to_owned();
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     tracing::info!(
         %machine_id,

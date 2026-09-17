@@ -61,7 +61,7 @@ pub(crate) async fn create(
 ) -> Result<Response<Domain>, Status> {
     crate::api::log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let req = request.into_inner();
     lock_and_ensure_reverse_zone_name_available(
@@ -73,9 +73,11 @@ pub(crate) async fn create(
     .await?;
     let new_domain = NewDomain::new(req.name);
 
-    let domain = domain::persist(new_domain, &mut txn).await?;
+    let domain = domain::persist(new_domain, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(Domain::from(domain)))
 }
@@ -86,7 +88,7 @@ pub(crate) async fn update(
 ) -> Result<Response<Domain>, Status> {
     crate::api::log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let req = request.into_inner();
     let domain_proto = req
@@ -97,13 +99,13 @@ pub(crate) async fn update(
         .id
         .ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let mut domain =
-        domain::find_by_uuid(&mut txn, uuid)
-            .await?
-            .ok_or_else(|| CarbideError::NotFoundError {
-                kind: "domain",
-                id: uuid.to_string(),
-            })?;
+    let mut domain = domain::find_by_uuid(&mut txn, uuid)
+        .await
+        .map_err(crate::CarbideError::from)?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "domain",
+            id: uuid.to_string(),
+        })?;
 
     let previous_name = domain.name.clone();
     domain.name = domain_proto.name;
@@ -119,9 +121,11 @@ pub(crate) async fn update(
 
     domain.increment_serial();
 
-    let updated_domain = domain::update(&domain, &mut txn).await?;
+    let updated_domain = domain::update(&domain, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(Domain::from(updated_domain)))
 }
@@ -132,27 +136,31 @@ pub(crate) async fn delete(
 ) -> Result<Response<DomainDeletionResult>, Status> {
     crate::api::log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let req = request.into_inner();
     let uuid = req.id.ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let domain =
-        domain::find_by_uuid(&mut txn, uuid)
-            .await?
-            .ok_or_else(|| CarbideError::NotFoundError {
-                kind: "domain",
-                id: uuid.to_string(),
-            })?;
+    let domain = domain::find_by_uuid(&mut txn, uuid)
+        .await
+        .map_err(crate::CarbideError::from)?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "domain",
+            id: uuid.to_string(),
+        })?;
 
-    db::dns::lock_reverse_zone_names(&mut txn, std::slice::from_ref(&domain.name)).await?;
+    db::dns::lock_reverse_zone_names(&mut txn, std::slice::from_ref(&domain.name))
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     // TODO: This needs to validate that nothing references the domain anymore
     // (like NetworkSegments)
 
-    domain::delete(domain, &mut txn).await?;
+    domain::delete(domain, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(DomainDeletionResult {}))
 }

@@ -404,7 +404,7 @@ pub(crate) async fn admin_bmc_reset(
         (None, None) => None,
     };
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let bmc_endpoint_request = match (req.bmc_endpoint_request, device_id) {
         (Some(_), Some(_)) => {
@@ -470,7 +470,7 @@ pub(crate) async fn admin_bmc_reset(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let endpoint_address = bmc_endpoint_request.ip_address.clone();
 
@@ -502,12 +502,12 @@ pub(crate) async fn disable_secure_boot(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_endpoint_request, _) =
         validate_and_complete_bmc_endpoint_request(&mut txn, Some(req), None).await?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -538,7 +538,7 @@ pub(crate) async fn lockdown(
         rpc::LockdownAction::Disable => libredfish::EnabledDisabled::Disabled,
     };
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_endpoint_request, _) = validate_and_complete_bmc_endpoint_request(
         &mut txn,
@@ -547,7 +547,7 @@ pub(crate) async fn lockdown(
     )
     .await?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -574,7 +574,7 @@ pub(crate) async fn lockdown_status(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_endpoint_request, _) = validate_and_complete_bmc_endpoint_request(
         &mut txn,
@@ -583,7 +583,7 @@ pub(crate) async fn lockdown_status(
     )
     .await?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -611,13 +611,13 @@ pub(crate) async fn enable_infinite_boot(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_endpoint_request, _) =
         validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
             .await?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -650,13 +650,13 @@ pub(crate) async fn is_infinite_boot_enabled(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_endpoint_request, _) =
         validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
             .await?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -693,7 +693,7 @@ pub(crate) async fn machine_setup(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_endpoint_request, owning_machine_id) =
         validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
@@ -726,8 +726,9 @@ pub(crate) async fn machine_setup(
             &desired,
             admin_selection_authority(entered_mac),
         )
-        .await?;
-        txn.commit().await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
+        txn.commit().await.map_err(crate::CarbideError::from)?;
         enqueue_boot_interface_reconciliation(api, machine_id, reconciliation_eligible).await;
 
         tracing::info!(
@@ -737,13 +738,14 @@ pub(crate) async fn machine_setup(
         return Ok(Response::new(rpc::MachineSetupResponse {}));
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
 
     let stored = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .into_iter()
         .next()
         .and_then(|ep| ep.boot_interface());
@@ -782,7 +784,7 @@ pub(crate) async fn set_dpu_first_boot_order(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_endpoint_request, owning_machine_id) =
         validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
@@ -811,8 +813,9 @@ pub(crate) async fn set_dpu_first_boot_order(
             &desired,
             admin_selection_authority(entered_mac),
         )
-        .await?;
-        txn.commit().await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
+        txn.commit().await.map_err(crate::CarbideError::from)?;
         enqueue_boot_interface_reconciliation(api, machine_id, reconciliation_eligible).await;
 
         tracing::info!(
@@ -822,13 +825,14 @@ pub(crate) async fn set_dpu_first_boot_order(
         return Ok(Response::new(rpc::SetDpuFirstBootOrderResponse {}));
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
 
     let stored = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .into_iter()
         .next()
         .and_then(|ep| ep.boot_interface());
@@ -873,7 +877,7 @@ pub(crate) async fn admin_power_control(
 
     let action = req.action();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_endpoint_request, machine_id) =
         validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
@@ -913,7 +917,8 @@ pub(crate) async fn admin_power_control(
                     host_health_config: api.runtime_config.host_health,
                 },
             )
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: machine_id.to_string(),
@@ -934,7 +939,7 @@ pub(crate) async fn admin_power_control(
         }
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     redfish_power_control(api, bmc_endpoint_request, action).await?;
 
@@ -969,13 +974,14 @@ pub(crate) async fn explore(
     };
 
     // Use the same stored boot-interface target as periodic exploration.
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let boot_interface = db::explored_endpoints::find_by_ips(&mut txn, vec![bmc_addr.ip()])
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .first()
         .and_then(|ep| ep.boot_interface_target())
         .map(Into::into);
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let report = api
         .endpoint_explorer
@@ -1189,8 +1195,9 @@ pub(super) async fn resolve_bmc_interface(
     let bmc_mac_address: MacAddress;
     if let Some(mac_str) = &request.mac_address {
         bmc_mac_address = mac_str.parse::<MacAddress>().map_err(CarbideError::from)?;
-    } else if let Some(bmc_machine_interface) =
-        find_by_ip(&api.database_connection, bmc_addr.ip()).await?
+    } else if let Some(bmc_machine_interface) = find_by_ip(&api.database_connection, bmc_addr.ip())
+        .await
+        .map_err(crate::CarbideError::from)?
     {
         bmc_mac_address = bmc_machine_interface.mac_address;
     } else {
@@ -1217,13 +1224,13 @@ pub(crate) async fn create_bmc_user(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_endpoint_request, _) =
         validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
             .await?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let endpoint_address = &bmc_endpoint_request.ip_address;
 
@@ -1280,12 +1287,12 @@ pub(crate) async fn delete_bmc_user(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let (bmc_endpoint_request, _) =
         validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
             .await?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let endpoint_address = &bmc_endpoint_request.ip_address;
 
@@ -1327,11 +1334,11 @@ pub(crate) async fn set_bmc_root_password(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let (bmc_endpoint_request, _) =
         validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
             .await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -1361,11 +1368,11 @@ pub(crate) async fn probe_bmc_vendor(
         .map(|id| try_parse_machine_id(id))
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let (bmc_endpoint_request, _) =
         validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
             .await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);

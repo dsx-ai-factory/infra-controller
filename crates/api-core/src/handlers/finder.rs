@@ -142,9 +142,13 @@ pub(crate) async fn identify_serial(
     let req = request.into_inner();
 
     let machine_ids = if req.exact {
-        db::machine_topology::find_by_serial(&api.database_connection, &req.serial_number).await?
+        db::machine_topology::find_by_serial(&api.database_connection, &req.serial_number)
+            .await
+            .map_err(crate::CarbideError::from)?
     } else {
-        db::machine_topology::find_freetext(&api.database_connection, &req.serial_number).await?
+        db::machine_topology::find_freetext(&api.database_connection, &req.serial_number)
+            .await
+            .map_err(crate::CarbideError::from)?
     };
 
     if machine_ids.len() > 1 {

@@ -58,12 +58,13 @@ pub(crate) async fn get_machine_boot_interfaces(
     let request = request.into_inner();
     let machine_id = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Store 1: owned interface rows -- the authoritative store for a machine
     // that exists. `find_by_machine_ids` returns a per-machine map.
     let owned_interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[machine_id])
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .remove(&machine_id)
         .unwrap_or_default();
 
@@ -78,18 +79,22 @@ pub(crate) async fn get_machine_boot_interfaces(
             ..Default::default()
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     // Store 2: predictions -- the boot candidates a host offers before its
     // first DHCP lease creates an owned row.
     let predicted_interfaces =
-        db::predicted_machine_interface::find_by_machine_id(txn.as_mut(), &machine_id).await?;
+        db::predicted_machine_interface::find_by_machine_id(txn.as_mut(), &machine_id)
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     // Store 3: the explored endpoint default. The machine's BMC IP(s) map it to
     // the explored endpoints site-explorer recorded a default against.
     let bmc_pairs =
         db::machine_topology::find_machine_bmc_pairs_by_machine_id(txn.as_mut(), vec![machine_id])
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
     let bmc_ips: Vec<std::net::IpAddr> = bmc_pairs
         .into_iter()
         .filter_map(|(_, ip)| ip)
@@ -101,7 +106,9 @@ pub(crate) async fn get_machine_boot_interfaces(
         // `find_by_ips` takes `impl DbReader`; the wrapping transaction
         // implements it directly (a bare `&mut PgConnection` would need a
         // coercion that generic bound can't perform).
-        db::explored_endpoints::find_by_ips(&mut txn, bmc_ips).await?
+        db::explored_endpoints::find_by_ips(&mut txn, bmc_ips)
+            .await
+            .map_err(crate::CarbideError::from)?
     };
 
     // Store 4: the retained post-deletion pairs. Collect the MACs the machine
@@ -125,10 +132,12 @@ pub(crate) async fn get_machine_boot_interfaces(
     let retained_records = if macs.is_empty() {
         Vec::new()
     } else {
-        db::retained_boot_interface::find_records_by_macs(&mut txn, &macs).await?
+        db::retained_boot_interface::find_records_by_macs(&mut txn, &macs)
+            .await
+            .map_err(crate::CarbideError::from)?
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     // The effective boot interface: `pick_boot_interface` over the owned rows
     // (primary wins, else the lowest-MAC non-underlay NIC). This is what the

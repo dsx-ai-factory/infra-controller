@@ -66,7 +66,8 @@ pub(crate) async fn find_pending_dpu_service_sync_ids(
 
     let machine_ids =
         db::machine_pending_action::find_outstanding_machine_ids(api.pg_pool(), DpuServiceSync)
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     let machine_ids = machine_ids
         .into_iter()
@@ -98,15 +99,16 @@ pub(crate) async fn find_pending_dpu_service_syncs_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let actions = db::machine_pending_action::find_outstanding_by_machine_ids(
         &mut txn,
         DpuServiceSync,
         &machine_ids,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let pending = project(api, &mut txn, actions).await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::ListPendingDpuServiceSyncsResponse {
         pending,
@@ -124,10 +126,12 @@ pub(crate) async fn list_dpu_service_sync_history(
     let machine_id: HostMachineId =
         convert_and_log_machine_id(request.get_ref().machine_id.as_ref())?;
 
-    let mut txn = api.txn_begin().await?;
-    let actions = db::machine_pending_action::find_all_for_machine(&mut txn, &machine_id).await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    let actions = db::machine_pending_action::find_all_for_machine(&mut txn, &machine_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
     let pending = project(api, &mut txn, actions).await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::ListPendingDpuServiceSyncsResponse {
         pending,
@@ -147,7 +151,8 @@ async fn project(
         .collect();
     let states = machine_states(txn, &machine_ids).await?;
     let instances = db::instance::find_by_machine_ids(txn, &machine_ids.iter().collect::<Vec<_>>())
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .into_iter()
         .map(|instance| (instance.machine_id, instance.id))
         .collect::<HashMap<_, _>>();
@@ -240,11 +245,12 @@ async fn resolve_target(
             // query per instance, so an oversized batch would otherwise do all
             // of that work inside a transaction only to be rejected after.
             check_batch_size(list.instance_ids.len())?;
-            let mut txn = api.txn_begin().await?;
+            let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
             let mut targets = Vec::with_capacity(list.instance_ids.len());
             for instance_id in &list.instance_ids {
                 let instance = db::instance::find_by_id(&mut txn, *instance_id)
-                    .await?
+                    .await
+                    .map_err(crate::CarbideError::from)?
                     .ok_or_else(|| CarbideError::NotFoundError {
                         kind: "instance",
                         id: instance_id.to_string(),
@@ -262,7 +268,7 @@ async fn resolve_target(
                     TenantPolicy::AllowNamedInstance(*instance_id),
                 ));
             }
-            txn.commit().await?;
+            txn.commit().await.map_err(crate::CarbideError::from)?;
             Ok(targets)
         }
         None => Err(CarbideError::InvalidArgument(
@@ -294,7 +300,7 @@ async fn validate(api: &Api, machine_ids: &[HostMachineId]) -> Result<(), Status
     }
     check_batch_size(machine_ids.len())?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let found = db::machine::find(
         &mut txn,
         db::ObjectFilter::List(machine_ids),
@@ -303,11 +309,12 @@ async fn validate(api: &Api, machine_ids: &[HostMachineId]) -> Result<(), Status
             ..MachineSearchConfig::default()
         },
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .into_iter()
     .map(|machine| machine.id)
     .collect::<HashSet<_>>();
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let missing: Vec<String> = machine_ids
         .iter()
@@ -443,7 +450,8 @@ where
             ..MachineSearchConfig::default()
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     Ok(machines
         .into_iter()
         .map(|machine| (machine.id, machine.current_state().to_string()))

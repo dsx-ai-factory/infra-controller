@@ -472,10 +472,11 @@ pub(crate) async fn find_interface_addresses(
         "interface_id is required".into(),
     ))?;
 
-    let mut txn = api.txn_begin().await?;
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
-    txn.commit().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    let addresses = db::machine_interface_address::find_for_interface(&mut txn, interface_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let proto_addresses = addresses
         .into_iter()

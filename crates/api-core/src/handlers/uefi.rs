@@ -190,7 +190,7 @@ pub(crate) async fn clear_host_uefi_password(
 ) -> Result<Response<rpc::ClearHostUefiPasswordResponse>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let request = request.into_inner();
 
@@ -198,7 +198,10 @@ pub(crate) async fn clear_host_uefi_password(
     // Resolve machine_id from machine_query first (preferred),
     // otherwise fall back to the host_id (now deprecated).
     let machine_id = if let Some(query) = request.machine_query {
-        match db::machine::find_by_query(&mut txn, &query).await? {
+        match db::machine::find_by_query(&mut txn, &query)
+            .await
+            .map_err(crate::CarbideError::from)?
+        {
             Some(machine) => {
                 log_machine_id(&machine.id);
                 machine.id
@@ -234,7 +237,8 @@ pub(crate) async fn clear_host_uefi_password(
             host_health_config: api.runtime_config.host_health,
         },
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: machine_id.to_string(),
@@ -247,7 +251,7 @@ pub(crate) async fn clear_host_uefi_password(
     // with a warning and a successful no-op response instead of surfacing an
     // internal error to the operator.
     if snapshot.host_snapshot.bios_password_set_time.is_none() {
-        txn.commit().await?;
+        txn.commit().await.map_err(crate::CarbideError::from)?;
         tracing::warn!(
             %machine_id,
             "No UEFI password is recorded as set on this host; nothing to clear"
@@ -273,7 +277,8 @@ pub(crate) async fn clear_host_uefi_password(
 
     let bmc_access_info =
         db::machine_interface::lookup_bmc_access_info(&mut txn, addr.ip(), Some(addr.port()))
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     // Resolve which credential the clear must authenticate with -- the password
     // the device currently holds, keyed by its converged version (table-driven;
@@ -283,7 +288,7 @@ pub(crate) async fn clear_host_uefi_password(
 
     // Commit before the remote reader (Vault) request so the connection is not
     // held across it, then read the actual secret.
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     let clear_credentials =
         read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &clear_key).await?;
 
@@ -307,7 +312,7 @@ pub(crate) async fn set_host_uefi_password(
 ) -> Result<Response<rpc::SetHostUefiPasswordResponse>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let request = request.into_inner();
 
@@ -315,7 +320,10 @@ pub(crate) async fn set_host_uefi_password(
     // Resolve machine_id from machine_query first (preferred),
     // otherwise fall back to the host_id (now deprecated).
     let machine_id = if let Some(query) = request.machine_query {
-        match db::machine::find_by_query(&mut txn, &query).await? {
+        match db::machine::find_by_query(&mut txn, &query)
+            .await
+            .map_err(crate::CarbideError::from)?
+        {
             Some(machine) => {
                 log_machine_id(&machine.id);
                 machine.id
@@ -351,7 +359,8 @@ pub(crate) async fn set_host_uefi_password(
             host_health_config: api.runtime_config.host_health,
         },
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: machine_id.to_string(),
@@ -373,7 +382,8 @@ pub(crate) async fn set_host_uefi_password(
 
     let bmc_access_info =
         db::machine_interface::lookup_bmc_access_info(&mut txn, addr.ip(), Some(addr.port()))
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     // Resolve the site-wide host UEFI credential key to set (table-driven; v0 =
     // the legacy unversioned site-default). This is the DB half; do it while the
@@ -382,7 +392,7 @@ pub(crate) async fn set_host_uefi_password(
 
     // Commit before the remote reader (Vault) request and the redfish call so the
     // connection is not held across them, then read the actual secret.
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     let host_uefi_credentials =
         read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &host_uefi_key).await?;
 
@@ -427,7 +437,8 @@ pub(crate) async fn set_host_uefi_password(
         }
         .boxed()
     })
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .map_err(|e| {
         tracing::error!(
             error = %e,
@@ -454,12 +465,15 @@ pub(crate) async fn set_dpu_uefi_password(
 ) -> Result<Response<rpc::SetDpuUefiPasswordResponse>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let request = request.into_inner();
 
     let machine_id: MachineId = if let Some(query) = request.machine_query {
-        match db::machine::find_by_query(&mut txn, &query).await? {
+        match db::machine::find_by_query(&mut txn, &query)
+            .await
+            .map_err(crate::CarbideError::from)?
+        {
             Some(machine) => {
                 log_machine_id(&machine.id);
                 machine.id
@@ -492,7 +506,8 @@ pub(crate) async fn set_dpu_uefi_password(
             host_health_config: api.runtime_config.host_health,
         },
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: machine_id.to_string(),
@@ -522,7 +537,8 @@ pub(crate) async fn set_dpu_uefi_password(
 
     let bmc_access_info =
         db::machine_interface::lookup_bmc_access_info(&mut txn, addr.ip(), Some(addr.port()))
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     // Resolve the site-wide DPU UEFI credential key to set (table-driven; v0 =
     // the legacy unversioned site-default). This is the DB half; do it while the
@@ -531,7 +547,7 @@ pub(crate) async fn set_dpu_uefi_password(
 
     // Commit before the remote reader (Vault) request and the redfish call so the
     // connection is not held across them, then read the actual secret.
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     let dpu_uefi_credentials =
         read_uefi_credentials(api.bmc_credential_ops.credential_reader(), &dpu_uefi_key).await?;
 
@@ -571,7 +587,8 @@ pub(crate) async fn set_dpu_uefi_password(
         }
         .boxed()
     })
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .map_err(|e| {
         tracing::error!(error = %e, "Failed to record dpu_uefi convergence");
         CarbideError::Internal {

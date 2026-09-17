@@ -75,7 +75,9 @@ async fn load_enabled_identity_for_well_known(
                 tenant_identity_config::find(&org_id, txn.as_mut()).await
             })
         })
-        .await??;
+        .await
+        .map_err(crate::CarbideError::from)?
+        .map_err(crate::CarbideError::from)?;
     match cfg {
         Some(c) if c.enabled => Ok(c),
         _ => Err(CarbideError::NotFoundError {
@@ -176,7 +178,9 @@ pub(crate) async fn sign_machine_identity(
                 async move { tenant_identity_config::find_by_machine_id(txn, &machine_id).await },
             )
         })
-        .await??;
+        .await
+        .map_err(crate::CarbideError::from)?
+        .map_err(crate::CarbideError::from)?;
 
     let allowed: &[String] = identity_row.allowed_audiences.0.as_slice();
     let audiences: Vec<String> = if req.audience.is_empty() {

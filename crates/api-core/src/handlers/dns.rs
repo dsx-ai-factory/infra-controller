@@ -296,7 +296,8 @@ pub(crate) async fn get_all_domains(
         &api.database_connection,
         db::ObjectColumnFilter::<db::dns::domain::IdColumn>::All,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     tracing::debug!(domain_count = domains.len(), "Found domains");
     for domain in &domains {
@@ -335,7 +336,9 @@ pub(crate) async fn get_all_domain_metadata(
     // Reverse zones may be stored with or without the trailing root dot, so
     // resolve their normalized identity. Forward domains retain the existing
     // exact lookup after the request normalization above.
-    let domains = db::dns::domain::find_by_name(&api.database_connection, &domain_name).await?;
+    let domains = db::dns::domain::find_by_name(&api.database_connection, &domain_name)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let domain = domains.first().ok_or_else(|| CarbideError::NotFoundError {
         kind: "domain",

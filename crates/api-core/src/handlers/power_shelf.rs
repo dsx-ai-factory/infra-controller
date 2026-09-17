@@ -105,9 +105,10 @@ pub(crate) async fn decommission_power_shelf(
         .into_inner()
         .power_shelf_id
         .ok_or_else(|| CarbideError::InvalidArgument("power_shelf_id is required".to_string()))?;
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let power_shelf = db_power_shelf::find_by_id(&mut txn, &power_shelf_id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "power_shelf",
             id: power_shelf_id.to_string(),
@@ -125,8 +126,9 @@ pub(crate) async fn decommission_power_shelf(
     }
 
     if let Some(rack_id) = power_shelf.rack_id.as_ref() {
-        let assigned_hosts =
-            db::managed_host::find_assigned_hosts_in_rack(&mut txn, rack_id).await?;
+        let assigned_hosts = db::managed_host::find_assigned_hosts_in_rack(&mut txn, rack_id)
+            .await
+            .map_err(crate::CarbideError::from)?;
         if !assigned_hosts.is_empty() {
             let assignments = assigned_hosts
                 .iter()
@@ -140,8 +142,10 @@ pub(crate) async fn decommission_power_shelf(
         }
     }
 
-    db_power_shelf::set_decommission_requested(&mut txn, power_shelf_id).await?;
-    txn.commit().await?;
+    db_power_shelf::set_decommission_requested(&mut txn, power_shelf_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(Response::new(rpc::DecommissionPowerShelfResponse {}))
 }
 
@@ -153,7 +157,9 @@ pub(crate) async fn find_ids(
 
     let filter: model::power_shelf::PowerShelfSearchFilter = request.into_inner().into();
 
-    let power_shelf_ids = db_power_shelf::find_ids(&api.database_connection, filter).await?;
+    let power_shelf_ids = db_power_shelf::find_ids(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::PowerShelfIdList {
         ids: power_shelf_ids,
@@ -180,13 +186,14 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let power_shelf_list = db_power_shelf::find_by(
         &mut txn,
         ObjectColumnFilter::List(db_power_shelf::IdColumn, &power_shelf_ids),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     txn.rollback_or_log("read-only load of power shelves by id")
         .await;
@@ -265,7 +272,7 @@ pub(crate) async fn admin_force_delete_power_shelf(
         .power_shelf_id
         .ok_or_else(|| CarbideError::InvalidArgument("power_shelf_id is required".to_string()))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Verify the power shelf exists.
     let power_shelf = db_power_shelf::find_by_id(&mut txn, &power_shelf_id)
@@ -319,7 +326,7 @@ pub(crate) async fn admin_force_delete_power_shelf(
         .await
         .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::AdminForceDeletePowerShelfResponse {
         power_shelf_id: power_shelf_id.to_string(),
@@ -380,7 +387,7 @@ pub(crate) async fn set_power_shelf_maintenance(
         (None, None) => "admin-cli".to_string(),
     };
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let existing = db_power_shelf::find_by(
         &mut txn,
@@ -418,7 +425,7 @@ pub(crate) async fn set_power_shelf_maintenance(
         .map_err(CarbideError::from)?;
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -443,7 +450,7 @@ pub(crate) async fn find_power_shelf_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let results = db::state_history::find_by_object_ids(
         &mut txn,
@@ -463,7 +470,7 @@ pub(crate) async fn find_power_shelf_state_histories(
         );
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(response))
 }
@@ -505,7 +512,7 @@ pub(crate) async fn update_power_shelf_metadata(
     };
     metadata.validate(true).map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let power_shelves = db_power_shelf::find_by(
         &mut txn,
@@ -528,9 +535,11 @@ pub(crate) async fn update_power_shelf_metadata(
         None => power_shelf.version,
     };
 
-    db_power_shelf::update_metadata(&mut txn, &power_shelf_id, expected_version, metadata).await?;
+    db_power_shelf::update_metadata(&mut txn, &power_shelf_id, expected_version, metadata)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }
@@ -604,7 +613,7 @@ pub(crate) async fn insert_power_shelf_health_report(
     };
     let mode: HealthReportApplyMode = mode.into();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let power_shelf = db_power_shelf::find_by_id(&mut txn, &power_shelf_id)
         .await
@@ -629,9 +638,11 @@ pub(crate) async fn insert_power_shelf_health_report(
         Err(e) => return Err(e.into()),
     }
 
-    db_power_shelf::insert_health_report(&mut txn, &power_shelf_id, mode, &report).await?;
+    db_power_shelf::insert_health_report(&mut txn, &power_shelf_id, mode, &report)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }
@@ -649,7 +660,7 @@ pub(crate) async fn remove_power_shelf_health_report(
     let power_shelf_id =
         power_shelf_id.ok_or_else(|| CarbideError::MissingArgument("power_shelf_id"))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let power_shelf = db_power_shelf::find_by_id(&mut txn, &power_shelf_id)
         .await
@@ -660,7 +671,7 @@ pub(crate) async fn remove_power_shelf_health_report(
         })?;
 
     remove_power_shelf_health_report_by_source(&power_shelf, &mut txn, source).await?;
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }

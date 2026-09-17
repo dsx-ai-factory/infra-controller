@@ -256,7 +256,8 @@ pub(crate) async fn update_expected_switch(
                     .map(|id| id.to_string())
                     .or_else(|| lookup.bmc_mac_address.map(|mac| mac.to_string()))
                     .unwrap_or_default(),
-            })?;
+            })
+            .map_err(crate::CarbideError::from)?;
 
         merge_expected_switch_patch(patch, current.into(), &update_mask)
             .try_into()

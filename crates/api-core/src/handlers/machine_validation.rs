@@ -78,9 +78,12 @@ pub(crate) async fn mark_machine_validation_complete(
         return Err(CarbideError::MissingArgument("validation id").into());
     };
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let machine = match db::machine::find_by_validation_id(&mut txn, validation_id).await? {
+    let machine = match db::machine::find_by_validation_id(&mut txn, validation_id)
+        .await
+        .map_err(crate::CarbideError::from)?
+    {
         Some(machine) => machine,
         None => {
             tracing::error!(machine_validation_id = %validation_id, "validation id not found");
@@ -104,7 +107,9 @@ pub(crate) async fn mark_machine_validation_complete(
     }
 
     let validation_result_error =
-        db::machine_validation_result::validate_current_context(&mut txn, validation_id).await?;
+        db::machine_validation_result::validate_current_context(&mut txn, validation_id)
+            .await
+            .map_err(crate::CarbideError::from)?;
     if validation_result_error.is_some() {
         state = MachineValidationState::Failed;
     }
@@ -118,14 +123,15 @@ pub(crate) async fn mark_machine_validation_complete(
             ..MachineValidationStatus::default()
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     if !completed {
         tracing::info!(
             %machine_id,
             machine_validation_id = %validation_id,
             "machine validation completion ignored because run is no longer active"
         );
-        txn.commit().await?;
+        txn.commit().await.map_err(crate::CarbideError::from)?;
         return Ok(Response::new(rpc::MachineValidationCompletedResponse {}));
     }
 
@@ -150,7 +156,8 @@ pub(crate) async fn mark_machine_validation_complete(
                 source: FailureSource::Scout,
             },
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
 
         // Update the Machine validation health report to include that the
         // validation failed
@@ -182,7 +189,8 @@ pub(crate) async fn mark_machine_validation_complete(
             &machine.id,
             &updated_validation_health_report,
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
     }
 
     if let Some(error_message) = validation_result_error {
@@ -195,10 +203,11 @@ pub(crate) async fn mark_machine_validation_complete(
                 source: FailureSource::Scout,
             },
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     carbide_instrument::emit(completion);
     Ok(Response::new(rpc::MachineValidationCompletedResponse {}))
@@ -258,13 +267,14 @@ pub(crate) async fn persist_validation_result(
         "Received machine validation result"
     );
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let machine = match db::machine::find_by_validation_id(
         &mut txn,
         &validation_result.validation_id,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     {
         Some(machine) => machine,
         None => {
@@ -280,7 +290,8 @@ pub(crate) async fn persist_validation_result(
         &mut txn,
         &validation_result.validation_id,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .ok_or_else(|| {
         CarbideError::internal(format!(
             "validation id {} was found via machine lookup but not by primary key",
@@ -293,7 +304,7 @@ pub(crate) async fn persist_validation_result(
             machine_id = %machine.id,
             "machine validation result ignored because run is no longer active"
         );
-        txn.commit().await?;
+        txn.commit().await.map_err(crate::CarbideError::from)?;
         return Ok(tonic::Response::new(()));
     }
 
@@ -324,7 +335,9 @@ pub(crate) async fn persist_validation_result(
     // Keep the durable run-item/attempt write ahead of the legacy projections.
     // A false return means this report is a replay of an already-terminal attempt.
     let first_terminal_report =
-        db::machine_validation_execution::record_result(&mut txn, &validation_result).await?;
+        db::machine_validation_execution::record_result(&mut txn, &validation_result)
+            .await
+            .map_err(crate::CarbideError::from)?;
     if !first_terminal_report {
         tracing::info!(
             machine_validation_id = %validation_result.validation_id,
@@ -332,7 +345,7 @@ pub(crate) async fn persist_validation_result(
             test_id = ?validation_result.test_id,
             "machine validation result ignored because attempt was already terminal"
         );
-        txn.commit().await?;
+        txn.commit().await.map_err(crate::CarbideError::from)?;
         return Ok(tonic::Response::new(()));
     }
 
@@ -362,10 +375,13 @@ pub(crate) async fn persist_validation_result(
         &machine.id,
         &updated_validation_health_report,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    db::machine_validation_result::create(validation_result, &mut txn).await?;
-    txn.commit().await?;
+    db::machine_validation_result::create(validation_result, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(tonic::Response::new(()))
 }
 
@@ -402,7 +418,8 @@ pub(crate) async fn get_machine_validation_results(
             machine_id,
             req.include_history,
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
 
         if let Some(validation_id) = validation_id {
             db_results.retain(|x| x.validation_id == validation_id)
@@ -412,7 +429,8 @@ pub(crate) async fn get_machine_validation_results(
             &api.database_connection,
             &validation_id,
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
     }
 
     let vec_rest = db_results
@@ -434,7 +452,8 @@ pub(crate) async fn get_machine_validation_external_config(
     let req: rpc::GetMachineValidationExternalConfigRequest = request.into_inner();
     let ret =
         db::machine_validation_config::find_config_by_name(&api.database_connection, &req.name)
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         GetMachineValidationExternalConfigResponse {
@@ -457,7 +476,7 @@ pub(crate) async fn add_update_machine_validation_external_config(
         return Err(machine_validation_mutation_disabled_status());
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let req: rpc::AddUpdateMachineValidationExternalConfigRequest = request.into_inner();
 
@@ -469,7 +488,7 @@ pub(crate) async fn add_update_machine_validation_external_config(
     )
     .await;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(tonic::Response::new(()))
 }
 
@@ -505,7 +524,8 @@ pub(crate) async fn get_machine_validation_runs(
                     .collect(),
             },
         )
-        .map(Response::new)?;
+        .map(Response::new)
+        .map_err(crate::CarbideError::from)?;
 
     Ok(ret)
 }
@@ -526,7 +546,8 @@ pub(crate) async fn find_machine_validation_run_item_ids(
         &mut db_reader,
         validation_id,
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .into_iter()
     .map(|id| ::rpc::common::Uuid {
         value: id.to_string(),
@@ -571,7 +592,8 @@ pub(crate) async fn find_machine_validation_run_items_by_ids(
     let mut db_reader = api.db_reader();
     let run_items =
         db::machine_validation_execution::find_run_items_by_ids(&mut db_reader, &run_item_ids)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .into_iter()
             .map(rpc::MachineValidationRunItem::from)
             .collect();
@@ -597,7 +619,8 @@ pub(crate) async fn get_machine_validation_attempt(
 
     let attempt =
         db::machine_validation_execution::find_attempt_by_id(&api.database_connection, &attempt_id)
-            .await?;
+            .await
+            .map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(rpc::MachineValidationAttempt::from(
         attempt,
@@ -638,7 +661,7 @@ pub(crate) async fn heartbeat_machine_validation_run(
         None => {}
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let accepted = db::machine_validation_execution::record_heartbeat(
         &mut txn,
         validation_id,
@@ -647,11 +670,12 @@ pub(crate) async fn heartbeat_machine_validation_run(
         test_id.as_deref(),
         chrono::Utc::now(),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     if accepted {
-        txn.commit().await?;
+        txn.commit().await.map_err(crate::CarbideError::from)?;
     } else {
-        txn.rollback().await?;
+        txn.rollback().await.map_err(crate::CarbideError::from)?;
     }
 
     Ok(tonic::Response::new(
@@ -670,7 +694,7 @@ pub(crate) async fn on_demand_machine_validation(
 
     match req.action() {
         rpc::machine_validation_on_demand_request::Action::Start => {
-            let mut txn = api.txn_begin().await?;
+            let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
             let machine = db::machine::find_one(
                 &mut txn,
@@ -680,7 +704,8 @@ pub(crate) async fn on_demand_machine_validation(
                     ..MachineSearchConfig::default()
                 },
             )
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .ok_or_else(|| {
                 CarbideError::InvalidArgument(format!("machine id {machine_id} not found"))
             })?;
@@ -729,7 +754,8 @@ pub(crate) async fn on_demand_machine_validation(
                             contexts: Some(req.contexts),
                         },
                     )
-                    .await?;
+                    .await
+                    .map_err(crate::CarbideError::from)?;
                     let validation_id = validation.id;
                     tracing::trace!(
                         machine_validation_id = %validation_id,
@@ -738,9 +764,10 @@ pub(crate) async fn on_demand_machine_validation(
 
                     // Update machine_validation_request.
                     db::machine::set_machine_validation_request(&mut txn, &machine_id, true)
-                        .await?;
+                        .await
+                        .map_err(crate::CarbideError::from)?;
 
-                    txn.commit().await?;
+                    txn.commit().await.map_err(crate::CarbideError::from)?;
 
                     Ok(tonic::Response::new(
                         rpc::MachineValidationOnDemandResponse {
@@ -780,7 +807,9 @@ pub(crate) async fn get_machine_validation_external_configs(
 ) -> Result<tonic::Response<rpc::GetMachineValidationExternalConfigsResponse>, Status> {
     log_request_data(&request);
 
-    let ret = db::machine_validation_config::find_configs(&api.database_connection).await?;
+    let ret = db::machine_validation_config::find_configs(&api.database_connection)
+        .await
+        .map_err(crate::CarbideError::from)?;
     Ok(tonic::Response::new(
         rpc::GetMachineValidationExternalConfigsResponse {
             configs: ret
@@ -798,10 +827,12 @@ pub(crate) async fn remove_machine_validation_external_config(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
-    let _ = db::machine_validation_config::remove_config(&mut txn, &req.name).await?;
-    txn.commit().await?;
+    let _ = db::machine_validation_config::remove_config(&mut txn, &req.name)
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }
@@ -994,7 +1025,7 @@ pub(crate) async fn update_machine_validation_test(
         validate_img_name(img_name).map_err(Status::from)?;
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // let existing = machine_validation_suites::find(
     //     &mut txn,
@@ -1012,9 +1043,11 @@ pub(crate) async fn update_machine_validation_test(
     //     ));
     // }
     let model_req: ModelTestUpdateRequest = req.clone().into();
-    let test_id = machine_validation_suites::update(&mut txn, model_req).await?;
+    let test_id = machine_validation_suites::update(&mut txn, model_req)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         rpc::MachineValidationTestAddUpdateResponse {
@@ -1058,7 +1091,7 @@ pub(crate) async fn add_machine_validation_test(
         validate_img_name(img_name).map_err(Status::from)?;
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let model_req: ModelTestAddRequest = req.into();
     let generated_test_id = machine_validation_suites::generate_test_id(&model_req.name);
@@ -1080,7 +1113,8 @@ pub(crate) async fn add_machine_validation_test(
             ..ModelTestsGetRequest::default()
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     if !tests.is_empty() && model_req.plugin.is_none() {
         return Err(CarbideError::InvalidArgument("name already exists".to_string()).into());
     }
@@ -1095,9 +1129,11 @@ pub(crate) async fn add_machine_validation_test(
         .max_by_key(|test| test.version.version_nr())
         .map(|test| test.version.increment())
         .unwrap_or_else(ConfigVersion::initial);
-    let test_id = machine_validation_suites::save(&mut txn, model_req, version).await?;
+    let test_id = machine_validation_suites::save(&mut txn, model_req, version)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         rpc::MachineValidationTestAddUpdateResponse {
@@ -1114,7 +1150,9 @@ pub(crate) async fn get_machine_validation_tests(
     log_request_data(&request);
     let req: ModelTestsGetRequest = request.into_inner().into();
 
-    let tests = machine_validation_suites::find(&api.database_connection, req).await?;
+    let tests = machine_validation_suites::find(&api.database_connection, req)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         rpc::MachineValidationTestsGetResponse {
@@ -1131,7 +1169,7 @@ pub(crate) async fn machine_validation_test_verfied(
     request: tonic::Request<rpc::MachineValidationTestVerfiedRequest>,
 ) -> Result<tonic::Response<rpc::MachineValidationTestVerfiedResponse>, Status> {
     let req = request.into_inner();
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let existing = machine_validation_suites::find(
         &mut txn,
@@ -1141,16 +1179,19 @@ pub(crate) async fn machine_validation_test_verfied(
             ..ModelTestsGetRequest::default()
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let Some(test) = existing.first() else {
         return Err(machine_validation_test_not_found(
             &req.test_id,
             &req.version,
         ));
     };
-    let _ = machine_validation_suites::mark_verified(&mut txn, req.test_id, test.version).await?;
+    let _ = machine_validation_suites::mark_verified(&mut txn, req.test_id, test.version)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         rpc::MachineValidationTestVerfiedResponse {
@@ -1163,7 +1204,7 @@ pub(crate) async fn machine_validation_test_next_version(
     request: tonic::Request<rpc::MachineValidationTestNextVersionRequest>,
 ) -> Result<tonic::Response<rpc::MachineValidationTestNextVersionResponse>, Status> {
     let req = request.into_inner();
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let existing = machine_validation_suites::find(
         &mut txn,
@@ -1172,16 +1213,19 @@ pub(crate) async fn machine_validation_test_next_version(
             ..ModelTestsGetRequest::default()
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let Some(test) = existing.iter().max_by_key(|test| test.version.version_nr()) else {
         return Err(Status::not_found(format!(
             "machine validation test {} was not found",
             req.test_id
         )));
     };
-    let (test_id, next_version) = machine_validation_suites::clone(&mut txn, test).await?;
+    let (test_id, next_version) = machine_validation_suites::clone(&mut txn, test)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         rpc::MachineValidationTestNextVersionResponse {
@@ -1196,7 +1240,7 @@ pub(crate) async fn machine_validation_test_enable_disable_test(
     request: tonic::Request<rpc::MachineValidationTestEnableDisableTestRequest>,
 ) -> Result<tonic::Response<rpc::MachineValidationTestEnableDisableTestResponse>, Status> {
     let req = request.into_inner();
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let existing = machine_validation_suites::find(
         &mut txn,
@@ -1206,7 +1250,8 @@ pub(crate) async fn machine_validation_test_enable_disable_test(
             ..ModelTestsGetRequest::default()
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let Some(test) = existing.first() else {
         return Err(machine_validation_test_not_found(
             &req.test_id,
@@ -1233,9 +1278,10 @@ pub(crate) async fn machine_validation_test_enable_disable_test(
         test.verified,
         test.plugin.is_some(),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(
         rpc::MachineValidationTestEnableDisableTestResponse {
@@ -1250,7 +1296,7 @@ pub(crate) async fn machine_validation_test_approve_full_host(
 ) -> Result<tonic::Response<rpc::MachineValidationTestFullHostApprovalResponse>, Status> {
     log_request_data(&request);
     let req = request.into_inner();
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let existing = machine_validation_suites::find(
         &mut txn,
         ModelTestsGetRequest {
@@ -1259,7 +1305,8 @@ pub(crate) async fn machine_validation_test_approve_full_host(
             ..Default::default()
         },
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let Some(test) = existing.first() else {
         return Err(machine_validation_test_not_found(
             &req.test_id,
@@ -1282,8 +1329,9 @@ pub(crate) async fn machine_validation_test_approve_full_host(
     validate_machine_validation_plugin(&plugin, &api.runtime_config.machine_validation_config)
         .map_err(Status::from)?;
     machine_validation_suites::approve_full_host(&mut txn, test.test_id.clone(), test.version)
-        .await?;
-    txn.commit().await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(tonic::Response::new(
         rpc::MachineValidationTestFullHostApprovalResponse {
             message: "Success".to_owned(),
@@ -1296,7 +1344,7 @@ pub(crate) async fn update_machine_validation_run(
     request: tonic::Request<rpc::MachineValidationRunRequest>,
 ) -> Result<tonic::Response<rpc::MachineValidationRunResponse>, Status> {
     let req = request.into_inner();
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let validation_id = req
         .validation_id
@@ -1326,21 +1374,24 @@ pub(crate) async fn update_machine_validation_run(
         total,
         req.duration_to_complete.unwrap_or_default().seconds,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     if !selected_tests.is_empty() {
-        let machine_validation =
-            db::machine_validation::find_by_id(&mut txn, &validation_id).await?;
+        let machine_validation = db::machine_validation::find_by_id(&mut txn, &validation_id)
+            .await
+            .map_err(crate::CarbideError::from)?;
         db::machine_validation_execution::materialize_run_plan(
             &mut txn,
             &validation_id,
             machine_validation.context.as_deref().unwrap_or_default(),
             &selected_tests,
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(rpc::MachineValidationRunResponse {
         message: "Success".to_string(),

@@ -29,16 +29,18 @@ pub(crate) async fn get_network_topology(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let query = match &req.id {
         Some(x) => ObjectFilter::One(x.as_str()),
         None => ObjectFilter::All,
     };
 
-    let data = db::network_devices::get_topology(&mut txn, query).await?;
+    let data = db::network_devices::get_topology(&mut txn, query)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(data.into()))
 }
@@ -61,7 +63,8 @@ pub(crate) async fn find_network_devices_by_device_ids(
         ObjectFilter::List(&network_device_ids),
         &search_config,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::NetworkTopologyData {
         network_devices: network_devices.into_iter().map_into().collect(),
@@ -85,7 +88,8 @@ pub(crate) async fn find_connected_devices_by_dpu_machine_ids(
         &api.database_connection,
         &dpu_ids,
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::ConnectedDeviceList {
         connected_devices: connected_devices.into_iter().map_into().collect(),

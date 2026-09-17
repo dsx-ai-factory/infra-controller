@@ -185,10 +185,12 @@ pub(crate) async fn rotate_credential(
 
     // Existing targets advance by one. NVOS is initialized at version zero only
     // after that immutable secret has been stored and read back below.
-    let mut txn = api.txn_begin().await?;
-    let current = db::credential_rotation::current_target_version(&mut txn, rotation_type).await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
+    let current = db::credential_rotation::current_target_version(&mut txn, rotation_type)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let next_version_i32 = match current {
         Some(current) => current.checked_add(1).ok_or_else(|| {
@@ -241,26 +243,24 @@ pub(crate) async fn rotate_credential(
 
     // Publish last. Existing rows use a version CAS; initial NVOS publication
     // uses row absence as its CAS.
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let staged = match current {
-        Some(current) => {
-            db::credential_rotation::set_next_target_version(
-                &mut txn,
-                rotation_type,
-                current,
-                request_meta,
-            )
-            .await?
-        }
-        None => {
-            db::credential_rotation::set_initial_target_version(
-                &mut txn,
-                rotation_type,
-                request_meta,
-            )
-            .await?
-        }
+        Some(current) => db::credential_rotation::set_next_target_version(
+            &mut txn,
+            rotation_type,
+            current,
+            request_meta,
+        )
+        .await
+        .map_err(crate::CarbideError::from)?,
+        None => db::credential_rotation::set_initial_target_version(
+            &mut txn,
+            rotation_type,
+            request_meta,
+        )
+        .await
+        .map_err(crate::CarbideError::from)?,
     };
 
     let staged = match staged {
@@ -275,10 +275,12 @@ pub(crate) async fn rotate_credential(
     };
 
     if rotation_type == RotationType::Nvos {
-        enqueue_nvos_rotation_switches(&mut txn).await?;
+        enqueue_nvos_rotation_switches(&mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::RotateCredentialResult {
         credential_type,
@@ -483,13 +485,13 @@ pub(crate) async fn get_credential_rotation_status(
         return device_rotation_status_response(api, rotation_type, device_mac).await;
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let status = db::credential_rotation::rotation_status(&mut txn, rotation_type)
         .await
         .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::CredentialRotationStatusResult {
         target_version: to_u32(status.target_version, "target version")?,
@@ -525,13 +527,13 @@ async fn device_rotation_status_response(
         ))
     })?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let status = db::credential_rotation::device_rotation_status(&mut txn, rotation_type, mac)
         .await
         .map_err(CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     let status = status.ok_or(CarbideError::NotFoundError {
         kind: "device_credential_rotation",

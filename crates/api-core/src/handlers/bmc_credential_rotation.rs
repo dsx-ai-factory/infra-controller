@@ -40,31 +40,43 @@ pub(crate) async fn trigger_bmc_credential_rotation(
     let req = request.into_inner();
     let mode = req.mode();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let target = resolve_target(&mut txn, req.device_id, req.bmc_mac).await?;
 
     match mode {
         Mode::Set => match target {
             DeviceId::Machine(id) => {
-                db::machine::set_bmc_credential_rotation_requested(&mut txn, &id).await?;
+                db::machine::set_bmc_credential_rotation_requested(&mut txn, &id)
+                    .await
+                    .map_err(crate::CarbideError::from)?;
             }
             DeviceId::Switch(id) => {
-                db::switch::set_bmc_credential_rotation_requested(&mut txn, id).await?;
+                db::switch::set_bmc_credential_rotation_requested(&mut txn, id)
+                    .await
+                    .map_err(crate::CarbideError::from)?;
             }
             DeviceId::PowerShelf(id) => {
-                db::power_shelf::set_bmc_credential_rotation_requested(&mut txn, id).await?;
+                db::power_shelf::set_bmc_credential_rotation_requested(&mut txn, id)
+                    .await
+                    .map_err(crate::CarbideError::from)?;
             }
         },
         Mode::Clear => match target {
             DeviceId::Machine(id) => {
-                db::machine::clear_bmc_credential_rotation_requested(&mut txn, &id).await?;
+                db::machine::clear_bmc_credential_rotation_requested(&mut txn, &id)
+                    .await
+                    .map_err(crate::CarbideError::from)?;
             }
             DeviceId::Switch(id) => {
-                db::switch::clear_bmc_credential_rotation_requested(&mut txn, id).await?;
+                db::switch::clear_bmc_credential_rotation_requested(&mut txn, id)
+                    .await
+                    .map_err(crate::CarbideError::from)?;
             }
             DeviceId::PowerShelf(id) => {
-                db::power_shelf::clear_bmc_credential_rotation_requested(&mut txn, id).await?;
+                db::power_shelf::clear_bmc_credential_rotation_requested(&mut txn, id)
+                    .await
+                    .map_err(crate::CarbideError::from)?;
             }
         },
         // An omitted `mode` decodes as `Unspecified`; reject it rather than let
@@ -76,7 +88,7 @@ pub(crate) async fn trigger_bmc_credential_rotation(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }

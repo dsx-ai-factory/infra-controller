@@ -29,7 +29,7 @@ pub(crate) async fn create_os_image(
     api: &Api,
     request: Request<crate::api::rpc::OsImageAttributes>,
 ) -> Result<Response<crate::api::rpc::OsImage>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let attrs: OsImageAttributes = OsImageAttributes::try_from(request.into_inner())
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
     if attrs.source_url.is_empty() || attrs.digest.is_empty() {
@@ -58,7 +58,7 @@ pub(crate) async fn list_os_image(
     api: &Api,
     request: Request<crate::api::rpc::ListOsImageRequest>,
 ) -> Result<Response<crate::api::rpc::ListOsImageResponse>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let tenant: Option<TenantOrganizationId> = match request.into_inner().tenant_organization_id {
         Some(x) => Some(
             TenantOrganizationId::try_from(x)
@@ -93,7 +93,7 @@ pub(crate) async fn get_os_image(
     api: &Api,
     request: Request<rpc::Uuid>,
 ) -> Result<Response<crate::api::rpc::OsImage>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let image_id: Uuid = Uuid::try_from(request.into_inner())
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
     let image =
@@ -117,7 +117,7 @@ pub(crate) async fn delete_os_image(
     api: &Api,
     request: Request<crate::api::rpc::DeleteOsImageRequest>,
 ) -> Result<Response<crate::api::rpc::DeleteOsImageResponse>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let req = request.into_inner();
     if req.id.is_none() {
         return Err(CarbideError::InvalidArgument("os image id missing".to_string()).into());
@@ -156,7 +156,7 @@ pub(crate) async fn update_os_image(
     api: &Api,
     request: Request<crate::api::rpc::OsImageAttributes>,
 ) -> Result<Response<crate::api::rpc::OsImage>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let new_attrs: OsImageAttributes = OsImageAttributes::try_from(request.into_inner())
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;

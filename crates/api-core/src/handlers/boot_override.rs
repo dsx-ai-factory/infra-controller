@@ -29,7 +29,7 @@ pub(crate) async fn get(
 
     let machine_interface_id = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let machine_id = match db::machine_interface::find_one(&mut txn, machine_interface_id).await {
         Ok(interface) => interface.machine_id,
@@ -41,7 +41,8 @@ pub(crate) async fn get(
     }
 
     let mbo = match db::machine_boot_override::find_optional(txn.as_pgconn(), machine_interface_id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
     {
         Some(mbo) => mbo,
         None => MachineBootOverride {
@@ -51,7 +52,7 @@ pub(crate) async fn get(
         },
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(mbo.into()))
 }
@@ -63,7 +64,7 @@ pub(crate) async fn set(
     crate::api::log_request_data(&request);
 
     let mbo: MachineBootOverride = request.into_inner().try_into()?;
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let machine_id = match db::machine_interface::find_one(&mut txn, mbo.machine_interface_id).await
     {
@@ -86,9 +87,11 @@ pub(crate) async fn set(
         ),
     }
 
-    db::machine_boot_override::update_or_insert(&mbo, &mut txn).await?;
+    db::machine_boot_override::update_or_insert(&mbo, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }
@@ -101,7 +104,7 @@ pub(crate) async fn clear(
 
     let machine_interface_id = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let machine_id = match db::machine_interface::find_one(&mut txn, machine_interface_id).await {
         Ok(interface) => interface.machine_id,
@@ -122,9 +125,11 @@ pub(crate) async fn clear(
             "Boot override for machine_interface_id disabled"
         ),
     }
-    db::machine_boot_override::clear(&mut txn, machine_interface_id).await?;
+    db::machine_boot_override::clear(&mut txn, machine_interface_id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(()))
 }

@@ -153,7 +153,8 @@ pub(crate) async fn allocate(
 
     if request.needs_hydration_from_deprecated_fields() {
         api.with_txn(|txn| request.hydrate_from_deprecated_fields(txn).boxed())
-            .await??;
+            .await
+            .map_err(crate::CarbideError::from)??;
     }
 
     let request = InstanceAllocationRequest::try_from(request)?;
@@ -189,7 +190,8 @@ pub(crate) async fn batch_allocate(
 
     if batch_request.needs_hydration_from_deprecated_fields() {
         api.with_txn(|txn| batch_request.hydrate_from_deprecated_fields(txn).boxed())
-            .await??;
+            .await
+            .map_err(crate::CarbideError::from)??;
     }
 
     // Convert all requests
@@ -243,7 +245,9 @@ pub(crate) async fn find_ids(
 
     let filter: model::instance::InstanceSearchFilter = request.into_inner().into();
 
-    let instance_ids = db::instance::find_ids(&api.database_connection, filter).await?;
+    let instance_ids = db::instance::find_ids(&api.database_connection, filter)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     Ok(tonic::Response::new(rpc::InstanceIdList { instance_ids }))
 }
@@ -268,14 +272,15 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let snapshots = db::managed_host::load_by_instance_ids(
         &mut txn,
         instance_ids.as_ref(),
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
-    .await?;
+    .await
+    .map_err(crate::CarbideError::from)?;
     let mut instances = Vec::with_capacity(snapshots.len());
     for snapshot in snapshots.into_iter() {
         instances.push(snapshot_to_instance(snapshot)?);
@@ -294,7 +299,7 @@ pub(crate) async fn find_by_machine_id(
 
     let machine_id = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let mh_snapshot = match db::managed_host::load_snapshot(
         &mut txn,
@@ -319,7 +324,7 @@ pub(crate) async fn find_by_machine_id(
 
     let response = Response::new(rpc::InstanceList { instances });
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(response)
 }
@@ -829,13 +834,14 @@ async fn release_one_instance(
         .id
         .ok_or(RpcDataConversionError::MissingArgument("id"))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     // Take the Instance lock before any optional Machine health update. IB
     // config changes use the same Instance-before-Machine order, and a
     // controller DELETE must acquire this Instance record before proceeding.
     let instance = db::instance::find_by_id_for_update(txn.as_mut(), instance_id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
@@ -877,7 +883,8 @@ async fn release_one_instance(
                 ..Default::default()
             },
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
@@ -917,18 +924,22 @@ async fn release_one_instance(
             %instance_id,
             "Instance is already marked for deletion.",
         );
-        txn.commit().await?;
+        txn.commit().await.map_err(crate::CarbideError::from)?;
         return Ok(());
     }
 
     let pkeys = load_ib_partition_pkeys(txn.as_mut(), &[&instance.infiniband_config]).await?;
     let memberships = ib_memberships_from_config(&instance.infiniband_config, &pkeys);
     for membership in memberships {
-        db::retired_ib_membership::record(txn.as_mut(), &membership).await?;
+        db::retired_ib_membership::record(txn.as_mut(), &membership)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
-    db::instance::mark_as_deleted(instance_id, &mut txn).await?;
+    db::instance::mark_as_deleted(instance_id, &mut txn)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(())
 }
@@ -966,10 +977,10 @@ pub(crate) async fn update_phone_home_last_contact(
         .instance_id
         .ok_or(CarbideError::MissingArgument("id"))?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let instance = db::instance::find_by_id(&mut txn, instance_id)
-        .await?
+        .await.map_err(crate::CarbideError::from)?
         .ok_or_else(|| {
             // Return PermissionDenied (not NotFound) so callers cannot probe instance existence
             // by observing which error they receive.
@@ -1000,7 +1011,8 @@ pub(crate) async fn update_phone_home_last_contact(
                 &carbide_uuid::machine::DpuMachineId::try_from(*caller_machine_id)
                     .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?,
             )
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .is_some_and(|host| host.id == instance.machine_id)
         };
 
@@ -1018,9 +1030,11 @@ pub(crate) async fn update_phone_home_last_contact(
         }
     }
 
-    let res = db::instance::update_phone_home_last_contact(&mut txn, instance.id).await?;
+    let res = db::instance::update_phone_home_last_contact(&mut txn, instance.id)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(rpc::InstancePhoneHomeLastContactResponse {
         timestamp: Some(res.into()),
@@ -1033,7 +1047,7 @@ pub(crate) async fn invoke_power(
 ) -> Result<Response<rpc::InstancePowerResult>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let request = request.into_inner();
     let instance_id = request
@@ -1044,7 +1058,8 @@ pub(crate) async fn invoke_power(
         &[instance_id],
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .pop()
     .ok_or(CarbideError::NotFoundError {
         kind: "instance",
@@ -1104,14 +1119,18 @@ pub(crate) async fn invoke_power(
         || request.boot_with_custom_ipxe);
 
     if use_state_machine_for_reboot {
-        db::instance::set_custom_pxe_reboot_requested(&machine_id, true, &mut txn).await?;
+        db::instance::set_custom_pxe_reboot_requested(&machine_id, true, &mut txn)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
 
     if request.boot_with_custom_ipxe
         && let Some(instance) = snapshot.instance.as_ref()
         && instance.config.os.phone_home_enabled
     {
-        db::instance::clear_phone_home_last_contact(&mut txn, instance.id).await?;
+        db::instance::clear_phone_home_last_contact(&mut txn, instance.id)
+            .await
+            .map_err(crate::CarbideError::from)?;
     }
 
     // For non-always-PXE instances, set use_custom_pxe_on_boot based on the request.
@@ -1123,7 +1142,8 @@ pub(crate) async fn invoke_power(
             request.boot_with_custom_ipxe,
             &mut txn,
         )
-        .await?;
+        .await
+        .map_err(crate::CarbideError::from)?;
     }
 
     // Check if reprovision is requested.
@@ -1181,7 +1201,7 @@ pub(crate) async fn invoke_power(
         }
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     if reprovision_handled {
         // Host will reboot once DPU reprovisioning is successfully finished.
@@ -1253,12 +1273,13 @@ pub(crate) async fn update_operating_system(
     };
     os.validate().map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     validate_os_definition_usable(&mut txn, &os).await?;
 
     let instance = db::instance::find_by_id(&mut txn, instance_id)
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or(CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
@@ -1279,21 +1300,24 @@ pub(crate) async fn update_operating_system(
         None => instance.config_version,
     };
 
-    db::instance::update_os(&mut txn, instance.id, expected_version, os).await?;
+    db::instance::update_os(&mut txn, instance.id, expected_version, os)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let mh_snapshot = db::managed_host::load_snapshot(
         &mut txn,
         &instance.machine_id,
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .ok_or(CarbideError::NotFoundError {
         kind: "instance",
         id: instance_id.to_string(),
     })?;
     let instance = snapshot_to_instance(mh_snapshot)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(instance))
 }
@@ -1354,14 +1378,15 @@ pub(crate) async fn update_instance_config(
     metadata.validate(true).map_err(|e| {
         CarbideError::InvalidArgument(format!("instance metadata is not valid: {e}"))
     })?;
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     let (machine_id, initial_config_version) = {
         // Capture the Instance before any overlap or IB lock wait. If another request
         // updates it while this request waits, this version remains the
         // implicit optimistic token rather than silently rebasing.
         let request_start_instance = db::instance::find_by_id(&mut txn, instance_id)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .ok_or(CarbideError::NotFoundError {
                 kind: "instance",
                 id: instance_id.to_string(),
@@ -1377,7 +1402,8 @@ pub(crate) async fn update_instance_config(
         &machine_id,
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .ok_or(CarbideError::NotFoundError {
         kind: "machine",
         id: machine_id.to_string(),
@@ -1453,7 +1479,9 @@ pub(crate) async fn update_instance_config(
         && (initial_instance.config.network_security_group_id != config.network_security_group_id
             || network_expands);
     if needs_overlap_check {
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        db::tenant_prefix_overlap::lock_checks(txn.as_mut())
+            .await
+            .map_err(crate::CarbideError::from)?;
         // No resource locks precede this wait. Reload the retained networks,
         // but keep the request's original version rather than rebasing it.
         mh_snapshot = db::managed_host::load_snapshot(
@@ -1461,7 +1489,8 @@ pub(crate) async fn update_instance_config(
             &machine_id,
             LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or(CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
@@ -1512,7 +1541,8 @@ pub(crate) async fn update_instance_config(
             Some(tenant_org),
             true,
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .pop()
         .is_none()
         {
@@ -1551,7 +1581,8 @@ pub(crate) async fn update_instance_config(
     // locks so no IB or later specialized config mutation uses stale state.
     if ib_config_update_requested {
         let locked_instance = db::instance::find_by_id_for_update(txn.as_mut(), instance_id)
-            .await?
+            .await
+            .map_err(crate::CarbideError::from)?
             .ok_or(CarbideError::NotFoundError {
                 kind: "instance",
                 id: instance_id.to_string(),
@@ -1573,7 +1604,8 @@ pub(crate) async fn update_instance_config(
                 ..Default::default()
             },
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .is_none()
         {
             return Err(CarbideError::NotFoundError {
@@ -1588,7 +1620,8 @@ pub(crate) async fn update_instance_config(
             &machine_id,
             LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
         )
-        .await?
+        .await
+        .map_err(crate::CarbideError::from)?
         .ok_or(CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
@@ -1627,21 +1660,24 @@ pub(crate) async fn update_instance_config(
     );
     update_instance_spx_config(&mh_snapshot, instance, &mut config.spxconfig, &mut txn).await?;
 
-    db::instance::update_config(&mut txn, instance.id, expected_version, config, metadata).await?;
+    db::instance::update_config(&mut txn, instance.id, expected_version, config, metadata)
+        .await
+        .map_err(crate::CarbideError::from)?;
 
     let mh_snapshot = db::managed_host::load_snapshot(
         &mut txn,
         &instance.machine_id,
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
-    .await?
+    .await
+    .map_err(crate::CarbideError::from)?
     .ok_or(CarbideError::NotFoundError {
         kind: "instance",
         id: instance_id.to_string(),
     })?;
     let instance = snapshot_to_instance(mh_snapshot)?;
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(instance))
 }

@@ -45,16 +45,18 @@ pub(crate) async fn trigger_nic_lockdown_credential_rotation(
         .ok_or_else(|| CarbideError::InvalidArgument("machine_id must be provided".to_string()))?;
     log_machine_id(&machine_id);
 
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
 
     match mode {
         Mode::Set => {
             db::machine::set_lockdown_ikm_credential_rotation_requested(&mut txn, machine_id)
-                .await?;
+                .await
+                .map_err(crate::CarbideError::from)?;
         }
         Mode::Clear => {
             db::machine::clear_lockdown_ikm_credential_rotation_requested(&mut txn, machine_id)
-                .await?;
+                .await
+                .map_err(crate::CarbideError::from)?;
         }
         Mode::Unspecified => {
             return Err(
@@ -63,7 +65,7 @@ pub(crate) async fn trigger_nic_lockdown_credential_rotation(
         }
     };
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
 
     Ok(Response::new(()))
 }

@@ -879,7 +879,7 @@ async fn queue_power_shelf_maintenance_via_state_controller(
     power_shelf_ids: &[PowerShelfId],
     operation: PowerShelfMaintenanceOperation,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
-    let mut txn = api.txn_begin().await?;
+    let mut txn = api.txn_begin().await.map_err(crate::CarbideError::from)?;
     let existing = db::power_shelf::find_by(
         &mut txn,
         db::ObjectColumnFilter::List(db::power_shelf::IdColumn, power_shelf_ids),
@@ -917,7 +917,7 @@ async fn queue_power_shelf_maintenance_via_state_controller(
         results.push(success_result(&power_shelf_id.to_string()));
     }
 
-    txn.commit().await?;
+    txn.commit().await.map_err(crate::CarbideError::from)?;
     Ok(results)
 }
 
