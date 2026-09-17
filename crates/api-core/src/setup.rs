@@ -2139,13 +2139,13 @@ fn nmxc_tls_config_from_nvlink(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
-    use std::path::Path;
 
     use carbide_network::virtualization::VpcVirtualizationType;
     use carbide_test_support::Outcome::{FailsWith, Yields};
     use carbide_test_support::{Case, check_cases, scenarios, value_scenarios};
     use figment::Figment;
     use figment::providers::{Format, Toml};
+    use figment::value::Value;
     use model::expected_machine::HostDpuPolicy;
     use model::network_segment::{NetworkDefinition, NetworkDefinitionSegmentType};
     use model::resource_pool::ResourcePoolType;
@@ -2350,35 +2350,29 @@ mod tests {
     fn load_layered_dpu_policy(
         layers: PolicyLayers,
     ) -> Result<Option<HostDpuPolicy>, figment::Error> {
-        let mut policy = None;
-        figment::Jail::try_with(|jail| {
-            jail.clear_env();
-            if let Some(environment_value) = layers.environment_value {
-                jail.set_env("CARBIDE_API_SITE_EXPLORER", environment_value);
-            }
+        let directory = tempfile::tempdir().unwrap();
+        let global_path = directory.path().join("global.toml");
+        let site_path = directory.path().join("site.toml");
+        let global_config = format!(
+            "{}\n[site_explorer]\n{}\n",
+            include_str!("cfg/test_data/min_config.toml"),
+            layers.global_setting,
+        );
+        let site_config = format!("[site_explorer]\n{}\n", layers.site_setting);
+        std::fs::write(&global_path, global_config).unwrap();
+        std::fs::write(&site_path, site_config).unwrap();
 
-            let global_config = format!(
-                "{}\n[site_explorer]\n{}\n",
-                include_str!("cfg/test_data/min_config.toml"),
-                layers.global_setting,
-            );
-            let site_config = format!("[site_explorer]\n{}\n", layers.site_setting);
-            jail.create_file("global.toml", &global_config)?;
-            jail.create_file("site.toml", &site_config)?;
-
-            policy = Some(
-                merged_carbide_config_figment(
-                    Path::new("global.toml"),
-                    Some(Path::new("site.toml")),
-                )
+        let mut environment = Figment::new();
+        if let Some(value) = layers.environment_value {
+            // Env uses Value's parser for structured environment values.
+            environment = environment.merge(("site_explorer", value.parse::<Value>().unwrap()));
+        }
+        Ok(
+            merged_carbide_config_figment(&global_path, Some(&site_path), environment)
                 .extract::<CarbideConfig>()?
                 .site_explorer
                 .dpu_policy,
-            );
-            Ok(())
-        })?;
-
-        Ok(policy.expect("Jail must run the configuration extraction"))
+        )
     }
 
     #[test]
@@ -2787,20 +2781,21 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::result_large_err)] // Figment controls the error representation.
     fn rack_profile_attributes_merge_per_key_with_provider_precedence() {
-        figment::Jail::expect_with(|jail| {
-            jail.clear_env();
+        let directory = tempfile::tempdir().unwrap();
+        let global_path = directory.path().join("global.toml");
+        let site_path = directory.path().join("site.toml");
+        // Environment input replaces only its duplicate key; unrelated
+        // keys from lower-priority providers remain in the effective map.
+        let environment = (
+            "rack_profiles",
+            "{NVL72={attributes={attribute1=environment,additional_attribute4=environment}}}"
+                .parse::<Value>()
+                .unwrap(),
+        );
 
-            // Environment input replaces only its duplicate key; unrelated
-            // keys from lower-priority providers remain in the effective map.
-            jail.set_env(
-                "CARBIDE_API_RACK_PROFILES",
-                "{NVL72={attributes={attribute1=environment,additional_attribute4=environment}}}",
-            );
-
-            let global_config = format!(
-                r#"{}
+        let global_config = format!(
+            r#"{}
 
 [rack_profiles.NVL72]
 product_family = "gb200"
@@ -2815,39 +2810,34 @@ count = 9
 [rack_profiles.NVL72.rack_capabilities.power_shelf]
 count = 8
 "#,
-                include_str!("cfg/test_data/min_config.toml"),
-            );
+            include_str!("cfg/test_data/min_config.toml"),
+        );
 
-            let site_config = r#"
+        let site_config = r#"
 [rack_profiles.NVL72]
 attributes = { attribute1 = "site", additional_attribute3 = "site" }
 "#;
-            jail.create_file("global.toml", &global_config)?;
-            jail.create_file("site.toml", site_config)?;
+        std::fs::write(&global_path, global_config).unwrap();
+        std::fs::write(&site_path, site_config).unwrap();
 
-            let config = merged_carbide_config_figment(
-                Path::new("global.toml"),
-                Some(Path::new("site.toml")),
-            )
-            .extract::<CarbideConfig>()?;
+        let config = merged_carbide_config_figment(&global_path, Some(&site_path), environment)
+            .extract::<CarbideConfig>()
+            .unwrap();
 
-            let attributes = &config.rack_profiles.get("NVL72").unwrap().attributes;
+        let attributes = &config.rack_profiles.get("NVL72").unwrap().attributes;
 
-            assert_eq!(
-                attributes,
-                &HashMap::from([
-                    ("attribute1".to_string(), "environment".to_string()),
-                    ("additional_attribute2".to_string(), "global".to_string()),
-                    ("additional_attribute3".to_string(), "site".to_string()),
-                    (
-                        "additional_attribute4".to_string(),
-                        "environment".to_string(),
-                    ),
-                ])
-            );
-
-            Ok(())
-        });
+        assert_eq!(
+            attributes,
+            &HashMap::from([
+                ("attribute1".to_string(), "environment".to_string()),
+                ("additional_attribute2".to_string(), "global".to_string()),
+                ("additional_attribute3".to_string(), "site".to_string()),
+                (
+                    "additional_attribute4".to_string(),
+                    "environment".to_string(),
+                ),
+            ])
+        );
     }
 
     #[test]
