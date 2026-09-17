@@ -28,23 +28,31 @@ the chart does not expose it; a future chart version can add it once Flow does.
 
 ### Durations
 
-Durations use the Go `time.ParseDuration` format: one or more decimal numbers,
-each followed by a unit from `ns`, `us`, `ms`, `s`, `m`, or `h`, for example
-`30s`, `1m`, `1.5h`, or `1h30m`. Both intervals must be greater than zero. The
-chart checks this at render time, so `helm install`, `helm upgrade`, and
-`helm template` fail before anything reaches the cluster. The location names
-`deployment.yaml` because the Deployment's checksum annotation renders the
-ConfigMap first:
+Durations use the Go `time.ParseDuration` format: one or more unsigned decimal
+numbers, each followed by a unit from `ns`, `us`, `µs`, `ms`, `s`, `m`, or `h`,
+for example `30s`, `1m`, `1.5h`, or `1h30m`. A leading sign is not accepted.
+Both intervals must be greater than zero.
+
+The chart's render-time check is syntactic: it rejects values that do not match
+this shape and values that are literally zero, so `helm install`,
+`helm upgrade`, and `helm template` fail before anything reaches the cluster.
+It does not evaluate the parsed duration; Flow does that at startup (see
+below). The location names `deployment.yaml` because the Deployment's checksum
+annotation renders the ConfigMap first:
 
 ```text
 Error: execution error at (nico-flow/templates/deployment.yaml:...): flowConfig.inventoryRunFrequency must be a Go duration string with a unit, such as 30s, 1m, or 1h30m; got "30"
 Error: execution error at (nico-flow/templates/deployment.yaml:...): flowConfig.leakDetectionInterval must be greater than zero; got "0s"
 ```
 
-If a file bypasses the chart, Flow itself rejects a bare number at startup
-with `Invalid configuration file /etc/flow/flowconfig.yaml: ...` and a zero
-interval with `invalid inventory sync interval: interval must be positive, got
-0s` (or `invalid leak detection interval: ...`).
+Flow validates the parsed value at startup and exits if it is unusable, which
+also covers a file that bypasses the chart. A value that Go cannot parse, such
+as a bare number or one beyond the `time.Duration` range (about `2562047h`),
+fails with `Invalid configuration file /etc/flow/flowconfig.yaml: ...`. A value
+that parses to zero, including a fraction below `1ns` such as
+`0.0000000001s`, fails with `invalid inventory sync interval: interval must be
+positive, got 0s` (or `invalid leak detection interval: ...`). The pod logs the
+error and restarts until the value is corrected.
 
 ### Booleans
 
