@@ -705,17 +705,54 @@ The instance detail response is rich -- it includes `interfaces[]` with assigned
 
 **What it does.** When phone-home is enabled, NICo does not consider the instance fully provisioned until the booted OS contacts NICo's metadata service from inside the guest. The instance is held in a provisioning state -- the transition to `Ready` is gated -- until that callback arrives. When it is disabled, NICo reports the instance ready as soon as provisioning and config sync finish, without waiting for any signal from the OS.
 
-**What NICo injects.** When phone-home is enabled, NICo edits your `userData` for you -- you do *not* add the callback yourself. NICo parses your cloud-init YAML, strips any existing [`phone_home`](https://cloudinit.readthedocs.io/en/latest/reference/modules.html#phone-home) block, and inserts one that POSTs to the site's metadata endpoint:
+**What NICo injects.** When phone-home is enabled, NICo edits your `userData`. You do not add the callback yourself. NICo parses your cloud-init YAML, removes the existing [`phone_home`](https://cloudinit.readthedocs.io/en/latest/reference/modules.html#phone-home) blocks that it can edit, and inserts one that sends a POST request to the site's metadata endpoint:
 
 ```yaml
 #cloud-config
 # ... your first-boot setup (SSH keys, passwords, packages, ...) ...
 phone_home:
-  url: http://169.254.169.254/latest/meta-data/phone_home
   post: all
+  url: http://169.254.169.254/latest/meta-data/phone_home
 ```
 
-The injected `url` is the site-configured phone-home endpoint (`site.phoneHomeUrl`; default `http://169.254.169.254/latest/meta-data/phone_home`), which the platform operator can override per deployment. If you supply no `userData`, NICo generates a minimal `#cloud-config` containing only the block above. Disabling phone-home reverses this, and NICo removes the matching `phone_home` block it manages. Because NICo rewrites your user-data as YAML, **any `userData` you provide must be valid cloud-init YAML (a `#cloud-config` mapping) when phone-home is enabled**. The API rejects requests with invalid user-data. (Supplying no user-data is fine: NICo generates the minimal `#cloud-config` shown above.)
+The injected `url` is the site-configured phone-home endpoint in `site.phoneHomeUrl`. The default is `http://169.254.169.254/latest/meta-data/phone_home`. The platform operator can override this endpoint for each deployment. If you supply no `userData` when enabling phone-home, NICo generates a minimal `#cloud-config` that contains only the block above.
+
+When you disable phone-home, the removal behavior depends on whether the request supplies `userData`. If it does, NICo removes only a `phone_home` block that reports to the site endpoint and leaves blocks that report elsewhere unchanged. If the request omits `userData`, NICo edits the stored blob. If NICo stored that blob with phone-home enabled, it removes every `phone_home` block. A stored block can contain a URL from before a change to `site.phoneHomeUrl`.
+
+**Which user data NICo can edit.** When phone-home is enabled, the `userData` you provide must be one of these formats:
+
+- A `#cloud-config` mapping.
+- A `#cloud-config-archive` sequence.
+
+The API rejects these inputs:
+
+- A `#!` script.
+- A `## template: jinja` document, because NICo cannot render the template back to text.
+- Another cloud-init format, including `#cloud-boothook` or `#cloud-config-jsonp`.
+- More than one YAML document.
+- Text that is not YAML.
+
+NICo treats user data without a format marker as `#cloud-config`, including user data with only a comment above the keys. Enabling phone-home writes the marker at the top so that cloud-init reads the document. When you disable phone-home for user data that NICo cannot edit, NICo leaves the document unchanged instead of rejecting the request. Any `phone_home` block in that document remains.
+
+**Where the block lands.** In a `#cloud-config` document, NICo adds the block at the top level. If the document contains an `autoinstall` section, NICo adds the block under `autoinstall.user-data`. This placement makes the callback come from the installed system instead of the installer.
+
+In a `#cloud-config-archive`, NICo adds the block to the part that installs a target system, again under `autoinstall.user-data`. Cloud-init determines a part's format from its `type` without reading the content. If `type` is absent, cloud-init uses the content's first line. If neither value identifies a format, cloud-init treats the part as `cloud-config`. The first-line rule above therefore applies to the document you send, not to the parts inside it.
+
+NICo leaves a part whose content is a `## template: jinja` document unchanged because it cannot render the template back to text. If no part installs a target system, NICo appends a `#cloud-config` part that contains only the block. NICo does the same when the installation part is a template that it leaves unchanged. In both cases, NICo leaves your parts unchanged:
+
+```yaml
+#cloud-config-archive
+- type: text/x-shellscript
+  content: |
+    #!/bin/sh
+    # ... your part, untouched ...
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      post: all
+      url: http://169.254.169.254/latest/meta-data/phone_home
+```
 
 cloud-init runs the `phone_home` module in its final stage, after the rest of your configuration has been applied, so the callback fires only after your setup has completed. When NICo receives the POST, it records the contact and releases the readiness gate, allowing the instance to become `Ready`.
 
