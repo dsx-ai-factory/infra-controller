@@ -46,3 +46,9 @@ pub enum ConditionalWrite<T, R> {
 /// distinguish them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControllerStateNotCurrent;
+
+/// `MaintenanceRequestNotCurrent` means the device is missing or its pending
+/// request no longer matches the request being completed. The clear operation
+/// does not distinguish these cases; any replacement request is left unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaintenanceRequestNotCurrent;

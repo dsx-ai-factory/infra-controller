@@ -384,17 +384,24 @@ pub async fn clear_decommission_requested(
         .map_err(|error| DatabaseError::new("clear_decommission_requested", error))
 }
 
+/// Clears only the maintenance request that the controller completed.
+/// A missing power shelf or a different pending request returns `NotApplied`.
 pub async fn clear_power_shelf_maintenance_requested(
     txn: &mut PgConnection,
     power_shelf_id: PowerShelfId,
-) -> DatabaseResult<()> {
-    let query = "UPDATE power_shelves SET power_shelf_maintenance_requested = NULL WHERE id = $1 RETURNING id";
-    sqlx::query_as::<_, PowerShelfId>(query)
+    request: &PowerShelfMaintenanceRequest,
+) -> DatabaseResult<crate::ConditionalWrite<(), crate::MaintenanceRequestNotCurrent>> {
+    let query = "UPDATE power_shelves SET power_shelf_maintenance_requested = NULL WHERE id = $1 AND power_shelf_maintenance_requested = $2 RETURNING id";
+    let cleared = sqlx::query_as::<_, PowerShelfId>(query)
         .bind(power_shelf_id)
+        .bind(sqlx::types::Json(request))
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::new("clear_power_shelf_maintenance_requested", e))?;
-    Ok(())
+    Ok(match cleared {
+        Some(_) => crate::ConditionalWrite::Applied(()),
+        None => crate::ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent),
+    })
 }
 
 /// Record an operator force-converge request against a power shelf's BMC (PMC)
@@ -1377,17 +1384,16 @@ mod tests {
         ] {
             set_power_shelf_maintenance_requested(&mut txn, shelf.id, "operator", operation)
                 .await?;
-            assert!(
-                find_by_id(&mut txn, &shelf.id)
-                    .await?
-                    .unwrap()
-                    .power_shelf_maintenance_requested
-                    .is_some(),
-                "request should be set before clear (op={:?})",
-                operation
-            );
+            let request = find_by_id(&mut txn, &shelf.id)
+                .await?
+                .unwrap()
+                .power_shelf_maintenance_requested
+                .expect("request should be set before clear");
 
-            clear_power_shelf_maintenance_requested(&mut txn, shelf.id).await?;
+            assert_eq!(
+                clear_power_shelf_maintenance_requested(&mut txn, shelf.id, &request).await?,
+                crate::ConditionalWrite::Applied(())
+            );
             assert!(
                 find_by_id(&mut txn, &shelf.id)
                     .await?
@@ -1402,9 +1408,8 @@ mod tests {
         Ok(())
     }
 
-    /// Clearing a maintenance request when none is set must be a no-op
-    /// (idempotent), since the state controller may call this after the
-    /// request has already been cleared by another path.
+    /// Clearing an absent maintenance request returns `NotApplied` and leaves
+    /// the pending field unset.
     #[crate::sqlx_test]
     async fn test_clear_power_shelf_maintenance_requested_when_none(
         pool: sqlx::PgPool,
@@ -1413,7 +1418,15 @@ mod tests {
         let shelf = create_seeded(&mut txn, 5, "Idempotent clear shelf").await?;
         assert!(shelf.power_shelf_maintenance_requested.is_none());
 
-        clear_power_shelf_maintenance_requested(&mut txn, shelf.id).await?;
+        let request = PowerShelfMaintenanceRequest {
+            requested_at: Utc::now(),
+            initiator: "operator".to_owned(),
+            operation: PowerShelfMaintenanceOperation::PowerOn,
+        };
+        assert_eq!(
+            clear_power_shelf_maintenance_requested(&mut txn, shelf.id, &request).await?,
+            crate::ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent)
+        );
         let reloaded = find_by_id(&mut txn, &shelf.id).await?.unwrap();
         assert!(reloaded.power_shelf_maintenance_requested.is_none());
 

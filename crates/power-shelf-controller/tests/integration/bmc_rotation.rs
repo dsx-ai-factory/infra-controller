@@ -33,8 +33,6 @@ use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, CredentialWriter, Credentials,
 };
 use carbide_test_harness::prelude::*;
-use carbide_uuid::machine::MachineInterfaceId;
-use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use chrono::Utc;
 use db::credential_rotation::{
@@ -43,7 +41,6 @@ use db::credential_rotation::{
 };
 use db::power_shelf as db_power_shelf;
 use mac_address::MacAddress;
-use model::allocation_type::AllocationType;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::power_shelf::{PowerShelfConfig, PowerShelfControllerState};
 use model::test_support::power_shelf_config;
@@ -51,7 +48,9 @@ use state_controller::config::IterationConfig;
 use state_controller::controller::StateController;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{ControllerEnv, load_power_shelf, set_power_shelf_controller_state};
+use crate::common::{
+    ControllerEnv, load_power_shelf, seed_pmc_endpoint, set_power_shelf_controller_state,
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -145,47 +144,6 @@ async fn run_power_shelf_controller_with_services(
         .build_for_manual_iterations(cancel_token)
         .unwrap();
     controller.run_single_iteration().await;
-}
-
-/// Link a `Bmc` machine_interface (with a MAC and IP) back to the power shelf so
-/// the shelf load query resolves `bmc_info`, giving the controller an
-/// addressable PMC endpoint to rotate. Returns the PMC MAC.
-async fn seed_pmc_endpoint(pool: &PgPool, power_shelf_id: PowerShelfId) -> TestResult<MacAddress> {
-    let mut txn = pool.begin().await?;
-
-    let segment_id: NetworkSegmentId = sqlx::query_scalar(
-        "INSERT INTO network_segments (name, version, network_segment_type)
-         VALUES ($1, 'V1-T0', 'tenant') RETURNING id",
-    )
-    .bind(format!("pmc-{power_shelf_id}"))
-    .fetch_one(txn.as_mut())
-    .await?;
-
-    let pmc_mac = "02:00:00:00:0b:01";
-    let bmc_interface_id: MachineInterfaceId = sqlx::query_scalar(
-        "INSERT INTO machine_interfaces
-             (power_shelf_id, association_type, segment_id, mac_address,
-              primary_interface, hostname, interface_type)
-         VALUES ($1, 'PowerShelf', $2, $3::macaddr, false, 'pmc', 'Bmc')
-         RETURNING id",
-    )
-    .bind(power_shelf_id)
-    .bind(segment_id)
-    .bind(pmc_mac)
-    .fetch_one(txn.as_mut())
-    .await?;
-
-    db::machine_interface_address::insert(
-        txn.as_mut(),
-        bmc_interface_id,
-        "10.30.40.50".parse()?,
-        AllocationType::Dhcp,
-    )
-    .await?;
-
-    txn.commit().await?;
-
-    Ok(pmc_mac.parse()?)
 }
 
 /// Stage a PMC that lags a freshly published site-wide target v1: seed the PMC's

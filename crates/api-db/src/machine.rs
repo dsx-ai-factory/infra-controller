@@ -2960,18 +2960,24 @@ pub async fn clear_decommission_requested(
         .map_err(|error| DatabaseError::new("clear_decommission_requested", error))
 }
 
+/// Clears only the maintenance request that the controller completed.
+/// A missing machine or a different pending request returns `NotApplied`.
 pub async fn clear_machine_maintenance_requested(
     txn: &mut PgConnection,
     machine_id: impl MachineIdSubtypeTrait,
-) -> DatabaseResult<()> {
-    let query =
-        "UPDATE machines SET machine_maintenance_requested = NULL WHERE id = $1 RETURNING id";
-    sqlx::query_as::<_, MachineId>(query)
+    request: &model::machine::MachineMaintenanceRequest,
+) -> DatabaseResult<ConditionalWrite<(), crate::MaintenanceRequestNotCurrent>> {
+    let query = "UPDATE machines SET machine_maintenance_requested = NULL WHERE id = $1 AND machine_maintenance_requested = $2 RETURNING id";
+    let cleared = sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
-        .fetch_one(txn)
+        .bind(sqlx::types::Json(request))
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::new("clear_machine_maintenance_requested", e))?;
-    Ok(())
+    Ok(match cleared {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent),
+    })
 }
 
 /// Record an operator "force-converge this BMC now" request on the machine that
