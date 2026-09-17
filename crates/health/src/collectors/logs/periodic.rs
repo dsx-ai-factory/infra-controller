@@ -44,6 +44,10 @@ pub struct LogsCollectorConfig {
     pub service_refresh_interval: Duration,
     pub data_sink: Option<Arc<dyn DataSink>>,
 
+    /// Cursor transferred from SSE when auto mode downgrades. `Some`, including
+    /// an empty map, replaces persisted periodic state on initial startup.
+    pub initial_last_seen_ids: Option<HashMap<ODataId, i32>>,
+
     /// Attach Redfish diagnostic payloads to emitted log records.
     pub include_diagnostics: bool,
 
@@ -84,6 +88,7 @@ pub struct LogsCollector<B: Bmc> {
     state: Option<LogsCollectorState<B>>,
     service_refresh_interval: Duration,
     data_sink: Option<Arc<dyn DataSink>>,
+    initial_last_seen_ids: Option<HashMap<ODataId, i32>>,
     include_diagnostics: bool,
     exclude_services: Vec<String>,
     skip_initial_history: bool,
@@ -106,6 +111,7 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for LogsCollector<B> {
             state: None,
             service_refresh_interval: config.service_refresh_interval,
             data_sink: config.data_sink,
+            initial_last_seen_ids: config.initial_last_seen_ids,
             include_diagnostics: config.include_diagnostics,
             exclude_services: config.exclude_services,
             skip_initial_history: config.skip_initial_history,
@@ -128,7 +134,13 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for LogsCollector<B> {
 }
 
 impl<B: Bmc + 'static> LogsCollector<B> {
-    async fn load_persistent_state(&self) -> PersistentState {
+    async fn load_persistent_state(&mut self) -> PersistentState {
+        // A downgrade handoff describes the active SSE session and therefore
+        // replaces any cursor left by an earlier periodic collector instance.
+        if let Some(last_seen_ids) = self.initial_last_seen_ids.take() {
+            return PersistentState { last_seen_ids };
+        }
+
         match tokio::fs::read_to_string(&self.state_file_path).await {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
             Err(_) => PersistentState::default(),
@@ -157,6 +169,7 @@ impl<B: Bmc + 'static> LogsCollector<B> {
 
     async fn discover_log_services(&self) -> Result<Vec<LogService<B>>, HealthError> {
         let service_root = ServiceRoot::new(self.bmc.clone()).await?;
+
         let mut services = Vec::new();
         let mut seen_ids = HashSet::new();
         let mut excluded_count = 0usize;
@@ -166,10 +179,12 @@ impl<B: Bmc + 'static> LogsCollector<B> {
                         seen_ids: &mut HashSet<String>,
                         excluded_count: &mut usize| {
             let service_id = service.odata_id().to_string();
+
             if self.is_excluded(&service_id) {
                 *excluded_count += 1;
                 return;
             }
+
             if seen_ids.insert(service_id) {
                 services.push(service);
             }
@@ -245,6 +260,7 @@ impl<B: Bmc + 'static> LogsCollector<B> {
                         last_service_refresh: Instant::now(),
                         last_seen_ids: persistent_state.last_seen_ids,
                     });
+
                     refresh_triggered = true;
                 }
                 Err(e) => {
@@ -552,6 +568,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::endpoint::test_support::{mac, test_endpoint};
     use crate::sink::LogSeverity;
 
     const JOURNAL_BMC: &str = "/redfish/v1/Managers/BMC_0/LogServices/Journal";
@@ -559,6 +576,48 @@ mod tests {
     const EVENTLOG: &str = "/redfish/v1/Systems/System_0/LogServices/EventLog";
     const XID: &str = "/redfish/v1/Chassis/HGX_GPU_0/LogServices/XID";
     const SEL: &str = "/redfish/v1/Systems/System_0/LogServices/SEL";
+
+    #[tokio::test]
+    async fn downgrade_handoff_replaces_persisted_periodic_cursor()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state_dir = tempfile::tempdir()?;
+        let state_file_path = state_dir.path().join("state.json");
+        let service = ODataId::from(EVENTLOG.to_string());
+        let stale_service = ODataId::from(SEL.to_string());
+
+        let persisted = PersistentState {
+            last_seen_ids: HashMap::from([(service.clone(), 100), (stale_service, 200)]),
+        };
+
+        tokio::fs::write(&state_file_path, serde_json::to_vec(&persisted)?).await?;
+
+        for (name, handoff) in [
+            ("current SSE cursor", HashMap::from([(service.clone(), 7)])),
+            ("empty SSE cursor", HashMap::new()),
+        ] {
+            let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:88")));
+
+            let mut collector = LogsCollector::new_runner(
+                Arc::clone(endpoint.bmc()),
+                endpoint,
+                LogsCollectorConfig {
+                    state_file_path: state_file_path.clone(),
+                    service_refresh_interval: Duration::from_secs(60),
+                    data_sink: None,
+                    initial_last_seen_ids: Some(handoff.clone()),
+                    include_diagnostics: false,
+                    exclude_services: Vec::new(),
+                    skip_initial_history: false,
+                },
+            )?;
+
+            let loaded = collector.load_persistent_state().await;
+
+            assert_eq!(loaded.last_seen_ids, handoff, "{name}");
+        }
+
+        Ok(())
+    }
 
     #[derive(Debug, PartialEq)]
     struct ObservedLog {

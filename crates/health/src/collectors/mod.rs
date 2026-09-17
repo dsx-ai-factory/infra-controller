@@ -39,7 +39,7 @@ pub use firmware::{FirmwareCollector, FirmwareCollectorConfig};
 pub use gpu_inventory::{GpuInventoryCollector, GpuInventoryCollectorConfig};
 pub(crate) use inventory::SharedInventory;
 pub use leak_detector::{LeakDetectorCollector, LeakDetectorCollectorConfig};
-pub(crate) use logs::auto::{AutoFailureBudget, BudgetDecision, FailureKind};
+pub(crate) use logs::auto::{AutoFailureBudget, BudgetDecision, FailureKind, SseCursorSink};
 pub use logs::{
     DowngradeEvent, DowngradeReason, LogDowngradeRegistry, LogsCollector, LogsCollectorConfig,
     SseLogCollector, SseLogCollectorConfig,

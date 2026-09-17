@@ -25,6 +25,7 @@ use arc_swap::ArcSwapOption;
 use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use prometheus::{Histogram, HistogramOpts};
+use tokio::sync::Notify;
 
 use super::reachability::ReachabilitySpec;
 use crate::HealthError;
@@ -348,6 +349,9 @@ pub struct DiscoveryLoopContext {
     pub(crate) api_client: Option<Arc<ApiClientWrapper>>,
     pub(crate) log_downgrade_registry: Arc<LogDowngradeRegistry>,
 
+    /// Wakes endpoint discovery when an auto-mode log collector changes mode.
+    pub(crate) collector_transition_notify: Arc<Notify>,
+
     /// Whether log collectors should attach diagnostic payload carriers.
     pub(crate) logs_include_diagnostics: bool,
 
@@ -449,6 +453,7 @@ impl DiscoveryLoopContext {
                 _ => None,
             },
             log_downgrade_registry: Arc::new(LogDowngradeRegistry::new()),
+            collector_transition_notify: Arc::new(Notify::new()),
             logs_include_diagnostics: config.sinks.includes_log_diagnostics(),
             attributes: config.attributes.clone(),
         })

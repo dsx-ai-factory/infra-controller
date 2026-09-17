@@ -15,9 +15,12 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use nv_redfish::core::ODataId;
 
 use super::context::{CollectorKind, DiscoveryLoopContext};
 use crate::HealthError;
@@ -30,8 +33,9 @@ use crate::collectors::{
     MetricsCollector, MetricsCollectorConfig, NmxcCollector, NmxcCollectorConfig,
     NmxcSchemaOverrideCollector, NmxcSchemaOverrideCollectorConfig, NmxtCollector,
     NmxtCollectorConfig, NvueRestCollector, NvueRestCollectorConfig, SensorCollector,
-    SensorCollectorConfig, SseLogCollector, SseLogCollectorConfig, StreamingCollectorStartContext,
-    TelemetryCollector, TelemetryCollectorConfig, spawn_gnmi_collector,
+    SensorCollectorConfig, SseCursorSink, SseLogCollector, SseLogCollectorConfig,
+    StreamingCollectorStartContext, TelemetryCollector, TelemetryCollectorConfig,
+    spawn_gnmi_collector,
 };
 use crate::config::{
     Configurable, LogCollectionMode, NmxcCollectorConfig as NmxcCollectorOptions, PeriodicLogConfig,
@@ -39,6 +43,9 @@ use crate::config::{
 use crate::endpoint::{BmcEndpoint, EndpointMetadata, SwitchEndpointRole};
 use crate::metrics::CollectorRegistry;
 use crate::sink::DataSink;
+
+// Auto mode stays in periodic fallback long enough to avoid rapid mode flapping.
+const SSE_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 fn logs_state_file_path(template: &str, endpoint_id: &str) -> PathBuf {
     PathBuf::from(template.replace("{machine_id}", endpoint_id))
@@ -48,12 +55,14 @@ fn build_periodic_logs_collector_config(
     config: &PeriodicLogConfig,
     state_file_path: PathBuf,
     data_sink: Option<Arc<dyn DataSink>>,
+    initial_last_seen_ids: Option<HashMap<ODataId, i32>>,
     include_diagnostics: bool,
 ) -> LogsCollectorConfig {
     LogsCollectorConfig {
         state_file_path,
         service_refresh_interval: config.state_refresh_interval,
         data_sink,
+        initial_last_seen_ids,
         include_diagnostics,
         exclude_services: config.exclude_services.clone(),
         skip_initial_history: config.skip_initial_history,
@@ -403,6 +412,7 @@ fn spawn_generic_redfish_collectors(
 
         let spawn_periodic_logs = |pcfg: PeriodicLogConfig,
                                    data_sink: Option<Arc<dyn DataSink>>,
+                                   initial_last_seen_ids: Option<HashMap<ODataId, i32>>,
                                    collector_registry: Arc<_>|
          -> Option<Result<Collector, HealthError>> {
             let endpoint_id = endpoint.log_identity().into_owned();
@@ -411,6 +421,7 @@ fn spawn_generic_redfish_collectors(
                 &pcfg,
                 state_file_path,
                 data_sink,
+                initial_last_seen_ids,
                 ctx.logs_include_diagnostics,
             );
 
@@ -458,21 +469,60 @@ fn spawn_generic_redfish_collectors(
             LogCollectionMode::Periodic => spawn_periodic_logs(
                 logs_cfg.periodic_or_default(),
                 data_sink.clone(),
+                None,
                 collector_registry,
             ),
             LogCollectionMode::Auto => {
                 if ctx.log_downgrade_registry.is_downgraded(&key) {
-                    spawn_periodic_logs(
+                    let retry_sse_after_downgrade = logs_cfg
+                        .auto
+                        .as_ref()
+                        .is_some_and(|auto| auto.retry_sse_after_downgrade);
+
+                    let initial_last_seen_ids =
+                        ctx.log_downgrade_registry.pending_last_seen_ids(&key);
+
+                    match spawn_periodic_logs(
                         logs_cfg.auto_periodic_or_default(),
                         data_sink.clone(),
+                        initial_last_seen_ids,
                         collector_registry,
-                    )
+                    ) {
+                        Some(Ok(mut periodic)) => {
+                            ctx.log_downgrade_registry.take_last_seen_ids(&key);
+
+                            if retry_sse_after_downgrade {
+                                let registry = ctx.log_downgrade_registry.clone();
+                                let transition_notify = ctx.collector_transition_notify.clone();
+                                let endpoint_key = key.clone();
+
+                                Some(Ok(Collector::spawn_task(move |cancel| async move {
+                                    tokio::select! {
+                                        () = cancel.cancelled() => periodic.stop().await,
+                                        () = periodic.finished() => {}
+                                        () = tokio::time::sleep(SSE_RETRY_INTERVAL) => {
+                                            periodic.stop().await;
+                                        }
+                                    }
+
+                                    registry.clear_downgraded(&endpoint_key);
+                                    transition_notify.notify_one();
+                                })))
+                            } else {
+                                Some(Ok(periodic))
+                            }
+                        }
+                        result => result,
+                    }
                 } else if let Some(data_sink) = data_sink.clone() {
                     let auto_cfg = logs_cfg.auto.clone().unwrap_or_default();
                     let registry = ctx.log_downgrade_registry.clone();
+                    let transition_notify = ctx.collector_transition_notify.clone();
                     let endpoint_key: std::borrow::Cow<'static, str> = key.clone().into();
                     let endpoint_rack_id = endpoint.rack_id.clone();
-                    let mut budget = AutoFailureBudget::new(auto_cfg, Instant::now());
+                    let mut budget = AutoFailureBudget::new(auto_cfg);
+                    let cursor_sink = Arc::new(SseCursorSink::new(data_sink));
+                    let tracked_data_sink: Arc<dyn DataSink> = cursor_sink.clone();
 
                     Some(Collector::start_streaming::<SseLogCollector<BmcClient>, _>(
                         endpoint_arc.clone(),
@@ -482,28 +532,34 @@ fn spawn_generic_redfish_collectors(
                             request_concurrency: ctx.bmc_request_concurrency,
                             gpu_inventory: sse_gpu_inventory,
                         },
-                        data_sink,
+                        tracked_data_sink,
                         StreamingCollectorStartContext {
                             backoff_config: sse_backoff_config(),
                             collector_registry,
                         },
-                        move |result| match result {
-                            Ok(()) => {
-                                budget.reset_transient(Instant::now());
-                                true
-                            }
-                            Err(e) => {
-                                match budget.record(FailureKind::classify(e), Instant::now()) {
-                                    BudgetDecision::Continue => true,
-                                    BudgetDecision::Downgrade(reason) => {
-                                        registry.mark_downgraded(
-                                            endpoint_key.clone(),
-                                            endpoint_rack_id.as_ref(),
-                                            reason,
-                                        );
+                        move |result| {
+                            let decision = match result {
+                                Ok(connected_for) => {
+                                    budget.record_stream_end(connected_for, Instant::now())
+                                }
+                                Err(error) => {
+                                    budget.record(FailureKind::classify(error), Instant::now())
+                                }
+                            };
 
-                                        false
-                                    }
+                            match decision {
+                                BudgetDecision::Continue => true,
+                                BudgetDecision::Downgrade(reason) => {
+                                    registry.mark_downgraded(
+                                        endpoint_key.clone(),
+                                        endpoint_rack_id.as_ref(),
+                                        reason,
+                                        cursor_sink.snapshot(),
+                                    );
+
+                                    transition_notify.notify_one();
+
+                                    false
                                 }
                             }
                         },
@@ -1086,6 +1142,7 @@ mod tests {
                         ..PeriodicLogConfig::default()
                     },
                     PathBuf::from("/tmp/logs_endpoint-42.json"),
+                    None,
                     None,
                     false,
                 )
@@ -1773,7 +1830,7 @@ mod tests {
         assert_eq!(ctx.collectors.len(CollectorKind::Metrics), 1);
     }
 
-    fn auto_mode_config() -> Config {
+    fn auto_mode_config(retry_sse_after_downgrade: bool) -> Config {
         let mut config = Config::default();
         config.collectors.sensors = Configurable::Disabled;
         config.collectors.firmware = Configurable::Disabled;
@@ -1784,19 +1841,24 @@ mod tests {
             mode: LogCollectionMode::Auto,
             sse: None,
             periodic: Some(PeriodicLogConfig::default()),
-            auto: Some(AutoModeConfig::default()),
+            auto: Some(AutoModeConfig {
+                retry_sse_after_downgrade,
+                ..AutoModeConfig::default()
+            }),
         });
         config
     }
 
-    #[tokio::test]
-    async fn test_auto_mode_with_downgraded_endpoint_spawns_periodic() {
+    #[tokio::test(start_paused = true)]
+    async fn auto_mode_periodic_fallback_expires_without_restart() {
         let limiter: Arc<dyn RateLimiter> = Arc::new(NoopLimiter);
+
         let metrics_manager = Arc::new(
             MetricsManager::new("test_auto_downgraded").expect("metrics manager should initialize"),
         );
+
         let mut ctx =
-            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config()))
+            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config(true)))
                 .expect("context should initialize");
 
         let endpoint = test_endpoint(Ipv4Addr::new(10, 0, 0, 1), "aa:bb:cc:dd:ee:01", None);
@@ -1805,22 +1867,88 @@ mod tests {
             endpoint.key().into(),
             endpoint.rack_id.as_ref(),
             DowngradeReason::SseNotAvailable,
+            HashMap::new(),
         );
 
-        spawn_collectors_for_endpoint(&mut ctx, &endpoint, None, "test_auto_downgraded")
+        let data_sink: Arc<dyn DataSink> = Arc::new(NoopSink);
+
+        spawn_collectors_for_endpoint(
+            &mut ctx,
+            &endpoint,
+            Some(data_sink.clone()),
+            "test_auto_downgraded",
+        )
+        .expect("spawn should succeed for downgraded auto endpoint");
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Logs), 1);
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(SSE_RETRY_INTERVAL).await;
+        tokio::task::yield_now().await;
+
+        assert!(!ctx.log_downgrade_registry.is_downgraded(&endpoint.key()));
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            ctx.collector_transition_notify.notified(),
+        )
+        .await
+        .expect("periodic fallback expiry should request immediate reconciliation");
+
+        ctx.collectors.prune_finished_logs();
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Logs), 0);
+
+        spawn_collectors_for_endpoint(&mut ctx, &endpoint, Some(data_sink), "test_auto_recovered")
+            .expect("spawn should retry SSE after periodic fallback expires");
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Logs), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auto_mode_periodic_fallback_is_sticky_without_opt_in() {
+        let limiter: Arc<dyn RateLimiter> = Arc::new(NoopLimiter);
+
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test_auto_sticky").expect("metrics manager should initialize"),
+        );
+
+        let mut ctx =
+            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config(false)))
+                .expect("context should initialize");
+
+        let endpoint = test_endpoint(Ipv4Addr::new(10, 0, 0, 2), "aa:bb:cc:dd:ee:02", None);
+
+        ctx.log_downgrade_registry.mark_downgraded(
+            endpoint.key().into(),
+            endpoint.rack_id.as_ref(),
+            DowngradeReason::SseNotAvailable,
+            HashMap::new(),
+        );
+
+        let data_sink: Arc<dyn DataSink> = Arc::new(NoopSink);
+
+        spawn_collectors_for_endpoint(&mut ctx, &endpoint, Some(data_sink), "test_auto_sticky")
             .expect("spawn should succeed for downgraded auto endpoint");
 
+        tokio::task::yield_now().await;
+        tokio::time::advance(SSE_RETRY_INTERVAL).await;
+        tokio::task::yield_now().await;
+
+        assert!(ctx.log_downgrade_registry.is_downgraded(&endpoint.key()));
         assert_eq!(ctx.collectors.len(CollectorKind::Logs), 1);
     }
 
     #[tokio::test]
     async fn test_auto_mode_without_downgrade_and_no_data_sink_skips_spawn() {
         let limiter: Arc<dyn RateLimiter> = Arc::new(NoopLimiter);
+
         let metrics_manager = Arc::new(
             MetricsManager::new("test_auto_no_sink").expect("metrics manager should initialize"),
         );
+
         let mut ctx =
-            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config()))
+            DiscoveryLoopContext::new(limiter, metrics_manager, Arc::new(auto_mode_config(false)))
                 .expect("context should initialize");
 
         let endpoint = test_endpoint(Ipv4Addr::new(10, 0, 0, 2), "aa:bb:cc:dd:ee:02", None);
