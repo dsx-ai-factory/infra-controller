@@ -2695,6 +2695,7 @@ PatchComponent - update a single component&#39;s fields
 | description | [string](#string) | optional | Update description (JSON string) |
 | rack_id | [UUID](#v1-UUID) | optional | Re-assign to a different rack |
 | bmcs | [BMCInfo](#v1-BMCInfo) | repeated | Update BMCs (matched by MAC address; create if new) |
+| update_mask | [google.protobuf.FieldMask](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Optional for backward compatibility. When omitted, position replaces all three coordinates. When set, supported paths are position.slot_id, position.tray_idx, and position.host_id; only those coordinates change. |
 
 
 
